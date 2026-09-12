@@ -11722,4 +11722,26 @@ test('doctor names the soul and systemPrompt an auto-discovered project config a
   assert.doesNotMatch(output.stdout, /Mallory/);
   assert.match(output.stdout, /sets soul and systemPrompt, which an auto-discovered config does not get to choose — every run started here ignores them/);
   assert.match(output.stdout, new RegExp(`--config ${shadow.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} to trust that file`));
+
+  // A key the environment outranks is not refused, it is beaten — the
+  // resolver leaves it out, and so does doctor. With both outranked there
+  // is nothing to say and nothing wrong.
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova.\n');
+  const one = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: one.streams,
+    env: { cwd: project, homeDir: home, processEnv: { STRATUS_SOUL: path.join(home, 'nova.md') } },
+  });
+  assert.match(one.output.stdout, /sets systemPrompt, which an auto-discovered config does not get to choose — every run started here ignores it/);
+  assert.doesNotMatch(one.output.stdout, /sets soul/);
+  const none = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: none.streams,
+    env: { cwd: project, homeDir: home, processEnv: { STRATUS_SOUL: path.join(home, 'nova.md'), STRATUS_SYSTEM_PROMPT: 'Be brief.' } },
+  });
+  assert.doesNotMatch(none.output.stdout, /does not get to choose/);
+  // The one finding left is the demo provider, which is the file's to set.
+  assert.match(none.output.stdout, /1 problem found:\n\s+! Provider is the offline demo model/);
 });
