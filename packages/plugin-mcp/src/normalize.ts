@@ -41,6 +41,12 @@ export const SERVER_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
  */
 export const BRIDGED_DESCRIPTION_MAX_LENGTH = 1024;
 
+/** Control characters and the Unicode `Bidi_Control` set, spelled out. */
+const spelledOut = (raw: string): string => raw.replace(
+  /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
+  (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, '0')}`,
+);
+
 /**
  * A server's tool description as it reaches the registry — and, through
  * it, every provider's tool block on every turn. The text is the server's,
@@ -56,10 +62,7 @@ export const BRIDGED_DESCRIPTION_MAX_LENGTH = 1024;
  * description is allowed to be several lines.
  */
 export const bridgedDescription = (raw: string): string => {
-  const escaped = raw.replace(
-    /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
-    (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, '0')}`,
-  );
+  const escaped = spelledOut(raw);
   // Counted and cut in code points, not UTF-16 units: an emoji is one
   // character, and a cut inside a surrogate pair is a malformed string a
   // provider may reject.
@@ -69,6 +72,48 @@ export const bridgedDescription = (raw: string): string => {
   }
   const marker = ` … [description truncated by stratus: ${characters.length} characters]`;
   return `${characters.slice(0, BRIDGED_DESCRIPTION_MAX_LENGTH - Array.from(marker).length).join('')}${marker}`;
+};
+
+/**
+ * The longest input schema a server gets to put in front of the model, in
+ * characters of its JSON. A schema is read by the provider as structure,
+ * but every string in it lands in the tool block as text, and sixteen
+ * thousand characters of parameter list is a page, not a parameter list.
+ */
+export const BRIDGED_SCHEMA_MAX_LENGTH = 16_384;
+
+/** The schema keys whose values are prose the model reads, at any depth. */
+const SCHEMA_ANNOTATION_KEYS = new Set(['description', 'title']);
+
+const boundedSchemaValue = (value: unknown): unknown => {
+  if (Array.isArray(value)) {
+    return value.map(boundedSchemaValue);
+  }
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+      spelledOut(key),
+      SCHEMA_ANNOTATION_KEYS.has(key) && typeof entry === 'string' ? bridgedDescription(entry) : boundedSchemaValue(entry),
+    ]));
+  }
+  return typeof value === 'string' ? spelledOut(value) : value;
+};
+
+/**
+ * A server's input schema as it reaches the registry — and, through it,
+ * the tool block of every turn, the same way the description does. The
+ * top-level description is not the only prose in `tools/list`: a
+ * `description` or `title` on any property, at any depth, is text the
+ * model reads too, and it was copied through unbounded. Each is bounded
+ * like the tool's own description; every other string in the schema —
+ * enum values, defaults, patterns, the property names themselves — has
+ * its control and bidi characters spelled out but keeps its length, since
+ * cutting one would change what the schema means. `undefined` when the
+ * bounded schema is still longer than {@link BRIDGED_SCHEMA_MAX_LENGTH}
+ * characters: that tool is not bridged, and the caller names it.
+ */
+export const bridgedSchema = (schema: Record<string, unknown>): Record<string, unknown> | undefined => {
+  const bounded = boundedSchemaValue(schema) as Record<string, unknown>;
+  return Array.from(JSON.stringify(bounded)).length <= BRIDGED_SCHEMA_MAX_LENGTH ? bounded : undefined;
 };
 
 /** The registered name a server's tool bridges to: `mcp.<server>.<segment>`. */

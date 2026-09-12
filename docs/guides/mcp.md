@@ -37,6 +37,11 @@ soul's allowlist — `tools: [mcp.linear.*]` grants one server:
   the cut announced, and control characters and Unicode bidi controls are
   spelled out (`\u202e`) rather than rendered — so a description that
   reads one way to a person and another to the model reads as what it is.
+  The same goes for the `description` and `title` of every property in a
+  tool's input schema, at any depth, and every other string in the schema
+  has its control and bidi characters spelled out. A schema still longer
+  than 16,384 characters after that is a page, not a parameter list: the
+  tool is not bridged, and the daemon log names it.
 - **A stdio server's environment is replaced** the way
   [`tool-shell`'s](./tools.md) is: it gets what you granted and nothing
   else, not the daemon's own environment.
