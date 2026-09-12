@@ -98,6 +98,13 @@ interface TemplateAgentPlan {
    * stored secret at all.
    */
   credentials: string[] | undefined;
+  /**
+   * The soul's `delegates:` list, the third gate, and the one that reaches
+   * furthest: a target on it runs a turn as *that* agent, with that agent's
+   * tools, credentials, and memory, and `*` names the whole roster.
+   * Undefined is none, like `credentials`.
+   */
+  delegates: string[] | undefined;
   /** Already installed under this filename; `--force` replaces it. */
   taken: boolean;
   /**
@@ -400,6 +407,7 @@ const planTemplateInstall = async (
       name: soul.agent.name,
       tools: soul.agent.tools ? [...soul.agent.tools] : undefined,
       credentials: soul.agent.credentials ? [...soul.agent.credentials] : undefined,
+      delegates: soul.agent.delegates ? [...soul.agent.delegates] : undefined,
       taken,
       ...(blocked !== undefined ? { blocked } : {}),
     });
@@ -464,6 +472,18 @@ const writeTemplatePlan = (streams: CliStreams, plan: TemplatePlan, env: CliEnvi
     // tools, because it is a different kind of grant.
     if (agent.credentials !== undefined && agent.credentials.length > 0) {
       writeLine(streams.stdout, `           may read your stored credentials: ${fromTemplate(agent.credentials.join(', '))}`);
+    }
+    // The furthest-reaching grant a folder of markdown can carry: a target
+    // runs a turn as that agent, under that agent's tools, credentials, and
+    // memory, and the wildcard is the whole roster — including agents this
+    // template never saw. Said in those words, like the empty tools: list.
+    if (agent.delegates !== undefined && agent.delegates.length > 0) {
+      writeLine(
+        streams.stdout,
+        agent.delegates.includes('*')
+          ? '           may hand work to EVERY agent on your roster, and run as them (delegates: [*])'
+          : `           may hand work to, and run as: ${fromTemplate(agent.delegates.join(', '))}`,
+      );
     }
     if (agent.blocked !== undefined) {
       writeLine(streams.stdout, `           cannot install ${fromTemplate(agent.file)}: ${fromTemplate(agent.blocked)}.`);
