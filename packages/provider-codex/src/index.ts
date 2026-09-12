@@ -3,6 +3,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 
 import {
+  markPromptDelivered,
+  isUnaddressedTurn,
   renderSystemPromptSections,
   uncachedInputTokens,
   type ExecutionContext,
@@ -623,6 +625,11 @@ export const createCodexProvider = ({
         }
       : undefined;
     const markIfSideEffects = <T>(error: T): T => (hostedToolRuns > 0 ? markHostedToolSideEffects(error) : error);
+    // From the first event on, Codex has this turn's prompt in its own
+    // thread, and a failure after that must say so (`markPromptDelivered`)
+    // or the kernel will send the prompt again on the next resume.
+    let delivered = false;
+    const markIfDelivered = <T>(error: T): T => (delivered ? markPromptDelivered(error) : error);
 
     // The abort signal riding into every hosted tool call is the provider's
     // own controller — the union of the caller's cancellation and the idle
@@ -682,6 +689,10 @@ export const createCodexProvider = ({
     // growing snapshots as suffixes. Wire tool names are translated back
     // to the kernel's own naming before consumers see them.
     const completedMessages: string[] = [];
+    // Whether Codex reported the turn finished: a stream that ends after
+    // `thread.started` with neither `turn.completed` nor `turn.failed` is a
+    // run that did not complete, and is never silence.
+    let turnCompleted = false;
     const emittedByItemId = new Map<string, number>();
     const wireToKernel = new Map<string, string>();
     for (const [kernelName, wireName] of bridgedToolNames(request.tools ?? [])) {
@@ -730,11 +741,13 @@ export const createCodexProvider = ({
     };
 
     const forwardEvent = async (event: CodexThreadEvent): Promise<void> => {
+      delivered = true;
       if (event.type === 'thread.started' && typeof event.thread_id === 'string' && event.thread_id.length > 0) {
         rememberThreadId(request.session, event.thread_id);
         return;
       }
       if (event.type === 'turn.completed') {
+        turnCompleted = true;
         reportUsage(event.usage);
         return;
       }
@@ -841,17 +854,17 @@ export const createCodexProvider = ({
         );
       }
       if (timedOutIdle && !request.signal?.aborted) {
-        throw markIfSideEffects(
+        throw markIfDelivered(markIfSideEffects(
           new Error(`Codex produced no output for ${idleTimeoutMs}ms; the run was aborted as stalled.`),
-        );
+        ));
       }
       const message = error instanceof Error ? error.message : String(error);
       if (/not (?:yet )?logged in|codex login/i.test(message)) {
-        throw markIfSideEffects(new Error(
+        throw markIfDelivered(markIfSideEffects(new Error(
           `Codex is not signed in on this machine. Run \`codex login\`, or add an OpenAI API key with \`stratus setup\`. (${message})`,
-        ));
+        )));
       }
-      throw markIfSideEffects(error);
+      throw markIfDelivered(markIfSideEffects(error));
     } finally {
       if (idleTimer) {
         clearTimeout(idleTimer);
@@ -869,7 +882,16 @@ export const createCodexProvider = ({
 
     const resultText = completedMessages.filter((text) => text.length > 0).join('\n\n');
     if (resultText.length === 0) {
-      throw markIfSideEffects(new Error('Codex returned an empty response.'));
+      // Silence is the answer a turn nobody asked for may give — see
+      // `RunInput.addressed` in core — when Codex said the turn finished
+      // with nothing to say. A stream that ended without `turn.completed`
+      // is a run that did not complete, and on any turn is an error.
+      if (turnCompleted && isUnaddressedTurn(request.session)) {
+        return { parts: [] };
+      }
+      throw markIfDelivered(markIfSideEffects(new Error(
+        turnCompleted ? 'Codex returned an empty response.' : 'Codex ended without completing the turn.',
+      )));
     }
 
     return { parts: [{ type: 'text' as const, text: resultText }] };

@@ -42,6 +42,15 @@ const scout = defineAgent({ instructions: 'You research things thoroughly.' });
 // scout.name → "Arlo", scout.avatar → matching palette + style
 ```
 
+That gives you an identity with no capability. A
+[template](../guides/templates.md) gives you a working one: a folder or a
+GitHub repo carrying the soul, the skills it uses, and the plugin config
+behind its tools, installed in one reviewed command.
+
+```bash
+stratus template add ./examples/templates/example
+```
+
 ## Soul files
 
 An agent can live in a file. A soul file is markdown with frontmatter — the

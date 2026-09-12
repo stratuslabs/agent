@@ -291,8 +291,9 @@ export interface Message {
   images?: ImageAttachment[];
   /**
    * A user message the agent was not spoken to by: something said in a
-   * conversation it is in, to somebody else, appended by `observe` with no
-   * turn run on it. Present only when true.
+   * conversation it is in, to somebody else — appended by `observe` with
+   * no turn run on it, or dispatched with `addressed: false`, which runs a
+   * turn the agent may answer with nothing. Present only when true.
    *
    * Durable, because it changes how the message is rendered on every later
    * turn, not just the next one: every renderer passes user content through
@@ -1879,10 +1880,81 @@ export const latestTurnReply = (session: Pick<Session, 'messages'>): string | un
  * judgement — the same reason a memory region is labelled by trust and not
  * annotated with advice.
  */
-export const promptTextOf = (message: Pick<Message, 'content' | 'overheard'>): string =>
-  message.overheard === true
-    ? `(overheard, not addressed to you)\n${message.content.split(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/).map((line) => `> ${line}`).join('\n')}`
-    : message.content;
+export const promptTextOf = (
+  message: Pick<Message, 'content' | 'overheard'>,
+  options: PromptTextOptions = {},
+): string => {
+  if (message.overheard !== true) {
+    return message.content;
+  }
+  const quoted = message.content
+    .split(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/)
+    .map((line) => `> ${line}`)
+    .join('\n');
+  const framed = `(overheard, not addressed to you)\n${quoted}`;
+  return options.latest === true ? `${framed}\n\n${UNADDRESSED_TURN_NOTE}` : framed;
+};
+
+/**
+ * Whether the turn a session is on is one nobody asked for: its newest
+ * user message is overheard, which only `addressed: false` produces at
+ * turn time — `observe` appends between turns, and every dispatch since
+ * before overhearing appended a message the agent was spoken to by. The
+ * one rule behind two decisions: the note that follows the newest message
+ * (`PromptTextOptions.latest`), and a provider accepting an empty answer
+ * as the answer rather than as a broken endpoint.
+ */
+export const isUnaddressedTurn = (session: Pick<Session, 'messages'>): boolean =>
+  session.messages.findLast((message) => message.role === 'user')?.overheard === true;
+
+/**
+ * A provider's way of saying a failed turn's prompt had already reached
+ * the model before the failure — a harness that recorded its session id
+ * and then died, most often. Marked on the error, off the type, the way
+ * `@stratusagent/providers` marks hosted-tool side effects: the runner
+ * cannot tell from the outside whether a harness holding its own history
+ * has this turn's message, and a turn it has must not be sent again.
+ */
+const PROMPT_DELIVERED: unique symbol = Symbol.for('stratus.promptDelivered');
+
+export const markPromptDelivered = <T>(error: T): T => {
+  if (typeof error === 'object' && error !== null) {
+    (error as Record<PropertyKey, unknown>)[PROMPT_DELIVERED] = true;
+  }
+  return error;
+};
+
+export const promptWasDelivered = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null
+  && (error as Record<PropertyKey, unknown>)[PROMPT_DELIVERED] === true;
+
+export interface PromptTextOptions {
+  /**
+   * Whether this is the newest user message of the turn being run. A turn
+   * that ends on an overheard message is one nobody asked for — it was
+   * dispatched with `addressed: false` — and the message is followed by
+   * `UNADDRESSED_TURN_NOTE`, telling the model so. Only the newest: the
+   * same message rendered on a later turn is history, and the decision it
+   * carried has been made.
+   */
+  latest?: boolean;
+}
+
+/**
+ * What a turn nobody asked for is told, after the message it ends on.
+ *
+ * The load-bearing sentence of reading the room, and the one that cannot
+ * be specified into correctness: a model asked "should you answer?" says
+ * yes far more often than a person would, so the note leans on silence
+ * hard, names the few things worth breaking it for, and says what an
+ * answer must not be — an acknowledgement is the interruption it exists
+ * to prevent. In the message and not the system prompt, because it has
+ * to reach a harness that holds its own history and takes only the newest
+ * message, and because a rule read next to the thing it applies to is
+ * followed more often than one read an hour ago.
+ */
+export const UNADDRESSED_TURN_NOTE =
+  'Nobody said that to you, and nobody is waiting on you. Reply only if you have something these people would want from you and do not have — an answer to a question left open, a correction to something wrong, a thing you were asked to watch for. Otherwise reply with nothing at all: no acknowledgement, no summary, no offer to help. Saying nothing is usually the right answer here.';
 
 /** Reads the checkpoint off a session, if it is parked. */
 export const readPendingApproval = (session: Session): PendingApprovalRecord | undefined => {
@@ -2887,6 +2959,19 @@ export class AllowAllApprovalPolicy implements ApprovalPolicy {
 const userImages = (images: ImageAttachment[] | undefined): Pick<Message, 'images'> =>
   images !== undefined && images.length > 0 ? { images } : {};
 
+/**
+ * See `RunInput.addressed`: an image reaches the model as pixels, before
+ * and outside the text that frames what was said as somebody else's, so
+ * a turn nobody asked for takes none.
+ */
+const refuseUnaddressedImages = (input: Pick<RunInput, 'addressed' | 'images'>): void => {
+  if (input.addressed === false && input.images !== undefined && input.images.length > 0) {
+    throw new Error(
+      'A turn nobody asked for cannot carry images: an image enters the prompt ahead of the frame that marks the message as somebody else\'s. Name the attachment in the message instead.',
+    );
+  }
+};
+
 export interface RunInput {
   sessionId: string;
   /** See Session.agent: the allowlist travels with the run. */
@@ -2894,6 +2979,20 @@ export interface RunInput {
   userMessage: string;
   /** Images sent with the message; see `Message.images`. */
   images?: ImageAttachment[];
+  /**
+   * Whether the message was said TO the agent. Omitted or true, the turn
+   * is one somebody asked for, as every turn was before overhearing.
+   * `false` runs a turn on something said to somebody else: the message
+   * is stored `overheard`, rendered as third-party speech, and the model
+   * is told (`UNADDRESSED_TURN_NOTE`) that it may answer with nothing — an
+   * empty reply is then a decision, not a failure, and the turn completes
+   * with an empty assistant message: no text for a surface to post, and a
+   * boundary so the message is never judged twice. Such a turn carries no
+   * images: they enter a prompt ahead of any frame that could mark them as
+   * somebody else's, so a message nobody addressed to the agent names its
+   * attachments instead, as an overheard one does.
+   */
+  addressed?: boolean;
   metadata?: JsonObject;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
   signal?: AbortSignal;
@@ -2904,6 +3003,8 @@ export interface ResumeInput {
   userMessage: string;
   /** Images sent with the message; see `Message.images`. */
   images?: ImageAttachment[];
+  /** See `RunInput.addressed`. */
+  addressed?: boolean;
   /**
    * This turn's metadata — read for the sender's trust
    * (`SENDER_TRUST_METADATA_KEY`) and not merged into the session's. The
@@ -3053,6 +3154,7 @@ export class AgentRunner {
   }
 
   async run(input: RunInput): Promise<Session> {
+    refuseUnaddressedImages(input);
     // The sender's trust is the turn's, not the session's: it is read here
     // and kept out of the persisted metadata, where a later reader would
     // take the first sender's label for every turn that follows.
@@ -3066,6 +3168,7 @@ export class AgentRunner {
       content: input.userMessage,
       createdAt: new Date().toISOString(),
       ...userImages(input.images),
+      ...(input.addressed === false ? { overheard: true } : {}),
     };
     omitImagesOutsideReplayBudget([opening], this.imageReplayBudget);
     const sessionInput: Omit<Session, 'createdAt' | 'updatedAt'> = {
@@ -3129,6 +3232,7 @@ export class AgentRunner {
   }
 
   async resume(input: ResumeInput): Promise<Session> {
+    refuseUnaddressedImages(input);
     const session = await this.store.get(input.sessionId);
     if (!session) {
       throw new Error(`Session not found: ${input.sessionId}`);
@@ -3162,6 +3266,10 @@ export class AgentRunner {
       content: input.userMessage,
       createdAt: new Date().toISOString(),
       ...userImages(input.images),
+      // Marked like a message `observe` appended, because it is one: the
+      // difference is only that a turn runs on it, and every renderer
+      // frames it from the same mark.
+      ...(input.addressed === false ? { overheard: true } : {}),
     });
     // Before the save below: the row that carries this turn is the row
     // that stops carrying the pixels nothing can send any more.
@@ -3518,6 +3626,23 @@ export class AgentRunner {
             toolCalls: [part.call],
           });
         }
+        if (response.parts.length === 0) {
+          // Silence, recorded. Only a turn nobody asked for ends this way —
+          // every provider refuses an empty answer on one somebody did —
+          // and the decision has to leave a mark: a harness holding its own
+          // history is sent every user message since the agent last spoke
+          // (`latestUserMessagePrompt`), and without an assistant message
+          // here the message this turn already judged would go again on
+          // the next one, and again on the one after that. Empty text is
+          // no reply (`latestTurnReply`) and no speaking (`lastSpokeAt`);
+          // it is the boundary of a turn that happened.
+          session.messages.push({
+            id: `${session.id}:assistant:${session.messages.length + 1}`,
+            role: 'assistant',
+            content: '',
+            createdAt: new Date().toISOString(),
+          });
+        }
         const sawToolCall = calls.length > 0;
         await this.store.save(session);
         await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
@@ -3567,6 +3692,26 @@ export class AgentRunner {
             : caught)
         : caught;
       const lastError = error instanceof Error ? error.message : String(error);
+      // Read off what the provider threw, not the normalized error: an
+      // abort replaces it with a fresh `RunAbortedError`, and a harness
+      // cancelled mid-turn — the watchdog's doing, most often — has the
+      // prompt just the same.
+      if (promptWasDelivered(caught) && isUnaddressedTurn(session)) {
+        // A turn nobody asked for whose prompt the harness took before it
+        // failed: the boundary goes in as if it had ended in silence, or
+        // `latestUserMessagePrompt` would send the harness this message
+        // again next time — the same double send the empty-answer
+        // boundary above closes, on the failure path. Only for such a
+        // turn: an addressed one that failed is retried by its sender
+        // with a new message, which is then the newest and the only one
+        // sent, as it always was.
+        session.messages.push({
+          id: `${session.id}:assistant:${session.messages.length + 1}`,
+          role: 'assistant',
+          content: '',
+          createdAt: new Date().toISOString(),
+        });
+      }
       session.status = 'failed';
       session.lastError = lastError;
       await this.store.save(session);

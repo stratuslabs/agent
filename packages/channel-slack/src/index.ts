@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   latestTurnReply,
   SENDER_TRUST_METADATA_KEY,
+  sessionWriteTrust,
   imageDimensions,
   isImageAttachmentMediaType,
   IMAGE_ATTACHMENT_MAX_BYTES,
@@ -357,11 +358,12 @@ interface HandoverClaim {
   /**
    * Spend the hold: hand the placeholder to `chunks`, run `between` while
    * this renderer still has no placeholder of its own, and reopen one
-   * below. False when there is nothing to hand over — no placeholder, or
-   * the renderer finished before the hold was taken — and the caller posts
-   * the chunks itself.
+   * below. `untaken` when there is nothing to hand over — no placeholder,
+   * or the renderer finished before the hold was taken — and the caller
+   * posts the chunks itself; `partial` when the placeholder took the first
+   * chunk and Slack refused one of the rest.
    */
-  take(chunks: readonly string[], between?: () => Promise<void>): Promise<boolean>;
+  take(chunks: readonly string[], between?: () => Promise<void>): Promise<'complete' | 'partial' | 'untaken'>;
   /** Give the hold back unspent, letting the queued turn finish. */
   release(): void;
 }
@@ -588,30 +590,49 @@ class ReplyRenderer {
     this.pendingEdit.unref?.();
   }
 
-  private queueEdit(text: string): void {
+  /**
+   * Queue one edit of the placeholder. Resolves to whether Slack took it —
+   * false when there was no placeholder to edit, the text belonged to a
+   * turn handed over meanwhile, or the update was refused — which is what
+   * lets `finalize` say whether the reply was ever published.
+   */
+  private queueEdit(text: string): Promise<boolean> {
     const generation = this.generation;
     // The handover as it stands when the edit is queued, not when it runs:
     // a handover that begins after this edit waits for this edit, and an
     // edit that then waited for that handover would be a cycle nothing
     // could break.
     const handover = this.handover;
-    this.editChain = this.editChain
+    const edit = this.editChain
       .then(() => handover)
-      .then(() => {
+      .then(async () => {
         // Read after the handover, not before: the placeholder may have
         // changed hands while this edit waited its turn — and the text
         // may belong to the turn that was handed over.
         const ref = this.ref;
-        return ref && generation === this.generation
-          ? this.web.chat.update({ channel: ref.channel, ts: ref.ts, text })
-          : undefined;
+        if (!ref || generation !== this.generation) {
+          return false;
+        }
+        await this.web.chat.update({ channel: ref.channel, ts: ref.ts, text });
+        return true;
       })
-      .then(() => undefined)
-      .catch((error) => this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`));
+      .catch((error) => {
+        this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      });
+    this.editChain = edit.then(() => undefined);
+    return edit;
   }
 
-  /** Replace the placeholder with the final reply, splitting if oversized. */
-  async finalize(reply: string): Promise<void> {
+  /**
+   * Replace the placeholder with the final reply, splitting if oversized.
+   * Resolves to whether ALL of it was published — the edit taken and every
+   * overflow message posted. A reply Slack refused any part of was not
+   * said in the thread as written, and nothing downstream may treat it as
+   * if it had been: a colleague hearing the whole of a reply the thread
+   * saw half of is reasoning from text nobody read.
+   */
+  async finalize(reply: string): Promise<boolean> {
     await this.handover;
     this.finalized = true;
     if (this.pendingEdit) {
@@ -623,9 +644,8 @@ class ReplyRenderer {
     // No placeholder — a handover could not open a fresh one — and the
     // reply is a message of its own rather than nothing at all.
     const rest = this.ref ? chunks.slice(1) : chunks;
-    if (this.ref) {
-      this.queueEdit(chunks[0] ?? NO_REPLY_TEXT);
-    }
+    const edited = this.ref ? this.queueEdit(chunks[0] ?? NO_REPLY_TEXT) : Promise.resolve(true);
+    let published = await edited;
     await this.editChain;
     await this.uploadChain;
     for (const chunk of rest) {
@@ -636,9 +656,11 @@ class ReplyRenderer {
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
       } catch (error) {
+        published = false;
         this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    return published;
   }
 
   async fail(message: string): Promise<void> {
@@ -681,7 +703,7 @@ class ReplyRenderer {
     return {
       take: async (chunks, between) => {
         if (spent) {
-          return false;
+          return 'untaken';
         }
         try {
           await previous;
@@ -704,11 +726,11 @@ class ReplyRenderer {
     chunks: readonly string[],
     drained: Promise<void>,
     between: (() => Promise<void>) | undefined,
-  ): Promise<boolean> {
+  ): Promise<'complete' | 'partial' | 'untaken'> {
     const [first, ...rest] = chunks;
     const given = this.ref;
     if (first === undefined || this.finalized || !given) {
-      return false;
+      return 'untaken';
     }
     await drained;
     try {
@@ -717,8 +739,9 @@ class ReplyRenderer {
       // Not handed over: the placeholder is still this turn's, and the
       // caller posts the reply as messages of its own.
       this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
+      return 'untaken';
     }
+    let complete = true;
     // The placeholder is the earlier turn's now, and the reference goes
     // before the reopen, so a reopen that fails cannot leave this turn
     // writing over the reply just handed over. (What was streamed into
@@ -733,6 +756,7 @@ class ReplyRenderer {
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
       } catch (error) {
+        complete = false;
         this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -750,7 +774,7 @@ class ReplyRenderer {
       // message of its own when it comes (see `finalize`).
       this.warn(`could not reopen a placeholder: ${error instanceof Error ? error.message : String(error)}`);
     }
-    return true;
+    return complete ? 'complete' : 'partial';
   }
 }
 
@@ -1846,6 +1870,143 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     connections.find((candidate) => candidate.config.agentId === agentId);
 
   /**
+   * Run `work` after everything already queued for this session's intake,
+   * and hold the next link until it settles. The link is claimed
+   * synchronously, so a message's place is fixed by when the adapter
+   * learned of it and not by how long its lookups take — see
+   * `handleInbound`, whose ordering this is.
+   */
+  const onIntakeChain = <T>(sessionId: string, work: () => Promise<T>): Promise<T> => {
+    const previous = intakeChains.get(sessionId) ?? Promise.resolve();
+    const link = previous.then(work);
+    const settled = link.then(
+      () => undefined,
+      () => undefined,
+    );
+    intakeChains.set(sessionId, settled);
+    void settled.then(() => {
+      if (intakeChains.get(sessionId) === settled) {
+        intakeChains.delete(sessionId);
+      }
+    });
+    return link;
+  };
+
+  /**
+   * What one agent REPLIED in a thread, heard by the thread's other agents.
+   *
+   * The other half of overhearing. What people say reaches an agent through
+   * its socket (`admit`), but a colleague's reply is a bot message the
+   * socket ignores on purpose, and its final text reaches Slack as a stream
+   * of edits rather than one event — so it is not an inbound path at all.
+   * The adapter that rendered the reply is the one thing that knows its
+   * final text, and it observes that into the session every other agent
+   * holds for the same thread, with no Slack event involved. Without this
+   * an agent that followed a thread knew the questions its colleague was
+   * asked and not the answers.
+   *
+   * Each hearer takes it on its own intake chain, claimed the moment the
+   * reply is final: a message typed while the reply was still streaming
+   * is already in that chain and is heard first, and one typed after the
+   * final edit cannot overtake it. The observe itself is placed there and
+   * not awaited inside the link — returned in a wrapper, since a promise
+   * returned from the link is one the chain adopts — for the reason
+   * `handleInbound` gives: a hearer with a long turn running must not hold
+   * its next message's place hostage to that turn.
+   *
+   * Only once it is SAID, in full. The reservation is taken when the reply
+   * is final, but the observe waits, inside the link, on `published` —
+   * whether Slack took every edit and post of it — and a reply Slack
+   * refused any part of is heard by nobody, since the thread did not see
+   * it as written and the hearer has no way to know which part. That holds
+   * the hearer's chain for the length of the final edit, which is the
+   * same network round trip a person's message holds it for.
+   *
+   * Two boundaries decide who hears it, and neither is "same workspace".
+   * Whether the hearer is in the THREAD is the gateway's answer on the
+   * session's chain, as for every overhear: an agent never invited here
+   * has no session under the key. Whether it is still in the CHANNEL is
+   * Slack's, asked per reply: a message a person types reaches an agent
+   * only through its own socket, so an app removed from a private channel
+   * simply stops hearing — but a reply is forwarded by this process, and
+   * would keep reaching an agent the operator took out of the room. That
+   * is the one path where membership has to be checked rather than
+   * assumed, and a lookup that fails leaves the agent not hearing, the
+   * direction a boundary should fail in.
+   *
+   * Sent under the speaker's own label rather than `user`: an agent's
+   * reply is at most its own word, and carries whatever its session has
+   * been exposed to — a restatement of a stranger's text is still the
+   * stranger's, which is exactly what `sessionWriteTrust` says.
+   *
+   * Only replies: a turn that said nothing posts `(no reply)`, which is
+   * nothing to hear, and a failed turn's error note is the failure's, not
+   * the agent's.
+   */
+  const overhearReply = async (
+    speaker: AgentConnection,
+    channel: string,
+    thread: string,
+    reply: string,
+    spoken: Pick<Session, 'metadata'>,
+    published: Promise<boolean>,
+  ): Promise<void> => {
+    const gateway = gatewayRef;
+    if (!gateway?.observe || reply.trim().length === 0) {
+      return;
+    }
+    const team = speaker.teamId;
+    const metadata = {
+      channel: 'slack',
+      team,
+      slackChannel: channel,
+      slackUser: speaker.botUserId,
+      slackThread: thread,
+      [SENDER_TRUST_METADATA_KEY]: sessionWriteTrust(spoken),
+    };
+    // In the reply's own workspace only, because a session key carries a
+    // team — the same reason `resolveFollowUpWinner` stays in-workspace.
+    const hearers = connections.filter(
+      (candidate) => candidate.teamId === team && candidate.config.agentId !== speaker.config.agentId,
+    );
+    await Promise.all(hearers.map(async (hearer) => {
+      const sessionId = channelSessionKey({
+        channel: 'slack',
+        agentId: hearer.config.agentId,
+        team,
+        conversation: channel,
+        thread,
+      });
+      try {
+        const { observed } = await onIntakeChain(sessionId, async () => {
+          if (!(await published)) {
+            return { observed: undefined };
+          }
+          let member: boolean | undefined;
+          try {
+            member = (await hearer.web.conversations.info({ channel })).channel?.is_member;
+          } catch (error) {
+            warn(`slack: could not tell whether ${hearer.config.agentId} is still in ${channel}, so it does not hear ${speaker.config.agentId}'s reply there: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          if (member !== true) {
+            return { observed: undefined };
+          }
+          // Named the way a person's message names its speaker: whoever
+          // spoke, by display name. A bot user's is the app's own, set by
+          // whoever installed it.
+          const author = await displayNameFor(hearer, speaker.botUserId);
+          return {
+            observed: gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${reply}`, metadata }),
+          };
+        });
+        await observed;
+      } catch (error) {
+        warn(`slack: ${hearer.config.agentId} could not overhear ${speaker.config.agentId}'s reply in ${channel}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }));
+  };
+
+  /**
    * The addressable outbound seam — the channel contract's first real
    * `OutboundConnection` implementation. Validate-then-hand-over: every
    * refusal here happens at schedule creation or at the moment of a send,
@@ -2189,10 +2350,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     thread: string | undefined,
     chunks: readonly string[],
     between?: () => Promise<void>,
-  ): Promise<void> => {
-    if (behind && await behind.take(chunks, between)) {
-      return;
+  ): Promise<boolean> => {
+    const taken = behind ? await behind.take(chunks, between) : 'untaken';
+    if (taken !== 'untaken') {
+      return taken === 'complete';
     }
+    // Whether ALL of it landed, as `finalize` answers: a reply the thread
+    // saw part of is not one anybody else may be told the whole of.
+    let published = true;
     for (const chunk of chunks) {
       try {
         await connection.web.chat.postMessage({
@@ -2201,12 +2366,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           ...(thread ? { thread_ts: thread } : {}),
         });
       } catch (error) {
+        published = false;
         warn(`slack: could not post part of a turn's outcome: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
     if (between) {
       await between();
     }
+    return published;
   };
 
   /**
@@ -2332,7 +2499,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       await uploads();
       return;
     }
-    await postAheadOf(behind, connection, channel, thread, posting, uploads);
+    // A reply the thread's other agents hear like any other, taking their
+    // place for it before the post, as `handleInbound` does.
+    const published = postAheadOf(behind, connection, channel, thread, posting, uploads);
+    const heard = routing.reply !== undefined && thread !== undefined
+      ? overhearReply(connection, channel, thread, routing.reply, routing, published)
+      : undefined;
+    await published;
+    await heard;
     log(`slack: posted the reply of a turn finished after a restart to ${channel}`);
   };
 
@@ -2862,8 +3036,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // reverse order in durable history. The chain is claimed here,
     // synchronously, so a message's place in it is fixed by when Slack
     // delivered it and not by how long anything it does takes.
-    const previousIntake = intakeChains.get(sessionId) ?? Promise.resolve();
-    const intake = previousIntake.then(async () => {
+    const intake = onIntakeChain(sessionId, async () => {
       // The durable half of addressing runs INSIDE the chain, for the same
       // reason: it awaits, and a message that had to ask the sessions must
       // not lose its place to one that did not. A message that turns out
@@ -2979,16 +3152,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       });
       return { renderer, turn };
     });
-    const settledIntake = intake.then(
-      () => undefined,
-      () => undefined,
-    );
-    intakeChains.set(sessionId, settledIntake);
-    void settledIntake.then(() => {
-      if (intakeChains.get(sessionId) === settledIntake) {
-        intakeChains.delete(sessionId);
-      }
-    });
 
     const started = await intake;
     if (!started) {
@@ -3033,7 +3196,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     removeFromQueue();
 
     if (session) {
-      await renderer.finalize(lastAssistantReply(session));
+      // The reply is final here, so this is when the thread's other agents
+      // take their place for it — before the final edit and the overflow
+      // posts, which are network I/O a later message must not overtake.
+      // A DM has no thread, and nobody else in it.
+      const reply = latestTurnReply(session);
+      const published = renderer.finalize(lastAssistantReply(session));
+      const heard = thread !== undefined && reply !== undefined
+        ? overhearReply(connection, event.channel, thread, reply, session, published)
+        : undefined;
+      await published;
+      await heard;
     } else {
       await renderer.fail(failure instanceof Error ? failure.message : String(failure));
     }

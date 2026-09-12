@@ -9,6 +9,8 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import {
+  markPromptDelivered,
+  isUnaddressedTurn,
   renderSystemPromptSections,
   type JsonObject,
   type ModelProvider,
@@ -428,6 +430,12 @@ export const createClaudeCodeProvider = ({
         }
       : undefined;
     const markIfSideEffects = <T>(error: T): T => (hostedToolRuns > 0 ? markHostedToolSideEffects(error) : error);
+    // Whether the SDK has yielded anything at all: from the first message
+    // on, the harness has this turn's prompt in its own history, and a
+    // failure after that must say so (`markPromptDelivered`) or the kernel
+    // will send the prompt again on the next resume.
+    let delivered = false;
+    const markIfDelivered = <T>(error: T): T => (delivered ? markPromptDelivered(error) : error);
     // The abort signal riding into every hosted tool call is the provider's
     // own controller — the union of the caller's cancellation and the idle
     // timeout — so hosted work never outlives the query around it: a
@@ -478,6 +486,10 @@ export const createClaudeCodeProvider = ({
     };
 
     let resultText: string | undefined;
+    // Whether the SDK reported the turn finished: a stream that closes
+    // without a `result` is a run that did not complete, whatever it
+    // yielded on the way, and is never silence.
+    let completed = false;
     // Tool input arrives as JSON fragments after the block's start event,
     // so the name has to be remembered from the start to label them.
     const toolNamesByIndex = new Map<number, string>();
@@ -553,6 +565,7 @@ export const createClaudeCodeProvider = ({
           options: attemptOptions,
         })) {
           resetIdleTimer();
+          delivered = true;
           // Every message carries it, so the id is captured whether the turn
           // succeeds or not — a session that fails mid-turn is still the
           // session the next turn should continue.
@@ -586,6 +599,7 @@ export const createClaudeCodeProvider = ({
             attemptUsage = message.modelUsage;
           }
           if (message.subtype === 'success' && !message.is_error) {
+            completed = true;
             resultText = message.result;
             continue;
           }
@@ -646,11 +660,11 @@ export const createClaudeCodeProvider = ({
         );
       }
       if (timedOutIdle && !request.signal?.aborted) {
-        throw markIfSideEffects(
+        throw markIfDelivered(markIfSideEffects(
           new Error(`Claude Code produced no output for ${idleTimeoutMs}ms; the run was aborted as stalled.`),
-        );
+        ));
       }
-      throw markIfSideEffects(error);
+      throw markIfDelivered(markIfSideEffects(error));
     } finally {
       if (idleTimer) {
         clearTimeout(idleTimer);
@@ -658,7 +672,16 @@ export const createClaudeCodeProvider = ({
     }
 
     if (resultText === undefined || resultText.length === 0) {
-      throw markIfSideEffects(new Error('Claude Code returned an empty response.'));
+      // Silence is the answer a turn nobody asked for may give — see
+      // `RunInput.addressed` in core — when the SDK said the turn finished
+      // with nothing to say. A stream that ended without a result is a run
+      // that did not complete, and on any turn is an error.
+      if (completed && isUnaddressedTurn(request.session)) {
+        return { parts: [] };
+      }
+      throw markIfDelivered(markIfSideEffects(new Error(
+        completed ? 'Claude Code returned an empty response.' : 'Claude Code ended without reporting a result.',
+      )));
     }
 
     return { parts: [{ type: 'text' as const, text: resultText }] };

@@ -96,9 +96,9 @@ Two supporting facts, both established by the runtime spike
 - **Silent bootstrap.** The app carries its own Node and a prebuilt package
   tree, **installs both to a stable path outside the app bundle**, writes the
   LaunchAgent against that path, starts `stratusd`, and health-checks it. The
-  tree vendors **every plugin the shipped templates name** — [16](./16-templates.md)
-  aborts creation when a template names a plugin that is not installed, and an
-  onboarding wizard has nowhere to send someone holding an install command. A
+  tree vendors **every plugin the templates it offers name** — [16](./16-templates.md)
+  shipped as `stratus template add`, which installs a template's plugins with
+  `npm install -g`, and an onboarding wizard has nowhere to run that. A
   template whose plugin is too heavy to vendor is either not offered on first
   run or its plugin is fetched as a pack first, on the provider-pack path.
 
@@ -424,9 +424,9 @@ specifies the sequence should start here.
 - Onboarding cannot apply a template without the operator confirming a
   summary that lists every tool with its resolved risk, every credential
   requested, and every plugin change — and the summary the app shows is
-  identical to what `stratus agent new --template X` prints for the same
-  overrides on the same
-  template on the same host, because it is the same computation.
+  identical to what `stratus template add <source>` prints for the same
+  template on the same host. 16 shipped as a file copy rather than a computed
+  plan, so that summary is a reading of the template's own files.
 - A template naming a plugin the payload does not carry never reaches
   onboarding, because 16 would refuse to create anything from it.
 - The app's own code contains no provider, tool, or loop code, and imports
@@ -437,8 +437,10 @@ specifies the sequence should start here.
 
 ## Depends on
 
-- **[16](./16-templates.md)** — the onboarding is a template picker, and the
-  format does not exist yet. This is the long pole, not the app.
+- **[16](./16-templates.md)** — the onboarding is a template picker. Shipped:
+  a template is a folder (`template.json`, `config.json`, `agents/`,
+  `skills/`), installed by `stratus template add`. What is missing for the app
+  is the list of templates to offer, not the format.
 - **16's contract extended to carry provider and model overrides** as explicit
   reviewed inputs. Today it renders only the id and the display name and keeps
   the rest literal, which a wizard offering a model picker contradicts. The
