@@ -26,7 +26,7 @@ import { readServiceCommand } from '../service.ts';
 import { serviceEnvFor } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
-import { quoteShellArg } from '../prompter.ts';
+import { ignoredConfigRemedy } from '../runtime.ts';
 import { loadSlackAdapter } from '../loaders.ts';
 import type { ParsedDoctorCommand } from '../parse.ts';
 
@@ -198,7 +198,7 @@ export const collectDoctorReport = async (
     problems.push(
       `${refusedByTrust.path} sets ${refusedByTrust.keys.join(' and ')}, which an auto-discovered config does not get to choose — `
       + `every run started here ignores ${refusedByTrust.keys.length === 1 ? 'it' : 'them'}. `
-      + `Run with --config ${quoteShellArg(refusedByTrust.path)} to trust that file, or move the key to ~/.stratus/config.json.`,
+      + ignoredConfigRemedy(refusedByTrust, false),
     );
   }
 

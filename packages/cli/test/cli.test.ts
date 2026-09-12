@@ -12314,7 +12314,10 @@ test('serve says once what an auto-discovered project config asked for and did n
   // The way out it names is one the daemon takes: `serve` has no --soul,
   // and a notice pointing at a flag the daemon refuses would cost a restart.
   assert.doesNotMatch(output.stderr, /--soul/);
-  assert.match(output.stderr, /to trust that file, or move the keys to ~\/\.stratus\/config\.json\./);
+  // Not "move the key to ~/.stratus/config.json": the project file that
+  // caused this shadows the global one, so a key moved there stays unset.
+  assert.match(output.stderr, /to trust that file, or set STRATUS_SOUL \/ STRATUS_SYSTEM_PROMPT\./);
+  assert.doesNotMatch(output.stderr, /config\.json\. /);
   assert.doesNotMatch(output.stdout, /Mallory/);
 });
 

@@ -73,13 +73,30 @@ export const warnOnUntrustedConfig = (runtime: RuntimeConfig, streams: CliStream
   warnOnIgnoredConfig(runtime.ignoredFromUntrustedConfig, streams, soulFlag);
 };
 
+/** The environment variable that names each refused key, as the resolver reads it. */
+const ENV_FOR_PROMPT_KEY: Record<IgnoredUntrustedConfig['keys'][number], string> = {
+  soul: 'STRATUS_SOUL',
+  systemPrompt: 'STRATUS_SYSTEM_PROMPT',
+};
+
 /**
- * `soulFlag` is whether the command printing this takes `--soul`: `run`
- * and `chat` do, `serve` does not, and a notice that sends the operator to
- * a flag the daemon refuses to start with is a notice that cost them a
- * restart. The daemon's other way is the global config, where a soul key
- * is the operator's own.
+ * The way out of a refused persona, as one sentence. `--config` trusts the
+ * file; the other way is the operator's own channel for the key — the
+ * `--soul` flag where the command takes one (`run` and `chat`; `serve` and
+ * `doctor` do not, and a notice sending the operator to a flag the daemon
+ * refuses is a notice that cost a restart), the environment otherwise.
+ * Never "move the key to ~/.stratus/config.json": the project file that
+ * caused this shadows the global one in discovery, so a key moved there
+ * would go on being unset for every run started here.
  */
+export const ignoredConfigRemedy = (ignored: IgnoredUntrustedConfig, soulFlag: boolean): string => {
+  const otherWay = soulFlag && ignored.keys.includes('soul')
+    ? 'pass --soul <path>'
+    : `set ${ignored.keys.map((key) => ENV_FOR_PROMPT_KEY[key]).join(' / ')}`;
+  return `Run with --config ${quoteShellArg(ignored.path)} to trust that file, or ${otherWay}.`;
+};
+
+/** `soulFlag`: whether the command printing this takes `--soul` — see {@link ignoredConfigRemedy}. */
 export const warnOnIgnoredConfig = (
   ignored: IgnoredUntrustedConfig | undefined,
   streams: CliStreams,
@@ -89,13 +106,10 @@ export const warnOnIgnoredConfig = (
     return;
   }
   const keys = ignored.keys.join(' and ');
-  const otherWay = soulFlag && ignored.keys.includes('soul')
-    ? ', or pass --soul <path>'
-    : `, or move the ${ignored.keys.length === 1 ? 'key' : 'keys'} to ~/.stratus/config.json`;
   writeLine(
     streams.stderr,
     `ignoring ${keys} in ${ignored.path}: what an agent is told is not a decision an auto-discovered config gets to make. `
-    + `Run with --config ${quoteShellArg(ignored.path)} to trust that file${otherWay}.`,
+    + ignoredConfigRemedy(ignored, soulFlag),
   );
 };
 
