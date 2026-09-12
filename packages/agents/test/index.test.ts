@@ -330,6 +330,16 @@ test('an agent delegates only to the agents its soul lists, and omitted means no
     () => toolWithComma.execute({ agent: 'foo,bar', prompt: 'hi' }, sessionAs(narrow)),
     /Add delegates: \["foo,bar"\] to its soul/,
   );
+  // Both quotes in the id: no inline spelling reads back as one entry, so
+  // the suggestion is the block form, which is never split.
+  const mixed = defineAgent({ name: 'Mixed', id: `a"',b` });
+  const registryWithMixed = createAgentTeam([narrow, mixed]);
+  const toolWithMixed = createDelegateTool({ registry: registryWithMixed, runner: new AgentRunner({ provider, agents: registryWithMixed }) });
+  await assert.rejects(
+    () => toolWithMixed.execute({ agent: `a"',b`, prompt: 'hi' }, sessionAs(narrow)),
+    /Add a delegates: list with the line "- a"',b" to its soul/,
+  );
+  assert.deepEqual(parseSoul(`---\nname: Lena\ndelegates:\n  - a"',b\n---\n\nHi.\n`).agent.delegates, [`a"',b`]);
   // `*` is anyone on the roster.
   const toBea = (await tool.execute({ agent: 'bea-lund', prompt: 'hi' }, sessionAs(open))) as { reply: string };
   assert.equal(toBea.reply, 'ok');
