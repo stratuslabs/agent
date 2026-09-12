@@ -125,10 +125,19 @@ export const runUpdate = async (
   }
 
   const pending = await pendingStateMigrations(env);
+  // The newer of what npm offers and what this build already is, never just
+  // the registry's answer: a dist-tag rollback, a stale mirror, or a CLI
+  // installed by explicit version all answer with something older, and a
+  // companion matching *that* would read as current while the process
+  // loading it is newer — the exact mismatch this exists to end. Held to
+  // this build, which is also why the target needs no network to be right.
+  const target = latest !== undefined && compareVersions(latest, CLI_VERSION) > 0
+    ? latest
+    : CLI_VERSION;
   // Against the version this run is heading for, not the one it is on: a
   // CLI already current still leaves a companion behind, which is the whole
   // case this reports.
-  const companions = await readCompanions(latest ?? CLI_VERSION, env);
+  const companions = await readCompanions(target, env);
   const stale = companions.filter((entry) => entry.stale);
 
   out(`stratus ${CLI_VERSION}`);
@@ -152,7 +161,7 @@ export const runUpdate = async (
     // command that lists what is installed.
     out(`  packages    ${companions.length} first-party alongside the CLI, ${stale.length === 0 ? 'none behind' : `${stale.length} behind`}`);
     for (const entry of stale) {
-      out(`              ${entry.name} ${entry.version} → ${latest ?? CLI_VERSION}`);
+      out(`              ${entry.name} ${entry.version} → ${target}`);
     }
   }
 
@@ -214,14 +223,18 @@ export const runUpdate = async (
   // needs no network — so `--check` says what an online update would fix.
   const upgrading = latest === undefined ? [] : [
     ...(upgradeAvailable ? [`${CLI_PACKAGE_NAME}@latest`] : []),
-    ...stale.map((entry) => `${entry.name}@latest`),
+    // `@latest` only where latest IS the target. Where this build is the
+    // newer one, `@latest` would install the very version the target just
+    // refused to be, so the companion is asked for by exact version — the
+    // one this CLI shipped alongside.
+    ...stale.map((entry) => `${entry.name}@${target === latest ? 'latest' : target}`),
   ];
   if (upgrading.length > 0) {
     if (upgradeAvailable) {
       out(`Upgrading ${CLI_PACKAGE_NAME} ${CLI_VERSION} → ${latest}…`);
     }
     for (const entry of stale) {
-      out(`Upgrading ${entry.name} ${entry.version} → ${latest}…`);
+      out(`Upgrading ${entry.name} ${entry.version} → ${target}…`);
     }
     const installed = await (env.packageInstaller ?? defaultPackageInstaller)(upgrading);
     if (installed.ok) {

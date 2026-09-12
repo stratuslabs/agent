@@ -733,3 +733,38 @@ test('doctor names a unit whose interpreter no longer exists', async () => {
     `expected a stale-interpreter problem, got: ${JSON.stringify(report.problems)}`,
   );
 });
+
+test('a registry answer older than this build does not become the target its companions are held to', async () => {
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  // npm answering with something older than the running CLI is a dist-tag
+  // rollback, a stale mirror, or a CLI installed by explicit version. The
+  // companion must still be held to the build that loads it — aimed at the
+  // registry's answer instead, one matching that answer reads as current
+  // while the process running it is newer.
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => '0.0.1',
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.0.1' : undefined,
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+    },
+  });
+  assert.equal(code, 0, `${output.stdout}\n${output.stderr}`);
+  // The exact version, not `@latest` — which would install the older thing
+  // the target just refused to be.
+  assert.deepEqual(installs, [[`@stratusagent/channel-slack@${CLI_VERSION}`]]);
+  // And the CLI itself is never downgraded to meet it.
+  assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/cli/);
+});
