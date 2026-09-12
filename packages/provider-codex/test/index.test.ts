@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { promptWasDelivered } from '@stratusagent/core';
 import { test } from 'node:test';
 import type {
   MemoryEntry,
@@ -157,6 +158,40 @@ test('failed turns and empty responses surface as errors', async () => {
     runTurn: createFakeRunTurn([{ type: 'thread.started', thread_id: 't1' }, { type: 'turn.completed' }]).runTurn,
   });
   await assert.rejects(() => empty.generate({ session: createSession() }), /empty response/);
+
+  // On a turn nobody asked for — its newest user message overheard,
+  // dispatched with `addressed: false` — nothing said is the answer.
+  const unasked = createSession();
+  unasked.messages.push({
+    id: 'session-1:user:2',
+    role: 'user',
+    content: 'Dylan: Bea, thoughts?',
+    createdAt: new Date().toISOString(),
+    overheard: true,
+  });
+  assert.deepEqual(await empty.generate({ session: unasked }), { parts: [] });
+  // A stream that ends after `thread.started` without `turn.completed` is a
+  // run that did not complete, not silence.
+  const cutOff = createCodexProvider({
+    runTurn: createFakeRunTurn([{ type: 'thread.started', thread_id: 't1' }]).runTurn,
+  });
+  await assert.rejects(() => cutOff.generate({ session: unasked }), /ended without completing the turn/);
+
+  // A failure after Codex sent anything says the prompt was delivered —
+  // the thread has it — and one before it does not.
+  await assert.rejects(
+    () => failed.generate({ session: createSession() }),
+    (error: unknown) => promptWasDelivered(error),
+  );
+  const unstarted = createCodexProvider({
+    runTurn: () => {
+      throw new Error('spawn failed');
+    },
+  });
+  await assert.rejects(
+    () => unstarted.generate({ session: createSession() }),
+    (error: unknown) => !promptWasDelivered(error),
+  );
 });
 
 test('a signed-out codex maps to sign-in guidance', async () => {

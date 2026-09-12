@@ -44,9 +44,10 @@ message nobody addressed to it is not its business.
 Threads with more than one agent follow the rule people already use: an
 untagged reply goes to **whoever spoke last**, and mentioning another agent
 moves the conversation to them. The agent that stood down keeps
-listening: what you say to its colleague in that thread goes into its own
-session, marked as said to somebody else, so when you turn back to it, it
-answers as someone who followed along. It is still a rule and not
+listening: what you say to its colleague in that thread, and what the
+colleague answers, go into its own session, marked as said to somebody
+else, so when you turn back to it, it answers as someone who followed
+along. It is still a rule and not
 judgement, so in a thread where people are mostly talking to each other the
 agent will answer replies that were not meant for it — give the side
 conversation its own thread. And an agent hears a thread from the mention

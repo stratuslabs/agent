@@ -113,6 +113,13 @@ export interface GatewayLike {
     userMessage: string;
     /** Images sent with the message — see `Message.images` in `@stratusagent/core`. */
     images?: ImageAttachment[];
+    /**
+     * Whether the message was said to the agent — see `RunInput.addressed`
+     * in `@stratusagent/core`. `false` runs a turn the agent may answer
+     * with nothing: the session completes with no reply, and the adapter
+     * posts nothing for it.
+     */
+    addressed?: boolean;
     metadata?: JsonObject;
     signal?: AbortSignal;
     /**
