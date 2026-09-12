@@ -316,8 +316,11 @@ posted back — a reply is a conversation the operator chose not to have.
 The refusal is one line in the daemon log naming the agent and the user
 id — one per message, however many times Slack delivers it. `"anyone"` is
 the default and today's behavior; the key inherits per agent like
-`slackUsers`, so Bea above stays open while everyone else is closed. A value that is neither word is a config error, never `anyone`:
-this is the one setting here whose misspelling would open the door.
+`slackUsers`, so Bea above stays open while everyone else is closed. A value
+that is neither word is a config error, never `anyone`: this is the one
+setting here whose misspelling would open the door. So is a `slackUsers`
+that is not a list of user ids: a per-agent list dropped for its shape would
+fall back to the shared one, the broader list it existed to narrow.
 `stratus serve` says at startup which agents refuse unlisted senders.
 
 Like `approvals`, this block is read only from a config you chose —

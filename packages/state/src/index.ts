@@ -1607,10 +1607,19 @@ const parsePrincipalsEntry = (raw: unknown, configPath: string, where: string): 
   }
   const source = raw as Record<string, unknown>;
   const entry: AgentPrincipalsConfig = {};
-  if (Array.isArray(source.slackUsers)) {
-    // An empty array survives, as `slackApprovers: []` does: it is how an
-    // agent is excluded from a global list, and dropping it would fall back
-    // to exactly the list being excluded.
+  if (source.slackUsers !== undefined) {
+    // A list in the wrong shape is refused rather than dropped: under
+    // admit: "principals" this list is the door, and a per-agent override
+    // that was silently dropped would fall back to the shared list — the
+    // broader one it existed to narrow. An entry that is not an id is
+    // dropped from the list, which only ever narrows it; an empty array
+    // survives, as `slackApprovers: []` does, because it is how an agent
+    // is excluded from a shared list.
+    if (!Array.isArray(source.slackUsers)) {
+      throw new Error(
+        `Invalid ${where}.slackUsers in config ${configPath}: expected a list of Slack user ids, received ${JSON.stringify(source.slackUsers)}.`,
+      );
+    }
     entry.slackUsers = source.slackUsers.filter(
       (candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0,
     );

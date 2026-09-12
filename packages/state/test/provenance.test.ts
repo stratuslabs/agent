@@ -388,6 +388,22 @@ test('principals.admit is inherited like slackUsers, and a misspelling is refuse
     () => validateConfigFile({ principals: { agents: { ava: { admit: true } } } }, 'test-config'),
     /Invalid principals\.agents\.ava\.admit in config test-config/,
   );
+  // The list is the door under admit: "principals", so a list in the wrong
+  // shape is refused too — a per-agent override that was silently dropped
+  // would fall back to the shared list, the broader one it existed to narrow.
+  assert.throws(
+    () => validateConfigFile({ principals: { slackUsers: ['U01DYLAN'], admit: 'principals', agents: { bea: { slackUsers: 'U-BOB' } } } }, 'test-config'),
+    /Invalid principals\.agents\.bea\.slackUsers in config test-config: expected a list of Slack user ids, received "U-BOB"\./,
+  );
+  assert.throws(
+    () => validateConfigFile({ principals: { slackUsers: 'U01DYLAN' } }, 'test-config'),
+    /Invalid principals\.slackUsers in config test-config: expected a list of Slack user ids, received "U01DYLAN"\./,
+  );
+  // An empty list is still how an agent is excluded from the shared one.
+  assert.deepEqual(
+    resolveAgentPrincipals(validateConfigFile({ principals: { slackUsers: ['U01DYLAN'], agents: { bea: { slackUsers: [] } } } }, 'test-config').principals, 'bea'),
+    { slackUsers: [] },
+  );
 });
 
 test('a global config that exists but cannot be read is unreadable behind a silent project config, never absent', async () => {
