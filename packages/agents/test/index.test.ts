@@ -361,9 +361,11 @@ test('an inline list splits on the commas outside quotes, so a quoted id keeps i
   // `['foo,bar']` used to become the two entries 'foo and bar' — for a
   // delegates list, a grant to two agents nobody meant and none to the
   // one they did, from a soul that loaded without complaint.
-  const soul = parseSoul('---\nname: Kai\ntools: [agent.delegate, "memory.recall"]\ndelegates: [\'foo,bar\', "a, b", baz, \'\']\n---\n\nHi.\n');
+  const soul = parseSoul('---\nname: Kai\ntools: [agent.delegate, "memory.recall"]\ndelegates: [\'foo,bar\', "a, b", baz, \'\', o\'brien, "x"y]\n---\n\nHi.\n');
   assert.deepEqual(soul.agent.tools, ['agent.delegate', 'memory.recall']);
-  assert.deepEqual(soul.agent.delegates, ['foo,bar', 'a, b', 'baz']);
+  // A quote opens an entry only at its start: o'brien is one id with an
+  // apostrophe in it, not the start of a quoted run that eats the list.
+  assert.deepEqual(soul.agent.delegates, ['foo,bar', 'a, b', 'baz', "o'brien", '"x"y']);
   assert.equal(isDelegateAllowed(soul.agent, 'foo,bar'), true);
   assert.equal(isDelegateAllowed(soul.agent, "'foo"), false);
 });

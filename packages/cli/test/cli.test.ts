@@ -11204,7 +11204,9 @@ test('the review names the agents a soul may hand work to, and says so for the w
   // move an operator would most want to see.
   const source = await writeTemplateDir({
     'template.json': EXAMPLE_MANIFEST,
-    'agents/scribe.md': '---\nname: Scribe\ntools:\n  - fs.read\ndelegates:\n  - editor\n  - reviewer\n---\n\nYou keep notes.\n',
+    // One id with a comma in it, beside a plain one: the review must not
+    // print it as two grants.
+    'agents/scribe.md': '---\nname: Scribe\ntools:\n  - fs.read\ndelegates:\n  - editor\n  - "re, viewer"\n---\n\nYou keep notes.\n',
     'agents/lead.md': '---\nname: Lead\ntools:\n  - agent.delegate\ndelegates:\n  - "*"\n---\n\nYou orchestrate.\n',
   });
 
@@ -11216,7 +11218,7 @@ test('the review names the agents a soul may hand work to, and says so for the w
   });
 
   assert.equal(code, 0, output.stderr);
-  assert.match(output.stdout, /agent    Scribe \(scribe\) — fs\.read\n\s+may hand work to, and run as: editor, reviewer/);
+  assert.match(output.stdout, /agent    Scribe \(scribe\) — fs\.read\n\s+may hand work to, and run as: editor, "re, viewer"\n/);
   assert.match(output.stdout, /agent    Lead \(lead\) — agent\.delegate\n\s+may hand work to EVERY agent on your roster, and run as them \(delegates: \[\*\]\)/);
 });
 

@@ -422,7 +422,11 @@ const splitInlineList = (inline: string): string[] => {
   let current = '';
   let quote: '"' | "'" | undefined;
   for (const character of inline) {
-    if (quote === undefined && (character === '"' || character === "'")) {
+    // A quote opens an entry only at the entry's start (after any leading
+    // space): an apostrophe inside an unquoted id — o'brien — is part of
+    // the id, and reading it as an opening quote would swallow every comma
+    // after it into one entry no agent has.
+    if (quote === undefined && (character === '"' || character === "'") && current.trim().length === 0) {
       quote = character;
     } else if (character === quote) {
       quote = undefined;

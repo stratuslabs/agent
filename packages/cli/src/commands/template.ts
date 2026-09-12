@@ -456,6 +456,15 @@ const planTemplateInstall = async (
  */
 const fromTemplate = (text: string): string => escapeControlCharacters(text);
 
+/**
+ * An id as the review prints it in a comma-separated list. An id may itself
+ * contain a comma or a space — the validator allows both — and a review
+ * that printed `editor, reviewer` for one grant to the agent `editor, reviewer`
+ * and for two grants alike would be a security review that cannot be read.
+ * Such an id is JSON-quoted; a plain one stays plain.
+ */
+const reviewId = (id: string): string => (/[,\s"']/.test(id) ? JSON.stringify(id) : id);
+
 /** What the operator says yes to: every file this would add, and every package. */
 const writeTemplatePlan = (streams: CliStreams, plan: TemplatePlan, env: CliEnvironment): void => {
   writeLine(streams.stdout, `${fromTemplate(plan.name)} — ${fromTemplate(plan.description)}`);
@@ -482,7 +491,7 @@ const writeTemplatePlan = (streams: CliStreams, plan: TemplatePlan, env: CliEnvi
         streams.stdout,
         agent.delegates.includes('*')
           ? '           may hand work to EVERY agent on your roster, and run as them (delegates: [*])'
-          : `           may hand work to, and run as: ${fromTemplate(agent.delegates.join(', '))}`,
+          : `           may hand work to, and run as: ${fromTemplate(agent.delegates.map(reviewId).join(', '))}`,
       );
     }
     if (agent.blocked !== undefined) {
