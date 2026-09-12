@@ -1372,6 +1372,80 @@ test('a reply held behind a hearer\'s long turn does not hold the hearer\'s next
   await adapter.stop();
 });
 
+test('a reply Slack refused to publish is heard by nobody', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `re ${userMessage}`));
+  gateway.sessionRouting = async (sessionId) => {
+    if (sessionId === 'slack:ava:T1:C1:100.1' || sessionId === 'slack:bea:T1:C1:960.0' || sessionId === 'slack:ava:T1:C1:960.0') {
+      return {
+        agentId: sessionId.split(':')[1] ?? '',
+        metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+        lastSpokeAt: sessionId.startsWith('slack:ava:') ? '2026-01-01T00:00:01.000Z' : '2026-01-01T00:00:00.000Z',
+        reply: 'the recovered reply',
+      };
+    }
+    return undefined;
+  };
+  // Every edit and every post of Ava's is refused, so nothing she says
+  // reaches the thread.
+  let refusing = true;
+  const update = webAva.chat.update;
+  const post = webAva.chat.postMessage;
+  webAva.chat.update = async (args) => {
+    if (refusing) {
+      throw new Error('ratelimited');
+    }
+    return update.call(webAva.chat, args);
+  };
+  webAva.chat.postMessage = async (args) => {
+    if (refusing && args.text !== '…') {
+      throw new Error('ratelimited');
+    }
+    return post.call(webAva.chat, args);
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const both = (message: ReturnType<typeof channelMessage>) =>
+    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // A turn of Ava's whose final edit is refused, and a recovered reply of
+  // hers whose every post is refused: neither was said in the thread, so
+  // Bea does not hear either.
+  await both(channelMessage({ text: 'say more', ts: '960.1', thread: '960.0' }));
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:C1:100.1' });
+  // Slack recovers; the next reply lands, and is heard.
+  refusing = false;
+  await both(channelMessage({ text: 'again', ts: '960.2', thread: '960.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: say more'],
+    ['ava', 'Dylan: again'],
+  ]);
+  assert.deepEqual(
+    gateway.observes.map((observed) => [observed.agentId, observed.message]),
+    [
+      ['bea', 'Dylan: say more'],
+      ['bea', 'Dylan: again'],
+      ['bea', 'Ava: re Dylan: again'],
+    ],
+  );
+});
+
 test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
