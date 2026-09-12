@@ -417,7 +417,7 @@ const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials', 'delegates'] as const;
  * `delegates` list, a grant to two agents nobody meant and none to the
  * one they did, from a soul that loaded without complaint.
  */
-const splitInlineList = (inline: string): string[] => {
+const splitInlineList = (inline: string): string[] | undefined => {
   const entries: string[] = [];
   let current = '';
   let quote: '"' | "'" | undefined;
@@ -437,8 +437,28 @@ const splitInlineList = (inline: string): string[] => {
     }
     current += character;
   }
+  // A quote left open would have swallowed every comma after it into one
+  // entry no agent has — for a delegates list, a typo that changes who is
+  // authorized while the soul loads without complaint. Refused instead.
+  if (quote !== undefined) {
+    return undefined;
+  }
   entries.push(current);
   return entries;
+};
+
+/**
+ * A value as an inline list entry, `[a, "b, c"]`: quoted when the inline
+ * parser would otherwise split it or unquote it, in whichever quote it
+ * does not contain. The refusal that tells an operator what to add to a
+ * soul renders the id this way, because `delegates: [foo,bar]` is a grant
+ * to two agents and a refusal of the one the message was about.
+ */
+const inlineListEntry = (value: string): string => {
+  if (!/[,"'\s]/.test(value) && unquote(value) === value) {
+    return value;
+  }
+  return value.includes('"') ? `'${value}'` : `"${value}"`;
 };
 
 const unquote = (value: string): string => {
@@ -619,7 +639,11 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
         if (!match) {
           throw new Error(`${capitalize(shape.kind)} frontmatter list "${key}" must be a block list or [a, b]: "${inline}"`);
         }
-        for (const item of splitInlineList(match[1] ?? '')) {
+        const items = splitInlineList(match[1] ?? '');
+        if (items === undefined) {
+          throw new Error(`${capitalize(shape.kind)} frontmatter list "${key}" has an unterminated quote: "${inline}"`);
+        }
+        for (const item of items) {
           const cleaned = unquote(item);
           if (cleaned.length > 0) {
             list.push(cleaned);
@@ -1390,7 +1414,7 @@ export const createDelegateTool = ({
     if (!isDelegateAllowed(session.agent, target.id)) {
       throw new Error(
         `Agent ${session.agent.id} may not delegate to ${target.id}. `
-        + `Add delegates: [${target.id}] to its soul, or delegates: ['*'] for any agent on the roster.`,
+        + `Add delegates: [${inlineListEntry(target.id)}] to its soul, or delegates: ['*'] for any agent on the roster.`,
       );
     }
 

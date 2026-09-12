@@ -321,6 +321,15 @@ test('an agent delegates only to the agents its soul lists, and omitted means no
     () => tool.execute({ agent: 'bea-lund', prompt: 'hi' }, sessionAs(narrow)),
     /may not delegate to bea-lund/,
   );
+  // The suggested edit names the id the way the inline parser reads it
+  // back: `delegates: [foo,bar]` would be a grant to two other agents.
+  const comma = defineAgent({ name: 'Comma', id: 'foo,bar' });
+  const registryWithComma = createAgentTeam([narrow, comma]);
+  const toolWithComma = createDelegateTool({ registry: registryWithComma, runner: new AgentRunner({ provider, agents: registryWithComma }) });
+  await assert.rejects(
+    () => toolWithComma.execute({ agent: 'foo,bar', prompt: 'hi' }, sessionAs(narrow)),
+    /Add delegates: \["foo,bar"\] to its soul/,
+  );
   // `*` is anyone on the roster.
   const toBea = (await tool.execute({ agent: 'bea-lund', prompt: 'hi' }, sessionAs(open))) as { reply: string };
   assert.equal(toBea.reply, 'ok');
@@ -368,6 +377,12 @@ test('an inline list splits on the commas outside quotes, so a quoted id keeps i
   assert.deepEqual(soul.agent.delegates, ['foo,bar', 'a, b', 'baz', "o'brien", '"x"y']);
   assert.equal(isDelegateAllowed(soul.agent, 'foo,bar'), true);
   assert.equal(isDelegateAllowed(soul.agent, "'foo"), false);
+  // A quote left open is refused, not read as one long id: a typo that
+  // changed who is authorized while the soul loaded would be worse.
+  assert.throws(
+    () => parseSoul("---\nname: Kai\ndelegates: ['bea, cy]\n---\n\nHi.\n"),
+    /Soul frontmatter list "delegates" has an unterminated quote: "\['bea, cy\]"/,
+  );
 });
 
 test('the soul writer round-trips a value the parser would otherwise unquote', () => {
