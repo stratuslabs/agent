@@ -1,0 +1,8 @@
+{
+  "plugins": {
+    "@stratusagent/tool-fs": {
+      "enabled": true,
+      "roots": ["~/notes"]
+    }
+  }
+}
