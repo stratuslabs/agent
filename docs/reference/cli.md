@@ -31,6 +31,8 @@ stratus update --check                 # report what an update would do, do noth
 stratus agent new                      # create an agent (guided on a terminal)
 stratus agent new --name Ava --instructions "You research things." --format soul > ava.md
 stratus agents                         # who's on the team (also: stratus agent list)
+stratus template add ./my-template     # install an agent, its skills, and the plugins behind them
+stratus template add owner/repo --yes  # …from GitHub, without the review prompt
 stratus skill add owner/repo           # install skills from GitHub or a local path
 stratus skill add owner/repo --skill hn-search --agent ava
 stratus skill validate ./my-skill      # check a skill (or a repo of them, or an installed id) against the Agent Skills spec
@@ -67,6 +69,7 @@ stratus dashboard                      # local browser dashboard
 | `doctor` | [Troubleshooting](../guides/troubleshooting.md) |
 | `update` | [Updating](../guides/updating.md) |
 | `agent new`, `agents` | [Agents](../concepts/agents.md) |
+| `template add` | [Templates](../guides/templates.md) |
 | `skill add`, `skill validate`, `skills`, `skill reload` | [Skills](../guides/skills.md), [Skill format](./skill-format.md) |
 | `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
@@ -112,8 +115,9 @@ stratus dashboard                      # local browser dashboard
 | `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one |
 | `--session` | `stratus logs`: show only one session's records |
 | `--skill <id>` | `stratus skill add`: pick one skill from a multi-skill repo (repeatable) |
-| `--force` | `stratus skill add`: replace an already-installed skill id |
+| `--force` | `stratus skill add`: replace an already-installed skill id. `stratus template add`: replace an agent or skill already installed under the same name |
 | `--no-reload` | `stratus skill add`: install without telling a running daemon to reload |
+| `--yes`, `-y` | `stratus template add`: install without the review prompt |
 | `--reason` | `stratus restart`: why, for the daemon's log |
 | `--drain-timeout <seconds>` | `stratus restart`: how long in-flight turns get to finish before they are aborted (default 30) |
 | `--help`, `-h` | Show help |

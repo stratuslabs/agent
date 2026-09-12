@@ -5,10 +5,16 @@
 `Gateway.observe` on the session chain, `session.observed`, the `overheard`
 mark on a message and the one rule (`promptTextOf`) every renderer frames
 it by, and the Slack adapter hearing, into an agent's own session, each
-message in a shared thread that was another agent's to answer. Pieces 2 and
-3 are not started.
+message in a shared thread that was another agent's to answer and each
+reply the other agent posted. Piece 2's kernel half has shipped: `dispatch`
+carries `addressed`, an unaddressed turn's message is stored `overheard` and
+followed in the prompt by `UNADDRESSED_TURN_NOTE`, and every provider
+accepts an empty answer on such a turn (`isUnaddressedTurn`) as the answer
+rather than as a broken endpoint. Its channel half — the Slack renderer
+posting nothing for a silent turn, and opening its placeholder lazily —
+lands with piece 3, which is the first thing that dispatches unaddressed.
 
-Two things the sketch did not say, found on the way:
+Four things the sketch did not say, found on the way:
 
 - **"Append and save" was not enough on the harness path.** A resumed SDK
   session is sent only the newest user message, since the harness holds
@@ -17,13 +23,48 @@ Two things the sketch did not say, found on the way:
   own history. `latestUserMessagePrompt` now sends every user message since
   the agent last spoke, which degrades to the old single message whenever
   nothing was overheard.
-- **What the other agent *replied* is not overheard yet — only what people
-  say.** A colleague's reply is a bot message the adapter deliberately
-  ignores, and its final text arrives as a stream of edits rather than one
-  event, so hearing it is a different mechanism: the adapter that rendered
-  the reply knows its final text and can observe it into the thread's other
-  sessions itself, with no Slack event involved. That is the next slice of
-  piece 1, before piece 2.
+- **What the other agent *replied* is a different mechanism from what
+  people say.** A colleague's reply is a bot message the adapter
+  deliberately ignores, and its final text arrives as a stream of edits
+  rather than one event — so it is heard by the adapter that rendered it,
+  which observes the final text into the thread's other sessions itself,
+  with no Slack event involved, under the speaker's own label
+  (`sessionWriteTrust`, so a reply restating a stranger's text is still the
+  stranger's). Three consequences. An agent served by another daemon is a
+  stranger's bot, and its replies are not heard — the daemon is the
+  boundary of who can be overheard, as it already was for who can be
+  named. A forwarded reply is the one path where channel membership has to
+  be asked rather than assumed: a person's message reaches an agent only
+  through its own socket, so an app removed from a private channel stops
+  hearing by itself, but a reply forwarded by the daemon would keep
+  arriving — so each hearer asks Slack, per reply, and a lookup that fails
+  leaves it not hearing. And each agent's socket runs on its own clock: a reply takes its
+  place in a hearer's session when it is final, so an app more than a
+  turn's length behind its colleague's hears the answer before the
+  question. Rare, since sockets run within milliseconds of each other, and
+  bounded to the ordering of a transcript rather than to what it holds.
+- **"An empty reply is a decision" was a provider change, not only a
+  renderer one.** Every provider — the two API paths and both harnesses —
+  treated an empty answer as a broken endpoint and threw, so a turn told
+  it may say nothing would have failed for saying nothing. They now ask
+  the session whether the turn was addressed; on one that was, empty stays
+  an error, because a model asked a question and returning nothing is
+  still an endpoint returning nothing — and so is an empty answer the
+  model did not choose: the API paths accept silence only when the turn
+  ended of its own accord (`end_turn`, or a `finish_reason` of `stop`),
+  never one cut off by the output budget or a content filter, which
+  stays the failure it was. The silence leaves an empty
+  assistant message in the session — no reply and no speaking, but the
+  boundary of a turn that happened, without which a harness sent
+  everything since the agent last spoke would be sent the judged message
+  again on every later turn. And such a turn carries no images: an image
+  enters the prompt as pixels, ahead of any frame that could mark it as
+  somebody else's, so the kernel refuses them and a channel names the
+  attachment instead, as it does for an overheard message. The note also
+  lives in the message rather than the system prompt, on purpose: a
+  harness that holds its own history takes only the newest message, and a
+  rule read next to the thing it applies to is followed more often than
+  one read an hour ago.
 
 ## Goal
 
@@ -198,10 +239,15 @@ test of whether this design is the right one.
   mark — the harness has never seen those, by construction — but a turn
   the harness accepted and then failed appends no reply and records
   nothing about what its prompt carried, so the overheard messages it
-  carried are still marked unheard next time. The same class of
-  double-send as before overhearing existed, narrowed to the overheard
-  messages. Closing it means the provider marking what it sent, on the
-  session, which is its own change.
+  carried are still marked unheard next time. Half closed: both harness
+  providers now mark an error thrown after the harness yielded anything
+  (`markPromptDelivered` in core), and a turn nobody asked for that fails
+  so marked leaves the same empty-assistant boundary a silent one does,
+  since that is the turn whose whole message would otherwise go again.
+  An addressed turn that failed after delivery gets no boundary yet — its
+  sender's retry is the newest message and the only one sent, and the
+  overheard messages ahead of it are the remaining case; the marker is
+  there for it.
 - **Does every overheard message cost a session write?** A busy thread would
   make that a write per message. Batching, or a tail the session keeps
   in-process until the next turn, is an optimization with a crash-consistency

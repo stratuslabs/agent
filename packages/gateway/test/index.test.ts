@@ -231,6 +231,16 @@ test('observe puts a message into a session with no turn, on the session\'s chai
       ['Dylan: Ava, and you?', false],
     ]);
 
+    // A turn dispatched unaddressed carries the same mark through to the
+    // runner: the message is stored overheard, on a new session and an
+    // existing one alike, and the turn is nobody's to answer.
+    const unasked = await gateway.dispatch({ sessionId: 'thread-o', userMessage: 'Bea: on it', addressed: false });
+    const unaskedMessage = unasked.messages.findLast((message) => message.role === 'user');
+    assert.equal(unaskedMessage?.overheard, true);
+    assert.equal(unaskedMessage?.content, 'Bea: on it');
+    const opened = await gateway.dispatch({ sessionId: 'thread-unasked', userMessage: 'Dylan: Bea?', addressed: false });
+    assert.equal(opened.messages[0]?.overheard, true);
+
     // An agent hears only conversations it is already in: nothing is
     // created on its behalf, and "not in that one" is an answer rather
     // than a refusal — a channel asks this for every thread its app can

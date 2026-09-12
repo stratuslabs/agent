@@ -714,6 +714,12 @@ export interface DispatchInput {
   userMessage: string;
   /** Images sent with the message — see `Message.images` in `@stratusagent/core`. */
   images?: ImageAttachment[];
+  /**
+   * Whether the message was said to the agent — see `RunInput.addressed`
+   * in `@stratusagent/core`. `false` runs a turn the agent may answer with
+   * nothing; omitted, the turn is one somebody asked for.
+   */
+  addressed?: boolean;
   metadata?: JsonObject;
   signal?: AbortSignal;
   /**
@@ -2285,6 +2291,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           sessionId: input.sessionId,
           userMessage: input.userMessage,
           ...(input.images !== undefined ? { images: input.images } : {}),
+          ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
           signal,
         });
@@ -2295,6 +2302,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         agent,
         userMessage: input.userMessage,
         ...(input.images !== undefined ? { images: input.images } : {}),
+        ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
         metadata,
         signal,
       });
