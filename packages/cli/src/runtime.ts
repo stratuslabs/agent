@@ -90,9 +90,14 @@ const ENV_FOR_PROMPT_KEY: Record<IgnoredUntrustedConfig['keys'][number], string>
  * would go on being unset for every run started here.
  */
 export const ignoredConfigRemedy = (ignored: IgnoredUntrustedConfig, soulFlag: boolean): string => {
+  const environment = (keys: IgnoredUntrustedConfig['keys']): string =>
+    `set ${keys.map((key) => ENV_FOR_PROMPT_KEY[key]).join(' / ')}`;
+  const rest = ignored.keys.filter((key) => key !== 'soul');
+  // The flag restores only the soul: when the preamble was refused too,
+  // a remedy that stopped at --soul would leave it silently unset.
   const otherWay = soulFlag && ignored.keys.includes('soul')
-    ? 'pass --soul <path>'
-    : `set ${ignored.keys.map((key) => ENV_FOR_PROMPT_KEY[key]).join(' / ')}`;
+    ? (rest.length === 0 ? 'pass --soul <path>' : `pass --soul <path> and ${environment(rest)}`)
+    : environment(ignored.keys);
   return `Run with --config ${quoteShellArg(ignored.path)} to trust that file, or ${otherWay}.`;
 };
 

@@ -12284,7 +12284,8 @@ test('runCli says what an auto-discovered project config asked for and did not g
   assert.equal(exitCode, 0);
   // Said once, on stderr, naming the file and the way to trust it.
   assert.match(output.stderr, /ignoring soul and systemPrompt in .*stratus\.config\.json/);
-  assert.match(output.stderr, /--config .*stratus\.config\.json to trust that file, or pass --soul/);
+  // Both keys were refused, and --soul restores only one of them.
+  assert.match(output.stderr, /--config .*stratus\.config\.json to trust that file, or pass --soul <path> and set STRATUS_SYSTEM_PROMPT\./);
   assert.doesNotMatch(output.stdout, /Mallory/);
 });
 
