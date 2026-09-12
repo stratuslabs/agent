@@ -20,7 +20,8 @@
     "build": "tsc -b",
     "cli": "node --experimental-strip-types ./src/bin.ts",
     "typecheck": "tsc --noEmit --project tsconfig.test.json",
-    "test": "node --test --experimental-strip-types ./test/**/*.test.ts"
+    "test": "node --test --experimental-strip-types ./test/**/*.test.ts",
+    "eval:room": "node --experimental-strip-types ./eval/reading-the-room/run.ts"
   },
   "engines": {
     "node": ">=22.13 <23 || >=23.4"
