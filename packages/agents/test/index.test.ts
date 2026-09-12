@@ -324,6 +324,22 @@ test('an agent delegates only to the agents its soul lists, and omitted means no
   assert.equal(toBea.reply, 'ok');
 });
 
+test('the delegate wildcard is not an agent id, and a delegates entry is an id or the wildcard, never quoted', () => {
+  // `delegates: ['*']` means anyone; an agent whose id was `*` could never
+  // be delegated to alone, so the id is reserved.
+  assert.equal(isValidAgentId('*'), false);
+  assert.throws(() => defineAgent({ name: 'Star', id: '*' }), /Invalid agent id/);
+
+  // The soul writer emits entries raw and the parser unquotes them, so an
+  // entry wrapped in quotes would come back as a different agent's.
+  assert.throws(
+    () => defineAgent({ name: 'Kai', delegates: ["'bea'"] }),
+    /Invalid delegates entry: "'bea'"\. Each entry is an agent id, or \* for any agent on the roster\./,
+  );
+  assert.throws(() => defineAgent({ name: 'Kai', delegates: ['a/b'] }), /Invalid delegates entry/);
+  assert.deepEqual(defineAgent({ name: 'Kai', delegates: ['*', 'bea'] }).delegates, ['*', 'bea']);
+});
+
 test('per-agent tool allowlists stop agents using tools they were not given', async () => {
   const restricted = defineAgent({ name: 'Esme Dawes', tools: [] });
   const registry = createAgentTeam([restricted]);

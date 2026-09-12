@@ -153,7 +153,10 @@ const isAddressableId = (id: string): boolean =>
   // to the prototype, so the write lands nowhere and `JSON.stringify` drops
   // it. `in {}` names exactly that set, and names it by the property it
   // has rather than by a list to keep in step.
-  && !(id in {});
+  && !(id in {})
+  // `*` is the delegate wildcard (`delegates: ['*']`), so an agent with that
+  // id could never be delegated to alone — reserved rather than ambiguous.
+  && id !== '*';
 
 /**
  * Whether `id` is safe to key an agent's resources and paths by.
@@ -314,6 +317,17 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
       + 'a dot or contain a slash, a backslash, a control character, or leading or trailing whitespace — '
       + 'it keys files and credentials, not just labels.',
     );
+  }
+  // Each entry is an id or the wildcard, and never wrapped in quotes: the
+  // soul writer emits entries raw and the parser unquotes them, so a
+  // quoted id would come back as a different agent's — a permission that
+  // changed on an unrelated edit.
+  for (const entry of input.delegates ?? []) {
+    if (entry !== '*' && (!isValidAgentId(entry) || /^(['"]).*\1$/.test(entry))) {
+      throw new Error(
+        `Invalid delegates entry: ${JSON.stringify(entry)}. Each entry is an agent id, or * for any agent on the roster.`,
+      );
+    }
   }
   // A chosen name's slug is used whole. It is not this function's to
   // shorten: the same name has resolved to the same id in every release,
