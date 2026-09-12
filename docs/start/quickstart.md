@@ -87,10 +87,12 @@ stratus run --config stratus.config.json "say hello"
 ```
 
 `--config` is what makes the file trusted. Without it the CLI still finds
-`./stratus.config.json`, but takes only its provider and model: a `soul` or
-`systemPrompt` in a file that arrived with a `git clone` is a system prompt
-somebody else wrote, so an auto-discovered config does not get to set one
-(see [Security](../concepts/security.md#what-a-cloned-repo-cannot-decide)).
+`./stratus.config.json` and applies its run settings, but not its `soul` or
+`systemPrompt`: a persona in a file that arrived with a `git clone` is a
+system prompt somebody else wrote, so an auto-discovered config does not get
+to set one. Which other keys a clone cannot set is listed under
+[Trusted-config-only settings](../reference/config.md#trusted-config-only-settings);
+the reasoning is in [Security](../concepts/security.md#what-a-cloned-repo-cannot-decide).
 
 ## What you'll see
 

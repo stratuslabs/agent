@@ -6553,6 +6553,20 @@ export const collectDoctorReport = async (
   // The file's soul under the resolver's trust rule: a project-local file
   // does not name one, so doctor must not attribute one to it.
   const soulValue = envSoul?.value ?? (winner?.label === 'project' ? undefined : fileConfig.soul);
+  // A refused persona is a finding, not a silence: the file asks for a soul
+  // or a preamble, no run started here will use it, and a doctor that said
+  // "no soul configured" would be hiding the trust decision it exists to
+  // explain.
+  if (winner?.label === 'project') {
+    const refused = (['soul', 'systemPrompt'] as const).filter((key) => typeof fileConfig[key] === 'string' && fileConfig[key].length > 0);
+    if (refused.length > 0) {
+      problems.push(
+        `${winner.path} sets ${refused.join(' and ')}, which an auto-discovered config does not get to choose — `
+        + `every run started here ignores ${refused.length === 1 ? 'it' : 'them'}. `
+        + `Run with --config ${quoteShellArg(winner.path)} to trust that file, or move the key to ~/.stratus/config.json.`,
+      );
+    }
+  }
   const soulSource = envSoul ? envSoul.name : (winner ? winner.path : '');
   const soulPath = typeof soulValue === 'string' ? path.resolve(cwd, soulValue) : undefined;
   // Loaded here for ATTRIBUTION only — the soul's frontmatter is what
