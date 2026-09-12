@@ -3067,7 +3067,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // reading of that convention), and a chart with no words is the last
       // thing said as surely as a sentence — the in-process handover record
       // already treats it so, and the durable answer must agree with it
-      // across a restart.
+      // across a restart. What the session records is what the agent
+      // said, for text and file alike, not what the channel delivered: a
+      // post Slack refused or an upload that failed reads as spoken here.
+      // The channel's own record has the delivery, and this is the
+      // reconstruction for a process that lost it; a delivery record
+      // written back into the session is the open item in roadmap 31.
       const spoken = (message: Message): boolean =>
         (message.role === 'assistant' && message.content.trim().length > 0)
         || (message.role === 'tool' && message.toolResult !== undefined && filePathsOf(message.toolResult).length > 0);

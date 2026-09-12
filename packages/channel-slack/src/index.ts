@@ -243,6 +243,12 @@ export interface SlackWebLike {
     postMessage(args: { channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[] }): Promise<{ ts?: string; channel?: string }>;
     update(args: { channel: string; ts: string; text: string; blocks?: SlackBlock[] }): Promise<unknown>;
     /**
+     * Take a message back. The one caller is a turn nobody asked for that
+     * opened its placeholder for an attempt the provider then abandoned and
+     * decided on silence after all — see `ReplyRenderer.retract`.
+     */
+    delete(args: { channel: string; ts: string }): Promise<unknown>;
+    /**
      * Visible only to `user`. Refusing a click needs to reach the person
      * who clicked without announcing to the channel that they tried.
      */
@@ -698,10 +704,11 @@ class ReplyRenderer {
     // reply as a message of its own beside a placeholder that then fills
     // with stale partial text.
     await this.editChain;
-    if (this.lazy && !this.ref && reply.trim().length === 0) {
-      // Silence, decided: nothing was posted and nothing is. The uploads
-      // still land — a file the turn produced is not nothing to say, and
-      // a turn that posted one has spoken, for the thread rule.
+    if (this.lazy && reply.trim().length === 0 && (!this.ref || await this.retract())) {
+      // Silence, decided: nothing was posted and nothing is — or what was
+      // posted has been taken back. The uploads still land: a file the
+      // turn produced is not nothing to say, and a turn that posted one
+      // has spoken, for the thread rule.
       await this.editChain;
       await this.uploadChain;
       return { published: false, spoke: this.uploaded };
@@ -730,6 +737,35 @@ class ReplyRenderer {
       }
     }
     return { published, spoke: landed || this.edited || this.uploaded };
+  }
+
+  /**
+   * Take back the placeholder a turn nobody asked for opened and then had
+   * nothing to put in: the line that opened it was an attempt the provider
+   * abandoned (`reset` — a fallback after a mid-stream failure), and the
+   * attempt that stood answered with nothing. Editing that placeholder to
+   * `(no reply)` would leave exactly the interruption a silent turn exists
+   * to avoid, and would count as speaking. Resolves to whether Slack let
+   * the message go: a delete refused leaves the abandoned line standing,
+   * and the turn finishes the ordinary way, since a message the thread
+   * can still see is the last thing said whatever it says.
+   */
+  private async retract(): Promise<boolean> {
+    const ref = this.ref;
+    if (!ref) {
+      return true;
+    }
+    try {
+      await this.web.chat.delete({ channel: ref.channel, ts: ref.ts });
+    } catch (error) {
+      this.warn(`chat.delete failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+    this.ref = undefined;
+    // The line the placeholder took is gone with it: nothing of this
+    // turn's stands in the thread unless a file does.
+    this.edited = false;
+    return true;
   }
 
   async fail(message: string): Promise<{ published: boolean; spoke: boolean }> {

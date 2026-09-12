@@ -59,6 +59,7 @@ const createFakeSocket = (): FakeSocket => {
 interface FakeWeb extends SlackWebLike {
   posts: Array<{ channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[] }>;
   updates: Array<{ channel: string; ts: string; text: string; blocks?: SlackBlock[] }>;
+  deletes: Array<{ channel: string; ts: string }>;
   ephemerals: Array<{ channel: string; user: string; text: string }>;
   uploads: Array<{ channel_id: string; filename?: string; contents: string; wasBuffer: boolean }>;
   userInfoDelayMs?: (callIndex: number) => number;
@@ -76,6 +77,7 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
   const web: FakeWeb = {
     posts: [],
     updates: [],
+    deletes: [],
     ephemerals: [],
     uploads: [],
     auth: {
@@ -96,6 +98,10 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
       },
       async update(args) {
         web.updates.push(args);
+        return {};
+      },
+      async delete(args) {
+        web.deletes.push(args);
         return {};
       },
       async postEphemeral(args) {
@@ -1664,6 +1670,75 @@ test('a turn nobody asked for opens its placeholder on its first text, never on 
   assert.deepEqual(web.posts.map((post) => post.text), ['…']);
   assert.deepEqual(web.updates.map((update) => update.text), ['Thinking', 'Done']);
   assert.equal(warnings.filter((line) => /a turn nobody asked for failed before saying anything: provider exploded/.test(line)).length, 1, warnings.join('\n'));
+});
+
+test('a turn nobody asked for whose abandoned attempt opened the placeholder takes it back when the retry says nothing', async () => {
+  const socket = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const warnings: string[] = [];
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    if (sessionId.includes(':bea:')) {
+      return sessionWithReply(sessionId, 'sure');
+    }
+    // Ava's primary provider streams a line, fails mid-stream, and the
+    // fallback that takes over answers with nothing.
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Actually, one thing' } });
+    await tick();
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'reset' } });
+    await tick();
+    return sessionWithReply(sessionId, '');
+  });
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }, { id: 'bea', name: 'Bea' }];
+  gateway.sessionRouting = async (sessionId) => ({
+    agentId: sessionId.includes(':ava:') ? 'ava' : 'bea',
+    metadata: {},
+    // Bea spoke last; Ava is attentive.
+    lastSpokeAt: new Date((sessionId.includes(':ava:') ? 990 : 991) * 1000).toISOString(),
+    lastAnsweredAt: new Date(990 * 1000).toISOString(),
+    heardSinceAnswered: 0,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+      { agentId: 'bea', appToken: 'xapp-2', botToken: 'xoxb-2' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: (botToken) => (botToken === 'xoxb-1' ? webAva : webBea),
+    warn: (line) => {
+      warnings.push(line);
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('message', channelMessage({ text: 'so what do we do', ts: '992.1', thread: '990.0' }));
+  // The placeholder the abandoned line opened is gone, not edited into
+  // `(no reply)`, and nothing of Ava's stands in the thread; Bea answered.
+  assert.deepEqual(webAva.posts.map((post) => post.text), ['…']);
+  assert.deepEqual(webAva.deletes, [{ channel: 'C1', ts: 'bot-ts-1' }]);
+  assert.ok(!webAva.updates.some((update) => update.text === '(no reply)'), webAva.updates.map((update) => update.text).join(' | '));
+  assert.deepEqual(webBea.updates.map((update) => update.text), ['sure']);
+  // Ava did not speak, so the thread is still Bea's: the follow-up runs
+  // Bea's turn under the thread rule and Ava's judgement, not Ava's alone.
+  await socket.deliver('message', channelMessage({ text: 'and then?', ts: '992.2', thread: '990.0' }));
+  const followUps = gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('and then?'));
+  assert.deepEqual(followUps.map((dispatch) => [dispatch.agentId, dispatch.addressed ?? true]).sort(), [['ava', false], ['bea', true]]);
+
+  // Slack refusing the delete leaves the line standing, and a standing
+  // message finishes the ordinary way: it says `(no reply)` and is the
+  // last thing said, so the next follow-up is Ava's and Bea stands down.
+  webAva.chat.delete = async () => {
+    throw new Error('cant_delete_message');
+  };
+  await socket.deliver('message', channelMessage({ text: 'hm', ts: '992.3', thread: '990.0' }));
+  assert.ok(webAva.updates.some((update) => update.text === '(no reply)'), webAva.updates.map((update) => update.text).join(' | '));
+  assert.equal(warnings.filter((line) => /chat\.delete failed: cant_delete_message/.test(line)).length, 1, warnings.join('\n'));
+  await socket.deliver('message', channelMessage({ text: 'ok', ts: '992.4', thread: '990.0' }));
+  await adapter.stop();
+  const last = gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('ok'));
+  assert.deepEqual(last.map((dispatch) => [dispatch.agentId, dispatch.addressed]), [['ava', false]]);
 });
 
 test('text streamed to a turn nobody asked for before it begins does not open its placeholder', async () => {

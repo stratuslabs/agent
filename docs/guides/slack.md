@@ -76,7 +76,8 @@ listens: judge
   **decides** whether an untagged message is one it should answer: the
   message runs a turn that is told nobody asked it anything and that it may
   say nothing, and a turn that says nothing leaves the thread untouched — no
-  `…`, no `(no reply)`. That "while" is its attention: eight messages or
+  `…`, no `(no reply)`, and a line a failed attempt had started before the
+  retry chose silence is deleted rather than left standing. That "while" is its attention: eight messages or
   fifteen minutes after it last answered a message that named it, whichever
   ends first; past that a message is heard for free with no model call, and
   mentioning it starts the window again. Speaking up on its own does not —

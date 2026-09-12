@@ -28,13 +28,15 @@ asking, and not by speaking up, which is why the anchor is its last
 *addressed* answer rather than its last reply; an
 overhear still costs a session write; `observe` stays with channels; and
 an agent's own turn in flight is ordered by the chain, as suspected. Still
-open: the addressed half of the failed-harness-batch double send, and one
+open: the addressed half of the failed-harness-batch double send; the
+durable holder record reading the transcript rather than what Slack
+accepted (below); and one
 edge of a judging agent alongside a thread-rule agent in one thread: a
 judging agent that speaks takes the thread once its reply has landed, so
 a message typed while it was still deciding may be answered by both
 (documented in the Slack README's rule 5).
 
-Five things the sketch did not say, found on the way:
+Six things the sketch did not say, found on the way:
 
 - **"Append and save" was not enough on the harness path.** A resumed SDK
   session is sent only the newest user message, since the harness holds
@@ -91,8 +93,20 @@ Five things the sketch did not say, found on the way:
   cannot take back, so a tool line alone earns nothing, and a judged turn
   that fails before saying anything posts no error note either — the
   failure is in the daemon log, and the note would be the interruption
-  the turn existed to avoid. A colleague's reply is never judged, only
-  heard: two judging agents would otherwise answer each other.
+  the turn existed to avoid. A placeholder that did open, for a line the
+  provider then abandoned (a fallback after a mid-stream failure), is
+  deleted when the retry decides on silence, since `(no reply)` in its
+  place would be that same interruption. A colleague's reply is never
+  judged, only heard: two judging agents would otherwise answer each other.
+- **The durable "who spoke last" reads the transcript, not the thread.**
+  While the daemon runs, the thread rule's record is what actually landed
+  in Slack — a chunk taken, a file uploaded. Across a restart the gateway
+  reconstructs it from the session (`lastSpokeAt`), and a session records
+  what the agent said, not what Slack accepted: text a post refused, or a
+  file whose upload failed, reads as spoken there. A delivery record the
+  channel writes back into the session would close that; it is a new
+  gateway seam with an ordering question against the overhears placed on
+  the same chain, and it is not in this piece.
 
 ## Goal
 
