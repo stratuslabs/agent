@@ -2149,6 +2149,121 @@ test('a judged turn whose file landed but whose words Slack refused has spoken, 
   assert.equal(gateway.observes.some((observed) => observed.message.startsWith('Ava:')), false);
 });
 
+test('a message to a colleague still waiting to be heard counts toward the window', async () => {
+  const socket = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, ''));
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava', listens: 'judge' },
+    { id: 'bea', name: 'Bea' },
+  ];
+  let heard = 6;
+  gateway.sessionRouting = async (sessionId) => (sessionId === 'slack:ava:T1:C1:1090.0'
+    ? { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1090 * 1000).toISOString(), lastAnsweredAt: new Date(1090 * 1000).toISOString(), heardSinceAnswered: heard }
+    : undefined);
+  // Overhears wait: the gateway's chain is held by a turn, so what Ava
+  // hears is not in the store until it ends.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const stubObserve = gateway.observe!;
+  gateway.observe = async (input) => {
+    await held;
+    return stubObserve.call(gateway, input);
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socket : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? web : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Six heard. A message to Bea is Ava's to hear — placed, not yet written.
+  const toBea = socket.deliver('message', channelMessage({ text: '<@B-BEA> your turn', ts: '1090.1', thread: '1090.0' }));
+  // Seven with it: still inside the window, judged.
+  await socket.deliver('message', channelMessage({ text: 'and?', ts: '1090.2', thread: '1090.0' }));
+  // The store now holds that judged message; the message to Bea is still
+  // pending. Eight: the window is spent, and this one is heard, not judged.
+  heard = 7;
+  const ninth = socket.deliver('message', channelMessage({ text: 'more?', ts: '1090.3', thread: '1090.0' }));
+  release();
+  await Promise.all([toBea, ninth]);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: and?']);
+  assert.deepEqual(gateway.observes.map((observed) => observed.message).sort(), ['Dylan: <@B-BEA> your turn', 'Dylan: more?']);
+});
+
+test('a judged turn that posted a file and then failed has still spoken, for the thread rule', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-judge-broke-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'png bytes');
+  const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
+    if (sessionId.startsWith('slack:ava:')) {
+      if (userMessage.includes('chart')) {
+        await gateway.bus.emit({
+          type: 'tool.completed',
+          sessionId,
+          result: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: chart } },
+        });
+        throw new Error('provider exploded');
+      }
+      return sessionWithReply(sessionId, '');
+    }
+    return sessionWithReply(sessionId, 'ok');
+  });
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava', listens: 'judge' },
+    { id: 'bea', name: 'Bea' },
+  ];
+  gateway.sessionRouting = async (sessionId) => {
+    if (sessionId === 'slack:ava:T1:C1:1100.0') {
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1100 * 1000).toISOString(), lastAnsweredAt: new Date(1100 * 1000).toISOString(), heardSinceAnswered: 0 };
+    }
+    if (sessionId === 'slack:bea:T1:C1:1100.0') {
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1100.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+    }
+    return undefined;
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const both = (message: ReturnType<typeof channelMessage>) =>
+    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  await both(channelMessage({ text: 'chart please', ts: '1100.1', thread: '1100.0' }));
+  await both(channelMessage({ text: 'nice', ts: '1100.2', thread: '1100.0' }));
+  await adapter.stop();
+
+  // The file landed before the failure, and is the last thing said: no
+  // error note (the turn was nobody's ask), and the thread is Ava's.
+  assert.equal(webAva.uploads.length, 1);
+  assert.deepEqual(webAva.posts, []);
+  const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
+  assert.deepEqual(of('bea'), ['Dylan: chart please']);
+  assert.deepEqual(of('ava'), ['Dylan: chart please', 'Dylan: nice']);
+});
+
 test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

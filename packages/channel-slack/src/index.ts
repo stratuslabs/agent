@@ -728,7 +728,7 @@ class ReplyRenderer {
     return { published, spoke: landed || this.uploaded };
   }
 
-  async fail(message: string): Promise<void> {
+  async fail(message: string): Promise<{ published: boolean; spoke: boolean }> {
     // The same wait `finalize` takes, for the same reason: a lazy turn's
     // first text may be opening its placeholder right now, and a failure
     // read as "before saying anything" would leave that placeholder saying
@@ -743,10 +743,9 @@ class ReplyRenderer {
       // failure is in the daemon log, and an error note would be the
       // interruption the turn existed to avoid.
       this.warn(`a turn nobody asked for failed before saying anything: ${message}`);
-      await this.finalize('');
-      return;
+      return this.finalize('');
     }
-    await this.finalize(`Something went wrong: ${message}`);
+    return this.finalize(`Something went wrong: ${message}`);
   }
 
   /**
@@ -2003,7 +2002,30 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * takes it over — so the two never count one message twice.
    */
   const pendingFor = (sessionId: string): number =>
-    (renderers.get(sessionId) ?? []).filter((renderer) => !renderer.turnStarted).length;
+    (renderers.get(sessionId) ?? []).filter((renderer) => !renderer.turnStarted).length
+    + (pendingObserves.get(sessionId) ?? 0);
+
+  /**
+   * Overhears placed on the gateway's chain and not yet written, per
+   * session: the other kind of message the store does not hold yet. An
+   * observe queued behind a running turn is heard only when the turn ends,
+   * and a burst of messages to a colleague would otherwise count toward
+   * nothing until then. Counted from placement to settlement.
+   */
+  const pendingObserves = new Map<string, number>();
+  const placeObserve = <T>(sessionId: string, observed: Promise<T>): Promise<T> => {
+    pendingObserves.set(sessionId, (pendingObserves.get(sessionId) ?? 0) + 1);
+    const release = (): void => {
+      const left = (pendingObserves.get(sessionId) ?? 1) - 1;
+      if (left > 0) {
+        pendingObserves.set(sessionId, left);
+      } else {
+        pendingObserves.delete(sessionId);
+      }
+    };
+    void observed.then(release, release);
+    return observed;
+  };
 
   /**
    * Run `work` after everything already queued for this session's intake,
@@ -2131,9 +2153,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           // spoke, by display name. A bot user's is the app's own, set by
           // whoever installed it.
           const author = await displayNameFor(hearer, speaker.botUserId);
-          return {
-            observed: gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${reply}`, metadata }),
-          };
+          const observed = gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${reply}`, metadata });
+          return { observed: observed === undefined ? undefined : placeObserve(sessionId, observed) };
         });
         await observed;
       } catch (error) {
@@ -3202,13 +3223,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // safe side. A host that cannot say leaves the agent hearing.
       let judged = false;
       if (admitted.judge && gateway.sessionRouting) {
+        // The pending count is taken BEFORE the store is read: a message
+        // that settles between the two would be counted by neither the
+        // other way round, and a window that runs one message short in a
+        // race is a bound kept; one that runs a message long is not.
+        const pending = pendingFor(sessionId);
         let routing: SessionRouting | undefined;
         try {
           routing = await gateway.sessionRouting(sessionId);
         } catch (error) {
           warn(`slack: could not read whether ${connection.config.agentId} is attentive in ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
         }
-        if (routing && attentive(routing, event.ts, pendingFor(sessionId))) {
+        if (routing && attentive(routing, event.ts, pending)) {
           judged = true;
           overhear = false;
         }
@@ -3298,7 +3324,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // an overhear queued behind a long turn would hold the next
         // message's place in this chain hostage to that turn.
         return {
-          observed: gateway.observe({ sessionId, agentId: connection.config.agentId, message: userMessage, metadata }),
+          observed: placeObserve(sessionId, gateway.observe({ sessionId, agentId: connection.config.agentId, message: userMessage, metadata })),
         };
       }
 
@@ -3399,7 +3425,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
       await heard;
     } else {
-      await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+      const { spoke } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+      if (renderer.lazy && spoke && threadKey !== undefined) {
+        // A file it posted before breaking is still the last thing said.
+        rememberAddressee(threadKey, connection.config.agentId, event.ts);
+      }
     }
   };
 
@@ -3594,6 +3624,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       approvalPosts.clear();
       threadAddressee.clear();
       coldVerdicts.clear();
+      pendingObserves.clear();
       botIdentities.clear();
       rendering.clear();
       resolvedWhileRendering.clear();
