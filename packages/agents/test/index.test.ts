@@ -22,6 +22,7 @@ import {
   agentIdWithSuffix,
   AGENT_ID_PATTERN,
   isValidAgentId,
+  isValidDelegateEntry,
   isValidSessionId,
   MAX_SESSION_ID_LENGTH,
   MAX_AGENT_ID_LENGTH,
@@ -329,6 +330,11 @@ test('the delegate wildcard is not an agent id, and a delegates entry is an id o
   // be delegated to alone, so the id is reserved.
   assert.equal(isValidAgentId('*'), false);
   assert.throws(() => defineAgent({ name: 'Star', id: '*' }), /Invalid agent id/);
+  // A session id is a broader address, and the wildcard means nothing there.
+  assert.equal(isValidSessionId('*'), true);
+  assert.equal(isValidDelegateEntry('*'), true);
+  assert.equal(isValidDelegateEntry('bea'), true);
+  assert.equal(isValidDelegateEntry("'bea'"), false);
 
   // The soul writer emits entries raw and the parser unquotes them, so an
   // entry wrapped in quotes would come back as a different agent's.

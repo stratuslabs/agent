@@ -153,10 +153,7 @@ const isAddressableId = (id: string): boolean =>
   // to the prototype, so the write lands nowhere and `JSON.stringify` drops
   // it. `in {}` names exactly that set, and names it by the property it
   // has rather than by a list to keep in step.
-  && !(id in {})
-  // `*` is the delegate wildcard (`delegates: ['*']`), so an agent with that
-  // id could never be delegated to alone — reserved rather than ambiguous.
-  && id !== '*';
+  && !(id in {});
 
 /**
  * Whether `id` is safe to key an agent's resources and paths by.
@@ -182,7 +179,21 @@ const isAddressableId = (id: string): boolean =>
  * Rejected, never sanitized: rewriting `../../escape` into `escape` hands
  * back an agent nobody asked for, keyed to resources nobody named.
  */
-export const isValidAgentId = (id: string): boolean => isAddressableId(id);
+// `*` is the delegate wildcard (`delegates: ['*']`), so an agent with that
+// id could never be delegated to alone — reserved rather than ambiguous.
+// Agent ids only: a session id is a broader address, and the wildcard means
+// nothing there.
+export const isValidAgentId = (id: string): boolean => isAddressableId(id) && id !== '*';
+
+/**
+ * Whether a `delegates` entry is one the soul can hold: an agent id, or the
+ * wildcard. Never wrapped in quotes — the soul writer emits entries raw and
+ * the parser unquotes them, so a quoted id would come back as a different
+ * agent's. Exported so the control API refuses a bad entry as the client's
+ * error rather than discovering it in the soul round-trip.
+ */
+export const isValidDelegateEntry = (entry: string): boolean =>
+  entry === '*' || (isValidAgentId(entry) && !/^(['"]).*\1$/.test(entry));
 
 /**
  * How much of a new session id is the *client's* to spend, on top of the
@@ -323,7 +334,7 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
   // quoted id would come back as a different agent's — a permission that
   // changed on an unrelated edit.
   for (const entry of input.delegates ?? []) {
-    if (entry !== '*' && (!isValidAgentId(entry) || /^(['"]).*\1$/.test(entry))) {
+    if (!isValidDelegateEntry(entry)) {
       throw new Error(
         `Invalid delegates entry: ${JSON.stringify(entry)}. Each entry is an agent id, or * for any agent on the roster.`,
       );
