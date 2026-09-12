@@ -89,9 +89,10 @@ Judging costs a model call per message inside the window, which is why the
 window exists. An agent that judges never takes a colleague's *reply* as
 something to answer — two judging agents would otherwise talk to each other
 — and in a thread that mixes a judging agent with one on the thread rule,
-a judging agent that speaks takes the thread like any speaker, so the other
-stands down from then on; only a message typed while the judging agent was
-still deciding may get both. Editable without opening the
+a judging agent that speaks takes the thread like any speaker — whoever's
+reply sits lowest in the thread holds it — so the other stands down from
+then on; only a message typed while the judging agent was still deciding
+may get both. Editable without opening the
 file: `PUT /agents/:id` takes `listens` like any other field.
 
 An app installed before this shipped needs the `channels:history` /

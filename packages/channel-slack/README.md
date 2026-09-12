@@ -67,9 +67,12 @@ they are the whole model:
    and waits to be named. A judging agent that chooses to speak takes the
    thread the way any speaker does, recorded once its reply has landed —
    so a message typed while it was still deciding may be answered by both
-   it and a thread-rule colleague that held the thread before, and
-   everything after is the judging agent's to decide. A colleague's reply
-   is never judged, only heard.
+   it and a thread-rule colleague that held the thread before. "Spoke
+   last" is read off the thread, not the clock: the holder is whichever
+   agent's reply sits lowest, since that is the one a reader answers, and
+   a placeholder posted early and filled in slowly sits above a reply
+   posted while it was being written. A colleague's reply is never
+   judged, only heard.
    The window also counts messages this daemon has dispatched that the
    session does not hold yet, so a burst typed inside one turn is judged
    up to the window and heard past it.

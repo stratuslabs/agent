@@ -32,7 +32,8 @@ open: the addressed half of the failed-harness-batch double send; the
 durable holder record reading the transcript rather than what Slack
 accepted (below); and one
 edge of a judging agent alongside a thread-rule agent in one thread: a
-judging agent that speaks takes the thread once its reply has landed, so
+judging agent that speaks takes the thread once its reply has landed —
+the holder being whichever agent's reply sits lowest in the thread — so
 a message typed while it was still deciding may be answered by both
 (documented in the Slack README's rule 5).
 

@@ -49,7 +49,7 @@ const THREAD_ADDRESSEE_CAPACITY = 2000;
  */
 const COLD_VERDICT_CAPACITY = 256;
 /**
- * How many changes of hands one thread remembers.
+ * How many claims on one thread it remembers.
  *
  * A message older than all of them asks the sessions instead, which answer
  * for the thread as it stands rather than as it stood — so a reply that old
@@ -57,13 +57,14 @@ const COLD_VERDICT_CAPACITY = 256;
  * bounding this, and something has to bound it: the alternative is a list
  * that grows with a conversation for the life of the daemon.
  *
- * Eight is chosen to sit far past the case it covers. This only has to
+ * A claim is a change of hands or a reply that landed (see
+ * `rememberAddressee`), so a busy thread writes one or two per message.
+ * Thirty-two sits far past the case the record covers: it only has to
  * span the lag between two sockets, which is messages inside one delivery
- * window; crossing it needs a single thread to change hands eight times —
- * eight mentions, alternating between agents — while one socket stays
- * behind for all of them.
+ * window, and crossing it needs that many replies in one thread while a
+ * socket stays behind for all of them.
  */
-const THREAD_HANDOVER_DEPTH = 8;
+const THREAD_HANDOVER_DEPTH = 32;
 /**
  * How many files an unrendered turn may queue for its outcome. Nothing
  * drains that queue until the outcome arrives, so a session whose outcome
@@ -297,6 +298,12 @@ export interface SlackAdapterOptions {
    * Defaults to `DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS`.
    */
   fileDownloadTimeoutMs?: number;
+  /**
+   * Test injection: the clock, in milliseconds, that an upload's place in
+   * the thread is read from (`ReplyOutcome.spokeAt`), since the upload
+   * call answers with no message ts. Defaults to `Date.now`.
+   */
+  now?: () => number;
 }
 
 // Lazy (and CJS-interoperable) so tests with injected fakes never load the
@@ -390,6 +397,28 @@ interface HandoverClaim {
 }
 
 /**
+ * What became of a turn's reply. `published`: whether ALL of its text was
+ * — the edit taken and every overflow message posted. `spoke`: whether
+ * ANYTHING of the turn's landed, a chunk or a file. `spokeAt`: where in
+ * the thread what landed sits — the ts of the lowest message of the
+ * turn's that Slack took — present exactly when `spoke` is.
+ */
+interface ReplyOutcome {
+  published: boolean;
+  spoke: boolean;
+  spokeAt?: string;
+}
+
+/**
+ * A clock reading as a Slack timestamp, for a message whose ts Slack does
+ * not hand back: `files.uploadV2` answers with the file, not the message
+ * it became. Slack timestamps are epoch seconds with six decimals, so the
+ * clock's reading compares with them as long as the two agree to within
+ * the gap between one message and the next.
+ */
+const slackTs = (ms: number): string => (ms / 1000).toFixed(6);
+
+/**
  * Renders one turn's reply into Slack with the placeholder-then-edit
  * pattern: post `…` immediately, fold streaming deltas and tool status
  * lines into throttled edits, and finalize with the authoritative reply
@@ -439,6 +468,18 @@ class ReplyRenderer {
   /** Whether any edit of this turn's landed — a streamed line Slack took is something said, whatever the final edit's fate. */
   private edited = false;
   /**
+   * Where in the thread this turn's words stand: the ts of the lowest
+   * message Slack took them in — the placeholder an edit landed in, or an
+   * overflow chunk posted — and, separately, when a file of its landed
+   * (`slackTs` of the clock, since the upload call answers with no message ts).
+   * What the thread rule orders by: an untagged reply is for whoever's
+   * reply sits lowest in the thread, the one a reader sees last, which is
+   * not the turn that finished last — a placeholder posted at intake and
+   * filled in slowly sits above a reply posted while it was being written.
+   */
+  private textAt: string | undefined;
+  private uploadedAt: string | undefined;
+  /**
    * A turn nobody asked for: the placeholder is not posted at intake but
    * on the first TEXT the turn streams, and a turn that ends having said
    * nothing leaves the thread untouched — no placeholder, no `(no reply)`,
@@ -452,6 +493,7 @@ class ReplyRenderer {
   private readonly threadTs: string | undefined;
   private readonly editIntervalMs: number;
   private readonly warn: (line: string) => void;
+  private readonly now: () => number;
 
   constructor(
     web: SlackWebLike,
@@ -459,7 +501,7 @@ class ReplyRenderer {
     threadTs: string | undefined,
     editIntervalMs: number,
     warn: (line: string) => void,
-    options: { lazy?: boolean } = {},
+    options: { lazy?: boolean; now?: () => number } = {},
   ) {
     this.web = web;
     this.channel = channel;
@@ -467,6 +509,7 @@ class ReplyRenderer {
     this.editIntervalMs = editIntervalMs;
     this.warn = warn;
     this.lazy = options.lazy ?? false;
+    this.now = options.now ?? Date.now;
   }
 
   /**
@@ -599,6 +642,7 @@ class ReplyRenderer {
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
         this.uploaded = true;
+        this.uploadedAt = slackTs(this.now());
       })
       .catch((error) => this.warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
   }
@@ -670,6 +714,7 @@ class ReplyRenderer {
         }
         await this.web.chat.update({ channel: ref.channel, ts: ref.ts, text });
         this.edited = true;
+        this.placeText(ref.ts);
         return true;
       })
       .catch((error) => {
@@ -682,16 +727,13 @@ class ReplyRenderer {
 
   /**
    * Replace the placeholder with the final reply, splitting if oversized.
-   * Resolves to two facts. `published`: whether ALL of the text was — the
-   * edit taken and every overflow message posted. A reply Slack refused
-   * any part of was not said in the thread as written, and nothing
-   * downstream may treat it as if it had been: a colleague hearing the
-   * whole of a reply the thread saw half of is reasoning from text nobody
-   * read. `spoke`: whether ANYTHING of this turn's landed — a chunk, or a
-   * file — which is what the thread rule's "who spoke last" is about, since
-   * a file beside a refused sentence is still the last thing said.
+   * Resolves to a `ReplyOutcome`. A reply Slack refused any part of was
+   * not said in the thread as written, and nothing downstream may treat it
+   * as if it had been: a colleague hearing the whole of a reply the thread
+   * saw half of is reasoning from text nobody read. But a file beside a
+   * refused sentence is still the last thing said, for the thread rule.
    */
-  async finalize(reply: string): Promise<{ published: boolean; spoke: boolean }> {
+  async finalize(reply: string): Promise<ReplyOutcome> {
     await this.handover;
     this.finalized = true;
     if (this.pendingEdit) {
@@ -711,7 +753,7 @@ class ReplyRenderer {
       // has spoken, for the thread rule.
       await this.editChain;
       await this.uploadChain;
-      return { published: false, spoke: this.uploaded };
+      return this.outcome(false, this.uploaded);
     }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
     const chunks = messageChunks(text);
@@ -725,18 +767,33 @@ class ReplyRenderer {
     await this.uploadChain;
     for (const chunk of rest) {
       try {
-        await this.web.chat.postMessage({
+        const posted = await this.web.chat.postMessage({
           channel: this.channel,
           text: chunk,
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
         landed = true;
+        this.placeText(posted.ts);
       } catch (error) {
         published = false;
         this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    return { published, spoke: landed || this.edited || this.uploaded };
+    return this.outcome(published, landed || this.edited || this.uploaded);
+  }
+
+  private placeText(ts: string | undefined): void {
+    if (ts !== undefined && (this.textAt === undefined || ts > this.textAt)) {
+      this.textAt = ts;
+    }
+  }
+
+  private outcome(published: boolean, spoke: boolean): ReplyOutcome {
+    const spokeAt = [this.textAt, this.uploadedAt]
+      .filter((ts): ts is string => ts !== undefined)
+      .sort()
+      .at(-1);
+    return { published, spoke, ...(spoke && spokeAt !== undefined ? { spokeAt } : {}) };
   }
 
   /**
@@ -765,10 +822,11 @@ class ReplyRenderer {
     // The line the placeholder took is gone with it: nothing of this
     // turn's stands in the thread unless a file does.
     this.edited = false;
+    this.textAt = undefined;
     return true;
   }
 
-  async fail(message: string): Promise<{ published: boolean; spoke: boolean }> {
+  async fail(message: string): Promise<ReplyOutcome> {
     // The same wait `finalize` takes, for the same reason: a lazy turn's
     // first text may be opening its placeholder right now, and a failure
     // read as "before saying anything" would leave that placeholder saying
@@ -1788,6 +1846,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const createWeb = options.createWebClient ?? defaultWebClient;
   const fetchFile = options.fetchFile ?? defaultFetchFile;
   const fileDownloadTimeoutMs = options.fileDownloadTimeoutMs ?? DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS;
+  const now = options.now ?? Date.now;
 
   const connections: AgentConnection[] = [];
   // Every agent this adapter was asked to carry, connected or not — the
@@ -2803,13 +2862,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Records that `agentId` holds the thread from the message at `ts`
    * onwards, wherever in the thread's history that message falls.
    *
-   * Only actual handovers are kept: a write naming the agent that already
-   * held the thread at that point adds nothing, so the list stays as short
-   * as the conversation's changes of hands rather than growing per message.
-   * The oldest handovers are dropped past `THREAD_HANDOVER_DEPTH`, and the
+   * Every claim is kept, not only changes of hands. A claim by the agent
+   * already holding the thread looks redundant until another agent's reply
+   * is placed between it and the one before — a judge's reply posted below
+   * the holder's older message and above its newer one — at which point it
+   * is what keeps the newer message the holder's; dropped, the judge's
+   * later insertion would take the thread from a reply that sits below it.
+   * Only the same claim twice — the same message reaching a second
+   * connection — is dropped.
+   * The oldest claims are dropped past `THREAD_HANDOVER_DEPTH`, and the
    * least recently written thread past `THREAD_ADDRESSEE_CAPACITY`; both
    * losses cost a lookup, never an answer, since the sessions still hold
    * the durable version.
+   *
+   * `ts` is a message's place in the thread: the message that handed the
+   * thread over at intake, or — once a reply has landed — the reply's own
+   * (`ReplyOutcome.spokeAt`), which is what puts a judge's reply posted
+   * below a colleague's placeholder after it, and one streamed above it
+   * before, whichever turn finished first.
    *
    * Slack timestamps compare as strings: `seconds.microseconds`, both
    * parts fixed width, so lexicographic order is chronological order.
@@ -2821,9 +2891,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       at -= 1;
     }
     const before = handovers[at - 1];
-    if (before && before.agentId === agentId) {
-      // Already this agent's from earlier in the thread; the same message
-      // reaching a second connection lands here too.
+    if (before && before.agentId === agentId && before.ts === ts) {
       return;
     }
     handovers.splice(at, 0, { agentId, ts });
@@ -2844,9 +2912,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * handover at or before it. Undefined when this process has no handover
    * that old, which sends the question to the sessions.
    */
-  const holderAt = (key: string, ts: string): string | undefined => handoverAt(key, ts)?.agentId;
-  /** The handover in force at `ts` — who holds, and from which message. */
-  const handoverAt = (key: string, ts: string): { agentId: string; ts: string } | undefined => {
+  const holderAt = (key: string, ts: string): string | undefined => {
     const handovers = threadAddressee.get(key);
     if (!handovers) {
       return undefined;
@@ -2854,37 +2920,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     for (let index = handovers.length - 1; index >= 0; index -= 1) {
       const handover = handovers[index];
       if (handover && handover.ts <= ts) {
-        return handover;
+        return handover.agentId;
       }
     }
     return undefined;
-  };
-  /**
-   * The record a turn that spoke leaves once its reply has landed, at the
-   * message it answered. A judged turn always leaves one: it took no part
-   * in the holder rule at intake, and without it a thread-rule colleague
-   * that held the thread before would keep answering beside it. Any other
-   * turn had its record written at intake, and leaves one here only when
-   * that record has since been overtaken: a judge answering an OLDER
-   * message and landing first inserts itself ahead of this turn's, which
-   * the intake's write — a no-op while this agent still held the thread —
-   * does not cover, so the next reply would go to the judge though this
-   * agent spoke last. A judge that answered the SAME message keeps it,
-   * whichever landed first: two answers to one message are one tie, and
-   * the rule is that a judge that chose to speak takes the thread, rather
-   * than whichever socket's reply happened to settle last. Late, either
-   * way, for a message typed while the turn was still running, which the
-   * other may therefore still take, and exact for everything after.
-   */
-  const rememberSpeaker = (key: string, agentId: string, ts: string, judged: boolean): void => {
-    if (judged) {
-      rememberAddressee(key, agentId, ts);
-      return;
-    }
-    const held = handoverAt(key, ts);
-    if (held !== undefined && held.agentId !== agentId && held.ts < ts) {
-      rememberAddressee(key, agentId, ts);
-    }
   };
   /**
    * Which of this process's agents a message names, or undefined if it
@@ -3404,7 +3443,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
       // A turn nobody asked for opens its placeholder on its first text,
       // if it ever has any — see `ReplyRenderer.lazy`.
-      const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn, { lazy: judged });
+      const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn, { lazy: judged, now });
       if (!judged) {
         try {
           await renderer.open();
@@ -3486,17 +3525,28 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const heard = thread !== undefined && reply !== undefined
         ? overhearReply(connection, event.channel, thread, reply, session, finalized.then((outcome) => outcome.published))
         : undefined;
-      const { spoke } = await finalized;
+      const { spoke, spokeAt } = await finalized;
       if (spoke && threadKey !== undefined) {
-        // The voice that just answered — see `rememberSpeaker`.
-        rememberSpeaker(threadKey, connection.config.agentId, event.ts, renderer.lazy);
+        // The voice that just answered, recorded where its reply sits in
+        // the thread. For a judging agent this is the only record there
+        // is — it took no part in the holder rule at intake — and without
+        // it a thread-rule colleague that held the thread before would
+        // keep answering beside it. For any other turn the intake wrote
+        // one at the message answered, and this one says where the answer
+        // landed, which is what settles two turns running at once: a
+        // placeholder posted at intake sits above a reply a judge posted
+        // while it was being filled, whichever turn finished first, and
+        // the reader's next untagged message is for the lower of the two.
+        // Late, either way, for a message typed while the turn was still
+        // running, which the other may therefore still take.
+        rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);
       }
       await heard;
     } else {
-      const { spoke } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+      const { spoke, spokeAt } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
       if (spoke && threadKey !== undefined) {
         // A file it posted before breaking is still the last thing said.
-        rememberSpeaker(threadKey, connection.config.agentId, event.ts, renderer.lazy);
+        rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);
       }
     }
   };
