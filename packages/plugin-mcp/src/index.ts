@@ -24,6 +24,11 @@ import {
   normalizeCallResult,
   sanitizeToolSegment,
   SERVER_NAME_PATTERN,
+  bridgedDescription,
+  bridgedSchema,
+  BRIDGED_SCHEMA_MAX_LENGTH,
+  BRIDGED_SCHEMA_MAX_DEPTH,
+  BRIDGED_SEGMENT_MAX_LENGTH,
 } from './normalize.ts';
 
 /**
@@ -38,7 +43,18 @@ import {
  */
 export const PLUGIN_MCP_VERSION = '0.11.2';
 
-export { bridgedToolName, normalizeCallResult, sanitizeToolSegment, SERVER_NAME_PATTERN } from './normalize.ts';
+export {
+  BRIDGED_DESCRIPTION_MAX_LENGTH,
+  BRIDGED_SCHEMA_MAX_LENGTH,
+  BRIDGED_SCHEMA_MAX_DEPTH,
+  BRIDGED_SEGMENT_MAX_LENGTH,
+  bridgedDescription,
+  bridgedSchema,
+  bridgedToolName,
+  normalizeCallResult,
+  sanitizeToolSegment,
+  SERVER_NAME_PATTERN,
+} from './normalize.ts';
 export { sealedStdioEnv, pathGrant, resolveCommandPath };
 
 /**
@@ -743,7 +759,10 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
 
   const proxyTool = (state: ServerState, registeredName: string, info: DiscoveredTool): Tool => ({
     name: registeredName,
-    description: info.description ?? `Tool ${info.mcpName} on the MCP server ${state.spec.name}.`,
+    // The fallback is built from the server's tool name, which the SDK
+    // accepts as any string — bounded the same way, or a nameless tool's
+    // name is the description a server writes.
+    description: info.description ?? bridgedDescription(`Tool ${info.mcpName} on the MCP server ${state.spec.name}.`),
     ...(info.parameters ? { parameters: info.parameters } : {}),
     // No risk claim, deliberately: what a bridged tool registers at is the
     // namespace's declared risk (and any operator override), applied by
@@ -859,6 +878,21 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     }
     const next = new Map<string, DiscoveredTool>();
     for (const tool of advertised) {
+      // A name too long to bridge leaves that one tool unbridged, named by
+      // its length rather than in full — quoting three thousand characters
+      // back into the log would be the attack succeeding one line lower.
+      // Judged on the name as the server wrote it, ahead of the segment
+      // refusal below: that refusal quotes the name and takes the whole
+      // plugin down, so a long name of nothing but characters the segment
+      // drops (sixty-five emoji) would otherwise reach it and do both.
+      if (Array.from(tool.name).length > BRIDGED_SEGMENT_MAX_LENGTH) {
+        warn(
+          `mcp server ${state.spec.name}: a tool whose name is ${Array.from(tool.name).length} characters long was not bridged: `
+          + `a name may be at most ${BRIDGED_SEGMENT_MAX_LENGTH} characters, because it is sent as the tool's name in every `
+          + 'model request. Shorten it on the server.',
+        );
+        continue;
+      }
       const segment = sanitizeToolSegment(tool.name);
       if (segment === undefined) {
         throw new McpConfigError(
@@ -866,6 +900,24 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         );
       }
       const registered = bridgedToolName(state.spec.name, segment);
+      // The schema's own prose is bounded the way the description is. A
+      // schema too long even then leaves that one tool unbridged, named in
+      // the log — not the server refused, and not the plugin: registrations
+      // are staged until setup succeeds, so a load-time throw here would
+      // take every tool of every configured server down over one page of
+      // parameters. The server's to shorten; everything else keeps working.
+      // Judged before the collision check below, so a tool that will not
+      // be bridged cannot collide with one that will: the order the server
+      // lists them in must not decide whether the whole plugin loads.
+      const parameters = isObject(tool.inputSchema) ? bridgedSchema(tool.inputSchema) : undefined;
+      if (isObject(tool.inputSchema) && parameters === undefined) {
+        warn(
+          `mcp server ${state.spec.name}: ${registered} was not bridged: its input schema is longer than `
+          + `${BRIDGED_SCHEMA_MAX_LENGTH} characters once its descriptions are bounded, or nests deeper than `
+          + `${BRIDGED_SCHEMA_MAX_DEPTH} levels, and a schema like that is a page, not a parameter list. Shorten it on the server.`,
+        );
+        continue;
+      }
       if (next.has(registered)) {
         // Folding two of the server's names into one registered name would
         // make the second silently answer calls meant for the first —
@@ -876,8 +928,8 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       }
       next.set(registered, {
         mcpName: tool.name,
-        ...(typeof tool.description === 'string' ? { description: tool.description } : {}),
-        ...(isObject(tool.inputSchema) ? { parameters: tool.inputSchema as JsonObject } : {}),
+        ...(typeof tool.description === 'string' ? { description: bridgedDescription(tool.description) } : {}),
+        ...(parameters !== undefined ? { parameters: parameters as JsonObject } : {}),
       });
     }
 

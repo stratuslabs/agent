@@ -2654,16 +2654,29 @@ export const memoryRegionHeading = (trust: TrustLevel): string => {
  * `unknown` region — never as the agent's own conclusion.
  */
 /**
+ * Unicode's `Bidi_Control` property as a character-class fragment: the
+ * marks, the Arabic letter mark, the embeddings and overrides, and the
+ * isolates. Exported so every escaper spells out the same set — text that
+ * reads one way to a person and another to the model is the same trick
+ * whether it arrives in a memory entry, a Slack name, or a tool description.
+ */
+export const BIDI_CONTROL_CHARACTERS = '\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069';
+
+const CONTROL_CHARACTERS = new RegExp(`[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029${BIDI_CONTROL_CHARACTERS}]`, 'g');
+
+/**
  * `text` on one line, every control character spelled out the way JSON
- * does (`\n`, `\u001b`), C1 controls and the Unicode line separators
- * included. The memory block and `stratus memory list` both frame an entry
- * by its line — `- ` under a region heading, an indent under an id — and a
- * fact holding a newline could otherwise start a line of its own that reads
- * as a heading, the trusted region's heading among them. Escaped rather
- * than dropped, so what is shown is still what is stored.
+ * does (`\n`, `\u001b`), C1 controls, the Unicode line separators and
+ * the bidi controls included. The memory block and `stratus memory list`
+ * both frame an entry by its line — `- ` under a region heading, an indent
+ * under an id — and a fact holding a newline could otherwise start a line
+ * of its own that reads as a heading, the trusted region's heading among
+ * them; a right-to-left override would make the line read differently to
+ * a person than to the model. Escaped rather than dropped, so what is
+ * shown is still what is stored.
  */
 export const escapeControlCharacters = (text: string): string =>
-  text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (character) => {
+  text.replace(CONTROL_CHARACTERS, (character) => {
     switch (character) {
       case '\n': return '\\n';
       case '\r': return '\\r';

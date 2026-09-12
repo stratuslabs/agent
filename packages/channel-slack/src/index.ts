@@ -12,6 +12,7 @@ import {
   IMAGE_ATTACHMENT_MAX_BYTES,
   IMAGE_ATTACHMENT_MAX_DIMENSION,
   IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
+  escapeControlCharacters,
   type AlwaysMeans,
   type ApprovalAnswer,
   type ImageAttachment,
@@ -28,6 +29,12 @@ import {
   type OutboundConnection,
   type OutboundMessageRef,
 } from '@stratusagent/channels';
+
+/**
+ * The longest display name the model is shown. Slack caps profile names
+ * well under this; the bound is for a profile that is not a name.
+ */
+const MAX_DISPLAY_NAME_LENGTH = 80;
 
 const SLACK_MAX_MESSAGE_CHARS = 4000;
 const DEFAULT_EDIT_INTERVAL_MS = 1000;
@@ -1842,6 +1849,41 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
   };
 
+  /**
+   * A display name as the model may read it: one line, bounded. It is text
+   * its owner typed into their profile, and it lands in the speaker
+   * position of a user turn (`Name: text`) or as `@Name` inside one — where
+   * a newline, or a name long enough to be a paragraph, would let its owner
+   * speak in a place nobody vouched for. Escaped rather than dropped, the
+   * way memory entries are, so a strange name still reads as strange.
+   */
+  const boundedDisplayName = (name: string): string => {
+    // Code points, not UTF-16 units: an emoji is one character of a name,
+    // and a cut inside a surrogate pair is a malformed speaker.
+    const characters = Array.from(escapeControlCharacters(name).trim());
+    return characters.length > MAX_DISPLAY_NAME_LENGTH
+      ? `${characters.slice(0, MAX_DISPLAY_NAME_LENGTH - 1).join('')}…`
+      : characters.join('');
+  };
+
+  /**
+   * Who is speaking, as the model reads it. A principal's profile is
+   * trusted the way their messages are, so it is their display name. With
+   * a principals list in force everyone else is their stable id, as a
+   * mention of them already is: named, not quoted. With no list at all
+   * there is nobody to prefer, so every author keeps their name — the turn
+   * is labelled `unknown` either way. "No list" is the key being absent:
+   * an explicit empty list is how an agent is excluded from a shared one,
+   * and it means nobody is preferred, not that nobody has been named.
+   */
+  const authorFor = async (connection: AgentConnection, userId: string): Promise<string> => {
+    const principals = connection.config.principals;
+    if (principals !== undefined && !principals.includes(userId)) {
+      return userId;
+    }
+    return boundedDisplayName(await displayNameFor(connection, userId));
+  };
+
   // Mentions arrive as <@U123> markup; the model should read names.
   /**
    * `<@U…>` mentions become `@name` — for principals only. A display name
@@ -1860,7 +1902,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     let result = withoutBot;
     for (const id of new Set(ids)) {
       if (principals.has(id)) {
-        result = result.replaceAll(`<@${id}>`, `@${await displayNameFor(connection, id)}`);
+        result = result.replaceAll(`<@${id}>`, `@${boundedDisplayName(await displayNameFor(connection, id))}`);
       }
     }
     return result.trim();
@@ -3082,7 +3124,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (cleaned.length === 0 && images.length === 0) {
         return undefined;
       }
-      const author = await displayNameFor(connection, userId);
+      const author = await authorFor(connection, userId);
       // In shared channels the model should know who is speaking; a DM is
       // unambiguous. A bare image in a channel still says who sent it.
       const spoken = isDm ? cleaned : (cleaned.length > 0 ? `${author}: ${cleaned}` : `${author}:`);
