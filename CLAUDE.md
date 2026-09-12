@@ -25,7 +25,7 @@ Where things are documented:
   Links and images here must be **absolute** `github.com` /
   `raw.githubusercontent.com` URLs: npm does not resolve monorepo-relative
   paths, and it renders this file only on publish.
-- `HELP_TEXT` in `packages/cli/src/help.ts` — every command and flag.
+- `HELP_TEXT` in `packages/cli/src/index.ts` — every command and flag.
 - `packages/channel-slack/README.md` — the Slack app setup.
 - `packages/control-api/README.md` — the HTTP + WS surface: every endpoint,
   the auth model, the event envelope, the `api` config block. Both other

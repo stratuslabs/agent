@@ -351,7 +351,7 @@ boundary must resolve per call rather than closing over one value at setup, and
 that is a requirement on the plugin, not a courtesy.
 
 Loading uses the `import.meta.resolve` + dynamic-import pattern of
-`loadSlackAdapter` in `packages/cli/src/loaders.ts`. It resolves first and imports
+`loadSlackAdapter` in `packages/cli/src/index.ts`. It resolves first and imports
 second on purpose: a package that is installed but missing one of *its*
 dependencies throws `ERR_MODULE_NOT_FOUND` too, so inspecting the import error
 cannot tell "not installed" from "installed and broken" — and silently

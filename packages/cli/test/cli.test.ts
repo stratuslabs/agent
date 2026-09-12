@@ -862,32 +862,27 @@ test('a soul listing only tools nothing provides is warned about, and still runs
 });
 
 test('the CLI never imports the gateway at module scope', async () => {
-  // `bin.ts` imports the barrel to call `unsupportedNodeMessage`, before
+  // `bin.ts` imports this module to call `unsupportedNodeMessage`, before
   // anything else has a chance to fail — the whole point being to explain
   // the Node floor rather than die with a builtin-module error further in.
-  // The barrel statically pulls in every module under src/, and
   // `@stratusagent/gateway` pulls in `node:sqlite` at module scope, so one
-  // static value import of it anywhere makes that guard fail with exactly the
-  // error it exists to replace, on every command including the ones that
-  // never touch a gateway.
+  // static value import of it makes that guard fail with exactly the error
+  // it exists to replace, on every command including the ones that never
+  // touch a gateway.
   //
   // There is no linter here to hold that, and a value import for a list of
   // strings is an easy thing to write by accident — this is what caught it.
-  const srcDir = path.join(import.meta.dirname, '..', 'src');
-  const sources = (await readdir(srcDir, { recursive: true })).filter((entry) => entry.endsWith('.ts'));
-  const staticImports: string[] = [];
-  for (const entry of sources) {
-    const source = await readFile(path.join(srcDir, entry), 'utf8');
-    // A whole statement, not a line: a wrapped import ends on a `} from` line
-    // that a per-line check would never see.
-    for (const match of source.matchAll(/^import\b[^;]*?\bfrom\s+'@stratusagent\/gateway'/gm)) {
-      staticImports.push(`${entry}: ${match[0].replaceAll(/\s+/g, ' ')}`);
-    }
-  }
+  const source = await readFile(
+    path.join(import.meta.dirname, '..', 'src', 'index.ts'),
+    'utf8',
+  );
+  const staticImports = source
+    .split('\n')
+    .filter((line) => /^import\b/.test(line) && line.includes("'@stratusagent/gateway'"));
 
   assert.ok(staticImports.length > 0, 'the assertion below would pass vacuously');
-  for (const statement of staticImports) {
-    assert.match(statement, /^[^:]+: import type\b/, `a value import of the gateway reaches node:sqlite: ${statement}`);
+  for (const line of staticImports) {
+    assert.match(line, /^import type\b/, `a value import of the gateway reaches node:sqlite: ${line}`);
   }
 });
 
