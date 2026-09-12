@@ -6386,6 +6386,13 @@ interface TemplateAgentPlan {
    * is the review lying in the one direction that matters.
    */
   tools: string[] | undefined;
+  /**
+   * The soul's `credentials:` list, the other capability gate. Undefined is
+   * *none* here, the opposite of `tools`: `assertCredentialAllowed` refuses
+   * a name the list does not carry, so a soul with no list reaches no
+   * stored secret at all.
+   */
+  credentials: string[] | undefined;
   /** Already installed under this filename; `--force` replaces it. */
   taken: boolean;
   /**
@@ -6454,20 +6461,58 @@ const mergeTemplateConfig = (base: JsonValue | undefined, incoming: JsonValue): 
  * object, so `plugins: []` or `api: { port: "bad" }` would otherwise be
  * written and make the whole global config unreadable on the next run.
  */
+/**
+ * Fragment leaves the validated document does not carry, by dotted path.
+ *
+ * `validateConfigFile` normalizes: it builds a fresh document out of the
+ * fields it recognizes, so a top-level key of the wrong type is dropped
+ * rather than refused. `model: 123` over an existing `model: "sonnet"`
+ * therefore deletes the model, while the review says it sets it to 123 and
+ * the command reports success. Saving only what survives is right; saving
+ * it without saying what did not is the bug.
+ */
+const leavesNotApplied = (
+  fragment: JsonValue,
+  validated: JsonValue | undefined,
+  prefix: readonly string[] = [],
+): string[] => {
+  if (!isPlainObject(fragment)) {
+    return JSON.stringify(validated) === JSON.stringify(fragment) ? [] : [prefix.join('.')];
+  }
+  // An empty object asks for a block, not for emptiness: the merge leaves
+  // whatever was already there, so anything object-shaped satisfies it.
+  if (!isPlainObject(validated)) {
+    return [prefix.join('.')];
+  }
+  return Object.entries(fragment)
+    .flatMap(([key, child]) => leavesNotApplied(child as JsonValue, validated[key], [...prefix, key]));
+};
+
 const mergedTemplateConfig = (
   current: CliConfigFile,
   fragment: JsonObject,
   configPath: string,
 ): CliConfigFile => {
   const merged = mergeTemplateConfig(current as JsonValue, fragment);
+  let validated: CliConfigFile;
   try {
-    return validateConfigFile(merged, configPath);
+    validated = validateConfigFile(merged, configPath);
   } catch (error) {
     throw new Error(
       `This template's ${TEMPLATE_CONFIG_FILENAME} would make ${configPath} unreadable: `
       + `${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  const dropped = leavesNotApplied(fragment, validated as JsonValue);
+  if (dropped.length > 0) {
+    throw new Error(
+      `This template's ${TEMPLATE_CONFIG_FILENAME} sets ${dropped.map(fromTemplate).join(', ')}, `
+      + `which ${configPath} cannot hold — the wrong type, or not a setting at all. `
+      + 'Installing it would drop those keys while the review said it set them, '
+      + 'and a key you already had set would go with them. Fix the template.',
+    );
+  }
+  return validated;
 };
 
 /**
@@ -6602,8 +6647,14 @@ const planTemplateInstall = async (
   // default soul (which can live outside `agents/` and still be served),
   // and the built-in `stratus`. Reading the roster alone said "available"
   // for ids the daemon would then hand to somebody else.
+  // Pinned to the global config, because that is the one this command
+  // merges into. Unpinned, `declaredAgentIds` resolves the configured soul
+  // by the working directory's precedence, so a checkout carrying a
+  // `stratus.config.json` hides the global config's own `soul:` — and an id
+  // that soul holds is then claimed against the wrong set, installing a
+  // roster entry the daemon shadows.
   const declared = agentFiles.length > 0
-    ? await declaredAgentIds(env)
+    ? await declaredAgentIds(env, globalConfigPath(env))
     : { ids: new Set<string>(), unread: [] as string[] };
   if (declared.unread.length > 0) {
     warn(`could not read ${declared.unread.join(' or ')}, so ids were not checked against what it declares.`);
@@ -6643,6 +6694,7 @@ const planTemplateInstall = async (
       id: soul.agent.id,
       name: soul.agent.name,
       tools: soul.agent.tools ? [...soul.agent.tools] : undefined,
+      credentials: soul.agent.credentials ? [...soul.agent.credentials] : undefined,
       taken,
       ...(blocked !== undefined ? { blocked } : {}),
     });
@@ -6678,34 +6730,54 @@ const planTemplateInstall = async (
   return { name, description, directory, agents, skills, packages, missing, config, configChanges };
 };
 
+/**
+ * Text a template supplied, on its way to a terminal.
+ *
+ * Every string in the review comes out of a folder somebody downloaded —
+ * the manifest, agent and tool names, config keys, filenames. A key ending
+ * in `\u001b[2J` erases the review directly above the prompt, and the
+ * operator then approves a display the template wrote. `JSON.stringify`
+ * covers a value's C0 range and nothing else, so it is not the guard
+ * either. This is the rule `stratus memory list` already applies to
+ * untrusted text, for the same reason.
+ */
+const fromTemplate = (text: string): string => escapeControlCharacters(text);
+
 /** What the operator says yes to: every file this would add, and every package. */
 const writeTemplatePlan = (streams: CliStreams, plan: TemplatePlan, env: CliEnvironment): void => {
-  writeLine(streams.stdout, `${plan.name} — ${plan.description}`);
+  writeLine(streams.stdout, `${fromTemplate(plan.name)} — ${fromTemplate(plan.description)}`);
   writeLine(streams.stdout);
   for (const agent of plan.agents) {
     // An absent `tools:` is not "none", it is "all" — see TemplateAgentPlan.
     const tools = agent.tools === undefined
       ? 'EVERY tool, because the soul has no tools: list'
-      : agent.tools.length > 0 ? agent.tools.join(', ') : 'no tools';
-    writeLine(streams.stdout, `  agent    ${agent.name} (${agent.id}) — ${tools}`);
+      : agent.tools.length > 0 ? fromTemplate(agent.tools.join(', ')) : 'no tools';
+    writeLine(streams.stdout, `  agent    ${fromTemplate(agent.name)} (${fromTemplate(agent.id)}) — ${tools}`);
+    // The other gate, and the one nobody expects a folder of markdown to
+    // move: a name here reaches the stored secret of that name the moment
+    // the soul lands. Printed on its own line rather than appended to the
+    // tools, because it is a different kind of grant.
+    if (agent.credentials !== undefined && agent.credentials.length > 0) {
+      writeLine(streams.stdout, `           may read your stored credentials: ${fromTemplate(agent.credentials.join(', '))}`);
+    }
     if (agent.blocked !== undefined) {
-      writeLine(streams.stdout, `           cannot install ${agent.file}: ${agent.blocked}.`);
+      writeLine(streams.stdout, `           cannot install ${fromTemplate(agent.file)}: ${fromTemplate(agent.blocked)}.`);
     } else if (agent.taken) {
-      writeLine(streams.stdout, `           ${agent.file} is already in your roster; --force replaces it.`);
+      writeLine(streams.stdout, `           ${fromTemplate(agent.file)} is already in your roster; --force replaces it.`);
     }
   }
   for (const skill of plan.skills) {
-    writeLine(streams.stdout, `  skill    ${skill}`);
+    writeLine(streams.stdout, `  skill    ${fromTemplate(skill)}`);
   }
   for (const specifier of plan.packages) {
     const note = plan.missing.includes(specifier) ? 'npm install -g' : 'already installed';
-    writeLine(streams.stdout, `  plugin   ${specifier} (${note})`);
+    writeLine(streams.stdout, `  plugin   ${fromTemplate(specifier)} (${note})`);
   }
   if (plan.configChanges.length > 0) {
     writeLine(streams.stdout, `  config   ${globalConfigPath(env)}`);
     for (const change of plan.configChanges) {
-      const replaces = change.was !== undefined ? `  (replaces ${JSON.stringify(change.was)})` : '';
-      writeLine(streams.stdout, `           ${change.path}: ${JSON.stringify(change.value)}${replaces}`);
+      const replaces = change.was !== undefined ? `  (replaces ${fromTemplate(JSON.stringify(change.was))})` : '';
+      writeLine(streams.stdout, `           ${fromTemplate(change.path)}: ${fromTemplate(JSON.stringify(change.value))}${replaces}`);
     }
   }
   writeLine(streams.stdout);
@@ -6744,7 +6816,13 @@ export const runTemplateAdd = async (
   const directory = scratch;
   try {
     if (resolved.kind === 'local') {
-      await cp(resolved.directory, scratch, { recursive: true });
+      // verbatimSymlinks for the reason `installSkillsFromDirectory` uses it
+      // on its own staging copy: the default rewrites a relative link to an
+      // absolute path into the source tree, and `findEscapingSymlink` then
+      // reads a skill's own intra-skill link as reaching outside itself and
+      // skips the skill. Installing the same folder through `skill add`
+      // accepts it, so the snapshot must not change the answer.
+      await cp(resolved.directory, scratch, { recursive: true, verbatimSymlinks: true });
     } else {
       writeLine(streams.stdout, `Fetching ${redactedSourceUrl(resolved.url)} …`);
       await cloneSource(resolved.url, scratch);
@@ -6755,7 +6833,7 @@ export const runTemplateAdd = async (
   }
 
   try {
-    const plan = await planTemplateInstall(env, directory, (line) => writeLine(streams.stderr, `Warning: ${line}`));
+    const plan = await planTemplateInstall(env, directory, (line) => writeLine(streams.stderr, `Warning: ${fromTemplate(line)}`));
     writeTemplatePlan(streams, plan, env);
 
     if (!command.yes && !await confirmTemplateInstall(streams, env)) {
@@ -6786,7 +6864,7 @@ export const runTemplateAdd = async (
     // narrows the window rather than closing it — the same gap between the
     // read and the write that `stratus agent new` has.
     const claimedNow = plan.agents.length > 0
-      ? await declaredAgentIds(env)
+      ? await declaredAgentIds(env, globalConfigPath(env))
       : { ids: new Set<string>() };
     const installedAgents: string[] = [];
     const enabledPackages: Array<{ specifier: string; on: boolean }> = [];
@@ -6837,7 +6915,7 @@ export const runTemplateAdd = async (
         refusedAgents.push(agent.file);
         continue;
       }
-      installedAgents.push(`${agent.name} (${agent.id})`);
+      installedAgents.push(`${fromTemplate(agent.name)} (${fromTemplate(agent.id)})`);
     }
 
     // The same installer `skill add` uses, so a skill a template carries
@@ -6876,15 +6954,15 @@ export const runTemplateAdd = async (
       writeLine(streams.stdout, `installed ${agent}`);
     }
     for (const skill of skillResult.installed) {
-      writeLine(streams.stdout, `installed skill ${skill.id}`);
+      writeLine(streams.stdout, `installed skill ${fromTemplate(skill.id)}`);
     }
     const enabled = enabledPackages.filter((entry) => entry.on).map((entry) => entry.specifier);
     const stillOff = enabledPackages.filter((entry) => !entry.on).map((entry) => entry.specifier);
     if (enabled.length > 0) {
-      writeLine(streams.stdout, `enabled ${enabled.join(', ')} in ${globalConfigPath(env)}`);
+      writeLine(streams.stdout, `enabled ${fromTemplate(enabled.join(', '))} in ${globalConfigPath(env)}`);
     }
     for (const specifier of stillOff) {
-      writeLine(streams.stdout, `configured ${specifier} in ${globalConfigPath(env)}, still disabled`);
+      writeLine(streams.stdout, `configured ${fromTemplate(specifier)} in ${globalConfigPath(env)}, still disabled`);
     }
 
     // Warnings rather than failures, on stderr, for the reason `skill add`
@@ -6893,21 +6971,21 @@ export const runTemplateAdd = async (
     // is an error.
     for (const file of refusedAgents) {
       writeLine(streams.stderr, command.force
-        ? `Warning: skipped ${file} — something created it while this was installing. Run the same command again to replace it.`
-        : `Warning: skipped ${file} — an agent of that name is already in your roster (--force replaces it).`);
+        ? `Warning: skipped ${fromTemplate(file)} — something created it while this was installing. Run the same command again to replace it.`
+        : `Warning: skipped ${fromTemplate(file)} — an agent of that name is already in your roster (--force replaces it).`);
     }
     for (const blocked of blockedAgents) {
-      writeLine(streams.stderr, `Warning: skipped ${blocked}. Ids key sessions, memory, and credentials, so one of them has to change.`);
+      writeLine(streams.stderr, `Warning: skipped ${fromTemplate(blocked)}. Ids key sessions, memory, and credentials, so one of them has to change.`);
     }
     for (const skipped of skillResult.skipped) {
-      writeLine(streams.stderr, `Warning: skipped skill ${skipped.id}: ${skipped.reason}`);
+      writeLine(streams.stderr, `Warning: skipped skill ${fromTemplate(skipped.id)}: ${fromTemplate(skipped.reason)}`);
     }
     // What installed *with* a caveat — a field another host owns, a bundled
     // scripts/ — said the same way `skill add` says it. The operator
     // deciding whether to enable a skill is the one who needs to hear it,
     // and a template installs skills without their asking for each.
     for (const warning of skillResult.warnings) {
-      writeLine(streams.stderr, `Warning: ${warning.id}: ${warning.message}`);
+      writeLine(streams.stderr, `Warning: ${fromTemplate(warning.id)}: ${fromTemplate(warning.message)}`);
     }
     if (installedAgents.length === 0 && skillResult.installed.length === 0 && Object.keys(plan.config).length === 0) {
       writeLine(streams.stderr, 'Error: nothing was installed.');

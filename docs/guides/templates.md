@@ -19,6 +19,7 @@ It prints everything it would add and asks before touching anything:
 Example — The layout a template uses. Copy this directory to start your own.
 
   agent    Scribe (scribe) — fs.read, fs.list, memory.remember, memory.recall
+           may read your stored credentials: SEARCH_API_KEY
   skill    meeting-notes
   plugin   @stratusagent/tool-fs (npm install -g)
   config   /home/you/.stratus/config.json
@@ -70,6 +71,13 @@ is copied.
 registered tool, and the review says so in those words. An empty list and a
 missing one are opposites.
 
+**Read the credential line too.** A soul's `credentials:` list is a second
+gate, and it works the other way round: a name on it reaches the stored
+credential of that name as soon as the agent is served, and a soul with no
+list reaches none. The review prints the list under the agent it belongs
+to. Installing a template never *stores* a credential — but it can hand an
+agent one you already have.
+
 ## Writing one
 
 Copy [`examples/templates/example`](../../examples/templates/example) and
@@ -82,15 +90,20 @@ change the files. Two things that example gets right:
   what does, so a template shipping a skill should name it there too.
 
 Nothing is generated or interpolated — what is in the folder is what lands
-on disk, which is what makes reading the folder a real review.
+on disk, which is what makes reading the folder a real review. Text from a
+template is escaped on its way to the terminal, so a name or config key
+holding an escape sequence shows up as `\u001b` rather than acting on the
+review the operator is reading.
 
 ## What it does not do
 
 - **No rollback.** Files are copied one at a time. If something fails
   partway, what already landed stays; the output says what was installed.
-  The two things that refuse *before* anything is copied are a config
-  fragment your config would not survive, and a package name that is not an
-  npm package name.
+  Three things refuse *before* anything is copied: a config fragment your
+  config would not survive, a package name that is not an npm package name,
+  and a config value the loader would silently normalize away — `model: 123`
+  would delete the model you have rather than set it, so the template is
+  refused instead.
 - **It will not install two agents with one id.** Ids key sessions, memory,
   and credentials, and a duplicate makes the whole roster refuse to load —
   so a soul claiming an id anything already holds is skipped and named.
