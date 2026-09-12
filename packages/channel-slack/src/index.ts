@@ -16,6 +16,7 @@ import {
   type ApprovalAnswer,
   type ImageAttachment,
   type JsonObject,
+  type ListensMode,
   type Session,
   type StratusEvent,
   type ToolResult,
@@ -27,6 +28,7 @@ import {
   type OutboundAddress,
   type OutboundConnection,
   type OutboundMessageRef,
+  type SessionRouting,
 } from '@stratusagent/channels';
 
 const SLACK_MAX_MESSAGE_CHARS = 4000;
@@ -71,6 +73,17 @@ const THREAD_HANDOVER_DEPTH = 8;
 const MAX_UNRENDERED_FILES = 20;
 
 const PLACEHOLDER_TEXT = '…';
+
+/**
+ * How long an agent that judges stays attentive after it last spoke: this
+ * many messages, or this many minutes, whichever ends first. Judging costs
+ * a model call per message, and two people talking for an hour is a
+ * hundred of them for one "no" — so attention decays the way a person's
+ * does. Outside the window a message is overheard for free, and a mention
+ * re-arms it, which is what a mention has always meant.
+ */
+const ATTENTION_MESSAGES = 8;
+const ATTENTION_MS = 15 * 60 * 1000;
 
 /**
  * A 5 MB image over a slow link is seconds, not minutes. Past this the
@@ -413,6 +426,15 @@ class ReplyRenderer {
    */
   private generation = 0;
   private finalized = false;
+  /**
+   * A turn nobody asked for: the placeholder is not posted at intake but
+   * on the first TEXT the turn streams, and a turn that ends having said
+   * nothing leaves the thread untouched — no placeholder, no `(no reply)`,
+   * no edit. Text and not a tool line, though the spec sketched either: a
+   * placeholder posted for a tool the turn ran on the way to deciding it
+   * had nothing to add is a message the decision cannot take back.
+   */
+  readonly lazy: boolean;
   private readonly web: SlackWebLike;
   private readonly channel: string;
   private readonly threadTs: string | undefined;
@@ -425,12 +447,14 @@ class ReplyRenderer {
     threadTs: string | undefined,
     editIntervalMs: number,
     warn: (line: string) => void,
+    options: { lazy?: boolean } = {},
   ) {
     this.web = web;
     this.channel = channel;
     this.threadTs = threadTs;
     this.editIntervalMs = editIntervalMs;
     this.warn = warn;
+    this.lazy = options.lazy ?? false;
   }
 
   /**
@@ -584,8 +608,15 @@ class ReplyRenderer {
       if (this.finalized) {
         return;
       }
+      // Nothing said yet: a lazy turn has no placeholder to edit, and a
+      // tool line alone does not earn one (see `lazy`). Nor does text
+      // streamed here before this turn began — a recovery's, routed to
+      // the head of the queue — which `beginTurn` drops.
+      if (this.lazy && !this.ref && (!this.turnStarted || this.buffer.trim().length === 0)) {
+        return;
+      }
       this.lastEditAt = Date.now();
-      this.queueEdit(messageText(this.currentText()));
+      void this.queueEdit(messageText(this.currentText()));
     }, delay);
     this.pendingEdit.unref?.();
   }
@@ -606,6 +637,17 @@ class ReplyRenderer {
     const edit = this.editChain
       .then(() => handover)
       .then(async () => {
+        if (this.lazy && !this.ref && this.turnStarted && generation === this.generation) {
+          // The first text of a turn nobody asked for: this is where its
+          // placeholder is posted, and the edit below fills it. A post
+          // that fails leaves the turn without one, and its reply is a
+          // message of its own when it comes (see `finalize`).
+          try {
+            await this.open();
+          } catch (error) {
+            this.warn(`could not open a placeholder: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
         // Read after the handover, not before: the placeholder may have
         // changed hands while this edit waited its turn — and the text
         // may belong to the turn that was handed over.
@@ -639,6 +681,13 @@ class ReplyRenderer {
       clearTimeout(this.pendingEdit);
       this.pendingEdit = undefined;
     }
+    if (this.lazy && !this.ref && reply.trim().length === 0) {
+      // Silence, decided: nothing was posted and nothing is. The uploads
+      // still land — a file the turn produced is not nothing to say.
+      await this.editChain;
+      await this.uploadChain;
+      return false;
+    }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
     const chunks = messageChunks(text);
     // No placeholder — a handover could not open a fresh one — and the
@@ -664,6 +713,14 @@ class ReplyRenderer {
   }
 
   async fail(message: string): Promise<void> {
+    if (this.lazy && !this.ref) {
+      // A turn nobody asked for that failed before saying anything: the
+      // failure is in the daemon log, and an error note would be the
+      // interruption the turn existed to avoid.
+      this.warn(`a turn nobody asked for failed before saying anything: ${message}`);
+      await this.finalize('');
+      return;
+    }
     await this.finalize(`Something went wrong: ${message}`);
   }
 
@@ -1642,6 +1699,13 @@ interface Admission {
    * handover gave to another agent — and by the sessions for the cold one.
    */
   overhear: boolean;
+  /**
+   * An untagged message reaching an agent that judges (`listens: judge`):
+   * heard in any case, and answered by a turn nobody asked for if the
+   * agent is still attentive — which only the session can say, so the
+   * intake decides it.
+   */
+  judge: boolean;
 }
 
 interface AgentConnection {
@@ -1868,6 +1932,46 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
   const connectionFor = (agentId: string): AgentConnection | undefined =>
     connections.find((candidate) => candidate.config.agentId === agentId);
+
+  /**
+   * How an agent listens, from its soul — read per message, so a roster
+   * reload takes effect on the next one. `thread` when the soul says
+   * nothing, which is every soul written before there was a choice.
+   */
+  const listensOf = (agentId: string): ListensMode =>
+    gatewayRef?.agents().find((agent) => agent.id === agentId)?.listens ?? 'thread';
+
+  /**
+   * Whether an agent that judges is still paying attention to a thread:
+   * within `ATTENTION_MESSAGES` and `ATTENTION_MS` of when it last spoke
+   * there, both read from the session rather than remembered here, so a
+   * restart forgets nothing. An agent that has never spoken in the thread
+   * is not attentive: it was mentioned and its first turn has not
+   * answered yet, or answered with nothing, and either way nothing has
+   * re-armed it. Measured against the message's own timestamp, not the
+   * clock, so a delivery that ran late is judged as of when it was said.
+   */
+  const attentive = (routing: SessionRouting, messageTs: string, pending: number): boolean => {
+    if (routing.lastSpokeAt === undefined) {
+      return false;
+    }
+    const spokeAt = Date.parse(routing.lastSpokeAt);
+    const saidAt = Number(messageTs) * 1000;
+    if (Number.isNaN(spokeAt) || Number.isNaN(saidAt) || saidAt - spokeAt > ATTENTION_MS) {
+      return false;
+    }
+    return (routing.heardSinceSpoke ?? 0) + pending < ATTENTION_MESSAGES;
+  };
+
+  /**
+   * Turns nobody asked for that this adapter has dispatched and the
+   * session has not yet absorbed, per session. The store counts what it
+   * holds, and a burst of messages typed inside one second would each
+   * read the same count and each be judged — the bound the window exists
+   * to give, blown by exactly the thread that needs it. Counted here until
+   * the turn settles, when the session carries the message itself.
+   */
+  const judgedInFlight = new Map<string, number>();
 
   /**
    * Run `work` after everything already queued for this session's intake,
@@ -2951,6 +3055,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ...(threadKey ? { threadKey } : {}),
       settled: true,
       overhear: false,
+      judge: false,
     };
 
     if (addressed) {
@@ -2973,9 +3078,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return { ...admission, overhear: true };
     }
 
-    // An untagged reply. The record is what this process has actually seen,
-    // in the order it saw it — right even inside the window before a
-    // handover reaches the store.
+    // An untagged reply. How this agent listens decides what it is: an
+    // agent that answers only mentions hears it and nothing more, and one
+    // that judges hears it and, if still attentive, takes a turn nobody
+    // asked for on it — decided in the intake, since only the session can
+    // say. Neither takes part in the holder rule below: that rule answers
+    // "whose is an untagged reply", and for these two agents the soul has
+    // already answered.
+    const listens = listensOf(connection.config.agentId);
+    if (listens === 'mentions') {
+      return { ...admission, overhear: true };
+    }
+    if (listens === 'judge') {
+      return { ...admission, overhear: true, judge: true };
+    }
+
+    // The record is what this process has actually seen, in the order it
+    // saw it — right even inside the window before a handover reaches the
+    // store.
     const holder = threadKey === undefined ? undefined : holderAt(threadKey, event.ts);
     if (holder !== undefined && threadKey !== undefined) {
       if (holder !== connection.config.agentId) {
@@ -3043,6 +3163,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // not to be this agent's leaves an empty link behind, which is all it
       // should cost.
       let overhear = admitted.overhear;
+      // Judged, not ruled: a turn nobody asked for, while the agent is
+      // still attentive, and a free overhear past that. Read off the
+      // chain — a session the invitation is still creating reads as not
+      // there, and the message is heard rather than judged, which is the
+      // safe side. A host that cannot say leaves the agent hearing.
+      let judged = false;
+      if (admitted.judge && gateway.sessionRouting) {
+        let routing: SessionRouting | undefined;
+        try {
+          routing = await gateway.sessionRouting(sessionId);
+        } catch (error) {
+          warn(`slack: could not read whether ${connection.config.agentId} is attentive in ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (routing && attentive(routing, event.ts, judgedInFlight.get(sessionId) ?? 0)) {
+          judged = true;
+          overhear = false;
+          judgedInFlight.set(sessionId, (judgedInFlight.get(sessionId) ?? 0) + 1);
+        }
+      }
       if (!admitted.settled) {
         // One verdict for this message, shared with whichever other agents
         // are asking about it — see `followUpWinner`.
@@ -3067,7 +3206,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // will answer: an overheard one is appended as text with no turn run
       // on it, and its attachments reach the transcript by name, as every
       // attachment did before images.
-      const { images, unread } = overhear
+      // Nor for one it will judge: the kernel refuses images on a turn
+      // nobody asked for, since they reach the model ahead of the frame
+      // that marks the message as somebody else's, and a judged message
+      // names its attachments the way an overheard one does.
+      const { images, unread } = overhear || judged
         ? { images: [] as ImageAttachment[], unread: event.files ?? [] }
         : await readImageAttachments(
           event.files ?? [],
@@ -3128,12 +3271,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         };
       }
 
-      const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn);
-      try {
-        await renderer.open();
-      } catch (error) {
-        warn(`could not post to ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
-        return undefined;
+      // A turn nobody asked for opens its placeholder on its first text,
+      // if it ever has any — see `ReplyRenderer.lazy`.
+      const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn, { lazy: judged });
+      if (!judged) {
+        try {
+          await renderer.open();
+        } catch (error) {
+          warn(`could not post to ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
+          return undefined;
+        }
       }
 
       // The push and the dispatch happen in the same microtask, so queue
@@ -3147,9 +3294,30 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         agentId: connection.config.agentId,
         userMessage,
         ...(images.length > 0 ? { images } : {}),
+        ...(judged ? { addressed: false } : {}),
         turnId: renderer.turnId,
         metadata,
       });
+      if (judged) {
+        void turn.then(
+          () => {
+            const left = (judgedInFlight.get(sessionId) ?? 1) - 1;
+            if (left > 0) {
+              judgedInFlight.set(sessionId, left);
+            } else {
+              judgedInFlight.delete(sessionId);
+            }
+          },
+          () => {
+            const left = (judgedInFlight.get(sessionId) ?? 1) - 1;
+            if (left > 0) {
+              judgedInFlight.set(sessionId, left);
+            } else {
+              judgedInFlight.delete(sessionId);
+            }
+          },
+        );
+      }
       return { renderer, turn };
     });
 
@@ -3201,7 +3369,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // posts, which are network I/O a later message must not overtake.
       // A DM has no thread, and nobody else in it.
       const reply = latestTurnReply(session);
-      const published = renderer.finalize(lastAssistantReply(session));
+      // A turn nobody asked for that said nothing posts nothing; every
+      // other turn says `(no reply)` where its answer would have gone.
+      const published = renderer.finalize(renderer.lazy ? reply ?? '' : lastAssistantReply(session));
       const heard = thread !== undefined && reply !== undefined
         ? overhearReply(connection, event.channel, thread, reply, session, published)
         : undefined;
@@ -3403,6 +3573,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       approvalPosts.clear();
       threadAddressee.clear();
       coldVerdicts.clear();
+      judgedInFlight.clear();
       botIdentities.clear();
       rendering.clear();
       resolvedWhileRendering.clear();

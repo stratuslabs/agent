@@ -1,20 +1,36 @@
 # 31 — Reading the room: overhearing, and an agent's own choice to speak
 
-**Status: in progress.** Piece 1 of the [design sketch](#design-sketch) —
-`observe` and the overheard lane — has shipped: `AgentRunner.observe`,
+**Status: shipped.** All three pieces of the [design sketch](#design-sketch)
+are in. Piece 1 — `observe` and the overheard lane: `AgentRunner.observe`,
 `Gateway.observe` on the session chain, `session.observed`, the `overheard`
 mark on a message and the one rule (`promptTextOf`) every renderer frames
 it by, and the Slack adapter hearing, into an agent's own session, each
 message in a shared thread that was another agent's to answer and each
-reply the other agent posted. Piece 2's kernel half has shipped: `dispatch`
-carries `addressed`, an unaddressed turn's message is stored `overheard` and
-followed in the prompt by `UNADDRESSED_TURN_NOTE`, and every provider
-accepts an empty answer on such a turn (`isUnaddressedTurn`) as the answer
-rather than as a broken endpoint. Its channel half — the Slack renderer
-posting nothing for a silent turn, and opening its placeholder lazily —
-lands with piece 3, which is the first thing that dispatches unaddressed.
+reply the other agent posted. Piece 2 — silent turns: `dispatch` carries
+`addressed`, an unaddressed turn's message is stored `overheard` and
+followed in the prompt by `UNADDRESSED_TURN_NOTE`, every provider accepts
+an empty answer on such a turn (`isUnaddressedTurn`) as the answer rather
+than as a broken endpoint, and the Slack renderer posts nothing for it —
+its placeholder opens on the turn's first text, if any. Piece 3 —
+`listens: mentions | thread | judge` in the soul (and by field on
+`PUT /agents/:id`), attention read from the session (`lastSpokeAt` and
+`heardSinceSpoke` on the routing: eight messages or fifteen minutes after
+the agent last spoke, whichever ends first, a mention re-arming it), and
+the eval under `packages/cli/eval/reading-the-room` — a labelled corpus
+and a runner scoring false speech at three times false silence, run on
+demand against the configured model with `pnpm eval:room`.
 
-Four things the sketch did not say, found on the way:
+What is answered of the open questions below: the default is `thread`,
+with `judge` opt-in; judgement is a full turn, not a pre-pass; the window
+is both messages and minutes, and an agent cannot extend its own; an
+overhear still costs a session write; `observe` stays with channels; and
+an agent's own turn in flight is ordered by the chain, as suspected. Still
+open: the failed-harness-batch double send, and a judging agent alongside a
+thread-rule agent in one thread, where both may answer the same message
+(documented in the Slack README's rule 5) — the thread rule hands a reply
+to whoever spoke last, and a judging agent is not asking.
+
+Five things the sketch did not say, found on the way:
 
 - **"Append and save" was not enough on the harness path.** A resumed SDK
   session is sent only the newest user message, since the harness holds
@@ -65,6 +81,14 @@ Four things the sketch did not say, found on the way:
   harness that holds its own history takes only the newest message, and a
   rule read next to the thing it applies to is followed more often than
   one read an hour ago.
+- **The placeholder opens on text, not on a tool line.** The sketch said
+  "first text or tool line"; a placeholder posted for a tool the turn ran
+  on the way to deciding it had nothing to add is a message the decision
+  cannot take back, so a tool line alone earns nothing, and a judged turn
+  that fails before saying anything posts no error note either — the
+  failure is in the daemon log, and the note would be the interruption
+  the turn existed to avoid. A colleague's reply is never judged, only
+  heard: two judging agents would otherwise answer each other.
 
 ## Goal
 

@@ -340,7 +340,34 @@ export interface AgentDefinition extends AgentDescriptor {
   skills?: string[];
   /** Credential names this agent may resolve. Omitted = none. */
   credentials?: string[];
+  /**
+   * How this agent listens in a conversation it shares with people talking
+   * to each other — see `ListensMode`. Omitted = `thread`. Part of what an
+   * agent is rather than how a daemon is deployed, which is why it sits
+   * beside `tools` and `skills` and not in a channel's config block.
+   */
+  listens?: ListensMode;
 }
+
+/**
+ * When an agent in a thread answers a message that did not name it.
+ *
+ * - `mentions`: only when named. The behavior before thread follow-through,
+ *   kept because some agents should be exactly this.
+ * - `thread`: every untagged reply in a thread it is in, by the rule people
+ *   use — the voice that just answered you is the one you are answering.
+ *   Cheap and predictable, and right for a thread with one person in it.
+ * - `judge`: overhear everything, and while attentive — a bounded window
+ *   after it last spoke — run a turn nobody asked for on each message and
+ *   let the model decide whether it has anything to add. Outside the
+ *   window a message is overheard for free. Every message the agent does
+ *   not answer is heard in every mode; the modes differ only in what it
+ *   answers.
+ */
+export type ListensMode = 'mentions' | 'thread' | 'judge';
+export const LISTENS_MODES: readonly ListensMode[] = ['mentions', 'thread', 'judge'];
+export const isListensMode = (value: unknown): value is ListensMode =>
+  typeof value === 'string' && (LISTENS_MODES as readonly string[]).includes(value);
 
 export class AgentRegistry {
   private agents = new Map<string, AgentDefinition>();

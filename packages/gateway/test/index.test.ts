@@ -221,6 +221,9 @@ test('observe puts a message into a session with no turn, on the session\'s chai
       [{ type: 'session.observed', sessionId: 'thread-o', agentId: first.agent.id }],
     );
     assert.equal((await gateway.sessionRouting('thread-o'))?.lastSpokeAt, spoke);
+    // And it has heard one message since: the other half of an attention
+    // window, counted from the session so a restart forgets nothing.
+    assert.equal((await gateway.sessionRouting('thread-o'))?.heardSinceSpoke, 1);
 
     // The next turn carries it, ahead of the message that started the turn.
     const next = await gateway.dispatch({ sessionId: 'thread-o', userMessage: 'Dylan: Ava, and you?' });
@@ -230,6 +233,7 @@ test('observe puts a message into a session with no turn, on the session\'s chai
       ['Dylan: Bea, what do you think?', true],
       ['Dylan: Ava, and you?', false],
     ]);
+    assert.equal((await gateway.sessionRouting('thread-o'))?.heardSinceSpoke, 0);
 
     // A turn dispatched unaddressed carries the same mark through to the
     // runner: the message is stored overheard, on a new session and an

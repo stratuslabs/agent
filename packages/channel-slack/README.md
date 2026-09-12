@@ -44,7 +44,25 @@ they are the whole model:
    straight after it reaches the agent you just named, and the agent that
    *had* the thread stands down at the same instant rather than whenever its
    own app next catches up.
-5. **Standing down is not leaving.** An agent in a thread hears what is
+5. **How an agent listens is the soul's to say.** Rules 3 and 4 are the
+   `thread` mode, the default. A soul with `listens: mentions` takes only
+   messages that name it, and hears the rest. One with `listens: judge`
+   hears everything and, while attentive — eight messages or fifteen
+   minutes after it last spoke, whichever ends first — runs a turn nobody
+   asked for on each untagged message, told it may answer with nothing;
+   past the window a message is heard with no turn at all, and a mention
+   re-arms it. A turn that decides on silence posts nothing: its
+   placeholder is opened only on the first text it streams, never on a
+   tool line, and a failed one posts no error note. Neither mode takes
+   part in the holder rule — that rule answers whose an untagged reply is,
+   and for these two the soul already has — so a thread-rule agent stands
+   down for a judging or mentions-only one that spoke last: the judging
+   one decides for itself, and the mentions-only one is being talked to
+   and waits to be named. A colleague's reply is never judged, only heard.
+   The window counts turns this daemon has dispatched and the session has
+   not yet absorbed, so a burst of messages typed inside one turn is
+   judged up to the window and heard past it.
+6. **Standing down is not leaving.** An agent in a thread hears what is
    said to the other agent in it — the question that named its colleague,
    the untagged replies that were the colleague's to answer, and what the
    colleague *replied* — into its own session, with no turn run and

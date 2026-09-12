@@ -95,6 +95,17 @@ export interface SessionRouting {
    */
   lastSpokeAt?: string;
   /**
+   * How many user messages the session holds after the agent last spoke —
+   * heard, or asked and left unanswered — and every one of them when it
+   * never has. With `lastSpokeAt`, the two halves of an attention window:
+   * an agent that judges whether to speak does so for a bounded number of
+   * messages and minutes after it last did, and both are read from the
+   * session rather than remembered in-process, so a restart forgets
+   * nothing about who is still listening. Absent from a host that does
+   * not count.
+   */
+  heardSinceSpoke?: number;
+  /**
    * The text the session's latest turn produced (`latestTurnReply` in
    * `@stratusagent/core`, the same rule an adapter finalizes its own turns
    * by; absent when the turn produced none) — for a turn the adapter did

@@ -416,6 +416,8 @@ export interface SessionRouting {
    * time, which a mid-turn save moves; see `@stratusagent/channels`.
    */
   lastSpokeAt?: string;
+  /** User messages after the agent last spoke — see `SessionRouting.heardSinceSpoke` in `@stratusagent/channels`. */
+  heardSinceSpoke?: number;
   /** The latest turn's text (`latestTurnReply`), when it produced any — see `@stratusagent/channels`. */
   reply?: string;
 }
@@ -3056,13 +3058,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // checkpoints, and a recovery resuming, all without having said
       // anything. A channel ordering two agents by "who spoke last" has to
       // read the speaking.
-      const lastSpokeAt = session.messages.findLast(
+      const spokeIndex = session.messages.findLastIndex(
         (message) => message.role === 'assistant' && message.content.trim().length > 0,
-      )?.createdAt;
+      );
+      const lastSpokeAt = spokeIndex >= 0 ? session.messages[spokeIndex]?.createdAt : undefined;
+      // The messages after that: what it has heard, or been asked and not
+      // answered, since — the other half of an attention window.
+      const heardSinceSpoke = session.messages
+        .slice(spokeIndex + 1)
+        .filter((message) => message.role === 'user').length;
       return {
         agentId: session.agent.id,
         metadata: session.metadata ?? {},
         ...(lastSpokeAt !== undefined ? { lastSpokeAt } : {}),
+        heardSinceSpoke,
         ...(reply !== undefined ? { reply } : {}),
       };
     },

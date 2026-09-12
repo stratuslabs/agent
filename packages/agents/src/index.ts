@@ -1,4 +1,7 @@
 import {
+  type ListensMode,
+  isListensMode,
+  LISTENS_MODES,
   AgentRegistry,
   isTaintedTrust,
   leastTrusted,
@@ -282,6 +285,8 @@ export interface DefineAgentInput {
   tools?: string[];
   skills?: string[];
   credentials?: string[];
+  /** See `AgentDefinition.listens`. */
+  listens?: ListensMode;
   avatar?: AvatarTheme;
   /** Seed for deterministic identity generation (used in tests). */
   seed?: string;
@@ -338,6 +343,7 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
     ...(input.tools ? { tools: input.tools } : {}),
     ...(input.skills ? { skills: input.skills } : {}),
     ...(input.credentials ? { credentials: input.credentials } : {}),
+    ...(input.listens ? { listens: input.listens } : {}),
   };
 };
 
@@ -360,7 +366,7 @@ export interface ParseSoulOptions {
   seed?: string;
 }
 
-const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model'] as const;
+const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model', 'listens'] as const;
 const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials'] as const;
 
 const unquote = (value: string): string => {
@@ -645,6 +651,15 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
 
   const instructions = body.trim();
 
+  // Strict, like every soul key: a misspelled mode would otherwise load as
+  // the default, and an agent that answers every reply when it was meant
+  // to judge is the failure this file is read to prevent.
+  if (scalars.listens !== undefined && !isListensMode(scalars.listens)) {
+    throw new Error(
+      `Soul frontmatter listens: ${JSON.stringify(scalars.listens)} is not a listening mode; use one of ${LISTENS_MODES.join(', ')}.`,
+    );
+  }
+
   const agent = defineAgent({
     ...(scalars.name ? { name: scalars.name } : {}),
     ...(scalars.id ? { id: scalars.id } : {}),
@@ -652,6 +667,7 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
     ...(lists.tools ? { tools: lists.tools } : {}),
     ...(lists.skills ? { skills: lists.skills } : {}),
     ...(lists.credentials ? { credentials: lists.credentials } : {}),
+    ...(isListensMode(scalars.listens) ? { listens: scalars.listens } : {}),
     ...(options.seed !== undefined ? { seed: options.seed } : {}),
   });
 
@@ -674,6 +690,9 @@ export const formatSoul = (soul: ParsedSoul): string => {
   }
   if (soul.model) {
     lines.push(`model: ${soul.model}`);
+  }
+  if (soul.agent.listens) {
+    lines.push(`listens: ${soul.agent.listens}`);
   }
   for (const [key, values] of [
     ['tools', soul.agent.tools],
