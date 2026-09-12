@@ -238,6 +238,22 @@ export interface SlackSocketLike {
   disconnect(): Promise<void>;
 }
 
+/**
+ * What `files.uploadV2` answers with, as much of it as is read here: the
+ * file's shares, each carrying the ts of the message the file became in a
+ * channel — where it sits in the thread. Whether a just-completed upload's
+ * shares are filled in yet is Slack's business, so every part is optional
+ * and a reader without one falls back (see `ReplyRenderer.queueUpload`).
+ */
+export interface SlackUploadResult {
+  files?: Array<{
+    shares?: {
+      public?: Record<string, Array<{ ts?: string }>>;
+      private?: Record<string, Array<{ ts?: string }>>;
+    };
+  }>;
+}
+
 export interface SlackWebLike {
   auth: { test(): Promise<{ user_id?: string; team_id?: string }> };
   chat: {
@@ -258,7 +274,7 @@ export interface SlackWebLike {
   files: {
     // The real SDK takes file DATA (a buffer or stream), never a path
     // string — typing it that way here keeps fakes honest too.
-    uploadV2(args: { channel_id: string; file: Buffer; filename?: string; title?: string; thread_ts?: string }): Promise<unknown>;
+    uploadV2(args: { channel_id: string; file: Buffer; filename?: string; title?: string; thread_ts?: string }): Promise<SlackUploadResult>;
   };
   conversations: {
     /**
@@ -300,8 +316,8 @@ export interface SlackAdapterOptions {
   fileDownloadTimeoutMs?: number;
   /**
    * Test injection: the clock, in milliseconds, that an upload's place in
-   * the thread is read from (`ReplyOutcome.spokeAt`), since the upload
-   * call answers with no message ts. Defaults to `Date.now`.
+   * the thread is read from (`ReplyOutcome.spokeAt`) when the upload's
+   * answer carries no share ts. Defaults to `Date.now`.
    */
   now?: () => number;
 }
@@ -410,13 +426,30 @@ interface ReplyOutcome {
 }
 
 /**
- * A clock reading as a Slack timestamp, for a message whose ts Slack does
- * not hand back: `files.uploadV2` answers with the file, not the message
- * it became. Slack timestamps are epoch seconds with six decimals, so the
- * clock's reading compares with them as long as the two agree to within
- * the gap between one message and the next.
+ * A clock reading as a Slack timestamp, for a file whose upload answered
+ * with no share ts. Slack timestamps are epoch seconds with six decimals,
+ * so the clock's reading compares with them as long as the two agree to
+ * within the gap between one message and the next.
  */
 const slackTs = (ms: number): string => (ms / 1000).toFixed(6);
+
+/**
+ * Where an upload sits in the thread: the ts of the message it became in
+ * `channel`, from the shares the upload answers with. Undefined when the
+ * answer carries none.
+ */
+const uploadPlace = (result: SlackUploadResult, channel: string): string | undefined => {
+  for (const file of result.files ?? []) {
+    for (const scope of [file.shares?.public, file.shares?.private]) {
+      for (const share of scope?.[channel] ?? []) {
+        if (share.ts !== undefined) {
+          return share.ts;
+        }
+      }
+    }
+  }
+  return undefined;
+};
 
 /**
  * Renders one turn's reply into Slack with the placeholder-then-edit
@@ -470,8 +503,8 @@ class ReplyRenderer {
   /**
    * Where in the thread this turn's words stand: the ts of the lowest
    * message Slack took them in — the placeholder an edit landed in, or an
-   * overflow chunk posted — and, separately, when a file of its landed
-   * (`slackTs` of the clock, since the upload call answers with no message ts).
+   * overflow chunk posted — and, separately, where a file of its landed
+   * (the share ts the upload answers with, or the clock — see `queueUpload`).
    * What the thread rule orders by: an untagged reply is for whoever's
    * reply sits lowest in the thread, the one a reader sees last, which is
    * not the turn that finished last — a placeholder posted at intake and
@@ -635,14 +668,27 @@ class ReplyRenderer {
       // failure instead of an unhandled stream error.
       .then(async () => {
         const data = await readFile(filePath);
-        await this.web.files.uploadV2({
+        // Where the file will sit is Slack's to say — the ts of the
+        // message it becomes, in the shares the upload answers with. When
+        // the answer carries none, the clock stands in, read BEFORE the
+        // call: the file is posted somewhere inside it, and a colleague's
+        // placeholder posted while the answer was on its way back sits
+        // below the file. Read after, the file would be placed below that
+        // placeholder and take a thread the colleague holds; read before,
+        // the error runs the other way, toward the colleague — the fault
+        // an @ fixes.
+        const before = slackTs(this.now());
+        const result = await this.web.files.uploadV2({
           channel_id: this.channel,
           file: data,
           filename: path.basename(filePath),
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
         this.uploaded = true;
-        this.uploadedAt = slackTs(this.now());
+        const placed = uploadPlace(result, this.channel) ?? before;
+        if (this.uploadedAt === undefined || placed > this.uploadedAt) {
+          this.uploadedAt = placed;
+        }
       })
       .catch((error) => this.warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
   }

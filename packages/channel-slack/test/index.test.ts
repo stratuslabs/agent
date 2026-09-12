@@ -124,7 +124,9 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
           contents: Buffer.isBuffer(args.file) ? args.file.toString('utf8') : String(args.file),
           wasBuffer: Buffer.isBuffer(args.file),
         });
-        return {};
+        // Slack answers with the file's shares — the ts of the message it
+        // became — which a test ordering messages asks for through `stamp`.
+        return web.stamp ? { files: [{ shares: { public: { [args.channel_id]: [{ ts: web.stamp() }] } } }] } : {};
       },
     },
     knownConversations: new Map(),
@@ -2375,6 +2377,13 @@ test('a judging agent that posts a file and says nothing has still spoken, for t
   const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-judge-file-'));
   const chart = path.join(dir, 'chart.png');
   await writeFile(chart, 'png bytes');
+  let clock = 1070.15;
+  const upload = webAva.files.uploadV2.bind(webAva.files);
+  webAva.files.uploadV2 = async (args) => {
+    const answered = await upload(args);
+    clock = 1070.25;
+    return answered;
+  };
   const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
     if (sessionId.startsWith('slack:ava:')) {
       if (userMessage.includes('chart')) {
@@ -2407,8 +2416,9 @@ test('a judging agent that posts a file and says nothing has still spoken, for t
       { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
     ],
     editIntervalMs: 0,
-    // The upload lands between the request and the next message.
-    now: () => 1070.15 * 1000,
+    // The upload lands between the request and the next message; its
+    // answer comes back after the next message, and the clock says so.
+    now: () => clock * 1000,
     createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
     createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
   });
@@ -2420,6 +2430,77 @@ test('a judging agent that posts a file and says nothing has still spoken, for t
   // no words.
   await both(channelMessage({ text: 'chart please', ts: '1070.1', thread: '1070.0' }));
   // The file was the last thing said: Bea stands down, Ava judges.
+  await both(channelMessage({ text: 'nice', ts: '1070.2', thread: '1070.0' }));
+  await adapter.stop();
+
+  assert.equal(webAva.uploads.length, 1);
+  assert.deepEqual(webAva.posts, []);
+  const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
+  assert.deepEqual(of('bea'), ['Dylan: chart please']);
+  assert.deepEqual(of('ava'), ['Dylan: chart please', 'Dylan: nice']);
+});
+
+test('a file sits where the share Slack answers with says, not where the clock does', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-judge-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'png bytes');
+  // Slack answers with where the file sits; the clock, read late, would
+  // put it after the next message.
+  const stamps = stampsAfter();
+  webAva.stamp = stamps.stamp;
+  webBea.stamp = stamps.stamp;
+  const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
+    if (sessionId.startsWith('slack:ava:')) {
+      if (userMessage.includes('chart')) {
+        await gateway.bus.emit({
+          type: 'tool.completed',
+          sessionId,
+          result: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: chart } },
+        });
+      }
+      return sessionWithReply(sessionId, '');
+    }
+    return sessionWithReply(sessionId, 'ok');
+  });
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava', listens: 'judge' },
+    { id: 'bea', name: 'Bea' },
+  ];
+  gateway.sessionRouting = async (sessionId) => {
+    if (sessionId === 'slack:ava:T1:C1:1070.0') {
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1070 * 1000).toISOString(), lastAnsweredAt: new Date(1070 * 1000).toISOString(), heardSinceAnswered: 0 };
+    }
+    if (sessionId === 'slack:bea:T1:C1:1070.0') {
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1070.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+    }
+    return undefined;
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    now: () => 9999 * 1000,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const both = (message: ReturnType<typeof channelMessage>) =>
+    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Bea's by the thread rule; Ava judges it and answers with a file and
+  // no words.
+  stamps.at('1070.1');
+  await both(channelMessage({ text: 'chart please', ts: '1070.1', thread: '1070.0' }));
+  // The file was the last thing said: Bea stands down, Ava judges.
+  stamps.at('1070.2');
   await both(channelMessage({ text: 'nice', ts: '1070.2', thread: '1070.0' }));
   await adapter.stop();
 
