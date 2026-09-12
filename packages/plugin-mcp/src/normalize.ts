@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { mkdir, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { JsonObject, JsonValue } from '@stratusagent/core';
+import { BIDI_CONTROL_CHARACTERS, type JsonObject, type JsonValue } from '@stratusagent/core';
 import { nameIdentifiesHandle, type TaintedWriteLedger } from '@stratusagent/plugins';
 
 /**
@@ -42,8 +42,10 @@ export const SERVER_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 export const BRIDGED_DESCRIPTION_MAX_LENGTH = 1024;
 
 /** Control characters and the Unicode `Bidi_Control` set, spelled out. */
+const DESCRIPTION_CONTROLS = new RegExp(`[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u2028\\u2029${BIDI_CONTROL_CHARACTERS}]`, 'g');
+
 const spelledOut = (raw: string): string => raw.replace(
-  /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
+  DESCRIPTION_CONTROLS,
   (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, '0')}`,
 );
 

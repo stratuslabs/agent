@@ -287,7 +287,8 @@ says so at startup. An agent's own entry replaces the shared list;
 
 The list also decides how a speaker is *named* in a channel turn, which
 the model reads as `Name: text`. A principal is their display name — one
-line, at most 80 characters, control characters spelled out — because
+line, at most 80 characters, control characters and Unicode bidi controls
+spelled out — because
 their profile is trusted the way their messages are. With a list in force,
 everyone else is their user id, exactly as an `@mention` of them already
 is: a display name is text its owner typed, and the speaker position of a
