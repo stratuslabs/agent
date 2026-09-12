@@ -681,6 +681,12 @@ class ReplyRenderer {
       clearTimeout(this.pendingEdit);
       this.pendingEdit = undefined;
     }
+    // Let the edits already queued land before deciding anything from
+    // `ref`: a lazy turn's first text may be opening its placeholder in
+    // that chain right now, and reading `ref` ahead of it would post the
+    // reply as a message of its own beside a placeholder that then fills
+    // with stale partial text.
+    await this.editChain;
     if (this.lazy && !this.ref && reply.trim().length === 0) {
       // Silence, decided: nothing was posted and nothing is. The uploads
       // still land — a file the turn produced is not nothing to say.
@@ -3179,7 +3185,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         if (routing && attentive(routing, event.ts, judgedInFlight.get(sessionId) ?? 0)) {
           judged = true;
           overhear = false;
-          judgedInFlight.set(sessionId, (judgedInFlight.get(sessionId) ?? 0) + 1);
         }
       }
       if (!admitted.settled) {
@@ -3299,6 +3304,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         metadata,
       });
       if (judged) {
+        // Counted here, where the turn actually starts, and not where the
+        // decision was made: a message that turns out to have nothing to
+        // judge — an attachment with no text — returns above without a
+        // turn, and a count taken early would hold its slot until the
+        // daemon restarted. Still inside this message's intake link, so
+        // the next message's decision sees it.
+        judgedInFlight.set(sessionId, (judgedInFlight.get(sessionId) ?? 0) + 1);
         void turn.then(
           () => {
             const left = (judgedInFlight.get(sessionId) ?? 1) - 1;

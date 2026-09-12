@@ -1752,6 +1752,85 @@ test('a burst of messages typed inside one turn is judged only up to the window'
   ]);
 });
 
+test('a turn nobody asked for that ends while its placeholder is still opening fills that placeholder', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let releaseTurn!: () => void;
+  const turnGate = new Promise<void>((resolve) => {
+    releaseTurn = resolve;
+  });
+  let releasePost!: () => void;
+  web.postGate = new Promise<void>((resolve) => {
+    releasePost = resolve;
+  });
+  // Slack is slow to take the placeholder. The moment the post is entered,
+  // the turn finishes — and only after the finalize has begun does Slack
+  // answer.
+  web.onPostEnter = () => {
+    releaseTurn();
+    setImmediate(() => releasePost());
+  };
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Thinking' } });
+    await turnGate;
+    return sessionWithReply(sessionId, 'Done');
+  });
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: {},
+    lastSpokeAt: new Date(1010 * 1000).toISOString(),
+    heardSinceSpoke: 0,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'slow slack', ts: '1010.1', thread: '1010.0' }));
+  await adapter.stop();
+
+  // One placeholder, edited to the reply — not a placeholder left saying
+  // "Thinking" with the reply posted beside it.
+  assert.deepEqual(web.posts.map((post) => post.text), ['…']);
+  assert.equal(web.updates.at(-1)?.text, 'Done');
+});
+
+test('an attachment with nothing said does not spend a judging slot', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, ''));
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: {},
+    lastSpokeAt: new Date(1020 * 1000).toISOString(),
+    heardSinceSpoke: 0,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  // Eight files dropped in with nothing said: no turn for any of them, and
+  // no slot held either.
+  for (let index = 1; index <= 8; index += 1) {
+    const dropped = channelMessage({ text: '', ts: `1020.${index}`, thread: '1020.0' });
+    await socket.deliver('message', {
+      ...dropped,
+      event: { ...dropped.event, files: [{ id: `F${index}`, name: `log-${index}.txt`, mimetype: 'text/plain' }] },
+    });
+  }
+  await socket.deliver('message', channelMessage({ text: 'so what do we do', ts: '1020.9', thread: '1020.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.addressed]), [['Dylan: so what do we do', false]]);
+});
+
 test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
