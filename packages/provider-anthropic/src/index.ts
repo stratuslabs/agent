@@ -787,11 +787,21 @@ export const createAnthropicProvider = ({
         ...calls.map((call) => ({ type: 'tool-call' as const, call })),
       ];
 
-      // Nothing said is the answer a turn nobody asked for may give — see
-      // `RunInput.addressed` in core. On a turn somebody asked for it is
-      // still an endpoint that returned nothing, and an error.
-      if (parts.length === 0 && !isUnaddressedTurn(request.session)) {
-        throw new Error('Claude returned an empty response.');
+      if (parts.length === 0) {
+        // Nothing said is the answer a turn nobody asked for may give — see
+        // `RunInput.addressed` in core — but only when the turn ended of
+        // its own accord. Thinking that consumed the output budget before
+        // any text or tool call surfaced ends with `max_tokens` and no
+        // parts, and that is the exhaustion the usage accounting above
+        // already treats as a failed outcome, not a decision.
+        const ended = response.stop_reason === 'end_turn' || response.stop_reason === 'stop_sequence';
+        if (!isUnaddressedTurn(request.session) || !ended) {
+          throw new Error(
+            response.stop_reason === 'max_tokens'
+              ? 'Claude returned an empty response: the output budget was exhausted before any text or tool call (stop_reason max_tokens).'
+              : 'Claude returned an empty response.',
+          );
+        }
       }
 
       return usage ? { parts, usage } : { parts };

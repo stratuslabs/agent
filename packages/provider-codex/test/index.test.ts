@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { promptWasDelivered } from '@stratusagent/core';
 import { test } from 'node:test';
 import type {
   MemoryEntry,
@@ -169,6 +170,22 @@ test('failed turns and empty responses surface as errors', async () => {
     overheard: true,
   });
   assert.deepEqual(await empty.generate({ session: unasked }), { parts: [] });
+
+  // A failure after Codex sent anything says the prompt was delivered —
+  // the thread has it — and one before it does not.
+  await assert.rejects(
+    () => failed.generate({ session: createSession() }),
+    (error: unknown) => promptWasDelivered(error),
+  );
+  const unstarted = createCodexProvider({
+    runTurn: () => {
+      throw new Error('spawn failed');
+    },
+  });
+  await assert.rejects(
+    () => unstarted.generate({ session: createSession() }),
+    (error: unknown) => !promptWasDelivered(error),
+  );
 });
 
 test('a signed-out codex maps to sign-in guidance', async () => {

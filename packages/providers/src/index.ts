@@ -151,6 +151,8 @@ interface OpenAICompatibleResponse {
       content?: string | Array<{ type?: string; text?: string }> | null;
       tool_calls?: OpenAICompatibleToolCall[];
     };
+    /** Why the model stopped — `stop`, `length`, `content_filter`, `tool_calls` — where the endpoint says. */
+    finish_reason?: string | null;
   }>;
   /**
    * Optional on purpose: `usage` is not in the subset every
@@ -479,11 +481,22 @@ export const createOpenAICompatibleProvider = ({
       }
 
       const result = builder.done();
-      // Nothing said is the answer a turn nobody asked for may give — see
-      // `RunInput.addressed` in core. On a turn somebody asked for it is
-      // still an endpoint that returned nothing, and an error.
-      if (result.parts.length === 0 && !isUnaddressedTurn(request.session)) {
-        throw new Error('Provider returned an empty response.');
+      if (result.parts.length === 0) {
+        // Nothing said is the answer a turn nobody asked for may give — see
+        // `RunInput.addressed` in core — but only when the model actually
+        // stopped: a response cut off by length, a content filter, or a
+        // tool call with no usable name is a failure reduced to no parts,
+        // and recording it as a decision would hide it. An endpoint that
+        // reports no finish reason at all is taken at its word.
+        const finishReason = payload.choices?.[0]?.finish_reason ?? undefined;
+        const stoppedNormally = finishReason === undefined || finishReason === 'stop';
+        if (!isUnaddressedTurn(request.session) || !stoppedNormally) {
+          throw new Error(
+            finishReason !== undefined && finishReason !== 'stop'
+              ? `Provider returned an empty response (finish_reason: ${finishReason}).`
+              : 'Provider returned an empty response.',
+          );
+        }
       }
 
       return usage ? { ...result, usage } : result;

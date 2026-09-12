@@ -1897,6 +1897,27 @@ export const promptTextOf = (
 export const isUnaddressedTurn = (session: Pick<Session, 'messages'>): boolean =>
   session.messages.findLast((message) => message.role === 'user')?.overheard === true;
 
+/**
+ * A provider's way of saying a failed turn's prompt had already reached
+ * the model before the failure — a harness that recorded its session id
+ * and then died, most often. Marked on the error, off the type, the way
+ * `@stratusagent/providers` marks hosted-tool side effects: the runner
+ * cannot tell from the outside whether a harness holding its own history
+ * has this turn's message, and a turn it has must not be sent again.
+ */
+const PROMPT_DELIVERED: unique symbol = Symbol.for('stratus.promptDelivered');
+
+export const markPromptDelivered = <T>(error: T): T => {
+  if (typeof error === 'object' && error !== null) {
+    (error as Record<PropertyKey, unknown>)[PROMPT_DELIVERED] = true;
+  }
+  return error;
+};
+
+export const promptWasDelivered = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null
+  && (error as Record<PropertyKey, unknown>)[PROMPT_DELIVERED] === true;
+
 export interface PromptTextOptions {
   /**
    * Whether this is the newest user message of the turn being run. A turn
@@ -3661,6 +3682,22 @@ export class AgentRunner {
             : caught)
         : caught;
       const lastError = error instanceof Error ? error.message : String(error);
+      if (promptWasDelivered(error) && isUnaddressedTurn(session)) {
+        // A turn nobody asked for whose prompt the harness took before it
+        // failed: the boundary goes in as if it had ended in silence, or
+        // `latestUserMessagePrompt` would send the harness this message
+        // again next time — the same double send the empty-answer
+        // boundary above closes, on the failure path. Only for such a
+        // turn: an addressed one that failed is retried by its sender
+        // with a new message, which is then the newest and the only one
+        // sent, as it always was.
+        session.messages.push({
+          id: `${session.id}:assistant:${session.messages.length + 1}`,
+          role: 'assistant',
+          content: '',
+          createdAt: new Date().toISOString(),
+        });
+      }
       session.status = 'failed';
       session.lastError = lastError;
       await this.store.save(session);

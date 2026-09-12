@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { promptWasDelivered } from '@stratusagent/core';
 import { test } from 'node:test';
 import type {
   MemoryEntry,
@@ -152,6 +153,22 @@ test('error results and empty responses surface as errors', async () => {
     overheard: true,
   });
   assert.deepEqual(await empty.generate({ session: unasked }), { parts: [] });
+
+  // A failure after the SDK yielded anything says the prompt was
+  // delivered — the harness has it — and one before it does not.
+  await assert.rejects(
+    () => failed.generate({ session: createSession() }),
+    (error: unknown) => promptWasDelivered(error),
+  );
+  const unstarted = createClaudeCodeProvider({
+    queryFn: () => {
+      throw new Error('spawn failed');
+    },
+  });
+  await assert.rejects(
+    () => unstarted.generate({ session: createSession() }),
+    (error: unknown) => !promptWasDelivered(error),
+  );
 });
 
 test('kernel tools bridge into the loop as an in-process MCP server', async () => {

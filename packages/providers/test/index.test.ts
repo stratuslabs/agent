@@ -1165,6 +1165,23 @@ test('a turn nobody asked for ends on the note, after its newest message only, o
     framed('Dylan: Bea, what do you think?'),
     `${framed('Bea: ship it')}\n\n${UNADDRESSED_TURN_NOTE}`,
   ]);
+  // Empty is a decision only when the model stopped: cut off by a content
+  // filter, it is the failure it always was.
+  let finishReason: string | undefined = 'content_filter';
+  const filtered = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.test/v1',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ choices: [{ message: { content: '' }, finish_reason: finishReason }] }),
+    } as Response),
+  });
+  await assert.rejects(() => filtered.generate(requestWith(thread)), /empty response \(finish_reason: content_filter\)/);
+  finishReason = 'stop';
+  assert.deepEqual(await filtered.generate(requestWith(thread)), { parts: [] });
+
   // The silent turn's empty assistant message is not on the wire, where
   // some endpoints refuse it.
   await provider.generate(requestWith(afterSilence));

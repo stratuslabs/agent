@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 
 import {
+  markPromptDelivered,
   isUnaddressedTurn,
   renderSystemPromptSections,
   uncachedInputTokens,
@@ -624,6 +625,11 @@ export const createCodexProvider = ({
         }
       : undefined;
     const markIfSideEffects = <T>(error: T): T => (hostedToolRuns > 0 ? markHostedToolSideEffects(error) : error);
+    // From the first event on, Codex has this turn's prompt in its own
+    // thread, and a failure after that must say so (`markPromptDelivered`)
+    // or the kernel will send the prompt again on the next resume.
+    let delivered = false;
+    const markIfDelivered = <T>(error: T): T => (delivered ? markPromptDelivered(error) : error);
 
     // The abort signal riding into every hosted tool call is the provider's
     // own controller — the union of the caller's cancellation and the idle
@@ -731,6 +737,7 @@ export const createCodexProvider = ({
     };
 
     const forwardEvent = async (event: CodexThreadEvent): Promise<void> => {
+      delivered = true;
       if (event.type === 'thread.started' && typeof event.thread_id === 'string' && event.thread_id.length > 0) {
         rememberThreadId(request.session, event.thread_id);
         return;
@@ -842,17 +849,17 @@ export const createCodexProvider = ({
         );
       }
       if (timedOutIdle && !request.signal?.aborted) {
-        throw markIfSideEffects(
+        throw markIfDelivered(markIfSideEffects(
           new Error(`Codex produced no output for ${idleTimeoutMs}ms; the run was aborted as stalled.`),
-        );
+        ));
       }
       const message = error instanceof Error ? error.message : String(error);
       if (/not (?:yet )?logged in|codex login/i.test(message)) {
-        throw markIfSideEffects(new Error(
+        throw markIfDelivered(markIfSideEffects(new Error(
           `Codex is not signed in on this machine. Run \`codex login\`, or add an OpenAI API key with \`stratus setup\`. (${message})`,
-        ));
+        )));
       }
-      throw markIfSideEffects(error);
+      throw markIfDelivered(markIfSideEffects(error));
     } finally {
       if (idleTimer) {
         clearTimeout(idleTimer);
@@ -876,7 +883,7 @@ export const createCodexProvider = ({
       if (isUnaddressedTurn(request.session)) {
         return { parts: [] };
       }
-      throw markIfSideEffects(new Error('Codex returned an empty response.'));
+      throw markIfDelivered(markIfSideEffects(new Error('Codex returned an empty response.')));
     }
 
     return { parts: [{ type: 'text' as const, text: resultText }] };

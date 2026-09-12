@@ -7,6 +7,7 @@ import {
   InMemorySessionStore,
   UNADDRESSED_TURN_NOTE,
   latestTurnReply,
+  markPromptDelivered,
   promptTextOf,
   type ModelProvider,
   type ProviderRequest,
@@ -99,4 +100,56 @@ test('a turn dispatched unaddressed stores its message overheard, is told so, an
   assert.equal(latestTurnReply(asked), 'here');
   const defaulted = await runner.resume({ sessionId: 's', userMessage: 'Dylan: Ava, once more' });
   assert.equal(defaulted.messages.findLast((message) => message.role === 'user')?.overheard, undefined);
+});
+
+test('a turn nobody asked for whose prompt the harness took before failing leaves its boundary', async () => {
+  let mode: 'delivered' | 'undelivered' | 'ok' = 'delivered';
+  const provider: ModelProvider = {
+    name: 'flaky',
+    async generate(): Promise<ProviderResponse> {
+      if (mode === 'delivered') {
+        // The harness recorded its session and then died: it has the
+        // prompt, and says so on the error.
+        throw markPromptDelivered(new Error('stream disconnected'));
+      }
+      if (mode === 'undelivered') {
+        throw new Error('could not start');
+      }
+      return { parts: [{ type: 'text', text: 'ok' }] };
+    },
+  };
+  const store = new InMemorySessionStore();
+  const runner = new AgentRunner({ provider, bus: new EventBus(), store });
+
+  await assert.rejects(
+    () => runner.run({ sessionId: 's', agent: AGENT, userMessage: 'Dylan: Bea?', addressed: false }),
+    /stream disconnected/,
+  );
+  const failed = await store.get('s');
+  // The message went; the boundary keeps it from going again, and the
+  // turn is still the failure it was.
+  assert.equal(failed?.status, 'failed');
+  assert.deepEqual(failed?.messages.map((message) => [message.role, message.content]), [
+    ['user', 'Dylan: Bea?'],
+    ['assistant', ''],
+  ]);
+  assert.equal(latestTurnReply(failed ?? { messages: [] }), undefined);
+
+  // A failure before the prompt was delivered leaves none: the message is
+  // still unheard, and goes next time.
+  mode = 'undelivered';
+  await assert.rejects(
+    () => runner.resume({ sessionId: 's', userMessage: 'Sam: and?', addressed: false }),
+    /could not start/,
+  );
+  assert.deepEqual((await store.get('s'))?.messages.map((message) => message.role), ['user', 'assistant', 'user']);
+
+  // An addressed turn that failed after delivery gets no boundary either:
+  // its sender retries with a new message, which is then the only one sent.
+  mode = 'delivered';
+  await assert.rejects(
+    () => runner.resume({ sessionId: 's', userMessage: 'Dylan: Ava, retry' }),
+    /stream disconnected/,
+  );
+  assert.deepEqual((await store.get('s'))?.messages.map((message) => message.role), ['user', 'assistant', 'user', 'user']);
 });

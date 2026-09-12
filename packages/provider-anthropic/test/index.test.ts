@@ -294,6 +294,14 @@ test('a turn nobody asked for reaches the API with the note after its newest mes
   });
   // And an empty answer is an answer: no text parts, no error.
   assert.deepEqual(response.parts, []);
+
+  // Unless the turn did not end of its own accord: thinking that ate the
+  // output budget before any text surfaced is exhaustion, not silence.
+  const exhausted = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: createMockFetch([apiMessage([], 'max_tokens')]).fetchImpl,
+  });
+  await assert.rejects(() => exhausted.generate({ session }), /stop_reason max_tokens/);
 });
 
 test('failed tool results replay as is_error tool_result blocks', async () => {

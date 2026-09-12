@@ -49,7 +49,11 @@ Four things the sketch did not say, found on the way:
   it may say nothing would have failed for saying nothing. They now ask
   the session whether the turn was addressed; on one that was, empty stays
   an error, because a model asked a question and returning nothing is
-  still an endpoint returning nothing. The silence leaves an empty
+  still an endpoint returning nothing — and so is an empty answer the
+  model did not choose: the API paths accept silence only when the turn
+  ended of its own accord (`end_turn`, or a `finish_reason` of `stop`),
+  never one cut off by the output budget or a content filter, which
+  stays the failure it was. The silence leaves an empty
   assistant message in the session — no reply and no speaking, but the
   boundary of a turn that happened, without which a harness sent
   everything since the agent last spoke would be sent the judged message
@@ -235,10 +239,15 @@ test of whether this design is the right one.
   mark — the harness has never seen those, by construction — but a turn
   the harness accepted and then failed appends no reply and records
   nothing about what its prompt carried, so the overheard messages it
-  carried are still marked unheard next time. The same class of
-  double-send as before overhearing existed, narrowed to the overheard
-  messages. Closing it means the provider marking what it sent, on the
-  session, which is its own change.
+  carried are still marked unheard next time. Half closed: both harness
+  providers now mark an error thrown after the harness yielded anything
+  (`markPromptDelivered` in core), and a turn nobody asked for that fails
+  so marked leaves the same empty-assistant boundary a silent one does,
+  since that is the turn whose whole message would otherwise go again.
+  An addressed turn that failed after delivery gets no boundary yet — its
+  sender's retry is the newest message and the only one sent, and the
+  overheard messages ahead of it are the remaining case; the marker is
+  there for it.
 - **Does every overheard message cost a session write?** A busy thread would
   make that a write per message. Batching, or a tail the session keeps
   in-process until the next turn, is an optimization with a crash-consistency
