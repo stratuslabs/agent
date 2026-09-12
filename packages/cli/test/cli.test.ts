@@ -9,6 +9,7 @@ import { Readable } from 'node:stream';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 import { tokenFingerprint } from '@stratusagent/control-api';
 import { claimHome } from '@stratusagent/gateway';
@@ -865,27 +866,49 @@ test('a soul listing only tools nothing provides is warned about, and still runs
 });
 
 test('the CLI never imports the gateway at module scope', async () => {
-  // `bin.ts` imports this module to call `unsupportedNodeMessage`, before
+  // `bin.ts` imports the barrel to call `unsupportedNodeMessage`, before
   // anything else has a chance to fail — the whole point being to explain
   // the Node floor rather than die with a builtin-module error further in.
+  // The barrel statically pulls in every module under src/, and
   // `@stratusagent/gateway` pulls in `node:sqlite` at module scope, so one
-  // static value import of it makes that guard fail with exactly the error
-  // it exists to replace, on every command including the ones that never
-  // touch a gateway.
+  // static value import of it anywhere makes that guard fail with exactly the
+  // error it exists to replace, on every command including the ones that
+  // never touch a gateway.
   //
   // There is no linter here to hold that, and a value import for a list of
   // strings is an easy thing to write by accident — this is what caught it.
-  const source = await readFile(
-    path.join(import.meta.dirname, '..', 'src', 'index.ts'),
-    'utf8',
-  );
-  const staticImports = source
-    .split('\n')
-    .filter((line) => /^import\b/.test(line) && line.includes("'@stratusagent/gateway'"));
+  const srcDir = path.join(import.meta.dirname, '..', 'src');
+  const sources = (await readdir(srcDir, { recursive: true })).filter((entry) => entry.endsWith('.ts'));
+  const gatewayStatements: { entry: string; text: string; typeOnly: boolean }[] = [];
+  for (const entry of sources) {
+    const source = await readFile(path.join(srcDir, entry), 'utf8');
+    // Parsed, not pattern-matched: a side-effect `import '…'`, a barrel
+    // `export { x } from '…'`, and a wrapped `import {\n…\n} from '…'` all
+    // load the module when this one is evaluated, and a regex over lines
+    // saw none of them — while one over statements matched a dynamic
+    // `import()` inside an exported function, which loads nothing until
+    // it runs.
+    const parsed = ts.createSourceFile(entry, source, ts.ScriptTarget.Latest);
+    for (const statement of parsed.statements) {
+      if (!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) {
+        continue;
+      }
+      const specifier = statement.moduleSpecifier;
+      if (specifier === undefined || !ts.isStringLiteral(specifier) || specifier.text !== '@stratusagent/gateway') {
+        continue;
+      }
+      // The statement-level `type`, not the inline one: type stripping turns
+      // `import { type X } from` into `import {} from`, which still loads.
+      const typeOnly = ts.isImportDeclaration(statement)
+        ? statement.importClause?.phaseModifier === ts.SyntaxKind.TypeKeyword
+        : statement.isTypeOnly;
+      gatewayStatements.push({ entry, text: statement.getText(parsed).replaceAll(/\s+/g, ' '), typeOnly });
+    }
+  }
 
-  assert.ok(staticImports.length > 0, 'the assertion below would pass vacuously');
-  for (const line of staticImports) {
-    assert.match(line, /^import type\b/, `a value import of the gateway reaches node:sqlite: ${line}`);
+  assert.ok(gatewayStatements.length > 0, 'the assertion below would pass vacuously');
+  for (const { entry, text, typeOnly } of gatewayStatements) {
+    assert.ok(typeOnly, `a value import of the gateway reaches node:sqlite: ${entry}: ${text}`);
   }
 });
 
