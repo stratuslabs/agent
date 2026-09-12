@@ -4418,6 +4418,35 @@ test('a refused reply is logged only in a thread the agent holds; a thread it wa
   assert.deepEqual(gateway.observes, []);
 });
 
+test('a refused reply in a thread the sessions say the agent holds is logged, memory or no memory', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // Nothing in memory — a restart — but the sessions record Ava in thread
+  // 900.0 and nobody in 950.0.
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:900.0', '2026-01-01T00:00:00.000Z']]));
+  const logged: string[] = [];
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN'], admit: 'principals' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: (line) => logged.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', mention('still here?', { type: 'message', ts: '900.2', thread_ts: '900.0', user: 'U-STRANGER' }));
+  await socket.deliver('message', mention('unrelated', { type: 'message', ts: '950.2', thread_ts: '950.0', user: 'U-STRANGER' }));
+  // `stop()` drains the durable lookup the refusal handed to the tracker.
+  await adapter.stop();
+
+  assert.deepEqual(
+    logged.filter((line) => /refused a message/.test(line)).map((line) => /from (U-[A-Z]+)/.exec(line)?.[1]),
+    ['U-STRANGER'],
+  );
+  assert.deepEqual(gateway.dispatches, []);
+  assert.deepEqual(gateway.observes, []);
+});
+
 test('a refused message is logged once however many times Slack delivers it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

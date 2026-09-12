@@ -2992,10 +2992,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Consuming the key here is safe because a refused message records
     // nothing a later copy could be needed for.
     if (!admitsSender(connection.config, sender)) {
-      const engaged = addressed
-        || (threadKey !== undefined && holderAt(threadKey, event.ts) === connection.config.agentId);
-      if (engaged && !alreadySeen(eventKey)) {
-        log(`slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`);
+      const refusal = `slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`;
+      const held = threadKey !== undefined ? holderAt(threadKey, event.ts) : undefined;
+      if (addressed || held === connection.config.agentId) {
+        if (!alreadySeen(eventKey)) {
+          log(refusal);
+        }
+      } else if (held === undefined && event.thread_ts !== undefined && !alreadySeen(eventKey)) {
+        // Nothing in memory says whose thread this is — after a restart, or
+        // once the record was evicted — but the sessions may: the durable
+        // half of the question the admitted path asks, and the same
+        // verdict. Off the intake chain, because a refused message gets no
+        // place in that queue, and the line is an audit, not a turn; `track`
+        // holds it so `stop()` drains it like any other background work.
+        const thread = event.thread_ts;
+        track(followUpWinner({ team, conversation: event.channel, thread }, event.ts).then((winner) => {
+          if (winner === connection.config.agentId) {
+            log(refusal);
+          }
+        }));
       }
       return undefined;
     }

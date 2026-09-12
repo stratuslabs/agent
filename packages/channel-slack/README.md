@@ -316,8 +316,9 @@ posted back — a reply is a conversation the operator chose not to have.
 The refusal is one line in the daemon log naming the agent and the user
 id — one per message, however many times Slack delivers it, and only for a
 message the agent would have taken up: a mention, or a reply in a thread
-the agent holds. A stranger's reply in a thread the agent was never part
-of is dropped without a line. `"anyone"` is
+the agent holds, whether the daemon remembers that or its sessions do. A
+stranger's reply in a thread the agent was never part of is dropped
+without a line. `"anyone"` is
 the default and today's behavior; the key inherits per agent like
 `slackUsers`, so Bea above stays open while everyone else is closed. A value
 that is neither word is a config error, never `anyone`: this is the one
