@@ -1,4 +1,5 @@
 import {
+  isUnaddressedTurn,
   droppedImageNote,
   imagesWithinReplayBudget,
   omitImage,
@@ -149,7 +150,11 @@ interface OpenAICompatibleResponse {
     message?: {
       content?: string | Array<{ type?: string; text?: string }> | null;
       tool_calls?: OpenAICompatibleToolCall[];
+      /** A structured refusal: the model declined, with `content` null and an ordinary `finish_reason`. */
+      refusal?: string | null;
     };
+    /** Why the model stopped — `stop`, `length`, `content_filter`, `tool_calls` — where the endpoint says. */
+    finish_reason?: string | null;
   }>;
   /**
    * Optional on purpose: `usage` is not in the subset every
@@ -479,7 +484,32 @@ export const createOpenAICompatibleProvider = ({
 
       const result = builder.done();
       if (result.parts.length === 0) {
-        throw new Error('Provider returned an empty response.');
+        // Nothing said is the answer a turn nobody asked for may give — see
+        // `RunInput.addressed` in core — but only when the model actually
+        // stopped: a response cut off by length, a content filter, or a
+        // tool call with no usable name is a failure reduced to no parts,
+        // and recording it as a decision would hide it. An endpoint that
+        // reports no finish reason at all is taken at its word.
+        const choice = payload.choices?.[0];
+        // A refusal is the model's own outcome, not silence: it arrives with
+        // `content: null` and a `finish_reason` of `stop`, and only this
+        // field says so.
+        const refusal = choice?.message?.refusal;
+        if (typeof refusal === 'string' && refusal.length > 0) {
+          throw new Error(`Provider refused the request: ${refusal}`);
+        }
+        const finishReason = choice?.finish_reason ?? undefined;
+        // A choice with a message has to exist: a 200 with an empty body,
+        // `{}`, or no choices is no completion at all, and a missing
+        // finish reason is tolerated only on one that is.
+        const stoppedNormally = choice?.message !== undefined && (finishReason === undefined || finishReason === 'stop');
+        if (!isUnaddressedTurn(request.session) || !stoppedNormally) {
+          throw new Error(
+            finishReason !== undefined && finishReason !== 'stop'
+              ? `Provider returned an empty response (finish_reason: ${finishReason}).`
+              : 'Provider returned an empty response.',
+          );
+        }
       }
 
       return usage ? { ...result, usage } : result;
@@ -648,6 +678,7 @@ const createOpenAICompatibleMessages = (
     messages.push({ role: 'system', content: section });
   }
 
+  const latest = latestUserMessageOf(request.session.messages);
   for (const message of request.session.messages) {
     if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
       const wireCalls = message.toolCalls.map((call) => ({
@@ -688,6 +719,12 @@ const createOpenAICompatibleMessages = (
       continue;
     }
 
+    if (message.role === 'assistant' && message.content.length === 0) {
+      // A turn nobody asked for that said nothing: the boundary is the
+      // kernel's, and an empty assistant message is a wire-format error on
+      // some endpoints and a blank line on the rest.
+      continue;
+    }
     // Framed by the kernel's one rule for it, so the OpenAI-compatible path
     // says "said to somebody else" the way the API and harness paths do —
     // an overheard message sent bare here would be an ordinary instruction
@@ -695,7 +732,7 @@ const createOpenAICompatibleMessages = (
     messages.push({
       role: message.role,
       content: message.role === 'user'
-        ? (vision ? userContentParts(message, replayed) : userMessageText(message))
+        ? (vision ? userContentParts(message, replayed, message === latest) : userMessageText(message, message === latest))
         : message.content,
       ...(message.name ? { name: message.name } : {}),
     });
@@ -707,8 +744,9 @@ const createOpenAICompatibleMessages = (
 const userContentParts = (
   message: Pick<Message, 'content' | 'overheard' | 'images'>,
   replayed: ReadonlySet<ImageAttachment>,
+  latest: boolean,
 ): OpenAICompatibleUserContent => {
-  const text = promptTextOf(message);
+  const text = promptTextOf(message, { latest });
   if (message.images === undefined || message.images.length === 0) {
     return text;
   }
@@ -850,17 +888,26 @@ const describeImageAttachments = (images: readonly ImageAttachment[] | undefined
   return `\n[Attached: ${names.join(', ')}. This runtime cannot see images — say so rather than guessing at them.]`;
 };
 
-/** A user message's text as a prompt carries it, with its images named after it. */
-const userMessageText = (message: Pick<Message, 'content' | 'overheard' | 'images'>): string =>
-  `${promptTextOf(message)}${describeImageAttachments(message.images)}`;
+/**
+ * A user message's text as a prompt carries it, with its images named after
+ * it. `latest` marks the newest user message of the turn — the one an
+ * unaddressed turn's note follows; see `PromptTextOptions`.
+ */
+const userMessageText = (message: Pick<Message, 'content' | 'overheard' | 'images'>, latest = false): string =>
+  `${promptTextOf(message, { latest })}${describeImageAttachments(message.images)}`;
+
+/** The newest user message — the one the turn being run ends on. */
+const latestUserMessageOf = (messages: readonly Message[]): Message | undefined =>
+  messages.findLast((message) => message.role === 'user');
 
 export const renderTranscriptPrompt = (request: ProviderRequest): string => {
   const conversational = request.session.messages.filter(
     (message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool',
   );
 
+  const latest = latestUserMessageOf(conversational);
   if (conversational.length === 1 && conversational[0]?.role === 'user') {
-    return userMessageText(conversational[0]);
+    return userMessageText(conversational[0], true);
   }
 
   const lines: string[] = ['Conversation so far:'];
@@ -877,13 +924,20 @@ export const renderTranscriptPrompt = (request: ProviderRequest): string => {
       for (const call of message.toolCalls) {
         lines.push(`[assistant called tool ${call.toolName}] ${JSON.stringify(call.input)}`);
       }
-      if (message.content.length === 0) {
-        continue;
-      }
     }
-    lines.push(`[${message.role}] ${message.role === 'user' ? userMessageText(message) : message.content}`);
+    if (message.role === 'assistant' && message.content.length === 0) {
+      // Either the tool-call message above, or the silence a turn nobody
+      // asked for ends in — neither is a line the model should read.
+      continue;
+    }
+    lines.push(`[${message.role}] ${message.role === 'user' ? userMessageText(message, message === latest) : message.content}`);
   }
-  lines.push('', 'Continue the conversation by replying to the latest user message.');
+  // A turn nobody asked for ends on an overheard message carrying its own
+  // instruction, and "reply to the latest user message" would countermand
+  // it in the next line.
+  if (latest?.overheard !== true) {
+    lines.push('', 'Continue the conversation by replying to the latest user message.');
+  }
   return lines.join('\n');
 };
 
@@ -924,5 +978,5 @@ export const latestUserMessagePrompt = (request: ProviderRequest): string => {
   if (unheard.length === 1 && newest.overheard !== true) {
     return userMessageText(newest);
   }
-  return unheard.map(userMessageText).join('\n');
+  return unheard.map((message) => userMessageText(message, message === newest)).join('\n');
 };

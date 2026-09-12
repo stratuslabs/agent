@@ -352,6 +352,10 @@ export const printSessionSummary = (session: Session, streams: CliStreams): void
       continue;
     }
 
+    if (message.role === 'assistant' && message.content.length === 0) {
+      // A turn nobody asked for that said nothing — see `RunInput.addressed`.
+      continue;
+    }
     const nameSuffix = message.name ? `:${message.name}` : '';
     const content = message.role === 'tool' ? stringifyValue(JSON.parse(message.content) as JsonValue) : message.content;
     writeLine(streams.stdout, `[${message.role}${nameSuffix}] ${content}`);
