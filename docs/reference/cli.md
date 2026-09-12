@@ -87,7 +87,7 @@ stratus dashboard                      # local browser dashboard
 | `--model` | Model for real providers (anthropic default: `claude-opus-5`, codex default: `gpt-5.5`) |
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |
-| `--approvals` | `run`/`chat`: tool approval mode — `always`, `ask`, or `never`. `serve`: how the daemon reaches a human — `headless` (refuse gated calls) or `remote` (ask in Slack); overrides the config's `approvals.mode` |
+| `--approvals` | `run`/`chat`: tool approval mode — `always`, `ask` (a y/N on every call), `gated` (`safe` tools run, the rest ask), or `never`. Default: `gated` at a terminal; `always` when stdin is not one (a pipe, a script, `--stdin`), said once on stderr the first time a gated tool runs. `serve`: how the daemon reaches a human — `headless` (refuse gated calls) or `remote` (ask in Slack); overrides the config's `approvals.mode` |
 | `--max-turns` | Max provider turns per run (default 8) |
 | `--format` | `text` or `json`; `agent new` also accepts `soul` — a ready-to-edit soul file |
 | `--name` | `agent new`: the agent's name (omit to have one generated) |

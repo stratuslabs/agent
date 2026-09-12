@@ -1995,6 +1995,24 @@ test('a demo daemon default never sheds the generic key from a pinned soul', asy
   assert.ok(apiKeys.some((key) => key === 'sk-generic'));
 });
 
+test('a roster soul with no tools: list is named at load, because the omitted key grants every tool', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'open.md', '---\nname: Open\n---\n\nI have every tool.\n');
+  await writeSoul(home, 'narrow.md', '---\nname: Narrow\ntools:\n  - memory.*\n---\n\nI have memory.\n');
+
+  const warnings: string[] = [];
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  await gateway.stop();
+
+  const named = warnings.filter((line) => line.includes('has no tools: list'));
+  assert.equal(named.length, 1, `expected one warning, got ${JSON.stringify(warnings)}`);
+  assert.match(named[0] ?? '', /agent open has no tools: list, so it may call every tool this daemon loads — add tools: \[\.\.\.\] to .*open\.md to say which/);
+  // The built-in agent has no file to add the key to, so it is not named.
+  assert.ok(!warnings.some((line) => line.includes('agent stratus has no tools')));
+});
+
 test('a roster soul cannot hijack the reserved built-in agent id', async () => {
   const home = await newHome();
   // A roster file whose name slugifies to the reserved id "stratus".

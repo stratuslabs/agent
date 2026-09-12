@@ -253,6 +253,12 @@ export interface CliEnvironment {
   stdin?: string;
   stdinStream?: NodeJS.ReadableStream;
   approvalInput?: NodeJS.ReadableStream;
+  /**
+   * Whether a person is at a terminal, for the approval default. Read from
+   * `process.stdin.isTTY` when absent; injectable because a test cannot
+   * make its stdin one.
+   */
+  terminal?: boolean;
   setupInput?: NodeJS.ReadableStream;
   processEnv?: NodeJS.ProcessEnv;
   cwd?: string;
@@ -575,7 +581,7 @@ export interface CliRunOptions {
 }
 
 export type CliProviderName = StratusProviderName;
-export type CliApprovalMode = 'always' | 'ask' | 'never';
+export type CliApprovalMode = 'always' | 'ask' | 'gated' | 'never';
 
 export interface ParsedRunCommand {
   command: 'run';
@@ -588,7 +594,8 @@ export interface ParsedRunCommand {
   soul?: string;
   format: 'text' | 'json';
   events: boolean;
-  approvals: CliApprovalMode;
+  /** Absent when `--approvals` was not given: see `defaultApprovalMode`. */
+  approvals?: CliApprovalMode;
   maxTurns?: number;
 }
 
@@ -630,7 +637,8 @@ export interface ParsedChatCommand {
   /** Path to a soul file defining the agent to chat with. */
   soul?: string;
   events: boolean;
-  approvals: CliApprovalMode;
+  /** Absent when `--approvals` was not given: see `defaultApprovalMode`. */
+  approvals?: CliApprovalMode;
   maxTurns?: number;
 }
 
@@ -1142,7 +1150,9 @@ Options:
   --config         Config file path (run: load settings from it, setup: write it)
   --format         Output format: text or json (default: text)
   --no-events      Hide event-by-event progress lines in text mode
-  --approvals      run/chat: tool approval mode — always, ask, or never (default: always)
+  --approvals      run/chat: tool approval mode — always, ask (every call), gated (safe tools
+                   run, the rest ask), or never. Default: gated at a terminal; always
+                   otherwise, said once on stderr the first time a gated tool runs
                    serve: how the daemon reaches a human — headless (refuse every
                    gated call) or remote (ask in Slack). Default headless, or
                    the config file's "approvals.mode"
@@ -1371,7 +1381,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   }
 
   if (command === 'chat') {
-    const parsed: ParsedChatCommand = { command: 'chat', events: false, approvals: 'always' };
+    const parsed: ParsedChatCommand = { command: 'chat', events: false };
     for (let index = 0; index < rest.length; index += 1) {
       const token = rest[index];
       if (!token) {
@@ -1407,7 +1417,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--approvals') {
         const value = readOptionValue(rest, index, '--approvals');
-        if (value !== 'always' && value !== 'ask' && value !== 'never') {
+        if (value !== 'always' && value !== 'ask' && value !== 'gated' && value !== 'never') {
           throw new Error(`Invalid value for --approvals: ${value}`);
         }
         parsed.approvals = value;
@@ -2194,7 +2204,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   let soul: string | undefined;
   let format: 'text' | 'json' = 'text';
   let events = true;
-  let approvals: CliApprovalMode = 'always';
+  let approvals: CliApprovalMode | undefined;
   let maxTurns: number | undefined;
   let useStdin = false;
   const positionals: string[] = [];
@@ -2268,8 +2278,8 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
     if (token === '--approvals') {
       const value = readOptionValue(rest, index, '--approvals');
-      if (value !== 'always' && value !== 'ask' && value !== 'never') {
-        throw new Error(`Unsupported approvals mode: ${value}. Use always, ask, or never.`);
+      if (value !== 'always' && value !== 'ask' && value !== 'gated' && value !== 'never') {
+        throw new Error(`Unsupported approvals mode: ${value}. Use always, ask, gated, or never.`);
       }
       approvals = value;
       index += 1;
@@ -2305,8 +2315,8 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     throw new Error('A prompt is required. Pass it with --prompt, --stdin, or as a positional argument.');
   }
 
-  if (approvals === 'ask' && useStdin) {
-    throw new Error('--approvals ask cannot be combined with --stdin because both read from standard input.');
+  if ((approvals === 'ask' || approvals === 'gated') && useStdin) {
+    throw new Error(`--approvals ${approvals} cannot be combined with --stdin because both read from standard input.`);
   }
 
   return {
@@ -2319,9 +2329,26 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     ...(soul ? { soul } : {}),
     format,
     events,
-    approvals,
+    ...(approvals !== undefined ? { approvals } : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
   };
+};
+
+/**
+ * The approval mode a run or chat uses when `--approvals` was not given.
+ *
+ * At a terminal the person is right there, so a gated call asks and a
+ * safe one runs, which is `gated` — the old default of `always` ran
+ * `shell.run` on whatever a page or a soul talked the model into, with
+ * nobody told. Anywhere else — a pipe, a script, `--stdin`, where the
+ * prompt already consumed the terminal — nobody can answer a y/N, and the
+ * run keeps its unattended behavior, saying so once on stderr when a
+ * gated call runs (see `createApprovalPolicy`).
+ */
+export const defaultApprovalMode = (env: CliEnvironment, promptFromStdin = false): CliApprovalMode => {
+  const terminal = env.terminal
+    ?? (env.stdinStream === undefined && env.stdin === undefined && process.stdin.isTTY === true);
+  return terminal && !promptFromStdin ? 'gated' : 'always';
 };
 
 export const formatEvent = (event: StratusEvent): string | null => {
@@ -2545,9 +2572,31 @@ export const createApprovalPolicy = (
   streams: CliStreams,
   env: CliEnvironment,
   ask?: (prompt: string) => Promise<string>,
+  /**
+   * The mode was defaulted rather than chosen. `always` chosen with a
+   * flag needs no commentary; `always` reached because nobody could be
+   * asked gets one line, the first time a call that would have asked runs.
+   */
+  defaulted = false,
 ): ApprovalPolicy => {
   if (mode === 'always') {
-    return new AllowAllApprovalPolicy();
+    if (!defaulted) {
+      return new AllowAllApprovalPolicy();
+    }
+    let noted = false;
+    return {
+      async approve(context) {
+        if (!noted && context.risk !== 'safe') {
+          noted = true;
+          writeLine(
+            streams.stderr,
+            `Note: running ${context.call.toolName} without asking — stdin is not a terminal and --approvals was not given. `
+            + 'Pass --approvals never to refuse gated tools.',
+          );
+        }
+        return true;
+      },
+    };
   }
 
   if (mode === 'never') {
@@ -2560,6 +2609,19 @@ export const createApprovalPolicy = (
 
   // A caller that already owns stdin (chat's readline) supplies its own
   // asker — two readers on one stream would race for the same bytes.
+  // `gated` is `ask` for the calls that matter: a `safe` tool is what the
+  // daemon runs unattended, and asking a person to confirm a memory read
+  // is how they learn to type `y` without reading the question. `ask`
+  // itself still asks about everything — the word says so.
+  if (mode === 'gated') {
+    const asking = createApprovalPolicy('ask', streams, env, ask);
+    return {
+      async approve(context) {
+        return context.risk === 'safe' ? true : asking.approve(context);
+      },
+    };
+  }
+
   if (ask) {
     return {
       async approve(context) {
@@ -2607,6 +2669,8 @@ const createAgentRuntime = async (
     askApproval?: (prompt: string) => Promise<string>;
     runtime: RuntimeConfig;
     approvals?: CliApprovalMode;
+    /** The mode came from `defaultApprovalMode`, not from a flag. */
+    approvalsDefaulted?: boolean;
     maxTurns?: number;
     env?: CliEnvironment;
     /** The config this command was pinned to, for reading its `plugins` block. */
@@ -2705,7 +2769,13 @@ const createAgentRuntime = async (
     provider: runtimeProvider,
     tools,
     executor: createLocalCommandExecutor(),
-    approvals: createApprovalPolicy(options.approvals ?? 'always', streams, options.env ?? {}, options.askApproval),
+    approvals: createApprovalPolicy(
+      options.approvals ?? 'always',
+      streams,
+      options.env ?? {},
+      options.askApproval,
+      options.approvalsDefaulted ?? false,
+    ),
     bus,
     skills,
     memory,
@@ -2795,6 +2865,8 @@ export const runSingleLoop = async (
     events?: boolean;
     runtime: RuntimeConfig;
     approvals?: CliApprovalMode;
+    /** The mode came from `defaultApprovalMode`, not from a flag. */
+    approvalsDefaulted?: boolean;
     maxTurns?: number;
     env?: CliEnvironment;
     configPath?: string;
@@ -2862,7 +2934,7 @@ export const runChat = async (
     prompt: '',
     format: 'text',
     events: false,
-    approvals: command.approvals,
+    ...(command.approvals ? { approvals: command.approvals } : {}),
     ...(command.provider ? { provider: command.provider } : {}),
     ...(command.model ? { model: command.model } : {}),
     ...(command.baseUrl ? { baseUrl: command.baseUrl } : {}),
@@ -2951,7 +3023,8 @@ export const runChat = async (
 
   const { runner, agent, metadata, disposePlugins } = await createAgentRuntime(streams, {
     runtime,
-    approvals: command.approvals,
+    approvals: command.approvals ?? defaultApprovalMode(env),
+    approvalsDefaulted: command.approvals === undefined,
     askApproval,
     ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
     ...(command.configPath ? { configPath: command.configPath } : {}),
@@ -10733,7 +10806,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     const session = await runSingleLoop(command.prompt, streams, {
       events: command.events && command.format === 'text',
       runtime,
-      approvals: command.approvals,
+      // `--stdin` has already read the terminal, so nothing could take a
+      // y/N there — what the parser refuses for an explicit `ask`.
+      approvals: command.approvals ?? defaultApprovalMode(resolvedEnv, argv.includes('--stdin')),
+      approvalsDefaulted: command.approvals === undefined,
       ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
       ...(command.configPath ? { configPath: command.configPath } : {}),
       env: resolvedEnv,

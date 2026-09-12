@@ -1,8 +1,13 @@
 # Approvals
 
 At a terminal, `stratus chat` and `stratus run` ask you directly:
-`--approvals` is `always`, `ask` (interactive y/N prompt), or `never`. This
-page is about the daemon, where there is no terminal to prompt on.
+`--approvals` is `always`, `ask` (a y/N prompt on every call), `gated`
+(`safe` tools run, everything else asks — exactly the line the daemon
+draws below), or `never`. `gated` is the default when stdin is a terminal.
+When stdin is a pipe or a script, or the prompt came in through `--stdin`,
+nobody can answer a y/N, so the default is `always`, and the run says so
+once on stderr the first time a gated tool runs. This page is about the
+daemon, where there is no terminal to prompt on.
 
 ## What the daemon will do on its own
 

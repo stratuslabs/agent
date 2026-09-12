@@ -1496,6 +1496,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         continue;
       }
       registerFresh({ definition: entry.soul.agent, soulPath: entry.path, soul: entry.soul });
+      // Said at load, because the allowlist fails open: `tools` omitted is
+      // every registered tool, the opposite of what `skills` and
+      // `credentials` do when omitted, and a soul that never wrote the key
+      // holds `shell.run` the moment that plugin is enabled. The built-in
+      // agent is exempt — it has no file to add the key to.
+      if (entry.soul.agent.tools === undefined) {
+        warn(
+          `agent ${entry.soul.agent.id} has no tools: list, so it may call every tool this daemon loads — `
+          + `add tools: [...] to ${entry.path} to say which`,
+        );
+      }
     }
     // The configured default soul is part of the roster too — it is what
     // an agentId-less dispatch answers as. It may live outside the agents
