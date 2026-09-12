@@ -2956,12 +2956,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // it; see the dedupe below for why it is not the event id.
     const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
 
+    // Recorded ahead of this agent's own refusal below, and on the named
+    // agent's admission rather than this one's: a sender Ava refuses and
+    // Bea admits has handed Bea the thread, and Ava's socket may be the
+    // one that hears it first. If Ava withheld the record, a fast untagged
+    // follow-up from someone Ava does admit would go to the old holder on
+    // Ava's socket and to Bea once Bea's socket caught up — two answers to
+    // one message. The refused message itself still takes no place in
+    // Ava's transcript; only the map learns who holds the thread.
+    if (threadKey && handoverTo) {
+      rememberAddressee(threadKey, handoverTo, event.ts);
+    }
+
     // Who may speak at all, judged before anything below remembers this
     // message. The adapter's own checks establish nothing about who is
     // typing; under `admit: 'principals'` the operator's list is the door,
     // not a label, and a sender not on it gets neither a turn nor a place
-    // in a transcript the agent reads — nor a say in who holds the thread,
-    // which the handover below would otherwise record on their word.
+    // in a transcript the agent reads — nor a say in who holds the thread
+    // beyond what the named agent's own admission above allowed.
     // Logged rather than answered — a reply is a conversation with someone
     // the operator chose not to have one with — and logged only for a
     // message this agent would have taken up: a channel subscribed for
@@ -2978,9 +2990,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         log(`slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`);
       }
       return undefined;
-    }
-    if (threadKey && handoverTo) {
-      rememberAddressee(threadKey, handoverTo, event.ts);
     }
 
     if (!addressed) {

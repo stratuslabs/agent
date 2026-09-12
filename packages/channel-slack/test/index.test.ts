@@ -4460,6 +4460,50 @@ test('a refused sender cannot hand a thread over: their mention of another agent
   ]);
 });
 
+test('a handover to an agent that admits the sender is recorded by a socket whose own agent refuses them', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // Both in the thread; Ava spoke last and holds it.
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:900.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:900.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+  // Ava takes Dylan only; Bea takes anyone.
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', principals: ['U-DYLAN'], admit: 'principals' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', principals: ['U-DYLAN'], admit: 'anyone' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // A stranger Ava refuses hands the thread to Bea, who admits them. Only
+  // Ava's socket has heard it so far — Bea's is behind — and Dylan's
+  // untagged follow-up arrives on Ava's socket before Bea's catches up.
+  // Ava must already know the thread is Bea's: answering here, with Bea
+  // about to answer the same message once her socket sees the handover,
+  // is two replies to one question.
+  await socketAva.deliver('message', {
+    body: { team_id: 'T1', event_id: 'evt-stranger' },
+    event: { type: 'message', user: 'U-STRANGER', text: '<@B-BEA> take this over', ts: '900.2', thread_ts: '900.0', channel: 'C1' },
+  });
+  await socketAva.deliver('message', channelMessage({ text: 'go on', ts: '900.3', thread: '900.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches, []);
+  // Ava stands down and overhears, as the agent that no longer holds the
+  // thread does; the stranger's own message reached no transcript of Ava's.
+  assert.deepEqual(gateway.observes.map((observed) => [observed.agentId, observed.message]), [
+    ['ava', 'Dylan: go on'],
+  ]);
+});
+
 test('a handover is recorded on the named agent\'s terms: a sender Ava admits cannot hand Bea a thread Bea would refuse', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
