@@ -2628,6 +2628,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // renderer here to keep quiet for it. The same rule as the lazy
       // renderer's: the failure is in the log, and the files it produced
       // still land, since a file is not nothing to say.
+      //
+      // "Said nothing" as the session can tell it: no reply saved for the
+      // turn. A line the old process had streamed into a placeholder and
+      // never saved is invisible here — the session records what was
+      // said, not what Slack took (roadmap 31's open item) — so such a
+      // turn is failed without a note under that line. Taken over the
+      // alternative on purpose: a note for every judged turn a restart
+      // caught turns a silent turn, the common case, into the
+      // interruption it existed to avoid; a line left standing happens
+      // only to a turn that had already chosen to speak.
       warn(`slack: a turn nobody asked for failed before saying anything: ${event.error}`);
       await uploadUnrenderedFiles(connection, channel, thread, files);
       return;

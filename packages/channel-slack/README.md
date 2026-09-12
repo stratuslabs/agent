@@ -56,7 +56,8 @@ they are the whole model:
    against its own window like any other message. A turn that decides on silence posts nothing: its
    placeholder is opened only on the first text it streams, never on a
    tool line, and a failed one posts no error note — one the daemon died
-   inside, failed at the next start, included. A line an attempt the
+   inside, failed at the next start, included, a line it had already
+   streamed staying as it was. A line an attempt the
    provider abandoned had already posted is taken back when the retry
    decides on silence. Neither mode takes
    part in the holder rule — that rule answers whose an untagged reply is,

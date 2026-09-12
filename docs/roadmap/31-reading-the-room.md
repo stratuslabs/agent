@@ -103,10 +103,15 @@ Six things the sketch did not say, found on the way:
   in Slack — a chunk taken, a file uploaded. Across a restart the gateway
   reconstructs it from the session (`lastSpokeAt`), and a session records
   what the agent said, not what Slack accepted: text a post refused, or a
-  file whose upload failed, reads as spoken there. A delivery record the
-  channel writes back into the session would close that; it is a new
-  gateway seam with an ordering question against the overhears placed on
-  the same chain, and it is not in this piece.
+  file whose upload failed, reads as spoken there, and a line streamed
+  into a placeholder by a process that died before saving its reply reads
+  as nothing said — so a judged turn a restart caught mid-sentence is
+  failed quietly, the line it had started left as it was, since a note
+  for every judged turn a restart caught would turn the silent ones, the
+  common case, into the interruption they existed to avoid. A delivery
+  record the channel writes back into the session would close all of
+  that; it is a new gateway seam with an ordering question against the
+  overhears placed on the same chain, and it is not in this piece.
 
 ## Goal
 
