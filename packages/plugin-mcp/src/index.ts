@@ -28,6 +28,7 @@ import {
   bridgedSchema,
   BRIDGED_SCHEMA_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_DEPTH,
+  BRIDGED_SEGMENT_MAX_LENGTH,
 } from './normalize.ts';
 
 /**
@@ -46,6 +47,7 @@ export {
   BRIDGED_DESCRIPTION_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_DEPTH,
+  BRIDGED_SEGMENT_MAX_LENGTH,
   bridgedDescription,
   bridgedSchema,
   bridgedToolName,
@@ -883,6 +885,17 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         );
       }
       const registered = bridgedToolName(state.spec.name, segment);
+      // A name too long to bridge leaves that one tool unbridged, named by
+      // its length rather than in full — quoting three thousand characters
+      // back into the log would be the attack succeeding one line lower.
+      if (Array.from(segment).length > BRIDGED_SEGMENT_MAX_LENGTH) {
+        warn(
+          `mcp server ${state.spec.name}: a tool whose name is ${Array.from(tool.name).length} characters long was not bridged: `
+          + `a name segment may be at most ${BRIDGED_SEGMENT_MAX_LENGTH} characters, because it is sent as the tool's name in every `
+          + 'model request. Shorten it on the server.',
+        );
+        continue;
+      }
       // The schema's own prose is bounded the way the description is. A
       // schema too long even then leaves that one tool unbridged, named in
       // the log — not the server refused, and not the plugin: registrations

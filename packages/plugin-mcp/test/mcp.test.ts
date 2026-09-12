@@ -184,7 +184,10 @@ test('a server\'s tool description reaches the registry bounded: bidi and contro
       server.registerTool('marks', { description: 'left\u200eright\u200fmark\u061c' }, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
       server.registerTool('emoji', { description: '🙂'.repeat(1024) }, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
       server.registerTool('emoji_long', { description: '🙂'.repeat(1100) }, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
-      server.registerTool(`\u202enameless${'x'.repeat(2000)}`, {}, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
+      // Within the name bound (a longer name is skipped outright, tested
+      // with the raw server below); the point here is the raw name in the
+      // fallback description.
+      server.registerTool(`\u202enameless${'x'.repeat(50)}`, {}, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
     },
   });
   const target = new ToolRegistry();
@@ -331,6 +334,7 @@ test('an annotation key inside a schema literal is data, and a bottomless schema
               default: { type: 'string', description: '\u202eA parameter called default.' },
               enum: { type: 'object', properties: { const: { description: `\u202e${'x'.repeat(2000)}` } } },
             },
+            $comment: `\u202e${'note '.repeat(400)}`,
             $defs: { examples: { description: '\u202eA definition called examples.' } },
             // Draft-07's `dependencies`: a map whose values are schemas or
             // lists of property names. The name `default` is a name here.
@@ -338,6 +342,9 @@ test('an annotation key inside a schema literal is data, and a bottomless schema
           },
         },
         { name: 'abyss', inputSchema: { type: 'object' as const, properties: { depth: deep } } },
+        // A name is the one string no description bound touches, and it is
+        // sent as the tool's name in every model request.
+        { name: 'a'.repeat(3_000), inputSchema: { type: 'object' as const } },
       ],
     }));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -370,6 +377,18 @@ test('an annotation key inside a schema literal is data, and a bottomless schema
     assert.equal(asSchema?.$defs?.examples?.description, '\\u202eA definition called examples.');
     const dependencies = (parameters as { dependencies?: Record<string, { description?: string } | string[]> } | undefined)?.dependencies;
     assert.deepEqual(dependencies, { default: { description: '\\u202eA dependency called default.' }, choice: ['default'] });
+    // `$comment` is prose the provider forwards like any other annotation.
+    const comment = (parameters as { $comment?: string } | undefined)?.$comment ?? '';
+    assert.match(comment, /^\\u202enote note /);
+    assert.ok(Array.from(comment).length <= BRIDGED_DESCRIPTION_MAX_LENGTH);
+    assert.match(comment, /truncated by stratus: 2006 characters\]$/);
+
+    // The three-thousand-character name: one tool skipped, named by length.
+    assert.equal(target.list().some((registered) => registered.name.length > 100), false);
+    assert.ok(
+      warnings.some((message) => /a tool whose name is 3000 characters long was not bridged: a name segment may be at most 64 characters/.test(message)),
+      warnings.join(' | '),
+    );
 
     // The bottomless one is one tool skipped and named, not a server that
     // went unreachable in a stack overflow and reconnects forever.
@@ -821,7 +840,10 @@ test('a protocol-level client error is neither logged nor blamed for a later clo
 test('every line the plugin logs is bounded, whatever a server named its tool', async () => {
   // MCP puts no length on a tool name, and the daemon log rotates at 8 MB;
   // the "connected" and "added" lines carry the name, so the bound is on
-  // the line, not on any one thing composed into it.
+  // the line, not on any one thing composed into it. A name past the
+  // segment bound is now skipped before it reaches any line at all, and
+  // the skip line names its length rather than quoting it — the bound on
+  // the line still holds behind that.
   // A raw Server, because McpServer's registerTool validates names and a
   // remote server's tools/list is under no such obligation.
   // The name reaches a line when it is discovered on a reconnect, so the
@@ -866,7 +888,11 @@ test('every line the plugin logs is bounded, whatever a server named its tool', 
   try {
     await serverSide?.close();
     await reconnected;
-    assert.ok(lines.some((line) => line.includes('xxxx')), 'the name reached a log line');
+    assert.ok(
+      lines.some((line) => /a tool whose name is 20000 characters long was not bridged/.test(line)),
+      `the skip was logged: ${lines.join(' | ')}`,
+    );
+    assert.ok(!lines.some((line) => line.includes('xxxx')), 'the name never reached a log line');
     for (const line of lines) {
       assert.ok(line.length <= 1001, `${line.length} chars`);
     }

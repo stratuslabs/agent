@@ -93,8 +93,23 @@ export const BRIDGED_SCHEMA_MAX_LENGTH = 16_384;
  */
 export const BRIDGED_SCHEMA_MAX_DEPTH = 64;
 
-/** The schema keys whose values are prose the model reads, at any depth. */
-const SCHEMA_ANNOTATION_KEYS = new Set(['description', 'title']);
+/**
+ * The schema keys whose values are prose the model reads, at any depth —
+ * `$comment` included: the spec calls it a note for schema authors, but
+ * the provider forwards the whole schema, so it is one more place a page
+ * of instructions can ride into every tool block.
+ */
+const SCHEMA_ANNOTATION_KEYS = new Set(['description', 'title', '$comment']);
+
+/**
+ * The longest name segment a server's tool may bridge under. The segment
+ * is the tail of `mcp.<server>.<segment>`, sent as the tool's name in
+ * every model request, and a name is the one string a server writes that
+ * no description bound touches — a tool called `a` three thousand times
+ * over is a page in the tool block by another route. Sixty-four is the
+ * longest name the strictest provider accepts whole.
+ */
+export const BRIDGED_SEGMENT_MAX_LENGTH = 64;
 
 /**
  * The schema keys whose values are data, not schema: a member named
