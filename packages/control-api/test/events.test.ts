@@ -168,14 +168,14 @@ test('an approval raised anywhere reaches the stream, and resolving it there set
       body: JSON.stringify({ requestId, answer: 'once', actor: 'web' }),
     });
     assert.equal(resolved.status, 200);
-    assert.deepEqual(await settles(answer, 'the parked call'), { answer: 'once', actor: 'web' });
+    assert.deepEqual(await settles(answer, 'the parked call'), { answer: 'once', actor: 'api:web' });
 
     const resolution = (await client.waitFor<Envelope>(
       isEnvelopeOf('tool.approval-resolved'),
       'the resolution frame',
     )).event;
     assert.equal(resolution.type === 'tool.approval-resolved' ? resolution.answer : undefined, 'once');
-    assert.equal(resolution.type === 'tool.approval-resolved' ? resolution.actor : undefined, 'web');
+    assert.equal(resolution.type === 'tool.approval-resolved' ? resolution.actor : undefined, 'api:web');
   } finally {
     client.close();
     await harness.stop();
@@ -234,6 +234,24 @@ test('a preflight failure is stamped with its own turn, not whatever is running 
       turnId,
       'the failure belongs to the turn that was rejected, whatever else is running',
     );
+  } finally {
+    client.close();
+    await harness.stop();
+  }
+});
+
+test('an inbound frame past the request-body cap closes the socket instead of being buffered', async () => {
+  const harness = await startApi();
+  const client = await connect(harness);
+  try {
+    // `ws` answers an oversized frame with close code 1009 ("message too
+    // big"). Without a cap of our own it would buffer up to its 100 MB
+    // default, while the HTTP side of the same API stops at 1 MB.
+    const closed = new Promise<number>((resolve) => {
+      client.socket.once('close', (code: number) => resolve(code));
+    });
+    client.socket.send(Buffer.alloc(1_048_576 + 1, 0x20));
+    assert.equal(await settles(closed, 'the close after an oversized frame'), 1009);
   } finally {
     client.close();
     await harness.stop();

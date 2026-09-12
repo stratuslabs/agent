@@ -16,6 +16,7 @@ import {
   resolveAgentApprovals,
   resolveRuntimeConfig,
   saveCredentials,
+  stratusHomePath,
 } from '../src/index.ts';
 
 const tempHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-state-'));
@@ -1258,4 +1259,16 @@ test('vision: false reaches the openai runtime, and only it', async () => {
   assert.equal(openaiPrimary.vision, false);
   assert.equal(openaiPrimary.fallback?.provider, 'anthropic');
   assert.equal('vision' in (openaiPrimary.fallback ?? {}), false);
+});
+
+test('the state directory is created owner-only by whichever write creates it first', async () => {
+  // The files under ~/.stratus are 0600 from the first write, but a
+  // directory born under the umask lists them to every user on the machine
+  // until the gateway token path happens to chmod it. The credentials file
+  // is the write most likely to come first, on a machine that has never run
+  // the daemon.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-perm-'));
+  const env = { homeDir: home };
+  await saveCredentials(env, {});
+  assert.equal((await stat(stratusHomePath(env))).mode & 0o777, 0o700);
 });

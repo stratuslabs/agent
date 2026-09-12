@@ -9,6 +9,10 @@ linked own the full story.
   `~/.stratus/gateway-token`, `~/.stratus/gateway.json`,
   `~/.stratus/logs/stratusd.jsonl`, and each agent's
   `<id>.whitelist.json`.
+- **The directories are `0700` too**, from whichever write creates them —
+  a credential saved on a machine that has never run the daemon, a memory
+  file, a whitelist, a skill install. A `0600` file in a directory the
+  umask opened is still a file every user on the machine can see listed.
 - **Stored sign-ins are endpoint-bound**: a credential saved for one
   endpoint is never sent to an endpoint a project-local config selects.
 - **Slack channel tokens are gateway infrastructure secrets.** They live

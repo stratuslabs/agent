@@ -250,7 +250,7 @@ export const createFileCommandWhitelist = (options: {
    * loss the unreadable-file guard above exists to prevent.
    */
   const save = async (agentId: string, grants: Grants): Promise<void> => {
-    await mkdir(options.directory, { recursive: true });
+    await mkdir(options.directory, { recursive: true, mode: 0o700 });
     const file: WhitelistFile = {
       version: WHITELIST_VERSION,
       scopes: grants.scopes,
