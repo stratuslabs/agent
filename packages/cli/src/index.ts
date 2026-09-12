@@ -10195,6 +10195,10 @@ const serveHeldHome = async (
     // the daemon-wide defaults it outranks, including STRATUS_PROVIDER, so
     // each served runtime is resolved the way a dispatch resolves it.
     for (const served of await servedRuntimes(env, command.configPath)) {
+      // The same notice `run` and `chat` give, collapsed to one line by the
+      // dedupe above: a daemon started in a cloned repo would otherwise
+      // switch to the built-in identity with nothing saying why.
+      warnOnUntrustedConfig(served.runtime, captured);
       await warnOnCredentialOverride(served.runtime, captured, served.env);
     }
   }
