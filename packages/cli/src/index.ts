@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { appendFile, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, copyFile, cp, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +14,9 @@ import {
   ToolRegistry,
   isTrustLevel,
   matchesSkillAllowlist,
+  matchesToolAllowlist,
+  raiseRiskTo,
+  toolScopesOverlap,
   escapeControlCharacters,
   memoryEntryTrust,
   missingSkillRequirements,
@@ -32,6 +35,7 @@ import {
   type ModelProvider,
   type Session,
   type StratusEvent,
+  type ToolRisk,
   type TrustLevel,
 } from '@stratusagent/core';
 import {
@@ -42,15 +46,31 @@ import {
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
 import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim, RestartOutcome } from '@stratusagent/gateway';
-import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
+import {
+  declaredRiskFor,
+  isFirstPartyPackage,
+  loadPlugins,
+  parseToolRiskOverrides,
+  preflightPlugin,
+  readPluginManifest,
+  riskFloorFor,
+  PluginConfigError,
+  PluginManifestError,
+  type LoadedPlugin,
+} from '@stratusagent/plugins';
 import {
   createFileCommandWhitelist,
   createPermissionPolicy,
+  describeAgentGrants,
   describeCommandScope,
   describeOriginScope,
+  describeToolGrant,
+  whitelistPathFor,
+  type AgentGrantsListing,
   type CommandScope,
   type OriginScope,
   type PermissionDecision,
+  type ToolGrant,
 } from '@stratusagent/permissions';
 import {
   createOpenAICompatibleProvider,
@@ -110,6 +130,7 @@ import {
   discoverSkillsInDirectory,
   installSkillsFromDirectory,
   loadOperatorSkills,
+  declaredAgentIds,
   loadRosterSouls,
   skillsDirPath,
   listAgentSummaries,
@@ -127,6 +148,7 @@ import {
   resolveEnvApiKey,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
+  validateConfigFile,
   resolveConfigLocation,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   saveChannelCredentials,
@@ -156,6 +178,7 @@ import {
   type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
+  type PluginConfigBlock,
   type PluginsConfig,
   type RosterEntry,
   type RuntimeSelection,
@@ -233,6 +256,7 @@ export interface CliEnvironment {
   stdinStream?: NodeJS.ReadableStream;
   approvalInput?: NodeJS.ReadableStream;
   setupInput?: NodeJS.ReadableStream;
+  templateInput?: NodeJS.ReadableStream;
   processEnv?: NodeJS.ProcessEnv;
   cwd?: string;
   /** Home directory override (tests). Defaults to os.homedir(). */
@@ -391,13 +415,133 @@ export const compareVersions = (a: string, b: string): number => {
  * both land in the caller's error handler, so a Windows setup would report
  * that it could not install and leave Slack and the dashboard missing.
  *
- * Every package name reaching the shell is a constant in this file, so
- * there is nothing user-supplied here for it to re-parse.
+ * `shell: true` concatenates the arguments without escaping — Node 24
+ * deprecates the pattern as DEP0190 for exactly that reason — so what may
+ * reach it is fenced by `isInstallablePackageName` below rather than by an
+ * argument about where the names come from. That argument used to be
+ * "every name here is a constant in this file", and it stopped being true
+ * the moment the Plugins menu started listing package names read from a
+ * config.
  */
 export const npmNeedsShell = (platform: NodeJS.Platform): boolean => platform === 'win32';
 
+/**
+ * Whether a string is a specifier npm would install — and therefore one
+ * safe to hand a shell.
+ *
+ * npm's own name grammar, which is far narrower than anything a shell
+ * treats as special: an optional `@scope/`, then lowercase alphanumerics
+ * with `-`, `_` and `.`, no leading `.` or `_`, 214 characters at most,
+ * and an optional `@version` of the same restricted alphabet. Nothing that
+ * matches contains a space, a quote, or a metacharacter — not `&`, not
+ * `|`, not `` ` ``, and not cmd.exe's `^` — so the fence and the
+ * correctness check are one check.
+ *
+ * The version half is deliberately not npm's full range syntax: `^1.0.0`
+ * is a valid range and `^` is cmd.exe's escape character. Only the plain
+ * forms this CLI actually passes are accepted, and a range that needs more
+ * is a thing to install by hand.
+ *
+ * A config key that fails this was never installable, so refusing costs no
+ * capability: `npm install -g 'pkg & whoami'` is not a thing that works
+ * and quietly becomes a thing that runs.
+ */
+/**
+ * The columns `selectInteractive` spends before an option's own text.
+ *
+ * Two for the selection marker, then `${n}) ` — so it grows with the option
+ * *count*, since every row is fitted to the widest prefix any row will
+ * have. A menu whose length a config decides therefore cannot reserve a
+ * constant: five first-party plugins plus five from a `plugins` block is
+ * ten rows, and `  10) ` is a column wider than `  1) `.
+ *
+ * The extra column is a deliberate spare. `fitMenuRow` trims to exactly its
+ * budget, and a row that fills the last column wraps on terminals that
+ * advance the cursor eagerly — which costs a whole redraw, since the rewind
+ * counts options rather than rendered rows.
+ */
+export const menuPrefixWidth = (optionCount: number): number => `  ${optionCount}) `.length + 1;
+
+/**
+ * npm's package-name grammar, and nothing else: an optional `@scope/`, then
+ * lowercase alphanumerics with `-`, `_` and `.`, no leading `.` or `_`, 214
+ * characters at most.
+ *
+ * This is what a `plugins` config key has to be, because that key is *also*
+ * the module specifier the loader hands `import.meta.resolve`. A version
+ * suffix is a thing npm installs and Node cannot resolve, so a key carrying
+ * one names a plugin that is permanently absent however many times it is
+ * installed.
+ */
+/**
+ * Whether one soul's allowlist reaches a tool a plugin contributes.
+ *
+ * The second gate, in the form both surfaces need it: `stratus plugins`
+ * asks it per tool to build the who-can-call-what table, and the setup
+ * menu asks it per agent to say what enabling just granted. An omitted
+ * list is every registered tool; a *declared namespace* is matched by
+ * overlap rather than by prefix, since `mcp.linear.*` sits under a granted
+ * `mcp.*` and neither is the other's prefix.
+ *
+ * Shared rather than written twice, and this is the fifth time on this
+ * change that mattered: a menu that answers "who can call it" differently
+ * from the command that reports it is two answers to one question.
+ */
+const soulGrantsTool = (
+  tools: readonly string[] | undefined,
+  name: string,
+  discovered: boolean,
+): boolean => {
+  if (tools === undefined) {
+    return true;
+  }
+  return discovered
+    ? tools.some((granted) => toolScopesOverlap(granted, name))
+    : matchesToolAllowlist(name, tools);
+};
+
+export const isPackageName = (name: string): boolean =>
+  name.length <= 214 && /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name);
+
+/**
+ * A package name, optionally with a plain version — what npm may be handed.
+ *
+ * A wider question than `isPackageName` and a different one: the updater
+ * installs `@stratusagent/cli@latest`, which is a valid thing to install and
+ * an invalid thing to import. Using one predicate for both let a versioned
+ * `plugins` key through the menu's install offer.
+ *
+ * The version half is deliberately not npm's full range syntax: `^1.0.0` is
+ * a valid range and `^` is cmd.exe's escape character. Only the plain forms
+ * this CLI actually passes are accepted, and a range that needs more is a
+ * thing to install by hand.
+ */
+export const isInstallableSpecifier = (specifier: string): boolean => {
+  const scoped = specifier.startsWith('@');
+  // Split on the `@` that introduces a version, never the one that opens a
+  // scope — `@scope/pkg` has both and only the first is part of the name.
+  const at = specifier.indexOf('@', scoped ? 1 : 0);
+  const name = at === -1 ? specifier : specifier.slice(0, at);
+  const version = at === -1 ? undefined : specifier.slice(at + 1);
+  if (!isPackageName(name)) {
+    return false;
+  }
+  return version === undefined || /^[a-z0-9][a-z0-9.-]*$/.test(version);
+};
+
 const defaultPackageInstaller: PackageInstaller = async (packages) => {
   const { spawn } = await import('node:child_process');
+  // The fence, at the one place that touches a shell, so every caller is
+  // behind it — including ones added later, which is how the old invariant
+  // was lost.
+  const rejected = packages.filter((entry) => !isInstallableSpecifier(entry));
+  if (rejected.length > 0) {
+    return {
+      ok: false,
+      message: `${rejected.join(', ')} ${rejected.length === 1 ? 'is not a package name' : 'are not package names'} npm can install. `
+        + 'Fix the key in your config, or install it yourself.',
+    };
+  }
   return new Promise<PackageInstallResult>((resolve) => {
     // npm's own output is inherited rather than captured: a global install
     // runs for tens of seconds, and a silent one is indistinguishable from
@@ -493,6 +637,16 @@ export interface ParsedChatCommand {
   maxTurns?: number;
 }
 
+export interface ParsedTemplateAddCommand {
+  command: 'template-add';
+  /** A GitHub `owner/repo`, a git URL, or a local path. */
+  source: string;
+  /** Skip the review and install straight away. */
+  yes?: boolean;
+  /** Replace an agent or skill already installed under the same name. */
+  force?: boolean;
+}
+
 export interface ParsedSkillAddCommand {
   command: 'skill-add';
   /** A GitHub `owner/repo`, a git URL, or a local path. */
@@ -511,6 +665,13 @@ export interface ParsedSkillValidateCommand {
   command: 'skill-validate';
   /** A skill directory, a directory of skills, or an installed skill's id. */
   target: string;
+}
+
+export interface ParsedPluginsCommand {
+  command: 'plugins';
+  format: 'text' | 'json';
+  /** The config whose plugins block to read, when not the default. */
+  configPath?: string;
 }
 
 export interface ParsedSkillsCommand {
@@ -572,6 +733,20 @@ export interface ParsedSchedulesCommand {
   /** cancel only: which schedule. */
   scheduleId?: string;
   format: 'text' | 'json';
+}
+
+export interface ParsedGrantsCommand {
+  command: 'grants';
+  action: 'list' | 'revoke';
+  agentId: string;
+  /** revoke: exactly one of the three names what goes. */
+  tool?: string;
+  /** The scope as `stratus grants` lists it — `git push`. */
+  scope?: string;
+  origin?: string;
+  format: 'text' | 'json';
+  gateway?: string;
+  token?: string;
 }
 
 export interface ParsedMemoryCommand {
@@ -659,12 +834,15 @@ export type ParsedCommand =
   | ParsedAgentNewCommand
   | ParsedAgentsCommand
   | ParsedSkillAddCommand
+  | ParsedTemplateAddCommand
   | ParsedSkillValidateCommand
+  | ParsedPluginsCommand
   | ParsedSkillsCommand
   | ParsedSkillReloadCommand
   | ParsedCredentialCommand
   | ParsedRestartCommand
   | ParsedSchedulesCommand
+  | ParsedGrantsCommand
   | ParsedMemoryCommand
   | ParsedSessionCommand
   | ParsedDoctorCommand
@@ -803,14 +981,20 @@ Usage:
   stratus run --config ./stratus.config.json --provider openai "Say hello"
   stratus agents
   stratus agents --gateway http://127.0.0.1:4123
+  stratus template add ./examples/templates/example
+  stratus template add stratuslabs/template-oncall --yes
   stratus skill add stratuslabs/skill-code-review
   stratus skill add ./my-skills --skill code-review --agent ava
   stratus skill validate ./my-skill
   stratus skills
+  stratus plugins
+  stratus plugins --format json
   stratus skill reload
   stratus restart
   stratus schedules
   stratus schedules cancel <id>
+  stratus grants ava
+  stratus grants revoke ava --tool web.fetch
   stratus memory list ava
   stratus memory reassert ava --trust user --all-unknown
   stratus session rollover slack:ava:T01ABCDEF:D07GHIJKL
@@ -828,8 +1012,10 @@ Usage:
 
 Commands:
   setup            Menu-driven onboarding: pick a provider, sign in (Claude
-                   subscription or API key), create your agent, connect it to
-                   Slack, and test it — settings go to ~/.stratus/config.json,
+                   subscription or API key), create your agent, enable the
+                   plugins it may use, connect it to Slack, choose who
+                   approves gated calls unattended, and test it — settings
+                   go to ~/.stratus/config.json,
                    sign-ins and channel tokens to ~/.stratus/credentials.json
                    (0600). Save & finish offers to install any optional
                    package your answers imply (the Slack channel, the control
@@ -857,6 +1043,15 @@ Commands:
   logs             Read the daemon's log from any terminal: -f to follow,
                    -n <count> for backlog, --agent / --session to filter,
                    --format json for the raw records
+  template add     Install a template — a folder (or GitHub repo) holding
+                   soul files, skills, and the plugin config they need. Prints
+                   every agent, skill, plugin package and config key it would
+                   add, then asks; --yes installs without asking, --force
+                   replaces an agent or skill already installed under the same
+                   name. Plugin packages the template's config.json names are
+                   installed with npm install -g and enabled in
+                   ~/.stratus/config.json, which needs a restart to take
+                   effect. See docs/guides/templates.md for the layout
   skill add        Install skills from a GitHub repo (owner/repo or URL) or a
                    local path into ~/.stratus/skills — whole directories, one
                    per skill; works with skills published for other agents
@@ -875,6 +1070,13 @@ Commands:
                    Exit 1 if anything would be refused
   skills           List installed skills and which agents enable each
                    (also: stratus skill list)
+  plugins          What this machine's plugins are, and where the chain from
+                   installed to callable breaks: whether the package resolves,
+                   whether a trusted config enables it, which agents' tools:
+                   lists select each tool it declares, and what the approval
+                   policy does with a gated call. Read from each package's
+                   manifest, so nothing is imported and no plugin's setup runs
+                   (--format json, --config <path>; also: stratus plugin list)
   skill reload     Ask the running daemon to re-read ~/.stratus/skills — for a
                    skill edited or removed by hand. A skill that will not
                    load refuses the whole reload and the previous set keeps
@@ -902,6 +1104,14 @@ Commands:
                    cancel <id>" stops the next firing and revokes the
                    destination that was approved with it
                    (also: stratus schedule list / schedule cancel <id>)
+  grants           What an agent may do unattended beyond the built-in safe
+                   list — its standing tool grants, command scopes, and
+                   sites, each an "always allow" somebody answered. From the
+                   running daemon when one is serving (--gateway, --token),
+                   else from ~/.stratus/agents/<id>.whitelist.json; --format
+                   json. "stratus grants revoke <agent> --tool <name> |
+                   --scope "<command>" | --origin <origin>" takes one back,
+                   and a running daemon stops honouring it at once
   memory list      Show an agent's live memory with the trust label each
                    entry carries — user, agent, unknown (no recorded origin,
                    or written in a conversation with someone not configured
@@ -973,6 +1183,7 @@ Options:
   --all-unknown    memory reassert: every live entry with no recorded origin
   --token          Bearer token for --gateway (default: ~/.stratus/gateway-token)
   --no-reload      skill add: install without reloading a running daemon
+  -y, --yes        template add: install without the review prompt
   --reason         restart: why, for the daemon's log
   --drain-timeout  restart: seconds the daemon lets in-flight turns finish
                    before aborting them (default: 30)
@@ -1541,6 +1752,34 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     };
   }
 
+  if (command === 'plugins' || (command === 'plugin' && rest[0] === 'list')) {
+    const pluginsRest = command === 'plugins' ? rest : rest.slice(1);
+    let format: 'text' | 'json' = 'text';
+    let configPath: string | undefined;
+    for (let index = 0; index < pluginsRest.length; index += 1) {
+      const token = pluginsRest[index] as string;
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(pluginsRest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Invalid value for --format: ${value}. Use text or json.`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--config') {
+        configPath = readOptionValue(pluginsRest, index, '--config');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return { command: 'plugins', format, ...(configPath !== undefined ? { configPath } : {}) };
+  }
+
   if (command === 'skills' || (command === 'skill' && rest[0] === 'list')) {
     const skillsRest = command === 'skills' ? rest : rest.slice(1);
     for (const token of skillsRest) {
@@ -1550,6 +1789,48 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       throw new Error(`Unknown option: ${token}`);
     }
     return { command: 'skills' };
+  }
+
+  if (command === 'template') {
+    const [subcommand, ...templateRest] = rest;
+    if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+      return { command: 'help' };
+    }
+    if (subcommand !== 'add') {
+      throw new Error(`Unknown template subcommand: ${subcommand}. Try: stratus template add <path or owner/repo>`);
+    }
+    let source: string | undefined;
+    let yes = false;
+    let force = false;
+    for (const token of templateRest) {
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--yes' || token === '-y') {
+        yes = true;
+        continue;
+      }
+      if (token === '--force') {
+        force = true;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      if (source !== undefined) {
+        throw new Error(`template add takes one source; got both ${JSON.stringify(source)} and ${JSON.stringify(token)}.`);
+      }
+      source = token;
+    }
+    if (source === undefined) {
+      throw new Error('template add needs a source: a GitHub owner/repo, a git URL, or a local path.');
+    }
+    return {
+      command: 'template-add',
+      source,
+      ...(yes ? { yes } : {}),
+      ...(force ? { force } : {}),
+    };
   }
 
   if (command === 'skill') {
@@ -1657,6 +1938,85 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       ...(agentId !== undefined ? { agentId } : {}),
       ...(reload ? {} : { reload }),
     };
+  }
+
+  if (command === 'grants') {
+    const action: ParsedGrantsCommand['action'] = rest[0] === 'revoke' ? 'revoke' : 'list';
+    const tokens = rest[0] === 'revoke' || rest[0] === 'list' ? rest.slice(1) : rest;
+    const usage = action === 'revoke'
+      ? 'stratus grants revoke <agent> --tool <name> | --scope "<command>" | --origin <origin>'
+      : 'stratus grants <agent>';
+    const parsed: ParsedGrantsCommand = { command: 'grants', action, agentId: '', format: 'text' };
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(tokens, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        parsed.format = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--gateway') {
+        parsed.gateway = readOptionValue(tokens, index, '--gateway');
+        index += 1;
+        continue;
+      }
+      if (token === '--token') {
+        parsed.token = readOptionValue(tokens, index, '--token');
+        index += 1;
+        continue;
+      }
+      if (action === 'revoke' && (token === '--tool' || token === '--scope' || token === '--origin')) {
+        const value = readOptionValue(tokens, index, token);
+        if (token === '--tool') {
+          parsed.tool = value;
+        } else if (token === '--scope') {
+          parsed.scope = value;
+        } else {
+          parsed.origin = value;
+        }
+        index += 1;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      if (parsed.agentId === '') {
+        parsed.agentId = token;
+        continue;
+      }
+      throw new Error(`Unexpected argument: ${token}. Try: ${usage}`);
+    }
+    if (parsed.agentId === '') {
+      throw new Error(`grants${action === 'revoke' ? ' revoke' : ''} needs the agent id: ${usage}.`);
+    }
+    // The agents package's own rule, the same one the control API route and
+    // `credential --agent` apply — and the reason is sharper here: this id is
+    // joined into a path (`<id>.whitelist.json`), and the grant store
+    // documents it as an already-validated single segment by the time it
+    // reaches that join. Unchecked, `../../other` reads — and on a revoke
+    // rewrites — a grant file outside ~/.stratus/agents.
+    if (!isValidAgentId(parsed.agentId)) {
+      throw new Error(
+        `${JSON.stringify(parsed.agentId)} cannot be an agent id, so it names no grant file. `
+        + 'Use the id `stratus agents` lists.',
+      );
+    }
+    if (action === 'revoke') {
+      const named = [parsed.tool, parsed.scope, parsed.origin].filter((value) => value !== undefined).length;
+      if (named !== 1) {
+        throw new Error(`grants revoke names exactly one of --tool, --scope, or --origin: ${usage}.`);
+      }
+    }
+    return parsed;
   }
 
   if (command === 'memory') {
@@ -2038,6 +2398,8 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• session.created ${event.sessionId}`;
     case 'session.updated':
       return `• session.updated ${event.status}`;
+    case 'session.observed':
+      return `• session.observed ${event.sessionId}`;
     case 'provider.response':
       return `• provider.response ${event.parts.length} part(s)`;
     case 'tool.called':
@@ -3269,6 +3631,11 @@ const SLACK_BOT_SCOPES = [
   // exists, and whether this app is a member of it.
   'channels:read',
   'chat:write',
+  // What lets an agent be shown a screenshot: file bytes sit behind an
+  // authenticated URL that answers a token without this scope with a
+  // sign-in page. An app installed without it still hears about the
+  // attachment, by name, and is told it cannot open it.
+  'files:read',
   'files:write',
   'groups:history',
   'groups:read',
@@ -3305,6 +3672,12 @@ export const slackAppManifest = (agentName: string): string => JSON.stringify({
   },
 }, null, 2);
 
+/**
+ * Where plugins other people publish are listed. Printed by `stratus
+ * plugins` and by setup's plugin menu, so the two cannot drift.
+ */
+const PLUGIN_MARKETPLACE_URL = 'github.com/stratuslabs/plugins';
+
 const DEFAULT_SOUL_STARTER = [
   'You are a helpful, warm generalist. Answer first, explain second, and',
   'keep replies short unless the question genuinely needs depth. Use',
@@ -3322,6 +3695,42 @@ interface SetupState {
   apiKeyEnv?: string;
   systemPrompt?: string;
   soulPath?: string;
+  /**
+   * Carried through a save untouched: setup has no menu for it, and a
+   * rewrite that dropped it would hand a text-only model its images back.
+   */
+  vision?: boolean;
+  /**
+   * Carried for the same reason `vision` is, and grouped with it because
+   * they are the same kind of thing: a preference about how requests are
+   * made, not a grant. Dropping them reverted an operator who had turned
+   * caching off — for a fleet that never reads a cached prefix back, where
+   * the write premium is a pure surcharge — to paying it again silently.
+   */
+  promptCache?: boolean;
+  promptCacheTtl?: '5m' | '1h';
+  /**
+   * The four blocks an operator writes by hand, carried for the same reason
+   * `vision` is — with more at stake, because each one is a decision about
+   * what the daemon may do rather than a preference. `save` rebuilds the
+   * file from this state, so a key absent here is a key deleted from disk:
+   * re-running setup silently un-installed every plugin, un-appointed every
+   * approver, dropped every principal back to `unknown`, and returned the
+   * control API to its default binding. Found while working out why an
+   * agent had no tools — the plugins block granting them had been erased by
+   * a later `stratus setup` that never mentioned plugins.
+   *
+   * Carried as `loadConfigFile` normalized them, not as the bytes on disk.
+   * That is the shape `validateConfigFile` already vouches for, and its own
+   * documentation is why: a writer that answers this question differently
+   * from the loader writes a file the next read rejects. A hand-written key
+   * no parser recognizes is dropped here — but every reader was already
+   * ignoring it, so what is lost is a key that never did anything.
+   */
+  plugins?: PluginsConfig;
+  approvals?: ApprovalsConfig;
+  api?: ApiConfig;
+  principals?: PrincipalsConfig;
   credentials: CredentialsFile;
   credentialsDirty: boolean;
   /** Channel tokens (Slack apps, keyed by agent id) and whether they changed. */
@@ -3410,6 +3819,13 @@ export const runSetup = async (
       ? { fallbackProvider: existing.fallbackProvider ?? existing.provider ?? 'anthropic' }
       : {}),
     ...(existing.fallbackBaseUrl ? { fallbackBaseUrl: existing.fallbackBaseUrl } : {}),
+    ...(existing.vision !== undefined ? { vision: existing.vision } : {}),
+    ...(existing.promptCache !== undefined ? { promptCache: existing.promptCache } : {}),
+    ...(existing.promptCacheTtl !== undefined ? { promptCacheTtl: existing.promptCacheTtl } : {}),
+    ...(existing.plugins !== undefined ? { plugins: existing.plugins } : {}),
+    ...(existing.approvals !== undefined ? { approvals: existing.approvals } : {}),
+    ...(existing.api !== undefined ? { api: existing.api } : {}),
+    ...(existing.principals !== undefined ? { principals: existing.principals } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
@@ -4322,6 +4738,1032 @@ export const runSetup = async (
     };
   };
 
+  /**
+   * What a plugin's block should say when setup writes it, beyond
+   * `enabled`. Only settings without which the plugin is installed,
+   * enabled, and still useless — the failure this menu exists to stop
+   * anyone reaching by accident:
+   *
+   * - `tool-fs` roots are the whole boundary. With none, the plugin loads
+   *   and every call fails "No filesystem roots are configured", which
+   *   reads to an agent as a broken tool rather than an unset one.
+   * - `plugin-mcp` requires `servers`, and its value is a set of endpoints
+   *   only the operator knows. A block written without it is refused at
+   *   load, so this menu offers no one-key enable for it.
+   *
+   * `tool-shell`, `tool-web` and `tool-browser` work from `{ enabled:
+   * true }` — their settings narrow what is already permitted, and the
+   * plugin without them is restrictive rather than broken.
+   */
+  const PLUGIN_SETUP: Record<string, {
+    label: string;
+    grants: string;
+    /** Asked for on enable; the block is not written without an answer. */
+    needs?: { key: string; question: string; placeholder: string; list: boolean };
+    /**
+     * Something setup can neither supply nor check without importing the
+     * plugin — which this menu never does. Printed on enable rather than
+     * blocking, because unlike a missing `roots` it is usually already
+     * satisfied and setup cannot tell which.
+     */
+    note?: string;
+    /**
+     * A setting setup cannot invent, and the reason. The refusal is about
+     * the setting being absent, never about the package: a block that
+     * already has it is enabled and disabled like any other.
+     */
+    byHand?: { key: string; reason: string };
+  }> = {
+    '@stratusagent/tool-fs': {
+      label: 'Files',
+      grants: 'fs.read, fs.list, fs.search, fs.write',
+      needs: {
+        key: 'roots',
+        question: 'Which directories may agents read and write? (comma-separated, e.g. ~/notes): ',
+        placeholder: '~/notes',
+        list: true,
+      },
+    },
+    '@stratusagent/tool-shell': { label: 'Shell', grants: 'shell.run' },
+    '@stratusagent/tool-web': { label: 'Web', grants: 'web.fetch' },
+    '@stratusagent/tool-browser': {
+      label: 'Browser',
+      grants: 'browser.goto, browser.read, browser.screenshot, browser.act',
+      // The package depends on `playwright-core`, which downloads no
+      // browser on purpose — a few megabytes rather than 150. So the
+      // browser is one you already have or one you fetch, and without
+      // either every call fails: enabled and unusable, the state this menu
+      // exists to prevent. Setup cannot check for it without importing the
+      // plugin, so it says so instead.
+      note: 'It drives a browser you already have. If none is found, run `npx playwright install chromium`, '
+        + 'or point it at yours with `channel` or `executablePath` under plugins["@stratusagent/tool-browser"].',
+    },
+    '@stratusagent/plugin-mcp': {
+      label: 'MCP bridge',
+      grants: 'mcp.<server>.<tool>, discovered at connect',
+      // Setup checks that `servers` is an object and stops there. What
+      // each entry needs — exactly one of `command` or `url`, and the
+      // rest of `resolveServerSpec` — is the plugin's rule, and both ways
+      // to apply it here are worse than not applying it: a copy in this
+      // file drifts from the plugin the first time it gains a transport,
+      // and importing the package to ask means calling `createPlugin`,
+      // which the loader's own comment says may open a socket. So the
+      // menu says what it did not check instead of implying it did. The
+      // claim that needs qualifying is the grant line's "the next time
+      // the daemon starts", which is a prediction about a block setup
+      // never wrote.
+      note: 'Setup checked that servers is a block and no further — reading what is inside it means loading the plugin, '
+        + 'which setup never does. If the bridge refuses an entry, the daemon says "plugin @stratusagent/plugin-mcp did not load" '
+        + 'at startup, and `stratus serve` shows that directly.',
+      byHand: {
+        key: 'servers',
+        reason: 'it needs a servers block naming each MCP server — see docs/reference/config.md',
+      },
+    },
+  };
+
+  /** Every package this menu lists: the first-party set, plus whatever is already configured. */
+  const pluginPackages = (): string[] => [
+    ...FIRST_PARTY_CAPABILITY_PACKAGES,
+    ...Object.keys(state.plugins ?? {}).filter((name) => !FIRST_PARTY_CAPABILITY_PACKAGES.includes(name)),
+  ];
+
+  const pluginEnabled = (name: string): boolean => {
+    const block = state.plugins?.[name];
+    return block !== undefined && block.enabled !== false;
+  };
+
+  /**
+   * What the daemon would refuse about a block, or `undefined` if it would
+   * take it — the loader's own preflight, not a third opinion.
+   *
+   * `stratus plugins` already runs `preflightPlugin` to answer exactly this
+   * about an enabled plugin, and the menu asking it a different way was how
+   * three rounds of review found a different hand-rolled check short of the
+   * real rule: a `servers` that is a string, `roots` that are numbers, a
+   * `timeoutMs` that is not an integer. The manifest's schema knows all
+   * three, so the fix is to ask it rather than to keep guessing at it.
+   *
+   * A package that will not resolve has no manifest to ask, and that is
+   * `undefined` too: setup cannot preflight what is not installed, and
+   * saying nothing is wrong is the same answer it has always given there.
+   */
+  const pluginConfigProblem = async (name: string, block: PluginConfigBlock): Promise<string | undefined> => {
+    try {
+      const { manifest, directory } = await readPluginManifest(name, {
+        resolve: (target) => import.meta.resolve(target),
+      });
+      await preflightPlugin(manifest, directory, block as JsonObject, workspacesDirPath(env));
+      return undefined;
+    } catch (error) {
+      // A package that will not *resolve* is not a verdict about the block —
+      // `host.resolve` throws a plain Error for that, and setup has always
+      // answered "nothing known" there. Everything the loader itself
+      // refuses is: a schema mismatch and a bad `toolRisks` override raise
+      // `PluginConfigError`, while an unparseable manifest and a skill file
+      // that is missing, unreadable or outside the package raise
+      // `PluginManifestError`. Catching only the first read the second as
+      // "no problem" and enabled a plugin the daemon rejects before it
+      // registers anything.
+      if (error instanceof PluginConfigError || error instanceof PluginManifestError) {
+        return error.message;
+      }
+      return undefined;
+    }
+  };
+
+  /**
+   * What setup did not check about this plugin, or `undefined` if there is
+   * nothing left unchecked.
+   *
+   * One concept, because the two cases print the same kind of sentence and
+   * the verdict below has to be qualified for both. `preflightPlugin` never
+   * imports the package — that is what lets it answer without starting
+   * anything — so a plugin can pass every check here and still be refused
+   * by `loadPlugins` for not exporting `createPlugin(config)`, returning
+   * something that is not a plugin, or failing `setup()`. For the packages
+   * this file knows, that is not a real risk and only the declared caveat
+   * applies; for one it does not know, it is exactly the risk, and reading
+   * an absent `PLUGIN_SETUP` entry as "nothing to declare" claimed a
+   * readiness setup had no way to establish.
+   */
+  const uncheckedReason = (name: string): string | undefined => {
+    const setup = PLUGIN_SETUP[name];
+    if (setup === undefined) {
+      return `Setup read ${name}'s manifest and no more — it never loads a package, so whether it exports createPlugin(config) `
+        + 'is something only a daemon start will tell you. If it does not, the daemon says "plugin '
+        + `${name} did not load" and registers nothing.`;
+    }
+    return setup.note;
+  };
+
+  /**
+   * The tool names a plugin contributes, read from its manifest.
+   *
+   * The manifest rather than `PLUGIN_SETUP.grants`, which is display text
+   * and exists only for the packages this file knows: a third-party plugin
+   * has real names too, and they are what decides whether a soul's
+   * `tools:` list already reaches it. `undefined` where no manifest can be
+   * read — a question setup declines rather than answers wrongly.
+   */
+  const pluginContributions = async (
+    name: string,
+  ): Promise<{ packageName: string; tools: string[]; namespaces: string[]; skills: string[] } | undefined> => {
+    try {
+      const { manifest } = await readPluginManifest(name, {
+        resolve: (target) => import.meta.resolve(target),
+      });
+      return {
+        // The manifest's own name, which is *not* the config key: the same
+        // package reached through an alias or a subpath specifier is a
+        // different key and the same `packageName`, and the loader
+        // qualifies skills with this one. Carried out of here so callers
+        // cannot reach for the specifier by accident.
+        packageName: manifest.packageName,
+        tools: manifest.contributes.tools.map((tool) => tool.name),
+        namespaces: manifest.contributes.toolsDiscovered.map((entry) => entry.namespace),
+        // The qualified form the loader stages them under, which is what a
+        // `skills:` entry has to match.
+        skills: manifest.contributes.skills.map((skill) => `${manifest.packageName}:${skill.id}`),
+      };
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * Whether the setting a plugin is useless without resolves to something
+   * for one agent, given the block that would be written.
+   *
+   * `resolvePluginAgentConfig` shallow-merges, so a per-agent value
+   * *replaces* the fleet-wide one rather than extending it. That is why
+   * `agents.<id>.roots: []` is how a config takes one agent out, and why a
+   * fleet-wide list says nothing about an agent that overrides it.
+   */
+  const pluginSettingReaches = (
+    block: PluginConfigBlock | undefined,
+    key: string,
+    agentId: string,
+  ): boolean => {
+    const agents = block?.agents;
+    const own = typeof agents === 'object' && agents !== null && !Array.isArray(agents)
+      ? (agents as Record<string, unknown>)[agentId]
+      : undefined;
+    const value = typeof own === 'object' && own !== null && !Array.isArray(own)
+      && key in (own as Record<string, unknown>)
+      ? (own as Record<string, unknown>)[key]
+      : block?.[key];
+    // Nonempty is this menu's own question — "would an agent get anything"
+    // — and the only part of it the manifest does not answer, since a
+    // schema that permits `roots: []` is right to. Whether the entries are
+    // the right *type* is the manifest's, checked by `pluginConfigProblem`
+    // before enabling, so a second test for it here would be the copy this
+    // file keeps growing.
+    return Array.isArray(value) && value.length > 0;
+  };
+
+  const pluginsSummary = (): string => {
+    const enabled = pluginPackages().filter((name) => pluginEnabled(name));
+    if (enabled.length === 0) {
+      return 'none — agents have no tools beyond the built-ins';
+    }
+    return enabled.map((name) => name.replace('@stratusagent/', '')).join(', ');
+  };
+
+  /**
+   * Enabling is only the second of two gates, and this menu owns just that
+   * one. The soul's `tools:` list is the other, and setup does not edit
+   * souls — so the line to paste is printed rather than applied, which is
+   * also the honest thing: which agent gets a tool is not a decision this
+   * menu has the standing to make.
+   */
+  const printSoulGrantLine = async (name: string): Promise<void> => {
+    const grants = PLUGIN_SETUP[name]?.grants;
+    const first = grants?.split(',')[0]?.trim();
+    writeLine(streams.stdout);
+
+    // A soul with no `tools:` key is allowlisted for *every* registered
+    // tool — `matchesToolAllowlist` treats an omitted list as permissive,
+    // and the built-in `stratus` agent has none, so a fresh install always
+    // has one. Enabling a plugin therefore can grant capability
+    // immediately, and saying "no agent can call it yet" would understate
+    // what just happened in the most common configuration there is. Read
+    // the roster and say which of the two it was.
+    const { entries, loaded } = await channelRoster();
+    if (!loaded) {
+      // The roster refused to load, so `entries` is empty — which is not
+      // evidence that every soul has a `tools:` list. Claiming nothing can
+      // call the plugin would be a statement about a file this command
+      // could not read, and false the moment the collision is fixed if any
+      // soul omits its allowlist. Same posture as the Channels menu.
+      writeLine(streams.stdout, `${name} is enabled. Who can call it is unknown until the roster loads — fix the error above, then run \`stratus plugins\`.`);
+      return;
+    }
+    const contributed = await pluginContributions(name);
+    const label = (list: ChannelRosterEntry[]): string =>
+      list.map((entry) => `${entry.soul.agent.name} (${entry.soul.agent.id})`).join(', ');
+    // Every contributed tool name, concrete and discovered alike. A
+    // discovered namespace is matched by overlap rather than prefix, which
+    // `soulGrantsTool` handles; both are things a `tools:` entry can reach.
+    const everyTool = contributed === undefined ? [] : [...contributed.tools, ...contributed.namespaces];
+    // What one soul's allowlist actually reaches — the *names*, not a
+    // yes/no. `tools: [fs.read]` grants one of the four tool-fs
+    // contributes, and reporting the plugin as callable said all four were.
+    //
+    // Reported as the soul's own **entries**, never as the plugin's
+    // declarations, because `toolScopesOverlap` is overlap and not
+    // containment: a soul granting `mcp.linear.get_issue` overlaps a
+    // declared `mcp.*` — which is the right test for "does this soul reach
+    // the plugin" and the wrong thing to print, since it read back as the
+    // soul granting the whole namespace. An entry says exactly what it
+    // says, and a discovered namespace has no tool names to enumerate
+    // until the bridge connects.
+    const reached = (entry: ChannelRosterEntry): string[] => {
+      const tools = entry.soul.agent.tools;
+      if (tools === undefined) {
+        return everyTool;
+      }
+      if (contributed === undefined) {
+        // No manifest, no names to test — no claim either way about a soul
+        // that named something specific.
+        return [];
+      }
+      return tools.filter((granted) =>
+        contributed.tools.some((tool) => soulGrantsTool([granted], tool, false))
+        || contributed.namespaces.some((namespace) => soulGrantsTool([granted], namespace, true)));
+    };
+    /** Concrete contributed tools no entry of this soul's reaches. */
+    const missedTools = (entry: ChannelRosterEntry): string[] => {
+      const tools = entry.soul.agent.tools;
+      if (tools === undefined || contributed === undefined) {
+        return [];
+      }
+      // Only the concrete ones: a declared namespace registers its tools at
+      // connect time, so setup cannot say which of them an entry misses.
+      return contributed.tools.filter((tool) => !soulGrantsTool(tools, tool, false));
+    };
+
+    // Allowlisted is not the same as able to call it. `tool-fs` enabled
+    // from a per-agent `roots` block leaves every *other* allowlisted soul
+    // holding tools that throw "No filesystem roots are configured" on the
+    // first call. Naming it as an agent that can call them would report the
+    // installed-enabled-and-useless state this menu exists to prevent as
+    // the success case.
+    const needsKey = PLUGIN_SETUP[name]?.needs?.key;
+    const settingReaches = (entry: ChannelRosterEntry): boolean => needsKey === undefined
+      || pluginSettingReaches(state.plugins?.[name], needsKey, entry.soul.agent.id);
+    const allowlisted = entries.filter((entry) => reached(entry).length > 0);
+    const callable = allowlisted.filter(settingReaches);
+    const unset = allowlisted.filter((entry) => !settingReaches(entry));
+    const permissive = callable.filter((entry) => entry.soul.agent.tools === undefined);
+    const explicit = callable.filter((entry) => entry.soul.agent.tools !== undefined);
+    // The key travels with the agents rather than beside them, so the
+    // branches below cannot ask about one and read the other.
+    const shortfall = needsKey !== undefined && unset.length > 0
+      ? { key: needsKey, agents: unset, one: unset.length === 1 }
+      : undefined;
+
+    // Skills are the other half of what a plugin contributes and they are
+    // gated the other way round: an omitted `skills:` list is **none**,
+    // deliberately, because a skill silently changing how an agent behaves
+    // is worse than one it has to be told about. So no soul gains them by
+    // default, and a line about tools cannot speak for them.
+    const skillLine = (): void => {
+      if (contributed === undefined || contributed.skills.length === 0) {
+        return;
+      }
+      const one = contributed.skills.length === 1;
+      writeLine(streams.stdout, `It also contributes ${one ? 'a skill' : 'skills'}: ${contributed.skills.join(', ')}.`);
+      // Every id, not the first: `matchesSkillAllowlist` selects an exact id
+      // or a package wildcard, so a one-item list from a plural sentence
+      // grants one skill and silently leaves the rest off.
+      //
+      // The wildcard is built from the *manifest's* package name, never the
+      // config key this menu was called with. They are the same for every
+      // ordinary install and differ for an alias or a subpath specifier,
+      // and the loader qualifies skills with the manifest's — so a wildcard
+      // spelled from the key would grant nothing while the exact ids beside
+      // it worked, which is the worst way for two halves of one sentence to
+      // disagree.
+      writeLine(streams.stdout, `Those are not granted by \`tools:\` and no soul gets them by default — an omitted \`skills:\` list is none. Add \`skills: [${contributed.skills.join(', ')}]\` to grant ${one ? 'it' : 'them'}${one ? '' : `, or \`skills: [${contributed.packageName}:*]\` for every skill this package contributes`}.`);
+    };
+
+    if (callable.length > 0) {
+      if (permissive.length > 0) {
+        writeLine(streams.stdout, `${name} is enabled — and ${label(permissive)} ${permissive.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
+        writeLine(streams.stdout, uncheckedReason(name) !== undefined
+          ? `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} what ${permissive.length === 1 ? 'that agent' : 'those agents'} would gain at the next daemon start — subject to the caveat above, which setup did not check.`
+          : `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} callable by ${permissive.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
+        writeLine(streams.stdout, 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.');
+      }
+      for (const entry of explicit) {
+        // Per soul, and naming what its list *matched* — an allowlist can
+        // grant one of four tools, and saying the plugin is callable there
+        // reported the other three as available when the runtime denies
+        // them.
+        const names = reached(entry);
+        const rest = missedTools(entry);
+        writeLine(streams.stdout, `${name} is enabled — and ${entry.soul.agent.name} (${entry.soul.agent.id}) already grants ${names.join(', ')} in \`tools:\`${rest.length > 0 ? `, but not ${rest.join(', ')}` : ''}.`);
+      }
+      if (shortfall !== undefined) {
+        writeLine(streams.stdout, `${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted too, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} — every call would fail until it is, under plugins["${name}"].agents.`);
+      }
+      skillLine();
+      return;
+    }
+
+    if (shortfall !== undefined) {
+      // Allowlisted souls, every one of them short the setting: neither the
+      // "callable by" line above nor the "no soul names it" one below is
+      // true, and each would send the operator to fix the wrong gate.
+      writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — ${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted for it, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} and every call would fail.`);
+      writeLine(streams.stdout, `Set ${shortfall.key} for ${shortfall.one ? 'it' : 'them'} under plugins["${name}"].agents, then run \`stratus plugins\` to see the whole chain.`);
+      skillLine();
+      return;
+    }
+
+    if (everyTool.length === 0) {
+      // A plugin that contributes no tools at all — skills only, which is a
+      // valid manifest. Sending the operator to edit `tools:` would name
+      // the wrong key entirely.
+      if (contributed !== undefined && contributed.skills.length > 0) {
+        writeLine(streams.stdout, `${name} is enabled. It contributes no tools, so there is nothing for a \`tools:\` list to name.`);
+        skillLine();
+        return;
+      }
+      writeLine(streams.stdout, `${name} is enabled. What it contributes is in its manifest — run \`stratus plugins\` to see it and who can reach it.`);
+      return;
+    }
+
+    writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — every soul in the roster has a \`tools:\` list and none of them names what it contributes, and a soul grants tools by naming them:`);
+    writeLine(streams.stdout, `  tools: [${everyTool[0] as string}]`);
+    writeLine(streams.stdout, `Add it to the \`tools:\` list in ${state.soulPath ?? 'your agent\'s soul file'}, then run \`stratus plugins\` to see the whole chain and what it contributes.`);
+    skillLine();
+  };
+
+  const choosePlugins = async (): Promise<void> => {
+    while (true) {
+      const packages = pluginPackages();
+      // Every package plus Back — the count the widest prefix comes from.
+      const reserved = menuPrefixWidth(packages.length + 1);
+      const options = packages.map((name) => {
+        const short = name.replace('@stratusagent/', '');
+        const installed = packageInstalled(name, env);
+        const status = !installed
+          ? '— not installed'
+          : pluginEnabled(name)
+            ? '✓ enabled'
+            : 'installed, not enabled';
+        return fitMenuRow(short.padEnd(18) + status, reserved);
+      });
+      options.push('Back');
+
+      const choice = await prompter.select(
+        'Plugins — what your agents can do (installing one grants nothing on its own)',
+        options,
+        { footnote: `More plugins — ${PLUGIN_MARKETPLACE_URL}` },
+      );
+      if (choice.kind !== 'index' || choice.index === options.length - 1) {
+        return;
+      }
+      const name = packages[choice.index];
+      if (!name) {
+        return;
+      }
+      await choosePlugin(name);
+    }
+  };
+
+  const choosePlugin = async (name: string): Promise<void> => {
+    const setup = PLUGIN_SETUP[name];
+    const installed = packageInstalled(name, env);
+    const enabled = pluginEnabled(name);
+
+    // Only a block still *missing* that setting is refused. A configured
+    // one switched off — by this menu, which promises its settings are kept
+    // for turning it back on — must be able to come back, or the promise is
+    // false and the switch is one-way.
+    const byHandValue = setup?.byHand !== undefined ? state.plugins?.[name]?.[setup.byHand.key] : undefined;
+    // Present *and* something the loader would take. Presence alone read
+    // `servers: "invalid"` as a config to switch back on; asking the
+    // manifest instead of inventing a shape test here is the same move the
+    // enable path makes, and there is one rule between them.
+    const byHandProblem = setup?.byHand !== undefined && byHandValue !== undefined
+      ? await pluginConfigProblem(name, state.plugins?.[name] ?? {})
+      : undefined;
+    const configuredByHand = byHandValue !== undefined && byHandProblem === undefined;
+    if (setup?.byHand && !enabled && !configuredByHand) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, `${name} contributes ${setup.grants}.`);
+      writeLine(streams.stdout, `Setup does not enable it: ${setup.byHand.reason}.`);
+      if (byHandProblem !== undefined) {
+        // Present, and not what the loader will take. Without this the
+        // refusal reads as "you have not set it", which sends an operator
+        // who plainly has to look for a menu bug rather than at the value.
+        writeLine(streams.stdout, `A daemon would refuse the block you have: ${byHandProblem}`);
+      }
+      if (!installed) {
+        writeLine(streams.stdout, `Install it with: npm install -g ${name}`);
+      }
+      await prompter.ask('Press Enter to return to the menu… ');
+      return;
+    }
+
+    if (!installed) {
+      // Enabled with the package gone — an uninstall, or a config copied
+      // from another machine. The block is exactly what an operator would
+      // want to clear, and reaching it used to require installing the
+      // package first in order to switch it off.
+      //
+      // A key that could never end up loaded is offered no install: the row
+      // comes from `Object.keys(state.plugins)`, so a typo, a stray
+      // character or a copied `pkg@1.2.3` arrives here as a package name.
+      //
+      // The bare-name rule, not the installable-specifier one: this key is
+      // what the loader hands `import.meta.resolve`, and Node does not
+      // resolve a version suffix — so `npm install -g @scope/foo@latest`
+      // succeeds and the plugin stays "not installed" forever. Switching it
+      // off stays available either way; a block keyed by something that can
+      // never load is exactly one to clear.
+      const installable = isPackageName(name);
+      const actions = enabled
+        ? [...(installable ? ['Install it with npm install -g'] : []), 'Switch it off in the config', 'Back']
+        : [...(installable ? ['Install it with npm install -g, then enable it'] : []), 'Back'];
+      if (!installable) {
+        writeLine(streams.stdout);
+        writeLine(streams.stdout, isInstallableSpecifier(name)
+          ? `${name} carries a version, and a plugins key is also the module specifier a daemon imports — Node does not resolve one, so installing it would leave the plugin absent. Key the block by the package name alone.`
+          : `${name} is not a package name npm can install — check the key in your plugins config.`);
+      }
+      const answer = await prompter.select(
+        enabled
+          ? `${name} is enabled in your config but not installed, so a daemon registers nothing for it.`
+          : `${name} is not installed. It contributes ${setup?.grants ?? 'its own tools'}.`,
+        actions,
+      );
+      if (answer.kind !== 'index' || answer.index === actions.length - 1) {
+        return;
+      }
+      if (enabled && answer.index === actions.length - 2) {
+        disablePlugin(name);
+        return;
+      }
+      writeLine(streams.stdout, `Running: npm install -g ${name}`);
+      const result = await (env.packageInstaller ?? defaultPackageInstaller)([name])
+        .catch((error: unknown) => ({
+          ok: false,
+          message: error instanceof Error ? error.message : String(error),
+        }));
+      if (!result.ok) {
+        writeLine(streams.stderr, `Could not install: ${result.message}`);
+        writeLine(streams.stderr, `Run \`npm install -g ${name}\` yourself, then re-run setup to enable it.`);
+        return;
+      }
+      writeLine(streams.stdout, `Installed ${name}.`);
+      // Enabling proceeds on npm's exit code, not a second resolve: a
+      // package written into the global prefix a moment ago need not be
+      // resolvable from THIS process, whose module resolution was fixed
+      // when it started. The same reasoning the optional-package step
+      // already uses for the dashboard.
+      await enablePlugin(name);
+      return;
+    }
+
+    if (!enabled) {
+      const answer = await prompter.select(
+        `${name} is installed but not enabled. It contributes ${setup?.grants ?? 'its own tools'}.`,
+        ['Enable it', 'Back'],
+      );
+      if (answer.kind !== 'index' || answer.index === 1) {
+        return;
+      }
+      await enablePlugin(name);
+      return;
+    }
+
+    const current = state.plugins?.[name] ?? {};
+    const actions = setup?.needs
+      ? [`Change ${setup.needs.key}`, 'Disable it', 'Back']
+      : ['Disable it', 'Back'];
+    const answer = await prompter.select(
+      `${name} is enabled.${setup?.needs && Array.isArray(current[setup.needs.key])
+        ? ` ${setup.needs.key}: ${(current[setup.needs.key] as string[]).join(', ')}`
+        : ''}`,
+      actions,
+    );
+    if (answer.kind !== 'index' || answer.index === actions.length - 1) {
+      return;
+    }
+    if (setup?.needs && answer.index === 0) {
+      await enablePlugin(name);
+      return;
+    }
+    disablePlugin(name);
+  };
+
+  /**
+   * Switched off, never deleted. The loader treats `enabled: false` and an
+   * absent key the same, but the operator does not: a block carries
+   * `agents` overrides and `toolRisks` that setup never asked about, and
+   * dropping them would be #161 again — a menu deleting config it does not
+   * own, one plugin at a time instead of all four blocks at once.
+   */
+  const disablePlugin = (name: string): void => {
+    state.plugins = {
+      ...(state.plugins ?? {}),
+      [name]: { ...(state.plugins?.[name] ?? {}), enabled: false },
+    };
+    writeLine(streams.stdout, packageInstalled(name, env)
+      ? `${name} is switched off. The package is still installed, and its settings are kept for when you turn it back on.`
+      : `${name} is switched off, so a daemon stops trying to load it. Its settings are kept for when you install it again.`);
+  };
+
+  const enablePlugin = async (name: string): Promise<void> => {
+    const setup = PLUGIN_SETUP[name];
+    const existing = state.plugins?.[name] ?? {};
+    const block: PluginConfigBlock = { ...existing, enabled: true };
+    // Whether the prompt below kept a per-agent value rather than writing a
+    // fleet-wide one. Said after the block is checked, not before: the
+    // alternative printed "keeping your per-agent roots" and then refused
+    // to enable, which is two answers to one question.
+    let keptPerAgent = false;
+
+    if (setup?.needs) {
+      const needsKey = setup.needs.key;
+      const prior = existing[needsKey];
+      const prefill = Array.isArray(prior) ? (prior as string[]).join(', ') : undefined;
+      const answer = (await prompter.ask(
+        setup.needs.question,
+        ...(prefill !== undefined ? [{ prefill }] : []),
+      )).trim();
+      const values = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
+      if (values.length === 0) {
+        // A per-agent block satisfies this on its own: the plugin resolves
+        // its settings per session, so `agents.<id>.roots` with nothing at
+        // the top level is a working config — and a narrower one than any
+        // fleet-wide answer this prompt could take. Demanding a global
+        // value here would push an operator to widen access to get past a
+        // menu.
+        //
+        // Deleted, not merely left unwritten: `block` is a copy of the
+        // existing one, so keeping the key would leave every unoverridden
+        // agent on the old fleet-wide roots while the line below says
+        // nothing is granted fleet-wide. Saying access narrowed while it
+        // did not is the worst way for this menu to be wrong.
+        //
+        // Only an interactive run reaches this with a key to delete: the
+        // prefill is editable on a TTY, while the piped prompter returns it
+        // for an empty line. So there is no test — `setupInput` forces the
+        // non-interactive path, where an empty answer means "keep" and this
+        // deletes a key that was never there.
+        delete block[needsKey];
+        // Asked of the block as it now stands, and only of agents the
+        // roster actually serves. An override left behind by a deleted
+        // agent grants nobody anything: every served agent would resolve
+        // an empty list and every call would fail, while this menu
+        // reported the plugin enabled — the same "configured and useless"
+        // state the prompt exists to prevent, reached by the branch that
+        // was supposed to allow the narrow config. An unreadable roster
+        // cannot answer, so it does not qualify anything either.
+        const { entries, loaded } = await channelRoster();
+        const coveredPerAgent = loaded
+          && entries.some((entry) => pluginSettingReaches(block, needsKey, entry.soul.agent.id));
+        if (!coveredPerAgent) {
+          // Otherwise not written at all rather than written empty: an
+          // enabled block with no roots anywhere is the exact "installed,
+          // enabled, and useless" state this menu exists to keep anyone
+          // from reaching by accident.
+          //
+          // "Left as it was" is the whole outcome, and what that means
+          // differs by where the operator came from. Reaching this by
+          // erasing an existing value — Change roots, prefill deleted —
+          // leaves the old value in the saved config, because the return
+          // is before `state.plugins` is written. Saying "it grants
+          // nothing without roots" there describes a block that still has
+          // roots, and an operator who meant to take access away would
+          // read it as confirmation. Setup names what it kept instead, and
+          // how to actually drop it, rather than dropping it on a guess:
+          // an empty answer is not an unambiguous "revoke", and this menu
+          // does not widen or narrow a boundary the operator did not.
+          const kept = existing[needsKey];
+          writeLine(streams.stdout, Array.isArray(kept) && kept.length > 0
+            ? `Nothing entered, so ${name} kept the ${needsKey} it already had (${kept.join(', ')}) — setup did not remove them. Edit plugins["${name}"].${needsKey} to change what is reachable.`
+            : `Nothing entered, so ${name} was left as it was — it grants nothing without ${needsKey}.`);
+          return;
+        }
+        keptPerAgent = true;
+      } else {
+        block[needsKey] = values;
+      }
+    }
+
+    // The block that would be *written*, not the one that was there. Asking
+    // before the prompt meant `Change roots` — the action offered precisely
+    // to repair a bad value — refused on the value it exists to replace,
+    // and an operator had no way through this menu to fix a setting this
+    // menu owns. Settings it does not own are still caught here: the
+    // replacement is folded in first, and whatever remains wrong is wrong
+    // in the block a daemon would be handed.
+    const problem = await pluginConfigProblem(name, block);
+    if (problem !== undefined) {
+      writeLine(streams.stdout);
+      // "was not enabled" is only true where the block was not already
+      // enabled. Reached from the install action on a config that already
+      // says `enabled: true`, this returns before touching `state`, so the
+      // old block survives and Save writes it — a daemon then tries the
+      // package it just installed and refuses it, while setup had said it
+      // was not enabled. Report what is actually there, and name the way
+      // out; switching it off is the operator's call, not this branch's,
+      // for the same reason the roots prompt does not revoke on a blank
+      // line.
+      writeLine(streams.stdout, existing.enabled === false || existing.enabled === undefined
+        ? `${name} was not enabled — a daemon would refuse these settings: ${problem}`
+        : `${name} is still enabled in your config, and a daemon would refuse these settings: ${problem}`);
+      writeLine(streams.stdout, existing.enabled === false || existing.enabled === undefined
+        ? 'Fix that in your config, then enable it here. `stratus plugins` reports the same check.'
+        : 'Fix that in your config, or switch the plugin off here so a daemon stops trying to load it. `stratus plugins` reports the same check.');
+      return;
+    }
+    if (keptPerAgent && setup?.needs) {
+      writeLine(streams.stdout, `Keeping the per-agent ${setup.needs.key} already configured for ${name}; nothing is granted fleet-wide.`);
+    }
+
+    state.plugins = { ...(state.plugins ?? {}), [name]: block };
+    const unchecked = uncheckedReason(name);
+    if (unchecked !== undefined) {
+      writeLine(streams.stdout, unchecked);
+    }
+    await printSoulGrantLine(name);
+  };
+
+  /**
+   * Who may answer a gated call while nobody is watching. The two halves
+   * are one decision: `remote` with nobody to ask behaves exactly like
+   * `headless` — the call parks and the timeout denies it — so the mode
+   * and the approvers are set on the same screen rather than in two places
+   * that can disagree.
+   */
+  /**
+   * The daemon's own verdict, not a second version of it. Every round of
+   * review on this row found the hand-written summary short a clause the
+   * engine applies — headless still runs already-authorized calls, an
+   * explicit `timeoutMs: 0` parks instead of denying, the control API can
+   * answer for an agent Slack cannot reach. The row now takes the first
+   * clause `stratus plugins` prints and the submenu carries the rest, so
+   * the two can differ in length and never in fact.
+   */
+  const approvalsSummary = async (): Promise<string[]> => {
+    const mode = state.approvals?.mode ?? 'headless';
+    const { entries, loaded } = await channelRoster();
+    // `headless` is a statement about the policy, not the roster, so it
+    // survives a roster that will not load. Everything else here depends on
+    // who is served: passing `undefined` would make `classifyApprovalReach`
+    // skip the intersection and read every stored token as askable, so the
+    // row would promise Slack asks for a fleet whose gateway refuses to
+    // start. Same rule as the grant line and the Channels menu — an
+    // unreadable roster is not evidence in either direction.
+    if (mode === 'remote' && !loaded) {
+      return ['remote — who can be asked is unknown until the roster loads; fix the error above, then `stratus plugins`'];
+    }
+    return unattendedReachParts(
+      mode,
+      state.approvals ?? {},
+      state.channels,
+      entries.map((entry) => entry.soul.agent.id),
+      apiApprovalsReachable(),
+      env,
+    );
+  };
+
+  /** Whether a parked call could be settled through `POST /api/v1/approvals`. */
+  const apiApprovalsReachable = (): boolean =>
+    packageInstalled('@stratusagent/control-api', env) && state.api?.enabled !== false;
+
+  const approvalReach = async (): Promise<ApprovalReach> => {
+    const { entries, loaded } = await channelRoster();
+    return classifyApprovalReach(
+      state.approvals ?? {},
+      state.channels,
+      loaded ? entries.map((entry) => entry.soul.agent.id) : undefined,
+      env,
+    );
+  };
+
+  /**
+   * Agents that can actually be asked: stored Slack tokens intersected with
+   * the roster. A token that outlived its agent is offered nowhere — the
+   * Slack adapter skips it (`no roster agent with id …`), so approvers
+   * named for it configure a route no call can take. `stratus plugins`
+   * learned this the same way; the Channels menu shows such tokens as
+   * orphans and is the one place they are reachable, to be cleared.
+   *
+   * A roster that failed to load is not evidence of an orphan, so the raw
+   * list stands in that case — the same posture the Channels menu takes,
+   * for the same reason: acting on "no agent has this id" when the roster
+   * could not say who its agents are destroys working configuration.
+   */
+  /**
+   * Agents whose approvers this screen may edit: stored tokens intersected
+   * with the roster, and deliberately *not* gated on the adapter being
+   * installed.
+   *
+   * Reachability and editability are different questions here, and only on
+   * this screen. `offerOptionalPackages()` runs inside `save()`, after the
+   * menu — so on a first install the operator connects Slack under
+   * Channels, opens Approvals, and the package that will be installed
+   * moments later is still absent. Gating the rows on it left the fresh
+   * install with nothing to configure and no way back into the menu,
+   * which is the one path this whole PR exists to make work.
+   *
+   * The *verdict* keeps the package gate, because that is a claim about
+   * what a daemon would do rather than about what may be written now.
+   */
+  const configurableSlackAgents = async (): Promise<string[]> => {
+    const stored = Object.keys(state.channels.slack ?? {});
+    const { entries, loaded } = await channelRoster();
+    if (!loaded) {
+      return stored;
+    }
+    return stored.filter((agentId) => entries.some((entry) => entry.soul.agent.id === agentId));
+  };
+
+  /**
+   * Trim a menu option to one physical terminal row.
+   *
+   * `selectInteractive` moves the cursor up by the number of options to
+   * redraw, so an option that wraps leaves the rewind short and every
+   * later redraw overwrites the wrong lines. `reserved` is what the
+   * caller's own prefix costs before the text starts.
+   *
+   * Only a TTY has a width to fit into, and piped output keeps the full
+   * text — which is where nothing is redrawn, and also why none of this is
+   * covered by a test: `prompter.isInteractive()` is false whenever
+   * `setupInput` is set, which is every one of them.
+   *
+   * Every option in every menu has this constraint. Fitted here are the
+   * ones this change lengthened or added; a long soul path in the Agent
+   * row can still wrap, and the real fix for that is teaching
+   * `selectInteractive` to count rendered rows.
+   */
+  const fitMenuRow = (text: string, reserved = 27): string => {
+    // `process.stdout` rather than the injected stream, which is typed to
+    // `write` alone — the same place `selectInteractive` reads `isTTY`
+    // from, and only consulted when it is actually driving a terminal.
+    const columns = prompter.isInteractive() ? process.stdout.columns : undefined;
+    if (typeof columns !== 'number' || columns <= 0) {
+      return text;
+    }
+    // The row's own prefix — `menuPrefixWidth`, plus whatever padding the
+    // caller adds — subtracted from the width, so what is left is what the
+    // text may occupy.
+    const budget = columns - reserved;
+    return text.length <= budget ? text : `${text.slice(0, Math.max(budget - 1, 0))}…`;
+  };
+
+  const chooseApprovals = async (): Promise<void> => {
+    while (true) {
+      const mode = state.approvals?.mode ?? 'headless';
+      const connected = await configurableSlackAgents();
+      // Two modes, a row per connected agent when remote, and Back.
+      const reserved = menuPrefixWidth(2 + (mode === 'remote' ? connected.length : 0) + 1);
+      // Static text, and still fitted: with `(current)` shown this row runs
+      // to 76 columns including the selection prefix, so it clears an
+      // 80-column terminal by four and wraps on anything narrower — and a
+      // wrapped row corrupts every redraw, because the rewind counts
+      // options rather than rendered rows. Being static is not being short.
+      const options = [
+        fitMenuRow(`Headless${mode === 'headless' ? ' (current)' : ''}          refuse gated calls when nobody is watching`, reserved),
+        fitMenuRow(`Ask in Slack${mode === 'remote' ? ' (current)' : ''}       park the turn and ask an approver`, reserved),
+      ];
+      if (mode === 'remote') {
+        for (const agentId of connected) {
+          // The *resolved* answer, through the rule the daemon uses: an
+          // agent with no override of its own inherits the top-level list,
+          // and reading the override alone would report "nobody" for an
+          // agent a global list already covers.
+          const resolved = resolveAgentApprovals(state.approvals, agentId);
+          const own = state.approvals?.agents?.[agentId]?.slackApprovers;
+          const approvers = resolved.slackApprovers ?? [];
+          const label = approvers.length === 0
+            ? '— nobody, so its calls are denied'
+            : own === undefined
+              ? `${approvers.join(', ')} (inherited)`
+              : approvers.join(', ');
+          // Fitted like the top-level row, and for the same reason: several
+          // approvers, or one long agent id, is enough to wrap — and the
+          // redraw rewinds by option count, not by rendered rows. Every
+          // option in every menu has this constraint; these are the ones
+          // this PR adds.
+          options.push(fitMenuRow(`  approvers for ${agentId}`.padEnd(26) + label
+            + (approvers.length > 0 && !resolved.slackChannel ? ' · no fallback channel' : ''), reserved));
+        }
+      }
+      options.push('Back');
+
+      // Said here because it is only true here: tokens are stored, the
+      // adapter is not installed yet, and Save is about to offer it. The
+      // rows are editable regardless — the alternative was a first install
+      // with nothing to configure.
+      const adapterPending = connected.length > 0 && !packageInstalled('@stratusagent/channel-slack', env);
+      // The whole verdict, never trimmed: a footnote is drawn once, outside
+      // the redraw loop, so wrapping costs nothing here — and this is the
+      // screen where the trimmed row's remainder belongs.
+      const verdict = (await approvalsSummary()).join('; ');
+      const footnote = adapterPending
+        ? `${verdict}. @stratusagent/channel-slack is not installed yet — Save & finish offers it, and these approvers apply once it is. ${serveCommand()} brings them online.`
+        : mode === 'remote' && connected.length === 0
+          // The advice comes *after* the verdict, never instead of it: with
+          // the control API up a parked call is already answerable, and
+          // replacing the verdict here told the operator to go connect
+          // Slack while the row above said the API had it. The screen that
+          // changes the mode must not answer differently from the row.
+          ? `${verdict}. No agent is connected to Slack, so connect one under Channels to be asked there.`
+          : verdict;
+      const choice = await prompter.select(
+        'Approvals — what happens to a gated call with nobody watching',
+        options,
+        { footnote },
+      );
+      if (choice.kind !== 'index' || choice.index === options.length - 1) {
+        return;
+      }
+      if (choice.index === 0) {
+        state.approvals = { ...(state.approvals ?? {}), mode: 'headless' };
+        continue;
+      }
+      if (choice.index === 1) {
+        state.approvals = { ...(state.approvals ?? {}), mode: 'remote' };
+        continue;
+      }
+      const agentId = connected[choice.index - 2];
+      if (!agentId) {
+        continue;
+      }
+      const resolved = resolveAgentApprovals(state.approvals, agentId);
+      const current = resolved.slackApprovers ?? [];
+      // Prefilled with the resolved list, and `ask` returns the prefill for
+      // an empty line — so Enter keeps what is on screen and can never
+      // revoke anything. That matters here more than elsewhere:
+      // `resolveAgentApprovals` reads `agent ?? global` and an empty array
+      // is not nullish, so a written `[]` is the config's way of *excluding*
+      // an agent from the global list, not of leaving it alone.
+      const answer = (await prompter.ask(
+        `Slack user ids who may approve for ${agentId} (comma-separated, e.g. U01ABCDEF; Enter to keep): `,
+        ...(current.length > 0 ? [{ prefill: current.join(', ') }] : []),
+      )).trim();
+      const approvers = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
+      const agents = { ...(state.approvals?.agents ?? {}) };
+      const entry = { ...(agents[agentId] ?? {}) };
+      const inheriting = state.approvals?.agents?.[agentId]?.slackApprovers === undefined;
+      const unchanged = approvers.length === current.length
+        && approvers.every((id, index) => id === current[index]);
+      if (approvers.length === 0) {
+        // An empty answer must never *widen*. With a top-level list in play
+        // this writes the explicit `[]` the config reserves for excluding
+        // an agent from it, because deleting the key would hand those
+        // approvers an agent that had been kept from them — either one the
+        // operator excluded on purpose, or one whose narrower list they
+        // just erased. `[]` and an absent key differ here in exactly the
+        // direction that matters, and the previous round fixed the other
+        // half of this: never write `[]` over a list nobody touched.
+        const globalApprovers = state.approvals?.slackApprovers ?? [];
+        const hadOwn = state.approvals?.agents?.[agentId]?.slackApprovers !== undefined;
+        if (globalApprovers.length > 0 || hadOwn) {
+          // `[]` outlives the list it excludes from. With no top-level
+          // approvers today the two look identical, but deleting the key
+          // means the agent silently joins whatever list is added tomorrow
+          // — so an exclusion already on disk is preserved, not tidied
+          // away because it happens to be inert right now.
+          entry.slackApprovers = [];
+          writeLine(streams.stdout, globalApprovers.length > 0
+            ? `${agentId} is excluded from the top-level approvers (${globalApprovers.join(', ')}), so nobody may approve for it and its gated calls are denied.`
+            : `${agentId} has no approvers, so its gated calls are denied — and it stays excluded if a top-level list is added later.`);
+        } else {
+          // Never had one and nothing to inherit: an absent key is what
+          // "unset" looks like, and writing `[]` would invent an exclusion
+          // the operator never asked for.
+          delete entry.slackApprovers;
+        }
+      } else if (inheriting && unchanged) {
+        // Keeping an inherited list must not freeze it: writing the same ids
+        // as this agent's own override would look identical today and stop
+        // tracking the top-level list the operator edits tomorrow.
+        writeLine(streams.stdout, `${agentId} still inherits the top-level approvers (${current.join(', ')}).`);
+      } else {
+        entry.slackApprovers = approvers;
+      }
+
+      if (entry.slackApprovers !== undefined || resolved.slackApprovers !== undefined) {
+        // The other half of a working route, and the half a fresh install
+        // has no way to guess it needs. A turn that arrived through Slack
+        // is answered in its own thread, but one from a schedule, a
+        // delegation or the control API reaches the adapter with no
+        // destination and is denied undeliverable — so approvers alone
+        // configure approvals for exactly the calls least likely to need
+        // them. `stratus plugins` reports this state; better not to create
+        // it here in the first place.
+        // "Enter to skip" is only true with nothing prefilled. `ask` returns
+        // the prefill for an empty line, so where a channel already resolves
+        // Enter *keeps* it — an operator told otherwise would believe they
+        // had removed a fallback that goes on receiving approval details.
+        // The same correction the approvers prompt above already carries.
+        //
+        // What clearing the line does, though, is decided by whether this
+        // agent *owns* the channel, not by whether one resolves: clearing
+        // an inherited one deletes a key that was never there and the
+        // global goes on resolving. Reading the offer off the resolved
+        // value promised a removal the branch below then refuses — the
+        // prompt and its own outcome disagreeing about the same keypress.
+        const ownChannel = state.approvals?.agents?.[agentId]?.slackChannel;
+        const globalChannel = state.approvals?.slackChannel;
+        const hasChannel = resolved.slackChannel !== undefined;
+        const channelOffer = ownChannel !== undefined
+          ? (globalChannel !== undefined
+            ? `(Enter to keep it; clear the line to fall back to the top-level ${globalChannel}): `
+            : '(Enter to keep it; clear the line to remove it): ')
+          : hasChannel
+            ? '(Enter to go on inheriting it; type another to give this agent its own): '
+            : '(e.g. C0123456, Enter to skip): ';
+        const channelAnswer = (await prompter.ask(
+          `Which Slack channel should ${agentId} ask in when the turn did not start in Slack? ${channelOffer}`,
+          ...(hasChannel ? [{ prefill: resolved.slackChannel as string }] : []),
+        )).trim();
+        // The same inheritance trap as the approvers above, one field over:
+        // the prompt is prefilled with the resolved value, so keeping an
+        // inherited channel would write it as this agent's own and stop it
+        // tracking the top-level one. Both fields need the guard; fixing
+        // only the one under review is how this arrived here twice.
+        const inheritsChannel = ownChannel === undefined;
+        if (channelAnswer.length > 0 && inheritsChannel && channelAnswer === resolved.slackChannel) {
+          writeLine(streams.stdout, `${agentId} still inherits the top-level fallback channel (${channelAnswer}).`);
+        } else if (channelAnswer.length > 0) {
+          entry.slackChannel = channelAnswer;
+        } else if (resolved.slackChannel !== undefined) {
+          // Blanked deliberately: an editable prefill makes this reachable.
+          // What it can mean depends on whether a top-level channel exists,
+          // and only one of the two is "no fallback" — clearing the
+          // override otherwise moves the agent onto the global channel,
+          // which is a different, possibly wider place to post approval
+          // details. Setup says which happened rather than assuming.
+          //
+          // Untested for the same reason the roots deletion above is: an
+          // empty answer where a prefill exists is a TTY-only path, since
+          // the piped prompter returns `line || prefill` and `setupInput`
+          // forces it.
+          delete entry.slackChannel;
+          writeLine(streams.stdout, globalChannel !== undefined
+            ? `${agentId} ${inheritsChannel ? 'still uses' : 'now uses'} the top-level fallback channel (${globalChannel})${inheritsChannel ? '' : ' instead of its own'}. Setup cannot turn the fallback off for one agent — remove approvals.slackChannel to drop it for everyone.`
+            : `${agentId} has no fallback channel now: only turns already in Slack can be asked.`);
+        } else {
+          writeLine(streams.stdout, `No fallback channel for ${agentId}: only turns already in Slack can be asked, and a scheduled or API-started call is denied undeliverable.`);
+        }
+      }
+
+      agents[agentId] = entry;
+      state.approvals = { ...(state.approvals ?? {}), mode: 'remote', agents };
+    }
+  };
+
   const chooseChannels = async (): Promise<void> => {
     while (true) {
       const { entries: roster, loaded: rosterLoaded } = await channelRoster();
@@ -4617,7 +6059,10 @@ export const runSetup = async (
     // it for me" starts a daemon at login the user asked not to have, which
     // is no more a successful setup than one that will not come up at all.
     let serviceStepFailed = false;
-    const config: Record<string, string> = { provider: state.provider };
+    // Typed as the file rather than as a bag of scalars: the carried blocks
+    // below are objects, and a `Record<string, string | boolean>` was what
+    // made dropping them the path of least resistance.
+    const config: CliConfigFile = { provider: state.provider };
     if (state.provider !== 'demo') {
       config.model = state.model ?? defaultModelFor(state.provider);
     }
@@ -4643,6 +6088,31 @@ export const runSetup = async (
       if (config.fallbackProvider === 'openai' && state.fallbackBaseUrl) {
         config.fallbackBaseUrl = state.fallbackBaseUrl;
       }
+    }
+    if (state.vision !== undefined) {
+      config.vision = state.vision;
+    }
+    if (state.promptCache !== undefined) {
+      config.promptCache = state.promptCache;
+    }
+    if (state.promptCacheTtl !== undefined) {
+      config.promptCacheTtl = state.promptCacheTtl;
+    }
+    // `plugins` and `approvals` have menus above; `api` and `principals`
+    // do not and are written back exactly as they were read. Both cases
+    // land here the same way, because the menus edit this state rather
+    // than the file — so there is nothing to merge, only to not lose.
+    if (state.plugins !== undefined) {
+      config.plugins = state.plugins;
+    }
+    if (state.approvals !== undefined) {
+      config.approvals = state.approvals;
+    }
+    if (state.api !== undefined) {
+      config.api = state.api;
+    }
+    if (state.principals !== undefined) {
+      config.principals = state.principals;
     }
 
     await saveConfigFile(configPath, config);
@@ -4806,18 +6276,35 @@ export const runSetup = async (
 
     while (true) {
       writeLine(streams.stdout);
+      // Awaited before the menu is drawn: the approvals summary reads the
+      // roster, to intersect stored Slack tokens with agents that exist.
+      // Every clause, not the first: a prefix of this sentence has been
+      // wrong twice — the mixed roster where Slack denies one agent and the
+      // control API answers for another reads as a flat denial without the
+      // clause that follows. So the row carries what `stratus plugins`
+      // prints, and where it cannot fit it is *visibly* cut rather than
+      // silently shortened: an ellipsis says there is more, which a chosen
+      // prefix never did. The Approvals screen has the whole thing.
+      //
+      // Cut at all only because `selectInteractive` rewinds the cursor by
+      // `options.length`, one physical row per option — a wrapped row
+      // corrupts every redraw after the first arrow key. Wrapping is not
+      // the cosmetic cost I took it for when I let this line grow.
+      const approvals = fitMenuRow((await approvalsSummary()).join('; '));
       const choice = await prompter.select('', [
         `Providers            ${providersSummary()}`,
         `Models               ${modelsSummary()}`,
         `Agent                ${agentSummary()}`,
+        `Plugins              ${fitMenuRow(pluginsSummary())}`,
         `Channels             ${channelsSummary()}`,
+        `Approvals            ${approvals}`,
         `Always on            ${serviceSummary()}`,
         'Test run             say hello with the current settings',
         'Save & finish',
       ]);
 
       // Backing out of the top level (Esc, or the input ending) saves.
-      if (choice.kind !== 'index' || choice.index === 6) {
+      if (choice.kind !== 'index' || choice.index === 8) {
         break;
       }
 
@@ -4828,10 +6315,14 @@ export const runSetup = async (
       } else if (choice.index === 2) {
         await chooseAgent();
       } else if (choice.index === 3) {
-        await chooseChannels();
+        await choosePlugins();
       } else if (choice.index === 4) {
-        await chooseService();
+        await chooseChannels();
       } else if (choice.index === 5) {
+        await chooseApprovals();
+      } else if (choice.index === 6) {
+        await chooseService();
+      } else if (choice.index === 7) {
         await testRun();
       }
     }
@@ -5569,15 +7060,29 @@ const describePrincipals = (principals: PrincipalsConfig, agentIds: string[]): s
     : `principals set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose Slack senders are all unknown`;
 };
 
+/**
+ * Which of these agents the Slack adapter would actually ask about, and
+ * which it would decline for. Separated from the sentence below because
+ * two callers need the *answer* and only one needs it as prose: a summary
+ * that says a call "asks in Slack" must not say it about an agent the
+ * adapter denies on arrival.
+ */
+const classifyApprovers = (
+  approvals: ApprovalsConfig,
+  agentIds: string[],
+): { covered: string[]; uncovered: string[] } => {
+  const covered = agentIds.filter((agentId) => (resolveAgentApprovals(approvals, agentId).slackApprovers ?? []).length > 0);
+  return { covered, uncovered: agentIds.filter((agentId) => !covered.includes(agentId)) };
+};
+
 const describeApprovers = (approvals: ApprovalsConfig, agentIds: string[]): string => {
   if (agentIds.length === 0) {
     return 'but no channel is running to ask through, so gated calls will wait out the approval timeout and then be denied';
   }
-  const covered = agentIds.filter((agentId) => (resolveAgentApprovals(approvals, agentId).slackApprovers ?? []).length > 0);
+  const { covered, uncovered } = classifyApprovers(approvals, agentIds);
   if (covered.length === 0) {
     return 'but no approvers are configured, so every gated call is denied on arrival';
   }
-  const uncovered = agentIds.filter((agentId) => !covered.includes(agentId));
   return uncovered.length === 0
     ? `approvers set for ${covered.join(', ')}`
     : `approvers set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose calls are denied on arrival`;
@@ -5922,9 +7427,10 @@ const runUpdate = async (
  * shorthand is the form skills.sh and its CLI print, so a skill published
  * there installs by the name its listing shows.
  */
-const resolveSkillSource = async (
+const resolveSource = async (
   source: string,
   env: CliEnvironment,
+  what: 'skill' | 'template',
 ): Promise<{ kind: 'local'; directory: string } | { kind: 'git'; url: string }> => {
   const localPath = path.resolve(readWorkingDirectory(env), source);
   try {
@@ -5945,7 +7451,7 @@ const resolveSkillSource = async (
     return { kind: 'git', url: source };
   }
   throw new Error(
-    `Cannot read ${JSON.stringify(source)} as a skill source. Pass a GitHub owner/repo, a git URL, or a local path.`,
+    `Cannot read ${JSON.stringify(source)} as a ${what} source. Pass a GitHub owner/repo, a git URL, or a local path.`,
   );
 };
 
@@ -5970,8 +7476,8 @@ const redactedSourceUrl = (url: string): string => {
   }
 };
 
-/** Shallow-clone a skills source. Git owns every transport we would otherwise re-implement. */
-const cloneSkillSource = async (url: string, destination: string): Promise<void> => {
+/** Shallow-clone a source repository. Git owns every transport we would otherwise re-implement. */
+const cloneSource = async (url: string, destination: string): Promise<void> => {
   const display = redactedSourceUrl(url);
   await new Promise<void>((resolve, reject) => {
     const child = spawn('git', ['clone', '--depth', '1', '--quiet', url, destination], {
@@ -5996,6 +7502,683 @@ const cloneSkillSource = async (url: string, destination: string): Promise<void>
   });
 };
 
+// ---------------------------------------------------------------------------
+// Templates: a folder of files, copied into ~/.stratus
+// ---------------------------------------------------------------------------
+
+/**
+ * What a template directory holds. Every entry is a file somebody could
+ * have written by hand into `~/.stratus`, which is the whole design:
+ * installing one is copying, and reviewing one is reading a folder.
+ *
+ *   template.json     name and description — the only required file
+ *   config.json       merged into ~/.stratus/config.json
+ *   agents/<id>.md    soul files, copied to ~/.stratus/agents/
+ *   skills/<id>/      skill directories, installed exactly as `skill add` does
+ *
+ * There is deliberately no list of packages to install. The keys of
+ * `config.json`'s `plugins` block already name them, and a second list
+ * would be a second answer that drifts from the first.
+ */
+const TEMPLATE_MANIFEST_FILENAME = 'template.json';
+const TEMPLATE_CONFIG_FILENAME = 'config.json';
+const TEMPLATE_AGENTS_DIRNAME = 'agents';
+const TEMPLATE_SKILLS_DIRNAME = 'skills';
+
+/**
+ * A package specifier this command will hand to `npm install -g`.
+ *
+ * `defaultPackageInstaller` spawns npm through a shell on Windows, and its
+ * comment says every package name reaching that shell is a constant in
+ * this file. A template makes that false — these names come out of a
+ * folder somebody downloaded — so anything that is not a plain npm package
+ * name is refused before it can be re-parsed as a command. No version
+ * suffix either: a template names packages, and the installed version is
+ * reported rather than pinned.
+ */
+const NPM_PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+
+interface TemplateAgentPlan {
+  /** The file inside `agents/`, and the name it installs under. */
+  file: string;
+  /** The reviewed bytes, so what installs is what was shown. */
+  contents: string;
+  /**
+   * The id the soul actually claims, which need not match the filename: an
+   * explicit `id:` wins, and a bare `name:` derives one. Ids are what key
+   * sessions, memory, and credentials, so they are what a collision is
+   * about.
+   */
+  id: string;
+  name: string;
+  /**
+   * The soul's allowlist, `undefined` when it has no `tools:` line — which
+   * means **every registered tool**, because `executeToolCall` skips the
+   * allowlist check entirely for an undefined list. Kept undefined rather
+   * than normalised to `[]` so the review can say so: an empty list and a
+   * missing one are opposites, and reporting the wider one as "no tools"
+   * is the review lying in the one direction that matters.
+   */
+  tools: string[] | undefined;
+  /**
+   * The soul's `credentials:` list, the other capability gate. Undefined is
+   * *none* here, the opposite of `tools`: `assertCredentialAllowed` refuses
+   * a name the list does not carry, so a soul with no list reaches no
+   * stored secret at all.
+   */
+  credentials: string[] | undefined;
+  /** Already installed under this filename; `--force` replaces it. */
+  taken: boolean;
+  /**
+   * Why this soul cannot be installed at all, if it cannot. An id claimed
+   * by a *different* file — another template soul, or a roster soul under
+   * another name — is fatal rather than skippable: `loadRosterSouls`
+   * refuses a duplicate id, so installing one takes down the whole roster
+   * until somebody finds the file. `--force` cannot help, because the
+   * clash is not with the file this would overwrite.
+   */
+  blocked?: string;
+}
+
+interface TemplatePlan {
+  name: string;
+  description: string;
+  directory: string;
+  agents: TemplateAgentPlan[];
+  skills: string[];
+  /** Plugin packages the config block names, in the order it names them. */
+  packages: string[];
+  /** Packages of those that this install would have to fetch. */
+  missing: string[];
+  config: JsonObject;
+  /** Every value the fragment sets, so the review can show them. */
+  configChanges: TemplateConfigChange[];
+}
+
+interface TemplateConfigChange {
+  /** A dotted path into the config, e.g. `plugins.@stratusagent/tool-fs.roots`. */
+  path: string;
+  value: JsonValue;
+  /** What that path says today, when the fragment replaces something. */
+  was?: JsonValue;
+}
+
+const isPlainObject = (value: unknown): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Merge a template's `config.json` onto the config that exists.
+ *
+ * Plain objects merge key by key; scalars and arrays replace. That rule is
+ * what keeps `plugins` additive — a template naming one package must not
+ * take away the packages already enabled, which is exactly the data loss
+ * `stratus setup` used to cause.
+ */
+const mergeTemplateConfig = (base: JsonValue | undefined, incoming: JsonValue): JsonValue => {
+  if (!isPlainObject(base) || !isPlainObject(incoming)) {
+    return incoming;
+  }
+  const merged: JsonObject = { ...base };
+  for (const [key, value] of Object.entries(incoming)) {
+    merged[key] = mergeTemplateConfig(base[key], value as JsonValue);
+  }
+  return merged;
+};
+
+/**
+ * The document a template's config would produce, refused if the loader
+ * would refuse it.
+ *
+ * `validateConfigFile` exists for this — "anything that *writes* a config
+ * has to answer the same question the loader answers", says its own doc
+ * comment — and a template's `config.json` is only checked for being an
+ * object, so `plugins: []` or `api: { port: "bad" }` would otherwise be
+ * written and make the whole global config unreadable on the next run.
+ */
+/**
+ * Fragment leaves the validated document does not carry, by dotted path.
+ *
+ * `validateConfigFile` normalizes: it builds a fresh document out of the
+ * fields it recognizes, so a top-level key of the wrong type is dropped
+ * rather than refused. `model: 123` over an existing `model: "sonnet"`
+ * therefore deletes the model, while the review says it sets it to 123 and
+ * the command reports success. Saving only what survives is right; saving
+ * it without saying what did not is the bug.
+ */
+const leavesNotApplied = (
+  fragment: JsonValue,
+  validated: JsonValue | undefined,
+  prefix: readonly string[] = [],
+): string[] => {
+  if (!isPlainObject(fragment)) {
+    return JSON.stringify(validated) === JSON.stringify(fragment) ? [] : [prefix.join('.')];
+  }
+  // An empty object asks for a block, not for emptiness: the merge leaves
+  // whatever was already there, so anything object-shaped satisfies it.
+  if (!isPlainObject(validated)) {
+    return [prefix.join('.')];
+  }
+  return Object.entries(fragment)
+    .flatMap(([key, child]) => leavesNotApplied(child as JsonValue, validated[key], [...prefix, key]));
+};
+
+const mergedTemplateConfig = (
+  current: CliConfigFile,
+  fragment: JsonObject,
+  configPath: string,
+): CliConfigFile => {
+  const merged = mergeTemplateConfig(current as JsonValue, fragment);
+  let validated: CliConfigFile;
+  try {
+    validated = validateConfigFile(merged, configPath);
+  } catch (error) {
+    throw new Error(
+      `This template's ${TEMPLATE_CONFIG_FILENAME} would make ${configPath} unreadable: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const dropped = leavesNotApplied(fragment, validated as JsonValue);
+  if (dropped.length > 0) {
+    throw new Error(
+      `This template's ${TEMPLATE_CONFIG_FILENAME} sets ${dropped.map(fromTemplate).join(', ')}, `
+      + `which ${configPath} cannot hold — the wrong type, or not a setting at all. `
+      + 'Installing it would drop those keys while the review said it set them, '
+      + 'and a key you already had set would go with them. Fix the template.',
+    );
+  }
+  return validated;
+};
+
+/**
+ * Every value a config fragment actually sets, as a dotted path.
+ *
+ * The review used to print the top-level keys — `config plugins` — which
+ * says nothing about what changed. A fragment's capability lives in its
+ * leaves: `plugins.@stratusagent/tool-fs.roots` is the difference between
+ * reading `~/notes` and reading `/`, and a review that hides it is a
+ * review that can be used to smuggle one past an operator.
+ *
+ * An empty object is a leaf in its own right: `{ plugins: { pkg: {} } }`
+ * adds a block, and printing nothing for it would lose that too.
+ */
+const configLeaves = (
+  value: JsonValue,
+  current: JsonValue | undefined,
+  prefix: readonly string[] = [],
+): TemplateConfigChange[] => {
+  if (!isPlainObject(value) || Object.keys(value).length === 0) {
+    const replaced = current !== undefined && JSON.stringify(current) !== JSON.stringify(value);
+    return [{ path: prefix.join('.'), value, ...(replaced ? { was: current } : {}) }];
+  }
+  // The current value is walked alongside rather than looked up by the
+  // dotted path afterwards: npm names may contain dots, so `plugins` plus
+  // a key like `a.b` renders a path that does not parse back to the key it
+  // came from — and a "replaces" note naming the wrong value would be
+  // worse than none.
+  return Object.entries(value).flatMap(([key, child]) => configLeaves(
+    child as JsonValue,
+    isPlainObject(current) ? current[key] : undefined,
+    [...prefix, key],
+  ));
+};
+
+/**
+ * Whether the soul already at `destination` is itself the holder of `id`.
+ * A match is the ordinary `--force` replacement rather than a collision with
+ * somebody else's agent; an unreadable or absent file is not holding it.
+ */
+const destinationHoldsId = async (destination: string, id: string): Promise<boolean> => {
+  try {
+    return (await loadSoulFile(destination)).agent.id === id;
+  } catch {
+    return false;
+  }
+};
+
+const readTemplateJson = async (file: string): Promise<JsonObject | undefined> => {
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`${file} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!isPlainObject(parsed)) {
+    throw new Error(`${file} must contain a JSON object.`);
+  }
+  return parsed;
+};
+
+/** Read a template directory and work out what installing it would do. */
+const planTemplateInstall = async (
+  env: CliEnvironment,
+  directory: string,
+  warn: (line: string) => void,
+): Promise<TemplatePlan> => {
+  const manifest = await readTemplateJson(path.join(directory, TEMPLATE_MANIFEST_FILENAME));
+  if (!manifest) {
+    throw new Error(
+      `${directory} has no ${TEMPLATE_MANIFEST_FILENAME}, so it is not a template. `
+      + 'A template is a directory with template.json in it; see docs/guides/templates.md.',
+    );
+  }
+  const name = typeof manifest.name === 'string' ? manifest.name.trim() : '';
+  const description = typeof manifest.description === 'string' ? manifest.description.trim() : '';
+  if (!name || !description) {
+    throw new Error(`${path.join(directory, TEMPLATE_MANIFEST_FILENAME)} needs a "name" and a "description".`);
+  }
+
+  const config = await readTemplateJson(path.join(directory, TEMPLATE_CONFIG_FILENAME)) ?? {};
+  const pluginsBlock = config.plugins;
+  const packages = isPlainObject(pluginsBlock) ? Object.keys(pluginsBlock) : [];
+  for (const specifier of packages) {
+    if (!NPM_PACKAGE_NAME.test(specifier)) {
+      throw new Error(
+        `${JSON.stringify(specifier)} is not an npm package name, so this template will not be installed. `
+        + 'A plugins key names the package to install and enable, nothing else.',
+      );
+    }
+  }
+  // What this install would have to fetch. Resolved the way the daemon
+  // resolves a plugin, so "already installed" means the same thing here as
+  // it does when the plugin is loaded.
+  const missing = packages.filter((specifier) => {
+    try {
+      import.meta.resolve(specifier);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+
+  const agents: TemplateAgentPlan[] = [];
+  const agentsDir = path.join(directory, TEMPLATE_AGENTS_DIRNAME);
+  let agentFiles: string[] = [];
+  try {
+    agentFiles = (await readdir(agentsDir, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  // The ids already spoken for, by path, so a soul whose id matches the very
+  // file it would replace is the ordinary `--force` case rather than a
+  // collision. A roster that is already broken is warned about and skipped:
+  // this command is not the place to refuse over somebody else's duplicate.
+  // `declaredAgentIds`, not a roster read of this command's own: it is the
+  // set an id is actually claimed against — the roster, the configured
+  // default soul (which can live outside `agents/` and still be served),
+  // and the built-in `stratus`. Reading the roster alone said "available"
+  // for ids the daemon would then hand to somebody else.
+  // Pinned to the global config, because that is the one this command
+  // merges into. Unpinned, `declaredAgentIds` resolves the configured soul
+  // by the working directory's precedence, so a checkout carrying a
+  // `stratus.config.json` hides the global config's own `soul:` — and an id
+  // that soul holds is then claimed against the wrong set, installing a
+  // roster entry the daemon shadows.
+  const declared = agentFiles.length > 0
+    ? await declaredAgentIds(env, globalConfigPath(env))
+    : { ids: new Set<string>(), unread: [] as string[] };
+  if (declared.unread.length > 0) {
+    warn(`could not read ${declared.unread.join(' or ')}, so ids were not checked against what it declares.`);
+  }
+
+  const claimedHere = new Map<string, string>();
+  for (const file of agentFiles) {
+    // Parsed rather than copied blind: the review below can only name the
+    // agent and its tools if the soul actually reads, and a template
+    // shipping a broken one should fail here rather than at the next run.
+    const soulPath = path.join(agentsDir, file);
+    const soul = await loadSoulFile(soulPath);
+    // The bytes the review is about, kept rather than re-read at copy time:
+    // a local template is a directory something else can edit, and the gap
+    // between the prompt and the copy is however long a human takes. What
+    // lands has to be what was shown.
+    const contents = await readFile(soulPath, 'utf8');
+    const destination = path.join(agentsDirPath(env), file);
+    let taken = false;
+    try {
+      await stat(destination);
+      taken = true;
+    } catch {
+      // Not installed under this name.
+    }
+    const replacesOwnId = taken && await destinationHoldsId(destination, soul.agent.id);
+    const alsoHere = claimedHere.get(soul.agent.id);
+    const blocked = alsoHere !== undefined
+      ? `${alsoHere} in this template already claims the id ${soul.agent.id}`
+      : !replacesOwnId && declared.ids.has(soul.agent.id)
+        ? `something already claims the id ${soul.agent.id}`
+        : undefined;
+    claimedHere.set(soul.agent.id, file);
+    agents.push({
+      file,
+      contents,
+      id: soul.agent.id,
+      name: soul.agent.name,
+      tools: soul.agent.tools ? [...soul.agent.tools] : undefined,
+      credentials: soul.agent.credentials ? [...soul.agent.credentials] : undefined,
+      taken,
+      ...(blocked !== undefined ? { blocked } : {}),
+    });
+  }
+
+  // Discovered by the same call that will install them. A directory listing
+  // is a different rule: `discoverSkillsInDirectory` also finds a root
+  // `SKILL.md` and the nested `.claude/skills/` layout, so a listing here
+  // would omit skills the installer then adds — the review under-reporting
+  // what lands, which is the one thing it must not do.
+  const skills = (await discoverSkillsInDirectory(path.join(directory, TEMPLATE_SKILLS_DIRNAME)))
+    .candidates
+    .map((candidate) => candidate.id)
+    .sort((left, right) => left.localeCompare(right));
+
+  // Validated against the config as it stands, so a fragment the loader
+  // would reject refuses the whole command before a single file is copied.
+  // Checked again under the write below, in case the file moved underneath.
+  const configChanges: TemplateConfigChange[] = [];
+  if (Object.keys(config).length > 0) {
+    let current: CliConfigFile = {};
+    try {
+      current = await loadConfigFile(globalConfigPath(env));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
+    mergedTemplateConfig(current, config, globalConfigPath(env));
+    configChanges.push(...configLeaves(config, current as JsonValue));
+  }
+
+  return { name, description, directory, agents, skills, packages, missing, config, configChanges };
+};
+
+/**
+ * Text a template supplied, on its way to a terminal.
+ *
+ * Every string in the review comes out of a folder somebody downloaded —
+ * the manifest, agent and tool names, config keys, filenames. A key ending
+ * in `\u001b[2J` erases the review directly above the prompt, and the
+ * operator then approves a display the template wrote. `JSON.stringify`
+ * covers a value's C0 range and nothing else, so it is not the guard
+ * either. This is the rule `stratus memory list` already applies to
+ * untrusted text, for the same reason.
+ */
+const fromTemplate = (text: string): string => escapeControlCharacters(text);
+
+/** What the operator says yes to: every file this would add, and every package. */
+const writeTemplatePlan = (streams: CliStreams, plan: TemplatePlan, env: CliEnvironment): void => {
+  writeLine(streams.stdout, `${fromTemplate(plan.name)} — ${fromTemplate(plan.description)}`);
+  writeLine(streams.stdout);
+  for (const agent of plan.agents) {
+    // An absent `tools:` is not "none", it is "all" — see TemplateAgentPlan.
+    const tools = agent.tools === undefined
+      ? 'EVERY tool, because the soul has no tools: list'
+      : agent.tools.length > 0 ? fromTemplate(agent.tools.join(', ')) : 'no tools';
+    writeLine(streams.stdout, `  agent    ${fromTemplate(agent.name)} (${fromTemplate(agent.id)}) — ${tools}`);
+    // The other gate, and the one nobody expects a folder of markdown to
+    // move: a name here reaches the stored secret of that name the moment
+    // the soul lands. Printed on its own line rather than appended to the
+    // tools, because it is a different kind of grant.
+    if (agent.credentials !== undefined && agent.credentials.length > 0) {
+      writeLine(streams.stdout, `           may read your stored credentials: ${fromTemplate(agent.credentials.join(', '))}`);
+    }
+    if (agent.blocked !== undefined) {
+      writeLine(streams.stdout, `           cannot install ${fromTemplate(agent.file)}: ${fromTemplate(agent.blocked)}.`);
+    } else if (agent.taken) {
+      writeLine(streams.stdout, `           ${fromTemplate(agent.file)} is already in your roster; --force replaces it.`);
+    }
+  }
+  for (const skill of plan.skills) {
+    writeLine(streams.stdout, `  skill    ${fromTemplate(skill)}`);
+  }
+  for (const specifier of plan.packages) {
+    const note = plan.missing.includes(specifier) ? 'npm install -g' : 'already installed';
+    writeLine(streams.stdout, `  plugin   ${fromTemplate(specifier)} (${note})`);
+  }
+  if (plan.configChanges.length > 0) {
+    writeLine(streams.stdout, `  config   ${globalConfigPath(env)}`);
+    for (const change of plan.configChanges) {
+      const replaces = change.was !== undefined ? `  (replaces ${fromTemplate(JSON.stringify(change.was))})` : '';
+      writeLine(streams.stdout, `           ${fromTemplate(change.path)}: ${fromTemplate(JSON.stringify(change.value))}${replaces}`);
+    }
+  }
+  writeLine(streams.stdout);
+};
+
+/** A y/N on stderr, so stdout stays exactly what `--yes` would have printed. */
+const confirmTemplateInstall = async (streams: CliStreams, env: CliEnvironment): Promise<boolean> => {
+  const input = env.templateInput ?? process.stdin;
+  const readline = createInterface({ input, terminal: false });
+  streams.stderr.write('Install this? [y/N] ');
+  try {
+    const answer = await new Promise<string>((resolve) => {
+      readline.once('line', resolve);
+      readline.once('close', () => resolve(''));
+    });
+    writeLine(streams.stderr);
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    readline.close();
+  }
+};
+
+export const runTemplateAdd = async (
+  command: ParsedTemplateAddCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const resolved = await resolveSource(command.source, env, 'template');
+  // Everything is read from a directory nothing else can write, so what the
+  // review described is what installs. A clone is already private; a local
+  // path is not — it is a working copy somebody may be editing, and the gap
+  // between printing the review and copying is however long the operator
+  // takes to answer plus however long `npm install -g` runs.
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-add-'));
+  const cleanup = (): Promise<void> => rm(scratch, { recursive: true, force: true });
+  const directory = scratch;
+  try {
+    if (resolved.kind === 'local') {
+      // verbatimSymlinks for the reason `installSkillsFromDirectory` uses it
+      // on its own staging copy: the default rewrites a relative link to an
+      // absolute path into the source tree, and `findEscapingSymlink` then
+      // reads a skill's own intra-skill link as reaching outside itself and
+      // skips the skill. Installing the same folder through `skill add`
+      // accepts it, so the snapshot must not change the answer.
+      await cp(resolved.directory, scratch, { recursive: true, verbatimSymlinks: true });
+    } else {
+      writeLine(streams.stdout, `Fetching ${redactedSourceUrl(resolved.url)} …`);
+      await cloneSource(resolved.url, scratch);
+    }
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+
+  try {
+    const plan = await planTemplateInstall(env, directory, (line) => writeLine(streams.stderr, `Warning: ${fromTemplate(line)}`));
+    writeTemplatePlan(streams, plan, env);
+
+    if (!command.yes && !await confirmTemplateInstall(streams, env)) {
+      writeLine(streams.stderr, 'Nothing was installed.');
+      return 1;
+    }
+
+    // Packages first, config last. A package installed with nothing
+    // enabling it is inert; a config enabling a package that is not
+    // installed makes the daemon warn and skip it on every start.
+    if (plan.missing.length > 0) {
+      const installer = env.packageInstaller ?? defaultPackageInstaller;
+      const result = await installer(plan.missing);
+      if (!result.ok) {
+        writeLine(streams.stderr, `Could not install ${plan.missing.join(' ')}: ${result.message}`);
+        writeLine(streams.stderr, 'Nothing was installed.');
+        return 1;
+      }
+    }
+
+    await mkdir(agentsDirPath(env), { recursive: true });
+    // Re-read the claimed ids rather than trusting the plan's snapshot. The
+    // exclusive write below only catches a collision on the same *path*, and
+    // an id is claimed by content: another `template add`, an `agent new`, or
+    // a hand-edited soul can take one under a different filename while the
+    // review sits at its prompt. Two files with one id is what
+    // `loadRosterSouls` refuses, and it refuses the whole roster. This
+    // narrows the window rather than closing it — the same gap between the
+    // read and the write that `stratus agent new` has.
+    const claimedNow = plan.agents.length > 0
+      ? await declaredAgentIds(env, globalConfigPath(env))
+      : { ids: new Set<string>() };
+    const installedAgents: string[] = [];
+    const enabledPackages: Array<{ specifier: string; on: boolean }> = [];
+    const refusedAgents: string[] = [];
+    const blockedAgents: string[] = [];
+    for (const agent of plan.agents) {
+      const destination = path.join(agentsDirPath(env), agent.file);
+      // Never, with or without --force: two files claiming one id is what
+      // `loadRosterSouls` refuses, and it refuses the whole roster.
+      if (agent.blocked !== undefined) {
+        blockedAgents.push(`${agent.file} — ${agent.blocked}`);
+        continue;
+      }
+      if (claimedNow.ids.has(agent.id) && !await destinationHoldsId(destination, agent.id)) {
+        blockedAgents.push(`${agent.file} — something already claims the id ${agent.id}`);
+        continue;
+      }
+      if (agent.taken && !command.force) {
+        refusedAgents.push(agent.file);
+        continue;
+      }
+      try {
+        // `--force` removes the entry first rather than writing over it: a
+        // roster entry can be a symlink, and writing through one truncates
+        // whatever it points at — a file outside the agents directory that
+        // this command was never asked to touch. `unlink` removes the link
+        // itself, so a dangling one is replaced too.
+        if (command.force) {
+          try {
+            await unlink(destination);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+              throw error;
+            }
+          }
+        }
+        // Always exclusive, both paths: the destination was checked while
+        // planning, and another `template add`, a setup flow, or an editor
+        // can create it in the meantime. Without the flag the documented
+        // "refused without --force" quietly becomes an overwrite of
+        // somebody's newer file, and a forced write lands on a file created
+        // after the unlink.
+        await writeFile(destination, agent.contents, { flag: 'wx' });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw error;
+        }
+        refusedAgents.push(agent.file);
+        continue;
+      }
+      installedAgents.push(`${fromTemplate(agent.name)} (${fromTemplate(agent.id)})`);
+    }
+
+    // The same installer `skill add` uses, so a skill a template carries
+    // and a skill installed by hand land identically — including the
+    // refuse-rather-than-overwrite rule.
+    const skillResult = plan.skills.length > 0
+      ? await installSkillsFromDirectory(env, path.join(directory, TEMPLATE_SKILLS_DIRNAME), {
+        ...(command.force ? { force: true } : {}),
+      })
+      : { installed: [], skipped: [], warnings: [], alreadyInstalled: [] };
+
+    if (Object.keys(plan.config).length > 0) {
+      const configPath = globalConfigPath(env);
+      let current: CliConfigFile = {};
+      try {
+        current = await loadConfigFile(configPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+      }
+      const merged = mergedTemplateConfig(current, plan.config, configPath);
+      await saveConfigFile(configPath, merged);
+      // What the merged block says, not what the template asked for. A
+      // fragment carrying `enabled: false`, or one that says nothing about
+      // `enabled` over a block already disabled, leaves the plugin off —
+      // and "enabled X" would then be the command reporting a capability
+      // the next restart will not provide.
+      for (const specifier of plan.packages) {
+        const block = merged.plugins?.[specifier];
+        enabledPackages.push({ specifier, on: block?.enabled !== false });
+      }
+    }
+
+    for (const agent of installedAgents) {
+      writeLine(streams.stdout, `installed ${agent}`);
+    }
+    for (const skill of skillResult.installed) {
+      writeLine(streams.stdout, `installed skill ${fromTemplate(skill.id)}`);
+    }
+    const enabled = enabledPackages.filter((entry) => entry.on).map((entry) => entry.specifier);
+    const stillOff = enabledPackages.filter((entry) => !entry.on).map((entry) => entry.specifier);
+    if (enabled.length > 0) {
+      writeLine(streams.stdout, `enabled ${fromTemplate(enabled.join(', '))} in ${globalConfigPath(env)}`);
+    }
+    for (const specifier of stillOff) {
+      writeLine(streams.stdout, `configured ${fromTemplate(specifier)} in ${globalConfigPath(env)}, still disabled`);
+    }
+
+    // Warnings rather than failures, on stderr, for the reason `skill add`
+    // puts its own there: the rest of the template installed, and stdout is
+    // the record of what landed. Only a template that added nothing at all
+    // is an error.
+    for (const file of refusedAgents) {
+      writeLine(streams.stderr, command.force
+        ? `Warning: skipped ${fromTemplate(file)} — something created it while this was installing. Run the same command again to replace it.`
+        : `Warning: skipped ${fromTemplate(file)} — an agent of that name is already in your roster (--force replaces it).`);
+    }
+    for (const blocked of blockedAgents) {
+      writeLine(streams.stderr, `Warning: skipped ${fromTemplate(blocked)}. Ids key sessions, memory, and credentials, so one of them has to change.`);
+    }
+    for (const skipped of skillResult.skipped) {
+      writeLine(streams.stderr, `Warning: skipped skill ${fromTemplate(skipped.id)}: ${fromTemplate(skipped.reason)}`);
+    }
+    // What installed *with* a caveat — a field another host owns, a bundled
+    // scripts/ — said the same way `skill add` says it. The operator
+    // deciding whether to enable a skill is the one who needs to hear it,
+    // and a template installs skills without their asking for each.
+    for (const warning of skillResult.warnings) {
+      writeLine(streams.stderr, `Warning: ${fromTemplate(warning.id)}: ${fromTemplate(warning.message)}`);
+    }
+    if (installedAgents.length === 0 && skillResult.installed.length === 0 && Object.keys(plan.config).length === 0) {
+      writeLine(streams.stderr, 'Error: nothing was installed.');
+      return 1;
+    }
+
+    // A running daemon holds its roster and its plugins in memory: souls are
+    // re-read only for agents it already has, and a plugin is loaded at
+    // start. So anything that landed needs the announced restart before it
+    // is served — not only a plugin change.
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, 'Tell a running daemon about it:');
+    writeLine(streams.stdout, '  stratus restart          # picks up new agents, skills, and plugins');
+    return 0;
+  } finally {
+    await cleanup();
+  }
+};
+
 /**
  * The souls skill enablement is judged against: the agents directory plus
  * the configured default soul (config `soul:` / STRATUS_SOUL), which may
@@ -6006,11 +8189,37 @@ const cloneSkillSource = async (url: string, destination: string): Promise<void>
 const rosterSoulsWithConfigured = async (
   env: CliEnvironment,
   warn: (line: string) => void,
+  options: {
+    /**
+     * The config whose `soul` key names the configured agent. A caller
+     * reading everything else from `--config` and this from the default
+     * file would answer for a roster the daemon it describes does not
+     * serve.
+     */
+    configPath?: string;
+    /**
+     * Seed the reserved built-in agent, the way `loadRoster` does. It has
+     * no `tools:` key, so it is granted every registered tool — and on a
+     * fresh install it is the only agent there is, which made "granted to
+     * nobody" exactly backwards for the most common configuration of all.
+     * Off by default: a caller reporting on souls should not have one
+     * appear that has no file.
+     */
+    includeBuiltIn?: boolean;
+  } = {},
 ): Promise<{ entries: Awaited<ReturnType<typeof loadRosterSouls>>; complete: boolean }> => {
-  const entries = await loadRosterSouls(env, warn);
+  const { configPath, includeBuiltIn = false } = options;
+  // Before the roster, exactly as the gateway registers it: a roster file
+  // claiming the reserved id is dropped by `loadRosterSouls`, and only the
+  // configured default soul may take it over — which the replace below
+  // does on id, so nothing extra is needed for that case.
+  const entries = includeBuiltIn
+    ? [{ soul: { agent: { ...DEFAULT_STRATUS_AGENT } } } as Awaited<ReturnType<typeof loadRosterSouls>>[number],
+      ...await loadRosterSouls(env, warn)]
+    : await loadRosterSouls(env, warn);
   let complete = true;
   try {
-    const configured = await resolveConfiguredSoul({}, env);
+    const configured = await resolveConfiguredSoul(configPath !== undefined ? { configPath } : {}, env);
     if (configured) {
       const entry = { soul: configured.soul, path: configured.path };
       const clash = entries.findIndex((candidate) => candidate.soul.agent.id === configured.soul.agent.id);
@@ -6037,7 +8246,7 @@ export const runSkillAdd = async (
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
-  const resolved = await resolveSkillSource(command.source, env);
+  const resolved = await resolveSource(command.source, env, 'skill');
   let sourceDir: string;
   let cleanup: (() => Promise<void>) | undefined;
   if (resolved.kind === 'local') {
@@ -6047,7 +8256,7 @@ export const runSkillAdd = async (
     cleanup = () => rm(scratch, { recursive: true, force: true });
     writeLine(streams.stdout, `Fetching ${redactedSourceUrl(resolved.url)} …`);
     try {
-      await cloneSkillSource(resolved.url, scratch);
+      await cloneSource(resolved.url, scratch);
     } catch (error) {
       await cleanup();
       throw error;
@@ -6198,6 +8407,148 @@ export const runSchedules = async (
   } finally {
     store.close();
   }
+};
+
+/** What `GET /agents/:id/grants` answers, and what the files answer when no daemon is serving. */
+interface GrantsListing extends AgentGrantsListing {
+  agentId: string;
+  tools: Array<ToolGrant & { stale?: string }>;
+}
+
+/**
+ * `stratus grants <agent>` and `stratus grants revoke <agent> …` — the
+ * operator's view of what an agent may do unattended, and the way to take
+ * one back.
+ *
+ * Through the running daemon when one says it is serving, and only then
+ * from the files, because of the daemon's cache: the store reads each
+ * agent's file once per process, so a revoke that edited the file behind a
+ * live daemon would leave the policy honouring a grant the listing no
+ * longer shows until the next restart. Going through `POST
+ * /agents/:id/grants/revoke` is what makes a revoke the next call's answer.
+ * A daemon that `gateway.json` names but that does not answer falls back
+ * to the files with a warning saying exactly that, since the file is still
+ * the truth for the next daemon to start.
+ */
+export const runGrants = async (
+  command: ParsedGrantsCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const agentId = command.agentId;
+  const encoded = encodeURIComponent(agentId);
+  const base = command.gateway
+    ? command.gateway.replace(/\/+$/, '')
+    : (await readGatewayInfo(env))?.url.replace(/\/+$/, '');
+
+  const revocation = command.action === 'revoke'
+    ? command.tool !== undefined
+      ? { tool: command.tool }
+      : command.scope !== undefined
+        ? { scope: command.scope }
+        : { origin: command.origin ?? '' }
+    : undefined;
+  const named = revocation?.tool ?? revocation?.scope ?? revocation?.origin ?? '';
+
+  const fromFiles = async (): Promise<number> => {
+    const store = createFileCommandWhitelist({
+      directory: agentsDirPath(env),
+      warn: (line) => writeLine(streams.stderr, `Warning: ${line}`),
+    });
+    if (revocation) {
+      const revoked = revocation.tool !== undefined
+        ? await store.forgetTool(agentId, revocation.tool)
+        : revocation.scope !== undefined
+          ? await store.forgetScope(agentId, revocation.scope)
+          : await store.forgetOrigin(agentId, revocation.origin ?? '');
+      return reportRevocation(revoked);
+    }
+    const listing: GrantsListing = { agentId, ...describeAgentGrants(await store.grantsFor(agentId)) };
+    return render(listing, `${whitelistPathFor(agentsDirPath(env), agentId)}`);
+  };
+
+  const reportRevocation = (revoked: boolean): number => {
+    if (!revoked) {
+      writeLine(streams.stderr, `${agentId} has no such grant. \`stratus grants ${agentId}\` lists what exists.`);
+      return 1;
+    }
+    writeLine(streams.stdout, `Revoked ${named} for ${agentId}.`);
+    return 0;
+  };
+
+  const render = (listing: GrantsListing, source: string): number => {
+    if (command.format === 'json') {
+      writeLine(streams.stdout, JSON.stringify({ ...listing, source }, null, 2));
+      return 0;
+    }
+    const total = listing.tools.length + listing.scopes.length + listing.origins.length;
+    if (total === 0) {
+      writeLine(streams.stdout, `${agentId} has no standing grants beyond the built-in safe list (${source}).`);
+      writeLine(streams.stdout, 'An "always allow" answered on one of its gated calls creates one.');
+      return 0;
+    }
+    writeLine(streams.stdout, `${agentId} may do this unattended, beyond the built-in safe list (${source}):`);
+    if (listing.tools.length > 0) {
+      writeLine(streams.stdout, '  tools');
+      for (const grant of listing.tools) {
+        const by = grant.grantedBy ? ` by ${grant.grantedBy}` : '';
+        const stale = grant.stale ? `  — stale: ${grant.stale}` : '';
+        writeLine(streams.stdout, `    ${describeToolGrant(grant)}  (granted ${grant.grantedAt}${by})${stale}`);
+      }
+    }
+    if (listing.scopes.length > 0) {
+      writeLine(streams.stdout, '  commands');
+      for (const row of listing.scopes) {
+        writeLine(streams.stdout, `    ${row.description}`);
+      }
+    }
+    if (listing.origins.length > 0) {
+      writeLine(streams.stdout, '  sites');
+      for (const row of listing.origins) {
+        writeLine(streams.stdout, `    ${row.origin}`);
+      }
+    }
+    writeLine(streams.stdout, `Take one back: stratus grants revoke ${agentId} --tool <name> | --scope "<command>" | --origin <origin>`);
+    return 0;
+  };
+
+  if (!base) {
+    return fromFiles();
+  }
+
+  let response: Response;
+  try {
+    response = revocation
+      ? await callRunningGateway(env, command, base, `/api/v1/agents/${encoded}/grants/revoke`, revocation)
+      : await callRunningGateway(env, command, base, `/api/v1/agents/${encoded}/grants`, undefined, 'GET');
+  } catch (error) {
+    if (command.gateway) {
+      throw error;
+    }
+    // Named by the file, not answering: a daemon that crashed leaves the
+    // file behind. The files are still the truth for the next one to
+    // start, so act on them — and say so, because if a daemon *is* alive
+    // behind a broken API it keeps its cached view until it restarts.
+    writeLine(
+      streams.stderr,
+      `Warning: ${gatewayInfoPath(env)} names a daemon at ${base}, but it did not answer `
+      + `(${error instanceof Error ? error.message : String(error)}). `
+      + `${revocation ? 'Revoking in' : 'Reading'} ${whitelistPathFor(agentsDirPath(env), agentId)} instead; `
+      + 'a daemon that is running will not notice until it restarts.',
+    );
+    return fromFiles();
+  }
+  if (response.status === 404 && revocation) {
+    return reportRevocation(false);
+  }
+  if (!response.ok) {
+    writeLine(streams.stderr, `Error: ${await gatewayErrorMessage(response)}`);
+    return 1;
+  }
+  if (revocation) {
+    return reportRevocation(true);
+  }
+  return render(await response.json() as GrantsListing, `from the daemon at ${base}`);
 };
 
 /**
@@ -6411,6 +8762,7 @@ const callRunningGateway = async (
   base: string,
   pathname: string,
   body?: Record<string, unknown>,
+  method: 'GET' | 'POST' = 'POST',
 ): Promise<Response> => {
   const token = await gatewayToken(env, target.token);
   const fetchImpl = env.fetch ?? globalThis.fetch;
@@ -6420,7 +8772,7 @@ const callRunningGateway = async (
   let response: Response;
   try {
     response = await fetchImpl(`${base}${pathname}`, {
-      method: 'POST',
+      method,
       headers: {
         authorization: `Bearer ${token}`,
         ...(body ? { 'content-type': 'application/json' } : {}),
@@ -6737,6 +9089,726 @@ export const runSkills = async (
     }
     writeLine(streams.stdout, `${skill.id.padEnd(24)}${skill.description}${suffix}`);
   }
+  return 0;
+};
+
+// ---- stratus plugins -------------------------------------------------------
+
+/**
+ * The first-party capability packages, for the one question a manifest
+ * cannot answer: what exists that this machine has not installed.
+ *
+ * A discovery aid and nothing else. What a package *contributes* is always
+ * read from its own manifest, so this list falling behind can cost a
+ * suggestion and never a wrong answer about a plugin that is here.
+ */
+const FIRST_PARTY_CAPABILITY_PACKAGES = [
+  '@stratusagent/tool-fs',
+  '@stratusagent/tool-shell',
+  '@stratusagent/tool-web',
+  '@stratusagent/tool-browser',
+  '@stratusagent/plugin-mcp',
+];
+
+/**
+ * The tool names the gateway registers before it loads any plugin. A plugin
+ * that registers one of these is refused whole, so a manifest declaring one
+ * is worth naming — advisory only, since whether it *registers* the name is
+ * a question no manifest answers. A name going stale here costs a warning,
+ * never a wrong answer about a plugin that loads.
+ */
+const KERNEL_TOOL_NAMES = [
+  'demo.echo',
+  'memory.remember',
+  'memory.recall',
+  'memory.forget',
+  'skill.read',
+  'schedule.every',
+  'schedule.at',
+  'schedule.list',
+  'schedule.cancel',
+  'message.send',
+  'agent.delegate',
+];
+
+/** One tool a plugin's manifest declares, as this machine would have it. */
+export interface PluginToolReport {
+  name: string;
+  /**
+   * Declared as a namespace rather than named, so the tools under it arrive
+   * when the server connects. `mcp.*` is the case: a name that does not
+   * exist yet is not a name that does not exist.
+   */
+  discovered: boolean;
+  /**
+   * What `ManifestBoundToolRegistry` would settle on, minus the claim only a
+   * running daemon has. An operator's `toolRisks` override *replaces* the
+   * manifest's declaration and is bounded only by the package's floor —
+   * lowering one is the whole point of the key — and without an override it
+   * is the riskier of the declaration and that floor. A registered object
+   * may then raise itself further, so this is a floor on what a call will
+   * face rather than the last word on it.
+   */
+  risk: ToolRisk;
+  /**
+   * Agent ids whose `tools:` allowlist selects this name. Empty is the
+   * finding, not the absence of one: installing a plugin grants nothing.
+   */
+  grantedTo: string[];
+}
+
+export interface PluginReport {
+  package: string;
+  /** Resolvable from this process. */
+  installed: boolean;
+  /** Named in the trusted config's plugins block, whatever its `enabled`. */
+  configured: boolean;
+  /** Configured and not switched off. */
+  enabled: boolean;
+  tools: PluginToolReport[];
+  /**
+   * Why a daemon would register nothing for this plugin, when it would —
+   * an unreadable manifest, or settings its own schema rejects. Enabled and
+   * loadable are different questions, and a report that ran them together
+   * would call `plugin-mcp` with no `servers` ready to use.
+   */
+  problem?: string;
+  /**
+   * What might go wrong that a manifest cannot settle. A name two packages
+   * both declare collides only if both *register* it, and registration is
+   * `setup()`'s business — so this says "if it does" rather than reporting
+   * a failure that may never happen.
+   */
+  warnings?: string[];
+}
+
+export interface PluginsReport {
+  approvals: 'headless' | 'remote';
+  /**
+   * What this machine would really do with a gated call — the mode alone
+   * does not say. `headless` still runs one a standing grant, an approved
+   * command scope, or an approved site already covers (the engine checks
+   * all three before it refuses), and `remote` with no reachable approver
+   * denies on arrival rather than asking anybody.
+   */
+  approvalsSummary: string;
+  /**
+   * Set when the roster did not load, in which case every `grantedTo` is
+   * withheld rather than reported empty — the same rule `stratus skills`
+   * follows, and for the same reason: unreadable enablement must not print
+   * as "granted to nobody".
+   */
+  rosterUnreadable: boolean;
+  plugins: PluginReport[];
+}
+
+/**
+ * The ways a gated call is already authorized before either mode's decision
+ * is reached — the standing tool grants, the approved command scopes, the
+ * approved sites, and a schedule's pre-authorized destination, in the order
+ * `createPermissionPolicy` checks them.
+ *
+ * Written once because it is read twice: enumerating it separately per mode
+ * is what left the destination path out of one of them and out of the other
+ * entirely. It is prose about a rule `@stratusagent/permissions` owns, so
+ * when that engine gains a path this string is what has to follow it.
+ */
+const ALREADY_AUTHORIZED = 'standing grants, approved command scopes and sites (stratus grants <agent>), '
+  + 'and destinations pre-authorized with a schedule (stratus schedules)';
+
+/**
+ * What a gated call would actually meet on this machine.
+ *
+ * The mode is not the answer on its own, in both directions. `headless`
+ * refuses a gated call *last*: the engine checks the standing tool grants,
+ * the approved command scopes, and the approved sites first, so an agent
+ * that was ever told "always allow" runs that tool unattended for good
+ * (`stratus grants <agent>` is what lists them). And `remote` only asks if
+ * somebody can be asked — with no channel to render the request a gated
+ * call waits out the timeout, and with no approver configured it is denied
+ * on arrival, which is `headless` by another name.
+ *
+ * Stating either as "gated calls are refused" or "gated calls are asked in
+ * Slack" would be wrong in exactly the configurations an operator runs this
+ * command to understand.
+ */
+/**
+ * Who can actually be asked, and what is missing for the rest. Split out of
+ * the sentence below because two surfaces need the *answer*: `stratus
+ * plugins` renders it as a paragraph, setup's Approvals row as a menu
+ * summary, and a second hand-rolled copy of "who is askable" drifted from
+ * this one within three PRs — stored tokens read as reachable agents when
+ * the package was absent, when the agent had left the roster, and when the
+ * only route left was the control API.
+ */
+interface ApprovalReach {
+  /** Tokens stored, package installed, agent still served. */
+  askable: string[];
+  /** Of those, the ones an approver is named for — the rest are denied on arrival. */
+  covered: string[];
+  /** Of those, the ones with no conversation to ask in for a turn that did not start in Slack. */
+  noFallback: string[];
+}
+
+const classifyApprovalReach = (
+  approvals: ApprovalsConfig,
+  channels: ChannelCredentials,
+  servedAgentIds: readonly string[] | undefined,
+  env: CliEnvironment,
+): ApprovalReach => {
+  // An adapter that is not installed renders nothing, so its stored tokens
+  // are not a route — `runServe` starts without the Slack channel and says
+  // so. Undefined served ids means the roster did not load, which is not
+  // evidence that any token is orphaned.
+  const stored = packageInstalled('@stratusagent/channel-slack', env)
+    ? Object.keys(channels.slack ?? {})
+    : [];
+  const askable = servedAgentIds === undefined
+    ? stored
+    : stored.filter((agentId) => servedAgentIds.includes(agentId));
+  const { covered } = classifyApprovers(approvals, askable);
+  const noFallback = covered.filter((agentId) => resolveAgentApprovals(approvals, agentId).slackChannel === undefined);
+  return { askable, covered, noFallback };
+};
+
+const describeUnattendedReach = async (
+  mode: 'headless' | 'remote',
+  approvals: ApprovalsConfig,
+  env: CliEnvironment,
+  /**
+   * The agents actually being served, or undefined when the roster did not
+   * load. Stored Slack tokens outlive the agent they were stored for, and
+   * the adapter skips an id the gateway is not serving — so a token with no
+   * agent behind it must not read as somebody who can be asked.
+   *
+   * `runServe` prints its own line without this intersection, and is right
+   * to: at startup the roster has not loaded yet. It reports the reverse
+   * direction separately once it has one, warning about served agents no
+   * channel can ask for. Here both are in view from the start.
+   */
+  servedAgentIds: readonly string[] | undefined,
+  /**
+   * Whether the control API would be serving. It is a second way to answer
+   * a parked call — `GET /api/v1/approvals` lists them, `POST` settles one
+   * — so an agent no Slack channel can ask for is not necessarily an agent
+   * nobody can ask.
+   */
+  apiReachable: boolean,
+): Promise<string> => {
+  const channels = await loadChannelCredentials(env);
+  return unattendedReachParts(mode, approvals, channels, servedAgentIds, apiReachable, env).join('; ');
+};
+
+/**
+ * The clauses above, unjoined and without reading the filesystem, so a
+ * caller holding unsaved state can render the same verdict. The first
+ * element is always the verdict itself; the rest qualify it.
+ *
+ * Split out because setup's Approvals row wrote its own version of this
+ * sentence, and every review round found it short a different clause the
+ * daemon actually applies — the headless exceptions, an explicit
+ * `timeoutMs: 0`, the control API on a mixed roster. There is one renderer
+ * now; a menu that wants a shorter line takes fewer clauses, never
+ * different words.
+ */
+const unattendedReachParts = (
+  mode: 'headless' | 'remote',
+  approvals: ApprovalsConfig,
+  channels: ChannelCredentials,
+  servedAgentIds: readonly string[] | undefined,
+  apiReachable: boolean,
+  env: CliEnvironment,
+): string[] => {
+  if (mode === 'headless') {
+    return [`headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`];
+  }
+  // The same condition `runServe` reports at startup, through the same
+  // helper: an agent is askable when its tokens are stored and something is
+  // installed to render the request.
+  const { askable, covered, noFallback } = classifyApprovalReach(approvals, channels, servedAgentIds, env);
+  // Qualified the same way the headless line is: the engine allows an
+  // already-authorized call before it asks anyone, so an unqualified "asks
+  // in Slack" hides unattended capability in precisely the configuration
+  // where Slack is set up correctly.
+  //
+  // The *verdict* is composed with the control API in view rather than
+  // corrected afterwards. `describeApprovers` answers a Slack question and
+  // is right to — `runServe` asks it before anything else is known — but
+  // its no-channel and no-approver answers both end in "denied", which is
+  // false wherever `POST /api/v1/approvals` can settle the call. Appending
+  // the API as a later clause left the two halves contradicting each other.
+  const slack = describeApprovers(approvals, askable);
+  // An explicit `timeoutMs: 0` is documented as "wait indefinitely", and
+  // the gateway arms no timer for it — so a call nobody answers is not
+  // eventually denied, it is parked for the life of the daemon. Promising
+  // a denial understates that, and holding a turn open forever is the more
+  // alarming outcome to leave unsaid.
+  const expires = approvals.timeoutMs !== 0;
+  const unanswered = expires ? 'before the timeout denies it' : 'and nothing else will — this daemon\'s approval timeout is 0, so it parks indefinitely';
+  // Three verdicts, selected by what can actually receive the request.
+  //
+  // With nobody askable there is no Slack adapter in the picture at all,
+  // so neither of the first two may say the call "asks in Slack" —
+  // appending `describeApprovers` to that phrasing produced a sentence
+  // that asked Slack and then said no Slack was running.
+  //
+  // The control API is offered only where Slack leaves a request parked.
+  // The Slack adapter handles the same event synchronously and *denies*
+  // when an agent has no approvers or no conversation to ask in, so for an
+  // agent it covers there is nothing left for an API client to answer.
+  // That is only true of agents it covers: one with no tokens at all
+  // reaches no adapter, and its request stays parked.
+  const verdict = (): string => {
+    if (askable.length === 0) {
+      return apiReachable
+        ? `remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it ${unanswered}`
+        : 'remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it '
+          + (expires
+            ? 'waits out the approval timeout and is denied'
+            : 'is never answered: this daemon\'s approval timeout is 0, so it parks indefinitely');
+    }
+    // "Parks and asks" is false for an agent the adapter declines: with no
+    // approvers configured it calls `resolveApproval(deny)` synchronously
+    // (channel-slack decline()), so nothing parks and nobody is asked.
+    // Same defect as the branch above, one case over — found by auditing
+    // the rest of this function after that one, not by review.
+    if (covered.length === 0) {
+      return 'remote — an uncovered gated call reaches Slack and is denied on arrival, because no approvers are configured';
+    }
+    return `remote — an uncovered gated call parks and asks in Slack, ${slack}`;
+  };
+  const parts = [verdict()];
+  // The reverse of a stale token, and the failure that actually bites: an
+  // agent the daemon serves that no channel can ask for parks its gated
+  // calls until the timeout denies them. `runServe` warns about exactly
+  // this once its roster loads; the difference here is only that both
+  // halves are in view from the start.
+  //
+  // Named only when *some* agent is askable: with none, the verdict above
+  // has already said no Slack channel is running at all, and listing every
+  // served agent under it repeats that in more words.
+  const unreachable = askable.length === 0
+    ? []
+    : (servedAgentIds ?? []).filter((agentId) => !askable.includes(agentId));
+  if (unreachable.length > 0) {
+    // Slack is not the only way to answer. `GET /api/v1/approvals` lists
+    // what is parked and `POST` settles it, so with the control API up
+    // these calls wait for a client rather than for the timeout — a very
+    // different thing to tell an operator.
+    parts.push(apiReachable
+      ? `no Slack channel can ask for ${unreachable.join(', ')}, so their gated calls park until the control `
+        + `API answers them${expires ? ' or the timeout denies them' : ' — with a timeout of 0, nothing else ever will'}`
+      : `no channel can ask for ${unreachable.join(', ')}, so their gated calls `
+        + (expires ? 'wait out the timeout and are denied' : 'park indefinitely: this daemon\'s approval timeout is 0'));
+  }
+  // Stored tokens are a *configured* route, not a live one. The adapter
+  // pushes a connection only after `auth.test()` and `socket.start()` both
+  // succeed, and `renderApprovalRequest` denies undeliverable for a
+  // configured agent with no live connection — so a revoked token or a
+  // dead app token turns "asks in Slack" into "denies on arrival". This
+  // command reads config and manifests by design and starts no daemon, so
+  // it cannot know which; saying so is the only honest option, and the
+  // daemon log is where the answer actually is (`warn` writes there, so
+  // `slack: could not connect <agent>` is in `stratus logs`).
+  if (covered.length > 0) {
+    parts.push('whether those apps are connected is not something this command can see — it reads config, '
+      + 'and one whose token no longer authenticates denies its gated calls instead of asking; '
+      + '`stratus logs` shows which came up');
+  }
+  // Approvers with nowhere to be asked outside their own thread. A turn
+  // that did not start in Slack — the API, the dashboard, a delegation —
+  // reaches the adapter with no destination and is denied undeliverable,
+  // so "approvers set" is only half an answer without a fallback channel.
+  if (noFallback.length > 0) {
+    parts.push(`${noFallback.join(', ')} ${noFallback.length === 1 ? 'has' : 'have'} no slackChannel, `
+      + 'so only turns already in Slack can be asked');
+  }
+  // What an "always allow" answer persists depends on what the call names,
+  // and mostly it is not the session: `createPermissionPolicy` maps an
+  // unscoped gated tool to a standing grant that outlives every restart,
+  // a command to a scope, a click to a site, and only a schedule's
+  // destination to the session. Saying "for the rest of its session" flat
+  // understated durable unattended access, which is the wrong direction to
+  // be wrong about approvals in.
+  // The session case is a call scoped by *destination*, which an ordinary
+  // outbound `message.send` is — not only a scheduled one. Naming the
+  // schedule alone read as though the everyday case were durable.
+  parts.push('an "always allow" answer persists — a standing grant for an unscoped tool, a command scope, '
+    + 'or a site, all until revoked; only a call scoped by destination, such as message.send, '
+    + 'lasts just the session');
+  return parts;
+};
+
+/**
+ * What this machine's plugins are, and where the chain from installed to
+ * callable breaks.
+ *
+ * Four things have to be true before an agent can call a plugin's tool —
+ * the package is installed, a trusted config enables it, the agent's
+ * `tools:` names it, and the approval policy lets the call through — and
+ * every one of them fails silently on its own. A listing of installed
+ * packages answers the first and reads as an answer to all four, which is
+ * how an agent ends up with a persona describing tools it never had.
+ *
+ * Manifests rather than a load: `readPluginManifest` imports nothing, so
+ * this never runs a plugin's `setup` — which for the MCP bridge would spawn
+ * every configured server's subprocess to answer a question about a
+ * daemon that is not running.
+ */
+export const collectPluginsReport = async (
+  command: ParsedPluginsCommand,
+  env: CliEnvironment,
+  warn: (line: string) => void,
+): Promise<PluginsReport> => {
+  const pluginsConfig = await loadServePlugins(env, command.configPath, warn);
+  const approvals = await loadServeApprovals(env, command.configPath, warn);
+  // What the loader would fold in, so the validation below is against the
+  // object a daemon on this machine would build.
+  const workspaceRoot = workspacesDirPath(env);
+  // Read the same way the daemon reads it: installed, and not switched off
+  // by the trusted config's `api` block.
+  const api = await loadServeApi(env, command.configPath, warn);
+  const apiReachable = packageInstalled('@stratusagent/control-api', env) && api.enabled !== false;
+
+  // Who grants what, from the roster a dispatch actually serves — the same
+  // resolution `stratus skills` uses, so the two commands cannot disagree
+  // about which souls are live.
+  let roster: Awaited<ReturnType<typeof loadRosterSouls>> = [];
+  let rosterUnreadable = false;
+  try {
+    const resolved = await rosterSoulsWithConfigured(env, warn, {
+      ...(command.configPath !== undefined ? { configPath: command.configPath } : {}),
+      includeBuiltIn: true,
+    });
+    roster = resolved.entries;
+    rosterUnreadable = !resolved.complete;
+  } catch (error) {
+    rosterUnreadable = true;
+    warn(`cannot say who is granted what — the roster did not load: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  /**
+   * Which agents a declared name reaches. A soul with no `tools:` key
+   * grants every registered tool, which is the opposite of an empty list —
+   * so an absent allowlist matches everything here too, or this would
+   * report the most permissive agents as the least.
+   */
+  const grantedTo = (name: string, discovered: boolean): string[] => roster
+    .filter((entry) => soulGrantsTool(entry.soul.agent.tools, name, discovered))
+    .map((entry) => entry.soul.agent.id);
+
+  // Configured first, in the operator's own order, then the first-party
+  // packages they have not configured — the second group is why an install
+  // that granted nothing is visible at all.
+  const configured = Object.keys(pluginsConfig);
+  const packages = [
+    ...configured,
+    ...FIRST_PARTY_CAPABILITY_PACKAGES.filter((name) => !configured.includes(name)),
+  ];
+
+  const plugins: PluginReport[] = [];
+  // Which package claimed each literal tool name, across the whole loop.
+  // `loadPlugins` keeps the same map and rejects the *later* plugin whole
+  // when a registration collides, so a per-plugin check would report two
+  // packages ready to serve one name that only one of them will get.
+  //
+  // Literal declarations only: the registry claims names as they register,
+  // and a namespace has none until its server connects.
+  // Qualified skill ids, tracked the same way and for the same reason.
+  const claimedSkills = new Map<string, string>();
+  /**
+   * Every name or namespace some plugin may register, in config order.
+   *
+   * One list rather than a map of literals, because a collision is an
+   * *overlap* and overlap has no preferred direction: a later literal falls
+   * under an earlier namespace exactly as a later namespace covers an
+   * earlier literal. Two one-way passes is what this was, and it missed
+   * whichever direction was written second.
+   *
+   * The daemon's own tools are *registered*, unconditionally, before any
+   * plugin loads; a plugin's entry is only a declaration, which is why the
+   * two produce different warnings.
+   */
+  const claims: Array<{ pattern: string; owner: string; registered: boolean }> = KERNEL_TOOL_NAMES
+    .map((name) => ({ pattern: name, owner: 'the daemon itself', registered: true }));
+  for (const specifier of packages) {
+    const block = pluginsConfig[specifier] ?? {};
+    const isConfigured = configured.includes(specifier);
+    const base: PluginReport = {
+      package: specifier,
+      installed: packageInstalled(specifier, env),
+      configured: isConfigured,
+      enabled: isConfigured && block.enabled !== false,
+      tools: [],
+    };
+    // Nothing below runs for a plugin the loader would skip. It skips an
+    // absent or switched-off block before it reads a manifest, parses an
+    // override, or validates anything — so doing any of that here invents a
+    // failure for a plugin that has none, and the renderer shows no tools
+    // for one either way. Gating the whole block rather than each call is
+    // deliberate: gating them one at a time is what left the override parse
+    // unconditional after the preflight moved.
+    if (!base.installed || !base.enabled) {
+      plugins.push(base);
+      continue;
+    }
+    try {
+      const { manifest, directory } = await readPluginManifest(specifier, {
+        resolve: (target) => import.meta.resolve(target),
+      });
+      const floor = riskFloorFor(isFirstPartyPackage(manifest.packageName));
+      const overrides = parseToolRiskOverrides(manifest, block);
+      // Everything the loader checks before importing, through the loader's
+      // own function — a plugin whose settings or skill files it rejects
+      // registers nothing, and reading here as enabled is the false clean
+      // bill this command exists to stop giving.
+      //
+      // Only for a plugin the loader would actually reach, though: it skips
+      // an absent or switched-off block before validating anything, so
+      // preflighting one would report `plugin-mcp` that nobody configured as
+      // broken settings instead of as the install to enable.
+      if (base.enabled) {
+        await preflightPlugin(manifest, directory, block, workspaceRoot);
+      }
+      // One row per tool the report will name, tracked as they are emitted.
+      // A concrete name can be reached more than one way — declared outright
+      // *and* covered by a namespace, or covered by two nested namespaces
+      // like `mcp.*` and `mcp.linear.*` — and every one of those is a single
+      // runtime tool. Filtering each source against the others is what
+      // produced two rounds of duplicate rows; one set, checked as rows are
+      // added, cannot miss a path.
+      const seen = new Set<string>();
+      const declared: Array<{ name: string; discovered: boolean; namespace: boolean; declared: ToolRisk }> = [];
+      const emit = (row: { name: string; discovered: boolean; namespace: boolean; declared: ToolRisk }): void => {
+        if (seen.has(row.name)) {
+          return;
+        }
+        seen.add(row.name);
+        declared.push(row);
+      };
+      // Literal declarations first: a name the manifest states outright is
+      // described best by its own entry, not by a namespace that covers it.
+      // Risk through `declaredRiskFor`, never the declaration in hand: with
+      // overlapping namespaces (`mcp.*` and `mcp.linear.*`) it is the *first*
+      // match that registration uses, so reading each entry's own risk would
+      // show a narrower namespace at a risk none of its tools will have.
+      const riskOf = (name: string, fallback: ToolRisk): ToolRisk => declaredRiskFor(manifest, name) ?? fallback;
+      for (const tool of manifest.contributes.tools) {
+        emit({ name: tool.name, discovered: false, namespace: false, declared: riskOf(tool.name, tool.risk) });
+      }
+      for (const entry of manifest.contributes.toolsDiscovered) {
+        emit({
+          name: entry.namespace,
+          discovered: true,
+          namespace: true,
+          declared: riskOf(entry.namespace, entry.risk),
+        });
+        // An override under a declared namespace names a concrete tool
+        // (`mcp.linear.get_issue`), which is the whole point of the key for
+        // a bridge — and it can never equal the namespace, so the namespace
+        // row alone would report the default risk for a tool the operator
+        // has deliberately re-rated. Listed beside it rather than folded in:
+        // they are different risks, and which tools carry the override is
+        // the thing worth seeing.
+        for (const name of overrides.keys()) {
+          // Any wildcard key, not merely the declared namespace itself: the
+          // registry applies an override by each concrete *registered*
+          // name, so a nested `mcp.linear.*` is exactly as inert as
+          // `mcp.*`. Excluding only the equal case left the nested one
+          // advertising a re-rating no call gets.
+          if (name.endsWith('.*')) {
+            continue;
+          }
+          if (matchesToolAllowlist(name, [entry.namespace])) {
+            emit({ name, discovered: true, namespace: false, declared: riskOf(name, entry.risk) });
+          }
+        }
+      }
+      // A warning, not a failure. Ownership is claimed at registration —
+      // `view.commit(owners)` records what `setup()` actually registered —
+      // so a name two manifests both declare collides only if both plugins
+      // go on to register it, which nothing here can know. Reporting it as
+      // a load failure would condemn a plugin that loads perfectly well
+      // because its tool is optional.
+      // Keyed by config entry, never by package name: the same package
+      // configured through two specifiers is two entries the loader treats
+      // as two plugins, and exempting them for sharing a `packageName`
+      // would hide the collision an operator is likeliest to create by
+      // accident.
+      //
+      // A plugin never collides with itself: everything it declares is
+      // gathered first, checked against what came before, and only then
+      // added. That ordering is what makes a manifest declaring both
+      // `mcp.ping` and `mcp.*` silent — it registers that name once — and
+      // it is load-bearing, so adding claims inside the loop below would
+      // reintroduce a warning telling operators to fix a working config.
+      const declaredHere = [
+        ...manifest.contributes.tools.map((tool) => tool.name),
+        ...manifest.contributes.toolsDiscovered.map((entry) => entry.namespace),
+      ];
+      for (const pattern of declaredHere) {
+        for (const claim of claims) {
+          if (!toolScopesOverlap(pattern, claim.pattern)) {
+            continue;
+          }
+          const subject = pattern === claim.pattern
+            ? `${pattern} is`
+            : `${pattern} overlaps ${claim.pattern}, which is`;
+          // One sentence for every collision, because a manifest cannot
+          // tell when a name registers and the cost turns entirely on
+          // that. `ManifestBoundToolRegistry` stages while `owners` is
+          // unset and registers live once `commit` sets it, so a clash
+          // before the plugin commits rolls it back whole and a clash
+          // after refuses that one registration. Neither side of the
+          // declaration says which: a bridge's first connect happens
+          // inside `setup()` when its server is up and on a reconnect
+          // when it is not, and a plugin may hold `context.tools` and
+          // register a plainly-named tool from a timer long after.
+          //
+          // Three rounds of review went into splitting this by
+          // declaration kind, then by which side of the pair held the
+          // namespace. Both splits claimed knowledge the manifest does
+          // not have. Do not reintroduce one.
+          base.warnings = [
+            ...(base.warnings ?? []),
+            `${subject} ${claim.registered ? 'already registered by' : 'also declared by'} ${claim.owner}; `
+            + 'if both register that name, a daemon keeps the first and refuses the second registration — '
+            + 'the whole plugin, tools and skills together, if it happens before that plugin finishes loading, '
+            + 'or just that one tool if it happens after',
+          ];
+        }
+      }
+      for (const pattern of declaredHere) {
+        claims.push({ pattern, owner: specifier, registered: false });
+      }
+
+      // Skills collide on the qualified `packageName:id`, so a clash means
+      // one package configured twice — the two-specifier case again. Firmer
+      // than the tool warning and worded that way: the loader stages skills
+      // from the manifest and refuses the second entry outright rather than
+      // waiting to see what `setup()` does. Still "if it loads", since a
+      // plugin that fails to import never reaches the check.
+      for (const skill of manifest.contributes.skills) {
+        const qualified = `${manifest.packageName}:${skill.id}`;
+        const owner = claimedSkills.get(qualified);
+        if (owner !== undefined) {
+          base.warnings = [
+            ...(base.warnings ?? []),
+            `skill ${qualified} is already declared by ${owner}; if both load, a daemon keeps the first `
+            + 'and refuses this one whole, tools and skills together',
+          ];
+        } else {
+          claimedSkills.set(qualified, specifier);
+        }
+      }
+      base.tools = declared.map((tool) => {
+        // Never on the namespace row. `parseToolRiskOverrides` accepts a
+        // namespace-shaped key, but the registry looks an override up by
+        // each concrete *registered* name — so `toolRisks: { "mcp.*": … }`
+        // changes no call, and showing the row at that risk would advertise
+        // a re-rating the daemon will not honour.
+        const override = tool.namespace ? undefined : overrides.get(tool.name);
+        return {
+          name: tool.name,
+          discovered: tool.discovered,
+          risk: override !== undefined
+            ? raiseRiskTo(override, floor)
+            : raiseRiskTo(tool.declared, floor),
+          grantedTo: grantedTo(tool.name, tool.discovered),
+        };
+      });
+    } catch (error) {
+      // Reported per plugin rather than thrown: one package with a broken
+      // manifest must not take down the listing that would have shown it.
+      base.problem = error instanceof Error ? error.message : String(error);
+    }
+    plugins.push(base);
+  }
+
+  const mode = approvals.mode ?? 'headless';
+  return {
+    approvals: mode,
+    approvalsSummary: await describeUnattendedReach(
+      mode,
+      approvals,
+      env,
+      rosterUnreadable ? undefined : roster.map((entry) => entry.soul.agent.id),
+      apiReachable,
+    ),
+    rosterUnreadable,
+    plugins,
+  };
+};
+
+/** `stratus plugins` — the chain from installed to callable, per plugin. */
+export const runPlugins = async (
+  command: ParsedPluginsCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const report = await collectPluginsReport(command, env, (line) => {
+    writeLine(streams.stderr, `Warning: ${line}`);
+  });
+
+  if (command.format === 'json') {
+    writeLine(streams.stdout, JSON.stringify(report, null, 2));
+    return 0;
+  }
+
+  writeLine(streams.stdout, `approvals: ${report.approvalsSummary}`);
+  writeLine(streams.stdout);
+
+  for (const plugin of report.plugins) {
+    const state = !plugin.installed
+      ? 'not installed'
+      : !plugin.configured
+        ? 'installed, not enabled'
+        : !plugin.enabled
+          ? 'installed, switched off'
+          // Enabled and loadable are separate: a plugin whose settings its
+          // own schema rejects is enabled and registers nothing, and saying
+          // only "enabled" here is the false clean bill this command exists
+          // to stop giving.
+          : plugin.problem !== undefined ? 'installed, enabled, will not load' : 'installed, enabled';
+    // Padded to a column, but never run together: a package name longer
+    // than the column would otherwise touch its own status.
+    writeLine(streams.stdout, `${plugin.package.padEnd(29)} ${state}`);
+
+    if (plugin.problem !== undefined) {
+      writeLine(streams.stdout, `  a daemon would register nothing for it: ${plugin.problem}`);
+      continue;
+    }
+    if (!plugin.installed) {
+      writeLine(streams.stdout, `  install it: npm install -g ${plugin.package}`);
+      continue;
+    }
+    // Nothing is registered for a plugin that will not load, so its tools
+    // are not listed: a grant column beside a name no agent can call reads
+    // as capability this machine has.
+    if (!plugin.configured) {
+      writeLine(streams.stdout, `  installing granted nothing — add "${plugin.package}" to the plugins block of a trusted config to load it`);
+      continue;
+    }
+    if (!plugin.enabled) {
+      writeLine(streams.stdout, '  switched off — remove "enabled": false to load it');
+      continue;
+    }
+    for (const warning of plugin.warnings ?? []) {
+      writeLine(streams.stdout, `  warning: ${warning}`);
+    }
+    for (const tool of plugin.tools) {
+      const granted = report.rosterUnreadable
+        ? ''
+        : tool.grantedTo.length > 0
+          ? ` → ${tool.grantedTo.join(', ')}`
+          : ' → nobody, until a soul’s tools: list names it';
+      const shape = tool.discovered ? ' (names arrive at connect)' : '';
+      writeLine(streams.stdout, `  ${tool.name.padEnd(28)}${tool.risk}${shape}${granted}`);
+    }
+  }
+
+  writeLine(streams.stdout);
+  writeLine(streams.stdout, `More plugins — ${PLUGIN_MARKETPLACE_URL}`);
   return 0;
 };
 
@@ -7699,6 +10771,17 @@ const serveHeldHome = async (
   // and this is where the file precedence is already understood.
   const pluginsConfig = await loadServePlugins(env, command.configPath, warn);
 
+  // Every kind of grant an agent holds — command scopes, origins, standing
+  // tool grants — in one file per agent beside its soul, through one store
+  // instance for the whole daemon. One instance, because the store caches
+  // each file for the life of the process: the control API's list and
+  // revoke go through this same object, which is what lets a revoke take
+  // effect on the policy's very next decision rather than at the next
+  // restart. A whitelist that exists and will not read is said here, once,
+  // and never written over — the daemon's log is where a grant list going
+  // quiet would otherwise go unnoticed.
+  const grantStore = createFileCommandWhitelist({ directory: agentsDirPath(env), warn });
+
   // The control API is a channel adapter like any other: started after the
   // roster loads, stopped before the store drains. It is optional because
   // installing it is how an operator says they want a port open.
@@ -7733,6 +10816,7 @@ const serveHeldHome = async (
         ...(apiHost !== undefined ? { host: apiHost } : {}),
         ...(apiPort !== undefined ? { port: apiPort } : {}),
         ...(command.configPath ? { configPath: command.configPath } : {}),
+        grants: grantStore,
         log,
         warn,
       });
@@ -7851,6 +10935,14 @@ const serveHeldHome = async (
   // not to bother.
   const onDecision = (decision: PermissionDecision): void => {
     if (decision.allowed) {
+      // A call that ran because somebody once said "always" is the one
+      // allowed decision the trace records: it is how something happened
+      // unattended, which is what an incident reconstruction needs to tell
+      // apart from a tool that was simply safe. Name and date, never input.
+      if (decision.grant) {
+        const by = decision.grant.grantedBy ? ` by ${decision.grant.grantedBy}` : '';
+        log(`${decision.agentId}: ${decision.toolName} ran under a standing grant (${describeToolGrant(decision.grant)}, granted ${decision.grant.grantedAt}${by}) (session ${decision.sessionId})`);
+      }
       return;
     }
     warn(`${decision.agentId}: ${decision.reason} (session ${decision.sessionId})`);
@@ -7863,10 +10955,7 @@ const serveHeldHome = async (
   // a tool that carries no command string is judged by its risk exactly as
   // before. The whitelist lives beside the agent's soul, per agent.
   const commands = {
-    // A whitelist that exists and will not read is said here, once, and
-    // never written over — the daemon's log is where a grant list going
-    // quiet would otherwise go unnoticed.
-    whitelist: createFileCommandWhitelist({ directory: agentsDirPath(env), warn }),
+    whitelist: grantStore,
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
       // An approval that widens what runs unattended, for every future
       // session, is precisely the decision that must not be the one leaving
@@ -7879,20 +10968,34 @@ const serveHeldHome = async (
   // do unattended. Wired unconditionally for the same reason — a tool that
   // names no origin is judged by its risk exactly as before.
   const origins = {
-    whitelist: commands.whitelist,
+    whitelist: grantStore,
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: OriginScope }) => {
       log(`${agentId}: ${describeOriginScope(scope)} is now acted on without asking`);
     },
   };
-  const approvals = (transport: ApprovalTransport): ApprovalPolicy => createPermissionPolicy(
-    // The destination scope rides along in BOTH modes — it is what lets a
-    // scheduled turn report to the channel a human approved with the
-    // schedule, and headless (where every other gated call is refused) is
-    // exactly the deployment it exists for.
-    approvalMode === 'remote'
-      ? { mode: 'remote', request: transport.request, onDecision, commands, origins, destinations: transport.destinations }
-      : { mode: 'headless', onDecision, commands, origins, destinations: transport.destinations },
-  );
+  const approvals = (transport: ApprovalTransport): ApprovalPolicy => {
+    // The standing-grant engine, in the same file again — and the tool's
+    // contributor from the gateway, so a grant records which package's
+    // tool the operator said yes to and stops applying when that changes.
+    const grants = {
+      store: grantStore,
+      contributorOf: transport.contributorOf,
+      onGranted: ({ agentId, grant }: { agentId: string; grant: ToolGrant }) => {
+        log(`${agentId}: ${describeToolGrant(grant)} now runs without asking, until revoked${grant.grantedBy ? ` (granted by ${grant.grantedBy})` : ''}`);
+      },
+    };
+    return createPermissionPolicy(
+      // The destination scope rides along in BOTH modes — it is what lets a
+      // scheduled turn report to the channel a human approved with the
+      // schedule, and headless (where every other gated call is refused) is
+      // exactly the deployment it exists for. So do the grants: a standing
+      // grant is the only path a scope-less gated tool has to running
+      // unattended, and headless is where that matters.
+      approvalMode === 'remote'
+        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations: transport.destinations }
+        : { mode: 'headless', onDecision, commands, origins, grants, destinations: transport.destinations },
+    );
+  };
 
   if (approvalMode === 'remote') {
     // Only agents whose channel actually came up can be asked: tokens on
@@ -8229,6 +11332,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         || command.command === 'chat'
         || command.command === 'run'
         || command.command === 'skill-add'
+        || command.command === 'template-add'
         || command.command === 'dashboard'
         || (command.command === 'credential' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
@@ -8290,6 +11394,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
       return await runAgents(command, streams, resolvedEnv);
     }
 
+    if (command.command === 'template-add') {
+      return await runTemplateAdd(command, streams, resolvedEnv);
+    }
+
     if (command.command === 'skill-add') {
       return await runSkillAdd(command, streams, resolvedEnv);
     }
@@ -8300,6 +11408,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'skills') {
       return await runSkills(streams, resolvedEnv);
+    }
+
+    if (command.command === 'plugins') {
+      return await runPlugins(command, streams, resolvedEnv);
     }
 
     if (command.command === 'credential') {
@@ -8316,6 +11428,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'schedules') {
       return await runSchedules(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'grants') {
+      return await runGrants(command, streams, resolvedEnv);
     }
 
     if (command.command === 'memory') {

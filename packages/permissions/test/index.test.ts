@@ -36,6 +36,28 @@ const context = (
   ...extra,
 });
 
+/**
+ * A tool judged by destination, which is the one shape that still gets the
+ * session-scoped "always": a durable grant there would be a standing yes to
+ * every destination. Every other unscoped gated tool now gets a standing
+ * grant instead, tested in grants.test.ts.
+ */
+const sendTool = (name: string): Tool => ({
+  name,
+  risk: 'gated',
+  destinationFor: (input) => (typeof input.destination === 'string' ? input.destination : undefined),
+  async execute() {
+    return null;
+  },
+});
+
+const sendContext = (name: string, sessionId = 'sess-1'): ApprovalContext => ({
+  session: session(sessionId),
+  call: { id: 'call-1', toolName: name, input: { destination: 'slack:C-ENG' } },
+  tool: sendTool(name),
+  risk: 'gated',
+});
+
 test('safe calls run unattended and riskier ones do not', async () => {
   const decisions: PermissionDecision[] = [];
   const policy = createPermissionPolicy({
@@ -139,29 +161,31 @@ test('the interactive prompt renders a gated call\'s arguments, so a schedule sh
   assert.match(asked[0]!, /arguments truncated — inspect the call before approving/);
 });
 
-test('"always" lasts for the session that said it, and no longer', async () => {
+test('"always" on a destination-scoped tool lasts for the session that said it, and no longer', async () => {
   let asks = 0;
+  const asked: string[] = [];
   const policy = createPermissionPolicy({
     mode: 'interactive',
-    ask: async () => {
+    ask: async (question) => {
       asks += 1;
+      asked.push(question);
       return 'always';
     },
   });
 
-  const first = context('shell.run', 'gated');
-  assert.equal(await policy.approve(first), true);
-  assert.equal(await policy.approve(context('shell.run', 'gated')), true);
+  assert.equal(await policy.approve(sendContext('message.send')), true);
+  assert.match(asked[0]!, /always this session/, 'the prompt says which lifetime it is offering');
+  assert.equal(await policy.approve(sendContext('message.send')), true);
   assert.equal(asks, 1, 'the second call in the same session did not ask again');
 
   // A different tool is a different question, even in the same session.
-  assert.equal(await policy.approve(context('fs.write', 'gated')), true);
+  assert.equal(await policy.approve(sendContext('message.post')), true);
   assert.equal(asks, 2);
 
-  // And another session starts over: one impatient yes must not become a
-  // standing grant across conversations.
-  const later = context('shell.run', 'gated', { session: session('sess-2') });
-  assert.equal(await policy.approve(later), true);
+  // And another session starts over: a yes to "send anywhere" must not
+  // become a standing grant across conversations — no per-destination
+  // grant exists yet, so the session is the widest honest lifetime.
+  assert.equal(await policy.approve(sendContext('message.send', 'sess-2')), true);
   assert.equal(asks, 3);
 });
 
@@ -181,8 +205,8 @@ test('an "always" grant cannot leak between sessions with adjacent ids', async (
   // approve the second. Channel session ids are colon-delimited and can
   // carry spaces from a channel name, so the join uses NUL, which cannot
   // appear in either half.
-  const first = context('run', 'gated', { session: session('a b') });
-  const second = context('b run', 'gated', { session: session('a') });
+  const first = sendContext('run', 'a b');
+  const second = sendContext('b run', 'a');
 
   assert.equal(await policy.approve(first), true);
   assert.equal(asks, 1);
@@ -274,37 +298,38 @@ test('remote mode refuses to be constructed with no way to ask', () => {
   );
 });
 
-test('a remote answer decides the call, and always covers the rest of the session', async () => {
-  const asked: string[] = [];
+test('a remote answer decides the call, and always on a destination-scoped tool covers the rest of the session', async () => {
+  const asked: Array<[string, string | undefined]> = [];
   const answers: ApprovalAnswer[] = ['once', 'always', 'deny'];
   const decisions: PermissionDecision[] = [];
   const policy = createPermissionPolicy({
     mode: 'remote',
     request: async (request) => {
-      asked.push(request.call.toolName);
+      asked.push([request.call.toolName, request.always]);
       return answers.shift() ?? 'deny';
     },
     onDecision: (decision) => decisions.push(decision),
   });
 
   assert.equal(await policy.approve(context('shell.run', 'gated')), true, 'allow once');
-  assert.equal(await policy.approve(context('fs.write', 'gated')), true, 'always allow');
-  // The second fs.write is covered by the "always" above and never reaches
+  assert.equal(await policy.approve(sendContext('message.send')), true, 'always allow');
+  // The second send is covered by the "always" above and never reaches
   // the transport — that is what makes the button worth clicking.
-  assert.equal(await policy.approve(context('fs.write', 'gated')), true);
+  assert.equal(await policy.approve(sendContext('message.send')), true);
   assert.equal(await policy.approve(context('fs.delete', 'dangerous')), false, 'deny');
 
-  assert.deepEqual(asked, ['shell.run', 'fs.write', 'fs.delete']);
+  // The request says in advance which lifetime "always" would create, so
+  // the transport can word the button and the outcome without guessing.
+  assert.deepEqual(asked, [['shell.run', 'tool'], ['message.send', 'session'], ['fs.delete', undefined]]);
   // A remote "always" is session-scoped exactly like the prompt's, so the
   // two surfaces cannot mean different things by the same word.
   assert.match(decisions[2]!.reason, /rest of this session/);
   assert.match(decisions[3]!.reason, /was not approved/);
 
   // Session-scoped means session-scoped: another session asks again.
-  const other = context('fs.write', 'gated', { session: session('sess-2') });
   answers.push('deny');
-  assert.equal(await policy.approve(other), false);
-  assert.deepEqual(asked, ['shell.run', 'fs.write', 'fs.delete', 'fs.write']);
+  assert.equal(await policy.approve(sendContext('message.send', 'sess-2')), false);
+  assert.deepEqual(asked.map(([name]) => name), ['shell.run', 'message.send', 'fs.delete', 'message.send']);
 });
 
 test('a transport that fails denies the call instead of failing the turn', async () => {

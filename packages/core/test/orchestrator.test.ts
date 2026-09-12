@@ -1794,3 +1794,89 @@ test('resuming a parked session retires its checkpoint along with the interrupte
   assert.deepEqual(executed, [], 'and nothing ran on the completed session');
   assert.equal((await store.get('parked-then-messaged'))?.status, 'completed');
 });
+
+test('images sent with a user message are stored on it, and only on it', async () => {
+  const store = new InMemorySessionStore();
+  const provider: ModelProvider = {
+    name: 'looking-provider',
+    async generate({ session }) {
+      const latest = session.messages.findLast((message) => message.role === 'user');
+      return { parts: [{ type: 'text', text: `saw ${latest?.images?.length ?? 0} images` }] };
+    },
+  };
+  const runner = new AgentRunner({ provider, store });
+  const shot = { mediaType: 'image/png' as const, data: 'iVBORw0KGgo=', name: 'shot.png' };
+
+  const first = await runner.run({
+    sessionId: 'session-images',
+    agent: { id: 'agent-images', name: 'Looker' },
+    userMessage: 'what is this?',
+    images: [shot],
+  });
+  assert.deepEqual(first.messages[0]?.images, [shot]);
+  assert.equal(first.messages.at(-1)?.content, 'saw 1 images');
+
+  // A message without images has no field at all, so a transcript written
+  // before images existed and one written after read the same.
+  const second = await runner.resume({ sessionId: 'session-images', userMessage: 'and now?', images: [] });
+  const asked = second.messages.filter((message) => message.role === 'user');
+  assert.equal(asked.length, 2);
+  assert.equal('images' in asked[1]!, false);
+  assert.equal(second.messages.at(-1)?.content, 'saw 0 images');
+
+  // The stored session carries the image for every later turn to replay.
+  const stored = await store.get('session-images');
+  assert.deepEqual(stored?.messages[0]?.images, [shot]);
+});
+
+test('a stored session keeps only the images inside its replay window', async () => {
+  const store = new InMemorySessionStore();
+  const provider: ModelProvider = {
+    name: 'looking-provider',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'ok' }] };
+    },
+  };
+  // Each image is 6 decoded bytes; the window holds two.
+  const runner = new AgentRunner({ provider, store, imageReplayBudget: { bytes: 12 } });
+  const image = (data: string, name: string) => ({ mediaType: 'image/png' as const, data, name });
+
+  await runner.run({ sessionId: 'session-window', agent: { id: 'a', name: 'A' }, userMessage: 'one', images: [image('AAAAAAAA', 'one.png')] });
+  await runner.resume({ sessionId: 'session-window', userMessage: 'two', images: [image('BBBBBBBB', 'two.png')] });
+  const third = await runner.resume({ sessionId: 'session-window', userMessage: 'three', images: [image('CCCCCCCC', 'three.png')] });
+
+  const asked = third.messages.filter((message) => message.role === 'user');
+  // The oldest image's bytes are gone from the row, its name is not.
+  assert.deepEqual(asked[0]?.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'one.png' }]);
+  assert.deepEqual(asked[1]?.images, [image('BBBBBBBB', 'two.png')]);
+  assert.deepEqual(asked[2]?.images, [image('CCCCCCCC', 'three.png')]);
+  const stored = await store.get('session-window');
+  assert.equal(stored?.messages[0]?.images?.[0]?.omitted, true);
+});
+
+test('the first stored turn is held to the replay window too', async () => {
+  const store = new InMemorySessionStore();
+  const provider: ModelProvider = {
+    name: 'looking-provider',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'ok' }] };
+    },
+  };
+  const runner = new AgentRunner({ provider, store, imageReplayBudget: { count: 1 } });
+  const image = (data: string, name: string) => ({ mediaType: 'image/png' as const, data, name });
+
+  const opened = await runner.run({
+    sessionId: 'session-first-window',
+    agent: { id: 'a', name: 'A' },
+    userMessage: 'both',
+    images: [image('AAAAAAAA', 'first.png'), image('BBBBBBBB', 'second.png')],
+  });
+
+  // Newest first inside the message: the second image is the one kept.
+  assert.deepEqual(opened.messages[0]?.images, [
+    { mediaType: 'image/png', data: '', omitted: true, name: 'first.png' },
+    image('BBBBBBBB', 'second.png'),
+  ]);
+  const stored = await store.get('session-first-window');
+  assert.equal(stored?.messages[0]?.images?.[0]?.omitted, true);
+});

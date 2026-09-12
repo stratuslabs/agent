@@ -1,6 +1,8 @@
 import type {
+  AlwaysMeans,
   ApprovalAnswer,
   ApprovalContext,
+  ApprovalOutcome,
   ApprovalPolicy,
   JsonObject,
   JsonValue,
@@ -32,9 +34,15 @@ import {
   type OriginScope,
 } from './origins.ts';
 import {
+  describeToolGrant,
+  findMatchingToolGrant,
+  type ToolGrant,
+} from './grants.ts';
+import {
   WhitelistUnreadableError,
   type CommandWhitelistStore,
   type OriginWhitelistStore,
+  type ToolGrantStore,
 } from './whitelist.ts';
 
 export {
@@ -59,11 +67,24 @@ export {
   type OriginScope,
 } from './origins.ts';
 export {
+  describeToolGrant,
+  findMatchingToolGrant,
+  matchesToolGrant,
+  parseToolGrant,
+  sameToolGrant,
+  type ToolGrant,
+} from './grants.ts';
+export {
   createFileCommandWhitelist,
+  describeAgentGrants,
   whitelistPathFor,
   WhitelistUnreadableError,
+  type AgentGrants,
+  type AgentGrantsListing,
+  type AgentGrantStore,
   type CommandWhitelistStore,
   type OriginWhitelistStore,
+  type ToolGrantStore,
 } from './whitelist.ts';
 
 /**
@@ -113,10 +134,19 @@ export interface ApprovalRequest {
    * create is the same defect as a record understating one it did.
    *
    * Absent is the ordinary case, where `always` remembers *something* —
-   * which of the two lifetimes is still not knowable here, and is why the
-   * wording for that case has to cover both.
+   * and `always` below says what.
    */
   oneShot?: boolean;
+  /**
+   * What `always` would remember, when it would remember something. The
+   * other half of `oneShot`: that one says a grant will not be created,
+   * this one says which kind will — so a transport can tell an approver in
+   * advance whether they are widening this session or this agent, and
+   * report afterwards what was actually granted rather than hedging
+   * between lifetimes it could not distinguish. Absent exactly when
+   * `oneShot` is true.
+   */
+  always?: AlwaysMeans;
   /**
    * When this call first parked, if it is being re-asked after a restart.
    * A transport that imposes a deadline measures from here rather than
@@ -137,8 +167,12 @@ export interface ApprovalRequest {
  * whatever is carrying it gives up. It never rejects for a timeout: an
  * expired request is a `deny`, which is a decision the turn can continue
  * from, not an error that fails it.
+ *
+ * A transport that knows who answered settles with an `ApprovalOutcome`
+ * so a standing grant can record them; one that does not settles with the
+ * bare answer, and both mean the same thing to the policy.
  */
-export type ApprovalRequester = (request: ApprovalRequest) => Promise<ApprovalAnswer>;
+export type ApprovalRequester = (request: ApprovalRequest) => Promise<ApprovalAnswer | ApprovalOutcome>;
 
 /** Why a call was allowed or refused, for logs and events. */
 export interface PermissionDecision {
@@ -184,6 +218,15 @@ export interface PermissionDecision {
    * the origin and not at a URL.
    */
   origin?: string;
+  /**
+   * The standing grant this call ran under, when one did. The daemon logs
+   * it: a call that ran because an operator once said "always" for this
+   * agent is exactly what someone reconstructing an unattended run needs
+   * to tell apart from one that ran because the tool was `safe`, and
+   * `reason` alone is prose. Absent on every other decision, including
+   * the one that created the grant — that one ran on a human's answer.
+   */
+  grant?: ToolGrant;
 }
 
 export interface PermissionPolicyOptions {
@@ -223,6 +266,35 @@ export interface PermissionPolicyOptions {
    * host with nowhere to keep a grant.
    */
   origins?: OriginScopeOptions;
+  /**
+   * The standing-grant engine, for a gated tool that names no scope at
+   * all (no `commandFor`, `destinationFor`, or `originFor`). Omitted, an
+   * "always" on such a tool still holds for this process, per agent — the
+   * same bargain a policy with no whitelist store makes — and nothing
+   * survives a restart, which is what a host with nowhere to keep a grant
+   * is honestly offering.
+   */
+  grants?: ToolGrantOptions;
+}
+
+export interface ToolGrantOptions {
+  /** Where "always allow" persists a tool grant, and where one is read back. */
+  store?: ToolGrantStore;
+  /**
+   * Which plugin package contributes a tool right now, or undefined for
+   * a kernel tool. Recorded on the grant when it is made and compared
+   * when it is used, so a grant follows the tool the operator was shown
+   * and not a later tool of the same name (`grants.ts` says why). Omitted,
+   * every tool reads as the kernel's, which matches every grant recorded
+   * the same way — the honest answer for a host with no plugin loader.
+   */
+  contributorOf?: (toolName: string) => string | undefined;
+  /**
+   * Called when a grant is persisted, for the same reason the scope
+   * engines report theirs: this is the decision that widens what runs
+   * unattended for every future session.
+   */
+  onGranted?: (event: { agentId: string; grant: ToolGrant }) => void;
 }
 
 export interface DestinationScopeOptions {
@@ -322,6 +394,13 @@ const untilAborted = async <T>(
  * answer useless on the next one, and remembering it fleet-wide would make
  * one impatient yes permanent.
  *
+ * Since standing grants landed this tier serves one shape only: a tool
+ * judged by destination (`message.send`) answered outside a schedule. A
+ * durable tool grant there would be a standing yes to every destination,
+ * and no per-destination grant exists yet, so the session is the widest
+ * honest lifetime. Every other unscoped gated tool goes to the standing
+ * grant below.
+ *
  * Joined on an escaped NUL rather than a space or a colon, because both of
  * those occur in real ids — a channel session id is
  * `slack:ava:T01ABCDEF:C07GHIJKL:…` — and a separator that can appear in
@@ -405,7 +484,7 @@ const awaitPrompt = async (
    * create is the same defect as hiding one it will.
    */
   alwaysMeans: string,
-): Promise<ApprovalAnswer | typeof ABORTED> => {
+): Promise<ApprovalOutcome | typeof ABORTED> => {
   const { call, risk, session } = context;
   // The command, when there is one: for a shell call the tool name is the
   // least interesting half of the question, and an approver shown only
@@ -440,9 +519,9 @@ const awaitPrompt = async (
 
   const answer = response.trim().toLowerCase();
   if (!YES.has(answer)) {
-    return 'deny';
+    return { answer: 'deny' };
   }
-  return ALWAYS.has(answer) ? 'always' : 'once';
+  return { answer: ALWAYS.has(answer) ? 'always' : 'once' };
 };
 
 /**
@@ -461,7 +540,8 @@ const awaitRemote = async (
   request: ApprovalRequester,
   origin: string | undefined,
   oneShot: boolean,
-): Promise<ApprovalAnswer | typeof ABORTED> => {
+  always: AlwaysMeans | undefined,
+): Promise<ApprovalOutcome | typeof ABORTED> => {
   const pending = request({
     session: context.session,
     call: context.call,
@@ -469,11 +549,12 @@ const awaitRemote = async (
     risk: context.risk,
     ...(origin !== undefined ? { origin } : {}),
     ...(oneShot ? { oneShot } : {}),
+    ...(always !== undefined ? { always } : {}),
     ...(context.parkedAt ? { parkedAt: context.parkedAt } : {}),
     ...(context.signal ? { signal: context.signal } : {}),
   }).then(
-    (answer) => answer,
-    () => 'deny' as const,
+    (outcome): ApprovalOutcome => (typeof outcome === 'string' ? { answer: outcome } : outcome),
+    (): ApprovalOutcome => ({ answer: 'deny' }),
   );
 
   return untilAborted(pending, context.signal);
@@ -495,9 +576,16 @@ const awaitRemote = async (
  * same two grant tiers over a different vocabulary — the site the page is
  * on, rather than the command the call would run. It has no third tier,
  * because there is no origin that is safe to click on out of the box.
+ *
+ * A gated tool that names no scope at all resolves through a *standing
+ * grant*: the tool itself, per agent, durable until revoked, over the same
+ * two tiers again (this process, then the file). It is what "always allow"
+ * creates for such a tool on every surface, so one word has one lifetime —
+ * and it is the only path a scope-less gated tool has to running in
+ * `headless`, which is the mode every installed service runs in.
  */
 export const createPermissionPolicy = (options: PermissionPolicyOptions): ApprovalPolicy => {
-  const { mode, ask, request, onDecision, commands, destinations, origins } = options;
+  const { mode, ask, request, onDecision, commands, destinations, origins, grants } = options;
   if (mode === 'interactive' && !ask) {
     throw new Error('interactive permission mode needs an `ask` function to reach a human.');
   }
@@ -510,12 +598,21 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
 
   const alwaysAllowed = new Set<string>();
   // Tier one of the three: scopes granted with "always" during this
-  // process's life. It is not merely a cache of the file — a policy built
-  // with no whitelist store still has to remember an answer for the rest of
-  // the session, which is what `always` means at a terminal.
+  // process's life, for a policy that has nowhere else to put them. A
+  // policy built with no whitelist store still has to remember an answer
+  // for the rest of the session, which is what `always` means at a
+  // terminal; so does one whose store refused the write. A grant the store
+  // *took* is not kept here as well: the store is then the one place a
+  // grant lives, so revoking it there is the next call's answer, rather
+  // than a promise the daemon keeps only until its next restart.
   const sessionScopes = new Map<string, CommandScope[]>();
   /** The same tier for origins, and for the same reason. */
   const sessionOrigins = new Map<string, OriginScope[]>();
+  /** And for standing tool grants. */
+  const processGrants = new Map<string, ToolGrant[]>();
+  const rememberForProcess = <T>(tier: Map<string, T[]>, agentId: string, grant: T): void => {
+    tier.set(agentId, [...(tier.get(agentId) ?? []), grant]);
+  };
 
   const report = (
     context: ApprovalContext,
@@ -524,6 +621,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     command?: string,
     destination?: string,
     origin?: string,
+    grant?: ToolGrant,
   ): boolean => {
     onDecision?.({
       allowed,
@@ -536,6 +634,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       ...(command === undefined ? {} : { command }),
       ...(destination === undefined ? {} : { destination }),
       ...(origin === undefined ? {} : { origin }),
+      ...(grant === undefined ? {} : { grant }),
     });
     return allowed;
   };
@@ -582,6 +681,16 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // with neither scope consulted. A tool that asked to be judged by a
       // scope does not get to be judged by nothing instead.
       const multiplyScoped = scopeHooks > 1;
+      // No scope hook at all: the tool's risk lives in its identity, which
+      // is the one shape a grant on the whole tool is honest for. This is
+      // what makes the `commandFor` / `originFor` exclusion structural —
+      // a tool that offers a scope is never `unscoped`, so it can never
+      // reach the standing grant below, whatever a refactor does to the
+      // order of the checks after this line.
+      const unscoped = scopeHooks === 0;
+      // Who contributes this tool right now, for matching a grant and for
+      // recording one. Resolved once so both halves see the same answer.
+      const contributor = grants?.contributorOf?.(call.toolName);
 
       const command = risk === 'gated' && singlyScoped
         ? context.tool.commandFor?.(call.input)
@@ -655,6 +764,26 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               command,
             );
           }
+        }
+      } else if (risk === 'gated' && unscoped) {
+        // The standing grant: this process's answers first, then the file.
+        // Read per call, never cached here, so a revocation through the
+        // store is the next call's answer — the reason a revoke needs no
+        // restart.
+        const standing = findMatchingToolGrant(call.toolName, contributor, [
+          ...(processGrants.get(session.agent.id) ?? []),
+          ...(grants?.store ? await grants.store.toolGrantsFor(session.agent.id) : []),
+        ]);
+        if (standing) {
+          return report(
+            context,
+            true,
+            `${call.toolName} ran under a standing grant for ${session.agent.id}`,
+            undefined,
+            undefined,
+            undefined,
+            standing,
+          );
         }
       } else if (risk !== 'dangerous'
         && !scopedByOrigin
@@ -747,6 +876,18 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         || multiplyScoped
         || (scopedByOrigin && origin === undefined)
         || (analysis !== undefined && commandScope === undefined);
+      // Which kind of grant `always` creates, as data for the transport and
+      // as words for the prompt — the same decision, made once, so the two
+      // surfaces cannot promise different lifetimes for the same answer.
+      const always: AlwaysMeans | undefined = oneShot
+        ? undefined
+        : command !== undefined
+          ? 'scope'
+          : scopedByOrigin
+            ? 'origin'
+            : unscoped
+              ? 'tool'
+              : 'session';
       const alwaysMeans = oneShot
         ? risk === 'dangerous'
           ? 'not remembered — a dangerous tool asks every time'
@@ -755,18 +896,21 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             : analysis !== undefined
               ? 'not remembered — this command cannot be reduced to a scope'
               : 'not remembered — there is no page to grant'
-        : command !== undefined
+        : always === 'scope'
           ? 'always this scope'
-          : scopedByOrigin
+          : always === 'origin'
             ? 'always this site'
-            : 'always this session';
-      const answer = mode === 'remote'
-        ? await awaitRemote(context, request!, origin, oneShot)
+            : always === 'tool'
+              ? `always for ${session.agent.name}, until revoked`
+              : 'always this session';
+      const outcome = mode === 'remote'
+        ? await awaitRemote(context, request!, origin, oneShot, always)
         : await awaitPrompt(context, ask!, command, origin, alwaysMeans);
 
-      if (answer === ABORTED) {
+      if (outcome === ABORTED) {
         return report(context, false, `${call.toolName} was cancelled while awaiting approval`);
       }
+      const { answer, actor } = outcome;
 
       if (answer === 'deny') {
         return report(
@@ -839,7 +983,6 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               `${call.toolName} was approved once; there is no page origin to remember, so it will ask again`,
             );
           }
-          sessionOrigins.set(session.agent.id, [...(sessionOrigins.get(session.agent.id) ?? []), originScope]);
           if (origins?.whitelist) {
             try {
               await origins.whitelist.rememberOrigin(session.agent.id, originScope);
@@ -850,11 +993,14 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               // Same bargain the command half makes: the answer holds for
               // this process, and the file that would carry it past a
               // restart is not written over grants nobody can read.
+              rememberForProcess(sessionOrigins, session.agent.id, originScope);
               return allowUnlessMoved(
                 `${call.toolName} was approved, and ${describeOriginScope(originScope)} is acted on without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
               );
             }
             origins.onScopeRemembered?.({ agentId: session.agent.id, scope: originScope });
+          } else {
+            rememberForProcess(sessionOrigins, session.agent.id, originScope);
           }
           return allowUnlessMoved(
             `${call.toolName} was approved, and ${describeOriginScope(originScope)} is now acted on without asking`,
@@ -877,7 +1023,6 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           // the bare executable (a shell). `git push origin main` persists
           // `git push` minus its destructive forms, so `git push --force`
           // asks again.
-          sessionScopes.set(session.agent.id, [...(sessionScopes.get(session.agent.id) ?? []), scope]);
           if (commands?.whitelist) {
             try {
               await commands.whitelist.remember(session.agent.id, scope);
@@ -890,12 +1035,15 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               // "always" means without a file — and the file that would
               // carry it past a restart is not written over grants nobody
               // can read. The line says both.
+              rememberForProcess(sessionScopes, session.agent.id, scope);
               return allowUnlessMoved(
                 `${call.toolName} was approved, and "${describeCommandScope(scope)}" runs without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
                 command,
               );
             }
             commands.onScopeRemembered?.({ agentId: session.agent.id, scope });
+          } else {
+            rememberForProcess(sessionScopes, session.agent.id, scope);
           }
           return allowUnlessMoved(
             `${call.toolName} was approved, and "${describeCommandScope(scope)}" now runs without asking`,
@@ -921,6 +1069,41 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           // nobody would choose deliberately.
           return allowUnlessMoved(
             `${call.toolName} was approved once; it names more than one kind of scope, so it will ask again`,
+          );
+        }
+        if (unscoped) {
+          // The standing grant. Recorded with the tool's contributor and
+          // with who answered, because both are unanswerable afterwards from
+          // anything else: a listing has to say which package's `web.fetch`
+          // was granted, and by whom. Kept for this process whatever the
+          // store does, which is what "always" means without a file.
+          const grant: ToolGrant = {
+            tool: call.toolName,
+            ...(contributor !== undefined ? { package: contributor } : {}),
+            grantedAt: new Date().toISOString(),
+            ...(actor !== undefined ? { grantedBy: actor } : {}),
+          };
+          if (grants?.store) {
+            try {
+              await grants.store.rememberTool(session.agent.id, grant);
+            } catch (error) {
+              if (!(error instanceof WhitelistUnreadableError)) {
+                throw error;
+              }
+              // The same bargain as the two scope kinds: the answer holds
+              // for this process, and the file is not written over grants
+              // nobody can read.
+              rememberForProcess(processGrants, session.agent.id, grant);
+              return allowUnlessMoved(
+                `${call.toolName} was approved, and runs without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
+              );
+            }
+            grants.onGranted?.({ agentId: session.agent.id, grant });
+          } else {
+            rememberForProcess(processGrants, session.agent.id, grant);
+          }
+          return allowUnlessMoved(
+            `${call.toolName} was approved, and ${describeToolGrant(grant)} now runs without asking for ${session.agent.id} until revoked`,
           );
         }
         alwaysAllowed.add(sessionKey(session.id, call.toolName));

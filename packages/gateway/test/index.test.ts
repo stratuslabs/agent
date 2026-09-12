@@ -8,6 +8,7 @@ import {
   PENDING_APPROVAL_METADATA_KEY,
   RunAbortedError,
   type ApprovalAnswer,
+  type ApprovalOutcome,
   type StratusEvent,
 } from '@stratusagent/core';
 import {
@@ -187,6 +188,80 @@ test('a session\'s routing reports when its agent last spoke, not when the row l
   }
 });
 
+test('observe puts a message into a session with no turn, on the session\'s chain, and refuses what dispatch refuses', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  const events: StratusEvent[] = [];
+  gateway.bus.subscribe((event) => {
+    events.push(event);
+  });
+  try {
+    const first = await gateway.dispatch({ sessionId: 'thread-o', userMessage: 'Dylan: Ava, hello' });
+    const spoke = (await gateway.sessionRouting('thread-o'))?.lastSpokeAt;
+    assert.ok(spoke);
+    const updatedBefore = events.filter((event) => event.type === 'session.updated').length;
+
+    const observed = await gateway.observe({ sessionId: 'thread-o', message: 'Dylan: Bea, what do you think?' });
+    assert.ok(observed, 'the agent is in this conversation');
+
+    // Appended and durable, and no turn ran: same status the last turn
+    // left, its own event and not a `session.updated`, and the agent has
+    // not spoken since — an adapter ordering agents by who spoke last
+    // must not see an overhear as speaking.
+    assert.equal(observed.messages.length, first.messages.length + 1);
+    assert.equal(observed.status, first.status);
+    const stored = await gateway.store.get('thread-o');
+    assert.equal(stored?.messages.at(-1)?.overheard, true);
+    assert.equal(stored?.messages.at(-1)?.content, 'Dylan: Bea, what do you think?');
+    assert.equal(events.filter((event) => event.type === 'session.updated').length, updatedBefore);
+    assert.deepEqual(
+      events.filter((event) => event.type === 'session.observed'),
+      [{ type: 'session.observed', sessionId: 'thread-o', agentId: first.agent.id }],
+    );
+    assert.equal((await gateway.sessionRouting('thread-o'))?.lastSpokeAt, spoke);
+
+    // The next turn carries it, ahead of the message that started the turn.
+    const next = await gateway.dispatch({ sessionId: 'thread-o', userMessage: 'Dylan: Ava, and you?' });
+    const users = next.messages.filter((message) => message.role === 'user').map((message) => [message.content, message.overheard === true]);
+    assert.deepEqual(users, [
+      ['Dylan: Ava, hello', false],
+      ['Dylan: Bea, what do you think?', true],
+      ['Dylan: Ava, and you?', false],
+    ]);
+
+    // An agent hears only conversations it is already in: nothing is
+    // created on its behalf, and "not in that one" is an answer rather
+    // than a refusal — a channel asks this for every thread its app can
+    // see.
+    assert.equal(await gateway.observe({ sessionId: 'never-seen', message: 'anyone?' }), undefined);
+    assert.equal(await gateway.store.get('never-seen'), undefined);
+
+    // Read on the chain, behind a dispatch queued ahead of it: the
+    // invitation that creates the session has landed by the time the
+    // observe looks, so a message said moments after a first mention is
+    // heard rather than dropped. Neither call is awaited before the other
+    // is placed — that is the shape a channel produces.
+    const invitation = gateway.dispatch({ sessionId: 'thread-fresh', userMessage: 'Dylan: Ava, hello' });
+    const heard = gateway.observe({ sessionId: 'thread-fresh', message: 'Dylan: Bea, and you?' });
+    await invitation;
+    assert.equal((await heard)?.messages.at(-1)?.overheard, true);
+    // Sessions never cross agent identities, by the same door dispatch uses.
+    await assert.rejects(
+      () => gateway.observe({ sessionId: 'thread-o', agentId: 'somebody-else', message: 'hm' }),
+      /belongs to agent .* not somebody-else/,
+    );
+    // And the scheduler's namespace is as closed to an overhear as to a turn.
+    await assert.rejects(
+      () => gateway.observe({ sessionId: 'schedule:x:y', message: 'psst' }),
+      /reserved for scheduled firings/,
+    );
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('sqlite sessions round-trip metadata (anthropic raw-turn cache included)', async () => {
   const home = await newHome();
   const store = new SqliteSessionStore(path.join(home, 'sessions.db'));
@@ -351,6 +426,44 @@ test('a rotated credential reaches the provider on the next dispatch', async () 
   await gateway.stop();
 
   assert.deepEqual(authHeaders, ['Bearer sk-before', 'Bearer sk-after']);
+});
+
+test('an agent that cannot currently answer still hears, and has it once it can', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const userContents: string[][] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+    userContents.push(body.messages.filter((message) => message.role === 'user').map((message) => message.content));
+    return openAiText('ok');
+  }) as typeof fetch;
+  const processEnv: NodeJS.ProcessEnv = { OPENAI_API_KEY: 'sk-test' };
+  const gateway = createGateway({ env: { homeDir: home, cwd: home, processEnv, fetch: fetchImpl }, idleTimeoutMs: 0 });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'quiet-1', agentId: 'ava', userMessage: 'Dylan: Ava, hello' });
+
+    // The credential goes away — a sign-in that lapsed, a restart without
+    // the env. A turn cannot be run, and says so.
+    delete processEnv.OPENAI_API_KEY;
+    await assert.rejects(() => gateway.dispatch({ sessionId: 'quiet-1', agentId: 'ava', userMessage: 'Dylan: Ava?' }));
+
+    // Hearing runs no turn and needs no provider: the thread carries on
+    // without the agent, and what was said is not lost to the outage.
+    const heard = await gateway.observe({ sessionId: 'quiet-1', agentId: 'ava', message: 'Dylan: Bea, cover for her?' });
+    assert.equal(heard?.messages.at(-1)?.overheard, true);
+
+    // Repaired, the next turn reads what was heard while it was down.
+    processEnv.OPENAI_API_KEY = 'sk-test';
+    await gateway.dispatch({ sessionId: 'quiet-1', agentId: 'ava', userMessage: 'Dylan: Ava, back?' });
+    assert.deepEqual(userContents.at(-1), [
+      'Dylan: Ava, hello',
+      '(overheard, not addressed to you)\n> Dylan: Bea, cover for her?',
+      'Dylan: Ava, back?',
+    ]);
+  } finally {
+    await gateway.stop();
+  }
 });
 
 test('a session never crosses agent identities', async () => {
@@ -716,7 +829,7 @@ test('a start that fails after a channel parked an approval denies it before tha
   try {
     await assert.rejects(gateway.start(), /port could not start/);
     assert.ok(parked, 'the early channel parked a request');
-    assert.equal(await settles(parked as Promise<string>, 'the parked request'), 'deny');
+    assert.equal((await settles(parked as Promise<{ answer: string }>, 'the parked request')).answer, 'deny');
     assert.deepEqual(order, ['resolved:cancelled', 'early stopped']);
   } finally {
     await gateway.stop();
@@ -2010,7 +2123,7 @@ test('a parked call is announced, and the answer resumes it', async () => {
   assert.ok(Date.parse(request.expiresAt) > 0);
 
   assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'always', actor: 'U9' }), true);
-  assert.equal(await settles(answer, 'the parked call'), 'always');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'always');
 
   const resolved = events.find((event) => event.type === 'tool.approval-resolved');
   assert.deepEqual(
@@ -2034,7 +2147,7 @@ test('a request nobody answers expires into a denial', async () => {
   const { gateway, transport } = await brokerHarness({ approvalTimeoutMs: 1 });
 
   const resolved = nextEvent(gateway.bus, 'tool.approval-resolved');
-  assert.equal(await settles(transport.request(parkedCall('sess-timeout')), 'the expiring request'), 'deny');
+  assert.equal((await settles(transport.request(parkedCall('sess-timeout')), 'the expiring request')).answer, 'deny');
   const event = await settles(resolved, 'the resolution event');
   assert.equal(event.reason, 'timeout');
   assert.equal(event.answer, 'deny');
@@ -2053,7 +2166,7 @@ test('aborting a turn invalidates its pending approval, and a later click is ref
   const request = await settles(requested, 'the approval request');
 
   controller.abort();
-  assert.equal(await settles(answer, 'the cancelled request'), 'deny');
+  assert.equal((await settles(answer, 'the cancelled request')).answer, 'deny');
   assert.equal((await settles(resolved, 'the resolution event')).reason, 'cancelled');
 
   // The acceptance criterion this exists for: an Allow arriving after the
@@ -2069,7 +2182,7 @@ test('a turn already aborted never parks at all', async () => {
   controller.abort();
 
   assert.equal(
-    await settles(transport.request(parkedCall('sess-pre-abort', controller.signal)), 'the request'),
+    (await settles(transport.request(parkedCall('sess-pre-abort', controller.signal)), 'the request')).answer,
     'deny',
   );
   // It still settles publicly: a denial that appears nowhere is exactly
@@ -2093,7 +2206,7 @@ test('shutting down denies what is parked instead of waiting it out', async () =
 
   await settles(gateway.stop(), 'the shutdown drain');
 
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
   assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'once' }), false);
 });
 
@@ -2136,7 +2249,7 @@ test('a resolution emitted at shutdown reaches channels before they stop', async
   await settles(requested, 'the approval request');
 
   await settles(gateway.stop(), 'the shutdown drain');
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
   assert.equal(sawResolutionBeforeStop, true, 'the channel stopped before its retraction arrived');
 });
 
@@ -2147,7 +2260,7 @@ test('a call that reaches approval during shutdown is refused, not parked', asyn
   // the same response. Parking it deadlocks the drain against a question
   // nobody is left to answer. A channel's stop() runs at exactly that
   // point in the sequence, which makes it the honest place to fire one.
-  let late: Promise<ApprovalAnswer> | undefined;
+  let late: Promise<ApprovalOutcome> | undefined;
   const channel: GatewayChannelAdapter = {
     name: 'fake',
     async start() {},
@@ -2164,7 +2277,7 @@ test('a call that reaches approval during shutdown is refused, not parked', asyn
 
   await settles(gateway.stop(), 'the shutdown drain');
   assert.ok(late, 'the channel fired a late request');
-  assert.equal(await settles(late, 'the late request'), 'deny');
+  assert.equal((await settles(late, 'the late request')).answer, 'deny');
 });
 
 test('an approval timeout past the timer range is clamped, not silently instant', async () => {
@@ -2203,7 +2316,7 @@ test('an approval timeout past the timer range is clamped, not silently instant'
     true,
     'the request had already expired, so the timeout overflowed to ~1ms',
   );
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
   await gateway.stop();
 });
 
@@ -2238,7 +2351,7 @@ test('a resolution a channel could not deliver is not filed as a human decision'
     gateway.resolveApproval({ requestId: request.requestId, answer: 'deny', reason: 'undeliverable' }),
     true,
   );
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
 
   const resolved = events.find((event) => event.type === 'tool.approval-resolved');
   assert.equal(resolved?.reason, 'undeliverable');
@@ -2281,7 +2394,7 @@ test('a resolution never reaches a subscriber before the request it answers', as
   assert.deepEqual(seen, [], 'nothing reached the channel while the announcement was held');
 
   releaseAnnouncement?.();
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
   await settles(gateway.stop(), 'the shutdown drain');
 
   assert.deepEqual(seen, ['tool.approval-requested', 'tool.approval-resolved']);
@@ -2580,7 +2693,7 @@ test('a re-asked request keeps the window it started with, not a fresh one', asy
   assert.ok(remainingMs <= 1_500, `expected about a second left, got ${remainingMs}ms`);
 
   gateway.resolveApproval({ requestId: request.requestId, answer: 'deny' });
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
   await gateway.stop();
 });
 
@@ -2588,13 +2701,13 @@ test('a request whose window is already spent is denied without being announced'
   const { gateway, transport, events } = await brokerHarness({ approvalTimeoutMs: 60_000 });
 
   assert.equal(
-    await settles(
+    (await settles(
       transport.request({
         ...parkedCall('sess-spent'),
         parkedAt: new Date(Date.now() - 3_600_000).toISOString(),
       }),
       'the spent request',
-    ),
+    )).answer,
     'deny',
   );
   // Never asked: announcing a request that is already over would post
@@ -3323,7 +3436,7 @@ test('pending approvals are listable, and the listing agrees with the announceme
   assert.ok(only?.parkedAt && Date.parse(only.parkedAt) > 0);
 
   assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'once' }), true);
-  assert.equal(await settles(answer, 'the parked call'), 'once');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'once');
 
   // Settled requests leave the list, so a panel rendered from it retracts
   // buttons instead of showing a decision that was already made.
@@ -4016,7 +4129,7 @@ test('a recovered firing retires only its own one-shot row, and does so even whe
     approvalTimeoutMs: 0,
     approvals: (transport) => ({
       approve: async ({ session, call, risk }) => (session.id === parkedFiring
-        ? (await transport.request({ session, call, risk })) !== 'deny'
+        ? (await transport.request({ session, call, risk })).answer !== 'deny'
         : true),
     }),
   });
@@ -4092,4 +4205,20 @@ test('GATEWAY_ONLY_TOOL_NAMES is exactly what a gateway adds over a plain host',
   } finally {
     await gateway.stop();
   }
+});
+
+test('a dispatch carrying images stores them on the turn it opens and on the turn it resumes', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  const shot = { mediaType: 'image/png' as const, data: 'iVBORw0KGgo=', name: 'shot.png' };
+  const opened = await gateway.dispatch({ sessionId: 'images-1', userMessage: 'what is this?', images: [shot] });
+  const resumed = await gateway.dispatch({ sessionId: 'images-1', userMessage: 'and this?', images: [{ ...shot, name: 'other.png' }] });
+  await gateway.stop();
+
+  assert.deepEqual(opened.messages[0]?.images, [shot]);
+  const asked = resumed.messages.filter((message) => message.role === 'user');
+  assert.deepEqual(asked.map((message) => message.images?.[0]?.name), ['shot.png', 'other.png']);
 });

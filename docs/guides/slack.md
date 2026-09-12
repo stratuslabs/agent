@@ -43,13 +43,15 @@ message nobody addressed to it is not its business.
 
 Threads with more than one agent follow the rule people already use: an
 untagged reply goes to **whoever spoke last**, and mentioning another agent
-moves the conversation to them. It is still a rule and not judgement, so in
-a thread where people are mostly talking to each other the agent will answer
-replies that were not meant for it — give the side conversation its own
-thread. Each agent keeps its own session, so one
-tagged in halfway through knows only what it is told from there — say what
-it needs in the message that brings it in. The full set of rules, and the
-two edges around them, is [Who a message is
+moves the conversation to them. The agent that stood down keeps
+listening: what you say to its colleague in that thread goes into its own
+session, marked as said to somebody else, so when you turn back to it, it
+answers as someone who followed along. It is still a rule and not
+judgement, so in a thread where people are mostly talking to each other the
+agent will answer replies that were not meant for it — give the side
+conversation its own thread. And an agent hears a thread from the mention
+that brought it in, not before — say what it needs in that message. The full
+set of rules, and the two edges around them, is [Who a message is
 for](../../packages/channel-slack/README.md#who-a-message-is-for).
 
 An app installed before this shipped needs the `channels:history` /
@@ -57,6 +59,37 @@ An app installed before this shipped needs the `channels:history` /
 once (the manifest `stratus setup` prints already has them) — until then it
 answers mentions and DMs and nothing else, which is also how you keep an
 agent mention-only on purpose.
+
+## Sending an image
+
+Attach a screenshot — a PNG, JPEG, GIF, or WebP — to a message, or drop one
+into the thread on its own, and the agent is shown it. That takes the
+`files:read` scope, which the manifest `stratus setup` prints includes; an
+app installed before it needs the scope added under **OAuth & Permissions**
+and a reinstall, and until then `stratus serve` warns, naming the scope,
+whenever an image arrives. Anything that is not an image the model can
+take — a log, a PDF, an image over 5 MB or 8000 pixels a side, or one that
+would take a single message's images past 20 MB together — reaches the agent by name, told
+that it cannot be opened, so it answers honestly rather than as if it had
+read the file.
+
+Which runtimes can actually look: agents on the **Anthropic API** or an
+**OpenAI-compatible** provider receive the image itself. The **Claude Code**
+and **Codex** harnesses take a text prompt, so an agent on either is told an
+image was attached, and what it was called, and that it cannot see it. An
+OpenAI-compatible model that takes only text — most local runtimes — needs
+`"vision": false` in [config](../reference/config.md), which gives it that
+same note; without it the endpoint rejects the request, and keeps rejecting
+every later turn of that session, because the image is stored with the
+message. The image is stored with the message in the session, so a later
+turn in the same thread still has it — up to 20 MB and 20 images across the
+thread, newest first, and fewer when the rest of the conversation — tool
+results, a long transcript — needs the room in the same request. Past
+either, the oldest images are let go of: the model is told one was there,
+and what it was called, and the session keeps that note in place of the
+pixels. The same happens to an image the model
+API refuses outright: it is dropped from the session and the turn retried
+without it, so one bad file cannot fail a thread from then on.
 
 ## Worth knowing
 

@@ -6,7 +6,16 @@ settings:
 
 importers:
 
-  .: {}
+  .:
+    devDependencies:
+      stratus-plugin-aliased:
+        specifier: workspace:stratus-plugin-fixture@*
+        version: link:fixtures/stratus-plugin-fixture
+      stratus-plugin-fixture:
+        specifier: workspace:*
+        version: link:fixtures/stratus-plugin-fixture
+
+  fixtures/stratus-plugin-fixture: {}
 
   packages/agents:
     dependencies:
@@ -101,6 +110,9 @@ importers:
       '@stratusagent/dashboard':
         specifier: workspace:*
         version: link:../dashboard
+      '@stratusagent/plugin-mcp':
+        specifier: workspace:*
+        version: link:../plugin-mcp
       '@stratusagent/tool-browser':
         specifier: workspace:*
         version: link:../tool-browser
@@ -131,6 +143,9 @@ importers:
       '@stratusagent/gateway':
         specifier: workspace:*
         version: link:../gateway
+      '@stratusagent/permissions':
+        specifier: workspace:*
+        version: link:../permissions
       '@stratusagent/provider-anthropic':
         specifier: workspace:*
         version: link:../provider-anthropic

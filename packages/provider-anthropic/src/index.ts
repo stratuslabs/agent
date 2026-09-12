@@ -8,7 +8,12 @@ import type {
   Tool as AnthropicTool,
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
+  droppedImageNote,
+  imagesWithinReplayBudget,
+  omitImage,
   renderSystemPromptParts,
+  type ImageAttachment,
+  type ImageReplayBudget,
   type JsonObject,
   type ModelProvider,
   type ProviderCallUsage,
@@ -16,12 +21,25 @@ import {
   type Session,
   type ToolCall,
   type ToolDescriptor,
+  promptTextOf,
 } from '@stratusagent/core';
 
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5';
 const DEFAULT_MAX_TOKENS = 4096;
 // Session metadata key holding raw assistant turns, keyed by tool_use id.
 export const RAW_TURNS_METADATA_KEY = 'anthropicRawTurns';
+
+/**
+ * The Messages API refuses a request body over 32 MiB. The image budget in
+ * core is a share of that, not the whole of it: the transcript, tool
+ * results, and tool schemas travel in the same body, and a session that
+ * has accumulated a few MiB of those alongside a full image window would
+ * be refused — without naming an image, so nothing would give way and the
+ * same request would fail on every later turn. Stopping short of the
+ * limit leaves room for what the measurement below cannot see: headers
+ * and the SDK's own framing.
+ */
+export const DEFAULT_REQUEST_BODY_MAX_BYTES = 30 * 1024 * 1024;
 
 export interface AnthropicProviderConfig {
   /** Anthropic API key (pay per use). One of apiKey / authToken is required. */
@@ -44,6 +62,20 @@ export interface AnthropicProviderConfig {
    * thinking off (e.g. for older models or latency-sensitive runs).
    */
   thinking?: 'default' | 'disabled';
+  /**
+   * How much of the transcript's images one request may replay, newest
+   * first — decoded bytes and a count; older images past either are sent
+   * as a note. Each defaults to core's constant for the Messages API's
+   * limit. Lower one for a proxy with a smaller limit.
+   */
+  imageReplayBudget?: ImageReplayBudget;
+  /**
+   * The most bytes one request body may serialize to before the oldest
+   * replayed images give way to the rest of it. Defaults to
+   * `DEFAULT_REQUEST_BODY_MAX_BYTES`. Lower it for a proxy with a smaller
+   * limit.
+   */
+  requestBodyMaxBytes?: number;
   /**
    * Mark the stable head of each request cacheable — the tool definitions and
    * the persona/skills system block, which are byte-identical across every
@@ -204,6 +236,22 @@ const buildPrompt = (
 const rejectsSystemMessages = (error: unknown): boolean =>
   error instanceof Anthropic.BadRequestError && /role .?system.? is not supported/i.test(error.message);
 
+/**
+ * The image block a 400 names, when it names one. The API spells the
+ * offending block's address into the message —
+ * `messages.3.content.0.image.source.base64.data: Could not process image`
+ * — which is the one thing that lets a provider drop exactly that image
+ * and try again, rather than fail a turn that will fail the same way on
+ * every replay after it.
+ */
+const rejectedImageAddress = (error: unknown): { message: number; block: number } | undefined => {
+  if (!(error instanceof Anthropic.BadRequestError)) {
+    return undefined;
+  }
+  const match = /messages\.(\d+)\.content\.(\d+)\.image\b/.exec(error.message);
+  return match ? { message: Number(match[1]), block: Number(match[2]) } : undefined;
+};
+
 type RawTurns = Record<string, ContentBlock[]>;
 
 /**
@@ -240,6 +288,33 @@ const rawTurnsFrom = (session: ProviderRequest['session']): RawTurns => {
   return fresh;
 };
 
+/**
+ * A user turn's blocks: its images first, then the text. An image outside
+ * the replay budget becomes a note saying so. The API refuses an empty
+ * text block, and a message that is only an image has no text — so the
+ * text block is added only when there is text, and a message with neither
+ * still sends one so the turn is never an empty content array.
+ */
+const userBlocks = (
+  content: string,
+  images: readonly ImageAttachment[] | undefined,
+  replayed: ReadonlySet<ImageAttachment>,
+  imageOf: WeakMap<ContentBlockParam, ImageAttachment>,
+): ContentBlockParam[] => {
+  const blocks: ContentBlockParam[] = (images ?? []).map((image) => {
+    if (!replayed.has(image)) {
+      return { type: 'text', text: droppedImageNote(image) };
+    }
+    const block: ContentBlockParam = { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } };
+    imageOf.set(block, image);
+    return block;
+  });
+  if (content.length > 0 || blocks.length === 0) {
+    blocks.push({ type: 'text', text: content });
+  }
+  return blocks;
+};
+
 const reconstructAssistantBlocks = (
   content: string,
   toolCalls: ToolCall[],
@@ -264,7 +339,17 @@ const createAnthropicMessages = (
   request: ProviderRequest,
   mapping: ToolNameMapping,
   rawTurns: RawTurns,
-): MessageParam[] => {
+  imageReplayBudget: ImageReplayBudget | undefined,
+): {
+  messages: MessageParam[];
+  imageOf: WeakMap<ContentBlockParam, ImageAttachment>;
+  /** Every image block sent, oldest first, with where it sits so it can give way. */
+  imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }>;
+} => {
+  const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudget);
+  // Which session image each image block came from, so a rejection that
+  // names a block can be answered on the session.
+  const imageOf = new WeakMap<ContentBlockParam, ImageAttachment>();
   // Build (role, blocks) groups first, merging consecutive same-role turns:
   // the runner records text and each tool call as separate messages, but on
   // the wire they belong to one assistant turn followed by one user turn of
@@ -353,10 +438,26 @@ const createAnthropicMessages = (
       continue;
     }
 
-    push('user', [{ type: 'text', text: message.content }]);
+    // Framed by the kernel's one rule for it: an overheard message is
+    // rendered as something said to somebody else, on this path as on the
+    // harness ones. Consecutive user turns merge above, so a message
+    // overheard between turns and the one that followed it reach the API
+    // as one user turn of two blocks. Its images, if any, ride ahead of it.
+    push('user', userBlocks(promptTextOf(message), message.images, replayed, imageOf));
   }
 
-  return groups.map((group) => ({ role: group.role, content: group.blocks }));
+  const imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }> = [];
+  for (const group of groups) {
+    group.blocks.forEach((block, index) => {
+      const image = imageOf.get(block);
+      if (image !== undefined) {
+        imageBlocks.push({ holder: group.blocks, index, image });
+      }
+    });
+  }
+  // The content arrays are the groups' own, so a block swapped in a holder
+  // is swapped in the request.
+  return { messages: groups.map((group) => ({ role: group.role, content: group.blocks })), imageOf, imageBlocks };
 };
 
 const extractParts = (
@@ -459,6 +560,8 @@ export const createAnthropicProvider = ({
   thinking = 'default',
   promptCache = true,
   promptCacheTtl = '5m',
+  imageReplayBudget,
+  requestBodyMaxBytes = DEFAULT_REQUEST_BODY_MAX_BYTES,
   fetch: fetchImpl,
 }: AnthropicProviderConfig): ModelProvider => {
   if (!apiKey && !authToken) {
@@ -487,7 +590,7 @@ export const createAnthropicProvider = ({
       const descriptors = sortedToolDescriptors(request.tools);
       const mapping = createToolNameMapping(descriptors);
       const tools = createAnthropicTools(descriptors, mapping);
-      const messages = createAnthropicMessages(request, mapping, rawTurns);
+      const { messages, imageOf, imageBlocks } = createAnthropicMessages(request, mapping, rawTurns, imageReplayBudget);
       // A system message has to follow a user turn. The kernel loop only
       // calls a provider with a user message or tool results last, so this
       // holds — but it is the API's rule, not ours, and a caller building
@@ -520,6 +623,26 @@ export const createAnthropicProvider = ({
       // byte-identical. Everything else about the request is the same either
       // way, so the fallback below only has to rebuild this.
       let params = buildParams(memoryAtTailSupported && tailTakesSystem);
+      // The image window is a share of the request, not the request: what
+      // is left of the body has to fit alongside it. Measured on the
+      // serialized params, oldest image giving way first, until it does.
+      // The session is left alone — these images are still within what a
+      // session keeps, and the next turn measures again for itself.
+      for (const { holder, index, image } of imageBlocks) {
+        if (Buffer.byteLength(JSON.stringify(params)) <= requestBodyMaxBytes) {
+          break;
+        }
+        // Only a swap that shrinks the body: the note can outweigh a tiny
+        // image, and swapping then would move the wrong way and could leave
+        // the last swap landing above the cap. What is still over after
+        // every image that helps has given way is the transcript's own
+        // size, which no image can answer for.
+        const note: ContentBlockParam = { type: 'text', text: droppedImageNote(image) };
+        if (Buffer.byteLength(JSON.stringify(note)) >= Buffer.byteLength(JSON.stringify(holder[index]))) {
+          continue;
+        }
+        holder[index] = note;
+      }
       // The turn's abort signal cancels the underlying HTTP request — the
       // kernel contract is that aborting stops the work, not just the wait.
       const requestOptions = request.signal ? { signal: request.signal } : undefined;
@@ -597,21 +720,41 @@ export const createAnthropicProvider = ({
       };
 
       let response;
-      try {
-        response = await send(params);
-      } catch (error) {
-        // The one recoverable rejection: this model has no mid-conversation
-        // system message, so memory has to go back in the system block. Only
-        // when we actually sent one — any other 400 is the caller's.
-        //
-        // No reset delta first: the API rejects the request before generating,
-        // so nothing has streamed for a consumer to discard.
-        if (params.messages.at(-1)?.role !== 'system' || !rejectsSystemMessages(error)) {
-          throw error;
+      // Each pass through this loop removes one thing the API refused, so
+      // it ends: the system message once, and each image at most once.
+      for (;;) {
+        try {
+          response = await send(params);
+          break;
+        } catch (error) {
+          // No reset delta on either recovery: the API rejects the request
+          // before generating, so nothing has streamed for a consumer to
+          // discard.
+          //
+          // One recoverable rejection: this model has no mid-conversation
+          // system message, so memory has to go back in the system block.
+          // Only when we actually sent one — any other 400 is the caller's.
+          if (params.messages.at(-1)?.role === 'system' && rejectsSystemMessages(error)) {
+            memoryAtTailSupported = false;
+            params = buildParams(false);
+            continue;
+          }
+          // The other: an image the API could not process. The channel
+          // checked its header and trailer, but that is not a decode. The
+          // image is emptied on the session itself — it is stored already,
+          // and left alone it would fail every later turn the same way —
+          // and the turn goes on with a note in its place.
+          const address = rejectedImageAddress(error);
+          const content = address === undefined ? undefined : params.messages[address.message]?.content;
+          const block = Array.isArray(content) ? content[address!.block] : undefined;
+          const image = block === undefined ? undefined : imageOf.get(block as ContentBlockParam);
+          if (image === undefined || block === undefined) {
+            throw error;
+          }
+          omitImage(image);
+          (content as ContentBlockParam[])[address!.block] = { type: 'text', text: droppedImageNote(image) };
+          continue;
         }
-        memoryAtTailSupported = false;
-        params = buildParams(false);
-        response = await send(params);
       }
 
       // Reported through the sink BEFORE anything that can reject the

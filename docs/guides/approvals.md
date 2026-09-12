@@ -17,7 +17,9 @@ wanted what:
 
 That is the honest default (`headless`) behind a service manager. If
 somebody *is* reachable, `--approvals remote` asks them instead — see
-below.
+below. What somebody has already answered **Always allow** to still runs
+unattended: a command scope, a site, or a standing grant on the tool — see
+[Standing grants](#standing-grants).
 
 A tool that declares no risk counts as `gated`, never `safe` — forgetting
 to classify something should cost a prompt, not an unattended command. Most
@@ -158,20 +160,122 @@ warning naming the file.
   you it is no longer pending *and* rewrites the message so the next reader
   is not offered a decision nothing is waiting for. A prompt nobody clicks
   stays as it is.
-- **Always allow means different things, and which one you get depends on
-  the tool.** For an ordinary tool it lasts for the session: it stops that
-  tool asking again in the same conversation, and it is forgotten when the
-  daemon restarts. For a call judged by a *scope* it persists that scope
-  instead, in `~/.stratus/agents/<id>.whitelist.json`, and a saved one
-  survives a restart — a command scope for `shell.run` (see
+- **Always allow means one thing: granted to this agent, until you revoke
+  it.** What it grants depends on how the tool is judged, and the prompt
+  says which before you answer. A call judged by a *scope* persists that
+  scope — a command scope for `shell.run` (see
   [Shell commands](./shell.md)), an origin for `browser.act` (see
-  [Browser actions](./browser.md)). When that file exists and no longer
-  parses it is never written over, so the answer holds only until the
-  daemon stops; the log line says which happened, and the Slack message
-  cannot, because it is sent before the write is attempted. A scoped tool never gets the tool-wide
-  grant, whatever the answer: one yes to `git status` must not become a yes
-  to every command, and one yes to a page must not become a yes to every
-  page.
+  [Browser actions](./browser.md)). Every other gated tool gets a
+  **standing grant** on the tool itself — see
+  [Standing grants](#standing-grants). The one exception is a send outside
+  a schedule (`message.send`): a grant there would be a yes to every
+  destination, and no per-destination grant exists yet, so it lasts for
+  the session and the prompt says so. Everything else lives in
+  `~/.stratus/agents/<id>.whitelist.json` and survives a restart. When that
+  file exists and no longer parses it is never written over, so the answer
+  holds only until the daemon stops; the log line says which happened, and
+  the Slack message cannot, because it is sent before the write is
+  attempted. A scoped tool never gets the tool-wide grant, whatever the
+  answer: one yes to `git status` must not become a yes to every command,
+  and one yes to a page must not become a yes to every page.
+
+## Standing grants
+
+Most installed tools are `gated` and name no scope — `web.fetch`,
+`fs.write`, a bridged MCP tool — so **Always allow** on one grants the
+**tool** to that agent: it runs without asking from then on, in every
+session and after every restart, until an operator revokes it. That is the
+only path such a tool has to running unattended at all: a `gated` call in
+`headless` mode is otherwise refused, whatever was approved in the past.
+
+**Grants are the daemon's, and only the daemon's.** `stratus run` and
+`stratus chat` do not consult them and cannot create one: at your own
+terminal `--approvals ask` is a per-call y/N on the tool call itself, with
+no **Always allow** to answer, exactly as it was before grants existed —
+you are the gate there, so there is nothing to remember. The same has
+always been true of [command scopes](./shell.md) and
+[sites](./browser.md).
+
+The grant is written to the same file as the agent's command scopes and
+sites, under `tools`, with the package that contributed the tool, when it
+was granted, and who answered (a Slack user id, when a channel asked):
+
+```jsonc
+// ~/.stratus/agents/ava.whitelist.json
+{
+  "version": 1,
+  "scopes": [{ "command": "git", "args": ["push"], "denyRefspecForms": true }],
+  "origins": [{ "origin": "https://app.example.com" }],
+  "tools": [
+    { "tool": "web.fetch", "package": "@stratusagent/tool-web", "grantedAt": "2026-09-07T09:14:36.000Z", "grantedBy": "U01DYLAN" }
+  ]
+}
+```
+
+Three rules hold it in place, and they are the security argument rather
+than scoping choices:
+
+- **Per agent.** A grant Ava holds is not one Juno inherits — which is the
+  whole reason the roster has separate identities.
+- **Never for a tool judged by a scope, and never for `dangerous`.** A
+  shell tool's risk lives in its argument, so a standing yes to `shell.run`
+  would be a yes to every command; the engine resolves the command *first*,
+  so the tool grant can never apply to it, and the same holds for a tool
+  judged by site. A `dangerous` tool asks every time, whatever the answer.
+  A `tools` row written by hand for either kind is ignored.
+- **Scoped to the tool as it was when granted.** The grant records which
+  package contributed the tool, and stops applying when that changes: a
+  *different* package claiming a name you granted — one plugin swapped for
+  another, an MCP server's tool taken over — asks again, and the listing
+  marks the old grant stale. A kernel tool records no package and matches
+  only a kernel tool.
+
+  **What this does not catch is the same package upgraded in place.** The
+  name is unchanged, so the grant survives the new version, and a tool that
+  quietly does more after an update keeps running unattended. That is a
+  deliberate limit rather than an oversight: pinning a grant to a version
+  would revoke every grant on every routine upgrade, which teaches an
+  operator to re-approve without reading — the opposite of what a standing
+  grant is for. Tighter identity is worth arguing on its own terms, and
+  until it exists the remedy is `stratus grants revoke` after an upgrade
+  you have reason to distrust. Grant durable tools from packages you would
+  also let update themselves.
+
+### Seeing and revoking them
+
+```bash
+stratus grants ava                                    # everything ava may do unattended, all three kinds
+stratus grants revoke ava --tool web.fetch            # a standing grant
+stratus grants revoke ava --scope "git push"          # a command scope, by the line the listing shows
+stratus grants revoke ava --origin https://app.example.com
+```
+
+With a daemon serving, both go through its control API (`GET
+/agents/:id/grants` and `POST /agents/:id/grants/revoke` — see the
+[control API README](../../packages/control-api/README.md)), and a revoke
+takes effect on the very next call, with no restart. The daemon caches
+each agent's file, so editing it behind a running daemon changes nothing
+until that daemon restarts; the command falls back to the file, and says
+so, only when the daemon `~/.stratus/gateway.json` names does not answer.
+With no daemon at all, the file is edited directly.
+
+A grant can outlive its agent: delete a soul and its `.whitelist.json`
+stays, and an agent created later under the same id inherits it.
+`stratus grants <id>` shows it whether or not a soul exists, so revoke the
+rows or remove the file when you retire an id. Grants do not expire on
+their own.
+
+### What the log records about a grant
+
+A call that ran under a standing grant is logged as such — the tool, when
+the grant was made and by whom, never the call's input — so a run that
+happened unattended can be told apart from one that ran because the tool
+was `safe`:
+
+```text
+09:14:36  —  ava: web.fetch now runs without asking, until revoked (granted by U01DYLAN)
+03:00:02  —  ava: web.fetch ran under a standing grant (web.fetch (@stratusagent/tool-web), granted 2026-09-07T09:14:36.000Z by U01DYLAN) (session schedule:…)
+```
 
 ## What the request shows, and how it ends
 

@@ -42,6 +42,7 @@
     "@stratusagent/channel-slack": "workspace:*",
     "@stratusagent/control-api": "workspace:*",
     "@stratusagent/dashboard": "workspace:*",
+    "@stratusagent/plugin-mcp": "workspace:*",
     "@stratusagent/tool-browser": "workspace:*",
     "@stratusagent/tool-fs": "workspace:*",
     "@stratusagent/tool-shell": "workspace:*",

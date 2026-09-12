@@ -23,7 +23,7 @@ lives.
 
 ```bash
 npm install -g @stratusagent/cli
-stratus setup     # sign in, create your first agent, connect Slack — one menu
+stratus setup     # sign in, create an agent, give it tools, connect Slack — one menu
 stratus chat      # talk; the conversation persists
 ```
 
@@ -36,13 +36,14 @@ line, 23.4+) — details in [Installation](docs/start/installation.md).
 | | Capability | |
 | --- | --- | --- |
 | 🕐 | **Always on** — the whole roster as a daemon that survives reboots, with durable sessions | [Always on](docs/guides/always-on.md) |
-| 💬 | **Live in Slack** — each agent its own app: avatar, presence, DMs, threads it keeps following without being re-tagged, streaming replies | [Slack](docs/guides/slack.md) |
+| 💬 | **Live in Slack** — each agent its own app: avatar, presence, DMs, threads it keeps following without being re-tagged, streaming replies, screenshots it can look at | [Slack](docs/guides/slack.md) |
 | 🧠 | **Remember** — memory keyed to the agent, searched and pruned by the agent itself, every fact labelled with where it came from | [Memory](docs/concepts/memory.md) |
 | 🛠 | **Use real tools** — files, a shell, the web, a browser; each an opt-in plugin, allowlisted per agent | [Tools](docs/guides/tools.md) |
 | 🔌 | **Mount MCP servers** — the whole MCP ecosystem under Stratus policy | [MCP](docs/guides/mcp.md) |
 | 🛡 | **Ask before acting** — safe calls run unattended; risky ones ask a human, in Slack if that's where you are | [Approvals](docs/guides/approvals.md) |
 | ⏰ | **Act on their own** — schedules an agent sets for itself, approved once by a human, reporting into Slack | [Schedules](docs/guides/schedules.md) |
 | 📚 | **Learn procedures** — skills installed from any GitHub repo, loaded only when relevant | [Skills](docs/guides/skills.md) |
+| 📦 | **Start from a template** — a folder or repo carrying an agent, its skills, and the plugins behind its tools, installed in one reviewed command | [Templates](docs/guides/templates.md) |
 | 🤝 | **Work as a team** — delegation between agents, routing that keeps the same face in the same places | [Agents](docs/concepts/agents.md) |
 | 🖥 | **Managed from anywhere** — one authenticated API, a web dashboard on top | [Remote access](docs/guides/remote-access.md) |
 
@@ -91,7 +92,9 @@ apart. The two surfaces are the deliberate exceptions: the Slack channel
 connects when an agent's tokens are stored (the decision you made
 connecting the app), and installing the control API + dashboard *is* the
 decision to open an authenticated local port (`--no-api` takes it back).
-`stratus setup` offers the packages your answers imply.
+`stratus setup` offers the packages your answers imply, and
+[`stratus plugins`](docs/guides/tools.md#which-link-in-the-chain-is-broken)
+says which of those gates a tool is currently stuck behind.
 
 The trust model behind that is in
 [Plugins](docs/concepts/plugins.md) and

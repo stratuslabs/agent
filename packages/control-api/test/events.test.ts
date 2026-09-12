@@ -168,7 +168,7 @@ test('an approval raised anywhere reaches the stream, and resolving it there set
       body: JSON.stringify({ requestId, answer: 'once', actor: 'web' }),
     });
     assert.equal(resolved.status, 200);
-    assert.equal(await settles(answer, 'the parked call'), 'once');
+    assert.deepEqual(await settles(answer, 'the parked call'), { answer: 'once', actor: 'web' });
 
     const resolution = (await client.waitFor<Envelope>(
       isEnvelopeOf('tool.approval-resolved'),

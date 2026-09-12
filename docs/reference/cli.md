@@ -7,7 +7,7 @@ links to.
 ## Commands
 
 ```bash
-stratus setup                          # onboarding menu: providers, models, agent, channels
+stratus setup                          # onboarding menu: providers, models, agent, plugins, channels, approvals
 stratus chat                           # talk — the conversation persists
 stratus chat --soul ./ava.md
 stratus run "say hello"
@@ -31,11 +31,15 @@ stratus update --check                 # report what an update would do, do noth
 stratus agent new                      # create an agent (guided on a terminal)
 stratus agent new --name Ava --instructions "You research things." --format soul > ava.md
 stratus agents                         # who's on the team (also: stratus agent list)
+stratus template add ./my-template     # install an agent, its skills, and the plugins behind them
+stratus template add owner/repo --yes  # …from GitHub, without the review prompt
 stratus skill add owner/repo           # install skills from GitHub or a local path
 stratus skill add owner/repo --skill hn-search --agent ava
 stratus skill validate ./my-skill      # check a skill (or a repo of them, or an installed id) against the Agent Skills spec
 stratus skills                         # what is installed, who enables it (also: stratus skill list)
 stratus skill reload                   # a running daemon re-reads ~/.stratus/skills — no restart
+stratus plugins                        # installed → enabled → granted → what approvals does with it (also: stratus plugin list)
+stratus plugins --format json          # the same chain as data
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 printf %s "$KEY" | stratus credential set search.apiKey   # store a named credential (value from stdin, never a flag)
 stratus credential set search.apiKey --agent ava         # one agent's own key, over the shared one
@@ -43,6 +47,10 @@ stratus credentials                    # stored names, never values (also: strat
 stratus credential remove search.apiKey
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
+stratus grants ava                     # what ava may do unattended: standing tool grants, command scopes, sites
+stratus grants revoke ava --tool web.fetch              # take a standing grant back — a running daemon stops honouring it at once
+stratus grants revoke ava --scope "git push"            # or a command scope, by the line the listing shows
+stratus grants revoke ava --origin https://app.example.com
 stratus memory list ava                # every live fact, with the trust label it carries
 stratus memory list ava --trust unknown --format json
 stratus memory reassert ava --trust user --all-unknown   # re-label every fact with no recorded origin
@@ -61,10 +69,12 @@ stratus dashboard                      # local browser dashboard
 | `doctor` | [Troubleshooting](../guides/troubleshooting.md) |
 | `update` | [Updating](../guides/updating.md) |
 | `agent new`, `agents` | [Agents](../concepts/agents.md) |
+| `template add` | [Templates](../guides/templates.md) |
 | `skill add`, `skill validate`, `skills`, `skill reload` | [Skills](../guides/skills.md), [Skill format](./skill-format.md) |
 | `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
+| `grants`, `grants revoke` | [Approvals](../guides/approvals.md#standing-grants) |
 | `memory list`, `memory reassert` | [Memory](../concepts/memory.md#where-a-fact-came-from) |
 | `session rollover` | [Memory](../concepts/memory.md#the-label-is-yours-to-raise-and-only-yours), [Control API](../../packages/control-api/README.md) |
 | `dashboard` | [Remote access](../guides/remote-access.md) |
@@ -92,7 +102,8 @@ stratus dashboard                      # local browser dashboard
 | `--api` | `stratus serve`: serve it even where the config says `api.enabled: false` (what `stratus dashboard` asks of the daemon it starts) |
 | `--api-host` | `stratus serve`: control API interface (default `127.0.0.1`) |
 | `--api-port` | `stratus serve`: control API port (default `4123`; `0` picks any free port). A port the daemon cannot bind stops it — it does not serve without the API |
-| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names) |
+| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`, `grants`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names; `grants` reads the files instead when none is serving) |
+| `--tool`, `--scope`, `--origin` | `stratus grants revoke`: which grant goes — exactly one of them |
 | `--trust <level>` | `stratus memory list`: show only entries at this label. `stratus memory reassert`: the label to record — `user`, `agent`, `unknown`, or `external` |
 | `--all-unknown` | `stratus memory reassert`: every live entry with no recorded origin, the upgrade case; ids may be given as well |
 | `--port`, `--host` | `stratus dashboard`: where a daemon it starts should bind |
@@ -104,8 +115,9 @@ stratus dashboard                      # local browser dashboard
 | `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one |
 | `--session` | `stratus logs`: show only one session's records |
 | `--skill <id>` | `stratus skill add`: pick one skill from a multi-skill repo (repeatable) |
-| `--force` | `stratus skill add`: replace an already-installed skill id |
+| `--force` | `stratus skill add`: replace an already-installed skill id. `stratus template add`: replace an agent or skill already installed under the same name |
 | `--no-reload` | `stratus skill add`: install without telling a running daemon to reload |
+| `--yes`, `-y` | `stratus template add`: install without the review prompt |
 | `--reason` | `stratus restart`: why, for the daemon's log |
 | `--drain-timeout <seconds>` | `stratus restart`: how long in-flight turns get to finish before they are aborted (default 30) |
 | `--help`, `-h` | Show help |

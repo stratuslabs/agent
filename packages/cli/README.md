@@ -24,16 +24,16 @@ says so plainly if yours is too old. Details:
 
 `stratus setup` is the whole onboarding, as one small menu: sign in (Claude
 Pro/Max subscription or API key, ChatGPT/Codex, or any OpenAI-compatible
-service), pick default and fallback models, create your first agent,
-connect Slack, and
-install the always-on service — no config files to edit, no env vars to
-export. Walkthrough:
+service), pick default and fallback models, create your first agent, enable
+the plugins it may use, connect Slack, choose who approves gated calls while
+nobody is watching, and install the always-on service — no config files to
+edit, no env vars to export. Walkthrough:
 [Setup](https://github.com/stratuslabs/agent/blob/main/docs/start/setup.md).
 
 ## Commands
 
 ```bash
-stratus setup                          # onboarding menu: providers, models, agent, channels
+stratus setup                          # onboarding menu: providers, models, agent, plugins, channels, approvals
 stratus chat                           # talk — the conversation persists
 stratus run "say hello"                # one-shot run (works offline on the demo provider)
 stratus serve                          # stratusd: the whole roster, always on
@@ -44,11 +44,14 @@ stratus doctor                         # what a run would use right now, and why
 stratus update                         # stop → upgrade → migrate → repair unit → restart
 stratus agent new                      # create an agent (guided on a terminal)
 stratus agents                         # who's on the team: souls, models, memory
+stratus template add owner/repo        # install an agent, its skills, and the plugins behind them — prints what it will add, then asks
 stratus skill add owner/repo           # install skills from GitHub (validated against the Agent Skills spec) — a running daemon picks them up, no restart
 stratus skill validate ./my-skill      # check a skill against the spec without installing it
+stratus plugins                        # installed → enabled → granted → what approvals does with it
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 stratus credentials                    # stored credential names (never values)
 stratus schedules                      # what the fleet has scheduled, and where it reports
+stratus grants ava                     # what ava may do unattended, and `grants revoke` to take one back
 stratus memory list ava                # every live fact, with the trust label it carries
 stratus memory reassert ava --trust user --all-unknown   # vouch for the facts with no recorded origin
 stratus session rollover <session-id>  # archive a conversation's transcript and start the same id over
@@ -75,7 +78,8 @@ Full reference with every subcommand:
 | `--no-log-file` | `serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
 | `--no-api` | `serve`: do not serve the control API |
 | `--api-host`, `--api-port` | `serve`: control API bind (default `127.0.0.1:4123`) |
-| `--gateway <url>`, `--token` | `agents`, `skill reload`, `restart`, `session rollover`: a running daemon's control API |
+| `--gateway <url>`, `--token` | `agents`, `skill reload`, `restart`, `session rollover`, `grants`: a running daemon's control API |
+| `--tool`, `--scope`, `--origin` | `grants revoke`: which grant goes — exactly one |
 | `--trust <level>` | `memory list`: show only that label; `memory reassert`: the label to record (`user`, `agent`, `unknown`, `external`) |
 | `--all-unknown` | `memory reassert`: every live fact with no recorded origin |
 | `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one |
