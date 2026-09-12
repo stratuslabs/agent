@@ -1885,12 +1885,23 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Each hearer takes it on its own intake chain, claimed the moment the
    * reply is final: a message typed while the reply was still streaming
    * is already in that chain and is heard first, and one typed after the
-   * final edit cannot overtake it. Whether the hearer is in the thread at
-   * all is the gateway's answer on the session's chain, as for every
-   * overhear — an agent never invited here has no session under the key,
-   * and hears nothing. The observe itself is placed there and not awaited
-   * inside the link, for the reason `handleInbound` gives: a hearer with
-   * a long turn running must not hold its next message's place hostage.
+   * final edit cannot overtake it. The observe itself is placed there and
+   * not awaited inside the link — returned in a wrapper, since a promise
+   * returned from the link is one the chain adopts — for the reason
+   * `handleInbound` gives: a hearer with a long turn running must not hold
+   * its next message's place hostage to that turn.
+   *
+   * Two boundaries decide who hears it, and neither is "same workspace".
+   * Whether the hearer is in the THREAD is the gateway's answer on the
+   * session's chain, as for every overhear: an agent never invited here
+   * has no session under the key. Whether it is still in the CHANNEL is
+   * Slack's, asked per reply: a message a person types reaches an agent
+   * only through its own socket, so an app removed from a private channel
+   * simply stops hearing — but a reply is forwarded by this process, and
+   * would keep reaching an agent the operator took out of the room. That
+   * is the one path where membership has to be checked rather than
+   * assumed, and a lookup that fails leaves the agent not hearing, the
+   * direction a boundary should fail in.
    *
    * Sent under the speaker's own label rather than `user`: an agent's
    * reply is at most its own word, and carries whatever its session has
@@ -1935,12 +1946,23 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         thread,
       });
       try {
-        const observed = await onIntakeChain(sessionId, async () => {
+        const { observed } = await onIntakeChain(sessionId, async () => {
+          let member: boolean | undefined;
+          try {
+            member = (await hearer.web.conversations.info({ channel })).channel?.is_member;
+          } catch (error) {
+            warn(`slack: could not tell whether ${hearer.config.agentId} is still in ${channel}, so it does not hear ${speaker.config.agentId}'s reply there: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          if (member !== true) {
+            return { observed: undefined };
+          }
           // Named the way a person's message names its speaker: whoever
           // spoke, by display name. A bot user's is the app's own, set by
           // whoever installed it.
           const author = await displayNameFor(hearer, speaker.botUserId);
-          return gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${reply}`, metadata });
+          return {
+            observed: gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${reply}`, metadata }),
+          };
         });
         await observed;
       } catch (error) {

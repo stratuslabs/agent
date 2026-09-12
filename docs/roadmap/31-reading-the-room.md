@@ -24,10 +24,15 @@ Three things the sketch did not say, found on the way:
   which observes the final text into the thread's other sessions itself,
   with no Slack event involved, under the speaker's own label
   (`sessionWriteTrust`, so a reply restating a stranger's text is still the
-  stranger's). Two consequences. An agent served by another daemon is a
+  stranger's). Three consequences. An agent served by another daemon is a
   stranger's bot, and its replies are not heard — the daemon is the
   boundary of who can be overheard, as it already was for who can be
-  named. And each agent's socket runs on its own clock: a reply takes its
+  named. A forwarded reply is the one path where channel membership has to
+  be asked rather than assumed: a person's message reaches an agent only
+  through its own socket, so an app removed from a private channel stops
+  hearing by itself, but a reply forwarded by the daemon would keep
+  arriving — so each hearer asks Slack, per reply, and a lookup that fails
+  leaves it not hearing. And each agent's socket runs on its own clock: a reply takes its
   place in a hearer's session when it is final, so an app more than a
   turn's length behind its colleague's hears the answer before the
   question. Rare, since sockets run within milliseconds of each other, and

@@ -57,7 +57,11 @@ they are the whole model:
    colleague's reply is heard under the colleague's own label, never as a
    person's: an agent's word is at most `agent`, and carries whatever its
    session has been exposed to. Replies only — a turn that said nothing,
-   or failed, is nothing to hear.
+   or failed, is nothing to hear — and only while the hearer's app is
+   still in the channel, which is asked of Slack per reply: a person's
+   message reaches an agent through its own socket, so an app removed
+   from a private channel stops hearing on its own, but a reply is
+   forwarded by the daemon and would otherwise keep arriving.
 
 Everyone in the thread is talking to the same agent — a reply from a second
 person is a follow-up like any other, and channel messages reach the model

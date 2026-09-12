@@ -891,6 +891,9 @@ test('an agent in a shared thread hears what is said to the other one, and posts
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
   const webBea = createFakeWeb('B-BEA', 'T1');
+  // Both apps are in the channel, which a reply asks Slack before it is heard.
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
   // Both in the thread; Ava spoke last.
   gateway.sessionRouting = routingOver(new Map([
@@ -974,6 +977,9 @@ test('a message said moments after an agent was invited is heard, not dropped', 
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
   const webBea = createFakeWeb('B-BEA', 'T1');
+  // Both apps are in the channel, which a reply asks Slack before it is heard.
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
   // Every dispatch waits on a gate, so the invitation's session is still
   // being created when the next message arrives — the durable record
   // knows nothing of this thread yet.
@@ -1073,6 +1079,9 @@ test('what an agent replied is heard by the thread\'s other agents, under its ow
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
   const webBea = createFakeWeb('B-BEA', 'T1');
+  // Both apps are in the channel, which a reply asks Slack before it is heard.
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
   const labelled = (id: string, reply: string, sessionTrust: string): Session => ({
     ...sessionWithReply(id, reply),
     metadata: { sessionTrust },
@@ -1152,6 +1161,9 @@ test('a message typed while a reply is still streaming is heard before the reply
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
   const webBea = createFakeWeb('B-BEA', 'T1');
+  // Both apps are in the channel, which a reply asks Slack before it is heard.
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
@@ -1206,6 +1218,9 @@ test('the reply of a turn finished after a restart is heard by the thread\'s oth
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
   const webBea = createFakeWeb('B-BEA', 'T1');
+  // Both apps are in the channel, which a reply asks Slack before it is heard.
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
   // Ava's turn was parked on a human when the daemon died and finished
   // after the restart, with no renderer in this process. Bea is in the
@@ -1242,6 +1257,119 @@ test('the reply of a turn finished after a restart is heard by the thread\'s oth
     [['bea', 'slack:bea:T1:C1:100.1', 'Ava: the recovered reply', 'agent']],
   );
   assert.equal(webBea.posts.length, 0);
+});
+
+test('an agent taken out of the channel stops hearing its colleague there, and so does one Slack cannot vouch for', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const warnings: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // Both in the thread — Bea's session is from before her app was removed
+  // from this private channel. Slack no longer delivers the channel to
+  // her socket; a reply forwarded by this process would still reach her.
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:940.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:940.0', '2026-01-01T00:00:00.000Z'],
+    ['slack:ava:T1:C2:940.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C2:940.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: false });
+  // C2: Ava is in it; Bea's app cannot even see it (`channel_not_found`).
+  webAva.knownConversations.set('C2', { is_member: true });
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    warn: (line) => {
+      warnings.push(line);
+    },
+  });
+  await adapter.start(gateway);
+
+  // Only Ava's socket gets these: Bea's app is out of the room.
+  await socketAva.deliver('message', channelMessage({ text: 'say more', ts: '940.1', thread: '940.0' }));
+  await socketAva.deliver('message', { ...channelMessage({ text: 'over here', ts: '940.2', thread: '940.0' }), event: { ...channelMessage({ text: 'over here', ts: '940.2', thread: '940.0' }).event, channel: 'C2' } });
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId), ['ava', 'ava']);
+  // Membership, not a session, is the boundary: nothing reached Bea.
+  assert.deepEqual(gateway.observes, []);
+  // A lookup Slack refuses fails closed, and says so.
+  assert.equal(warnings.filter((line) => /could not tell whether bea is still in C2/.test(line)).length, 1, warnings.join('\n'));
+});
+
+test('a reply held behind a hearer\'s long turn does not hold the hearer\'s next message', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:950.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:950.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+  // Bea's session has a turn running for as long as this test says: the
+  // gateway's chain holds the reply's observe behind it.
+  let release!: () => void;
+  const beaBusy = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let heldReply!: () => void;
+  const replyHeld = new Promise<void>((resolve) => {
+    heldReply = resolve;
+  });
+  const stubObserve = gateway.observe!;
+  gateway.observe = async (input) => {
+    if (input.message.startsWith('Ava:')) {
+      heldReply();
+      await beaBusy;
+    }
+    return stubObserve.call(gateway, input);
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Ava answers; her reply's observe into Bea's session is now waiting
+  // behind Bea's turn.
+  const first = channelMessage({ text: 'say more', ts: '950.1', thread: '950.0' });
+  const answered = Promise.all([socketAva.deliver('message', first), socketBea.deliver('message', first)]);
+  await replyHeld;
+  // Somebody turns to Bea. Her message's place in her intake chain is
+  // behind the reply's link — which must have let go the moment the
+  // observe was placed, or this dispatch waits out Bea's whole turn.
+  const toBea = channelMessage({ text: '<@B-BEA> and you?', ts: '950.2', thread: '950.0' });
+  const asked = Promise.all([socketAva.deliver('message', toBea), socketBea.deliver('message', toBea)]);
+  // A macrotask later, not a wall clock: everything between the reply's
+  // link and Bea's dispatch is promise-resolved, so by the time an
+  // immediate scheduled now runs, that dispatch has either happened or is
+  // held behind the observe — which here holds until released.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: say more'],
+    ['bea', 'Dylan: and you?'],
+  ]);
+  release();
+  await Promise.all([answered, asked]);
+  await adapter.stop();
 });
 
 test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {
