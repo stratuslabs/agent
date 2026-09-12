@@ -23,6 +23,7 @@ import {
   AGENT_ID_PATTERN,
   isValidAgentId,
   isValidDelegateEntry,
+  isDelegateAllowed,
   isValidSessionId,
   MAX_SESSION_ID_LENGTH,
   MAX_AGENT_ID_LENGTH,
@@ -345,16 +346,38 @@ test('the delegate wildcard is not an agent id, and a delegates entry is an id o
   assert.equal(isValidSessionId('*'), true);
   assert.equal(isValidDelegateEntry('*'), true);
   assert.equal(isValidDelegateEntry('bea'), true);
-  assert.equal(isValidDelegateEntry("'bea'"), false);
+  // Every id a roster can hold can be named as a target, quotes included.
+  assert.equal(isValidDelegateEntry("'bea'"), isValidAgentId("'bea'"));
+  assert.equal(isValidDelegateEntry("'bea'"), true);
 
-  // The soul writer emits entries raw and the parser unquotes them, so an
-  // entry wrapped in quotes would come back as a different agent's.
   assert.throws(
-    () => defineAgent({ name: 'Kai', delegates: ["'bea'"] }),
-    /Invalid delegates entry: "'bea'"\. Each entry is an agent id, or \* for any agent on the roster\./,
+    () => defineAgent({ name: 'Kai', delegates: ['a/b'] }),
+    /Invalid delegates entry: "a\/b"\. Each entry is an agent id, or \* for any agent on the roster\./,
   );
-  assert.throws(() => defineAgent({ name: 'Kai', delegates: ['a/b'] }), /Invalid delegates entry/);
   assert.deepEqual(defineAgent({ name: 'Kai', delegates: ['*', 'bea'] }).delegates, ['*', 'bea']);
+});
+
+test('the soul writer round-trips a value the parser would otherwise unquote', () => {
+  // The parser strips one layer of matching quotes from every value, so an
+  // id like 'bea' written raw would come back as bea — for a delegates
+  // entry, a permission changed by an unrelated edit through the control
+  // API's field editor, which renders the soul on every edit. The writer
+  // wraps such a value in the other quote, and the parser strips that.
+  const agent = defineAgent({
+    name: '"Kai"',
+    id: "'kai'",
+    instructions: 'Hi.',
+    tools: ['"demo.echo"'],
+    delegates: ["'bea'", '"cy"', 'dee'],
+  });
+  const reparsed = parseSoul(formatSoul({ agent }));
+  assert.equal(reparsed.agent.name, '"Kai"');
+  assert.equal(reparsed.agent.id, "'kai'");
+  assert.deepEqual(reparsed.agent.tools, ['"demo.echo"']);
+  assert.deepEqual(reparsed.agent.delegates, ["'bea'", '"cy"', 'dee']);
+  // And a grant to the quoted id is a grant to that agent alone.
+  assert.equal(isDelegateAllowed(reparsed.agent, "'bea'"), true);
+  assert.equal(isDelegateAllowed(reparsed.agent, 'bea'), false);
 });
 
 test('per-agent tool allowlists stop agents using tools they were not given', async () => {

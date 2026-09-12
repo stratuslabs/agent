@@ -186,14 +186,14 @@ const isAddressableId = (id: string): boolean =>
 export const isValidAgentId = (id: string): boolean => isAddressableId(id) && id !== '*';
 
 /**
- * Whether a `delegates` entry is one the soul can hold: an agent id, or the
- * wildcard. Never wrapped in quotes — the soul writer emits entries raw and
- * the parser unquotes them, so a quoted id would come back as a different
- * agent's. Exported so the control API refuses a bad entry as the client's
- * error rather than discovering it in the soul round-trip.
+ * Whether a `delegates` entry is one the soul can hold: any agent id, or
+ * the wildcard — the same rule as {@link isValidAgentId}, so every agent a
+ * roster can hold can be named as a target. Exported so the control API
+ * refuses a bad entry as the client's error rather than discovering it in
+ * the soul round-trip.
  */
 export const isValidDelegateEntry = (entry: string): boolean =>
-  entry === '*' || (isValidAgentId(entry) && !/^(['"]).*\1$/.test(entry));
+  entry === '*' || isValidAgentId(entry);
 
 /**
  * How much of a new session id is the *client's* to spend, on top of the
@@ -342,10 +342,9 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
       + 'it keys files and credentials, not just labels.',
     );
   }
-  // Each entry is an id or the wildcard, and never wrapped in quotes: the
-  // soul writer emits entries raw and the parser unquotes them, so a
-  // quoted id would come back as a different agent's — a permission that
-  // changed on an unrelated edit.
+  // Each entry is an id or the wildcard. Refused here, not in the tool: a
+  // list holding a value no agent can have would be a grant to nobody
+  // that read as a grant.
   for (const entry of input.delegates ?? []) {
     if (!isValidDelegateEntry(entry)) {
       throw new Error(
@@ -715,8 +714,21 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
  * Render an agent definition as a soul file, ready to save and edit. The
  * inverse of parseSoul for round-tripping `stratus agent new` output.
  */
+/**
+ * A scalar or list entry as the soul writer emits it. The parser strips
+ * one layer of matching quotes from every value, so a value that begins
+ * and ends with the same quote — an agent id like `'bea'`, which
+ * {@link isValidAgentId} allows — would come back as `bea`: for a
+ * `delegates` entry that is a permission changed by an unrelated edit,
+ * since the control API renders a soul through here on every field edit.
+ * Such a value is wrapped in the other quote, which the parser strips
+ * back off; so is one the parser's trim would alter.
+ */
+const writeScalar = (value: string): string =>
+  unquote(value) === value ? value : (value.startsWith('"') ? `'${value}'` : `"${value}"`);
+
 export const formatSoul = (soul: ParsedSoul): string => {
-  const lines: string[] = ['---', `name: ${soul.agent.name}`, `id: ${soul.agent.id}`];
+  const lines: string[] = ['---', `name: ${writeScalar(soul.agent.name)}`, `id: ${writeScalar(soul.agent.id)}`];
 
   if (soul.provider) {
     lines.push(`provider: ${soul.provider}`);
@@ -733,7 +745,7 @@ export const formatSoul = (soul: ParsedSoul): string => {
     if (values && values.length > 0) {
       lines.push(`${key}:`);
       for (const value of values) {
-        lines.push(`  - ${value}`);
+        lines.push(`  - ${writeScalar(value)}`);
       }
     }
   }
