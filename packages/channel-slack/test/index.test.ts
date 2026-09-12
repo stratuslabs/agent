@@ -1798,6 +1798,49 @@ test('a turn nobody asked for that ends while its placeholder is still opening f
   assert.equal(web.updates.at(-1)?.text, 'Done');
 });
 
+test('a turn nobody asked for that fails while its placeholder is still opening reports the failure there', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let releaseTurn!: () => void;
+  const turnGate = new Promise<void>((resolve) => {
+    releaseTurn = resolve;
+  });
+  let releasePost!: () => void;
+  web.postGate = new Promise<void>((resolve) => {
+    releasePost = resolve;
+  });
+  web.onPostEnter = () => {
+    releaseTurn();
+    setImmediate(() => releasePost());
+  };
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Thinking' } });
+    await turnGate;
+    throw new Error('provider exploded');
+  });
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: {},
+    lastSpokeAt: new Date(1015 * 1000).toISOString(),
+    heardSinceSpoke: 0,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'slow slack', ts: '1015.1', thread: '1015.0' }));
+  await adapter.stop();
+
+  // The placeholder it had started to open carries the failure, not
+  // `(no reply)` — it said something, and then broke.
+  assert.deepEqual(web.posts.map((post) => post.text), ['…']);
+  assert.match(web.updates.at(-1)?.text ?? '', /Something went wrong: provider exploded/);
+});
+
 test('an attachment with nothing said does not spend a judging slot', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

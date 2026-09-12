@@ -719,6 +719,11 @@ class ReplyRenderer {
   }
 
   async fail(message: string): Promise<void> {
+    // The same wait `finalize` takes, for the same reason: a lazy turn's
+    // first text may be opening its placeholder right now, and a failure
+    // read as "before saying anything" would leave that placeholder saying
+    // `(no reply)` where the failure belongs.
+    await this.editChain;
     if (this.lazy && !this.ref) {
       // A turn nobody asked for that failed before saying anything: the
       // failure is in the daemon log, and an error note would be the
