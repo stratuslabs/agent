@@ -345,6 +345,10 @@ test('an annotation key inside a schema literal is data, and a bottomless schema
         // A name is the one string no description bound touches, and it is
         // sent as the tool's name in every model request.
         { name: 'a'.repeat(3_000), inputSchema: { type: 'object' as const } },
+        // A long name of nothing the segment keeps: judged by its length
+        // before the segment is, so it is the same one skipped tool and not
+        // a refusal, quoting the name, that takes every server's tools down.
+        { name: '\u{1F41B}'.repeat(65), inputSchema: { type: 'object' as const } },
       ],
     }));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -386,9 +390,14 @@ test('an annotation key inside a schema literal is data, and a bottomless schema
     // The three-thousand-character name: one tool skipped, named by length.
     assert.equal(target.list().some((registered) => registered.name.length > 100), false);
     assert.ok(
-      warnings.some((message) => /a tool whose name is 3000 characters long was not bridged: a name segment may be at most 64 characters/.test(message)),
+      warnings.some((message) => /a tool whose name is 3000 characters long was not bridged: a name may be at most 64 characters/.test(message)),
       warnings.join(' | '),
     );
+    assert.ok(
+      warnings.some((message) => /a tool whose name is 65 characters long was not bridged: a name may be at most 64 characters/.test(message)),
+      warnings.join(' | '),
+    );
+    assert.ok(!warnings.some((message) => message.includes('\u{1F41B}')), warnings.join(' | '));
 
     // The bottomless one is one tool skipped and named, not a server that
     // went unreachable in a stack overflow and reconnects forever.
