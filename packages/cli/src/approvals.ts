@@ -149,10 +149,19 @@ export const describePrincipals = (principals: PrincipalsConfig, agentIds: strin
       ? 'no principals configured, so every Slack sender is unknown and every fact written in Slack carries that label — set principals.slackUsers in ~/.stratus/config.json'
       : `no principals listed, so every Slack sender is unknown${door} — nobody at all can talk to ${closed.join(', ')} until principals.slackUsers names someone`;
   }
+  // An uncovered agent's senders are all unknown only if it admits them: a
+  // closed agent with nobody listed refuses everyone, and saying its
+  // senders are "all unknown" and then "refused" in one line is a summary
+  // that contradicts itself about the one thing it exists to say.
   const uncovered = agentIds.filter((agentId) => !covered.includes(agentId));
-  return (uncovered.length === 0
-    ? `principals set for ${covered.join(', ')}`
-    : `principals set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose Slack senders are all unknown`) + door;
+  const uncoveredOpen = uncovered.filter((agentId) => !closed.includes(agentId));
+  const uncoveredClosed = uncovered.filter((agentId) => closed.includes(agentId));
+  return `principals set for ${covered.join(', ')}`
+    + (uncoveredOpen.length > 0 ? `; none for ${uncoveredOpen.join(', ')}, whose Slack senders are all unknown` : '')
+    + (uncoveredClosed.length > 0
+      ? `; none for ${uncoveredClosed.join(', ')}, who refuse every sender until principals.slackUsers names someone`
+      : '')
+    + door;
 };
 
 /**

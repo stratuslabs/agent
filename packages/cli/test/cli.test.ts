@@ -12266,6 +12266,17 @@ test('the startup provenance line says which agents refuse unlisted senders, eve
     describePrincipals({ admit: 'principals' }, ['ava']),
     /^no principals listed, so every Slack sender is unknown; unlisted senders are refused — nobody at all can talk to ava until principals\.slackUsers names someone$/,
   );
+  // The same agent beside a covered one: excluded from the shared list and
+  // closed, Bea refuses everyone, and the line must not first call her
+  // senders "all unknown" and then "refused".
+  assert.match(
+    describePrincipals({ slackUsers: ['U1'], admit: 'principals', agents: { bea: { slackUsers: [] } } }, ['ava', 'bea']),
+    /^principals set for ava; none for bea, who refuse every sender until principals\.slackUsers names someone; unlisted senders are refused$/,
+  );
+  assert.match(
+    describePrincipals({ slackUsers: ['U1'], agents: { bea: { slackUsers: [] }, cy: { slackUsers: [], admit: 'principals' } } }, ['ava', 'bea', 'cy']),
+    /^principals set for ava; none for bea, whose Slack senders are all unknown; none for cy, who refuse every sender until principals\.slackUsers names someone; unlisted senders are refused by cy and admitted as unknown by the rest$/,
+  );
 });
 
 test('serve with an unreadable principals block refuses every Slack sender rather than admitting everyone', async () => {
