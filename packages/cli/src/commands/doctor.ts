@@ -20,11 +20,13 @@ import {
   type RosterEntry,
   type RuntimeConfig,
   type StratusConfigFile,
+  ignoredUntrustedConfigKeys,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
 import { serviceEnvFor } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
+import { ignoredConfigRemedy } from '../runtime.ts';
 import { loadSlackAdapter } from '../loaders.ts';
 import type { ParsedDoctorCommand } from '../parse.ts';
 
@@ -153,7 +155,9 @@ export const collectDoctorReport = async (
    * resolveRuntimeConfig actually returns or throws.
    */
   const envSoul = envPick('STRATUS_SOUL');
-  const soulValue = envSoul?.value ?? fileConfig.soul;
+  // The file's soul under the resolver's trust rule: a project-local file
+  // does not name one, so doctor must not attribute one to it.
+  const soulValue = envSoul?.value ?? (winner?.label === 'project' ? undefined : fileConfig.soul);
   const soulSource = envSoul ? envSoul.name : (winner ? winner.path : '');
   const soulPath = typeof soulValue === 'string' ? path.resolve(cwd, soulValue) : undefined;
   // Loaded here for ATTRIBUTION only — the soul's frontmatter is what
@@ -179,6 +183,23 @@ export const collectDoctorReport = async (
         );
       }
     }
+  }
+
+  // A refused persona is a finding, not a silence: the file asks for a soul
+  // or a preamble, no run started here will use it, and a doctor that said
+  // "no soul configured" would be hiding the trust decision it exists to
+  // explain. The resolver's own record is the verdict — it already leaves
+  // out a key the environment outranked, which is not refused but beaten —
+  // and only when no run could resolve at all is the same rule applied
+  // here, so the finding still appears beside the failure that hid it.
+  const refusedByTrust = resolved?.ignoredFromUntrustedConfig
+    ?? ignoredUntrustedConfigKeys({}, fileConfig, winner ? { path: winner.path, trusted: winner.label !== 'project' } : undefined, env);
+  if (refusedByTrust) {
+    problems.push(
+      `${refusedByTrust.path} sets ${refusedByTrust.keys.join(' and ')}, which an auto-discovered config does not get to choose — `
+      + `every run started here ignores ${refusedByTrust.keys.length === 1 ? 'it' : 'them'}. `
+      + ignoredConfigRemedy(refusedByTrust, false),
+    );
   }
 
   const envProviderPick = envPick('STRATUS_PROVIDER');

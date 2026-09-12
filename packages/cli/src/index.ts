@@ -115,6 +115,7 @@ export { describeApprovalCall, createApprovalPolicy } from './approvals.ts';
 export {
   resolveRuntimeConfig,
   warnOnCredentialOverride,
+  warnOnUntrustedConfig,
   runSingleLoop,
   printSessionSummary,
 } from './runtime.ts';

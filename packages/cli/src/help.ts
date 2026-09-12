@@ -231,7 +231,9 @@ Options:
 Config file:
   The CLI looks for ./stratus.config.json first, then a path from --config / STRATUS_CONFIG,
   then the global ~/.stratus/config.json written by \`stratus setup\`.
-  A "soul" key (or STRATUS_SOUL) points at a soul file so every run uses that agent.
+  A "soul" key (or STRATUS_SOUL) points at a soul file so every run uses that agent —
+  from ~/.stratus/config.json or a file named with --config; an auto-discovered
+  ./stratus.config.json does not get to choose a soul or a systemPrompt.
 
 Plugins (tools):
   Capability is optional: install a package, then list it under "plugins" in a

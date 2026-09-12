@@ -38,11 +38,13 @@ import {
   workspacesDirPath,
   type RuntimeSelection,
   type RuntimeConfig,
+  type IgnoredUntrustedConfig,
 } from '@stratusagent/state';
 import { createApprovalPolicy } from './approvals.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
 import { formatEvent } from './events.ts';
 import { writeLine, stringifyValue } from './io.ts';
+import { quoteShellArg } from './prompter.ts';
 import type { CliApprovalMode, ParsedRunCommand } from './parse.ts';
 import { loadServePlugins } from './trusted-config.ts';
 
@@ -59,6 +61,62 @@ export const resolveRuntimeConfig = (
   command: RuntimeSelection & Partial<Omit<ParsedRunCommand, keyof RuntimeSelection>>,
   env: CliEnvironment = {},
 ): Promise<RuntimeConfig> => resolveStateRuntimeConfig(command, env);
+
+/**
+ * Says, once the run is up, what an auto-discovered project config asked
+ * for and did not get. The resolver only records it — nothing is logging
+ * while a run resolves — and a persona that silently failed to apply would
+ * read as the agent ignoring its instructions rather than as the trust
+ * decision it is.
+ */
+export const warnOnUntrustedConfig = (runtime: RuntimeConfig, streams: CliStreams, soulFlag = true): void => {
+  warnOnIgnoredConfig(runtime.ignoredFromUntrustedConfig, streams, soulFlag);
+};
+
+/** The environment variable that names each refused key, as the resolver reads it. */
+const ENV_FOR_PROMPT_KEY: Record<IgnoredUntrustedConfig['keys'][number], string> = {
+  soul: 'STRATUS_SOUL',
+  systemPrompt: 'STRATUS_SYSTEM_PROMPT',
+};
+
+/**
+ * The way out of a refused persona, as one sentence. `--config` trusts the
+ * file; the other way is the operator's own channel for the key — the
+ * `--soul` flag where the command takes one (`run` and `chat`; `serve` and
+ * `doctor` do not, and a notice sending the operator to a flag the daemon
+ * refuses is a notice that cost a restart), the environment otherwise.
+ * Never "move the key to ~/.stratus/config.json": the project file that
+ * caused this shadows the global one in discovery, so a key moved there
+ * would go on being unset for every run started here.
+ */
+export const ignoredConfigRemedy = (ignored: IgnoredUntrustedConfig, soulFlag: boolean): string => {
+  const environment = (keys: IgnoredUntrustedConfig['keys']): string =>
+    `set ${keys.map((key) => ENV_FOR_PROMPT_KEY[key]).join(' / ')}`;
+  const rest = ignored.keys.filter((key) => key !== 'soul');
+  // The flag restores only the soul: when the preamble was refused too,
+  // a remedy that stopped at --soul would leave it silently unset.
+  const otherWay = soulFlag && ignored.keys.includes('soul')
+    ? (rest.length === 0 ? 'pass --soul <path>' : `pass --soul <path> and ${environment(rest)}`)
+    : environment(ignored.keys);
+  return `Run with --config ${quoteShellArg(ignored.path)} to trust that file, or ${otherWay}.`;
+};
+
+/** `soulFlag`: whether the command printing this takes `--soul` — see {@link ignoredConfigRemedy}. */
+export const warnOnIgnoredConfig = (
+  ignored: IgnoredUntrustedConfig | undefined,
+  streams: CliStreams,
+  soulFlag = true,
+): void => {
+  if (!ignored) {
+    return;
+  }
+  const keys = ignored.keys.join(' and ');
+  writeLine(
+    streams.stderr,
+    `ignoring ${keys} in ${ignored.path}: what an agent is told is not a decision an auto-discovered config gets to make. `
+    + ignoredConfigRemedy(ignored, soulFlag),
+  );
+};
 
 /**
  * A saved subscription sign-in silently demoted to per-token billing is the

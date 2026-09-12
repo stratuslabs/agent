@@ -24,6 +24,7 @@ import {
   resolveAgentApprovals,
   resolveAgentPrincipals,
   servedRuntimes,
+  discoverIgnoredUntrustedConfig,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogWriter } from '../logs.ts';
 import { describePrincipals, describeApprovers } from '../approvals.ts';
@@ -33,7 +34,7 @@ import { formatEvent, eventDetail } from '../events.ts';
 import { writeLine } from '../io.ts';
 import { loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
 import type { ParsedServeCommand } from '../parse.ts';
-import { warnOnCredentialOverride } from '../runtime.ts';
+import { warnOnCredentialOverride, warnOnUntrustedConfig, warnOnIgnoredConfig } from '../runtime.ts';
 import {
   RESTART_EXIT_CODE,
   UNDRAINED_RESTART_EXIT_CODE,
@@ -304,10 +305,19 @@ const serveHeldHome = async (
       stdout: { write: () => true },
       stderr: { write: (chunk: string) => { collect(chunk.replace(/\n$/, '')); return true; } },
     };
+    // The same notice `run` and `chat` give, from config discovery rather
+    // than from a resolved runtime: servedRuntimes drops a pass that fails
+    // to resolve — a real provider with no usable credential — and that
+    // daemon still starts, with nothing saying why the clone's persona is
+    // not in force. The per-runtime record below repeats it for a pass
+    // that did resolve; the dedupe above collapses the two to one line.
+    // `serve` takes no --soul, so the notice names the global config instead.
+    warnOnIgnoredConfig(await discoverIgnoredUntrustedConfig(command.configPath ? { configPath: command.configPath } : {}, env), captured, false);
     // A pinned soul does not merely add a provider — the gateway DEMOTES
     // the daemon-wide defaults it outranks, including STRATUS_PROVIDER, so
     // each served runtime is resolved the way a dispatch resolves it.
     for (const served of await servedRuntimes(env, command.configPath)) {
+      warnOnUntrustedConfig(served.runtime, captured, false);
       await warnOnCredentialOverride(served.runtime, captured, served.env);
     }
   }

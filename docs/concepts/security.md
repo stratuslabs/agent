@@ -45,6 +45,17 @@ daemon, who may approve its tool calls, whose messages an agent takes as
 its operator's, and which interface it binds are not decisions a clone gets
 to make. ([Configuration](../reference/config.md))
 
+Nor does a clone get to decide **what the agent is told**: `soul` and
+`systemPrompt` are read from a trusted config only. A `soul: ./AGENT.md` in
+a repository you cloned is a system prompt written by whoever pushed it,
+taking effect the moment you run `stratus run` in that directory — with
+whatever tools and approvals that run has. `--soul`, `STRATUS_SOUL`, and
+`STRATUS_SYSTEM_PROMPT` still name one, because the flag and the
+environment are yours; the run says on stderr what the file asked for and
+did not get, and names `--config <file>` as the way to trust it. The
+daemon says the same once at startup — even when its runtime cannot
+resolve, since that daemon starts too.
+
 Nor does a clone get to decide **where your key goes, or which key it is**:
 
 - **`apiKeyEnv` is ignored from an untrusted config.** Choosing the
