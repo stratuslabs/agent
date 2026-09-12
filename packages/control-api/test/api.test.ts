@@ -911,6 +911,49 @@ test('the config document round-trips, and bad value types are refused', async (
   }
 });
 
+test('how an agent listens is editable by field, and only to a mode', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  try {
+    const judged = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ listens: 'judge' }),
+    });
+    assert.equal(judged.status, 200);
+    assert.match(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8'), /^listens: judge$/m);
+    assert.equal((await json<{ agent: { listens?: string } }>(await harness.call('/api/v1/agents/ava'))).agent.listens, 'judge');
+
+    // An edit of something else leaves it alone.
+    await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ instructions: 'You are Ava, terse.' }),
+    });
+    assert.match(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8'), /^listens: judge$/m);
+
+    const loudly = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ listens: 'loudly' }),
+    });
+    assert.equal(loudly.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(loudly)).error.code, 'invalid_listens');
+
+    // An empty string clears it back to the default, as it does a pin.
+    const cleared = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ listens: '' }),
+    });
+    assert.equal(cleared.status, 200);
+    assert.doesNotMatch(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8'), /listens:/);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('a malformed allowlist edit is refused rather than silently ignored', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');

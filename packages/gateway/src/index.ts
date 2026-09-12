@@ -4,6 +4,9 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  type Message,
+  filePathsOf,
+  isUnaddressedTurn,
   abortErrorFor,
   AgentRegistry,
   AgentRunner,
@@ -416,8 +419,14 @@ export interface SessionRouting {
    * time, which a mid-turn save moves; see `@stratusagent/channels`.
    */
   lastSpokeAt?: string;
+  /** When the agent last answered a message that addressed it — see `@stratusagent/channels`. */
+  lastAnsweredAt?: string;
+  /** User messages after that answer — see `SessionRouting.heardSinceAnswered` in `@stratusagent/channels`. */
+  heardSinceAnswered?: number;
   /** The latest turn's text (`latestTurnReply`), when it produced any — see `@stratusagent/channels`. */
   reply?: string;
+  /** Whether the turn the session is on is one nobody asked for (`isUnaddressedTurn`) — see `@stratusagent/channels`. */
+  unaddressed?: boolean;
 }
 
 /**
@@ -3056,14 +3065,53 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // checkpoints, and a recovery resuming, all without having said
       // anything. A channel ordering two agents by "who spoke last" has to
       // read the speaking.
-      const lastSpokeAt = session.messages.findLast(
-        (message) => message.role === 'assistant' && message.content.trim().length > 0,
-      )?.createdAt;
+      // Speaking is text, or a file: a tool result carrying one is posted
+      // into the thread by the channel (`filePathsOf`, the kernel's one
+      // reading of that convention), and a chart with no words is the last
+      // thing said as surely as a sentence — the in-process handover record
+      // already treats it so, and the durable answer must agree with it
+      // across a restart. What the session records is what the agent
+      // said, for text and file alike, not what the channel delivered: a
+      // post Slack refused or an upload that failed reads as spoken here.
+      // The channel's own record has the delivery, and this is the
+      // reconstruction for a process that lost it; a delivery record
+      // written back into the session is the open item in roadmap 31.
+      const spoken = (message: Message): boolean =>
+        (message.role === 'assistant' && message.content.trim().length > 0)
+        || (message.role === 'tool' && message.toolResult !== undefined && filePathsOf(message.toolResult).length > 0);
+      const spokeIndex = session.messages.findLastIndex(spoken);
+      const lastSpokeAt = spokeIndex >= 0 ? session.messages[spokeIndex]?.createdAt : undefined;
+      // The attention anchor is narrower than the thread rule's: the newest
+      // reply to a turn somebody ASKED for — one whose message was not
+      // overheard. A reply the agent chose to give on a turn nobody asked
+      // for is speaking, for the thread rule, and not an anchor, or a
+      // judge that likes the sound of its own voice would never drift out.
+      // The trigger of a reply is the nearest user message before it.
+      let answeredIndex = -1;
+      for (let index = session.messages.length - 1; index >= 0 && answeredIndex < 0; index -= 1) {
+        const message = session.messages[index];
+        if (!message || !spoken(message)) {
+          continue;
+        }
+        const trigger = session.messages.slice(0, index).findLast((earlier) => earlier.role === 'user');
+        if (trigger !== undefined && trigger.overheard !== true) {
+          answeredIndex = index;
+        }
+      }
+      const lastAnsweredAt = answeredIndex >= 0 ? session.messages[answeredIndex]?.createdAt : undefined;
+      // The messages after that answer: what it has heard, judged, or been
+      // asked and not answered since — the other half of the window.
+      const heardSinceAnswered = session.messages
+        .slice(answeredIndex + 1)
+        .filter((message) => message.role === 'user').length;
       return {
         agentId: session.agent.id,
         metadata: session.metadata ?? {},
         ...(lastSpokeAt !== undefined ? { lastSpokeAt } : {}),
+        ...(lastAnsweredAt !== undefined ? { lastAnsweredAt } : {}),
+        heardSinceAnswered,
         ...(reply !== undefined ? { reply } : {}),
+        ...(isUnaddressedTurn(session) ? { unaddressed: true } : {}),
       };
     },
 

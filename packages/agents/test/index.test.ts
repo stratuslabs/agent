@@ -679,6 +679,20 @@ test('an id that is merely un-sluglike is left alone, because someone is using i
   assert.equal(isValidAgentId(defineAgent({ name: 'Ava Löf!' }).id), true);
 });
 
+test('listens: in soul frontmatter is one of three modes, round-trips, and a misspelling is refused', () => {
+  const soul = parseSoul('---\nname: Ava\nlistens: judge\n---\n\nYou are Ava.\n');
+  assert.equal(soul.agent.listens, 'judge');
+  assert.match(formatSoul(soul), /^listens: judge$/m);
+  // Omitted, the definition says nothing and the channel reads `thread`.
+  assert.equal(parseSoul('---\nname: Ava\n---\n\nYou are Ava.\n').agent.listens, undefined);
+  // Strict, like every soul key: a soul meant to judge that loaded as one
+  // answering every reply is the failure the file is read to prevent.
+  assert.throws(
+    () => parseSoul('---\nname: Ava\nlistens: loudly\n---\n\nYou are Ava.\n'),
+    /listens: "loudly" is not a listening mode; use one of mentions, thread, judge/,
+  );
+});
+
 test('a soul declaring a path-capable id is rejected at parse', async () => {
   assert.throws(
     () => parseSoul('---\nname: Ava\nid: ../../escape\n---\n\nYou are Ava.\n'),

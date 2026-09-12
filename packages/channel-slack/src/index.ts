@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 
 import {
+  filePathsOf,
   latestTurnReply,
   SENDER_TRUST_METADATA_KEY,
   sessionWriteTrust,
@@ -16,6 +17,7 @@ import {
   type ApprovalAnswer,
   type ImageAttachment,
   type JsonObject,
+  type ListensMode,
   type Session,
   type StratusEvent,
   type ToolResult,
@@ -27,6 +29,7 @@ import {
   type OutboundAddress,
   type OutboundConnection,
   type OutboundMessageRef,
+  type SessionRouting,
 } from '@stratusagent/channels';
 
 const SLACK_MAX_MESSAGE_CHARS = 4000;
@@ -46,7 +49,7 @@ const THREAD_ADDRESSEE_CAPACITY = 2000;
  */
 const COLD_VERDICT_CAPACITY = 256;
 /**
- * How many changes of hands one thread remembers.
+ * How many claims on one thread it remembers.
  *
  * A message older than all of them asks the sessions instead, which answer
  * for the thread as it stands rather than as it stood — so a reply that old
@@ -54,13 +57,14 @@ const COLD_VERDICT_CAPACITY = 256;
  * bounding this, and something has to bound it: the alternative is a list
  * that grows with a conversation for the life of the daemon.
  *
- * Eight is chosen to sit far past the case it covers. This only has to
+ * A claim is a change of hands or a reply that landed (see
+ * `rememberAddressee`), so a busy thread writes one or two per message.
+ * Thirty-two sits far past the case the record covers: it only has to
  * span the lag between two sockets, which is messages inside one delivery
- * window; crossing it needs a single thread to change hands eight times —
- * eight mentions, alternating between agents — while one socket stays
- * behind for all of them.
+ * window, and crossing it needs that many replies in one thread while a
+ * socket stays behind for all of them.
  */
-const THREAD_HANDOVER_DEPTH = 8;
+const THREAD_HANDOVER_DEPTH = 32;
 /**
  * How many files an unrendered turn may queue for its outcome. Nothing
  * drains that queue until the outcome arrives, so a session whose outcome
@@ -71,6 +75,18 @@ const THREAD_HANDOVER_DEPTH = 8;
 const MAX_UNRENDERED_FILES = 20;
 
 const PLACEHOLDER_TEXT = '…';
+
+/**
+ * How long an agent that judges stays attentive after it last answered a
+ * message that addressed it: this many messages, or this many minutes,
+ * whichever ends first. Judging costs
+ * a model call per message, and two people talking for an hour is a
+ * hundred of them for one "no" — so attention decays the way a person's
+ * does. Outside the window a message is overheard for free, and a mention
+ * re-arms it, which is what a mention has always meant.
+ */
+const ATTENTION_MESSAGES = 8;
+const ATTENTION_MS = 15 * 60 * 1000;
 
 /**
  * A 5 MB image over a slow link is seconds, not minutes. Past this the
@@ -222,11 +238,33 @@ export interface SlackSocketLike {
   disconnect(): Promise<void>;
 }
 
+/**
+ * What `files.uploadV2` answers with, as much of it as is read here: the
+ * file's shares, each carrying the ts of the message the file became in a
+ * channel — where it sits in the thread. Whether a just-completed upload's
+ * shares are filled in yet is Slack's business, so every part is optional
+ * and a reader without one falls back (see `ReplyRenderer.queueUpload`).
+ */
+export interface SlackUploadResult {
+  files?: Array<{
+    shares?: {
+      public?: Record<string, Array<{ ts?: string }>>;
+      private?: Record<string, Array<{ ts?: string }>>;
+    };
+  }>;
+}
+
 export interface SlackWebLike {
   auth: { test(): Promise<{ user_id?: string; team_id?: string }> };
   chat: {
     postMessage(args: { channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[] }): Promise<{ ts?: string; channel?: string }>;
     update(args: { channel: string; ts: string; text: string; blocks?: SlackBlock[] }): Promise<unknown>;
+    /**
+     * Take a message back. The one caller is a turn nobody asked for that
+     * opened its placeholder for an attempt the provider then abandoned and
+     * decided on silence after all — see `ReplyRenderer.retract`.
+     */
+    delete(args: { channel: string; ts: string }): Promise<unknown>;
     /**
      * Visible only to `user`. Refusing a click needs to reach the person
      * who clicked without announcing to the channel that they tried.
@@ -236,7 +274,7 @@ export interface SlackWebLike {
   files: {
     // The real SDK takes file DATA (a buffer or stream), never a path
     // string — typing it that way here keeps fakes honest too.
-    uploadV2(args: { channel_id: string; file: Buffer; filename?: string; title?: string; thread_ts?: string }): Promise<unknown>;
+    uploadV2(args: { channel_id: string; file: Buffer; filename?: string; title?: string; thread_ts?: string }): Promise<SlackUploadResult>;
   };
   conversations: {
     /**
@@ -276,6 +314,12 @@ export interface SlackAdapterOptions {
    * Defaults to `DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS`.
    */
   fileDownloadTimeoutMs?: number;
+  /**
+   * Test injection: the clock, in milliseconds, that an upload's place in
+   * the thread is read from (`ReplyOutcome.spokeAt`) when the upload's
+   * answer carries no share ts. Defaults to `Date.now`.
+   */
+  now?: () => number;
 }
 
 // Lazy (and CJS-interoperable) so tests with injected fakes never load the
@@ -369,6 +413,45 @@ interface HandoverClaim {
 }
 
 /**
+ * What became of a turn's reply. `published`: whether ALL of its text was
+ * — the edit taken and every overflow message posted. `spoke`: whether
+ * ANYTHING of the turn's landed, a chunk or a file. `spokeAt`: where in
+ * the thread what landed sits — the ts of the lowest message of the
+ * turn's that Slack took — present exactly when `spoke` is.
+ */
+interface ReplyOutcome {
+  published: boolean;
+  spoke: boolean;
+  spokeAt?: string;
+}
+
+/**
+ * A clock reading as a Slack timestamp, for a file whose upload answered
+ * with no share ts. Slack timestamps are epoch seconds with six decimals,
+ * so the clock's reading compares with them as long as the two agree to
+ * within the gap between one message and the next.
+ */
+const slackTs = (ms: number): string => (ms / 1000).toFixed(6);
+
+/**
+ * Where an upload sits in the thread: the ts of the message it became in
+ * `channel`, from the shares the upload answers with. Undefined when the
+ * answer carries none.
+ */
+const uploadPlace = (result: SlackUploadResult, channel: string): string | undefined => {
+  for (const file of result.files ?? []) {
+    for (const scope of [file.shares?.public, file.shares?.private]) {
+      for (const share of scope?.[channel] ?? []) {
+        if (share.ts !== undefined) {
+          return share.ts;
+        }
+      }
+    }
+  }
+  return undefined;
+};
+
+/**
  * Renders one turn's reply into Slack with the placeholder-then-edit
  * pattern: post `…` immediately, fold streaming deltas and tool status
  * lines into throttled edits, and finalize with the authoritative reply
@@ -413,11 +496,37 @@ class ReplyRenderer {
    */
   private generation = 0;
   private finalized = false;
+  /** Whether any upload of this turn's landed — a file is something said, placeholder or not. */
+  private uploaded = false;
+  /** Whether any edit of this turn's landed — a streamed line Slack took is something said, whatever the final edit's fate. */
+  private edited = false;
+  /**
+   * Where in the thread this turn's words stand: the ts of the lowest
+   * message Slack took them in — the placeholder an edit landed in, or an
+   * overflow chunk posted — and, separately, where a file of its landed
+   * (the share ts the upload answers with, or the clock — see `queueUpload`).
+   * What the thread rule orders by: an untagged reply is for whoever's
+   * reply sits lowest in the thread, the one a reader sees last, which is
+   * not the turn that finished last — a placeholder posted at intake and
+   * filled in slowly sits above a reply posted while it was being written.
+   */
+  private textAt: string | undefined;
+  private uploadedAt: string | undefined;
+  /**
+   * A turn nobody asked for: the placeholder is not posted at intake but
+   * on the first TEXT the turn streams, and a turn that ends having said
+   * nothing leaves the thread untouched — no placeholder, no `(no reply)`,
+   * no edit. Text and not a tool line, though the spec sketched either: a
+   * placeholder posted for a tool the turn ran on the way to deciding it
+   * had nothing to add is a message the decision cannot take back.
+   */
+  readonly lazy: boolean;
   private readonly web: SlackWebLike;
   private readonly channel: string;
   private readonly threadTs: string | undefined;
   private readonly editIntervalMs: number;
   private readonly warn: (line: string) => void;
+  private readonly now: () => number;
 
   constructor(
     web: SlackWebLike,
@@ -425,12 +534,15 @@ class ReplyRenderer {
     threadTs: string | undefined,
     editIntervalMs: number,
     warn: (line: string) => void,
+    options: { lazy?: boolean; now?: () => number } = {},
   ) {
     this.web = web;
     this.channel = channel;
     this.threadTs = threadTs;
     this.editIntervalMs = editIntervalMs;
     this.warn = warn;
+    this.lazy = options.lazy ?? false;
+    this.now = options.now ?? Date.now;
   }
 
   /**
@@ -556,12 +668,27 @@ class ReplyRenderer {
       // failure instead of an unhandled stream error.
       .then(async () => {
         const data = await readFile(filePath);
-        await this.web.files.uploadV2({
+        // Where the file will sit is Slack's to say — the ts of the
+        // message it becomes, in the shares the upload answers with. When
+        // the answer carries none, the clock stands in, read BEFORE the
+        // call: the file is posted somewhere inside it, and a colleague's
+        // placeholder posted while the answer was on its way back sits
+        // below the file. Read after, the file would be placed below that
+        // placeholder and take a thread the colleague holds; read before,
+        // the error runs the other way, toward the colleague — the fault
+        // an @ fixes.
+        const before = slackTs(this.now());
+        const result = await this.web.files.uploadV2({
           channel_id: this.channel,
           file: data,
           filename: path.basename(filePath),
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
+        this.uploaded = true;
+        const placed = uploadPlace(result, this.channel) ?? before;
+        if (this.uploadedAt === undefined || placed > this.uploadedAt) {
+          this.uploadedAt = placed;
+        }
       })
       .catch((error) => this.warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
   }
@@ -584,8 +711,15 @@ class ReplyRenderer {
       if (this.finalized) {
         return;
       }
+      // Nothing said yet: a lazy turn has no placeholder to edit, and a
+      // tool line alone does not earn one (see `lazy`). Nor does text
+      // streamed here before this turn began — a recovery's, routed to
+      // the head of the queue — which `beginTurn` drops.
+      if (this.lazy && !this.ref && (!this.turnStarted || this.buffer.trim().length === 0)) {
+        return;
+      }
       this.lastEditAt = Date.now();
-      this.queueEdit(messageText(this.currentText()));
+      void this.queueEdit(messageText(this.currentText()));
     }, delay);
     this.pendingEdit.unref?.();
   }
@@ -606,6 +740,17 @@ class ReplyRenderer {
     const edit = this.editChain
       .then(() => handover)
       .then(async () => {
+        if (this.lazy && !this.ref && this.turnStarted && generation === this.generation) {
+          // The first text of a turn nobody asked for: this is where its
+          // placeholder is posted, and the edit below fills it. A post
+          // that fails leaves the turn without one, and its reply is a
+          // message of its own when it comes (see `finalize`).
+          try {
+            await this.open();
+          } catch (error) {
+            this.warn(`could not open a placeholder: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
         // Read after the handover, not before: the placeholder may have
         // changed hands while this edit waited its turn — and the text
         // may belong to the turn that was handed over.
@@ -614,6 +759,8 @@ class ReplyRenderer {
           return false;
         }
         await this.web.chat.update({ channel: ref.channel, ts: ref.ts, text });
+        this.edited = true;
+        this.placeText(ref.ts);
         return true;
       })
       .catch((error) => {
@@ -626,45 +773,136 @@ class ReplyRenderer {
 
   /**
    * Replace the placeholder with the final reply, splitting if oversized.
-   * Resolves to whether ALL of it was published — the edit taken and every
-   * overflow message posted. A reply Slack refused any part of was not
-   * said in the thread as written, and nothing downstream may treat it as
-   * if it had been: a colleague hearing the whole of a reply the thread
-   * saw half of is reasoning from text nobody read.
+   * Resolves to a `ReplyOutcome`. A reply Slack refused any part of was
+   * not said in the thread as written, and nothing downstream may treat it
+   * as if it had been: a colleague hearing the whole of a reply the thread
+   * saw half of is reasoning from text nobody read. But a file beside a
+   * refused sentence is still the last thing said, for the thread rule.
    */
-  async finalize(reply: string): Promise<boolean> {
+  async finalize(reply: string): Promise<ReplyOutcome> {
     await this.handover;
     this.finalized = true;
     if (this.pendingEdit) {
       clearTimeout(this.pendingEdit);
       this.pendingEdit = undefined;
     }
+    // Let the edits already queued land before deciding anything from
+    // `ref`: a lazy turn's first text may be opening its placeholder in
+    // that chain right now, and reading `ref` ahead of it would post the
+    // reply as a message of its own beside a placeholder that then fills
+    // with stale partial text.
+    await this.editChain;
+    if (this.lazy && reply.trim().length === 0 && (!this.ref || await this.retract())) {
+      // Silence, decided: nothing was posted and nothing is — or what was
+      // posted has been taken back. The uploads still land: a file the
+      // turn produced is not nothing to say, and a turn that posted one
+      // has spoken, for the thread rule.
+      await this.editChain;
+      await this.uploadChain;
+      return this.outcome(false, this.uploaded);
+    }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
     const chunks = messageChunks(text);
     // No placeholder — a handover could not open a fresh one — and the
     // reply is a message of its own rather than nothing at all.
     const rest = this.ref ? chunks.slice(1) : chunks;
-    const edited = this.ref ? this.queueEdit(chunks[0] ?? NO_REPLY_TEXT) : Promise.resolve(true);
-    let published = await edited;
+    const edited = this.ref ? this.queueEdit(chunks[0] ?? NO_REPLY_TEXT) : Promise.resolve(false);
+    let landed = await edited;
+    let published = this.ref ? landed : true;
     await this.editChain;
     await this.uploadChain;
     for (const chunk of rest) {
       try {
-        await this.web.chat.postMessage({
+        const posted = await this.web.chat.postMessage({
           channel: this.channel,
           text: chunk,
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
+        landed = true;
+        this.placeText(posted.ts);
       } catch (error) {
         published = false;
         this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    return published;
+    // A placeholder that opened for a turn nobody asked for and never
+    // took a word of it — every edit refused — is a `…` standing alone
+    // under the agent's name, the interruption a judged turn exists to
+    // avoid, so it is taken back like an abandoned attempt's. One Slack
+    // will not let go stands, and a message the thread can see is the
+    // last thing said whatever it says.
+    let stranded = false;
+    if (this.lazy && this.ref !== undefined && !landed && !this.edited) {
+      stranded = !(await this.retract());
+      if (stranded) {
+        this.placeText(this.ref?.ts);
+      }
+    }
+    return this.outcome(published, landed || this.edited || this.uploaded || stranded);
   }
 
-  async fail(message: string): Promise<void> {
-    await this.finalize(`Something went wrong: ${message}`);
+  private placeText(ts: string | undefined): void {
+    if (ts !== undefined && (this.textAt === undefined || ts > this.textAt)) {
+      this.textAt = ts;
+    }
+  }
+
+  private outcome(published: boolean, spoke: boolean): ReplyOutcome {
+    const spokeAt = [this.textAt, this.uploadedAt]
+      .filter((ts): ts is string => ts !== undefined)
+      .sort()
+      .at(-1);
+    return { published, spoke, ...(spoke && spokeAt !== undefined ? { spokeAt } : {}) };
+  }
+
+  /**
+   * Take back the placeholder a turn nobody asked for opened and then had
+   * nothing to put in: the line that opened it was an attempt the provider
+   * abandoned (`reset` — a fallback after a mid-stream failure), and the
+   * attempt that stood answered with nothing. Editing that placeholder to
+   * `(no reply)` would leave exactly the interruption a silent turn exists
+   * to avoid, and would count as speaking. Resolves to whether Slack let
+   * the message go: a delete refused leaves the abandoned line standing,
+   * and the turn finishes the ordinary way, since a message the thread
+   * can still see is the last thing said whatever it says.
+   */
+  private async retract(): Promise<boolean> {
+    const ref = this.ref;
+    if (!ref) {
+      return true;
+    }
+    try {
+      await this.web.chat.delete({ channel: ref.channel, ts: ref.ts });
+    } catch (error) {
+      this.warn(`chat.delete failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+    this.ref = undefined;
+    // The line the placeholder took is gone with it: nothing of this
+    // turn's stands in the thread unless a file does.
+    this.edited = false;
+    this.textAt = undefined;
+    return true;
+  }
+
+  async fail(message: string): Promise<ReplyOutcome> {
+    // The same wait `finalize` takes, for the same reason: a lazy turn's
+    // first text may be opening its placeholder right now, and a failure
+    // read as "before saying anything" would leave that placeholder saying
+    // `(no reply)` where the failure belongs.
+    await this.editChain;
+    // "Before saying anything" is no placeholder AND nothing buffered: a
+    // first text whose zero-delay edit has not fired yet has still been
+    // said, and its failure is reported — as a message of its own, since
+    // there is no placeholder to edit — rather than swallowed with it.
+    if (this.lazy && !this.ref && this.buffer.trim().length === 0) {
+      // A turn nobody asked for that failed before saying anything: the
+      // failure is in the daemon log, and an error note would be the
+      // interruption the turn existed to avoid.
+      this.warn(`a turn nobody asked for failed before saying anything: ${message}`);
+      return this.finalize('');
+    }
+    return this.finalize(`Something went wrong: ${message}`);
   }
 
   /**
@@ -778,29 +1016,10 @@ class ReplyRenderer {
   }
 }
 
-// The adapter-level convention for file-bearing tool results: an ok result
-// whose object output carries `file: string` or `files: string[]` refers to
-// local paths the channel should deliver as attachments.
-const collectFilePaths = (result: ToolResult): string[] => {
-  const output = result.output;
-  if (typeof output !== 'object' || output === null || Array.isArray(output)) {
-    return [];
-  }
-  const paths: string[] = [];
-  const single = (output as { file?: unknown }).file;
-  if (typeof single === 'string' && single.length > 0) {
-    paths.push(single);
-  }
-  const many = (output as { files?: unknown }).files;
-  if (Array.isArray(many)) {
-    for (const entry of many) {
-      if (typeof entry === 'string' && entry.length > 0) {
-        paths.push(entry);
-      }
-    }
-  }
-  return paths;
-};
+// The file-bearing result convention is the kernel's (`filePathsOf`), so
+// the gateway counts a turn that produced a file as having spoken by the
+// same rule this adapter uploads it by.
+const collectFilePaths = (result: ToolResult): string[] => filePathsOf(result);
 
 // A hard cut must never land between the halves of a UTF-16 surrogate
 // pair — an emoji on the boundary would reach Slack as two replacement
@@ -1642,6 +1861,13 @@ interface Admission {
    * handover gave to another agent — and by the sessions for the cold one.
    */
   overhear: boolean;
+  /**
+   * An untagged message reaching an agent that judges (`listens: judge`):
+   * heard in any case, and answered by a turn nobody asked for if the
+   * agent is still attentive — which only the session can say, so the
+   * intake decides it.
+   */
+  judge: boolean;
 }
 
 interface AgentConnection {
@@ -1679,6 +1905,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const createWeb = options.createWebClient ?? defaultWebClient;
   const fetchFile = options.fetchFile ?? defaultFetchFile;
   const fileDownloadTimeoutMs = options.fileDownloadTimeoutMs ?? DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS;
+  const now = options.now ?? Date.now;
 
   const connections: AgentConnection[] = [];
   // Every agent this adapter was asked to carry, connected or not — the
@@ -1870,6 +2097,80 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     connections.find((candidate) => candidate.config.agentId === agentId);
 
   /**
+   * How an agent listens, from its soul — read per message, so a roster
+   * reload takes effect on the next one. `thread` when the soul says
+   * nothing, which is every soul written before there was a choice.
+   */
+  const listensOf = (agentId: string): ListensMode =>
+    gatewayRef?.agents().find((agent) => agent.id === agentId)?.listens ?? 'thread';
+
+  /**
+   * Whether an agent that judges is still paying attention to a thread:
+   * within `ATTENTION_MESSAGES` and `ATTENTION_MS` of when it last
+   * answered a message that addressed it, both read from the session
+   * rather than remembered here, so a restart forgets nothing. Anchored
+   * to an addressed answer and not to any reply: a reply the agent chose
+   * to give on a turn nobody asked for does not re-arm it, or a talkative
+   * judge would keep itself attentive for good and cost a call per message
+   * — the self-extension the spec declined. An agent never addressed in
+   * the thread is not attentive: it was mentioned and its first turn has
+   * not answered yet, or answered with nothing. Measured against the
+   * message's own timestamp, not the clock, so a delivery that ran late is
+   * judged as of when it was said. Bounded below as well as above: a
+   * message said before the answer the window starts from is outside it
+   * — Slack redelivers events a restarted daemon has no memory of, and a
+   * negative age would otherwise pass the minutes bound however old the
+   * message, on a turn the agent's answer already came after.
+   */
+  const attentive = (routing: SessionRouting, messageTs: string, pending: number): boolean => {
+    if (routing.lastAnsweredAt === undefined) {
+      return false;
+    }
+    const answeredAt = Date.parse(routing.lastAnsweredAt);
+    const saidAt = Number(messageTs) * 1000;
+    if (Number.isNaN(answeredAt) || Number.isNaN(saidAt) || saidAt < answeredAt || saidAt - answeredAt > ATTENTION_MS) {
+      return false;
+    }
+    return (routing.heardSinceAnswered ?? 0) + pending < ATTENTION_MESSAGES;
+  };
+
+  /**
+   * Messages this adapter has dispatched to a session that the session
+   * does not hold yet. The store counts what it holds, and a burst of
+   * messages typed inside one second would each read the same count and
+   * each be judged — the bound the window exists to give, blown by exactly
+   * the thread that needs it. The renderer queue already knows: a renderer
+   * is queued at dispatch and its turn starts (`turnStarted`) only once
+   * the runner has saved the message — the same moment the store's count
+   * takes it over — so the two never count one message twice.
+   */
+  const pendingFor = (sessionId: string): number =>
+    (renderers.get(sessionId) ?? []).filter((renderer) => !renderer.turnStarted).length
+    + (pendingObserves.get(sessionId) ?? 0);
+
+  /**
+   * Overhears placed on the gateway's chain and not yet written, per
+   * session: the other kind of message the store does not hold yet. An
+   * observe queued behind a running turn is heard only when the turn ends,
+   * and a burst of messages to a colleague would otherwise count toward
+   * nothing until then. Counted from placement to settlement.
+   */
+  const pendingObserves = new Map<string, number>();
+  const placeObserve = <T>(sessionId: string, observed: Promise<T>): Promise<T> => {
+    pendingObserves.set(sessionId, (pendingObserves.get(sessionId) ?? 0) + 1);
+    const release = (): void => {
+      const left = (pendingObserves.get(sessionId) ?? 1) - 1;
+      if (left > 0) {
+        pendingObserves.set(sessionId, left);
+      } else {
+        pendingObserves.delete(sessionId);
+      }
+    };
+    void observed.then(release, release);
+    return observed;
+  };
+
+  /**
    * Run `work` after everything already queued for this session's intake,
    * and hold the next link until it settles. The link is claimed
    * synchronously, so a message's place is fixed by when the adapter
@@ -1995,9 +2296,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           // spoke, by display name. A bot user's is the app's own, set by
           // whoever installed it.
           const author = await displayNameFor(hearer, speaker.botUserId);
-          return {
-            observed: gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${reply}`, metadata }),
-          };
+          const observed = gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${reply}`, metadata });
+          return { observed: observed === undefined ? undefined : placeObserve(sessionId, observed) };
         });
         await observed;
       } catch (error) {
@@ -2440,6 +2740,26 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const channel = metadata.slackChannel;
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
+    if (routing.unaddressed === true && routing.reply === undefined) {
+      // A turn nobody asked for that said nothing before it broke — the
+      // daemon died inside it, and the next start failed it with no
+      // renderer here to keep quiet for it. The same rule as the lazy
+      // renderer's: the failure is in the log, and the files it produced
+      // still land, since a file is not nothing to say.
+      //
+      // "Said nothing" as the session can tell it: no reply saved for the
+      // turn. A line the old process had streamed into a placeholder and
+      // never saved is invisible here — the session records what was
+      // said, not what Slack took (roadmap 31's open item) — so such a
+      // turn is failed without a note under that line. Taken over the
+      // alternative on purpose: a note for every judged turn a restart
+      // caught turns a silent turn, the common case, into the
+      // interruption it existed to avoid; a line left standing happens
+      // only to a turn that had already chosen to speak.
+      warn(`slack: a turn nobody asked for failed before saying anything: ${event.error}`);
+      await uploadUnrenderedFiles(connection, channel, thread, files);
+      return;
+    }
     await postAheadOf(
       behind,
       connection,
@@ -2601,13 +2921,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Records that `agentId` holds the thread from the message at `ts`
    * onwards, wherever in the thread's history that message falls.
    *
-   * Only actual handovers are kept: a write naming the agent that already
-   * held the thread at that point adds nothing, so the list stays as short
-   * as the conversation's changes of hands rather than growing per message.
-   * The oldest handovers are dropped past `THREAD_HANDOVER_DEPTH`, and the
+   * Every claim is kept, not only changes of hands. A claim by the agent
+   * already holding the thread looks redundant until another agent's reply
+   * is placed between it and the one before — a judge's reply posted below
+   * the holder's older message and above its newer one — at which point it
+   * is what keeps the newer message the holder's; dropped, the judge's
+   * later insertion would take the thread from a reply that sits below it.
+   * Only the same claim twice — the same message reaching a second
+   * connection — is dropped.
+   * The oldest claims are dropped past `THREAD_HANDOVER_DEPTH`, and the
    * least recently written thread past `THREAD_ADDRESSEE_CAPACITY`; both
    * losses cost a lookup, never an answer, since the sessions still hold
    * the durable version.
+   *
+   * `ts` is a message's place in the thread: the message that handed the
+   * thread over at intake, or — once a reply has landed — the reply's own
+   * (`ReplyOutcome.spokeAt`), which is what puts a judge's reply posted
+   * below a colleague's placeholder after it, and one streamed above it
+   * before, whichever turn finished first.
    *
    * Slack timestamps compare as strings: `seconds.microseconds`, both
    * parts fixed width, so lexicographic order is chronological order.
@@ -2619,9 +2950,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       at -= 1;
     }
     const before = handovers[at - 1];
-    if (before && before.agentId === agentId) {
-      // Already this agent's from earlier in the thread; the same message
-      // reaching a second connection lands here too.
+    if (before && before.agentId === agentId && before.ts === ts) {
       return;
     }
     handovers.splice(at, 0, { agentId, ts });
@@ -2951,6 +3280,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ...(threadKey ? { threadKey } : {}),
       settled: true,
       overhear: false,
+      judge: false,
     };
 
     if (addressed) {
@@ -2973,9 +3303,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return { ...admission, overhear: true };
     }
 
-    // An untagged reply. The record is what this process has actually seen,
-    // in the order it saw it — right even inside the window before a
-    // handover reaches the store.
+    // An untagged reply. How this agent listens decides what it is: an
+    // agent that answers only mentions hears it and nothing more, and one
+    // that judges hears it and, if still attentive, takes a turn nobody
+    // asked for on it — decided in the intake, since only the session can
+    // say. Neither takes part in the holder rule below: that rule answers
+    // "whose is an untagged reply", and for these two agents the soul has
+    // already answered.
+    const listens = listensOf(connection.config.agentId);
+    if (listens === 'mentions') {
+      return { ...admission, overhear: true };
+    }
+    if (listens === 'judge') {
+      return { ...admission, overhear: true, judge: true };
+    }
+
+    // The record is what this process has actually seen, in the order it
+    // saw it — right even inside the window before a handover reaches the
+    // store.
     const holder = threadKey === undefined ? undefined : holderAt(threadKey, event.ts);
     if (holder !== undefined && threadKey !== undefined) {
       if (holder !== connection.config.agentId) {
@@ -3043,6 +3388,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // not to be this agent's leaves an empty link behind, which is all it
       // should cost.
       let overhear = admitted.overhear;
+      // Judged, not ruled: a turn nobody asked for, while the agent is
+      // still attentive, and a free overhear past that. Read off the
+      // chain — a session the invitation is still creating reads as not
+      // there, and the message is heard rather than judged, which is the
+      // safe side. A host that cannot say leaves the agent hearing.
+      let judged = false;
+      if (admitted.judge && gateway.sessionRouting) {
+        // The pending count is taken BEFORE the store is read: a message
+        // that settles between the two would be counted by neither the
+        // other way round, and a window that runs one message short in a
+        // race is a bound kept; one that runs a message long is not.
+        const pending = pendingFor(sessionId);
+        let routing: SessionRouting | undefined;
+        try {
+          routing = await gateway.sessionRouting(sessionId);
+        } catch (error) {
+          warn(`slack: could not read whether ${connection.config.agentId} is attentive in ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (routing && attentive(routing, event.ts, pending)) {
+          judged = true;
+          overhear = false;
+        }
+      }
       if (!admitted.settled) {
         // One verdict for this message, shared with whichever other agents
         // are asking about it — see `followUpWinner`.
@@ -3067,7 +3435,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // will answer: an overheard one is appended as text with no turn run
       // on it, and its attachments reach the transcript by name, as every
       // attachment did before images.
-      const { images, unread } = overhear
+      // Nor for one it will judge: the kernel refuses images on a turn
+      // nobody asked for, since they reach the model ahead of the frame
+      // that marks the message as somebody else's, and a judged message
+      // names its attachments the way an overheard one does.
+      const { images, unread } = overhear || judged
         ? { images: [] as ImageAttachment[], unread: event.files ?? [] }
         : await readImageAttachments(
           event.files ?? [],
@@ -3124,16 +3496,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // an overhear queued behind a long turn would hold the next
         // message's place in this chain hostage to that turn.
         return {
-          observed: gateway.observe({ sessionId, agentId: connection.config.agentId, message: userMessage, metadata }),
+          observed: placeObserve(sessionId, gateway.observe({ sessionId, agentId: connection.config.agentId, message: userMessage, metadata })),
         };
       }
 
-      const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn);
-      try {
-        await renderer.open();
-      } catch (error) {
-        warn(`could not post to ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
-        return undefined;
+      // A turn nobody asked for opens its placeholder on its first text,
+      // if it ever has any — see `ReplyRenderer.lazy`.
+      const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn, { lazy: judged, now });
+      if (!judged) {
+        try {
+          await renderer.open();
+        } catch (error) {
+          warn(`could not post to ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
+          return undefined;
+        }
       }
 
       // The push and the dispatch happen in the same microtask, so queue
@@ -3147,6 +3523,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         agentId: connection.config.agentId,
         userMessage,
         ...(images.length > 0 ? { images } : {}),
+        ...(judged ? { addressed: false } : {}),
         turnId: renderer.turnId,
         metadata,
       });
@@ -3201,14 +3578,35 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // posts, which are network I/O a later message must not overtake.
       // A DM has no thread, and nobody else in it.
       const reply = latestTurnReply(session);
-      const published = renderer.finalize(lastAssistantReply(session));
+      // A turn nobody asked for that said nothing posts nothing; every
+      // other turn says `(no reply)` where its answer would have gone.
+      const finalized = renderer.finalize(renderer.lazy ? reply ?? '' : lastAssistantReply(session));
       const heard = thread !== undefined && reply !== undefined
-        ? overhearReply(connection, event.channel, thread, reply, session, published)
+        ? overhearReply(connection, event.channel, thread, reply, session, finalized.then((outcome) => outcome.published))
         : undefined;
-      await published;
+      const { spoke, spokeAt } = await finalized;
+      if (spoke && threadKey !== undefined) {
+        // The voice that just answered, recorded where its reply sits in
+        // the thread. For a judging agent this is the only record there
+        // is — it took no part in the holder rule at intake — and without
+        // it a thread-rule colleague that held the thread before would
+        // keep answering beside it. For any other turn the intake wrote
+        // one at the message answered, and this one says where the answer
+        // landed, which is what settles two turns running at once: a
+        // placeholder posted at intake sits above a reply a judge posted
+        // while it was being filled, whichever turn finished first, and
+        // the reader's next untagged message is for the lower of the two.
+        // Late, either way, for a message typed while the turn was still
+        // running, which the other may therefore still take.
+        rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);
+      }
       await heard;
     } else {
-      await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+      const { spoke, spokeAt } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+      if (spoke && threadKey !== undefined) {
+        // A file it posted before breaking is still the last thing said.
+        rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);
+      }
     }
   };
 
@@ -3403,6 +3801,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       approvalPosts.clear();
       threadAddressee.clear();
       coldVerdicts.clear();
+      pendingObserves.clear();
       botIdentities.clear();
       rendering.clear();
       resolvedWhileRendering.clear();

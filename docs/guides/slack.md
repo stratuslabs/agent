@@ -47,13 +47,53 @@ moves the conversation to them. The agent that stood down keeps
 listening: what you say to its colleague in that thread, and what the
 colleague answers, go into its own session, marked as said to somebody
 else, so when you turn back to it, it answers as someone who followed
-along. It is still a rule and not
-judgement, so in a thread where people are mostly talking to each other the
-agent will answer replies that were not meant for it — give the side
-conversation its own thread. And an agent hears a thread from the mention
-that brought it in, not before — say what it needs in that message. The full
-set of rules, and the two edges around them, is [Who a message is
+along. And an agent hears a thread from the mention that brought it in, not
+before — say what it needs in that message. The full set of rules, and the
+two edges around them, is [Who a message is
 for](../../packages/channel-slack/README.md#who-a-message-is-for).
+
+### How an agent listens
+
+That rule is a rule and not judgement: in a thread where people are mostly
+talking to each other, an agent that answers every untagged reply will
+answer ones that were not meant for it. `listens:` in the soul's frontmatter
+picks how the agent handles a reply that did not name it — part of what the
+agent *is*, next to `tools:` and `skills:`, not a deployment setting:
+
+```markdown
+---
+name: Ava
+listens: judge
+---
+```
+
+- `thread` — the default, and the rule above: every untagged reply in a
+  thread it is in. Cheap, predictable, and right for a thread with one
+  person in it.
+- `mentions` — only when named. The behavior before thread follow-through
+  existed; some agents should be exactly this.
+- `judge` — it hears everything, and for a while after it last spoke it
+  **decides** whether an untagged message is one it should answer: the
+  message runs a turn that is told nobody asked it anything and that it may
+  say nothing, and a turn that says nothing leaves the thread untouched — no
+  `…`, no `(no reply)`, and a line a failed attempt had started before the
+  retry chose silence is deleted rather than left standing. That "while" is its attention: eight messages or
+  fifteen minutes after it last answered a message that named it, whichever
+  ends first; past that a message is heard for free with no model call, and
+  mentioning it starts the window again. Speaking up on its own does not —
+  an agent cannot extend its own attention, or a talkative one would never
+  drift out. So "thanks Ava, we've got it from here" works because it is a
+  sentence the agent read, and a mention is still the way to be sure.
+
+Judging costs a model call per message inside the window, which is why the
+window exists. An agent that judges never takes a colleague's *reply* as
+something to answer — two judging agents would otherwise talk to each other
+— and in a thread that mixes a judging agent with one on the thread rule,
+a judging agent that speaks takes the thread like any speaker — whoever's
+reply sits lowest in the thread holds it — so the other stands down from
+then on; only a message typed while the judging agent was still deciding
+may get both. Editable without opening the
+file: `PUT /agents/:id` takes `listens` like any other field.
 
 An app installed before this shipped needs the `channels:history` /
 `groups:history` / `mpim:history` scopes and the `message.*` events added

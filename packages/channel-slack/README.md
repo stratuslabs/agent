@@ -44,7 +44,39 @@ they are the whole model:
    straight after it reaches the agent you just named, and the agent that
    *had* the thread stands down at the same instant rather than whenever its
    own app next catches up.
-5. **Standing down is not leaving.** An agent in a thread hears what is
+5. **How an agent listens is the soul's to say.** Rules 3 and 4 are the
+   `thread` mode, the default. A soul with `listens: mentions` takes only
+   messages that name it, and hears the rest. One with `listens: judge`
+   hears everything and, while attentive — eight messages or fifteen
+   minutes after it last answered a message that named it, whichever ends
+   first — runs a turn nobody asked for on each untagged message, told it
+   may answer with nothing; past the window a message is heard with no
+   turn at all, and a mention re-arms it. A reply it chose to give on its
+   own does not: it takes the thread for the thread rule, and counts
+   against its own window like any other message. A turn that decides on silence posts nothing: its
+   placeholder is opened only on the first text it streams, never on a
+   tool line, and a failed one posts no error note — one the daemon died
+   inside, failed at the next start, included, a line it had already
+   streamed staying as it was. A line an attempt the
+   provider abandoned had already posted is taken back when the retry
+   decides on silence. Neither mode takes
+   part in the holder rule — that rule answers whose an untagged reply is,
+   and for these two the soul already has — so a thread-rule agent stands
+   down for a judging or mentions-only one that spoke last: the judging
+   one decides for itself, and the mentions-only one is being talked to
+   and waits to be named. A judging agent that chooses to speak takes the
+   thread the way any speaker does, recorded once its reply has landed —
+   so a message typed while it was still deciding may be answered by both
+   it and a thread-rule colleague that held the thread before. "Spoke
+   last" is read off the thread, not the clock: the holder is whichever
+   agent's reply sits lowest, since that is the one a reader answers, and
+   a placeholder posted early and filled in slowly sits above a reply
+   posted while it was being written. A colleague's reply is never
+   judged, only heard.
+   The window also counts messages this daemon has dispatched that the
+   session does not hold yet, so a burst typed inside one turn is judged
+   up to the window and heard past it.
+6. **Standing down is not leaving.** An agent in a thread hears what is
    said to the other agent in it — the question that named its colleague,
    the untagged replies that were the colleague's to answer, and what the
    colleague *replied* — into its own session, with no turn run and

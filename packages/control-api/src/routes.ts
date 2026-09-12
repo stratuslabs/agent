@@ -13,6 +13,7 @@ import {
   isValidDelegateEntry,
 } from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
+import { LISTENS_MODES, isListensMode } from '@stratusagent/core';
 import { describeAgentGrants, WhitelistUnreadableError, type AgentGrantStore } from '@stratusagent/permissions';
 import {
   isScheduleSessionId,
@@ -623,12 +624,25 @@ export const routes: Route[] = [
       } else {
         const provider = optionalString(body, 'provider');
         const model = optionalString(body, 'model');
+        // Like a pin: an empty string clears it back to the default, an
+        // absent key leaves it alone, and anything but a mode is refused.
+        const listens = optionalString(body, 'listens');
+        if (listens !== undefined && listens.length > 0 && !isListensMode(listens)) {
+          throw new ApiError(
+            400,
+            'invalid_listens',
+            `listens must be one of ${LISTENS_MODES.join(', ')}, not ${JSON.stringify(listens)}.`,
+          );
+        }
         if (provider !== undefined && provider.length > 0) {
           validateProvider(provider, 'provider');
         }
+        // Cleared by an empty string, which the spread below cannot do: a
+        // key the current definition carries has to be taken off it.
+        const { listens: _kept, ...currentAgent } = current.agent;
         next = {
           agent: {
-            ...current.agent,
+            ...(listens === undefined ? current.agent : currentAgent),
             ...(optionalString(body, 'name') !== undefined ? { name: optionalString(body, 'name') as string } : {}),
             ...(optionalString(body, 'instructions') !== undefined
               ? { instructions: optionalString(body, 'instructions') as string }
@@ -637,6 +651,7 @@ export const routes: Route[] = [
             ...(body.skills !== undefined ? { skills: allowlist(body.skills, 'skills') } : {}),
             ...(body.credentials !== undefined ? { credentials: allowlist(body.credentials, 'credentials') } : {}),
             ...(body.delegates !== undefined ? { delegates: delegatesAllowlist(body.delegates) } : {}),
+            ...(isListensMode(listens) ? { listens } : {}),
           },
           // An empty string clears a pin; an absent key leaves it alone.
           ...(provider === undefined ? (current.provider ? { provider: current.provider } : {}) : (provider ? { provider } : {})),
