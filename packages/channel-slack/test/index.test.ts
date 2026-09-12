@@ -1430,18 +1430,41 @@ test('a reply Slack refused to publish is heard by nobody', async () => {
   // Slack recovers; the next reply lands, and is heard.
   refusing = false;
   await both(channelMessage({ text: 'again', ts: '960.2', thread: '960.0' }));
+  // A reply too long for one message whose overflow Slack refuses: the
+  // thread saw its first part only, and a hearer has no way to know which
+  // part — so it is heard as not said at all, not as the whole.
+  const longReply = `${'first part\n'.repeat(300)}${'x'.repeat(2000)}`;
+  const answers = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    if (input.userMessage.includes('a lot')) {
+      gateway.dispatches.push({ sessionId: input.sessionId, agentId: input.agentId ?? '', userMessage: input.userMessage });
+      await gateway.bus.emit({ type: 'session.updated', sessionId: input.sessionId, status: 'running' });
+      return sessionWithReply(input.sessionId, longReply);
+    }
+    return answers.call(gateway, input);
+  };
+  webAva.chat.postMessage = async (args) => {
+    if (args.text !== '…') {
+      throw new Error('ratelimited');
+    }
+    return post.call(webAva.chat, args);
+  };
+  await both(channelMessage({ text: 'write a lot', ts: '960.3', thread: '960.0' }));
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
     ['ava', 'Dylan: say more'],
     ['ava', 'Dylan: again'],
+    ['ava', 'Dylan: write a lot'],
   ]);
+  assert.ok(webAva.updates.some((update) => update.text.startsWith('first part')), 'the first part was edited in');
   assert.deepEqual(
     gateway.observes.map((observed) => [observed.agentId, observed.message]),
     [
       ['bea', 'Dylan: say more'],
       ['bea', 'Dylan: again'],
       ['bea', 'Ava: re Dylan: again'],
+      ['bea', 'Dylan: write a lot'],
     ],
   );
 });
