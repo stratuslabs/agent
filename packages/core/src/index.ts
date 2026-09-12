@@ -339,6 +339,16 @@ export interface AgentDefinition extends AgentDescriptor {
   skills?: string[];
   /** Credential names this agent may resolve. Omitted = none. */
   credentials?: string[];
+  /**
+   * Agent ids this agent may delegate to through `agent.delegate`, or `*`
+   * for any agent on the roster. Omitted = none, matching `credentials`
+   * rather than `tools`: delegation runs a turn as another agent, under
+   * that agent's tools, credentials, and memory, so it is the lateral
+   * move a prompt-injected agent would take — and `agent.delegate` is
+   * `safe`, so nothing else asks. Checked by the delegate tool against the
+   * session's agent, the way the tool allowlist is.
+   */
+  delegates?: string[];
 }
 
 export class AgentRegistry {

@@ -282,6 +282,7 @@ export interface DefineAgentInput {
   tools?: string[];
   skills?: string[];
   credentials?: string[];
+  delegates?: string[];
   avatar?: AvatarTheme;
   /** Seed for deterministic identity generation (used in tests). */
   seed?: string;
@@ -338,8 +339,17 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
     ...(input.tools ? { tools: input.tools } : {}),
     ...(input.skills ? { skills: input.skills } : {}),
     ...(input.credentials ? { credentials: input.credentials } : {}),
+    ...(input.delegates ? { delegates: input.delegates } : {}),
   };
 };
+
+/**
+ * Whether `agent` may delegate to the agent with id `targetId`. Exact ids
+ * or `*`; no namespace globs, because agent ids have no namespaces. Omitted
+ * is nobody — see `AgentDefinition.delegates`.
+ */
+export const isDelegateAllowed = (agent: Pick<AgentDefinition, 'delegates'>, targetId: string): boolean =>
+  (agent.delegates ?? []).some((entry) => entry === '*' || entry === targetId);
 
 /**
  * A parsed soul file: the agent it defines plus optional runtime hints.
@@ -361,7 +371,7 @@ export interface ParseSoulOptions {
 }
 
 const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model'] as const;
-const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials'] as const;
+const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials', 'delegates'] as const;
 
 const unquote = (value: string): string => {
   const trimmed = value.trim();
@@ -652,6 +662,7 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
     ...(lists.tools ? { tools: lists.tools } : {}),
     ...(lists.skills ? { skills: lists.skills } : {}),
     ...(lists.credentials ? { credentials: lists.credentials } : {}),
+    ...(lists.delegates ? { delegates: lists.delegates } : {}),
     ...(options.seed !== undefined ? { seed: options.seed } : {}),
   });
 
@@ -679,6 +690,7 @@ export const formatSoul = (soul: ParsedSoul): string => {
     ['tools', soul.agent.tools],
     ['skills', soul.agent.skills],
     ['credentials', soul.agent.credentials],
+    ['delegates', soul.agent.delegates],
   ] as const) {
     if (values && values.length > 0) {
       lines.push(`${key}:`);
@@ -1288,6 +1300,17 @@ export const createDelegateTool = ({
     }
     if (target.id === session.agent.id) {
       throw new Error('An agent cannot delegate to itself.');
+    }
+    // Judged on the session's frozen copy of the agent, as the tool
+    // allowlist is: the target is model-chosen input, and without this
+    // list any agent holding this tool could run a turn as any other —
+    // under the other's tools, credentials, and memory — which is the
+    // lateral move a prompt-injected agent would take.
+    if (!isDelegateAllowed(session.agent, target.id)) {
+      throw new Error(
+        `Agent ${session.agent.id} may not delegate to ${target.id}. `
+        + `Add delegates: [${target.id}] to its soul, or delegates: ['*'] for any agent on the roster.`,
+      );
     }
 
     delegationCount += 1;

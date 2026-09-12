@@ -5,6 +5,7 @@ import {
   AgentRunner,
   InMemoryAgentMemoryStore,
   ToolRegistry,
+  type AgentDefinition,
   type ModelProvider,
   type Session,
 } from '@stratusagent/core';
@@ -135,6 +136,7 @@ test('orchestrators delegate to other agents and get their reply back', async ()
   const orchestrator = defineAgent({
     name: 'August North',
     tools: ['agent.delegate'],
+    delegates: ['priya-salinger'],
   });
   const specialist = defineAgent({
     name: 'Priya Salinger',
@@ -209,7 +211,7 @@ test('orchestrators delegate to other agents and get their reply back', async ()
 test('delegation by an ambiguous display name fails instead of picking an agent', async () => {
   const umaOne = defineAgent({ name: 'Uma', id: 'uma-one' });
   const umaTwo = defineAgent({ name: 'Uma', id: 'uma-two' });
-  const orchestrator = defineAgent({ name: 'Theo' });
+  const orchestrator = defineAgent({ name: 'Theo', delegates: ['*'] });
   const registry = createAgentTeam([umaOne, umaTwo, orchestrator]);
 
   const provider: ModelProvider = {
@@ -243,7 +245,7 @@ test('delegation by an ambiguous display name fails instead of picking an agent'
 });
 
 test('delegate tool rejects self-delegation, unknown agents, and depth overruns', async () => {
-  const orchestrator = defineAgent({ name: 'Kai Ibarra' });
+  const orchestrator = defineAgent({ name: 'Kai Ibarra', delegates: ['*'] });
   const registry = createAgentTeam([orchestrator]);
   const provider: ModelProvider = {
     name: 'noop',
@@ -276,6 +278,50 @@ test('delegate tool rejects self-delegation, unknown agents, and depth overruns'
     () => tool.execute({ agent: 'anyone', prompt: 'hi' }, sessionFor({ delegationDepth: 2 })),
     /Delegation depth limit reached \(2\)/,
   );
+});
+
+test('an agent delegates only to the agents its soul lists, and omitted means nobody', async () => {
+  const closed = defineAgent({ name: 'Kai Ibarra', tools: ['agent.delegate'] });
+  const narrow = defineAgent({ name: 'Lena Voss', tools: ['agent.delegate'], delegates: ['nia-park'] });
+  const open = defineAgent({ name: 'Omar Reyes', tools: ['agent.delegate'], delegates: ['*'] });
+  const nia = defineAgent({ name: 'Nia Park' });
+  const bea = defineAgent({ name: 'Bea Lund' });
+  const registry = createAgentTeam([closed, narrow, open, nia, bea]);
+  const provider: ModelProvider = {
+    name: 'noop',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'ok' }] };
+    },
+  };
+  const runner = new AgentRunner({ provider, agents: registry });
+  const tool = createDelegateTool({ registry, runner });
+  const sessionAs = (agent: AgentDefinition): Session => ({
+    id: `s-${agent.id}`,
+    agent,
+    status: 'running',
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  });
+
+  // The target is model-chosen input; the list is the operator's. Without
+  // one, the tool being in `tools:` grants nothing — the way a credential
+  // the soul never named cannot be resolved — and the refusal names the
+  // fix.
+  await assert.rejects(
+    () => tool.execute({ agent: 'Nia Park', prompt: 'hi' }, sessionAs(closed)),
+    /Agent kai-ibarra may not delegate to nia-park\. Add delegates: \[nia-park\] to its soul, or delegates: \['\*'\] for any agent/,
+  );
+  // Listed by id: allowed, and matched by id even when named by display name.
+  const toNia = (await tool.execute({ agent: 'Nia Park', prompt: 'hi' }, sessionAs(narrow))) as { reply: string };
+  assert.equal(toNia.reply, 'ok');
+  await assert.rejects(
+    () => tool.execute({ agent: 'bea-lund', prompt: 'hi' }, sessionAs(narrow)),
+    /may not delegate to bea-lund/,
+  );
+  // `*` is anyone on the roster.
+  const toBea = (await tool.execute({ agent: 'bea-lund', prompt: 'hi' }, sessionAs(open))) as { reply: string };
+  assert.equal(toBea.reply, 'ok');
 });
 
 test('per-agent tool allowlists stop agents using tools they were not given', async () => {
@@ -358,6 +404,8 @@ tools:
   - memory.remember
 credentials:
   - ANTHROPIC_API_KEY
+delegates:
+  - bea
 ---
 
 You are warm and precise. You keep replies short and never use jargon.
@@ -369,6 +417,7 @@ You are warm and precise. You keep replies short and never use jargon.
   assert.equal(soul.model, 'claude-opus-5');
   assert.deepEqual(soul.agent.tools, ['demo.echo', 'memory.remember']);
   assert.deepEqual(soul.agent.credentials, ['ANTHROPIC_API_KEY']);
+  assert.deepEqual(soul.agent.delegates, ['bea']);
   assert.equal(
     soul.agent.instructions,
     'You are warm and precise. You keep replies short and never use jargon.',
@@ -436,7 +485,7 @@ Curious, a little playful, always cites sources.`);
 });
 
 test('delegation forwards the parent turn abort signal into the dispatcher', async () => {
-  const orchestrator = defineAgent({ name: 'Orchestrator', instructions: 'You orchestrate.' });
+  const orchestrator = defineAgent({ name: 'Orchestrator', instructions: 'You orchestrate.', delegates: ['*'] });
   const target = defineAgent({ name: 'Target', instructions: 'You help.' });
   const registry = createAgentTeam([orchestrator, target]);
 
