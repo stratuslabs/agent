@@ -319,8 +319,10 @@ the default and today's behavior; the key inherits per agent like
 `slackUsers`, so Bea above stays open while everyone else is closed. A value
 that is neither word is a config error, never `anyone`: this is the one
 setting here whose misspelling would open the door. So is a `slackUsers`
-that is not a list of user ids: a per-agent list dropped for its shape would
-fall back to the shared one, the broader list it existed to narrow.
+that is not a list of user ids, and so is a block or a per-agent entry that
+is not an object: dropped for its shape, a per-agent list would fall back to
+the shared one, the broader list it existed to narrow, and the block itself
+would fall back to `anyone`.
 `stratus serve` says at startup which agents refuse unlisted senders.
 
 Like `approvals`, this block is read only from a config you chose —

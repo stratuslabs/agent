@@ -1602,8 +1602,15 @@ export const resolveAgentApprovals = (
 };
 
 const parsePrincipalsEntry = (raw: unknown, configPath: string, where: string): AgentPrincipalsConfig | undefined => {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+  if (raw === undefined) {
     return undefined;
+  }
+  // A block or override in the wrong shape is refused, never dropped: under
+  // admit: "principals" this block is an authorization boundary, and a
+  // dropped override inherits the shared answer — or, for the block itself,
+  // the default `anyone` — which is the door opened by a typo.
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid ${where} in config ${configPath}: expected an object, received ${JSON.stringify(raw)}.`);
   }
   const source = raw as Record<string, unknown>;
   const entry: AgentPrincipalsConfig = {};
@@ -1644,6 +1651,11 @@ const parsePrincipalsConfig = (raw: unknown, configPath: string): PrincipalsConf
   }
   const principals: PrincipalsConfig = { ...shared };
   const source = raw as Record<string, unknown>;
+  if (source.agents !== undefined && (typeof source.agents !== 'object' || source.agents === null || Array.isArray(source.agents))) {
+    throw new Error(
+      `Invalid principals.agents in config ${configPath}: expected an object keyed by agent id, received ${JSON.stringify(source.agents)}.`,
+    );
+  }
   if (typeof source.agents === 'object' && source.agents !== null && !Array.isArray(source.agents)) {
     const agents: Record<string, AgentPrincipalsConfig> = {};
     for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {

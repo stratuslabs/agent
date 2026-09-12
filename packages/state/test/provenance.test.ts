@@ -174,7 +174,12 @@ test('the principals block parses like approvals: per-agent overrides, an empty 
   assert.deepEqual(resolveAgentPrincipals(config.principals, 'cy'), { slackUsers: ['U01DYLAN'] });
   assert.deepEqual(resolveAgentPrincipals(config.principals, 'dee'), { slackUsers: ['U01DYLAN'] });
   assert.deepEqual(resolveAgentPrincipals(undefined, 'ava'), {});
-  assert.equal(validateConfigFile({ principals: 'U01DYLAN' }, 'test-config').principals, undefined);
+  // A block that is not an object is refused, not dropped: dropped, it
+  // would be the default `anyone` — see the admit test below.
+  assert.throws(
+    () => validateConfigFile({ principals: 'U01DYLAN' }, 'test-config'),
+    /Invalid principals in config test-config: expected an object, received "U01DYLAN"\./,
+  );
 });
 
 // ---- the two harness paths -------------------------------------------------
@@ -404,6 +409,23 @@ test('principals.admit is inherited like slackUsers, and a misspelling is refuse
     resolveAgentPrincipals(validateConfigFile({ principals: { slackUsers: ['U01DYLAN'], agents: { bea: { slackUsers: [] } } } }, 'test-config').principals, 'bea'),
     { slackUsers: [] },
   );
+  // And so is the block itself, or an override, in the wrong shape: a
+  // dropped block is the default `anyone`, a dropped override the shared
+  // answer — both doors opened by a typo.
+  assert.throws(
+    () => validateConfigFile({ principals: [] }, 'test-config'),
+    /Invalid principals in config test-config: expected an object, received \[\]\./,
+  );
+  assert.throws(
+    () => validateConfigFile({ principals: { admit: 'principals', agents: { bea: [] } } }, 'test-config'),
+    /Invalid principals\.agents\.bea in config test-config: expected an object, received \[\]\./,
+  );
+  assert.throws(
+    () => validateConfigFile({ principals: { admit: 'principals', agents: ['bea'] } }, 'test-config'),
+    /Invalid principals\.agents in config test-config: expected an object keyed by agent id, received \["bea"\]\./,
+  );
+  // Absent is still absent.
+  assert.equal(validateConfigFile({ provider: 'demo' }, 'test-config').principals, undefined);
 });
 
 test('a global config that exists but cannot be read is unreadable behind a silent project config, never absent', async () => {
