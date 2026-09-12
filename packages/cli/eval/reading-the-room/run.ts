@@ -14,6 +14,12 @@ interface LabelledMessage {
   addressed?: boolean;
   /** What a colleague in the agent's position would do with an untagged message. */
   expect?: 'speak' | 'silent';
+  /**
+   * Heard, never judged: a message naming another agent, or that agent's
+   * reply. The Slack adapter observes these into the session with no turn,
+   * so scoring a decision on them would score one production never makes.
+   */
+  observe?: boolean;
 }
 
 interface Corpus {
@@ -56,6 +62,10 @@ const main = async (): Promise<void> => {
     const lines: string[] = [];
     for (const message of thread.messages) {
       const userMessage = `${message.speaker}: ${message.text}`;
+      if (message.observe === true) {
+        await runner.observe({ sessionId, message: userMessage });
+        continue;
+      }
       const addressed = message.addressed === true;
       const session = first
         ? await runner.run({ sessionId, agent, userMessage, addressed })

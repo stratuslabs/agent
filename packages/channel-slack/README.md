@@ -59,9 +59,9 @@ they are the whole model:
    down for a judging or mentions-only one that spoke last: the judging
    one decides for itself, and the mentions-only one is being talked to
    and waits to be named. A colleague's reply is never judged, only heard.
-   The window counts turns this daemon has dispatched and the session has
-   not yet absorbed, so a burst of messages typed inside one turn is
-   judged up to the window and heard past it.
+   The window also counts messages this daemon has dispatched that the
+   session does not hold yet, so a burst typed inside one turn is judged
+   up to the window and heard past it.
 6. **Standing down is not leaving.** An agent in a thread hears what is
    said to the other agent in it — the question that named its colleague,
    the untagged replies that were the colleague's to answer, and what the

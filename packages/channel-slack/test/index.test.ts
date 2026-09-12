@@ -1708,16 +1708,19 @@ test('text streamed to a turn nobody asked for before it begins does not open it
 test('a burst of messages typed inside one turn is judged only up to the window', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
-  // Every turn waits: the session never absorbs a judged message before
-  // the next one arrives, so the store's count stays at zero throughout.
+  // Every turn waits before it starts: the session never absorbs a judged
+  // message before the next one arrives, so the store's count stays at
+  // zero throughout and nothing has reported `running`.
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const gateway = createStubGateway(async ({ sessionId }) => {
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, ''));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
     await gate;
-    return sessionWithReply(sessionId, '');
-  });
+    return stubDispatch.call(gateway, input);
+  };
   gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
   gateway.sessionRouting = async () => ({
     agentId: 'ava',
@@ -1742,7 +1745,9 @@ test('a burst of messages typed inside one turn is judged only up to the window'
   await adapter.stop();
 
   // Eight judged — the window — and the rest heard for free, whatever the
-  // store had counted by then.
+  // store had counted by then. Once a turn has started the store holds its
+  // message and it is counted there instead, never twice (a running turn
+  // that is still pending in the queue is not a second message).
   assert.equal(gateway.dispatches.length, 8);
   assert.deepEqual(gateway.observes.map((observed) => observed.message), [
     'Dylan: burst 9',
@@ -1872,6 +1877,48 @@ test('an attachment with nothing said does not spend a judging slot', async () =
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.addressed]), [['Dylan: so what do we do', false]]);
+});
+
+test('a judged turn already running is counted by the store, not twice', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  // Seven heard since Ava spoke, one of them the message of the turn now
+  // running (the store saved it as the turn began). An eighth message is
+  // the last inside the window, and must not read as the ninth.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    await gate;
+    return sessionWithReply(sessionId, '');
+  });
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+  let heard = 6;
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: {},
+    lastSpokeAt: new Date(1030 * 1000).toISOString(),
+    heardSinceSpoke: heard,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  const seventh = socket.deliver('message', channelMessage({ text: 'seven', ts: '1030.7', thread: '1030.0' }));
+  // The stub reports `running` at dispatch, which is when the store holds
+  // the message: the count moves with it.
+  heard = 7;
+  const eighth = socket.deliver('message', channelMessage({ text: 'eight', ts: '1030.8', thread: '1030.0' }));
+  release();
+  await Promise.all([seventh, eighth]);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: seven', 'Dylan: eight']);
 });
 
 test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {

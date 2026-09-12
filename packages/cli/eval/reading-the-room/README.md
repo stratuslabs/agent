@@ -13,9 +13,11 @@ after it runs as a turn nobody asked for — exactly the turn a judging agent
 takes — and is labelled `speak` (a colleague in Ava's position would say
 something: an open question only she can answer, a correction to something
 somebody is about to act on, an answer to a question she asked) or `silent`
-(two people talking to each other, small talk, thanks, a handover to another
-agent). Attention windows are not simulated: this measures the decision,
-not the budget.
+(two people talking to each other, small talk, thanks). A message that
+names another agent, and that agent's reply, is marked `observe`: the Slack
+adapter only ever hears those, so they enter the session with no turn and
+no score, as in production. Attention windows are not simulated: this
+measures the decision, not the budget.
 
 Run it against whatever `stratus` is configured to run on, optionally as a
 particular soul:

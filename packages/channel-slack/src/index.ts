@@ -1975,14 +1975,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
-   * Turns nobody asked for that this adapter has dispatched and the
-   * session has not yet absorbed, per session. The store counts what it
-   * holds, and a burst of messages typed inside one second would each
-   * read the same count and each be judged — the bound the window exists
-   * to give, blown by exactly the thread that needs it. Counted here until
-   * the turn settles, when the session carries the message itself.
+   * Messages this adapter has dispatched to a session that the session
+   * does not hold yet. The store counts what it holds, and a burst of
+   * messages typed inside one second would each read the same count and
+   * each be judged — the bound the window exists to give, blown by exactly
+   * the thread that needs it. The renderer queue already knows: a renderer
+   * is queued at dispatch and its turn starts (`turnStarted`) only once
+   * the runner has saved the message — the same moment the store's count
+   * takes it over — so the two never count one message twice.
    */
-  const judgedInFlight = new Map<string, number>();
+  const pendingFor = (sessionId: string): number =>
+    (renderers.get(sessionId) ?? []).filter((renderer) => !renderer.turnStarted).length;
 
   /**
    * Run `work` after everything already queued for this session's intake,
@@ -3187,7 +3190,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         } catch (error) {
           warn(`slack: could not read whether ${connection.config.agentId} is attentive in ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
         }
-        if (routing && attentive(routing, event.ts, judgedInFlight.get(sessionId) ?? 0)) {
+        if (routing && attentive(routing, event.ts, pendingFor(sessionId))) {
           judged = true;
           overhear = false;
         }
@@ -3308,33 +3311,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         turnId: renderer.turnId,
         metadata,
       });
-      if (judged) {
-        // Counted here, where the turn actually starts, and not where the
-        // decision was made: a message that turns out to have nothing to
-        // judge — an attachment with no text — returns above without a
-        // turn, and a count taken early would hold its slot until the
-        // daemon restarted. Still inside this message's intake link, so
-        // the next message's decision sees it.
-        judgedInFlight.set(sessionId, (judgedInFlight.get(sessionId) ?? 0) + 1);
-        void turn.then(
-          () => {
-            const left = (judgedInFlight.get(sessionId) ?? 1) - 1;
-            if (left > 0) {
-              judgedInFlight.set(sessionId, left);
-            } else {
-              judgedInFlight.delete(sessionId);
-            }
-          },
-          () => {
-            const left = (judgedInFlight.get(sessionId) ?? 1) - 1;
-            if (left > 0) {
-              judgedInFlight.set(sessionId, left);
-            } else {
-              judgedInFlight.delete(sessionId);
-            }
-          },
-        );
-      }
       return { renderer, turn };
     });
 
@@ -3590,7 +3566,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       approvalPosts.clear();
       threadAddressee.clear();
       coldVerdicts.clear();
-      judgedInFlight.clear();
       botIdentities.clear();
       rendering.clear();
       resolvedWhileRendering.clear();

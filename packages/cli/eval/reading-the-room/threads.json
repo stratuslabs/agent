@@ -203,12 +203,12 @@
         {
           "speaker": "Dylan",
           "text": "<@Bea> can you check the ingest side too",
-          "expect": "silent"
+          "observe": true
         },
         {
           "speaker": "Bea",
           "text": "Ingest is caught up as of 10:40; nothing queued.",
-          "expect": "silent"
+          "observe": true
         },
         {
           "speaker": "Dylan",
