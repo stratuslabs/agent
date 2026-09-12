@@ -82,9 +82,31 @@ export const createApprovalPolicy = (
   streams: CliStreams,
   env: CliEnvironment,
   ask?: (prompt: string) => Promise<string>,
+  /**
+   * The mode was defaulted rather than chosen. `always` chosen with a
+   * flag needs no commentary; `always` reached because nobody could be
+   * asked gets one line, the first time a call that would have asked runs.
+   */
+  defaulted = false,
 ): ApprovalPolicy => {
   if (mode === 'always') {
-    return new AllowAllApprovalPolicy();
+    if (!defaulted) {
+      return new AllowAllApprovalPolicy();
+    }
+    let noted = false;
+    return {
+      async approve(context) {
+        if (!noted && context.risk !== 'safe') {
+          noted = true;
+          writeLine(
+            streams.stderr,
+            `Note: running ${context.call.toolName} without asking — stdin is not a terminal and --approvals was not given. `
+            + 'Pass --approvals never to refuse gated tools.',
+          );
+        }
+        return true;
+      },
+    };
   }
 
   if (mode === 'never') {
@@ -97,6 +119,19 @@ export const createApprovalPolicy = (
 
   // A caller that already owns stdin (chat's readline) supplies its own
   // asker — two readers on one stream would race for the same bytes.
+  // `gated` is `ask` for the calls that matter: a `safe` tool is what the
+  // daemon runs unattended, and asking a person to confirm a memory read
+  // is how they learn to type `y` without reading the question. `ask`
+  // itself still asks about everything — the word says so.
+  if (mode === 'gated') {
+    const asking = createApprovalPolicy('ask', streams, env, ask);
+    return {
+      async approve(context) {
+        return context.risk === 'safe' ? true : asking.approve(context);
+      },
+    };
+  }
+
   if (ask) {
     return {
       async approve(context) {

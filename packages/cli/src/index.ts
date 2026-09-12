@@ -106,6 +106,7 @@ export {
   type ParsedHelpCommand,
   type ParsedCommand,
   parseCommand,
+  defaultApprovalMode,
 } from './parse.ts';
 
 export { formatEvent, eventDetail } from './events.ts';

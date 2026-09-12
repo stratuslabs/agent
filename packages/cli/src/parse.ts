@@ -5,7 +5,7 @@ import type { CliEnvironment } from './environment.ts';
 
 export type CliProviderName = StratusProviderName;
 
-export type CliApprovalMode = 'always' | 'ask' | 'never';
+export type CliApprovalMode = 'always' | 'ask' | 'gated' | 'never';
 
 export interface ParsedRunCommand {
   command: 'run';
@@ -18,7 +18,8 @@ export interface ParsedRunCommand {
   soul?: string;
   format: 'text' | 'json';
   events: boolean;
-  approvals: CliApprovalMode;
+  /** Absent when `--approvals` was not given: see `defaultApprovalMode`. */
+  approvals?: CliApprovalMode;
   maxTurns?: number;
 }
 
@@ -60,7 +61,8 @@ export interface ParsedChatCommand {
   /** Path to a soul file defining the agent to chat with. */
   soul?: string;
   events: boolean;
-  approvals: CliApprovalMode;
+  /** Absent when `--approvals` was not given: see `defaultApprovalMode`. */
+  approvals?: CliApprovalMode;
   maxTurns?: number;
 }
 
@@ -407,7 +409,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   }
 
   if (command === 'chat') {
-    const parsed: ParsedChatCommand = { command: 'chat', events: false, approvals: 'always' };
+    const parsed: ParsedChatCommand = { command: 'chat', events: false };
     for (let index = 0; index < rest.length; index += 1) {
       const token = rest[index];
       if (!token) {
@@ -443,7 +445,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--approvals') {
         const value = readOptionValue(rest, index, '--approvals');
-        if (value !== 'always' && value !== 'ask' && value !== 'never') {
+        if (value !== 'always' && value !== 'ask' && value !== 'gated' && value !== 'never') {
           throw new Error(`Invalid value for --approvals: ${value}`);
         }
         parsed.approvals = value;
@@ -1272,7 +1274,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   let soul: string | undefined;
   let format: 'text' | 'json' = 'text';
   let events = true;
-  let approvals: CliApprovalMode = 'always';
+  let approvals: CliApprovalMode | undefined;
   let maxTurns: number | undefined;
   let useStdin = false;
   const positionals: string[] = [];
@@ -1346,8 +1348,8 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
     if (token === '--approvals') {
       const value = readOptionValue(rest, index, '--approvals');
-      if (value !== 'always' && value !== 'ask' && value !== 'never') {
-        throw new Error(`Unsupported approvals mode: ${value}. Use always, ask, or never.`);
+      if (value !== 'always' && value !== 'ask' && value !== 'gated' && value !== 'never') {
+        throw new Error(`Unsupported approvals mode: ${value}. Use always, ask, gated, or never.`);
       }
       approvals = value;
       index += 1;
@@ -1383,8 +1385,8 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     throw new Error('A prompt is required. Pass it with --prompt, --stdin, or as a positional argument.');
   }
 
-  if (approvals === 'ask' && useStdin) {
-    throw new Error('--approvals ask cannot be combined with --stdin because both read from standard input.');
+  if ((approvals === 'ask' || approvals === 'gated') && useStdin) {
+    throw new Error(`--approvals ${approvals} cannot be combined with --stdin because both read from standard input.`);
   }
 
   return {
@@ -1397,7 +1399,24 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     ...(soul ? { soul } : {}),
     format,
     events,
-    approvals,
+    ...(approvals !== undefined ? { approvals } : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
   };
+};
+
+/**
+ * The approval mode a run or chat uses when `--approvals` was not given.
+ *
+ * At a terminal the person is right there, so a gated call asks and a
+ * safe one runs, which is `gated` — the old default of `always` ran
+ * `shell.run` on whatever a page or a soul talked the model into, with
+ * nobody told. Anywhere else — a pipe, a script, `--stdin`, where the
+ * prompt already consumed the terminal — nobody can answer a y/N, and the
+ * run keeps its unattended behavior, saying so once on stderr when a
+ * gated call runs (see `createApprovalPolicy`).
+ */
+export const defaultApprovalMode = (env: CliEnvironment, promptFromStdin = false): CliApprovalMode => {
+  const terminal = env.terminal
+    ?? (env.stdinStream === undefined && env.stdin === undefined && process.stdin.isTTY === true);
+  return terminal && !promptFromStdin ? 'gated' : 'always';
 };

@@ -202,7 +202,9 @@ Options:
   --config         Config file path (run: load settings from it, setup: write it)
   --format         Output format: text or json (default: text)
   --no-events      Hide event-by-event progress lines in text mode
-  --approvals      run/chat: tool approval mode — always, ask, or never (default: always)
+  --approvals      run/chat: tool approval mode — always, ask (every call), gated (safe tools
+                   run, the rest ask), or never. Default: gated at a terminal; always
+                   otherwise, said once on stderr the first time a gated tool runs
                    serve: how the daemon reaches a human — headless (refuse every
                    gated call) or remote (ask in Slack). Default headless, or
                    the config file's "approvals.mode"

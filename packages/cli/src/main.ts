@@ -27,7 +27,7 @@ import { runUpdate } from './commands/update.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
 import { HELP_TEXT } from './help.ts';
 import { writeLine, readPromptFromStdin } from './io.ts';
-import { parseCommand } from './parse.ts';
+import { parseCommand, defaultApprovalMode } from './parse.ts';
 import {
   resolveRuntimeConfig,
   warnOnCredentialOverride,
@@ -224,7 +224,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     const session = await runSingleLoop(command.prompt, streams, {
       events: command.events && command.format === 'text',
       runtime,
-      approvals: command.approvals,
+      // `--stdin` has already read the terminal, so nothing could take a
+      // y/N there — what the parser refuses for an explicit `ask`.
+      approvals: command.approvals ?? defaultApprovalMode(resolvedEnv, argv.includes('--stdin')),
+      approvalsDefaulted: command.approvals === undefined,
       ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
       ...(command.configPath ? { configPath: command.configPath } : {}),
       env: resolvedEnv,

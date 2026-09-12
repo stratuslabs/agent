@@ -10,6 +10,12 @@ export interface CliEnvironment {
   stdin?: string;
   stdinStream?: NodeJS.ReadableStream;
   approvalInput?: NodeJS.ReadableStream;
+  /**
+   * Whether a person is at a terminal, for the approval default. Read from
+   * `process.stdin.isTTY` when absent; injectable because a test cannot
+   * make its stdin one.
+   */
+  terminal?: boolean;
   setupInput?: NodeJS.ReadableStream;
   templateInput?: NodeJS.ReadableStream;
   processEnv?: NodeJS.ProcessEnv;
