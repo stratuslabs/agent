@@ -5,10 +5,10 @@
 `Gateway.observe` on the session chain, `session.observed`, the `overheard`
 mark on a message and the one rule (`promptTextOf`) every renderer frames
 it by, and the Slack adapter hearing, into an agent's own session, each
-message in a shared thread that was another agent's to answer. Pieces 2 and
-3 are not started.
+message in a shared thread that was another agent's to answer and each
+reply the other agent posted. Pieces 2 and 3 are not started.
 
-Two things the sketch did not say, found on the way:
+Three things the sketch did not say, found on the way:
 
 - **"Append and save" was not enough on the harness path.** A resumed SDK
   session is sent only the newest user message, since the harness holds
@@ -17,13 +17,26 @@ Two things the sketch did not say, found on the way:
   own history. `latestUserMessagePrompt` now sends every user message since
   the agent last spoke, which degrades to the old single message whenever
   nothing was overheard.
-- **What the other agent *replied* is not overheard yet — only what people
-  say.** A colleague's reply is a bot message the adapter deliberately
-  ignores, and its final text arrives as a stream of edits rather than one
-  event, so hearing it is a different mechanism: the adapter that rendered
-  the reply knows its final text and can observe it into the thread's other
-  sessions itself, with no Slack event involved. That is the next slice of
-  piece 1, before piece 2.
+- **What the other agent *replied* is a different mechanism from what
+  people say.** A colleague's reply is a bot message the adapter
+  deliberately ignores, and its final text arrives as a stream of edits
+  rather than one event — so it is heard by the adapter that rendered it,
+  which observes the final text into the thread's other sessions itself,
+  with no Slack event involved, under the speaker's own label
+  (`sessionWriteTrust`, so a reply restating a stranger's text is still the
+  stranger's). Three consequences. An agent served by another daemon is a
+  stranger's bot, and its replies are not heard — the daemon is the
+  boundary of who can be overheard, as it already was for who can be
+  named. A forwarded reply is the one path where channel membership has to
+  be asked rather than assumed: a person's message reaches an agent only
+  through its own socket, so an app removed from a private channel stops
+  hearing by itself, but a reply forwarded by the daemon would keep
+  arriving — so each hearer asks Slack, per reply, and a lookup that fails
+  leaves it not hearing. And each agent's socket runs on its own clock: a reply takes its
+  place in a hearer's session when it is final, so an app more than a
+  turn's length behind its colleague's hears the answer before the
+  question. Rare, since sockets run within milliseconds of each other, and
+  bounded to the ordering of a transcript rather than to what it holds.
 
 ## Goal
 
