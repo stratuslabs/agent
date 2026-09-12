@@ -322,6 +322,19 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
   const name = input.name ?? generateAgentName(input.seed);
   // Only an explicit id is checked: a derived one comes out of slugify,
   // which cannot produce anything unsafe.
+  if (input.id === '*') {
+    // The wildcard was an accepted id until `delegates` gave it a meaning,
+    // so a soul written before then can still carry it. The path-safety
+    // message would be wrong for it — `*` breaks none of those rules — and
+    // the roster reports this error with the file's path, so name the real
+    // reason and the fix rather than leaving the operator to guess why an
+    // agent that loaded yesterday is skipped today.
+    throw new Error(
+      'Invalid agent id: "*". * is the delegates wildcard (delegates: [\'*\'] means any agent on the roster), '
+      + 'so no agent may have it as an id — give this agent another id. Its sessions, memory, and credentials '
+      + 'are keyed by the old id and stay on disk.',
+    );
+  }
   if (input.id !== undefined && !isValidAgentId(input.id)) {
     throw new Error(
       `Invalid agent id: ${JSON.stringify(input.id)}. An id becomes a path segment, so it may not start with `

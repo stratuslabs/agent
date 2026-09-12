@@ -329,7 +329,18 @@ test('the delegate wildcard is not an agent id, and a delegates entry is an id o
   // `delegates: ['*']` means anyone; an agent whose id was `*` could never
   // be delegated to alone, so the id is reserved.
   assert.equal(isValidAgentId('*'), false);
-  assert.throws(() => defineAgent({ name: 'Star', id: '*' }), /Invalid agent id/);
+  // The wildcard was a valid id before `delegates` existed, so a soul on
+  // disk can still declare it, and the roster skips such a soul with this
+  // message and the file's path. The path-safety wording would be wrong
+  // for it: the error names the delegate wildcard and the fix instead.
+  assert.throws(
+    () => defineAgent({ name: 'Star', id: '*' }),
+    /Invalid agent id: "\*"\. \* is the delegates wildcard .* give this agent another id\. Its sessions, memory, and credentials are keyed by the old id and stay on disk\./,
+  );
+  assert.throws(
+    () => parseSoul('---\nname: Star\nid: "*"\n---\nHi'),
+    /Invalid agent id: "\*"\. \* is the delegates wildcard/,
+  );
   // A session id is a broader address, and the wildcard means nothing there.
   assert.equal(isValidSessionId('*'), true);
   assert.equal(isValidDelegateEntry('*'), true);
