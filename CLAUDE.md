@@ -167,6 +167,25 @@ hand and by review:
 - New behavior needs a test that fails without the change. Verify that it
   does; a test that passes both ways is worse than none, because it reads
   as covered.
+- **A fake stands in for an interface; a fixture package stands in for a
+  package on disk.** Anything that resolves a *specifier* — the plugin
+  loader, `stratus plugins`, the setup Plugins row — cannot be driven by an
+  object literal: it calls `import.meta.resolve`, so the thing has to be
+  installed. `fixtures/*` is a second workspace glob for exactly that, and
+  its packages are `private: true` and outside `packages/`, where
+  everything ships. `stratus-plugin-fixture` is the one that exists, and it
+  is there because every plugin under `packages/` contributes tools and is
+  named in the CLI's own `PLUGIN_SETUP` — so a plugin contributing *skills*,
+  and a package the CLI has no entry for, had no fixture and three review
+  findings landed on code no test could reach. A test needing a shape no
+  real package has gets a fixture; a test needing a package name that
+  differs from its manifest's gets a pnpm alias
+  (`"stratus-plugin-aliased": "workspace:stratus-plugin-fixture@*"`), which
+  is the only way to make a config key and a `packageName` disagree. Both
+  links live in the **root** `package.json`, which is private — a published
+  package listing a private `workspace:*` devDependency leaves a version
+  nobody can resolve in its published metadata, and resolution walks the
+  parent chain to the root either way.
 - **`pnpm typecheck` covers test files too.** Each package's
   `tsconfig.test.json` exists for that, and it has to re-declare
   `"exclude": ["dist"]` — the package tsconfig excludes `test` so a build

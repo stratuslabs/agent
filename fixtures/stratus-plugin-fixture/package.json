@@ -1,0 +1,23 @@
+{
+  "name": "stratus-plugin-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A plugin manifest with skills and no tools, so the CLI can be tested against one.",
+  "type": "module",
+  "exports": "./index.js",
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "skills": [
+        {
+          "id": "greet",
+          "path": "./skills/greet/SKILL.md"
+        },
+        {
+          "id": "summarize",
+          "path": "./skills/summarize/SKILL.md"
+        }
+      ]
+    }
+  }
+}
