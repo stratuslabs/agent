@@ -27,6 +27,10 @@ pnpm eval:room
 pnpm eval:room -- --soul ~/.stratus/agents/ava.md
 ```
 
+The corpus names its agent Ava; with a soul of another name every mention
+of Ava in the threads is retargeted to that name, so the agent under test
+is the one being spoken to. Colleagues (Bea) keep their names.
+
 It prints, per thread and in total, **false speech** (spoke when labelled
 silent) and **false silence** (silent when labelled speak), and a score
 that weights false speech three times false silence — a colleague who

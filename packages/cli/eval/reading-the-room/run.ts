@@ -54,6 +54,12 @@ const main = async (): Promise<void> => {
   const provider = createRuntimeProvider(runtime);
   const runner = new AgentRunner({ provider, store: new InMemorySessionStore(), bus: new EventBus() });
 
+  // The corpus is written to its own agent by name; a soul with another
+  // name is addressed by that name, or the thread would name one agent and
+  // run as another. Whole words only, so a colleague's name stays theirs.
+  const corpusName = new RegExp(`\\b${corpus.agent.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+  const retarget = (text: string): string => text.replace(corpusName, agent.name);
+
   const total: Tally = { judged: 0, falseSpeech: 0, falseSilence: 0 };
   for (const thread of corpus.threads) {
     const tally: Tally = { judged: 0, falseSpeech: 0, falseSilence: 0 };
@@ -61,7 +67,7 @@ const main = async (): Promise<void> => {
     let first = true;
     const lines: string[] = [];
     for (const message of thread.messages) {
-      const userMessage = `${message.speaker}: ${message.text}`;
+      const userMessage = `${message.speaker}: ${retarget(message.text)}`;
       if (message.observe === true) {
         await runner.observe({ sessionId, message: userMessage });
         continue;

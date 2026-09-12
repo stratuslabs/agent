@@ -672,13 +672,16 @@ class ReplyRenderer {
 
   /**
    * Replace the placeholder with the final reply, splitting if oversized.
-   * Resolves to whether ALL of it was published — the edit taken and every
-   * overflow message posted. A reply Slack refused any part of was not
-   * said in the thread as written, and nothing downstream may treat it as
-   * if it had been: a colleague hearing the whole of a reply the thread
-   * saw half of is reasoning from text nobody read.
+   * Resolves to two facts. `published`: whether ALL of the text was — the
+   * edit taken and every overflow message posted. A reply Slack refused
+   * any part of was not said in the thread as written, and nothing
+   * downstream may treat it as if it had been: a colleague hearing the
+   * whole of a reply the thread saw half of is reasoning from text nobody
+   * read. `spoke`: whether ANYTHING of this turn's landed — a chunk, or a
+   * file — which is what the thread rule's "who spoke last" is about, since
+   * a file beside a refused sentence is still the last thing said.
    */
-  async finalize(reply: string): Promise<boolean> {
+  async finalize(reply: string): Promise<{ published: boolean; spoke: boolean }> {
     await this.handover;
     this.finalized = true;
     if (this.pendingEdit) {
@@ -697,15 +700,16 @@ class ReplyRenderer {
       // a turn that posted one has spoken, for the thread rule.
       await this.editChain;
       await this.uploadChain;
-      return this.uploaded;
+      return { published: false, spoke: this.uploaded };
     }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
     const chunks = messageChunks(text);
     // No placeholder — a handover could not open a fresh one — and the
     // reply is a message of its own rather than nothing at all.
     const rest = this.ref ? chunks.slice(1) : chunks;
-    const edited = this.ref ? this.queueEdit(chunks[0] ?? NO_REPLY_TEXT) : Promise.resolve(true);
-    let published = await edited;
+    const edited = this.ref ? this.queueEdit(chunks[0] ?? NO_REPLY_TEXT) : Promise.resolve(false);
+    let landed = await edited;
+    let published = this.ref ? landed : true;
     await this.editChain;
     await this.uploadChain;
     for (const chunk of rest) {
@@ -715,12 +719,13 @@ class ReplyRenderer {
           text: chunk,
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
+        landed = true;
       } catch (error) {
         published = false;
         this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    return published;
+    return { published, spoke: landed || this.uploaded };
   }
 
   async fail(message: string): Promise<void> {
@@ -3377,11 +3382,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const reply = latestTurnReply(session);
       // A turn nobody asked for that said nothing posts nothing; every
       // other turn says `(no reply)` where its answer would have gone.
-      const published = renderer.finalize(renderer.lazy ? reply ?? '' : lastAssistantReply(session));
+      const finalized = renderer.finalize(renderer.lazy ? reply ?? '' : lastAssistantReply(session));
       const heard = thread !== undefined && reply !== undefined
-        ? overhearReply(connection, event.channel, thread, reply, session, published)
+        ? overhearReply(connection, event.channel, thread, reply, session, finalized.then((outcome) => outcome.published))
         : undefined;
-      const spoke = await published;
+      const { spoke } = await finalized;
       if (renderer.lazy && spoke && threadKey !== undefined) {
         // A judging agent that chose to speak is now the voice that just
         // answered, and the thread rule's record has to say so, or a
