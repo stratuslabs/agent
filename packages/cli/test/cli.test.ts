@@ -24,6 +24,7 @@ import {
   menuPrefixWidth,
   createLogWriter,
   createApprovalPolicy,
+  warnOnUntrustedConfig,
   currentLogPosition,
   describeApprovalCall,
   eventDetail,
@@ -11695,4 +11696,13 @@ test('serve says once what an auto-discovered project config asked for and did n
   // identity stayed the built-in, and the log says why.
   assert.equal((output.stderr.match(/ignoring soul and systemPrompt in .*stratus\.config\.json/g) ?? []).length, 1);
   assert.doesNotMatch(output.stdout, /Mallory/);
+});
+
+test('the untrusted-config notice quotes a path the shell would otherwise split', () => {
+  const { streams, output } = createStreams();
+  warnOnUntrustedConfig({
+    provider: 'demo',
+    ignoredFromUntrustedConfig: { path: '/tmp/my repo/stratus.config.json', keys: ['soul'] },
+  }, streams);
+  assert.match(output.stderr, /Run with --config '\/tmp\/my repo\/stratus\.config\.json' to trust that file, or pass --soul <path>\./);
 });

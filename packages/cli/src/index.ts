@@ -2450,7 +2450,7 @@ export const warnOnUntrustedConfig = (runtime: RuntimeConfig, streams: CliStream
   writeLine(
     streams.stderr,
     `ignoring ${keys} in ${ignored.path}: what an agent is told is not a decision an auto-discovered config gets to make. `
-    + `Run with --config ${ignored.path} to trust that file${ignored.keys.includes('soul') ? ', or pass --soul <path>' : ''}.`,
+    + `Run with --config ${quoteShellArg(ignored.path)} to trust that file${ignored.keys.includes('soul') ? ', or pass --soul <path>' : ''}.`,
   );
 };
 
