@@ -120,6 +120,98 @@ test('update --check reports what it would do and exits 1 only when something is
   assert.match(settled.output.stdout, /Nothing to do/);
 });
 
+test('update upgrades the companion packages that lag the CLI, in the same npm call', async () => {
+  const home = await freshHome();
+  // The CLI and its companions are separate global installs, so upgrading
+  // the CLI used to leave every one of them at whatever version the day
+  // setup first ran put there — a Slack adapter two releases behind the
+  // daemon loading it, which nothing reported.
+  const installed: Record<string, string> = {
+    '@stratusagent/channel-slack': '0.10.1',
+    '@stratusagent/control-api': '99.0.0',
+    '@stratusagent/tool-fs': '0.9.0',
+  };
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => '99.0.0',
+      installedVersionReader: async (specifier) => installed[specifier],
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+    },
+  });
+  assert.equal(code, 0, `update failed:\n${output.stdout}\n${output.stderr}`);
+
+  // One call: they are one release, and installing them separately leaves a
+  // window where the daemon and the adapter it loads disagree about their
+  // own version. The one already current is not in it.
+  assert.deepEqual(installs, [[
+    '@stratusagent/cli@latest',
+    '@stratusagent/channel-slack@latest',
+    '@stratusagent/tool-fs@latest',
+  ]]);
+  assert.match(output.stdout, /Upgrading @stratusagent\/channel-slack 0\.10\.1 → 99\.0\.0/);
+  assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/control-api/);
+});
+
+test('update --check reports a companion left behind by a CLI that is already current', async () => {
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });
+  const { streams, output } = createStreams();
+  // The shape of the reported bug: `stratus update` said "Nothing to do"
+  // while the installed Slack adapter predated the release that fixed it.
+  const code = await runCli({
+    argv: ['update', '--check'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.10.1' : undefined,
+    },
+  });
+  // Actionable exits 1 so a cron job or script notices.
+  assert.equal(code, 1, output.stdout);
+  assert.match(output.stdout, /up to date/);
+  assert.match(output.stdout, /1 behind/);
+  assert.match(output.stdout, /@stratusagent\/channel-slack 0\.10\.1 → /);
+  assert.doesNotMatch(output.stdout, /Nothing to do/);
+});
+
+test('update --check says none are behind when every companion is current', async () => {
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update', '--check'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? CLI_VERSION : undefined,
+    },
+  });
+  assert.equal(code, 0, output.stdout);
+  assert.match(output.stdout, /1 first-party alongside the CLI, none behind/);
+  assert.match(output.stdout, /Nothing to do/);
+});
+
 test('update stops the service, upgrades, migrates, rewrites the unit with current paths, and preserves its config pin', async () => {
   const home = await freshHome();
   const configPath = path.join(home, 'pinned.config.json');
@@ -143,6 +235,10 @@ test('update stops the service, upgrades, migrates, rewrites the unit with curre
       processEnv: {},
       serviceRunner: runningServiceRunner,
       packageVersionFetcher: async () => '99.0.0',
+      // Nothing of ours beside the CLI, so this stays a test about the CLI
+      // upgrade. Left to the real reader it would answer from the suite's
+      // own node_modules, where every workspace package is installed.
+      installedVersionReader: async () => undefined,
       packageInstaller: async (packages) => {
         installs.push(packages);
         return { ok: true, message: '' };
@@ -188,6 +284,13 @@ test('an unreachable npm still migrates and repairs the unit — the offline cas
       processEnv: {},
       serviceRunner: runningServiceRunner,
       packageVersionFetcher: async () => undefined,
+      // Behind this build, so the installer below is reachable at all: a
+      // companion is measured against the CLI when npm cannot say what
+      // latest is, and `@latest` cannot resolve without the registry
+      // either — the line promising a version would be the only thing that
+      // happened.
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.0.1' : undefined,
       packageInstaller: async () => {
         throw new Error('npm must not be invoked when the registry did not answer');
       },
@@ -196,6 +299,9 @@ test('an unreachable npm still migrates and repairs the unit — the offline cas
   assert.equal(code, 0, output.stderr);
   assert.match(output.stdout, /npm did not answer/);
   assert.match(output.stdout, /Rewriting the service unit/);
+  // Reported, so `--check` still says what an online update would fix.
+  assert.match(output.stdout, /1 behind/);
+  assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/channel-slack/);
   const rewritten = await readServiceCommand({ homeDir: home, cwd: home, run: runningServiceRunner });
   assert.equal(rewritten?.execPath, process.execPath);
 });

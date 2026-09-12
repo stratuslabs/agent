@@ -22,10 +22,53 @@ import {
   defaultPackageVersionFetcher,
   compareVersions,
   defaultPackageInstaller,
+  defaultInstalledVersionReader,
   CLI_VERSION,
   CLI_PACKAGE_NAME,
 } from '../npm.ts';
 import type { ParsedUpdateCommand } from '../parse.ts';
+import {
+  FIRST_PARTY_CAPABILITY_PACKAGES,
+  FIRST_PARTY_COMPANION_PACKAGES,
+} from '../plugin-catalog.ts';
+
+/** One first-party package this machine has, and how it compares to the CLI's target. */
+interface CompanionPackage {
+  name: string;
+  version: string;
+  stale: boolean;
+}
+
+/**
+ * The first-party packages installed beside the CLI, and whether each one
+ * lags the version the CLI is heading for.
+ *
+ * The gap this closes: the CLI and its companions are separate global
+ * installs, so upgrading `@stratusagent/cli` left every one of them at
+ * whatever version was installed the day setup first ran. A Slack adapter
+ * two releases behind the daemon loading it is not a configuration anyone
+ * chose, and nothing reported it — `doctor` says "installed", which was
+ * true of the stale one too.
+ *
+ * Read from each package's own manifest rather than asked of npm: the
+ * question is what this machine has, one registry round trip per package
+ * would answer a different one, and they ship in lockstep so the CLI's
+ * target version is theirs.
+ */
+const readCompanions = async (
+  target: string,
+  env: CliEnvironment,
+): Promise<CompanionPackage[]> => {
+  const read = env.installedVersionReader ?? defaultInstalledVersionReader;
+  const found: CompanionPackage[] = [];
+  for (const name of [...FIRST_PARTY_COMPANION_PACKAGES, ...FIRST_PARTY_CAPABILITY_PACKAGES]) {
+    const version = await read(name);
+    if (version !== undefined) {
+      found.push({ name, version, stale: compareVersions(target, version) > 0 });
+    }
+  }
+  return found;
+};
 
 /**
  * `stratus update` — the whole upgrade dance, in the order that cannot lose
@@ -82,6 +125,11 @@ export const runUpdate = async (
   }
 
   const pending = await pendingStateMigrations(env);
+  // Against the version this run is heading for, not the one it is on: a
+  // CLI already current still leaves a companion behind, which is the whole
+  // case this reports.
+  const companions = await readCompanions(latest ?? CLI_VERSION, env);
+  const stale = companions.filter((entry) => entry.stale);
 
   out(`stratus ${CLI_VERSION}`);
   out(latest === undefined
@@ -98,6 +146,15 @@ export const runUpdate = async (
   for (const note of unitNotes) {
     out(`  unit        ${note}`);
   }
+  if (companions.length > 0) {
+    // A count and then only what would change, like every other line here:
+    // this reports state, not an inventory — `stratus plugins` is the
+    // command that lists what is installed.
+    out(`  packages    ${companions.length} first-party alongside the CLI, ${stale.length === 0 ? 'none behind' : `${stale.length} behind`}`);
+    for (const entry of stale) {
+      out(`              ${entry.name} ${entry.version} → ${latest ?? CLI_VERSION}`);
+    }
+  }
 
   if (command.check) {
     for (const migration of pending) {
@@ -107,7 +164,7 @@ export const runUpdate = async (
       out('This build cannot update that state — upgrade the package itself (`npm install -g @stratusagent/cli`).');
       return 1;
     }
-    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0;
+    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0 || stale.length > 0;
     out(actionable
       ? 'Run `stratus update` to apply the above.'
       : 'Nothing to do.');
@@ -146,9 +203,27 @@ export const runUpdate = async (
   }
 
   let upgradeFailed = false;
-  if (upgradeAvailable) {
-    out(`Upgrading ${CLI_PACKAGE_NAME} ${CLI_VERSION} → ${latest}…`);
-    const installed = await (env.packageInstaller ?? defaultPackageInstaller)([`${CLI_PACKAGE_NAME}@latest`]);
+  // The CLI and every companion that lags it, in one npm call: they are
+  // one release, and installing them separately leaves a window where the
+  // daemon and the adapter it loads disagree about their own version.
+  //
+  // Nothing at all when the registry did not answer, companions included:
+  // `@latest` cannot resolve without it, so the install would fail after
+  // printing a line promising a version npm never confirmed. Staleness is
+  // still *reported* offline — it is measured against this build, which
+  // needs no network — so `--check` says what an online update would fix.
+  const upgrading = latest === undefined ? [] : [
+    ...(upgradeAvailable ? [`${CLI_PACKAGE_NAME}@latest`] : []),
+    ...stale.map((entry) => `${entry.name}@latest`),
+  ];
+  if (upgrading.length > 0) {
+    if (upgradeAvailable) {
+      out(`Upgrading ${CLI_PACKAGE_NAME} ${CLI_VERSION} → ${latest}…`);
+    }
+    for (const entry of stale) {
+      out(`Upgrading ${entry.name} ${entry.version} → ${latest}…`);
+    }
+    const installed = await (env.packageInstaller ?? defaultPackageInstaller)(upgrading);
     if (installed.ok) {
       // This process is still the old build; migrations the new version
       // adds run when it first starts — which the restart below is.

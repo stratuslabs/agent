@@ -23,6 +23,23 @@ export const FIRST_PARTY_CAPABILITY_PACKAGES = [
 ];
 
 /**
+ * The optional first-party packages a machine installs alongside the CLI:
+ * the ones that are not plugins and so appear in no `plugins` block —
+ * the Slack channel, the control API, the dashboard it serves.
+ *
+ * Named here with the capability packages because `stratus update` needs
+ * one answer to "what else of ours is on this machine". They ship from
+ * this repository in lockstep with the CLI, which is what lets one version
+ * be the target for all of them; a package missing from this list is not
+ * upgraded, so adding one is part of shipping it.
+ */
+export const FIRST_PARTY_COMPANION_PACKAGES = [
+  '@stratusagent/channel-slack',
+  '@stratusagent/control-api',
+  '@stratusagent/dashboard',
+];
+
+/**
  * The tool names the gateway registers before it loads any plugin. A plugin
  * that registers one of these is refused whole, so a manifest declaring one
  * is worth naming — advisory only, since whether it *registers* the name is

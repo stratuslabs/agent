@@ -52,6 +52,7 @@ import {
   tailLog,
   npmNeedsShell,
 } from '../src/index.ts';
+import { stateFilePath } from '@stratusagent/state';
 import type { Session, Tool } from '@stratusagent/core';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -12404,4 +12405,27 @@ test('a plugin the merged config leaves disabled is not reported as enabled', as
   assert.equal(code, 0, output.stderr);
   assert.match(output.stdout, /configured @stratusagent\/tool-fs .*still disabled/);
   assert.doesNotMatch(output.stdout, /^enabled /m);
+});
+
+
+test('stratus reports its own version, without asking npm or touching state', async () => {
+  // The first thing a bug report is asked for, and it was reachable only
+  // through `update --check` — which asks the registry over the network to
+  // answer a question about this machine, and cannot answer at all when it
+  // is offline.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-version-'));
+  for (const argv of [['--version'], ['-v'], ['version']]) {
+    const { streams, output } = createStreams();
+    const code = await runCli({
+      argv,
+      streams,
+      // No packageVersionFetcher and no service runner: needing either
+      // would mean this reads something other than the build it is.
+      env: { homeDir: home, cwd: home, processEnv: {} },
+    });
+    assert.equal(code, 0, `${argv.join(' ')} failed: ${output.stderr}`);
+    assert.equal(output.stdout.trim(), `stratus ${CLI_VERSION}`);
+  }
+  // Answered before the migration check, so a state stamp is never written.
+  await assert.rejects(() => stat(stateFilePath({ homeDir: home })));
 });

@@ -1,4 +1,5 @@
 import type {
+  InstalledVersionReader,
   PackageInstallResult,
   PackageInstaller,
   PackageVersionFetcher,
@@ -149,6 +150,18 @@ export const defaultPackageInstaller: PackageInstaller = async (packages) => {
         : { ok: false, message: `npm exited with code ${code ?? 'unknown'}` });
     });
   });
+};
+
+/**
+ * What `stratus update` reads to learn which version of a companion this
+ * machine actually has. Through `@stratusagent/plugins`, which already owns
+ * the bounded walk from a resolved specifier to its package.json — a second
+ * copy here would drift from it, and this one would be the copy that
+ * decides whether somebody's Slack adapter gets upgraded.
+ */
+export const defaultInstalledVersionReader: InstalledVersionReader = async (specifier) => {
+  const { installedPackageVersion } = await import('@stratusagent/plugins');
+  return installedPackageVersion(specifier, { resolve: (target) => import.meta.resolve(target) });
 };
 
 export const CLI_VERSION = '0.11.2';
