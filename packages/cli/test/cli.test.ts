@@ -11698,6 +11698,13 @@ test('a project config that shadows the global one does not suppress the global 
     await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, () => {}),
     { slackUsers: ['U-DYLAN'], admit: 'principals' },
   );
+  // A clone whose block is malformed is refused, not unreadable — the
+  // global policy still applies rather than a door closed on everyone.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ principals: { admit: 'principal' } }));
+  assert.deepEqual(
+    await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, () => {}),
+    { slackUsers: ['U-DYLAN'], admit: 'principals' },
+  );
 
   // No global file at all is no policy, as it always was.
   const bare = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-bare-'));

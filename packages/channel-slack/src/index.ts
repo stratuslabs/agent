@@ -2530,10 +2530,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * so is one whose `auth.test` itself failed, since its bot id was never
    * learned.
    */
-  const agentNamedIn = (text: string, team: string): string | undefined => {
+  const agentNamedIn = (
+    text: string,
+    team: string,
+    /**
+     * Whether a named agent would take this message at all. A message
+     * naming two agents hands the thread to one that admits the sender,
+     * not to the first one named: the agent that refuses will not answer,
+     * and a handover to it is a thread nobody holds.
+     */
+    admits: (agentId: string) => boolean = () => true,
+  ): string | undefined => {
     let offline: string | undefined;
     for (const [agentId, identity] of botIdentities) {
-      if (identity.teamId !== team || !mentions(text, identity.botUserId)) {
+      if (identity.teamId !== team || !mentions(text, identity.botUserId) || !admits(agentId)) {
         continue;
       }
       if (connections.some((live) => live.config.agentId === agentId)) {
@@ -2732,6 +2742,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (event.user === connection.botUserId) {
       return undefined;
     }
+    // Bound once the guard above has run: the closures below cannot see
+    // that narrowing.
+    const sender = event.user;
 
     const isDm = event.channel_type === 'im';
     const team = args.body?.team_id ?? connection.teamId;
@@ -2755,7 +2768,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // handover, Ava could take the next untagged reply while Bea's socket
     // was still behind, and answer a question that had just been handed
     // away. The message Ava must record is exactly the one Ava ignores.
-    const named = agentNamedIn(text, team);
+    // Who the message is for, judged on the named agents' own terms rather
+    // than this one's: agents may list different principals, and a sender
+    // Ava admits but Bea refuses must not be able to hand Bea the thread
+    // from Ava's socket — Bea's own socket refuses the same message, and
+    // the map is shared. A message naming Bea and Cy is Cy's, who will
+    // answer it and hold the thread. One naming only agents that refuse
+    // the sender is still theirs and not this agent's to answer — so the
+    // refusing agent stays `named`, and only the handover is withheld.
+    const handoverTo = agentNamedIn(text, team, (agentId) => admitsSender(agentConfigFor(agentId), sender));
+    const named = handoverTo ?? agentNamedIn(text, team);
 
     // Who may speak at all, judged before anything below remembers this
     // message. The adapter's own checks establish nothing about who is
@@ -2768,18 +2790,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // message this agent would have taken up: a channel subscribed for
     // thread follow-through delivers every top-level post, and a line per
     // stranger per post is a log with nothing left to read.
-    if (!admitsSender(connection.config, event.user)) {
+    if (!admitsSender(connection.config, sender)) {
       if (addressed || event.thread_ts !== undefined) {
-        log(`slack: ${connection.config.agentId} refused a message from ${event.user}: not a listed principal, and admit is "principals"`);
+        log(`slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`);
       }
       return undefined;
     }
-    // Recorded on the named agent's terms, not this one's: agents may list
-    // different principals, and a sender Ava admits but Bea refuses must
-    // not be able to hand Bea the thread from Ava's socket — Bea's own
-    // socket refuses the same message, and the map is shared.
-    if (threadKey && named && admitsSender(agentConfigFor(named), event.user)) {
-      rememberAddressee(threadKey, named, event.ts);
+    if (threadKey && handoverTo) {
+      rememberAddressee(threadKey, handoverTo, event.ts);
     }
 
     if (!addressed) {

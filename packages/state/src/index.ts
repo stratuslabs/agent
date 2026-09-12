@@ -1786,7 +1786,15 @@ export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
     if (!location) {
       return { status: 'absent' };
     }
-    const value = (await loadConfigFile(location.path))[key];
+    // An untrusted file that fails to load is judged like one that says
+    // nothing: it could not have set a trusted-only block whatever it
+    // contained, and a malformed block in a clone must not be the reason
+    // the operator's own policy is not read — refused is not the same as
+    // unreadable. Its own errors reach the operator through `run` and
+    // `doctor`, which read the file for what it may set.
+    const value = location.trusted
+      ? (await loadConfigFile(location.path))[key]
+      : await loadConfigFile(location.path).then((config) => config[key], () => undefined);
     if (!location.trusted) {
       if (value !== undefined) {
         return { status: 'untrusted', path: location.path };

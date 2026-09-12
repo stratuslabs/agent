@@ -4089,6 +4089,53 @@ test('a handover honours an offline agent\'s door: its socket failing to start d
   ]);
 });
 
+test('a message naming two agents hands the thread to the one that admits the sender', async () => {
+  const sockets = { a: createFakeSocket(), b: createFakeSocket(), c: createFakeSocket() };
+  const webs = { a: createFakeWeb('B-AVA', 'T1'), b: createFakeWeb('B-BEA', 'T1'), c: createFakeWeb('B-CY', 'T1') };
+  const logged: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.agents = () => [{ id: 'ava', name: 'Ava' }, { id: 'bea', name: 'Bea' }, { id: 'cy', name: 'Cy' }];
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:900.0', '2026-01-01T00:00:01.000Z'],
+  ]));
+  // Bea takes Dylan only; Cy takes anyone. Bea is named first.
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', principals: ['U-DYLAN'], admit: 'principals' },
+      { agentId: 'cy', appToken: 'xapp-c', botToken: 'xoxb-c' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? sockets.a : appToken === 'xapp-b' ? sockets.b : sockets.c),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webs.a : botToken === 'xoxb-b' ? webs.b : webs.c),
+    log: (line) => logged.push(line),
+    warn: (line) => logged.push(`warn: ${line}`),
+  });
+  await adapter.start(gateway);
+
+  const handover = channelMessage({ text: '<@B-BEA> <@B-CY> take this over', ts: '900.2', thread: '900.0', user: 'U-STRANGER' });
+  await sockets.a.deliver('message', handover);
+  await sockets.b.deliver('message', handover);
+  await sockets.c.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-handover-cy' },
+    event: { type: 'app_mention', user: 'U-STRANGER', text: '<@B-BEA> <@B-CY> take this over', ts: '900.2', thread_ts: '900.0', channel: 'C1' },
+  });
+  const afterwards = channelMessage({ text: 'go on', ts: '900.3', thread: '900.0' });
+  await sockets.a.deliver('message', afterwards);
+  await sockets.b.deliver('message', afterwards);
+  await sockets.c.deliver('message', afterwards);
+  await adapter.stop();
+
+  // Cy answered the mention and holds the thread; Bea, who refused the
+  // sender, never did — and Ava stood down for Cy.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    // Bea's mention stays in the text as a stable id: not a principal, so
+    // never a display name (see the humanizer's rule).
+    ['cy', 'name-U-STRANGER: <@B-BEA>  take this over'],
+    ['cy', 'Dylan: go on'],
+  ], JSON.stringify(logged));
+});
+
 test('a refused top-level post nobody addressed is dropped without a log line', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

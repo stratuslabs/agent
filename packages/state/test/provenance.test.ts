@@ -414,6 +414,14 @@ test('a project config that says nothing about a trusted-only block leaves the g
     status: 'untrusted',
     path: path.join(project, 'stratus.config.json'),
   });
+  // A clone whose block is malformed is refused, not unreadable: the
+  // operator's own policy is still the answer.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ principals: { admit: 'principal' } }));
+  assert.deepEqual(await readTrustedConfigBlock('principals', env), {
+    status: 'present',
+    value: { slackUsers: ['U-DYLAN'], admit: 'principals' },
+    path: path.join(home, '.stratus', 'config.json'),
+  });
   // And no global file is absent, as it always was.
   const bare = await mkdtemp(path.join(os.tmpdir(), 'stratus-shadow-bare-'));
   await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
