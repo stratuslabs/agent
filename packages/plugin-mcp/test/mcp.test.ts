@@ -320,7 +320,12 @@ test('an annotation key inside a schema literal is data, and a bottomless schema
                 default: { title: '\u202edefault' },
                 examples: [{ description: '\u202eexample' }],
               },
+              // Parameters that happen to be NAMED like literal keywords are
+              // schemas: the keys of `properties` are the server's names.
+              default: { type: 'string', description: '\u202eA parameter called default.' },
+              enum: { type: 'object', properties: { const: { description: `\u202e${'x'.repeat(2000)}` } } },
             },
+            $defs: { examples: { description: '\u202eA definition called examples.' } },
           },
         },
         { name: 'abyss', inputSchema: { type: 'object' as const, properties: { depth: deep } } },
@@ -346,6 +351,14 @@ test('an annotation key inside a schema literal is data, and a bottomless schema
     assert.deepEqual(choice?.enum, [{ description: '\u202eactual' }, 'plain']);
     assert.deepEqual(choice?.default, { title: '\u202edefault' });
     assert.deepEqual(choice?.examples, [{ description: '\u202eexample' }]);
+    const asSchema = parameters as {
+      properties?: Record<string, { description?: string; properties?: Record<string, { description?: string }> }>;
+      $defs?: Record<string, { description?: string }>;
+    } | undefined;
+    assert.equal(asSchema?.properties?.default?.description, '\\u202eA parameter called default.');
+    const nested = asSchema?.properties?.enum?.properties?.const?.description ?? '';
+    assert.match(nested, /^\\u202ex+ … \[description truncated by stratus: 2006 characters\]$/);
+    assert.equal(asSchema?.$defs?.examples?.description, '\\u202eA definition called examples.');
 
     // The bottomless one is one tool skipped and named, not a server that
     // went unreachable in a stack overflow and reconnects forever.

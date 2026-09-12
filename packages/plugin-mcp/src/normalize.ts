@@ -109,21 +109,34 @@ class SchemaTooDeepError extends Error {
   }
 }
 
-const boundedSchemaValue = (value: unknown, depth: number): unknown => {
+/**
+ * The schema keywords whose value is a map from a *name* to a schema. The
+ * names are the server's — a parameter called `default` or `enum` is an
+ * ordinary parameter — so the keys of these maps are never read as
+ * keywords, and every value under them is a schema again. Without this
+ * distinction a description hidden under `properties.default` would pass
+ * through as a literal, unbounded.
+ */
+const SCHEMA_MAP_KEYS = new Set(['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas']);
+
+const boundedSchemaValue = (value: unknown, depth: number, position: 'schema' | 'map'): unknown => {
   if (depth > BRIDGED_SCHEMA_MAX_DEPTH) {
     throw new SchemaTooDeepError();
   }
   if (Array.isArray(value)) {
-    return value.map((entry) => boundedSchemaValue(entry, depth + 1));
+    return value.map((entry) => boundedSchemaValue(entry, depth + 1, 'schema'));
   }
   if (typeof value === 'object' && value !== null) {
+    if (position === 'map') {
+      return Object.fromEntries(Object.entries(value).map(([name, entry]) => [name, boundedSchemaValue(entry, depth + 1, 'schema')]));
+    }
     return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
       key,
       SCHEMA_LITERAL_KEYS.has(key)
         ? entry
         : SCHEMA_ANNOTATION_KEYS.has(key) && typeof entry === 'string'
           ? bridgedDescription(entry)
-          : boundedSchemaValue(entry, depth + 1),
+          : boundedSchemaValue(entry, depth + 1, SCHEMA_MAP_KEYS.has(key) ? 'map' : 'schema'),
     ]));
   }
   return value;
@@ -142,14 +155,16 @@ const boundedSchemaValue = (value: unknown, depth: number): unknown => {
  * server as a different value, and the schema would be a lie in the
  * direction that breaks calls. An annotation key *inside* a literal (an
  * `enum` member with a `description` field) is data too, and is left
- * alone. `undefined` when the bounded schema is still longer than
+ * alone — while a *parameter* named `enum` or `default` is a schema like
+ * any other, because the keys of `properties` and `$defs` are names, not
+ * keywords. `undefined` when the bounded schema is still longer than
  * {@link BRIDGED_SCHEMA_MAX_LENGTH} characters, or nests deeper than
  * {@link BRIDGED_SCHEMA_MAX_DEPTH}: that tool is not bridged, and the
  * caller names it.
  */
 export const bridgedSchema = (schema: Record<string, unknown>): Record<string, unknown> | undefined => {
   try {
-    const bounded = boundedSchemaValue(schema, 0) as Record<string, unknown>;
+    const bounded = boundedSchemaValue(schema, 0, 'schema') as Record<string, unknown>;
     // The literal subtrees were not walked, so the serialisation is the
     // one place a bottomless `default` can still blow the stack — a
     // RangeError there is the same answer as a schema too deep to walk.
