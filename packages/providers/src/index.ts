@@ -1,4 +1,5 @@
 import {
+  isUnaddressedTurn,
   droppedImageNote,
   imagesWithinReplayBudget,
   omitImage,
@@ -478,7 +479,10 @@ export const createOpenAICompatibleProvider = ({
       }
 
       const result = builder.done();
-      if (result.parts.length === 0) {
+      // Nothing said is the answer a turn nobody asked for may give — see
+      // `RunInput.addressed` in core. On a turn somebody asked for it is
+      // still an endpoint that returned nothing, and an error.
+      if (result.parts.length === 0 && !isUnaddressedTurn(request.session)) {
         throw new Error('Provider returned an empty response.');
       }
 
@@ -648,6 +652,7 @@ const createOpenAICompatibleMessages = (
     messages.push({ role: 'system', content: section });
   }
 
+  const latest = latestUserMessageOf(request.session.messages);
   for (const message of request.session.messages) {
     if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
       const wireCalls = message.toolCalls.map((call) => ({
@@ -695,7 +700,7 @@ const createOpenAICompatibleMessages = (
     messages.push({
       role: message.role,
       content: message.role === 'user'
-        ? (vision ? userContentParts(message, replayed) : userMessageText(message))
+        ? (vision ? userContentParts(message, replayed, message === latest) : userMessageText(message, message === latest))
         : message.content,
       ...(message.name ? { name: message.name } : {}),
     });
@@ -707,8 +712,9 @@ const createOpenAICompatibleMessages = (
 const userContentParts = (
   message: Pick<Message, 'content' | 'overheard' | 'images'>,
   replayed: ReadonlySet<ImageAttachment>,
+  latest: boolean,
 ): OpenAICompatibleUserContent => {
-  const text = promptTextOf(message);
+  const text = promptTextOf(message, { latest });
   if (message.images === undefined || message.images.length === 0) {
     return text;
   }
@@ -850,17 +856,26 @@ const describeImageAttachments = (images: readonly ImageAttachment[] | undefined
   return `\n[Attached: ${names.join(', ')}. This runtime cannot see images — say so rather than guessing at them.]`;
 };
 
-/** A user message's text as a prompt carries it, with its images named after it. */
-const userMessageText = (message: Pick<Message, 'content' | 'overheard' | 'images'>): string =>
-  `${promptTextOf(message)}${describeImageAttachments(message.images)}`;
+/**
+ * A user message's text as a prompt carries it, with its images named after
+ * it. `latest` marks the newest user message of the turn — the one an
+ * unaddressed turn's note follows; see `PromptTextOptions`.
+ */
+const userMessageText = (message: Pick<Message, 'content' | 'overheard' | 'images'>, latest = false): string =>
+  `${promptTextOf(message, { latest })}${describeImageAttachments(message.images)}`;
+
+/** The newest user message — the one the turn being run ends on. */
+const latestUserMessageOf = (messages: readonly Message[]): Message | undefined =>
+  messages.findLast((message) => message.role === 'user');
 
 export const renderTranscriptPrompt = (request: ProviderRequest): string => {
   const conversational = request.session.messages.filter(
     (message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool',
   );
 
+  const latest = latestUserMessageOf(conversational);
   if (conversational.length === 1 && conversational[0]?.role === 'user') {
-    return userMessageText(conversational[0]);
+    return userMessageText(conversational[0], true);
   }
 
   const lines: string[] = ['Conversation so far:'];
@@ -881,9 +896,14 @@ export const renderTranscriptPrompt = (request: ProviderRequest): string => {
         continue;
       }
     }
-    lines.push(`[${message.role}] ${message.role === 'user' ? userMessageText(message) : message.content}`);
+    lines.push(`[${message.role}] ${message.role === 'user' ? userMessageText(message, message === latest) : message.content}`);
   }
-  lines.push('', 'Continue the conversation by replying to the latest user message.');
+  // A turn nobody asked for ends on an overheard message carrying its own
+  // instruction, and "reply to the latest user message" would countermand
+  // it in the next line.
+  if (latest?.overheard !== true) {
+    lines.push('', 'Continue the conversation by replying to the latest user message.');
+  }
   return lines.join('\n');
 };
 
@@ -924,5 +944,5 @@ export const latestUserMessagePrompt = (request: ProviderRequest): string => {
   if (unheard.length === 1 && newest.overheard !== true) {
     return userMessageText(newest);
   }
-  return unheard.map(userMessageText).join('\n');
+  return unheard.map((message) => userMessageText(message, message === newest)).join('\n');
 };

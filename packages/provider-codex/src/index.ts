@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 
 import {
+  isUnaddressedTurn,
   renderSystemPromptSections,
   uncachedInputTokens,
   type ExecutionContext,
@@ -869,6 +870,12 @@ export const createCodexProvider = ({
 
     const resultText = completedMessages.filter((text) => text.length > 0).join('\n\n');
     if (resultText.length === 0) {
+      // Silence is the answer a turn nobody asked for may give — see
+      // `RunInput.addressed` in core; on a turn somebody asked for it is a
+      // harness that returned nothing.
+      if (isUnaddressedTurn(request.session)) {
+        return { parts: [] };
+      }
       throw markIfSideEffects(new Error('Codex returned an empty response.'));
     }
 

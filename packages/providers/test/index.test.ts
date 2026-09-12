@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { ProviderCallUsage, ProviderRequest } from '@stratusagent/core';
+import { UNADDRESSED_TURN_NOTE, type ProviderCallUsage, type ProviderRequest } from '@stratusagent/core';
 import {
   createOpenAICompatibleProvider,
   createProviderRegistry,
@@ -1040,15 +1040,16 @@ test('a resumed harness is sent everything since the agent last spoke, overheard
     ].join('\n'),
   );
 
-  // A single overheard message with nothing after it is still framed —
-  // bare would read as if the agent had been asked.
+  // A turn ending on an overheard message is one nobody asked for: the
+  // message is framed — bare would read as if the agent had been asked —
+  // and followed by the note that says it may answer with nothing.
   assert.equal(
     latestUserMessagePrompt(requestWith([
       message('u1', 'user', 'Dylan: hello'),
       message('a1', 'assistant', 'hi'),
       message('u2', 'user', 'Dylan: Bea?', true),
     ])),
-    '(overheard, not addressed to you)\n> Dylan: Bea?',
+    `(overheard, not addressed to you)\n> Dylan: Bea?\n\n${UNADDRESSED_TURN_NOTE}`,
   );
 
   // A turn the harness accepted and then failed appends no reply, so its
@@ -1095,6 +1096,60 @@ test('a resumed harness is sent everything since the agent last spoke, overheard
     ])),
     /\[user\] \(overheard, not addressed to you\)\n> Dylan: Bea\?\n\[user\] Dylan: Ava\?/,
   );
+});
+
+test('a turn nobody asked for ends on the note, after its newest message only, on every path', async () => {
+  // Two overheard messages, the turn dispatched unaddressed on the second:
+  // both framed, the note after the newest and not the earlier one.
+  const thread = [
+    message('u1', 'user', 'Dylan: Ava, hello'),
+    message('a1', 'assistant', 'hi'),
+    message('u2', 'user', 'Dylan: Bea, what do you think?', true),
+    message('u3', 'user', 'Bea: ship it', true),
+  ];
+  const framed = (text: string) => `(overheard, not addressed to you)\n> ${text}`;
+
+  assert.equal(
+    latestUserMessagePrompt(requestWith(thread)),
+    [framed('Dylan: Bea, what do you think?'), `${framed('Bea: ship it')}\n\n${UNADDRESSED_TURN_NOTE}`].join('\n'),
+  );
+
+  // The transcript rendering carries the note in the message and drops
+  // its own closing instruction: "reply to the latest user message" would
+  // countermand the note in the next line.
+  const transcript = renderTranscriptPrompt(requestWith(thread));
+  assert.match(transcript, /\[user\] \(overheard, not addressed to you\)\n> Bea: ship it\n\n/);
+  assert.ok(transcript.endsWith(UNADDRESSED_TURN_NOTE), transcript);
+  assert.doesNotMatch(transcript, /Continue the conversation/);
+  // An addressed turn keeps it.
+  assert.match(renderTranscriptPrompt(requestWith([...thread, message('u4', 'user', 'Dylan: Ava?')])), /Continue the conversation by replying to the latest user message\.$/);
+  // A first turn that is unaddressed — the one-message rendering.
+  assert.equal(
+    renderTranscriptPrompt(requestWith([message('u1', 'user', 'Dylan: Bea?', true)])),
+    `${framed('Dylan: Bea?')}\n\n${UNADDRESSED_TURN_NOTE}`,
+  );
+
+  // The OpenAI-compatible wire body, per message.
+  let body: { messages: Array<{ role: string; content: string }> } | undefined;
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.test/v1',
+    fetch: async (_url, init) => {
+      body = JSON.parse(String(init?.body));
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: '' } }] }),
+      } as Response;
+    },
+  });
+  await provider.generate(requestWith(thread));
+  assert.deepEqual(body?.messages.filter((entry) => entry.role === 'user').map((entry) => entry.content), [
+    'Dylan: Ava, hello',
+    framed('Dylan: Bea, what do you think?'),
+    `${framed('Bea: ship it')}\n\n${UNADDRESSED_TURN_NOTE}`,
+  ]);
 });
 
 test('every line of an overheard message stays quoted, so none of it can pass as addressed', () => {

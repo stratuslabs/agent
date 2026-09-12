@@ -6,9 +6,15 @@
 mark on a message and the one rule (`promptTextOf`) every renderer frames
 it by, and the Slack adapter hearing, into an agent's own session, each
 message in a shared thread that was another agent's to answer and each
-reply the other agent posted. Pieces 2 and 3 are not started.
+reply the other agent posted. Piece 2's kernel half has shipped: `dispatch`
+carries `addressed`, an unaddressed turn's message is stored `overheard` and
+followed in the prompt by `UNADDRESSED_TURN_NOTE`, and every provider
+accepts an empty answer on such a turn (`isUnaddressedTurn`) as the answer
+rather than as a broken endpoint. Its channel half — the Slack renderer
+posting nothing for a silent turn, and opening its placeholder lazily —
+lands with piece 3, which is the first thing that dispatches unaddressed.
 
-Three things the sketch did not say, found on the way:
+Four things the sketch did not say, found on the way:
 
 - **"Append and save" was not enough on the harness path.** A resumed SDK
   session is sent only the newest user message, since the harness holds
@@ -37,6 +43,16 @@ Three things the sketch did not say, found on the way:
   turn's length behind its colleague's hears the answer before the
   question. Rare, since sockets run within milliseconds of each other, and
   bounded to the ordering of a transcript rather than to what it holds.
+- **"An empty reply is a decision" was a provider change, not only a
+  renderer one.** Every provider — the two API paths and both harnesses —
+  treated an empty answer as a broken endpoint and threw, so a turn told
+  it may say nothing would have failed for saying nothing. They now ask
+  the session whether the turn was addressed; on one that was, empty stays
+  an error, because a model asked a question and returning nothing is
+  still an endpoint returning nothing. The note also lives in the message
+  rather than the system prompt, on purpose: a harness that holds its own
+  history takes only the newest message, and a rule read next to the
+  thing it applies to is followed more often than one read an hour ago.
 
 ## Goal
 

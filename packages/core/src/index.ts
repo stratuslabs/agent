@@ -291,8 +291,9 @@ export interface Message {
   images?: ImageAttachment[];
   /**
    * A user message the agent was not spoken to by: something said in a
-   * conversation it is in, to somebody else, appended by `observe` with no
-   * turn run on it. Present only when true.
+   * conversation it is in, to somebody else — appended by `observe` with
+   * no turn run on it, or dispatched with `addressed: false`, which runs a
+   * turn the agent may answer with nothing. Present only when true.
    *
    * Durable, because it changes how the message is rendered on every later
    * turn, not just the next one: every renderer passes user content through
@@ -1869,10 +1870,60 @@ export const latestTurnReply = (session: Pick<Session, 'messages'>): string | un
  * judgement — the same reason a memory region is labelled by trust and not
  * annotated with advice.
  */
-export const promptTextOf = (message: Pick<Message, 'content' | 'overheard'>): string =>
-  message.overheard === true
-    ? `(overheard, not addressed to you)\n${message.content.split(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/).map((line) => `> ${line}`).join('\n')}`
-    : message.content;
+export const promptTextOf = (
+  message: Pick<Message, 'content' | 'overheard'>,
+  options: PromptTextOptions = {},
+): string => {
+  if (message.overheard !== true) {
+    return message.content;
+  }
+  const quoted = message.content
+    .split(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/)
+    .map((line) => `> ${line}`)
+    .join('\n');
+  const framed = `(overheard, not addressed to you)\n${quoted}`;
+  return options.latest === true ? `${framed}\n\n${UNADDRESSED_TURN_NOTE}` : framed;
+};
+
+/**
+ * Whether the turn a session is on is one nobody asked for: its newest
+ * user message is overheard, which only `addressed: false` produces at
+ * turn time — `observe` appends between turns, and every dispatch since
+ * before overhearing appended a message the agent was spoken to by. The
+ * one rule behind two decisions: the note that follows the newest message
+ * (`PromptTextOptions.latest`), and a provider accepting an empty answer
+ * as the answer rather than as a broken endpoint.
+ */
+export const isUnaddressedTurn = (session: Pick<Session, 'messages'>): boolean =>
+  session.messages.findLast((message) => message.role === 'user')?.overheard === true;
+
+export interface PromptTextOptions {
+  /**
+   * Whether this is the newest user message of the turn being run. A turn
+   * that ends on an overheard message is one nobody asked for — it was
+   * dispatched with `addressed: false` — and the message is followed by
+   * `UNADDRESSED_TURN_NOTE`, telling the model so. Only the newest: the
+   * same message rendered on a later turn is history, and the decision it
+   * carried has been made.
+   */
+  latest?: boolean;
+}
+
+/**
+ * What a turn nobody asked for is told, after the message it ends on.
+ *
+ * The load-bearing sentence of reading the room, and the one that cannot
+ * be specified into correctness: a model asked "should you answer?" says
+ * yes far more often than a person would, so the note leans on silence
+ * hard, names the few things worth breaking it for, and says what an
+ * answer must not be — an acknowledgement is the interruption it exists
+ * to prevent. In the message and not the system prompt, because it has
+ * to reach a harness that holds its own history and takes only the newest
+ * message, and because a rule read next to the thing it applies to is
+ * followed more often than one read an hour ago.
+ */
+export const UNADDRESSED_TURN_NOTE =
+  'Nobody said that to you, and nobody is waiting on you. Reply only if you have something these people would want from you and do not have — an answer to a question left open, a correction to something wrong, a thing you were asked to watch for. Otherwise reply with nothing at all: no acknowledgement, no summary, no offer to help. Saying nothing is usually the right answer here.';
 
 /** Reads the checkpoint off a session, if it is parked. */
 export const readPendingApproval = (session: Session): PendingApprovalRecord | undefined => {
@@ -2884,6 +2935,16 @@ export interface RunInput {
   userMessage: string;
   /** Images sent with the message; see `Message.images`. */
   images?: ImageAttachment[];
+  /**
+   * Whether the message was said TO the agent. Omitted or true, the turn
+   * is one somebody asked for, as every turn was before overhearing.
+   * `false` runs a turn on something said to somebody else: the message
+   * is stored `overheard`, rendered as third-party speech, and the model
+   * is told (`UNADDRESSED_TURN_NOTE`) that it may answer with nothing — an
+   * empty reply is then a decision, not a failure, and the turn completes
+   * with no assistant text for a surface to post.
+   */
+  addressed?: boolean;
   metadata?: JsonObject;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
   signal?: AbortSignal;
@@ -2894,6 +2955,8 @@ export interface ResumeInput {
   userMessage: string;
   /** Images sent with the message; see `Message.images`. */
   images?: ImageAttachment[];
+  /** See `RunInput.addressed`. */
+  addressed?: boolean;
   /**
    * This turn's metadata — read for the sender's trust
    * (`SENDER_TRUST_METADATA_KEY`) and not merged into the session's. The
@@ -3056,6 +3119,7 @@ export class AgentRunner {
       content: input.userMessage,
       createdAt: new Date().toISOString(),
       ...userImages(input.images),
+      ...(input.addressed === false ? { overheard: true } : {}),
     };
     omitImagesOutsideReplayBudget([opening], this.imageReplayBudget);
     const sessionInput: Omit<Session, 'createdAt' | 'updatedAt'> = {
@@ -3152,6 +3216,10 @@ export class AgentRunner {
       content: input.userMessage,
       createdAt: new Date().toISOString(),
       ...userImages(input.images),
+      // Marked like a message `observe` appended, because it is one: the
+      // difference is only that a turn runs on it, and every renderer
+      // frames it from the same mark.
+      ...(input.addressed === false ? { overheard: true } : {}),
     });
     // Before the save below: the row that carries this turn is the row
     // that stops carrying the pixels nothing can send any more.

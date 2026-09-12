@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ImageAttachment, MemoryEntry, ProviderCallUsage, ProviderRequest, Session } from '@stratusagent/core';
+import { UNADDRESSED_TURN_NOTE, type ImageAttachment, type MemoryEntry, type ProviderCallUsage, type ProviderRequest, type Session } from '@stratusagent/core';
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
@@ -265,6 +265,35 @@ test('a message overheard between turns reaches the API framed, in one user turn
       { type: 'text', text: 'Dylan: Ava, and you?' },
     ],
   });
+});
+
+test('a turn nobody asked for reaches the API with the note after its newest message only', async () => {
+  const { fetchImpl, requests } = createMockFetch([apiMessage([])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const now = new Date().toISOString();
+  const session = createSession({
+    messages: [
+      { id: 's:u:1', role: 'user', content: 'Dylan: Ava, hello', createdAt: now },
+      { id: 's:a:2', role: 'assistant', content: 'Hello!', createdAt: now },
+      { id: 's:u:3', role: 'user', content: 'Dylan: Bea, what do you think?', createdAt: now, overheard: true },
+      // Dispatched with `addressed: false`: a turn runs on it, and the
+      // model is told it may answer with nothing.
+      { id: 's:u:4', role: 'user', content: 'Bea: ship it', createdAt: now, overheard: true },
+    ],
+  });
+
+  const response = await provider.generate({ session });
+
+  const wire = requests[0]!.body.messages;
+  assert.deepEqual(wire[2], {
+    role: 'user',
+    content: [
+      { type: 'text', text: '(overheard, not addressed to you)\n> Dylan: Bea, what do you think?' },
+      { type: 'text', text: `(overheard, not addressed to you)\n> Bea: ship it\n\n${UNADDRESSED_TURN_NOTE}` },
+    ],
+  });
+  // And an empty answer is an answer: no text parts, no error.
+  assert.deepEqual(response.parts, []);
 });
 
 test('failed tool results replay as is_error tool_result blocks', async () => {

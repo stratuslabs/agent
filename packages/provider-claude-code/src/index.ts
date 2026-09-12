@@ -9,6 +9,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import {
+  isUnaddressedTurn,
   renderSystemPromptSections,
   type JsonObject,
   type ModelProvider,
@@ -658,6 +659,12 @@ export const createClaudeCodeProvider = ({
     }
 
     if (resultText === undefined || resultText.length === 0) {
+      // Silence is the answer a turn nobody asked for may give — see
+      // `RunInput.addressed` in core; on a turn somebody asked for it is a
+      // harness that returned nothing.
+      if (isUnaddressedTurn(request.session)) {
+        return { parts: [] };
+      }
       throw markIfSideEffects(new Error('Claude Code returned an empty response.'));
     }
 

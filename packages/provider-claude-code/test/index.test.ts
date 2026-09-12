@@ -140,6 +140,18 @@ test('error results and empty responses surface as errors', async () => {
     () => empty.generate({ session: createSession() }),
     /empty response/,
   );
+
+  // On a turn nobody asked for — its newest user message overheard,
+  // dispatched with `addressed: false` — nothing said is the answer.
+  const unasked = createSession();
+  unasked.messages.push({
+    id: 'session-1:user:2',
+    role: 'user',
+    content: 'Dylan: Bea, thoughts?',
+    createdAt: new Date().toISOString(),
+    overheard: true,
+  });
+  assert.deepEqual(await empty.generate({ session: unasked }), { parts: [] });
 });
 
 test('kernel tools bridge into the loop as an in-process MCP server', async () => {

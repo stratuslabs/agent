@@ -8,6 +8,7 @@ import type {
   Tool as AnthropicTool,
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
+  isUnaddressedTurn,
   droppedImageNote,
   imagesWithinReplayBudget,
   omitImage,
@@ -379,6 +380,9 @@ const createAnthropicMessages = (
     (calls ?? []).some((call) => emittedCallIds.has(call.id));
 
   const messages = request.session.messages;
+  // The newest user message is the one the turn ends on; an unaddressed
+  // turn's note follows it and no other — see `PromptTextOptions`.
+  const latest = messages.findLast((message) => message.role === 'user');
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     if (!message || message.role === 'system') {
@@ -443,7 +447,7 @@ const createAnthropicMessages = (
     // harness ones. Consecutive user turns merge above, so a message
     // overheard between turns and the one that followed it reach the API
     // as one user turn of two blocks. Its images, if any, ride ahead of it.
-    push('user', userBlocks(promptTextOf(message), message.images, replayed, imageOf));
+    push('user', userBlocks(promptTextOf(message, { latest: message === latest }), message.images, replayed, imageOf));
   }
 
   const imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }> = [];
@@ -783,7 +787,10 @@ export const createAnthropicProvider = ({
         ...calls.map((call) => ({ type: 'tool-call' as const, call })),
       ];
 
-      if (parts.length === 0) {
+      // Nothing said is the answer a turn nobody asked for may give — see
+      // `RunInput.addressed` in core. On a turn somebody asked for it is
+      // still an endpoint that returned nothing, and an error.
+      if (parts.length === 0 && !isUnaddressedTurn(request.session)) {
         throw new Error('Claude returned an empty response.');
       }
 
