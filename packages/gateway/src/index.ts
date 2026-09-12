@@ -1412,6 +1412,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // The last successfully loaded config snapshot, serving dispatches while
   // the file on disk is temporarily broken (an operator mid-edit).
   let lastGoodConfigSnapshot: NonNullable<RuntimeSelection['presetConfig']> | undefined;
+  /**
+   * Said at load, because the allowlist fails open: `tools` omitted is
+   * every registered tool, the opposite of what `skills` and `credentials`
+   * do when omitted, and a soul that never wrote the key holds `shell.run`
+   * the moment that plugin is enabled. The built-in agent is exempt — it
+   * has no file to add the key to.
+   */
+  const warnNoToolsList = (agentId: string, soulPath: string): void => {
+    warn(
+      `agent ${agentId} has no tools: list, so it may call every tool this daemon loads — `
+      + `add tools: [...] to ${soulPath} to say which`,
+    );
+  };
+
   const defaultAgentId = async (): Promise<string> => {
     // Identity only — never full runtime resolution: credential checks do
     // not belong here, or a daemon default provider without installed keys
@@ -1451,6 +1465,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         soul: resolved.soul,
         soulPath: resolved.path,
       });
+      // The same notice the roster loop gives, for a default soul that
+      // lives outside the agents directory — the one path a soul takes
+      // into the roster without passing that loop. Only on a fresh
+      // registration, so a roster-backed default is named once, there.
+      if (resolved.soul.agent.tools === undefined) {
+        warnNoToolsList(id, resolved.path);
+      }
     }
     lastDefaultAgentId = id;
     return id;
@@ -1496,16 +1517,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         continue;
       }
       registerFresh({ definition: entry.soul.agent, soulPath: entry.path, soul: entry.soul });
-      // Said at load, because the allowlist fails open: `tools` omitted is
-      // every registered tool, the opposite of what `skills` and
-      // `credentials` do when omitted, and a soul that never wrote the key
-      // holds `shell.run` the moment that plugin is enabled. The built-in
-      // agent is exempt — it has no file to add the key to.
       if (entry.soul.agent.tools === undefined) {
-        warn(
-          `agent ${entry.soul.agent.id} has no tools: list, so it may call every tool this daemon loads — `
-          + `add tools: [...] to ${entry.path} to say which`,
-        );
+        warnNoToolsList(entry.soul.agent.id, entry.path);
       }
     }
     // The configured default soul is part of the roster too — it is what

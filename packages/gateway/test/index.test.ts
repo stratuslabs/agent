@@ -2013,6 +2013,37 @@ test('a roster soul with no tools: list is named at load, because the omitted ke
   assert.ok(!warnings.some((line) => line.includes('agent stratus has no tools')));
 });
 
+test('a config-only default soul with no tools: list is named too, and a roster-backed one only once', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Outside the roster directory: the one path into the roster that does
+  // not pass the roster loop.
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+  const warnings: string[] = [];
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  await gateway.stop();
+  const named = warnings.filter((line) => line.includes('has no tools: list'));
+  assert.deepEqual(named.map((line) => line.replace(/ — add tools:.*$/, '')), [
+    'agent nova has no tools: list, so it may call every tool this daemon loads',
+  ]);
+  assert.match(named[0] ?? '', /to .*nova\.md to say which/);
+
+  // The same soul inside the roster directory, and configured as the
+  // default: the roster loop names it, and the default resolution does not
+  // name it again.
+  const roster = await newHome();
+  await writeSoul(roster, 'nova.md', '---\nname: Nova\n---\n\nYou are Nova.\n');
+  await writeFile(path.join(roster, '.stratus', 'config.json'), JSON.stringify({ soul: '.stratus/agents/nova.md' }));
+  const once: string[] = [];
+  const second = createGateway({ env: { homeDir: roster, cwd: roster, processEnv: {} }, idleTimeoutMs: 0, warn: (line) => once.push(line) });
+  await second.start();
+  await second.stop();
+  assert.equal(once.filter((line) => line.includes('has no tools: list')).length, 1, JSON.stringify(once));
+});
+
 test('a roster soul cannot hijack the reserved built-in agent id', async () => {
   const home = await newHome();
   // A roster file whose name slugifies to the reserved id "stratus".
