@@ -2031,6 +2031,14 @@ test('a config-only default soul with no tools: list is named too, and a roster-
   ]);
   assert.match(named[0] ?? '', /to .*nova\.md to say which/);
 
+  // Every roster load, not only the first registration: the promise is a
+  // notice each time the roster loads, and a reload re-reads the soul.
+  const again = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  await again.start();
+  await again.reloadRoster();
+  await again.stop();
+  assert.equal(warnings.filter((line) => line.includes('agent nova has no tools: list')).length, 3);
+
   // The same soul inside the roster directory, and configured as the
   // default: the roster loop names it, and the default resolution does not
   // name it again.

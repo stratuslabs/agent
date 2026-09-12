@@ -1409,6 +1409,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * built-in definition.
    */
   let lastDefaultAgentId: string | undefined;
+  /**
+   * What the last default resolution read, for the roster load to judge
+   * — the soul is re-read on every resolution, so a `tools:` key removed
+   * after startup is seen here, where the registered source would still
+   * carry the old definition until the next dispatch refreshes it.
+   */
+  let lastDefaultResolved: { soul: ParsedSoul; path: string } | undefined;
   // The last successfully loaded config snapshot, serving dispatches while
   // the file on disk is temporarily broken (an operator mid-edit).
   let lastGoodConfigSnapshot: NonNullable<RuntimeSelection['presetConfig']> | undefined;
@@ -1447,8 +1454,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // now the cached answer too, so a later transient read failure
       // cannot resurrect the retired soul's identity.
       lastDefaultAgentId = DEFAULT_STRATUS_AGENT.id;
+      lastDefaultResolved = undefined;
       return DEFAULT_STRATUS_AGENT.id;
     }
+    lastDefaultResolved = resolved;
     const id = resolved.soul.agent.id;
     // The normal setup layout has the default soul in ~/.stratus/agents
     // too: keep the roster registration — its soulPath drives per-dispatch
@@ -1465,13 +1474,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         soul: resolved.soul,
         soulPath: resolved.path,
       });
-      // The same notice the roster loop gives, for a default soul that
-      // lives outside the agents directory — the one path a soul takes
-      // into the roster without passing that loop. Only on a fresh
-      // registration, so a roster-backed default is named once, there.
-      if (resolved.soul.agent.tools === undefined) {
-        warnNoToolsList(id, resolved.path);
-      }
     }
     lastDefaultAgentId = id;
     return id;
@@ -1504,6 +1506,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // no correct winner, and refusing to serve beats letting sort order
     // decide whose sessions, memory, and credentials an agent inherits.
     const entries: RosterEntry[] = await loadRosterSouls(env, warn);
+    // Which souls this pass named for having no tools: list, so the
+    // configured default is not named twice when it is one of them.
+    const namedThisPass = new Set<string>();
     for (const entry of entries) {
       // Against ids claimed by THIS pass, not by any earlier one: a reload
       // must be free to re-register the agent it just re-read, and only the
@@ -1519,13 +1524,26 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       registerFresh({ definition: entry.soul.agent, soulPath: entry.path, soul: entry.soul });
       if (entry.soul.agent.tools === undefined) {
         warnNoToolsList(entry.soul.agent.id, entry.path);
+        namedThisPass.add(entry.path);
       }
     }
     // The configured default soul is part of the roster too — it is what
     // an agentId-less dispatch answers as. It may live outside the agents
     // directory, and it survives a read failure by name, so what it
     // resolves to is kept whether or not this pass re-registered it.
-    seen.add(await defaultAgentId());
+    const defaultId = await defaultAgentId();
+    seen.add(defaultId);
+    // The same notice for a default soul that lives outside the agents
+    // directory — the one path into the roster that skips the loop above
+    // — on every load, judged on what the resolution just read rather
+    // than on the registered source, so a key removed after startup is
+    // reported at the next reload. A roster-backed default was named by
+    // the loop, and is not named twice.
+    if (lastDefaultResolved !== undefined
+      && lastDefaultResolved.soul.agent.tools === undefined
+      && !namedThisPass.has(lastDefaultResolved.path)) {
+      warnNoToolsList(defaultId, lastDefaultResolved.path);
+    }
 
     for (const id of [...sources.keys()]) {
       if (!seen.has(id)) {
