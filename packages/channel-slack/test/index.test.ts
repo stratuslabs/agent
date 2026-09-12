@@ -2264,6 +2264,71 @@ test('a judged turn that posted a file and then failed has still spoken, for the
   assert.deepEqual(of('ava'), ['Dylan: chart please', 'Dylan: nice']);
 });
 
+test('a judged turn whose streamed line landed but whose final edit Slack refused has spoken', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  // The streamed line is taken; the final reply is refused.
+  const update = webAva.chat.update;
+  webAva.chat.update = async (args) => {
+    if (args.text === 'Done') {
+      throw new Error('ratelimited');
+    }
+    return update.call(webAva.chat, args);
+  };
+  const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
+    if (sessionId.startsWith('slack:ava:')) {
+      if (userMessage.includes('think')) {
+        await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Thinking' } });
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return sessionWithReply(sessionId, 'Done');
+      }
+      return sessionWithReply(sessionId, '');
+    }
+    return sessionWithReply(sessionId, 'ok');
+  });
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava', listens: 'judge' },
+    { id: 'bea', name: 'Bea' },
+  ];
+  gateway.sessionRouting = async (sessionId) => {
+    if (sessionId === 'slack:ava:T1:C1:1110.0') {
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1110 * 1000).toISOString(), lastAnsweredAt: new Date(1110 * 1000).toISOString(), heardSinceAnswered: 0 };
+    }
+    if (sessionId === 'slack:bea:T1:C1:1110.0') {
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1110.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+    }
+    return undefined;
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const both = (message: ReturnType<typeof channelMessage>) =>
+    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  await both(channelMessage({ text: 'let me think', ts: '1110.1', thread: '1110.0' }));
+  await both(channelMessage({ text: 'well?', ts: '1110.2', thread: '1110.0' }));
+  await adapter.stop();
+
+  // "Thinking" is in the thread under Ava's name, so she spoke and holds
+  // it; "Done" never landed, so Bea did not hear it.
+  assert.deepEqual(webAva.updates.map((edit) => edit.text), ['Thinking']);
+  const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
+  assert.deepEqual(of('bea'), ['Dylan: let me think']);
+  assert.deepEqual(of('ava'), ['Dylan: let me think', 'Dylan: well?']);
+  assert.equal(gateway.observes.some((observed) => observed.message.startsWith('Ava:')), false);
+});
+
 test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

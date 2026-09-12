@@ -429,6 +429,8 @@ class ReplyRenderer {
   private finalized = false;
   /** Whether any upload of this turn's landed — a file is something said, placeholder or not. */
   private uploaded = false;
+  /** Whether any edit of this turn's landed — a streamed line Slack took is something said, whatever the final edit's fate. */
+  private edited = false;
   /**
    * A turn nobody asked for: the placeholder is not posted at intake but
    * on the first TEXT the turn streams, and a turn that ends having said
@@ -660,6 +662,7 @@ class ReplyRenderer {
           return false;
         }
         await this.web.chat.update({ channel: ref.channel, ts: ref.ts, text });
+        this.edited = true;
         return true;
       })
       .catch((error) => {
@@ -725,7 +728,7 @@ class ReplyRenderer {
         this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    return { published, spoke: landed || this.uploaded };
+    return { published, spoke: landed || this.edited || this.uploaded };
   }
 
   async fail(message: string): Promise<{ published: boolean; spoke: boolean }> {
