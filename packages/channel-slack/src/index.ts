@@ -358,11 +358,12 @@ interface HandoverClaim {
   /**
    * Spend the hold: hand the placeholder to `chunks`, run `between` while
    * this renderer still has no placeholder of its own, and reopen one
-   * below. False when there is nothing to hand over — no placeholder, or
-   * the renderer finished before the hold was taken — and the caller posts
-   * the chunks itself.
+   * below. `untaken` when there is nothing to hand over — no placeholder,
+   * or the renderer finished before the hold was taken — and the caller
+   * posts the chunks itself; `partial` when the placeholder took the first
+   * chunk and Slack refused one of the rest.
    */
-  take(chunks: readonly string[], between?: () => Promise<void>): Promise<boolean>;
+  take(chunks: readonly string[], between?: () => Promise<void>): Promise<'complete' | 'partial' | 'untaken'>;
   /** Give the hold back unspent, letting the queued turn finish. */
   release(): void;
 }
@@ -625,10 +626,11 @@ class ReplyRenderer {
 
   /**
    * Replace the placeholder with the final reply, splitting if oversized.
-   * Resolves to whether any of it was published — the edit taken, or at
-   * least one overflow message posted. A reply Slack refused entirely was
-   * never said in the thread, and nothing downstream may treat it as if it
-   * had been.
+   * Resolves to whether ALL of it was published — the edit taken and every
+   * overflow message posted. A reply Slack refused any part of was not
+   * said in the thread as written, and nothing downstream may treat it as
+   * if it had been: a colleague hearing the whole of a reply the thread
+   * saw half of is reasoning from text nobody read.
    */
   async finalize(reply: string): Promise<boolean> {
     await this.handover;
@@ -642,7 +644,7 @@ class ReplyRenderer {
     // No placeholder — a handover could not open a fresh one — and the
     // reply is a message of its own rather than nothing at all.
     const rest = this.ref ? chunks.slice(1) : chunks;
-    const edited = this.ref ? this.queueEdit(chunks[0] ?? NO_REPLY_TEXT) : Promise.resolve(false);
+    const edited = this.ref ? this.queueEdit(chunks[0] ?? NO_REPLY_TEXT) : Promise.resolve(true);
     let published = await edited;
     await this.editChain;
     await this.uploadChain;
@@ -653,8 +655,8 @@ class ReplyRenderer {
           text: chunk,
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
-        published = true;
       } catch (error) {
+        published = false;
         this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -701,7 +703,7 @@ class ReplyRenderer {
     return {
       take: async (chunks, between) => {
         if (spent) {
-          return false;
+          return 'untaken';
         }
         try {
           await previous;
@@ -724,11 +726,11 @@ class ReplyRenderer {
     chunks: readonly string[],
     drained: Promise<void>,
     between: (() => Promise<void>) | undefined,
-  ): Promise<boolean> {
+  ): Promise<'complete' | 'partial' | 'untaken'> {
     const [first, ...rest] = chunks;
     const given = this.ref;
     if (first === undefined || this.finalized || !given) {
-      return false;
+      return 'untaken';
     }
     await drained;
     try {
@@ -737,8 +739,9 @@ class ReplyRenderer {
       // Not handed over: the placeholder is still this turn's, and the
       // caller posts the reply as messages of its own.
       this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
+      return 'untaken';
     }
+    let complete = true;
     // The placeholder is the earlier turn's now, and the reference goes
     // before the reopen, so a reopen that fails cannot leave this turn
     // writing over the reply just handed over. (What was streamed into
@@ -753,6 +756,7 @@ class ReplyRenderer {
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
       } catch (error) {
+        complete = false;
         this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -770,7 +774,7 @@ class ReplyRenderer {
       // message of its own when it comes (see `finalize`).
       this.warn(`could not reopen a placeholder: ${error instanceof Error ? error.message : String(error)}`);
     }
-    return true;
+    return complete ? 'complete' : 'partial';
   }
 }
 
@@ -1910,10 +1914,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * `handleInbound` gives: a hearer with a long turn running must not hold
    * its next message's place hostage to that turn.
    *
-   * Only once it is SAID. The reservation is taken when the reply is
-   * final, but the observe waits, inside the link, on `published` — whether
-   * Slack took the edit or a post — and a reply Slack refused entirely is
-   * heard by nobody, since nobody in the thread saw it either. That holds
+   * Only once it is SAID, in full. The reservation is taken when the reply
+   * is final, but the observe waits, inside the link, on `published` —
+   * whether Slack took every edit and post of it — and a reply Slack
+   * refused any part of is heard by nobody, since the thread did not see
+   * it as written and the hearer has no way to know which part. That holds
    * the hearer's chain for the length of the final edit, which is the
    * same network round trip a person's message holds it for.
    *
@@ -2346,10 +2351,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     chunks: readonly string[],
     between?: () => Promise<void>,
   ): Promise<boolean> => {
-    if (behind && await behind.take(chunks, between)) {
-      return true;
+    const taken = behind ? await behind.take(chunks, between) : 'untaken';
+    if (taken !== 'untaken') {
+      return taken === 'complete';
     }
-    let published = false;
+    // Whether ALL of it landed, as `finalize` answers: a reply the thread
+    // saw part of is not one anybody else may be told the whole of.
+    let published = true;
     for (const chunk of chunks) {
       try {
         await connection.web.chat.postMessage({
@@ -2357,8 +2365,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           text: chunk,
           ...(thread ? { thread_ts: thread } : {}),
         });
-        published = true;
       } catch (error) {
+        published = false;
         warn(`slack: could not post part of a turn's outcome: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
