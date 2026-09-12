@@ -46,14 +46,18 @@ they are the whole model:
    own app next catches up.
 5. **Standing down is not leaving.** An agent in a thread hears what is
    said to the other agent in it — the question that named its colleague,
-   the untagged replies that were the colleague's to answer — into its own
-   session, with no turn run and nothing posted. The next time it is
-   asked, it answers as someone who followed the conversation rather than
-   one who stepped out of the room. What it hears is marked as said to
-   somebody else, so a stranger's words in a shared thread never read to
-   it as an instruction; and a stranger overheard lowers its session's
-   trust label exactly as one who addressed it would, since their text is
-   in the transcript either way.
+   the untagged replies that were the colleague's to answer, and what the
+   colleague *replied* — into its own session, with no turn run and
+   nothing posted. The next time it is asked, it answers as someone who
+   followed the conversation rather than one who stepped out of the room.
+   What it hears is marked as said to somebody else, so a stranger's words
+   in a shared thread never read to it as an instruction; and a stranger
+   overheard lowers its session's trust label exactly as one who addressed
+   it would, since their text is in the transcript either way. A
+   colleague's reply is heard under the colleague's own label, never as a
+   person's: an agent's word is at most `agent`, and carries whatever its
+   session has been exposed to. Replies only — a turn that said nothing,
+   or failed, is nothing to hear.
 
 Everyone in the thread is talking to the same agent — a reply from a second
 person is a follow-up like any other, and channel messages reach the model
@@ -98,11 +102,10 @@ a question, and gets no reply.
 Sessions are still per agent: an agent hears a thread from the mention
 that brought it in, and what was said before that — to the other agent, or
 by it — is not backfilled ([#147](https://github.com/stratuslabs/agent/issues/147)).
-Bring it up to speed in the message that tags it. What the *other agent*
-replied is not overheard yet either — only what people say — so an agent
-that followed a thread knows the questions its colleague was asked and not
-the answers; that is the next step of
-[31](../../docs/roadmap/31-reading-the-room.md).
+Bring it up to speed in the message that tags it. A colleague's reply is
+heard by the daemon that posted it, not through Slack — an agent served by
+another daemon is a stranger's bot to this one, and its replies are not
+heard at all.
 
 Three edges worth knowing. An agent whose app was installed before the
 history scopes below is told about mentions only, and behaves exactly as it
