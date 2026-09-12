@@ -38,6 +38,7 @@ Usage:
   stratus doctor
   stratus update
   stratus update --check
+  stratus --version
   stratus service install
   stratus service status
   stratus logs -f
@@ -175,17 +176,20 @@ Commands:
                    and which file or environment variable decided each, then
                    flag anything that would surprise you (--format json)
   update           The whole upgrade dance, in the order that cannot lose
-                   data: stop stratusd, upgrade the package from npm, run
+                   data: stop stratusd, upgrade the package from npm —
+                   together with every optional first-party package this
+                   machine has, which ship in lockstep with it — run
                    pending state migrations, rewrite the service unit with
                    current node/entrypoint paths, restart. --check reports
                    what it would do without doing any of it (exits 1 when
-                   something is actionable). Works offline too — an
-                   unreachable npm skips the upgrade but still migrates and
-                   repairs the unit
+                   something is actionable, a companion left behind
+                   included). Works offline too — an unreachable npm skips
+                   the upgrade but still migrates and repairs the unit
   dashboard        Open the web dashboard: finds a running daemon (or starts one),
                    mints a single-use sign-in link, and opens your browser at it.
                    Needs @stratusagent/control-api and @stratusagent/dashboard
   help             Show this help message
+  version          Print this build's version (also: --version, -v)
 
 Agent options:
   --name           Agent name (omit to have one generated)
@@ -227,6 +231,7 @@ Options:
   --api-host       serve: control API interface (default: 127.0.0.1)
   --api-port       serve: control API port (default: 4123, 0 for any free port)
   --help, -h       Show this help message
+  --version, -v    Print this build's version and exit
 
 Config file:
   The CLI looks for ./stratus.config.json first, then a path from --config / STRATUS_CONFIG,

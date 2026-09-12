@@ -26,8 +26,9 @@ stratus service uninstall
 stratus logs -f                        # what the daemon has been doing
 stratus logs --agent ava -n 200
 stratus doctor                         # what a run would use right now, and why
-stratus update                         # the whole upgrade dance, in the safe order
+stratus update                         # the whole upgrade dance, in the safe order — the CLI and its companions
 stratus update --check                 # report what an update would do, do nothing
+stratus --version                      # which build this is (also: stratus version, stratus -v)
 stratus agent new                      # create an agent (guided on a terminal)
 stratus agent new --name Ava --instructions "You research things." --format soul > ava.md
 stratus agents                         # who's on the team (also: stratus agent list)
@@ -108,6 +109,7 @@ stratus dashboard                      # local browser dashboard
 | `--all-unknown` | `stratus memory reassert`: every live entry with no recorded origin, the upgrade case; ids may be given as well |
 | `--port`, `--host` | `stratus dashboard`: where a daemon it starts should bind |
 | `--no-open` | `stratus dashboard`: skip automatic browser opening |
+| `--version`, `-v` | Print this build's version and exit — reads nothing but itself, so it answers offline and before any state migration |
 | `--token` | Bearer token for `--gateway` (default: `~/.stratus/gateway-token`, or `STRATUS_GATEWAY_TOKEN`) |
 | `--no-login` | `stratus service install`: install without the start-at-login trigger |
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |

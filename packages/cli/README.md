@@ -41,7 +41,8 @@ stratus serve --approvals remote       # ask a human in Slack instead of refusin
 stratus service install                # keep stratusd running under launchd/systemd
 stratus logs -f                        # what the daemon has been doing
 stratus doctor                         # what a run would use right now, and why
-stratus update                         # stop → upgrade → migrate → repair unit → restart
+stratus update                         # stop → upgrade (CLI + its companions) → migrate → repair unit → restart
+stratus --version                      # which build this is
 stratus agent new                      # create an agent (guided on a terminal)
 stratus agents                         # who's on the team: souls, models, memory
 stratus template add owner/repo        # install an agent, its skills, and the plugins behind them — prints what it will add, then asks
@@ -85,6 +86,7 @@ Full reference with every subcommand:
 | `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one |
 | `--port`, `--host`, `--no-open` | `dashboard`: where a daemon it starts should bind; skip opening the browser |
 | `--no-login` | `service install`: install without the start-at-login trigger |
+| `--version`, `-v` | Print this build's version and exit |
 | `-f`, `-n`, `--agent`, `--session` | `logs`: follow, backlog size, and filters |
 
 Precedence: flags → `STRATUS_*` env vars → soul file hints → config file.
