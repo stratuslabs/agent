@@ -198,7 +198,9 @@ always been true of [command scopes](./shell.md) and
 
 The grant is written to the same file as the agent's command scopes and
 sites, under `tools`, with the package that contributed the tool, when it
-was granted, and who answered (a Slack user id, when a channel asked):
+was granted, and who answered — a Slack user id when a channel asked, or
+`api` / `dashboard` with the caller's own label after a colon when the
+decision came through the control API:
 
 ```jsonc
 // ~/.stratus/agents/ava.whitelist.json

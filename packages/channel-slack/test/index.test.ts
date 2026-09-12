@@ -2759,6 +2759,47 @@ test('a click on a request this daemon never rendered is answered, not dropped',
   await adapter.stop();
 });
 
+test('a request decided through the control API names the caller as text, never as a mention', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+  // The API records how the caller authenticated, with its label after a
+  // colon. Rendered as a Slack mention that would be `<@api:ops-bot>`: not
+  // a person, and not even valid markup.
+  await gateway.bus.emit({
+    type: 'tool.approval-resolved',
+    sessionId: 'slack:ava:T1:C1:100.1',
+    requestId: 'req-1',
+    answer: 'once',
+    reason: 'decided',
+    actor: 'api:ops-bot <script>',
+  });
+  const update = web.updates.at(-1);
+  assert.equal(buttonIds(update?.blocks).length, 0);
+  assert.match(update?.text ?? '', /Allowed once.* by api:ops-bot &lt;script&gt;\.$/);
+  assert.doesNotMatch(update?.text ?? '', /<@api/);
+
+  // A clicker is still a mention: the approvers set is what a click can
+  // come from, and what the renderer mentions.
+  gateway.pendingApprovals.add('req-2');
+  await gateway.bus.emit(approvalRequest({ requestId: 'req-2' }));
+  await gateway.bus.emit({
+    type: 'tool.approval-resolved',
+    sessionId: 'slack:ava:T1:C1:100.1',
+    requestId: 'req-2',
+    answer: 'deny',
+    reason: 'decided',
+    actor: 'U-DYLAN',
+  });
+  assert.match(web.updates.at(-1)?.text ?? '', /by <@U-DYLAN>\.$/);
+
+  await adapter.stop();
+});
+
 test('an expired request retracts its own buttons', async () => {
   const { web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },

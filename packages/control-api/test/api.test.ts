@@ -429,7 +429,7 @@ test('a parked approval is listed and resolvable, and a late second click is ref
       body: JSON.stringify({ requestId: parked.requestId, answer: 'once', actor: 'web' }),
     });
     assert.equal(resolved.status, 200);
-    assert.deepEqual(await settles(answer, 'the parked call'), { answer: 'once', actor: 'web' });
+    assert.deepEqual(await settles(answer, 'the parked call'), { answer: 'once', actor: 'api:web' });
 
     // The normal outcome of a button clicked a minute too late. Never a
     // "try again".
@@ -2297,6 +2297,55 @@ test('a daemon started without a grant store says so rather than listing nothing
     const response = await harness.call('/api/v1/agents/stratus/grants');
     assert.equal(response.status, 501);
     assert.equal((await json<{ error: { code: string } }>(response)).error.code, 'grants_unavailable');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('an approval decided through the API is recorded as the API, never as a channel approver', async () => {
+  const harness = await startApi({ approvals: true });
+  const transport = harness.transport;
+  assert.ok(transport, 'the harness captured the approval transport');
+  const park = (sessionId: string) =>
+    transport.request({
+      session: {
+        id: sessionId,
+        agent: { id: 'stratus', name: 'Stratus' },
+        status: 'running',
+        messages: [],
+        createdAt: '2026-08-19T00:00:00.000Z',
+        updatedAt: '2026-08-19T00:00:00.000Z',
+        metadata: { channel: 'slack', slackChannel: 'C1' },
+      },
+      call: { id: `call-${sessionId}`, toolName: 'shell.run', input: { command: 'ls' } },
+      risk: 'gated',
+    });
+  const decide = async (sessionId: string, body: Record<string, unknown>) => {
+    const listed = await json<{ approvals: Array<{ requestId: string; sessionId: string }> }>(
+      await harness.call('/api/v1/approvals'),
+    );
+    const parked = listed.approvals.find((entry) => entry.sessionId === sessionId);
+    assert.ok(parked, `the call for ${sessionId} is parked`);
+    const resolved = await harness.call('/api/v1/approvals', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId: parked.requestId, ...body }),
+    });
+    assert.equal(resolved.status, 200);
+  };
+  try {
+    // A Slack click records the clicker's user id bare, and the grants
+    // listing and the edited Slack message both show whatever is recorded.
+    // A body that spells a Slack id must not come out looking like that
+    // approver's decision.
+    const spoofed = park('sess-spoof');
+    await decide('sess-spoof', { answer: 'once', actor: 'U-DYLAN' });
+    assert.deepEqual(await settles(spoofed, 'the spoofed call'), { answer: 'once', actor: 'api:U-DYLAN' });
+
+    // And no label at all still says how the decision arrived.
+    const unlabelled = park('sess-plain');
+    await decide('sess-plain', { answer: 'deny' });
+    assert.deepEqual(await settles(unlabelled, 'the unlabelled call'), { answer: 'deny', actor: 'api' });
   } finally {
     await harness.stop();
   }
