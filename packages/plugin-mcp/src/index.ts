@@ -883,20 +883,15 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         );
       }
       const registered = bridgedToolName(state.spec.name, segment);
-      if (next.has(registered)) {
-        // Folding two of the server's names into one registered name would
-        // make the second silently answer calls meant for the first —
-        // refused, the same reason any collision is.
-        throw new McpConfigError(
-          `MCP server ${state.spec.name} advertises two tools that both bridge to ${registered} (one of them ${JSON.stringify(tool.name)}). Rename one on the server.`,
-        );
-      }
       // The schema's own prose is bounded the way the description is. A
       // schema too long even then leaves that one tool unbridged, named in
       // the log — not the server refused, and not the plugin: registrations
       // are staged until setup succeeds, so a load-time throw here would
       // take every tool of every configured server down over one page of
       // parameters. The server's to shorten; everything else keeps working.
+      // Judged before the collision check below, so a tool that will not
+      // be bridged cannot collide with one that will: the order the server
+      // lists them in must not decide whether the whole plugin loads.
       const parameters = isObject(tool.inputSchema) ? bridgedSchema(tool.inputSchema) : undefined;
       if (isObject(tool.inputSchema) && parameters === undefined) {
         warn(
@@ -905,6 +900,14 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
           + `${BRIDGED_SCHEMA_MAX_DEPTH} levels, and a schema like that is a page, not a parameter list. Shorten it on the server.`,
         );
         continue;
+      }
+      if (next.has(registered)) {
+        // Folding two of the server's names into one registered name would
+        // make the second silently answer calls meant for the first —
+        // refused, the same reason any collision is.
+        throw new McpConfigError(
+          `MCP server ${state.spec.name} advertises two tools that both bridge to ${registered} (one of them ${JSON.stringify(tool.name)}). Rename one on the server.`,
+        );
       }
       next.set(registered, {
         mcpName: tool.name,

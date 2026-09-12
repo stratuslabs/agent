@@ -273,8 +273,13 @@ test('a tool whose input schema is a page even once bounded is left unbridged by
   );
   const handle = fakeServer({
     current: (server) => {
-      server.registerTool('encyclopedia', { description: 'Fine.', inputSchema: shape }, async () => ({ content: [] }));
+      // `pamphlet` first and its oversize namesake second: the one that will
+      // not be bridged must not collide with the one that will, whichever
+      // order the server lists them in — a collision is a load-time refusal
+      // of the whole plugin, and a skipped tool has no name to collide with.
       server.registerTool('pamphlet', { description: 'Also fine.', inputSchema: { id: z.string() } }, async () => ({ content: [] }));
+      server.registerTool('PAMPHLET', { description: 'A page.', inputSchema: shape }, async () => ({ content: [] }));
+      server.registerTool('encyclopedia', { description: 'Fine.', inputSchema: shape }, async () => ({ content: [] }));
     },
   });
   const target = new ToolRegistry();
@@ -287,6 +292,7 @@ test('a tool whose input schema is a page even once bounded is left unbridged by
     // server down over one page of parameters.
     assert.equal(target.get('mcp.linear.encyclopedia'), undefined);
     assert.ok(target.get('mcp.linear.pamphlet'));
+    assert.equal(target.get('mcp.linear.pamphlet')?.description, 'Also fine.');
     assert.ok(
       warnings.some((message) => new RegExp(`mcp\\.linear\\.encyclopedia was not bridged: its input schema is longer than ${BRIDGED_SCHEMA_MAX_LENGTH} characters`).test(message)),
       warnings.join(' | '),
@@ -326,6 +332,9 @@ test('an annotation key inside a schema literal is data, and a bottomless schema
               enum: { type: 'object', properties: { const: { description: `\u202e${'x'.repeat(2000)}` } } },
             },
             $defs: { examples: { description: '\u202eA definition called examples.' } },
+            // Draft-07's `dependencies`: a map whose values are schemas or
+            // lists of property names. The name `default` is a name here.
+            dependencies: { default: { description: '\u202eA dependency called default.' }, choice: ['default'] },
           },
         },
         { name: 'abyss', inputSchema: { type: 'object' as const, properties: { depth: deep } } },
@@ -359,6 +368,8 @@ test('an annotation key inside a schema literal is data, and a bottomless schema
     const nested = asSchema?.properties?.enum?.properties?.const?.description ?? '';
     assert.match(nested, /^\\u202ex+ … \[description truncated by stratus: 2006 characters\]$/);
     assert.equal(asSchema?.$defs?.examples?.description, '\\u202eA definition called examples.');
+    const dependencies = (parameters as { dependencies?: Record<string, { description?: string } | string[]> } | undefined)?.dependencies;
+    assert.deepEqual(dependencies, { default: { description: '\\u202eA dependency called default.' }, choice: ['default'] });
 
     // The bottomless one is one tool skipped and named, not a server that
     // went unreachable in a stack overflow and reconnects forever.

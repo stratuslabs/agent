@@ -115,9 +115,11 @@ class SchemaTooDeepError extends Error {
  * ordinary parameter — so the keys of these maps are never read as
  * keywords, and every value under them is a schema again. Without this
  * distinction a description hidden under `properties.default` would pass
- * through as a literal, unbounded.
+ * through as a literal, unbounded. Draft-07's `dependencies` is here too:
+ * its values are schemas or lists of property names, and a list walked as
+ * a schema comes back untouched.
  */
-const SCHEMA_MAP_KEYS = new Set(['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas']);
+const SCHEMA_MAP_KEYS = new Set(['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas', 'dependencies']);
 
 const boundedSchemaValue = (value: unknown, depth: number, position: 'schema' | 'map'): unknown => {
   if (depth > BRIDGED_SCHEMA_MAX_DEPTH) {
