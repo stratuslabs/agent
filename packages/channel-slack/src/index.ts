@@ -427,6 +427,8 @@ class ReplyRenderer {
    */
   private generation = 0;
   private finalized = false;
+  /** Whether any upload of this turn's landed — a file is something said, placeholder or not. */
+  private uploaded = false;
   /**
    * A turn nobody asked for: the placeholder is not posted at intake but
    * on the first TEXT the turn streams, and a turn that ends having said
@@ -587,6 +589,7 @@ class ReplyRenderer {
           filename: path.basename(filePath),
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
+        this.uploaded = true;
       })
       .catch((error) => this.warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
   }
@@ -690,10 +693,11 @@ class ReplyRenderer {
     await this.editChain;
     if (this.lazy && !this.ref && reply.trim().length === 0) {
       // Silence, decided: nothing was posted and nothing is. The uploads
-      // still land — a file the turn produced is not nothing to say.
+      // still land — a file the turn produced is not nothing to say, and
+      // a turn that posted one has spoken, for the thread rule.
       await this.editChain;
       await this.uploadChain;
-      return false;
+      return this.uploaded;
     }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
     const chunks = messageChunks(text);

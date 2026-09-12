@@ -2019,6 +2019,69 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
   assert.deepEqual(of('ava'), ['Dylan: say more', 'Dylan: help me', 'Dylan: thanks']);
 });
 
+test('a judging agent that posts a file and says nothing has still spoken, for the thread rule', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-judge-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'png bytes');
+  const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
+    if (sessionId.startsWith('slack:ava:')) {
+      if (userMessage.includes('chart')) {
+        await gateway.bus.emit({
+          type: 'tool.completed',
+          sessionId,
+          result: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: chart } },
+        });
+      }
+      return sessionWithReply(sessionId, '');
+    }
+    return sessionWithReply(sessionId, 'ok');
+  });
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava', listens: 'judge' },
+    { id: 'bea', name: 'Bea' },
+  ];
+  gateway.sessionRouting = async (sessionId) => {
+    if (sessionId === 'slack:ava:T1:C1:1070.0') {
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1070 * 1000).toISOString(), lastAnsweredAt: new Date(1070 * 1000).toISOString(), heardSinceAnswered: 0 };
+    }
+    if (sessionId === 'slack:bea:T1:C1:1070.0') {
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1070.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+    }
+    return undefined;
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const both = (message: ReturnType<typeof channelMessage>) =>
+    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Bea's by the thread rule; Ava judges it and answers with a file and
+  // no words.
+  await both(channelMessage({ text: 'chart please', ts: '1070.1', thread: '1070.0' }));
+  // The file was the last thing said: Bea stands down, Ava judges.
+  await both(channelMessage({ text: 'nice', ts: '1070.2', thread: '1070.0' }));
+  await adapter.stop();
+
+  assert.equal(webAva.uploads.length, 1);
+  assert.deepEqual(webAva.posts, []);
+  const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
+  assert.deepEqual(of('bea'), ['Dylan: chart please']);
+  assert.deepEqual(of('ava'), ['Dylan: chart please', 'Dylan: nice']);
+});
+
 test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
