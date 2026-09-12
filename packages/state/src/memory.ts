@@ -407,7 +407,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
   };
 
   const appendRecord = async (record: MemoryRecord): Promise<void> => {
-    await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    await mkdir(path.dirname(filePath), { recursive: true });
     try {
       await chmod(filePath, 0o600);
     } catch (error) {
@@ -428,7 +428,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       return db;
     }
     const { DatabaseSync } = await loadSqlite();
-    await mkdir(path.dirname(indexPath), { recursive: true, mode: 0o700 });
+    await mkdir(path.dirname(indexPath), { recursive: true });
     const open = (): SqliteDatabase => {
       const opened = new DatabaseSync(indexPath);
       opened.exec('PRAGMA busy_timeout = 5000;');

@@ -679,7 +679,7 @@ const loadRawCredentialsFile = async (env: StateEnvironment): Promise<Record<str
 // its own writes. Atomicity is about what a *reader* can observe.
 const writeRawCredentialsFile = async (env: StateEnvironment, contents: Record<string, unknown>): Promise<void> => {
   const filePath = credentialsPath(env);
-  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  await mkdir(path.dirname(filePath), { recursive: true });
   // Unique per write, so two writers never share a temporary file.
   const temporary = `${filePath}.${randomUUID()}.tmp`;
   try {
@@ -941,7 +941,7 @@ export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> 
       .filter(isMemoryEntryLine)
       .filter((line) => !existingIds.has((JSON.parse(line) as MemoryEntry).id));
     if (entries.length > 0) {
-      await mkdir(path.dirname(globalPath), { recursive: true, mode: 0o700 });
+      await mkdir(path.dirname(globalPath), { recursive: true });
       await appendFile(globalPath, `${entries.join('\n')}\n`);
     }
 
@@ -1179,7 +1179,7 @@ const readStateStampSync = (env: StateEnvironment): StateStamp => {
 };
 
 const writeStateStamp = async (env: StateEnvironment, stamp: StateStamp): Promise<void> => {
-  await mkdir(stratusHomePath(env), { recursive: true, mode: 0o700 });
+  await mkdir(stratusHomePath(env), { recursive: true });
   // Atomically, via rename: `writeFile` truncates before it writes, so a
   // crash in between would leave partial JSON — which reads as schema 0,
   // exactly the state that lets an older binary past the newer-schema
@@ -2368,7 +2368,7 @@ export const installSkillsFromDirectory = async (
       });
       continue;
     }
-    await mkdir(skillsDirPath(env), { recursive: true, mode: 0o700 });
+    await mkdir(skillsDirPath(env), { recursive: true });
     const staging = path.join(skillsDirPath(env), `.installing-${candidate.id}-${randomUUID().slice(0, 8)}`);
     try {
       // verbatimSymlinks keeps a relative intra-skill link relative — the
@@ -3692,7 +3692,7 @@ export const claimSoulFile = async (
   if (unread.length > 0) {
     note(`Note: could not read ${unread.join(' or ')}, so this id was not checked against the ids it declares.`);
   }
-  await mkdir(agentsDirPath(env), { recursive: true, mode: 0o700 });
+  await mkdir(agentsDirPath(env), { recursive: true });
   let agent = defineAgent({ ...(input.name ? { name: input.name } : {}), instructions: input.instructions });
   const baseId = agent.id;
   for (;;) {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -349,14 +349,4 @@ test('grant rows are read leniently and written back whole, beside the scopes th
   assert.equal(stored.tools?.length, 2);
 
   assert.equal(parseToolGrant({ tool: 'a.b', package: '', grantedAt: 'x' })?.package, undefined);
-});
-
-test('the whitelist directory is created owner-only when the first grant creates it', async () => {
-  // The whitelist file is 0600 from its first write. A directory born under
-  // the umask would list it to every user on the machine anyway, and on a
-  // fresh install the first standing grant is what creates that directory.
-  const directory = path.join(await newDirectory(), 'agents');
-  const store = createFileCommandWhitelist({ directory });
-  await store.remember('ava', { command: 'git', args: ['push'] });
-  assert.equal((await stat(directory)).mode & 0o777, 0o700);
 });

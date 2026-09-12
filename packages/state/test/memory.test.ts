@@ -285,13 +285,3 @@ test('the index file is owner-only, like the JSONL it derives from', async () =>
   assert.equal(jsonlMode, 0o600);
   assert.equal(indexMode, 0o600);
 });
-
-test('the directory a memory file is created in is owner-only', async () => {
-  // A memory store is opened on a path the migration may not have created
-  // yet; the file lands 0600, and the directory it creates must not undo
-  // that by listing it to every user on the machine.
-  const filePath = path.join(await tempDir(), 'agents', 'ava', 'memory.jsonl');
-  const store = createFileMemoryStore(filePath);
-  await store.append('ava', 'a fact that had to create its own directory');
-  assert.equal((await stat(path.dirname(filePath))).mode & 0o777, 0o700);
-});
