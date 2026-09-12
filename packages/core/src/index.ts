@@ -355,7 +355,21 @@ export interface AgentDefinition extends AgentDescriptor {
 export class AgentRegistry {
   private agents = new Map<string, AgentDefinition>();
 
+  /**
+   * `*` in a `delegates` list means any agent on the roster, so an agent
+   * with that id could never be granted alone — `delegates: ['*']` would
+   * open the whole roster to reach it. The soul loader refuses the id;
+   * this refuses it for a definition built in code, since the wildcard's
+   * meaning is decided here, where the roster lives, and not by which
+   * path put the agent on it.
+   */
   register(agent: AgentDefinition): AgentDefinition {
+    if (agent.id === '*') {
+      throw new Error(
+        'Invalid agent id: "*". * is the delegates wildcard (delegates: [\'*\'] means any agent on the roster), '
+        + 'so no agent may have it as an id — give this agent another id.',
+      );
+    }
     this.agents.set(agent.id, agent);
     return agent;
   }

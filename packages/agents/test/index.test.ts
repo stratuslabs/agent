@@ -361,6 +361,13 @@ test('the delegate wildcard is not an agent id, and a delegates entry is an id o
     () => parseSoul('---\nname: Star\nid: "*"\n---\nHi'),
     /Invalid agent id: "\*"\. \* is the delegates wildcard/,
   );
+  // A definition built in code never passes through defineAgent, so the
+  // registry itself refuses the id: a roster holding `*` would make
+  // `delegates: ['*']` the only way to reach one agent.
+  assert.throws(
+    () => createAgentTeam([{ id: '*', name: 'Star' }]),
+    /Invalid agent id: "\*"\. \* is the delegates wildcard .* give this agent another id\./,
+  );
   // A session id is a broader address, and the wildcard means nothing there.
   assert.equal(isValidSessionId('*'), true);
   assert.equal(isValidDelegateEntry('*'), true);
