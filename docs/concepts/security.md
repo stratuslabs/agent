@@ -37,6 +37,12 @@ linked own the full story.
 
 ## What a cloned repo cannot decide
 
+**Who may talk to an agent in Slack is the operator's list, once `admit`
+says so.** The `principals` block names the senders an agent takes as its
+operator; by default everyone else is still answered, labelled `unknown`.
+`"admit": "principals"` refuses them before a turn starts — see
+[Who counts as the operator](../../packages/channel-slack/README.md#who-counts-as-the-operator).
+
 The `plugins`, `approvals`, `principals`, and `api` config blocks are read
 **only from a trusted config** — the global `~/.stratus/config.json` or a
 file you passed yourself. An auto-discovered project-local

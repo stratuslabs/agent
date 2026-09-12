@@ -157,7 +157,19 @@ export interface AgentPrincipalsConfig {
    * which inherits.
    */
   slackUsers?: string[];
+  /**
+   * Who gets a turn at all. `anyone` — the default — admits every sender
+   * the adapter's own checks pass, labelling the unlisted ones `unknown`;
+   * `principals` refuses everyone not in `slackUsers` before a turn
+   * starts, and does not let the agent overhear them either. The label is
+   * provenance; this is authorization, and an agent that holds tools
+   * wants the second — a stranger's message is not merely uncertain, it
+   * is a prompt they chose.
+   */
+  admit?: PrincipalsAdmit;
 }
+
+export type PrincipalsAdmit = 'anyone' | 'principals';
 
 /** The `principals` block of ~/.stratus/config.json. */
 export interface PrincipalsConfig extends AgentPrincipalsConfig {
@@ -1376,7 +1388,7 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   if (approvals) {
     resolved.approvals = approvals;
   }
-  const principals = parsePrincipalsConfig(config.principals);
+  const principals = parsePrincipalsConfig(config.principals, configPath);
   if (principals) {
     resolved.principals = principals;
   }
@@ -1589,7 +1601,7 @@ export const resolveAgentApprovals = (
   };
 };
 
-const parsePrincipalsEntry = (raw: unknown): AgentPrincipalsConfig | undefined => {
+const parsePrincipalsEntry = (raw: unknown, configPath: string, where: string): AgentPrincipalsConfig | undefined => {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
   }
@@ -1603,11 +1615,21 @@ const parsePrincipalsEntry = (raw: unknown): AgentPrincipalsConfig | undefined =
       (candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0,
     );
   }
+  if (source.admit !== undefined) {
+    // Refused rather than defaulted: a misspelt `admit` that quietly meant
+    // `anyone` would be the one setting here whose failure opens the door.
+    if (source.admit !== 'anyone' && source.admit !== 'principals') {
+      throw new Error(
+        `Invalid ${where}.admit in config ${configPath}: expected "anyone" or "principals", received ${JSON.stringify(source.admit)}.`,
+      );
+    }
+    entry.admit = source.admit;
+  }
   return entry;
 };
 
-const parsePrincipalsConfig = (raw: unknown): PrincipalsConfig | undefined => {
-  const shared = parsePrincipalsEntry(raw);
+const parsePrincipalsConfig = (raw: unknown, configPath: string): PrincipalsConfig | undefined => {
+  const shared = parsePrincipalsEntry(raw, configPath, 'principals');
   if (!shared) {
     return undefined;
   }
@@ -1616,7 +1638,7 @@ const parsePrincipalsConfig = (raw: unknown): PrincipalsConfig | undefined => {
   if (typeof source.agents === 'object' && source.agents !== null && !Array.isArray(source.agents)) {
     const agents: Record<string, AgentPrincipalsConfig> = {};
     for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
-      const parsed = parsePrincipalsEntry(entry);
+      const parsed = parsePrincipalsEntry(entry, configPath, `principals.agents.${agentId}`);
       if (parsed) {
         agents[agentId] = parsed;
       }
@@ -1640,7 +1662,8 @@ export const resolveAgentPrincipals = (
 ): AgentPrincipalsConfig => {
   const agent = principals?.agents?.[agentId];
   const slackUsers = agent?.slackUsers ?? principals?.slackUsers;
-  return { ...(slackUsers ? { slackUsers } : {}) };
+  const admit = agent?.admit ?? principals?.admit;
+  return { ...(slackUsers ? { slackUsers } : {}), ...(admit ? { admit } : {}) };
 };
 
 export interface ResolvedConfigLocation {

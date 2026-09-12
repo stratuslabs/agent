@@ -6987,9 +6987,17 @@ const describePrincipals = (principals: PrincipalsConfig, agentIds: string[]): s
     return 'no principals configured, so every Slack sender is unknown and every fact written in Slack carries that label — set principals.slackUsers in ~/.stratus/config.json';
   }
   const uncovered = agentIds.filter((agentId) => !covered.includes(agentId));
-  return uncovered.length === 0
+  // Which agents refuse the unlisted outright, so an operator reading the
+  // startup line knows whether the list is a label or a door.
+  const closed = agentIds.filter((agentId) => resolveAgentPrincipals(principals, agentId).admit === 'principals');
+  const door = closed.length === 0
+    ? '; every agent still admits unlisted senders as unknown (principals.admit: "principals" refuses them)'
+    : closed.length === agentIds.length
+      ? '; unlisted senders are refused'
+      : `; unlisted senders are refused by ${closed.join(', ')} and admitted as unknown by the rest`;
+  return (uncovered.length === 0
     ? `principals set for ${covered.join(', ')}`
-    : `principals set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose Slack senders are all unknown`;
+    : `principals set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose Slack senders are all unknown`) + door;
 };
 
 /**
@@ -10128,6 +10136,7 @@ const serveHeldHome = async (
             ...(route.slackApprovers ? { approvers: route.slackApprovers } : {}),
             ...(route.slackChannel ? { approvalChannel: route.slackChannel } : {}),
             ...(principals.slackUsers ? { principals: principals.slackUsers } : {}),
+            ...(principals.admit ? { admit: principals.admit } : {}),
           };
         }),
         log,

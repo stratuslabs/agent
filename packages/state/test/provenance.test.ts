@@ -358,3 +358,33 @@ test('a stored memory label nobody can read is a recorded unknown, not an absent
   assert.equal(entries.find((entry) => entry.id === 'ava:memory:1')?.trust, undefined);
   assert.equal(entries.find((entry) => entry.id === 'ava:memory:2')?.trust, 'unknown');
 });
+
+test('principals.admit is inherited like slackUsers, and a misspelling is refused rather than defaulted open', () => {
+  const config = validateConfigFile({
+    principals: {
+      slackUsers: ['U01DYLAN'],
+      admit: 'principals',
+      agents: {
+        ava: { admit: 'anyone' },
+        bea: { slackUsers: ['U01OPS'] },
+      },
+    },
+  }, 'test-config');
+  // Ava opens her door again; Bea keeps the shared answer with her own list;
+  // Cy inherits both; nothing configured says nothing.
+  assert.deepEqual(resolveAgentPrincipals(config.principals, 'ava'), { slackUsers: ['U01DYLAN'], admit: 'anyone' });
+  assert.deepEqual(resolveAgentPrincipals(config.principals, 'bea'), { slackUsers: ['U01OPS'], admit: 'principals' });
+  assert.deepEqual(resolveAgentPrincipals(config.principals, 'cy'), { slackUsers: ['U01DYLAN'], admit: 'principals' });
+  assert.deepEqual(resolveAgentPrincipals(undefined, 'ava'), {});
+
+  // The one setting here whose failure would open the door: a value that
+  // is neither word is an error naming the key, never "anyone".
+  assert.throws(
+    () => validateConfigFile({ principals: { admit: 'principal' } }, 'test-config'),
+    /Invalid principals\.admit in config test-config: expected "anyone" or "principals", received "principal"/,
+  );
+  assert.throws(
+    () => validateConfigFile({ principals: { agents: { ava: { admit: true } } } }, 'test-config'),
+    /Invalid principals\.agents\.ava\.admit in config test-config/,
+  );
+});

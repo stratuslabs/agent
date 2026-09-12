@@ -102,7 +102,9 @@ without it, so one bad file cannot fail a thread from then on.
   you list your Slack user id under `principals` in `~/.stratus/config.json`,
   every message an agent receives in Slack is treated as coming from someone
   it cannot vouch for, and every fact it remembers there is labelled that
-  way. How and why is in [Who counts as the
+  way. The label does not refuse anyone; `"admit": "principals"` in the
+  same block does, so an agent with tools answers only the people you
+  listed. How and why is in [Who counts as the
   operator](../../packages/channel-slack/README.md#who-counts-as-the-operator)
   and [Memory](../concepts/memory.md#where-a-fact-came-from).
 - **Replies are translated to Slack's markup.** Agents write Markdown; Slack

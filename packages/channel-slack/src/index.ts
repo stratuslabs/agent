@@ -115,6 +115,14 @@ export interface SlackAgentConfig {
    * nobody is, and every sender is `unknown`.
    */
   principals?: string[];
+  /**
+   * Whether an unlisted sender gets a turn at all. `anyone` (the default)
+   * admits them as `unknown`; `principals` refuses them before a turn
+   * starts and does not let the agent overhear them either — the text
+   * would be in the transcript, which is what this mode exists to keep
+   * out. The label above is provenance; this is authorization.
+   */
+  admit?: 'anyone' | 'principals';
 }
 
 // The thin surfaces of the Slack SDKs the adapter touches — injectable so
@@ -2854,6 +2862,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     const { event, isDm, team, userId, thread, sessionId, threadKey } = admitted;
+
+    // Who may speak at all, judged before the message takes a place in the
+    // chain. The adapter's own checks establish nothing about who is
+    // typing; under `admit: 'principals'` the operator's list is the door,
+    // not a label, and a sender not on it gets neither a turn nor a place
+    // in a transcript the agent reads. Logged rather than answered: a
+    // reply is a conversation with someone the operator chose not to have
+    // one with.
+    if (connection.config.admit === 'principals' && !(connection.config.principals ?? []).includes(userId)) {
+      log(`slack: ${connection.config.agentId} refused a message from ${userId}: not a listed principal, and admit is "principals"`);
+      return;
+    }
 
     // Everything up to (and including) the dispatch call is serialized per
     // session in Slack receipt order: the user lookups and placeholder
