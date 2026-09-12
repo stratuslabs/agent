@@ -6974,8 +6974,15 @@ const loadServePrincipals = async (
     return {};
   }
   if (block.status === 'unreadable') {
-    warn(`ignoring the principals config (${block.error instanceof Error ? block.error.message : String(block.error)}); every Slack sender is unknown`);
-    return {};
+    // Closed, not open: the one thing in this block that can fail to
+    // parse is `admit`, whose misspelling would otherwise mean `anyone` —
+    // the setting exists so that a typo does not open the door, and a
+    // warning that opens it anyway is the door with a note on it.
+    warn(
+      `the principals config could not be read (${block.error instanceof Error ? block.error.message : String(block.error)}); `
+      + 'refusing every Slack sender until it is fixed',
+    );
+    return { admit: 'principals' };
   }
   return block.status === 'present' ? block.value : {};
 };

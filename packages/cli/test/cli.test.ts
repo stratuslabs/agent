@@ -11650,3 +11650,26 @@ test('the startup provenance line says which agents refuse unlisted senders, eve
     /^no principals listed, so every Slack sender is unknown; unlisted senders are refused — nobody at all can talk to ava until principals\.slackUsers names someone$/,
   );
 });
+
+test('serve with an unreadable principals block refuses every Slack sender rather than admitting everyone', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-principals-'));
+  await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
+  // A typo in the one setting whose misspelling would open the door.
+  await writeFile(
+    path.join(serveHome, '.stratus', 'config.json'),
+    JSON.stringify({ principals: { slackUsers: ['U-DYLAN'], admit: 'principal' } }),
+  );
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.equal(code, 0);
+  assert.match(output.stderr, /principals config could not be read \(.*Invalid principals\.admit .*received "principal"\.\); refusing every Slack sender until it is fixed/);
+  assert.doesNotMatch(output.stderr, /every Slack sender is unknown/);
+});

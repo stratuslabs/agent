@@ -1854,6 +1854,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     connections.find((candidate) => candidate.config.agentId === agentId);
 
   /**
+   * Whether an agent takes a message from this sender at all. An agent
+   * this adapter does not serve (no connection) is nobody's to refuse
+   * here, so it admits — the same answer as before the door existed.
+   */
+  const admitsSender = (connection: AgentConnection | undefined, userId: string): boolean =>
+    connection === undefined
+    || connection.config.admit !== 'principals'
+    || (connection.config.principals ?? []).includes(userId);
+
+  /**
    * The addressable outbound seam — the channel contract's first real
    * `OutboundConnection` implementation. Validate-then-hand-over: every
    * refusal here happens at schedule creation or at the moment of a send,
@@ -2715,18 +2725,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (event.user === connection.botUserId) {
       return undefined;
     }
-    // Who may speak at all, judged before anything below remembers this
-    // message. The adapter's own checks establish nothing about who is
-    // typing; under `admit: 'principals'` the operator's list is the door,
-    // not a label, and a sender not on it gets neither a turn nor a place
-    // in a transcript the agent reads — nor a say in who holds the thread,
-    // which the handover below would otherwise record on their word.
-    // Logged rather than answered: a reply is a conversation with someone
-    // the operator chose not to have one with.
-    if (connection.config.admit === 'principals' && !(connection.config.principals ?? []).includes(event.user)) {
-      log(`slack: ${connection.config.agentId} refused a message from ${event.user}: not a listed principal, and admit is "principals"`);
-      return undefined;
-    }
 
     const isDm = event.channel_type === 'im';
     const team = args.body?.team_id ?? connection.teamId;
@@ -2751,7 +2749,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // was still behind, and answer a question that had just been handed
     // away. The message Ava must record is exactly the one Ava ignores.
     const named = agentNamedIn(text, team);
-    if (threadKey && named) {
+
+    // Who may speak at all, judged before anything below remembers this
+    // message. The adapter's own checks establish nothing about who is
+    // typing; under `admit: 'principals'` the operator's list is the door,
+    // not a label, and a sender not on it gets neither a turn nor a place
+    // in a transcript the agent reads — nor a say in who holds the thread,
+    // which the handover below would otherwise record on their word.
+    // Logged rather than answered — a reply is a conversation with someone
+    // the operator chose not to have one with — and logged only for a
+    // message this agent would have taken up: a channel subscribed for
+    // thread follow-through delivers every top-level post, and a line per
+    // stranger per post is a log with nothing left to read.
+    if (!admitsSender(connection, event.user)) {
+      if (addressed || event.thread_ts !== undefined) {
+        log(`slack: ${connection.config.agentId} refused a message from ${event.user}: not a listed principal, and admit is "principals"`);
+      }
+      return undefined;
+    }
+    // Recorded on the named agent's terms, not this one's: agents may list
+    // different principals, and a sender Ava admits but Bea refuses must
+    // not be able to hand Bea the thread from Ava's socket — Bea's own
+    // socket refuses the same message, and the map is shared.
+    if (threadKey && named && admitsSender(connectionFor(named), event.user)) {
       rememberAddressee(threadKey, named, event.ts);
     }
 

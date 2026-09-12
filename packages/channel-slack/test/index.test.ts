@@ -4010,6 +4010,72 @@ test('a refused sender cannot hand a thread over: their mention of another agent
   ]);
 });
 
+test('a handover is recorded on the named agent\'s terms: a sender Ava admits cannot hand Bea a thread Bea would refuse', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:900.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:900.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+  // Ava takes anyone; Bea takes Dylan only. The map of who holds a thread
+  // is shared, and every socket records a handover it sees.
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', principals: ['U-DYLAN'], admit: 'principals' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const stranger = {
+    body: { team_id: 'T1', event_id: 'evt-stranger' },
+    event: { type: 'app_mention', user: 'U-STRANGER', text: '<@B-BEA> take this over', ts: '900.2', thread_ts: '900.0', channel: 'C1' },
+  };
+  await socketAva.deliver('message', { ...stranger, event: { ...stranger.event, type: 'message' } });
+  await socketBea.deliver('app_mention', stranger);
+  const afterwards = channelMessage({ text: 'go on', ts: '900.3', thread: '900.0' });
+  await socketAva.deliver('message', afterwards);
+  await socketBea.deliver('message', afterwards);
+  await adapter.stop();
+
+  // Ava's socket saw the mention and, admitting the stranger herself, would
+  // once have recorded Bea as the thread's holder. Bea refuses the sender,
+  // so nothing moved: Dylan's next untagged reply is still Ava's.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: go on'],
+  ]);
+});
+
+test('a refused top-level post nobody addressed is dropped without a log line', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const logged: string[] = [];
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN'], admit: 'principals' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: (line) => logged.push(line),
+  });
+  await adapter.start(gateway);
+  // A channel subscribed for follow-through delivers every post. One that
+  // names nobody and starts no thread is not a message this agent would
+  // have taken up, so refusing it is not an event.
+  await socket.deliver('message', channelMessage({ text: 'lunch anyone?', ts: '300.1', user: 'U-STRANGER' }));
+  // A mention is, and so is a reply inside a thread.
+  await socket.deliver('app_mention', mention('<@B-AVA> hello', { ts: '300.2', user: 'U-STRANGER' }));
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches, []);
+  assert.equal(logged.filter((line) => /refused a message from U-STRANGER/.test(line)).length, 1);
+});
+
 test('a mention becomes a display name only for a principal; a stranger stays a stable id, so their profile text never rides a user turn', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
