@@ -52,16 +52,22 @@ test('a turn dispatched unaddressed stores its message overheard, is told so, an
   assert.equal(opened.messages[0]?.overheard, true);
   assert.equal(provider.prompts[0], `(overheard, not addressed to you)\n> Dylan: Bea, thoughts?\n\n${UNADDRESSED_TURN_NOTE}`);
   // It said nothing, and that is a completed turn with no reply — not a
-  // failure, and not an answer either.
+  // failure, and not an answer either. The silence leaves an empty
+  // assistant message: the boundary of a turn that happened, so a harness
+  // sent everything since the agent last spoke is not sent this message
+  // again next time.
   assert.equal(opened.status, 'completed');
   assert.equal(latestTurnReply(opened), undefined);
-  assert.equal(opened.messages.filter((message) => message.role === 'assistant').length, 0);
+  assert.deepEqual(opened.messages.map((message) => [message.role, message.content]), [
+    ['user', 'Dylan: Bea, thoughts?'],
+    ['assistant', ''],
+  ]);
   assert.equal(events.some((event) => event.type === 'session.failed'), false);
 
   // A later unaddressed turn on the same session: marked the same way,
   // the note after it and not after the earlier overheard message.
   const again = await runner.resume({ sessionId: 's', userMessage: 'Bea: ship it', addressed: false });
-  assert.equal(again.messages.at(-1)?.overheard, true);
+  assert.equal(again.messages.findLast((message) => message.role === 'user')?.overheard, true);
   assert.equal(
     provider.prompts[1],
     [
@@ -71,14 +77,26 @@ test('a turn dispatched unaddressed stores its message overheard, is told so, an
   );
   assert.equal(latestTurnReply(again), undefined);
 
+  // No images on a turn nobody asked for: they would reach the model ahead
+  // of the frame that marks the message as somebody else's.
+  const image = { mediaType: 'image/png' as const, data: 'aGk=', name: 'shot.png' };
+  await assert.rejects(
+    () => runner.resume({ sessionId: 's', userMessage: 'Bea: look', addressed: false, images: [image] }),
+    /cannot carry images/,
+  );
+  await assert.rejects(
+    () => runner.run({ sessionId: 's2', agent: AGENT, userMessage: 'Bea: look', addressed: false, images: [image] }),
+    /cannot carry images/,
+  );
+
   // Addressed — the default, and `true` spelled out — is what every turn
   // was before: bare, no mark, no note, and the history it follows is
   // still framed as what it was.
   const asked = await runner.resume({ sessionId: 's', userMessage: 'Dylan: Ava, and you?', addressed: true });
-  assert.equal(asked.messages.at(-1)?.overheard, undefined);
+  assert.equal(asked.messages.findLast((message) => message.role === 'user')?.overheard, undefined);
   assert.ok(provider.prompts[2]?.endsWith('Dylan: Ava, and you?'));
   assert.equal(provider.prompts[2]?.includes(UNADDRESSED_TURN_NOTE), false);
   assert.equal(latestTurnReply(asked), 'here');
   const defaulted = await runner.resume({ sessionId: 's', userMessage: 'Dylan: Ava, once more' });
-  assert.equal(defaulted.messages.at(-1)?.overheard, undefined);
+  assert.equal(defaulted.messages.findLast((message) => message.role === 'user')?.overheard, undefined);
 });

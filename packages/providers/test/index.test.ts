@@ -1129,6 +1129,21 @@ test('a turn nobody asked for ends on the note, after its newest message only, o
     `${framed('Dylan: Bea?')}\n\n${UNADDRESSED_TURN_NOTE}`,
   );
 
+  // After a silent turn — its empty assistant message the boundary — a
+  // resumed harness is sent only what came after: the judged message does
+  // not go again, on the path that would otherwise accumulate it.
+  const afterSilence = [
+    ...thread,
+    message('a2', 'assistant', ''),
+    message('u4', 'user', 'Sam: and the invoice one?', true),
+  ];
+  assert.equal(
+    latestUserMessagePrompt(requestWith(afterSilence)),
+    `${framed('Sam: and the invoice one?')}\n\n${UNADDRESSED_TURN_NOTE}`,
+  );
+  // And the transcript rendering shows no blank assistant line for it.
+  assert.doesNotMatch(renderTranscriptPrompt(requestWith(afterSilence)), /\[assistant\] \n/);
+
   // The OpenAI-compatible wire body, per message.
   let body: { messages: Array<{ role: string; content: string }> } | undefined;
   const provider = createOpenAICompatibleProvider({
@@ -1149,6 +1164,16 @@ test('a turn nobody asked for ends on the note, after its newest message only, o
     'Dylan: Ava, hello',
     framed('Dylan: Bea, what do you think?'),
     `${framed('Bea: ship it')}\n\n${UNADDRESSED_TURN_NOTE}`,
+  ]);
+  // The silent turn's empty assistant message is not on the wire, where
+  // some endpoints refuse it.
+  await provider.generate(requestWith(afterSilence));
+  assert.deepEqual(body?.messages.map((entry) => [entry.role, entry.content.length > 0]), [
+    ['user', true],
+    ['assistant', true],
+    ['user', true],
+    ['user', true],
+    ['user', true],
   ]);
 });
 

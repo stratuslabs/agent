@@ -2928,6 +2928,19 @@ export class AllowAllApprovalPolicy implements ApprovalPolicy {
 const userImages = (images: ImageAttachment[] | undefined): Pick<Message, 'images'> =>
   images !== undefined && images.length > 0 ? { images } : {};
 
+/**
+ * See `RunInput.addressed`: an image reaches the model as pixels, before
+ * and outside the text that frames what was said as somebody else's, so
+ * a turn nobody asked for takes none.
+ */
+const refuseUnaddressedImages = (input: Pick<RunInput, 'addressed' | 'images'>): void => {
+  if (input.addressed === false && input.images !== undefined && input.images.length > 0) {
+    throw new Error(
+      'A turn nobody asked for cannot carry images: an image enters the prompt ahead of the frame that marks the message as somebody else\'s. Name the attachment in the message instead.',
+    );
+  }
+};
+
 export interface RunInput {
   sessionId: string;
   /** See Session.agent: the allowlist travels with the run. */
@@ -2942,7 +2955,11 @@ export interface RunInput {
    * is stored `overheard`, rendered as third-party speech, and the model
    * is told (`UNADDRESSED_TURN_NOTE`) that it may answer with nothing — an
    * empty reply is then a decision, not a failure, and the turn completes
-   * with no assistant text for a surface to post.
+   * with an empty assistant message: no text for a surface to post, and a
+   * boundary so the message is never judged twice. Such a turn carries no
+   * images: they enter a prompt ahead of any frame that could mark them as
+   * somebody else's, so a message nobody addressed to the agent names its
+   * attachments instead, as an overheard one does.
    */
   addressed?: boolean;
   metadata?: JsonObject;
@@ -3106,6 +3123,7 @@ export class AgentRunner {
   }
 
   async run(input: RunInput): Promise<Session> {
+    refuseUnaddressedImages(input);
     // The sender's trust is the turn's, not the session's: it is read here
     // and kept out of the persisted metadata, where a later reader would
     // take the first sender's label for every turn that follows.
@@ -3183,6 +3201,7 @@ export class AgentRunner {
   }
 
   async resume(input: ResumeInput): Promise<Session> {
+    refuseUnaddressedImages(input);
     const session = await this.store.get(input.sessionId);
     if (!session) {
       throw new Error(`Session not found: ${input.sessionId}`);
@@ -3574,6 +3593,23 @@ export class AgentRunner {
             content: '',
             createdAt: new Date().toISOString(),
             toolCalls: [part.call],
+          });
+        }
+        if (response.parts.length === 0) {
+          // Silence, recorded. Only a turn nobody asked for ends this way —
+          // every provider refuses an empty answer on one somebody did —
+          // and the decision has to leave a mark: a harness holding its own
+          // history is sent every user message since the agent last spoke
+          // (`latestUserMessagePrompt`), and without an assistant message
+          // here the message this turn already judged would go again on
+          // the next one, and again on the one after that. Empty text is
+          // no reply (`latestTurnReply`) and no speaking (`lastSpokeAt`);
+          // it is the boundary of a turn that happened.
+          session.messages.push({
+            id: `${session.id}:assistant:${session.messages.length + 1}`,
+            role: 'assistant',
+            content: '',
+            createdAt: new Date().toISOString(),
           });
         }
         const sawToolCall = calls.length > 0;

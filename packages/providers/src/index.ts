@@ -693,6 +693,12 @@ const createOpenAICompatibleMessages = (
       continue;
     }
 
+    if (message.role === 'assistant' && message.content.length === 0) {
+      // A turn nobody asked for that said nothing: the boundary is the
+      // kernel's, and an empty assistant message is a wire-format error on
+      // some endpoints and a blank line on the rest.
+      continue;
+    }
     // Framed by the kernel's one rule for it, so the OpenAI-compatible path
     // says "said to somebody else" the way the API and harness paths do —
     // an overheard message sent bare here would be an ordinary instruction
@@ -892,9 +898,11 @@ export const renderTranscriptPrompt = (request: ProviderRequest): string => {
       for (const call of message.toolCalls) {
         lines.push(`[assistant called tool ${call.toolName}] ${JSON.stringify(call.input)}`);
       }
-      if (message.content.length === 0) {
-        continue;
-      }
+    }
+    if (message.role === 'assistant' && message.content.length === 0) {
+      // Either the tool-call message above, or the silence a turn nobody
+      // asked for ends in — neither is a line the model should read.
+      continue;
     }
     lines.push(`[${message.role}] ${message.role === 'user' ? userMessageText(message, message === latest) : message.content}`);
   }

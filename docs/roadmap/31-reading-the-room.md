@@ -49,10 +49,18 @@ Four things the sketch did not say, found on the way:
   it may say nothing would have failed for saying nothing. They now ask
   the session whether the turn was addressed; on one that was, empty stays
   an error, because a model asked a question and returning nothing is
-  still an endpoint returning nothing. The note also lives in the message
-  rather than the system prompt, on purpose: a harness that holds its own
-  history takes only the newest message, and a rule read next to the
-  thing it applies to is followed more often than one read an hour ago.
+  still an endpoint returning nothing. The silence leaves an empty
+  assistant message in the session — no reply and no speaking, but the
+  boundary of a turn that happened, without which a harness sent
+  everything since the agent last spoke would be sent the judged message
+  again on every later turn. And such a turn carries no images: an image
+  enters the prompt as pixels, ahead of any frame that could mark it as
+  somebody else's, so the kernel refuses them and a channel names the
+  attachment instead, as it does for an overheard message. The note also
+  lives in the message rather than the system prompt, on purpose: a
+  harness that holds its own history takes only the newest message, and a
+  rule read next to the thing it applies to is followed more often than
+  one read an hour ago.
 
 ## Goal
 
