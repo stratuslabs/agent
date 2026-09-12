@@ -1805,14 +1805,7 @@ export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
       // started inside any cloned repository would run with none of the
       // operator's policy — a clone that cannot set a policy must not be
       // able to make one disappear either.
-      const globalPath = globalConfigPath(env);
-      if (!(await stat(globalPath).then(() => true, () => false))) {
-        return { status: 'absent' };
-      }
-      const fromGlobal = (await loadConfigFile(globalPath))[key];
-      return fromGlobal === undefined
-        ? { status: 'absent' }
-        : { status: 'present', value: fromGlobal as NonNullable<StratusConfigFile[K]>, path: globalPath };
+      return readGlobalConfigBlock(key, env);
     }
     if (value === undefined) {
       return { status: 'absent' };
@@ -1821,6 +1814,29 @@ export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
   } catch (error) {
     return { status: 'unreadable', error };
   }
+};
+
+/**
+ * The global file's block, for a caller that has already refused the
+ * discovered one. Absent only when the file does not exist: a global file
+ * that exists and cannot be read (`EACCES`, a directory where a file
+ * should be) is `unreadable`, so the caller's fail-closed handling applies
+ * — an operator's `admit: "principals"` behind a permission error must not
+ * read as no policy at all, which for the Slack door means `anyone`.
+ */
+export const readGlobalConfigBlock = async <K extends keyof StratusConfigFile>(
+  key: K,
+  env: StateEnvironment,
+): Promise<TrustedConfigBlock<NonNullable<StratusConfigFile[K]>>> => {
+  const globalPath = globalConfigPath(env);
+  try {
+    await stat(globalPath);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { status: 'absent' }
+      : { status: 'unreadable', error };
+  }
+  return readTrustedConfigBlock(key, env, globalPath);
 };
 
 // A soul travels with the run: an explicit soul path outranks STRATUS_SOUL,

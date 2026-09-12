@@ -12291,6 +12291,28 @@ test('serve with an unreadable principals block refuses every Slack sender rathe
   assert.doesNotMatch(output.stderr, /every Slack sender is unknown/);
 });
 
+test('a global config that cannot be read behind a project config closes the door rather than opening it', async () => {
+  // `~/.stratus` is a file: the global config exists as a path and cannot
+  // be read. That is the unreadable case, which refuses every sender —
+  // not the no-file case, which would have admitted everyone.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-unreadable-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-unreadable-project-'));
+  await writeFile(path.join(home, '.stratus'), 'not a directory');
+  const warnings: string[] = [];
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(
+    await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, (line) => warnings.push(line)),
+    { admit: 'principals' },
+  );
+  assert.match(warnings.at(-1) ?? '', /principals config could not be read \(.*ENOTDIR.*\); refusing every Slack sender until it is fixed/);
+  // The same when the clone carries a refused block of its own.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ principals: { admit: 'anyone' } }));
+  assert.deepEqual(
+    await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, () => {}),
+    { admit: 'principals' },
+  );
+});
+
 test('a project config that shadows the global one does not suppress the global principals policy', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-project-'));

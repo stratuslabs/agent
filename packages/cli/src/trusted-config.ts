@@ -1,6 +1,5 @@
-import { stat } from 'node:fs/promises';
 import {
-  globalConfigPath,
+  readGlobalConfigBlock,
   readTrustedConfigBlock,
   type ApiConfig,
   type ApprovalsConfig,
@@ -94,9 +93,7 @@ export const loadServePrincipals = async (
       `ignoring the principals config in ${block.path}: a project-local config cannot decide whose messages `
       + 'this daemon\'s agents treat as their operator\'s. Using ~/.stratus/config.json instead.',
     );
-    const globalPath = globalConfigPath(env);
-    const globalExists = await stat(globalPath).then(() => true, () => false);
-    block = globalExists ? await readTrustedConfigBlock('principals', env, globalPath) : { status: 'absent' };
+    block = await readGlobalConfigBlock('principals', env);
   }
   if (block.status === 'unreadable') {
     // Closed, not open: the one thing in this block that can fail to

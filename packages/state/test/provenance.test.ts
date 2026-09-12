@@ -390,6 +390,21 @@ test('principals.admit is inherited like slackUsers, and a misspelling is refuse
   );
 });
 
+test('a global config that exists but cannot be read is unreadable behind a silent project config, never absent', async () => {
+  // `~/.stratus` is a file, so the global config's path cannot be resolved
+  // (ENOTDIR — the same class as EACCES). Before, any stat failure read as
+  // "no global file", and an operator's admit: "principals" behind a
+  // permission error became no policy — which for the Slack door is
+  // `anyone`. Only ENOENT is absent; the rest is the caller's fail-closed case.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-global-unreadable-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-global-unreadable-project-'));
+  await writeFile(path.join(home, '.stratus'), 'not a directory');
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  const block = await readTrustedConfigBlock('principals', { homeDir: home, cwd: project, processEnv: {} });
+  assert.equal(block.status, 'unreadable');
+  assert.equal(block.status === 'unreadable' ? (block.error as NodeJS.ErrnoException).code : undefined, 'ENOTDIR');
+});
+
 test('a project config that says nothing about a trusted-only block leaves the global block in force', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shadow-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-shadow-project-'));
