@@ -25,10 +25,11 @@ with `judge` opt-in; judgement is a full turn, not a pre-pass; the window
 is both messages and minutes, and an agent cannot extend its own; an
 overhear still costs a session write; `observe` stays with channels; and
 an agent's own turn in flight is ordered by the chain, as suspected. Still
-open: the failed-harness-batch double send, and a judging agent alongside a
-thread-rule agent in one thread, where both may answer the same message
-(documented in the Slack README's rule 5) — the thread rule hands a reply
-to whoever spoke last, and a judging agent is not asking.
+open: the addressed half of the failed-harness-batch double send, and one
+edge of a judging agent alongside a thread-rule agent in one thread: a
+judging agent that speaks takes the thread once its reply has landed, so
+a message typed while it was still deciding may be answered by both
+(documented in the Slack README's rule 5).
 
 Five things the sketch did not say, found on the way:
 

@@ -58,7 +58,12 @@ they are the whole model:
    and for these two the soul already has — so a thread-rule agent stands
    down for a judging or mentions-only one that spoke last: the judging
    one decides for itself, and the mentions-only one is being talked to
-   and waits to be named. A colleague's reply is never judged, only heard.
+   and waits to be named. A judging agent that chooses to speak takes the
+   thread the way any speaker does, recorded once its reply has landed —
+   so a message typed while it was still deciding may be answered by both
+   it and a thread-rule colleague that held the thread before, and
+   everything after is the judging agent's to decide. A colleague's reply
+   is never judged, only heard.
    The window also counts messages this daemon has dispatched that the
    session does not hold yet, so a burst typed inside one turn is judged
    up to the window and heard past it.

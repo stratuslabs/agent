@@ -1921,6 +1921,91 @@ test('a judged turn already running is counted by the store, not twice', async (
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: seven', 'Dylan: eight']);
 });
 
+test('a turn nobody asked for that fails right after its first text still reports the failure', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    // The first text and the failure in the same breath: the edit that
+    // would open the placeholder has not had its turn on the timer yet.
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Thinking' } });
+    throw new Error('provider exploded');
+  });
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: {},
+    lastSpokeAt: new Date(1050 * 1000).toISOString(),
+    heardSinceSpoke: 0,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'quick', ts: '1050.1', thread: '1050.0' }));
+  await adapter.stop();
+
+  // Said something, then broke: the failure is in the thread, as a
+  // message of its own since no placeholder ever opened.
+  assert.deepEqual(web.updates, []);
+  assert.deepEqual(web.posts.map((post) => post.text), ['Something went wrong: provider exploded']);
+});
+
+test('a judging agent that speaks becomes the voice a thread-rule colleague stands down for', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const gateway = createStubGateway(({ sessionId, userMessage }) => {
+    if (sessionId.startsWith('slack:ava:')) {
+      return sessionWithReply(sessionId, userMessage.includes('help') ? 'Here is help' : '');
+    }
+    return sessionWithReply(sessionId, 'ok');
+  });
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava', listens: 'judge' },
+    { id: 'bea', name: 'Bea' },
+  ];
+  // Both in the thread; Bea spoke last, and Ava is attentive.
+  gateway.sessionRouting = async (sessionId) => {
+    if (sessionId === 'slack:ava:T1:C1:1060.0') {
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1060 * 1000).toISOString(), heardSinceSpoke: 0 };
+    }
+    if (sessionId === 'slack:bea:T1:C1:1060.0') {
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1060.05 * 1000).toISOString(), heardSinceSpoke: 0 };
+    }
+    return undefined;
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const both = (message: ReturnType<typeof channelMessage>) =>
+    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Bea's by the thread rule (she spoke last); Ava judges it and says nothing.
+  await both(channelMessage({ text: 'say more', ts: '1060.1', thread: '1060.0' }));
+  // Still Bea's — and Ava, judging, has something to add this time.
+  await both(channelMessage({ text: 'help me', ts: '1060.2', thread: '1060.0' }));
+  // Ava is now the voice that just answered: Bea stands down, Ava judges.
+  await both(channelMessage({ text: 'thanks', ts: '1060.3', thread: '1060.0' }));
+  await adapter.stop();
+
+  const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
+  assert.deepEqual(of('bea'), ['Dylan: say more', 'Dylan: help me']);
+  assert.deepEqual(of('ava'), ['Dylan: say more', 'Dylan: help me', 'Dylan: thanks']);
+});
+
 test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

@@ -724,7 +724,11 @@ class ReplyRenderer {
     // read as "before saying anything" would leave that placeholder saying
     // `(no reply)` where the failure belongs.
     await this.editChain;
-    if (this.lazy && !this.ref) {
+    // "Before saying anything" is no placeholder AND nothing buffered: a
+    // first text whose zero-delay edit has not fired yet has still been
+    // said, and its failure is reported — as a message of its own, since
+    // there is no placeholder to edit — rather than swallowed with it.
+    if (this.lazy && !this.ref && this.buffer.trim().length === 0) {
       // A turn nobody asked for that failed before saying anything: the
       // failure is in the daemon log, and an error note would be the
       // interruption the turn existed to avoid.
@@ -3368,7 +3372,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const heard = thread !== undefined && reply !== undefined
         ? overhearReply(connection, event.channel, thread, reply, session, published)
         : undefined;
-      await published;
+      const spoke = await published;
+      if (renderer.lazy && spoke && threadKey !== undefined) {
+        // A judging agent that chose to speak is now the voice that just
+        // answered, and the thread rule's record has to say so, or a
+        // thread-rule colleague that held the thread before would keep
+        // answering beside it. Recorded at the message it answered, once
+        // the reply has landed — late for a message typed while it was
+        // still deciding, which that colleague may therefore still take,
+        // and exact for everything after.
+        rememberAddressee(threadKey, connection.config.agentId, event.ts);
+      }
       await heard;
     } else {
       await renderer.fail(failure instanceof Error ? failure.message : String(failure));
