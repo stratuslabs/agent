@@ -25,6 +25,7 @@ import {
   createLogWriter,
   createApprovalPolicy,
   describePrincipals,
+  loadServePrincipals,
   currentLogPosition,
   describeApprovalCall,
   eventDetail,
@@ -11672,4 +11673,33 @@ test('serve with an unreadable principals block refuses every Slack sender rathe
   assert.equal(code, 0);
   assert.match(output.stderr, /principals config could not be read \(.*Invalid principals\.admit .*received "principal"\.\); refusing every Slack sender until it is fixed/);
   assert.doesNotMatch(output.stderr, /every Slack sender is unknown/);
+});
+
+test('a project config that shadows the global one does not suppress the global principals policy', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ principals: { slackUsers: ['U-DYLAN'], admit: 'principals' } }),
+  );
+  // The clone's own block, and a clone with no block at all: neither may
+  // decide the policy, and neither may make it disappear.
+  const warnings: string[] = [];
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo', principals: { admit: 'anyone' } }));
+  assert.deepEqual(
+    await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, (line) => warnings.push(line)),
+    { slackUsers: ['U-DYLAN'], admit: 'principals' },
+  );
+  assert.match(warnings[0] ?? '', /ignoring the principals config in .*stratus\.config\.json.*Using ~\/\.stratus\/config\.json instead/);
+
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(
+    await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, () => {}),
+    { slackUsers: ['U-DYLAN'], admit: 'principals' },
+  );
+
+  // No global file at all is no policy, as it always was.
+  const bare = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-bare-'));
+  assert.deepEqual(await loadServePrincipals({ homeDir: bare, cwd: project, processEnv: {} }, undefined, () => {}), {});
 });

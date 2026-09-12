@@ -1787,11 +1787,27 @@ export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
       return { status: 'absent' };
     }
     const value = (await loadConfigFile(location.path))[key];
+    if (!location.trusted) {
+      if (value !== undefined) {
+        return { status: 'untrusted', path: location.path };
+      }
+      // The project file says nothing about this block, and it shadows
+      // the global file in discovery: the trusted file is the answer, as
+      // it would be were the project file not there. Otherwise a daemon
+      // started inside any cloned repository would run with none of the
+      // operator's policy — a clone that cannot set a policy must not be
+      // able to make one disappear either.
+      const globalPath = globalConfigPath(env);
+      if (!(await stat(globalPath).then(() => true, () => false))) {
+        return { status: 'absent' };
+      }
+      const fromGlobal = (await loadConfigFile(globalPath))[key];
+      return fromGlobal === undefined
+        ? { status: 'absent' }
+        : { status: 'present', value: fromGlobal as NonNullable<StratusConfigFile[K]>, path: globalPath };
+    }
     if (value === undefined) {
       return { status: 'absent' };
-    }
-    if (!location.trusted) {
-      return { status: 'untrusted', path: location.path };
     }
     return { status: 'present', value: value as NonNullable<StratusConfigFile[K]>, path: location.path };
   } catch (error) {

@@ -4052,6 +4052,43 @@ test('a handover is recorded on the named agent\'s terms: a sender Ava admits ca
   ]);
 });
 
+test('a handover honours an offline agent\'s door: its socket failing to start does not open it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  // Bea authenticates but never comes up. She stays recognizable in a
+  // mention, and her door stays hers.
+  socketBea.start = async () => {
+    throw new Error('socket mode refused');
+  };
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:900.0', '2026-01-01T00:00:01.000Z'],
+  ]));
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', principals: ['U-DYLAN'], admit: 'principals' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+
+  await socketAva.deliver('message', channelMessage({ text: '<@B-BEA> take this over', ts: '900.2', thread: '900.0', user: 'U-STRANGER' }));
+  await socketAva.deliver('message', channelMessage({ text: 'go on', ts: '900.3', thread: '900.0' }));
+  await adapter.stop();
+
+  // Ava, admitting the stranger herself, still did not hand Bea the thread:
+  // Bea refuses that sender, connection or no connection.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: go on'],
+  ]);
+});
+
 test('a refused top-level post nobody addressed is dropped without a log line', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

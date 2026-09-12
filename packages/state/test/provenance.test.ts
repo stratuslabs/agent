@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -26,6 +26,7 @@ import {
   resolveAgentPrincipals,
   validateConfigFile,
   withLegacyDefaultMemories,
+  readTrustedConfigBlock,
 } from '../src/index.ts';
 
 const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'stratus-provenance-'));
@@ -387,4 +388,34 @@ test('principals.admit is inherited like slackUsers, and a misspelling is refuse
     () => validateConfigFile({ principals: { agents: { ava: { admit: true } } } }, 'test-config'),
     /Invalid principals\.agents\.ava\.admit in config test-config/,
   );
+});
+
+test('a project config that says nothing about a trusted-only block leaves the global block in force', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shadow-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-shadow-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ principals: { slackUsers: ['U-DYLAN'], admit: 'principals' } }),
+  );
+  // The clone is discovered first and has no principals key. Before, that
+  // read as "absent" and the operator's policy vanished with it.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  const env = { homeDir: home, cwd: project, processEnv: {} };
+  assert.deepEqual(await readTrustedConfigBlock('principals', env), {
+    status: 'present',
+    value: { slackUsers: ['U-DYLAN'], admit: 'principals' },
+    path: path.join(home, '.stratus', 'config.json'),
+  });
+  // A clone that does carry the key is still refused, and still not the
+  // global one's substitute — that is the caller's decision to make.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ principals: { admit: 'anyone' } }));
+  assert.deepEqual(await readTrustedConfigBlock('principals', env), {
+    status: 'untrusted',
+    path: path.join(project, 'stratus.config.json'),
+  });
+  // And no global file is absent, as it always was.
+  const bare = await mkdtemp(path.join(os.tmpdir(), 'stratus-shadow-bare-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(await readTrustedConfigBlock('principals', { homeDir: bare, cwd: project, processEnv: {} }), { status: 'absent' });
 });

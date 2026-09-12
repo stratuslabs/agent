@@ -6960,18 +6960,25 @@ const loadServeApprovals = async (
  * from. A cloned repo appointing itself the principal would arrive as
  * `user` in every Slack thread the daemon serves.
  */
-const loadServePrincipals = async (
+export const loadServePrincipals = async (
   env: CliEnvironment,
   configPath: string | undefined,
   warn: (line: string) => void,
 ): Promise<PrincipalsConfig> => {
-  const block = await readTrustedConfigBlock('principals', env, configPath);
+  let block = await readTrustedConfigBlock('principals', env, configPath);
   if (block.status === 'untrusted') {
+    // An auto-discovered project config shadows the global one in
+    // discovery, and a daemon started inside a cloned repository would
+    // otherwise run with no principals policy at all — a cloned repo that
+    // cannot define the policy must not be able to suppress it either. The
+    // global file is the trusted answer; it is read instead.
     warn(
       `ignoring the principals config in ${block.path}: a project-local config cannot decide whose messages `
-      + 'this daemon\'s agents treat as their operator\'s. Move it to ~/.stratus/config.json, or pass it with --config.',
+      + 'this daemon\'s agents treat as their operator\'s. Using ~/.stratus/config.json instead.',
     );
-    return {};
+    const globalPath = globalConfigPath(env);
+    const globalExists = await stat(globalPath).then(() => true, () => false);
+    block = globalExists ? await readTrustedConfigBlock('principals', env, globalPath) : { status: 'absent' };
   }
   if (block.status === 'unreadable') {
     // Closed, not open: the one thing in this block that can fail to

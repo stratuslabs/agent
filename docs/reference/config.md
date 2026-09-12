@@ -107,7 +107,10 @@ global `~/.stratus/config.json`, or a file passed with `--config` /
 `STRATUS_CONFIG`. An auto-discovered project-local `stratus.config.json`
 ships in any repository you clone, and none of these is a decision a clone
 gets to make; a project config that tries is ignored. The three blocks say
-so with a warning naming the file. `apiKeyEnv` has no such channel — it is
+so with a warning naming the file. A project config that says nothing
+about a block leaves the global file's block in force — a clone that
+cannot set a policy cannot make one disappear either, so `stratus serve`
+started inside a repository still runs under your own `principals`. `apiKeyEnv` has no such channel — it is
 read while a run's provider is being resolved, before anything is logging —
 so the provider's own default variable is substituted quietly, and the
 setting is named in the missing-key error you get if that variable is not

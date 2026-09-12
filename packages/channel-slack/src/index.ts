@@ -1853,15 +1853,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const connectionFor = (agentId: string): AgentConnection | undefined =>
     connections.find((candidate) => candidate.config.agentId === agentId);
 
+  /** An agent's configuration, whether or not its socket came up. */
+  const agentConfigFor = (agentId: string): SlackAgentConfig | undefined =>
+    options.agents.find((candidate) => candidate.agentId === agentId);
+
   /**
-   * Whether an agent takes a message from this sender at all. An agent
-   * this adapter does not serve (no connection) is nobody's to refuse
-   * here, so it admits — the same answer as before the door existed.
+   * Whether an agent takes a message from this sender at all — judged on
+   * its configuration, not on a live connection: an agent whose socket
+   * failed to start is still recognizable in a mention, and its door is
+   * still its own. An agent this adapter was never configured for is
+   * nobody's to refuse here, so it admits — the answer from before the
+   * door existed.
    */
-  const admitsSender = (connection: AgentConnection | undefined, userId: string): boolean =>
-    connection === undefined
-    || connection.config.admit !== 'principals'
-    || (connection.config.principals ?? []).includes(userId);
+  const admitsSender = (config: SlackAgentConfig | undefined, userId: string): boolean =>
+    config === undefined
+    || config.admit !== 'principals'
+    || (config.principals ?? []).includes(userId);
 
   /**
    * The addressable outbound seam — the channel contract's first real
@@ -2761,7 +2768,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // message this agent would have taken up: a channel subscribed for
     // thread follow-through delivers every top-level post, and a line per
     // stranger per post is a log with nothing left to read.
-    if (!admitsSender(connection, event.user)) {
+    if (!admitsSender(connection.config, event.user)) {
       if (addressed || event.thread_ts !== undefined) {
         log(`slack: ${connection.config.agentId} refused a message from ${event.user}: not a listed principal, and admit is "principals"`);
       }
@@ -2771,7 +2778,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // different principals, and a sender Ava admits but Bea refuses must
     // not be able to hand Bea the thread from Ava's socket — Bea's own
     // socket refuses the same message, and the map is shared.
-    if (threadKey && named && admitsSender(connectionFor(named), event.user)) {
+    if (threadKey && named && admitsSender(agentConfigFor(named), event.user)) {
       rememberAddressee(threadKey, named, event.ts);
     }
 
