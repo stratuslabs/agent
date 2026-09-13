@@ -12938,7 +12938,11 @@ test('a plugin executor selected by a trusted config runs the commands, and a se
   assert.equal(payload.session.metadata.executor, 'fixture');
   assert.match(output.stdout, /fixture-executor/);
 
-  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ executor: 'sandbox', plugins: { 'stratus-plugin-fixture-executor': {} } })}\n`);
+  // The refusal comes after the plugins loaded, so what they acquired is
+  // released on the way out — a store's open file, a browser — exactly as
+  // it is after a run that failed.
+  const disposeMarker = path.join(home, 'disposed');
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ executor: 'sandbox', plugins: { 'stratus-plugin-fixture-executor': { disposeMarker } } })}\n`);
   const refused = createStreams();
   const refusedCode = await runCli({
     argv: ['run', '--prompt', 'please use the echo tool'],
@@ -12947,6 +12951,7 @@ test('a plugin executor selected by a trusted config runs the commands, and a se
   });
   assert.notEqual(refusedCode, 0);
   assert.match(refused.output.stderr, /selects executor sandbox, which no loaded plugin registers \(registered: fixture\)/);
+  assert.equal(await readFile(disposeMarker, 'utf8'), 'disposed\n');
 });
 
 test('a plugin channel starts under the daemon from its stored transport secrets and delivers an inbound message', async () => {

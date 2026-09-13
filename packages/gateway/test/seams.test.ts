@@ -233,6 +233,7 @@ test('outbound speech goes to the adapter that carries the agent when one kind h
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: sender\ntools: [message.send]\n---\n\nYou are Ava.\n');
   await writeSoul(home, 'juno.md', '---\nname: Juno\nid: juno\nprovider: sender\ntools: [message.send]\n---\n\nYou are Juno.\n');
+  await writeSoul(home, 'mia.md', '---\nname: Mia\nid: mia\nprovider: sender\ntools: [message.send]\n---\n\nYou are Mia.\n');
   const posted: string[] = [];
   const channelPlugin = (label: string, agents: string[]) => plugin(label, (context) => {
     context.channels!.register({
@@ -280,6 +281,12 @@ test('outbound speech goes to the adapter that carries the agent when one kind h
   try {
     await gateway.dispatch({ sessionId: 'out-juno', agentId: 'juno', userMessage: 'say something' });
     await gateway.dispatch({ sessionId: 'out-ava', agentId: 'ava', userMessage: 'say something' });
+    assert.deepEqual(posted, ['b for juno: from juno', 'a for ava: from ava']);
+    // An agent no adapter claims is refused, not handed to whichever
+    // adapter started first: that one would post under another agent's
+    // transport identity.
+    const mia = await gateway.dispatch({ sessionId: 'out-mia', agentId: 'mia', userMessage: 'say something' });
+    assert.match(JSON.stringify(mia.messages), /No running 'fixture' channel carries agent mia/);
     assert.deepEqual(posted, ['b for juno: from juno', 'a for ava: from ava']);
   } finally {
     await gateway.stop();

@@ -94,6 +94,10 @@ resolved per agent from the `openai.apiKey` named credential.
 
 A channel plugin registers an adapter for a **kind** — `discord`, `matrix` —
 and carries the agents that have transport secrets stored for that kind.
+Those are the agents it speaks for, inbound and out: an agent's
+`message.send` to that kind goes through the adapter carrying it, and an
+agent no adapter of the kind carries is refused rather than posted under
+another agent's identity.
 The secrets live where Slack's tokens already do, in
 `~/.stratus/credentials.json` under `channels.<kind>.<agentId>`, and the
 plugin's README says which names to store:
