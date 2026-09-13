@@ -157,7 +157,19 @@ export interface AgentPrincipalsConfig {
    * which inherits.
    */
   slackUsers?: string[];
+  /**
+   * Who gets a turn at all. `anyone` — the default — admits every sender
+   * the adapter's own checks pass, labelling the unlisted ones `unknown`;
+   * `principals` refuses everyone not in `slackUsers` before a turn
+   * starts, and does not let the agent overhear them either. The label is
+   * provenance; this is authorization, and an agent that holds tools
+   * wants the second — a stranger's message is not merely uncertain, it
+   * is a prompt they chose.
+   */
+  admit?: PrincipalsAdmit;
 }
+
+export type PrincipalsAdmit = 'anyone' | 'principals';
 
 /** The `principals` block of ~/.stratus/config.json. */
 export interface PrincipalsConfig extends AgentPrincipalsConfig {
@@ -1376,7 +1388,7 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   if (approvals) {
     resolved.approvals = approvals;
   }
-  const principals = parsePrincipalsConfig(config.principals);
+  const principals = parsePrincipalsConfig(config.principals, configPath);
   if (principals) {
     resolved.principals = principals;
   }
@@ -1589,34 +1601,65 @@ export const resolveAgentApprovals = (
   };
 };
 
-const parsePrincipalsEntry = (raw: unknown): AgentPrincipalsConfig | undefined => {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+const parsePrincipalsEntry = (raw: unknown, configPath: string, where: string): AgentPrincipalsConfig | undefined => {
+  if (raw === undefined) {
     return undefined;
+  }
+  // A block or override in the wrong shape is refused, never dropped: under
+  // admit: "principals" this block is an authorization boundary, and a
+  // dropped override inherits the shared answer — or, for the block itself,
+  // the default `anyone` — which is the door opened by a typo.
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid ${where} in config ${configPath}: expected an object, received ${JSON.stringify(raw)}.`);
   }
   const source = raw as Record<string, unknown>;
   const entry: AgentPrincipalsConfig = {};
-  if (Array.isArray(source.slackUsers)) {
-    // An empty array survives, as `slackApprovers: []` does: it is how an
-    // agent is excluded from a global list, and dropping it would fall back
-    // to exactly the list being excluded.
+  if (source.slackUsers !== undefined) {
+    // A list in the wrong shape is refused rather than dropped: under
+    // admit: "principals" this list is the door, and a per-agent override
+    // that was silently dropped would fall back to the shared list — the
+    // broader one it existed to narrow. An entry that is not an id is
+    // dropped from the list, which only ever narrows it; an empty array
+    // survives, as `slackApprovers: []` does, because it is how an agent
+    // is excluded from a shared list.
+    if (!Array.isArray(source.slackUsers)) {
+      throw new Error(
+        `Invalid ${where}.slackUsers in config ${configPath}: expected a list of Slack user ids, received ${JSON.stringify(source.slackUsers)}.`,
+      );
+    }
     entry.slackUsers = source.slackUsers.filter(
       (candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0,
     );
   }
+  if (source.admit !== undefined) {
+    // Refused rather than defaulted: a misspelt `admit` that quietly meant
+    // `anyone` would be the one setting here whose failure opens the door.
+    if (source.admit !== 'anyone' && source.admit !== 'principals') {
+      throw new Error(
+        `Invalid ${where}.admit in config ${configPath}: expected "anyone" or "principals", received ${JSON.stringify(source.admit)}.`,
+      );
+    }
+    entry.admit = source.admit;
+  }
   return entry;
 };
 
-const parsePrincipalsConfig = (raw: unknown): PrincipalsConfig | undefined => {
-  const shared = parsePrincipalsEntry(raw);
+const parsePrincipalsConfig = (raw: unknown, configPath: string): PrincipalsConfig | undefined => {
+  const shared = parsePrincipalsEntry(raw, configPath, 'principals');
   if (!shared) {
     return undefined;
   }
   const principals: PrincipalsConfig = { ...shared };
   const source = raw as Record<string, unknown>;
+  if (source.agents !== undefined && (typeof source.agents !== 'object' || source.agents === null || Array.isArray(source.agents))) {
+    throw new Error(
+      `Invalid principals.agents in config ${configPath}: expected an object keyed by agent id, received ${JSON.stringify(source.agents)}.`,
+    );
+  }
   if (typeof source.agents === 'object' && source.agents !== null && !Array.isArray(source.agents)) {
     const agents: Record<string, AgentPrincipalsConfig> = {};
     for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
-      const parsed = parsePrincipalsEntry(entry);
+      const parsed = parsePrincipalsEntry(entry, configPath, `principals.agents.${agentId}`);
       if (parsed) {
         agents[agentId] = parsed;
       }
@@ -1640,7 +1683,8 @@ export const resolveAgentPrincipals = (
 ): AgentPrincipalsConfig => {
   const agent = principals?.agents?.[agentId];
   const slackUsers = agent?.slackUsers ?? principals?.slackUsers;
-  return { ...(slackUsers ? { slackUsers } : {}) };
+  const admit = agent?.admit ?? principals?.admit;
+  return { ...(slackUsers ? { slackUsers } : {}), ...(admit ? { admit } : {}) };
 };
 
 export interface ResolvedConfigLocation {
@@ -1763,17 +1807,57 @@ export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
     if (!location) {
       return { status: 'absent' };
     }
-    const value = (await loadConfigFile(location.path))[key];
+    // An untrusted file that fails to load is judged like one that says
+    // nothing: it could not have set a trusted-only block whatever it
+    // contained, and a malformed block in a clone must not be the reason
+    // the operator's own policy is not read — refused is not the same as
+    // unreadable. Its own errors reach the operator through `run` and
+    // `doctor`, which read the file for what it may set.
+    const value = location.trusted
+      ? (await loadConfigFile(location.path))[key]
+      : await loadConfigFile(location.path).then((config) => config[key], () => undefined);
+    if (!location.trusted) {
+      if (value !== undefined) {
+        return { status: 'untrusted', path: location.path };
+      }
+      // The project file says nothing about this block, and it shadows
+      // the global file in discovery: the trusted file is the answer, as
+      // it would be were the project file not there. Otherwise a daemon
+      // started inside any cloned repository would run with none of the
+      // operator's policy — a clone that cannot set a policy must not be
+      // able to make one disappear either.
+      return readGlobalConfigBlock(key, env);
+    }
     if (value === undefined) {
       return { status: 'absent' };
-    }
-    if (!location.trusted) {
-      return { status: 'untrusted', path: location.path };
     }
     return { status: 'present', value: value as NonNullable<StratusConfigFile[K]>, path: location.path };
   } catch (error) {
     return { status: 'unreadable', error };
   }
+};
+
+/**
+ * The global file's block, for a caller that has already refused the
+ * discovered one. Absent only when the file does not exist: a global file
+ * that exists and cannot be read (`EACCES`, a directory where a file
+ * should be) is `unreadable`, so the caller's fail-closed handling applies
+ * — an operator's `admit: "principals"` behind a permission error must not
+ * read as no policy at all, which for the Slack door means `anyone`.
+ */
+export const readGlobalConfigBlock = async <K extends keyof StratusConfigFile>(
+  key: K,
+  env: StateEnvironment,
+): Promise<TrustedConfigBlock<NonNullable<StratusConfigFile[K]>>> => {
+  const globalPath = globalConfigPath(env);
+  try {
+    await stat(globalPath);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { status: 'absent' }
+      : { status: 'unreadable', error };
+  }
+  return readTrustedConfigBlock(key, env, globalPath);
 };
 
 // A soul travels with the run: an explicit soul path outranks STRATUS_SOUL,
