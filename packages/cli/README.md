@@ -7,7 +7,7 @@ put them in Slack — from one command.
 <!-- Pinned to the commit that added the asset so it renders on any ref
      (including this branch pre-merge) and on npm, which needs an absolute
      URL. Replacing the banner means updating this pin. -->
-![Stratus Labs](https://raw.githubusercontent.com/stratuslabs/agent/265bc175e60fd901b339095215439505606755bc/docs/assets/stratus-banner.png)
+![Stratus Labs](https://raw.githubusercontent.com/stratuslabs/agent/main/docs/assets/stratus-banner.png)
 
 ## Install
 
