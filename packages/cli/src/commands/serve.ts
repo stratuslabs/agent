@@ -48,6 +48,7 @@ import {
   loadServePrincipals,
   loadServeApi,
   loadServePlugins,
+  loadServeRuntimeSelection,
 } from '../trusted-config.ts';
 
 export const runServe = async (
@@ -163,6 +164,11 @@ const serveHeldHome = async (
   // blocks above: the trust boundary is a property of *which file* said it,
   // and this is where the file precedence is already understood.
   const pluginsConfig = await loadServePlugins(env, command.configPath, warn);
+  // Which of the loaded plugins' executors and memory stores serve this
+  // daemon — the same trust rule, one step on, and refused by the gateway
+  // at start when the name is nobody's.
+  const executorName = await loadServeRuntimeSelection('executor', env, command.configPath, warn);
+  const memoryStoreName = await loadServeRuntimeSelection('memoryStore', env, command.configPath, warn);
 
   // Every kind of grant an agent holds — command scopes, origins, standing
   // tool grants — in one file per agent beside its soul, through one store
@@ -454,6 +460,8 @@ const serveHeldHome = async (
           },
         }
       : {}),
+    ...(executorName !== undefined ? { executor: executorName } : {}),
+    ...(memoryStoreName !== undefined ? { memoryStore: memoryStoreName } : {}),
     ...(approvalsConfig.timeoutMs !== undefined ? { approvalTimeoutMs: approvalsConfig.timeoutMs } : {}),
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),

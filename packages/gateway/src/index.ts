@@ -10,6 +10,9 @@ import {
   abortErrorFor,
   AgentRegistry,
   AgentRunner,
+  ChannelRegistry,
+  ContributionRegistry,
+  createRoutedMemoryStore,
   EventBus,
   RunAbortedError,
   SkillRegistry,
@@ -24,13 +27,18 @@ import {
   latestTurnReply,
   readPendingApproval,
   type AgentDefinition,
+  type AgentMemoryStore,
   type AlwaysMeans,
   type ApprovalAnswer,
   type ApprovalOutcome,
   type ApprovalPolicy,
   type ApprovalResolutionReason,
+  type Executor,
+  type ExecutorContribution,
   type ImageAttachment,
   type JsonObject,
+  type MemoryStoreContribution,
+  type ProviderContribution,
   type Session,
   type SessionStatus,
   type SessionStore,
@@ -89,11 +97,17 @@ import {
   type PluginLoadFailure,
 } from '@stratusagent/plugins';
 import {
+  BUILTIN_EXECUTOR_NAME,
+  BUILTIN_MEMORY_STORE_NAME,
+  BUILTIN_PROVIDER_NAMES,
   createDemoTool,
   createFileCredentialResolver,
   createFileMemoryStore,
   createRuntimeProvider,
   DEFAULT_STRATUS_AGENT,
+  isRegisteredProviderName,
+  loadChannelTransportSecrets,
+  registeredProviderNameOf,
   loadOperatorSkills,
   loadRosterSouls,
   FALLBACK_ACTIVE_METADATA_KEY,
@@ -640,8 +654,24 @@ export interface GatewayPluginStatus {
   trusted?: boolean;
   tools?: GatewayTool[];
   skills?: GatewaySkill[];
+  /** Provider names it registered — what a soul's `provider:` can select. */
+  providers?: string[];
+  /** Channel kinds it registered, and the agents each carries. */
+  channels?: Array<{ kind: string; agents: string[] }>;
+  /** Memory store names it registered — what `memoryStore` can select. */
+  memory?: string[];
+  /** Executor names it registered — what `executor` can select. */
+  executors?: string[];
   /** Present when the plugin did not load, and the only field that is. */
   error?: string;
+}
+
+/** One provider a soul's `provider:` can select on this daemon. */
+export interface GatewayProviderStatus {
+  /** The name as a soul writes it: `anthropic`, or a plugin's `ollama`. */
+  name: string;
+  /** The plugin package that registered it; absent for a built-in. */
+  package?: string;
 }
 
 export interface GatewayOptions {
@@ -685,6 +715,24 @@ export interface GatewayOptions {
    * is already understood.
    */
   plugins?: PluginsConfig;
+  /**
+   * Which executor runs tool calls, by the name a plugin registered it
+   * under (`local`, or absent, is the built-in child-process executor).
+   * From a **trusted** config only, like `plugins`: an executor is where
+   * an agent's commands run, and a cloned repository swapping a sandbox
+   * for the host is the downgrade that rule exists to refuse. A name no
+   * loaded plugin registered fails `start()` — a daemon silently running
+   * commands on the host when the operator selected a sandbox is worse
+   * than one that did not start.
+   */
+  executor?: string;
+  /**
+   * Which store backs agent memory, by registered name (`file`, or absent,
+   * is the built-in). Same trust rule and same refusal as `executor`: a
+   * daemon writing memories into a store the operator did not select is a
+   * daemon whose agents remember into the wrong place.
+   */
+  memoryStore?: string;
   /**
    * How plugin packages are resolved and imported.
    *
@@ -868,6 +916,13 @@ export interface Gateway {
    */
   plugins(): GatewayPluginStatus[];
   /**
+   * Every provider a soul's `provider:` can select on this daemon: the
+   * built-ins, then what loaded plugins registered, in load order. The
+   * registry, not the literal — a surface listing providers reads this so
+   * a contributed one is offered where the built-ins are.
+   */
+  providers(): GatewayProviderStatus[];
+  /**
    * The soul behind each agent in the current roster, built-in included
    * (which has none).
    *
@@ -1040,7 +1095,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const store = options.sessionDbPath
     ? new SqliteSessionStore(sessionDbPath)
     : new SqliteSessionStore(sessionDbPath, { ownedDirectory: true });
-  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+  // The built-in store, behind a route that can change its mind: the memory
+  // tools and every runner are built before a plugin has loaded, so the
+  // store they hold is the one that answers *per call* with whichever was
+  // selected once the plugins are up. Per call, not per start, is also
+  // what keeps a contributed store per-agent-resolvable rather than
+  // process-global.
+  const fileMemory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+  let selectedMemory: AgentMemoryStore = fileMemory;
+  const memory = createRoutedMemoryStore(() => selectedMemory);
+  let selectedExecutor: Executor | undefined;
+
+  // What loaded plugins contributed besides tools and skills. The loader
+  // commits into these; the gateway reads them by name — a provider when a
+  // runner is built, the executor and memory store once at start, the
+  // channels when serving begins.
+  const providerContributions = new ContributionRegistry<ProviderContribution>();
+  const channelContributions = new ChannelRegistry();
+  const memoryContributions = new ContributionRegistry<MemoryStoreContribution>();
+  const executorContributions = new ContributionRegistry<ExecutorContribution>();
 
   // ---- schedules ----------------------------------------------------------
 
@@ -1779,12 +1852,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // when the turn's next save lands — a daemon killed mid-fallback
       // must not retry the primary on restart.
       (session) => store.save(session),
+      providerContributions,
     );
 
     const runner = new AgentRunner({
       provider,
       tools,
-      executor: createLocalCommandExecutor(),
+      // Runners are built on dispatch, after the plugins loaded and the
+      // selection below ran, so a contributed executor is in place for
+      // the first turn.
+      executor: selectedExecutor ?? createLocalCommandExecutor(),
       ...(approvals ? { approvals } : {}),
       store,
       bus,
@@ -1848,9 +1925,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const streamsDeltas = (config: RuntimeConfig): boolean =>
     // Both Anthropic modes stream now: an API key through the Messages
     // API, a subscription token through the Agent SDK's partial messages —
-    // and the codex harness streams item snapshots in every auth mode.
+    // and the codex harness streams item snapshots in every auth mode. A
+    // contributed provider says for itself, and one that did not say is
+    // read as not streaming: a watchdog armed over a silent-until-done
+    // call would abort every long turn.
     (config.provider === 'anthropic' && Boolean(config.apiKey || config.authToken))
-    || config.provider === 'codex';
+    || config.provider === 'codex'
+    || (isRegisteredProviderName(config.provider)
+      && providerContributions.get(registeredProviderNameOf(config.provider))?.streams === true);
 
   /**
    * Progress-based abort, armed only while the turn is actually awaiting a
@@ -2208,9 +2290,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const runner = runnerFor(config);
 
     const metadata: JsonObject = {
-      ...(config.provider === 'demo'
-        ? { provider: 'demo' }
-        : { provider: config.provider, model: config.model }),
+      provider: config.provider,
+      // A contributed provider may leave the model to its own default, in
+      // which case there is none to record.
+      ...(config.provider !== 'demo' && config.model !== undefined ? { model: config.model } : {}),
       ...input.metadata,
     };
 
@@ -2712,6 +2795,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       tools,
       skills: skillCatalog,
       bus,
+      providers: providerContributions,
+      channels: channelContributions,
+      memory: memoryContributions,
+      executors: executorContributions,
+      // The host-owned path for a channel's transport secrets: the same
+      // `channels.<kind>.<agentId>` namespace Slack's tokens live in, read
+      // for the kind the plugin declared, and never through the
+      // agent-scoped resolver below.
+      channelSecrets: (kind) => loadChannelTransportSecrets(env, kind),
       // The file-backed resolver, so a plugin needing a key reaches the
       // *calling* agent's — its allowlist checked, its own entry before the
       // fleet's shared one.
@@ -2730,11 +2822,59 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       const contributed = [
         ...plugin.tools.map((tool) => `${tool.name} (${tool.risk})`),
         ...plugin.skills.map((skill) => `skill ${skill.id}`),
+        ...plugin.contributions.providers.map((name) => `provider ${name}`),
+        ...plugin.contributions.channels.map((channel) => `channel ${channel.kind} for ${channel.agents.join(', ') || 'no agent'}`),
+        ...plugin.contributions.memory.map((name) => `memory store ${name}`),
+        ...plugin.contributions.executors.map((name) => `executor ${name}`),
       ];
       log(`plugin ${plugin.package} loaded — ${contributed.join(', ') || 'no tools'}`);
     }
     for (const failure of result.failures) {
       warn(`plugin ${failure.package} did not load: ${failure.reason}`);
+    }
+  };
+
+  /**
+   * Which package registered a name, for the log line and the refusal.
+   * From the load records rather than a second map: they are the record.
+   */
+  const contributorOf = (kind: 'executors' | 'memory', name: string): string | undefined =>
+    loadedPlugins.find((plugin) => plugin.contributions[kind].includes(name))?.package;
+
+  /**
+   * Put the operator's executor and memory-store selections into effect,
+   * or refuse to start. Refuse, not warn: the built-in executor runs
+   * commands on this host, and an operator who selected a sandbox that
+   * failed to load must not find their agents on the host anyway; a
+   * memory store the same, one write later. A name no plugin registered
+   * is named with what is, so a typo reads as one.
+   */
+  const applyContributionSelections = (): void => {
+    const executorName = options.executor;
+    if (executorName !== undefined && executorName !== BUILTIN_EXECUTOR_NAME) {
+      const contribution = executorContributions.get(executorName);
+      if (!contribution) {
+        throw new Error(
+          `The config selects executor ${executorName}, which no loaded plugin registers`
+          + (executorContributions.names().length > 0 ? ` (registered: ${executorContributions.names().join(', ')})` : '')
+          + `. Enable the plugin that contributes it, or set executor to ${BUILTIN_EXECUTOR_NAME}.`,
+        );
+      }
+      selectedExecutor = contribution.executor;
+      log(`executor ${executorName} selected, from ${contributorOf('executors', executorName) ?? 'a plugin'}`);
+    }
+    const memoryName = options.memoryStore;
+    if (memoryName !== undefined && memoryName !== BUILTIN_MEMORY_STORE_NAME) {
+      const contribution = memoryContributions.get(memoryName);
+      if (!contribution) {
+        throw new Error(
+          `The config selects memoryStore ${memoryName}, which no loaded plugin registers`
+          + (memoryContributions.names().length > 0 ? ` (registered: ${memoryContributions.names().join(', ')})` : '')
+          + `. Enable the plugin that contributes it, or set memoryStore to ${BUILTIN_MEMORY_STORE_NAME}.`,
+        );
+      }
+      selectedMemory = contribution.store;
+      log(`memory store ${memoryName} selected, from ${contributorOf('memory', memoryName) ?? 'a plugin'}`);
     }
   };
 
@@ -2785,8 +2925,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     // Channels come up after the roster so their first inbound message
     // already has agents to dispatch to. One failing adapter must not
-    // keep the rest (or the gateway) down.
-    for (const adapter of options.channels ?? []) {
+    // keep the rest (or the gateway) down. The host's adapters first, then
+    // the plugins' in load order — the `plugins` block's order, which is
+    // the one an operator can read.
+    const adapters: GatewayChannelAdapter[] = [
+      ...(options.channels ?? []),
+      ...channelContributions.list().map((contribution) => contribution.adapter),
+    ];
+    for (const adapter of adapters) {
       try {
         await adapter.start(gateway);
         startedChannels.push(adapter);
@@ -3018,6 +3164,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // startSkills).
         await startSkills();
         await startPlugins();
+        applyContributionSelections();
         await startServing();
       } catch (error) {
         // A `start()` that rejects never reaches its caller's shutdown path
@@ -3343,12 +3490,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
             path: skill.path,
           };
         }),
+        providers: plugin.contributions.providers,
+        channels: plugin.contributions.channels,
+        memory: plugin.contributions.memory,
+        executors: plugin.contributions.executors,
       }));
       const failed: GatewayPluginStatus[] = pluginFailures.map((failure) => ({
         package: failure.package,
         error: failure.reason,
       }));
       return [...loaded, ...failed];
+    },
+
+    providers() {
+      const contributed = loadedPlugins.flatMap((plugin) =>
+        plugin.contributions.providers.map((name) => ({ name, package: plugin.package })));
+      return [...BUILTIN_PROVIDER_NAMES.map((name) => ({ name })), ...contributed];
     },
 
     async servedSouls() {

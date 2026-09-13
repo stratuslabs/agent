@@ -24,7 +24,9 @@ import {
   loadCredentials,
   loadRosterSouls,
   loadSoulFile,
+  isRegisteredProviderName,
   readNonEmptyString,
+  registeredProviderNameOf,
   readProcessEnv,
   readWorkingDirectory,
   resolveAgentApprovals,
@@ -259,7 +261,16 @@ export const runSetup = async (
   // Widened to CliProviderName only so setup can ask about the provider it
   // currently has selected, `demo` included; the rule itself is the shared one.
   const defaultKeyEnvFor = (provider: CliProviderName): string =>
-    defaultApiKeyEnvName(provider === 'demo' ? 'anthropic' : provider);
+    defaultApiKeyEnvName(credentialProviderOf(provider) ?? 'anthropic');
+
+  /**
+   * The sign-in a selection is stored under, or nothing: the demo provider
+   * has none, and a provider a plugin registered brings its own through
+   * its plugin's config and credentials — setup neither stores nor checks
+   * one for it.
+   */
+  const credentialProviderOf = (provider: CliProviderName): CredentialProviderName | undefined =>
+    provider === 'demo' || isRegisteredProviderName(provider) ? undefined : provider;
 
   const credentialLabel = (provider: CredentialProviderName, credential: StoredCredential): string =>
     credential.type === 'oauth_token'
@@ -307,6 +318,9 @@ export const runSetup = async (
   const signInSummary = (): string => {
     if (state.provider === 'demo') {
       return 'no account needed';
+    }
+    if (isRegisteredProviderName(state.provider)) {
+      return `served by the plugin that registers ${registeredProviderNameOf(state.provider)}, on its own sign-in`;
     }
     const credential = state.credentials[state.provider];
     if (credential) {
@@ -554,7 +568,13 @@ export const runSetup = async (
       ? readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
         ?? state.apiKeyEnv
       : undefined;
-    return state.credentials[provider] !== undefined
+    const stored = credentialProviderOf(provider);
+    // A contributed provider brings its own sign-in; setup cannot check
+    // it and does not claim to.
+    if (stored === undefined) {
+      return isRegisteredProviderName(provider);
+    }
+    return state.credentials[stored] !== undefined
       || readNonEmptyString(processEnv.STRATUS_API_KEY) !== undefined
       || (keyEnvSelector ? readNonEmptyString(processEnv[String(keyEnvSelector)]) !== undefined : false)
       || readNonEmptyString(processEnv[defaultKeyEnvFor(provider)]) !== undefined;
@@ -660,7 +680,8 @@ export const runSetup = async (
       // provider, wherever the default currently points.
       const listed = available.find((entry) => entry.id === typed);
       const inferred = listed?.provider
-        ?? (state.provider !== 'demo' ? state.provider : available[0]!.provider);
+        ?? credentialProviderOf(state.provider)
+        ?? available[0]!.provider;
       return { provider: inferred, id: typed };
     };
 
@@ -861,7 +882,8 @@ export const runSetup = async (
       ?? defaultKeyEnvFor(state.provider);
     const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
       ?? readNonEmptyString(processEnv[String(keyEnv)]);
-    const credential = envKey ? undefined : state.credentials[state.provider];
+    const storedFor = credentialProviderOf(state.provider);
+    const credential = envKey || storedFor === undefined ? undefined : state.credentials[storedFor];
     const boundUrl = credential?.type === 'api_key' ? credential.baseUrl : undefined;
     const model = state.model ?? defaultModelFor(state.provider);
 
@@ -2642,7 +2664,7 @@ export const runSetup = async (
       writeLine(streams.stdout, 'You are ready to go — no account needed. Try:');
     } else if (readNonEmptyString(processEnv.STRATUS_API_KEY)) {
       writeLine(streams.stdout, 'STRATUS_API_KEY is exported and takes precedence over your saved sign-in. You are ready to go. Try:');
-    } else if (state.credentials[state.provider]) {
+    } else if (isRegisteredProviderName(state.provider) || state.credentials[credentialProviderOf(state.provider) ?? 'anthropic']) {
       writeLine(streams.stdout, `You are ${signInSummary()} — ready to go. Try:`);
     } else {
       const keyEnv = state.apiKeyEnv ?? defaultKeyEnvFor(state.provider);

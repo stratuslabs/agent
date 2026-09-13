@@ -55,7 +55,7 @@ import {
   tailLog,
   npmNeedsShell,
 } from '../src/index.ts';
-import { stateFilePath } from '@stratusagent/state';
+import { memoryFilePath, stateFilePath } from '@stratusagent/state';
 import type { Session, Tool } from '@stratusagent/core';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -1352,7 +1352,12 @@ test('parseCommand accepts the anthropic provider and soul flag', () => {
     approvals: 'always',
   });
 
-  assert.throws(() => parseCommand(['run', '--provider', 'claude', 'hello']), /Unsupported provider/);
+  // A name a plugin could register parses — whether one did is the run's
+  // question, answered when the provider is built. A name no plugin could
+  // register is refused here.
+  const pluginProvider = parseCommand(['run', '--provider', 'claude', 'hello']);
+  assert.equal(pluginProvider.command === 'run' ? pluginProvider.provider : undefined, 'plugin:claude');
+  assert.throws(() => parseCommand(['run', '--provider', 'Claude', 'hello']), /Unsupported provider/);
 });
 
 test('resolveRuntimeConfig defaults anthropic to claude-opus-5 and its own key env', async () => {
@@ -12718,4 +12723,154 @@ test('stratus reports its own version, without asking npm or touching state', as
   }
   // Answered before the migration check, so a state stamp is never written.
   await assert.rejects(() => stat(stateFilePath({ homeDir: home })));
+});
+
+// ---- registration seams (step 19A) ------------------------------------------
+//
+// One installed fixture plugin per contribution kind, under `fixtures/`, each
+// resolved through `import.meta.resolve` and loaded by the real loader — the
+// path a global install takes — rather than through a fake module host.
+
+const seamHome = async (config: Record<string, unknown>): Promise<string> => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-seams-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify(config)}\n`);
+  return home;
+};
+
+test('a plugin provider serves a run selected with --provider, through the real loader', async () => {
+  const home = await seamHome({ plugins: { 'stratus-plugin-fixture-provider': { reply: 'hello from the fixture' } } });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['run', '--provider', 'fixture', '--model', 'tiny', '--prompt', 'hi'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /provider=plugin:fixture model=tiny/);
+  assert.match(output.stdout, /hello from the fixture \(model: tiny\)/);
+  assert.ok(!output.stderr.includes('did not load'), output.stderr);
+});
+
+test('a provider nobody registered is refused by name, with what is registered', async () => {
+  const home = await seamHome({ plugins: { 'stratus-plugin-fixture-provider': {} } });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['run', '--provider', 'ollama', '--prompt', 'hi'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.notEqual(exitCode, 0);
+  assert.match(output.stderr, /No provider named ollama is registered \(plugins registered: fixture\)/);
+});
+
+test('a plugin memory store selected by a trusted config backs remember and recall, per agent, with nothing written to the file store', async () => {
+  const home = await seamHome({
+    memoryStore: 'fixture',
+    plugins: {
+      'stratus-plugin-fixture-provider': { mode: 'memory', reply: 'done' },
+      'stratus-plugin-fixture-memory': {},
+    },
+  });
+  const soulFor = async (id: string): Promise<string> => {
+    const soulPath = path.join(home, `${id}.md`);
+    await writeFile(soulPath, `---\nname: ${id}\nid: ${id}\nprovider: fixture\nmodel: tea\ntools: [memory.remember, memory.recall]\n---\n\nYou are ${id}.\n`);
+    return soulPath;
+  };
+
+  const ava = createStreams();
+  assert.equal(await runCli({
+    argv: ['run', '--soul', await soulFor('ava'), '--prompt', 'hi'],
+    streams: ava.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  }), 0, ava.output.stderr);
+  assert.match(ava.output.stdout, /done; recalled .*ava likes tea/);
+
+  // Same process, so the fixture store still holds ava's fact: juno's
+  // recall finds juno's and never ava's — the per-agent key is the contract's.
+  const juno = createStreams();
+  assert.equal(await runCli({
+    argv: ['run', '--soul', await soulFor('juno'), '--prompt', 'hi'],
+    streams: juno.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  }), 0, juno.output.stderr);
+  assert.match(juno.output.stdout, /done; recalled .*juno likes tea/);
+  assert.doesNotMatch(juno.output.stdout, /ava likes/);
+
+  // The built-in store was never written to.
+  const fileStore = await readFile(memoryFilePath({ homeDir: home }), 'utf8').catch(() => '');
+  assert.ok(!fileStore.includes('likes'), fileStore);
+});
+
+test('a plugin executor selected by a trusted config runs the commands, and a selection nothing registers refuses the run', async () => {
+  const home = await seamHome({ executor: 'fixture', plugins: { 'stratus-plugin-fixture-executor': {} } });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'please use the echo tool', '--format', 'json'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  const payload = JSON.parse(output.stdout) as { session: { status: string; metadata: Record<string, unknown> } };
+  assert.equal(payload.session.status, 'completed');
+  assert.equal(payload.session.metadata.executor, 'fixture');
+  assert.match(output.stdout, /fixture-executor/);
+
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ executor: 'sandbox', plugins: { 'stratus-plugin-fixture-executor': {} } })}\n`);
+  const refused = createStreams();
+  const refusedCode = await runCli({
+    argv: ['run', '--prompt', 'please use the echo tool'],
+    streams: refused.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+  assert.notEqual(refusedCode, 0);
+  assert.match(refused.output.stderr, /selects executor sandbox, which no loaded plugin registers \(registered: fixture\)/);
+});
+
+test('a plugin channel starts under the daemon from its stored transport secrets and delivers an inbound message', async () => {
+  const home = await seamHome({ plugins: { 'stratus-plugin-fixture-channel': {} } });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    `${JSON.stringify({ channels: { fixture: { ava: { token: 'fixture-token-1' } } } })}\n`,
+  );
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 1500);
+
+  await runCli({
+    argv: ['serve', '--no-events', '--no-api'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.match(output.stdout, /plugin stratus-plugin-fixture-channel loaded — channel fixture for ava/);
+  assert.match(output.stdout, /fixture channel delivered a completed turn for ava/);
+  // Channels stop before plugins dispose, and both happen.
+  assert.match(output.stdout, /fixture channel stopped/);
+  assert.ok(!output.stderr.includes('did not load'), output.stderr);
+});
+
+test('plugins lists what a manifest declares besides tools, and how each is selected', async () => {
+  const home = await seamHome({
+    plugins: {
+      'stratus-plugin-fixture-provider': {},
+      'stratus-plugin-fixture-channel': {},
+      'stratus-plugin-fixture-memory': {},
+      'stratus-plugin-fixture-executor': {},
+    },
+  });
+  const { streams, output } = createStreams();
+
+  assert.equal(await runCli({ argv: ['plugins'], streams, env: { homeDir: home, cwd: home, processEnv: {} } }), 0);
+  assert.match(output.stdout, /provider fixture\s+a soul selects it with provider:/);
+  assert.match(output.stdout, /channel fixture\s+starts for the agents with tokens under channels\.<kind>/);
+  assert.match(output.stdout, /memory store fixture\s+a trusted config selects it with memoryStore:/);
+  assert.match(output.stdout, /executor fixture\s+a trusted config selects it with executor:/);
 });

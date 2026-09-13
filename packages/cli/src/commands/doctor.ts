@@ -9,6 +9,8 @@ import {
   loadCredentials,
   loadRosterSouls,
   loadSoulFile,
+  isSignedInRuntime,
+  parseProviderName,
   readNonEmptyString,
   readProcessEnv,
   readWorkingDirectory,
@@ -237,10 +239,12 @@ export const collectDoctorReport = async (
     const envModel = envPick('STRATUS_MODEL');
     // A soul's model belongs to the soul's provider, and the config's model
     // to the config's provider — either can be stranded by an override.
-    const soulModelApplies = soul?.provider === undefined || soul.provider === resolved.provider;
+    // The soul's pin in resolved form, so a soul saying `ollama` matches
+    // the `plugin:ollama` the run resolved to.
+    const soulModelApplies = soul?.provider === undefined || parseProviderName(soul.provider, 'soul file') === resolved.provider;
     const configModelApplies = (fileConfig.provider ?? 'openai') === resolved.provider;
     model = {
-      value: resolved.model,
+      value: resolved.model ?? 'the provider\'s own default',
       source: envModel
         ? envModel.name
         : soulModelApplies && soul?.model === resolved.model
@@ -253,7 +257,7 @@ export const collectDoctorReport = async (
 
   const credentials = await loadCredentials(env);
   const signIns: DoctorReport['signIns'] = [];
-  const usedKeyEnvVar = resolved && resolved.provider !== 'demo' ? resolved.apiKeyEnvVar : undefined;
+  const usedKeyEnvVar = resolved && isSignedInRuntime(resolved) ? resolved.apiKeyEnvVar : undefined;
   const usesAuthToken = resolved?.provider === 'anthropic' && resolved.authToken !== undefined;
   const fallback = resolved && resolved.provider !== 'demo' ? resolved.fallback : undefined;
 

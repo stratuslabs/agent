@@ -14,8 +14,36 @@ importers:
       stratus-plugin-fixture:
         specifier: workspace:*
         version: link:fixtures/stratus-plugin-fixture
+      stratus-plugin-fixture-channel:
+        specifier: workspace:*
+        version: link:fixtures/stratus-plugin-fixture-channel
+      stratus-plugin-fixture-executor:
+        specifier: workspace:*
+        version: link:fixtures/stratus-plugin-fixture-executor
+      stratus-plugin-fixture-memory:
+        specifier: workspace:*
+        version: link:fixtures/stratus-plugin-fixture-memory
+      stratus-plugin-fixture-provider:
+        specifier: workspace:*
+        version: link:fixtures/stratus-plugin-fixture-provider
 
   fixtures/stratus-plugin-fixture: {}
+
+  fixtures/stratus-plugin-fixture-channel: {}
+
+  fixtures/stratus-plugin-fixture-executor:
+    dependencies:
+      '@stratusagent/executor-local':
+        specifier: workspace:*
+        version: link:../../packages/executor-local
+
+  fixtures/stratus-plugin-fixture-memory:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+
+  fixtures/stratus-plugin-fixture-provider: {}
 
   packages/agents:
     dependencies:

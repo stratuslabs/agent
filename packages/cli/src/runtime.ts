@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
   AgentRunner,
+  ContributionRegistry,
+  createRoutedMemoryStore,
   EventBus,
   SkillRegistry,
   ToolRegistry,
@@ -8,7 +10,13 @@ import {
   describeToolAllowlistFinding,
   unmatchedToolAllowlist,
   type AgentDefinition,
+  type AgentMemoryStore,
+  type Executor,
+  type ExecutorContribution,
+  type JsonObject,
   type JsonValue,
+  type MemoryStoreContribution,
+  type ProviderContribution,
   type Session,
   type StratusEvent,
 } from '@stratusagent/core';
@@ -21,12 +29,15 @@ import {
   GATEWAY_ONLY_TOOL_NAMES,
 } from '@stratusagent/agents';
 import {
+  BUILTIN_EXECUTOR_NAME,
+  BUILTIN_MEMORY_STORE_NAME,
   createDemoTool,
   createFileCredentialResolver,
   createFileMemoryStore,
   createRuntimeProvider,
   defaultApiKeyEnvName,
   DEFAULT_STRATUS_AGENT,
+  isSignedInRuntime,
   loadCredentials,
   loadOperatorSkills,
   memoryFilePath,
@@ -46,7 +57,7 @@ import { formatEvent } from './events.ts';
 import { writeLine, stringifyValue } from './io.ts';
 import { quoteShellArg } from './prompter.ts';
 import type { CliApprovalMode, ParsedRunCommand } from './parse.ts';
-import { loadServePlugins } from './trusted-config.ts';
+import { loadServePlugins, loadServeRuntimeSelection } from './trusted-config.ts';
 
 /**
  * Kept with its historical CLI signature: a parsed run command is a
@@ -138,7 +149,7 @@ export const warnOnCredentialOverride = async (
   // The resolver records the variable that actually won — guessing it here
   // would name the wrong one whenever a custom apiKeyEnv supplied the key,
   // sending the reader to unset something that was never the cause.
-  const primaryOverride = runtime.apiKey !== undefined
+  const primaryOverride = isSignedInRuntime(runtime) && runtime.apiKey !== undefined
     ? { provider: runtime.provider, envVar: runtime.apiKeyEnvVar }
     : undefined;
   // Both subscription sign-ins demote the same way: a Claude setup token
@@ -196,7 +207,13 @@ export const createAgentRuntime = async (
 ) => {
   const runEnv = options.env ?? {};
   await migrateLegacyMemory(runEnv);
-  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(runEnv)));
+  // Routed, as the daemon's is: the memory tools register before the
+  // plugins load (so a plugin cannot claim their names), and the store
+  // they hold answers per call with whichever the trusted config selected
+  // once the plugins are up.
+  const fileMemory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(runEnv)));
+  let selectedMemory: AgentMemoryStore = fileMemory;
+  const memory = createRoutedMemoryStore(() => selectedMemory);
 
   const tools = new ToolRegistry();
   tools.register(createDemoTool());
@@ -241,6 +258,9 @@ export const createAgentRuntime = async (
     writeLine(streams.stderr, `Warning: ${line}`);
   });
   const loadedPlugins: LoadedPlugin[] = [];
+  const providers = new ContributionRegistry<ProviderContribution>();
+  const memoryStores = new ContributionRegistry<MemoryStoreContribution>();
+  const executors = new ContributionRegistry<ExecutorContribution>();
   if (Object.keys(pluginsConfig).length > 0) {
     const result = await loadPlugins({
       config: pluginsConfig,
@@ -251,6 +271,13 @@ export const createAgentRuntime = async (
       tools,
       skills,
       bus,
+      providers,
+      memory: memoryStores,
+      executors,
+      // No channel registry and no transport secrets: a local run has no
+      // channels, so a channel plugin's registration is recorded and goes
+      // nowhere, and its request for its secrets is refused with a message
+      // that says so rather than answered with an empty roster.
       credentials: createFileCredentialResolver(runEnv),
       workspaceRoot: workspacesDirPath(runEnv),
     });
@@ -258,6 +285,39 @@ export const createAgentRuntime = async (
     for (const failure of result.failures) {
       writeLine(streams.stderr, `Warning: plugin ${failure.package} did not load: ${failure.reason}`);
     }
+  }
+
+  // The same selections the daemon makes, from the same trusted keys, and
+  // the same refusal: a run that quietly fell back to the host's executor
+  // when the operator selected a sandbox would be the local test lying
+  // about what the daemon does.
+  const warnTrusted = (line: string): void => {
+    writeLine(streams.stderr, `Warning: ${line}`);
+  };
+  const executorName = (await loadServeRuntimeSelection('executor', runEnv, options.configPath, warnTrusted)) ?? BUILTIN_EXECUTOR_NAME;
+  let executor: Executor | undefined;
+  if (executorName !== BUILTIN_EXECUTOR_NAME) {
+    const contribution = executors.get(executorName);
+    if (!contribution) {
+      throw new Error(
+        `The config selects executor ${executorName}, which no loaded plugin registers`
+        + (executors.names().length > 0 ? ` (registered: ${executors.names().join(', ')})` : '')
+        + `. Enable the plugin that contributes it, or set executor to ${BUILTIN_EXECUTOR_NAME}.`,
+      );
+    }
+    executor = contribution.executor;
+  }
+  const memoryName = (await loadServeRuntimeSelection('memoryStore', runEnv, options.configPath, warnTrusted)) ?? BUILTIN_MEMORY_STORE_NAME;
+  if (memoryName !== BUILTIN_MEMORY_STORE_NAME) {
+    const contribution = memoryStores.get(memoryName);
+    if (!contribution) {
+      throw new Error(
+        `The config selects memoryStore ${memoryName}, which no loaded plugin registers`
+        + (memoryStores.names().length > 0 ? ` (registered: ${memoryStores.names().join(', ')})` : '')
+        + `. Enable the plugin that contributes it, or set memoryStore to ${BUILTIN_MEMORY_STORE_NAME}.`,
+      );
+    }
+    selectedMemory = contribution.store;
   }
 
   // The Claude Code runtime executes kernel tools by calling back into the
@@ -280,12 +340,14 @@ export const createAgentRuntime = async (
       return hostedRunner.executeHostedToolCall(session, call, context);
     },
     options.maxTurns,
+    undefined,
+    providers,
   );
 
   const runner = new AgentRunner({
     provider: runtimeProvider,
     tools,
-    executor: createLocalCommandExecutor(),
+    executor: executor ?? createLocalCommandExecutor(),
     approvals: createApprovalPolicy(options.approvals ?? 'always', streams, options.env ?? {}, options.askApproval),
     bus,
     skills,
@@ -342,11 +404,14 @@ export const createAgentRuntime = async (
   }
 
 
-  const metadata = options.runtime.provider === 'demo'
-    ? { provider: 'demo' as const, executor: 'local-command' }
+  const metadata: JsonObject = options.runtime.provider === 'demo'
+    // The built-in keeps the name it has always recorded; a contributed
+    // executor records the name it registered under.
+    ? { provider: 'demo', executor: executor ? executorName : 'local-command' }
     : {
         provider: options.runtime.provider,
-        model: options.runtime.model,
+        // A contributed provider may leave the model to its own default.
+        ...(options.runtime.model !== undefined ? { model: options.runtime.model } : {}),
         ...(options.runtime.provider === 'openai' ? { baseUrl: options.runtime.baseUrl } : {}),
       };
 

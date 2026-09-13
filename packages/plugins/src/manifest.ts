@@ -1,4 +1,5 @@
 import {
+  BUILTIN_PROVIDER_NAMES,
   DEFAULT_TOOL_RISK,
   matchesToolAllowlist,
   SKILL_READ_TOOL_NAME,
@@ -38,6 +39,18 @@ export interface PluginSkillDeclaration {
   path: string;
 }
 
+/**
+ * A named contribution of one of the four kinds that are not tools: a
+ * provider, a memory store, or an executor a soul or a trusted config
+ * selects by this name, or a channel kind (`discord`) whose adapter the
+ * plugin registers. Declared so the view can hold `setup()` to it — a
+ * plugin that declares a channel and registers a provider is refused at
+ * load, naming the package and the undeclared kind.
+ */
+export interface PluginNamedDeclaration {
+  name: string;
+}
+
 export interface PluginContributions {
   tools: PluginToolDeclaration[];
   toolsDiscovered: PluginNamespaceDeclaration[];
@@ -48,7 +61,26 @@ export interface PluginContributions {
    * and must stay inside it.
    */
   skills: PluginSkillDeclaration[];
+  /** Provider names `setup()` may register (`ollama`); never a built-in name. */
+  providers: PluginNamedDeclaration[];
+  /** Channel kinds `setup()` may register an adapter for (`discord`). */
+  channels: PluginNamedDeclaration[];
+  /** Memory store names `setup()` may register. */
+  memory: PluginNamedDeclaration[];
+  /** Executor names `setup()` may register. */
+  executors: PluginNamedDeclaration[];
 }
+
+/** The contribution kinds a manifest declares by name alone. */
+export type PluginNamedContributionKind = 'providers' | 'channels' | 'memory' | 'executors';
+
+export const PLUGIN_NAMED_CONTRIBUTION_KINDS: readonly PluginNamedContributionKind[] = [
+  'providers',
+  'channels',
+  'memory',
+  'executors',
+];
+
 
 export interface PluginManifest {
   /** The package name, which is the plugin's identity. */
@@ -84,6 +116,12 @@ const TOOL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9_-]*)+$/;
 const NAMESPACE_PATTERN = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9_-]*)*\.\*$/;
 
 const RISKS: ToolRisk[] = ['safe', 'gated', 'dangerous'];
+
+// A contribution name: the shape a soul's `provider:` or a config's
+// `executor` writes, and a channel kind. Lowercase runs joined by
+// hyphens, like a skill id, so `plugin:` prefixed forms and package
+// names (`@scope/name`) can never be mistaken for one.
+const CONTRIBUTION_NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -230,6 +268,45 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
     }
   }
 
+  const named: Record<PluginNamedContributionKind, PluginNamedDeclaration[]> = {
+    providers: [],
+    channels: [],
+    memory: [],
+    executors: [],
+  };
+  for (const kind of PLUGIN_NAMED_CONTRIBUTION_KINDS) {
+    const entries = contributes[kind];
+    if (entries === undefined) {
+      continue;
+    }
+    if (!Array.isArray(entries)) {
+      throw new PluginManifestError(`Plugin ${packageName}: contributes.${kind} must be an array.`);
+    }
+    for (const entry of entries) {
+      if (!isObject(entry) || typeof entry.name !== 'string') {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: every contributes.${kind} entry needs a "name".`,
+        );
+      }
+      if (!CONTRIBUTION_NAME_PATTERN.test(entry.name)) {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: ${JSON.stringify(entry.name)} is not a ${kind} name. Use lowercase runs joined by hyphens (ollama, vector-db).`,
+        );
+      }
+      if (kind === 'providers' && (BUILTIN_PROVIDER_NAMES as readonly string[]).includes(entry.name)) {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: provider ${entry.name} is built in and cannot be contributed by a plugin. Register it under a name of your own.`,
+        );
+      }
+      if (named[kind].some((declared) => declared.name === entry.name)) {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: contributes.${kind} declares ${JSON.stringify(entry.name)} twice.`,
+        );
+      }
+      named[kind].push({ name: entry.name });
+    }
+  }
+
   const credentials: string[] = [];
   if (stratus.credentials !== undefined) {
     if (!Array.isArray(stratus.credentials) || stratus.credentials.some((name) => typeof name !== 'string')) {
@@ -245,7 +322,7 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
   return {
     packageName,
     pluginVersion: PLUGIN_MANIFEST_VERSION,
-    contributes: { tools, toolsDiscovered, skills },
+    contributes: { tools, toolsDiscovered, skills, ...named },
     credentials,
     ...(isObject(stratus.config) ? { config: stratus.config as JsonObject } : {}),
   };

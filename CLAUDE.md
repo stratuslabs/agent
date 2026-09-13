@@ -173,11 +173,14 @@ hand and by review:
   object literal: it calls `import.meta.resolve`, so the thing has to be
   installed. `fixtures/*` is a second workspace glob for exactly that, and
   its packages are `private: true` and outside `packages/`, where
-  everything ships. `stratus-plugin-fixture` is the one that exists, and it
+  everything ships. `stratus-plugin-fixture` was the first, and it
   is there because every plugin under `packages/` contributes tools and is
   named in the CLI's own `PLUGIN_SETUP` — so a plugin contributing *skills*,
   and a package the CLI has no entry for, had no fixture and three review
-  findings landed on code no test could reach. A test needing a shape no
+  findings landed on code no test could reach. The four
+  `stratus-plugin-fixture-<kind>` packages are the same idea for the
+  provider, channel, memory-store, and executor seams — one per kind, so a
+  failing test names the seam it broke (see `fixtures/README.md`). A test needing a shape no
   real package has gets a fixture; a test needing a package name that
   differs from its manifest's gets a pnpm alias
   (`"stratus-plugin-aliased": "workspace:stratus-plugin-fixture@*"`), which

@@ -1,0 +1,19 @@
+{
+  "name": "stratus-plugin-fixture-memory",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A plugin contributing a memory store, so the memory seam can be tested through the real loader.",
+  "type": "module",
+  "exports": "./index.js",
+  "dependencies": {
+    "@stratusagent/core": "workspace:*"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "memory": [
+        { "name": "fixture" }
+      ]
+    }
+  }
+}

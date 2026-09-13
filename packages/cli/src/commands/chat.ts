@@ -149,7 +149,7 @@ export const runChat = async (
 
   const modelLine = runtime.provider === 'demo'
     ? 'demo (offline)'
-    : `${runtime.provider} · ${runtime.model}`;
+    : `${runtime.provider} · ${runtime.model ?? 'default model'}`;
 
   if (interactive) {
     streams.stdout.write('\u001b[2J\u001b[H');

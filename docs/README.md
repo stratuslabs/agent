@@ -28,6 +28,7 @@ tree is where the depth lives.
 | Upgrade without losing anything | [Updating](./guides/updating.md) |
 | Figure out why a run used the wrong provider | [Troubleshooting](./guides/troubleshooting.md) |
 | Mount an MCP server's tools | [MCP](./guides/mcp.md) |
+| Run agents on a provider, channel, memory store, or executor a plugin supplies — or write one | [Extending](./guides/extending.md) |
 | Use the web dashboard, or reach a daemon from another machine | [Remote access](./guides/remote-access.md) |
 | Look up a command or flag | [CLI reference](./reference/cli.md) |
 | Look up a config key, or understand precedence | [Configuration](./reference/config.md) |

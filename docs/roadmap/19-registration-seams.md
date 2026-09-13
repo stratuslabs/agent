@@ -1,5 +1,20 @@
 # 19 — Registration seams: providers, channels, and memory stores as real plugins
 
+**Status: 19A shipped; 19B next.** The roadmap [table](./README.md) carries
+the record of what landed. Of the open questions below: a soul's `provider:`
+selects a registered provider by its **name**, not a package — provider
+names are unique per install, as tool names are, so the qualifier skills
+need has nothing to disambiguate here; and the fixtures live one per kind in
+one place, [`fixtures/`](../../fixtures/README.md). One item in the 19A
+scope landed narrower than written: `StratusProviderName` opened, but
+`CredentialProviderName` — the set a stored sign-in is keyed by — stays the
+built-in three, because a contributed provider is credentialed through its
+own config block and manifest-declared credentials, the path
+[`plugins.md`](../architecture/plugins.md) already prescribes, and a second
+sign-in path keyed by plugin name would have been a second credential
+mechanism nothing could read. The enumerating surfaces read
+`Gateway.providers()` for selection instead of a literal.
+
 ## Goal
 
 `PluginContext` grows past `{ bus, tools }`, so a plugin's `setup` can register
