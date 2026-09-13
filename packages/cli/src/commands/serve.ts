@@ -267,6 +267,7 @@ const serveHeldHome = async (
             ...(route.slackApprovers ? { approvers: route.slackApprovers } : {}),
             ...(route.slackChannel ? { approvalChannel: route.slackChannel } : {}),
             ...(principals.slackUsers ? { principals: principals.slackUsers } : {}),
+            ...(principals.admit ? { admit: principals.admit } : {}),
           };
         }),
         log,

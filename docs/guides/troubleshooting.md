@@ -55,6 +55,11 @@ subscription sign-in to per-token billing.
 - **The agents stopped answering after a node upgrade** — the service unit
   points at an interpreter that no longer exists. `stratus update` repairs
   it; [Updating](./updating.md) explains why.
+- **Slack replies arrive full of `**` and `##`, or some other companion
+  behaves like an older build** — the optional packages are global installs
+  of their own, so one can lag the CLI loading it. `stratus update --check`
+  names any that are behind and `stratus update` brings them up; note that
+  `stratus doctor` reports a stale package as `installed`, because it is.
 - **`stratus logs` shows nothing, but the daemon won't start** — a daemon
   that fails before it starts serving never opens the structured log. See
   [When the log is empty](./logs.md#when-the-log-is-empty) for where those

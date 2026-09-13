@@ -5,6 +5,6 @@
     "composite": false,
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "test/**/*.test.ts"],
+  "include": ["src/**/*.ts", "test/**/*.test.ts", "eval/**/*.ts"],
   "exclude": ["dist"]
 }

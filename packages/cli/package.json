@@ -1,6 +1,6 @@
 {
   "name": "@stratusagent/cli",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -20,7 +20,8 @@
     "build": "tsc -b",
     "cli": "node --experimental-strip-types ./src/bin.ts",
     "typecheck": "tsc --noEmit --project tsconfig.test.json",
-    "test": "node --test --experimental-strip-types ./test/**/*.test.ts"
+    "test": "node --test --experimental-strip-types ./test/**/*.test.ts",
+    "eval:room": "node --experimental-strip-types ./eval/reading-the-room/run.ts"
   },
   "engines": {
     "node": ">=22.13 <23 || >=23.4"

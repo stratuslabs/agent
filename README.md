@@ -64,6 +64,7 @@ provider: anthropic
 model: claude-opus-5
 tools: [fs.read, fs.search, web.fetch, memory.*]
 skills: [code-review]
+listens: judge
 ---
 
 You are a sharp, warm generalist assistant. Answer first, explain second...

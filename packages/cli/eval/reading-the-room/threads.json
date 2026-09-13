@@ -1,0 +1,273 @@
+{
+  "agent": {
+    "name": "Ava",
+    "instructions": "You are Ava, an engineer on a small product team. You are helpful, direct, and brief, and you know when a conversation is not yours."
+  },
+  "threads": [
+    {
+      "id": "deploy-window",
+      "title": "Two people planning a deploy under Ava's status update",
+      "messages": [
+        {
+          "speaker": "Dylan",
+          "text": "<@Ava> what's the state of the release branch?",
+          "addressed": true
+        },
+        {
+          "speaker": "Dylan",
+          "text": "Sam, can you do the deploy at 4?",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Sam",
+          "text": "4 works. I'll ping you when it's out.",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Dylan",
+          "text": "cool, and we're doing the db migration first right",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Sam",
+          "text": "yep, migration then deploy",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Dylan",
+          "text": "actually is the migration on the release branch yet?",
+          "expect": "speak"
+        }
+      ]
+    },
+    {
+      "id": "thanks-from-here",
+      "title": "Dismissal is a sentence",
+      "messages": [
+        {
+          "speaker": "Dylan",
+          "text": "<@Ava> why is the nightly build red?",
+          "addressed": true
+        },
+        {
+          "speaker": "Dylan",
+          "text": "thanks Ava, we've got it from here",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Sam",
+          "text": "I'll take the flaky one, you take the timeout",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Dylan",
+          "text": "deal",
+          "expect": "silent"
+        }
+      ]
+    },
+    {
+      "id": "answering-her-question",
+      "title": "A person answers the question Ava asked, untagged",
+      "messages": [
+        {
+          "speaker": "Dylan",
+          "text": "<@Ava> can you draft the incident summary for last night?",
+          "addressed": true
+        },
+        {
+          "speaker": "Dylan",
+          "text": "staging, not prod — it never reached prod",
+          "expect": "speak"
+        },
+        {
+          "speaker": "Sam",
+          "text": "Dylan did you see the ticket from support about the same thing",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Dylan",
+          "text": "yeah I'll reply to them after standup",
+          "expect": "silent"
+        }
+      ]
+    },
+    {
+      "id": "wrong-fact",
+      "title": "Somebody is about to act on something Ava knows is wrong",
+      "messages": [
+        {
+          "speaker": "Dylan",
+          "text": "<@Ava> which region is the eu cluster in?",
+          "addressed": true
+        },
+        {
+          "speaker": "Sam",
+          "text": "ok so I'll point the new dns at eu-west-2 then",
+          "expect": "speak"
+        },
+        {
+          "speaker": "Dylan",
+          "text": "sounds good",
+          "expect": "silent"
+        }
+      ]
+    },
+    {
+      "id": "lunch",
+      "title": "Small talk after Ava answered",
+      "messages": [
+        {
+          "speaker": "Dylan",
+          "text": "<@Ava> remind me the on-call handoff time?",
+          "addressed": true
+        },
+        {
+          "speaker": "Sam",
+          "text": "anyone up for lunch at 1",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Dylan",
+          "text": "in. the place with the good soup?",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Sam",
+          "text": "obviously",
+          "expect": "silent"
+        }
+      ]
+    },
+    {
+      "id": "follow-up-to-her",
+      "title": "An untagged follow-up that is plainly for Ava",
+      "messages": [
+        {
+          "speaker": "Dylan",
+          "text": "<@Ava> summarize the three open PRs on the billing repo",
+          "addressed": true
+        },
+        {
+          "speaker": "Dylan",
+          "text": "and which of those touches the invoice template?",
+          "expect": "speak"
+        },
+        {
+          "speaker": "Dylan",
+          "text": "ok merging the first one",
+          "expect": "silent"
+        }
+      ]
+    },
+    {
+      "id": "two-humans-debug",
+      "title": "Two people debugging next to Ava",
+      "messages": [
+        {
+          "speaker": "Dylan",
+          "text": "<@Ava> paste the last 20 lines of the worker log",
+          "addressed": true
+        },
+        {
+          "speaker": "Sam",
+          "text": "that's the redis timeout again",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Dylan",
+          "text": "I thought we bumped that last week",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Sam",
+          "text": "we bumped the client one not the server one",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Dylan",
+          "text": "ugh. can someone check what the server timeout is set to now",
+          "expect": "speak"
+        }
+      ]
+    },
+    {
+      "id": "handed-to-colleague",
+      "title": "The question moved to another agent",
+      "messages": [
+        {
+          "speaker": "Dylan",
+          "text": "<@Ava> is the search index rebuild done?",
+          "addressed": true
+        },
+        {
+          "speaker": "Dylan",
+          "text": "<@Bea> can you check the ingest side too",
+          "observe": true
+        },
+        {
+          "speaker": "Bea",
+          "text": "Ingest is caught up as of 10:40; nothing queued.",
+          "observe": true
+        },
+        {
+          "speaker": "Dylan",
+          "text": "great, thanks both",
+          "expect": "silent"
+        }
+      ]
+    },
+    {
+      "id": "asked-about-her",
+      "title": "People talk about Ava's answer without asking her",
+      "messages": [
+        {
+          "speaker": "Dylan",
+          "text": "<@Ava> how long does the export usually take?",
+          "addressed": true
+        },
+        {
+          "speaker": "Sam",
+          "text": "that's longer than I remembered",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Dylan",
+          "text": "it got slower after the schema change",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Sam",
+          "text": "is there a way to run it in parallel? Ava would know",
+          "expect": "speak"
+        }
+      ]
+    },
+    {
+      "id": "meeting-scheduling",
+      "title": "Scheduling that never involves Ava",
+      "messages": [
+        {
+          "speaker": "Dylan",
+          "text": "<@Ava> what did the customer say in the last support thread?",
+          "addressed": true
+        },
+        {
+          "speaker": "Sam",
+          "text": "we should get them on a call. tuesday?",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Dylan",
+          "text": "tuesday's packed, wednesday am?",
+          "expect": "silent"
+        },
+        {
+          "speaker": "Sam",
+          "text": "wed 10 then, I'll send the invite",
+          "expect": "silent"
+        }
+      ]
+    }
+  ]
+}

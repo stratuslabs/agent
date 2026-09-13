@@ -253,6 +253,10 @@ export interface ParsedHelpCommand {
   command: 'help';
 }
 
+export interface ParsedVersionCommand {
+  command: 'version';
+}
+
 export type ParsedCommand =
   | ParsedRunCommand
   | ParsedChatCommand
@@ -277,7 +281,8 @@ export type ParsedCommand =
   | ParsedUpdateCommand
   | ParsedServiceCommand
   | ParsedServeCommand
-  | ParsedHelpCommand;
+  | ParsedHelpCommand
+  | ParsedVersionCommand;
 
 const readPromptFromEnvironment = (env: CliEnvironment): string => (env.stdin ?? '').trim();
 
@@ -294,6 +299,15 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
   if (!command || command === 'help' || command === '--help' || command === '-h') {
     return { command: 'help' };
+  }
+
+  // Before every other command, and answered even where one would fail:
+  // the first thing anyone is asked for in a bug report is the version,
+  // and a build too broken to serve is exactly when it is wanted. Reaching
+  // it through `update --check` was the only way to see it, which asks npm
+  // over the network to answer a question about this machine.
+  if (command === 'version' || command === '--version' || command === '-v') {
+    return { command: 'version' };
   }
 
   if (command === 'dashboard') {
