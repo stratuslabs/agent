@@ -1920,7 +1920,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // ten-minute timer instead of the idle timeout the operator set.
     (fallback.provider === 'anthropic' && Boolean(fallback.apiKey || fallback.authToken))
     // The codex harness streams item snapshots in every auth mode.
-    || fallback.provider === 'codex';
+    || fallback.provider === 'codex'
+    // A contributed fallback says for itself, exactly as a contributed
+    // primary does below; a session that switched to one must not lose
+    // the watchdog the plugin declared it could have.
+    || (isRegisteredProviderName(fallback.provider)
+      && providerContributions.get(registeredProviderNameOf(fallback.provider))?.streams === true);
 
   const streamsDeltas = (config: RuntimeConfig): boolean =>
     // Both Anthropic modes stream now: an API key through the Messages
@@ -2294,6 +2299,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // A contributed provider may leave the model to its own default, in
       // which case there is none to record.
       ...(config.provider !== 'demo' && config.model !== undefined ? { model: config.model } : {}),
+      // Which executor the turn's tool calls run through — the built-in
+      // under the name `stratus run` has always recorded, a contributed one
+      // under its registered name — so a transcript says where a command
+      // ran, not only which model asked for it.
+      executor: selectedExecutor && options.executor !== undefined ? options.executor : 'local-command',
       ...input.metadata,
     };
 

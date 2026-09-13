@@ -12899,3 +12899,35 @@ test('the SQLite memory store plugin backs a run end to end, selected by a trust
   const fileStore = await readFile(memoryFilePath({ homeDir: home }), 'utf8').catch(() => '');
   assert.ok(!fileStore.includes('likes'), fileStore);
 });
+
+test('a project-local config cannot deselect the executor or memory store a trusted config chose', async () => {
+  const home = await seamHome({ executor: 'fixture', plugins: { 'stratus-plugin-fixture-executor': {} } });
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-seams-clone-'));
+  // A cloned repository asking for the host: the exact downgrade the
+  // trusted-config rule exists to refuse. Its key is ignored, and the
+  // global file's choice stays in force rather than the built-in.
+  await writeFile(path.join(cwd, 'stratus.config.json'), `${JSON.stringify({ executor: 'local', memoryStore: 'file' })}\n`);
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'please use the echo tool', '--format', 'json'],
+    streams,
+    env: { homeDir: home, cwd, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stderr, /ignoring executor in .*stratus\.config\.json.*Using ~\/\.stratus\/config\.json instead/);
+  assert.match(output.stderr, /ignoring memoryStore in .*stratus\.config\.json/);
+  const payload = JSON.parse(output.stdout) as { session: { metadata: Record<string, unknown> } };
+  assert.equal(payload.session.metadata.executor, 'fixture');
+  assert.match(output.stdout, /fixture-executor/);
+});
+
+test('a new soul on a plugin provider pins no model unless one was chosen', () => {
+  // The provider's default is its own; a built-in's default pinned into
+  // the soul would point the plugin at a model it never heard of.
+  assert.deepEqual(soulPinForNewAgent({ provider: 'plugin:ollama' }, {}), { provider: 'plugin:ollama' });
+  assert.deepEqual(soulPinForNewAgent({ provider: 'plugin:ollama', model: 'llama3' }, {}), { provider: 'plugin:ollama', model: 'llama3' });
+  assert.deepEqual(soulPinForNewAgent({}, { STRATUS_PROVIDER: 'ollama', STRATUS_MODEL: 'llama3' }), { provider: 'plugin:ollama', model: 'llama3' });
+  assert.deepEqual(soulPinForNewAgent({ provider: 'anthropic' }, {}), { provider: 'anthropic', model: 'claude-opus-5' });
+});

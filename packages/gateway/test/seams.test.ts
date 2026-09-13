@@ -127,6 +127,7 @@ test('a plugin provider serves a run a soul selected, and a plugin memory store 
     assert.match(avaReply, /served by fixture on tiny; recalled .*ava likes tiny/);
     assert.equal(ava.metadata?.provider, 'plugin:fixture');
     assert.equal(ava.metadata?.model, 'tiny');
+    assert.equal(ava.metadata?.executor, 'local-command');
 
     // Juno's soul pins no model: the provider is built for its own default,
     // and juno's recall finds juno's fact and never ava's.
@@ -244,6 +245,8 @@ test('a plugin executor selected by the config runs the commands, and a selectio
     const session = await gateway.dispatch({ sessionId: 'exec-1', agentId: 'ava', userMessage: 'please use the echo tool' });
     assert.equal(session.status, 'completed');
     assert.deepEqual(ran, ['demo.echo']);
+    // The transcript says where its commands ran, under the registered name.
+    assert.equal(session.metadata?.executor, 'fixture');
     assert.deepEqual(gateway.plugins()[0]?.executors, ['fixture']);
   } finally {
     await gateway.stop();

@@ -27,6 +27,7 @@ import {
   isRegisteredProviderName,
   readNonEmptyString,
   registeredProviderNameOf,
+  type BuiltinProviderName,
   readProcessEnv,
   readWorkingDirectory,
   resolveAgentApprovals,
@@ -252,12 +253,16 @@ export const runSetup = async (
     consumeNotices: () => recentNotices.splice(0),
   });
 
-  const defaultModelFor = (provider: CliProviderName): string =>
+  const builtInDefaultModel = (provider: BuiltinProviderName): string =>
     provider === 'openai'
       ? DEFAULT_OPENAI_MODEL
       : provider === 'codex'
         ? DEFAULT_CODEX_MODEL
         : DEFAULT_ANTHROPIC_MODEL;
+  // A contributed provider's default is its own, so setup has none to
+  // name for it — and none to write into a config or a soul.
+  const defaultModelFor = (provider: CliProviderName): string | undefined =>
+    isRegisteredProviderName(provider) ? undefined : builtInDefaultModel(provider);
   // Widened to CliProviderName only so setup can ask about the provider it
   // currently has selected, `demo` included; the rule itself is the shared one.
   const defaultKeyEnvFor = (provider: CliProviderName): string =>
@@ -796,8 +801,9 @@ export const runSetup = async (
     const name = await prompter.ask('Name your agent (Enter to have one generated): ');
     const instructions = await prompter.ask('Describe their personality in a sentence or two (Enter for a starter you can edit later): ');
     const persona = instructions || DEFAULT_SOUL_STARTER;
+    const pinnedModel = state.model ?? defaultModelFor(state.provider);
     const pin = state.provider !== 'demo'
-      ? { provider: state.provider, model: state.model ?? defaultModelFor(state.provider) }
+      ? { provider: state.provider, ...(pinnedModel !== undefined ? { model: pinnedModel } : {}) }
       : {};
     const claimed = await claimSoulFile(
       env,
@@ -885,7 +891,20 @@ export const runSetup = async (
     const storedFor = credentialProviderOf(state.provider);
     const credential = envKey || storedFor === undefined ? undefined : state.credentials[storedFor];
     const boundUrl = credential?.type === 'api_key' ? credential.baseUrl : undefined;
-    const model = state.model ?? defaultModelFor(state.provider);
+
+    if (isRegisteredProviderName(state.provider)) {
+      // A contributed provider brings its own sign-in and its own default
+      // model; the test run selects it and no more, exactly as a real run
+      // resolves it.
+      return {
+        provider: state.provider,
+        ...(state.model ? { model: state.model } : {}),
+        ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
+        ...(env.fetch ? { fetch: env.fetch } : {}),
+        ...(soul ? { soul } : {}),
+      };
+    }
+    const model = state.model ?? builtInDefaultModel(state.provider);
 
     if (state.provider === 'anthropic') {
       const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
@@ -2482,8 +2501,9 @@ export const runSetup = async (
     // below are objects, and a `Record<string, string | boolean>` was what
     // made dropping them the path of least resistance.
     const config: CliConfigFile = { provider: state.provider };
-    if (state.provider !== 'demo') {
-      config.model = state.model ?? defaultModelFor(state.provider);
+    const savedModel = state.model ?? defaultModelFor(state.provider);
+    if (state.provider !== 'demo' && savedModel !== undefined) {
+      config.model = savedModel;
     }
     if (state.provider === 'openai') {
       config.baseUrl = state.baseUrl ?? state.credentials.openai?.baseUrl ?? DEFAULT_OPENAI_BASE_URL;
@@ -2637,8 +2657,8 @@ export const runSetup = async (
     // would make `stratus run` behave differently from what was just saved.
     const conflicts = [
       detectEnvOverride('STRATUS_PROVIDER', state.provider, '--provider'),
-      ...(state.provider !== 'demo'
-        ? [detectEnvOverride('STRATUS_MODEL', state.model ?? defaultModelFor(state.provider), '--model')]
+      ...(state.provider !== 'demo' && (state.model ?? defaultModelFor(state.provider)) !== undefined
+        ? [detectEnvOverride('STRATUS_MODEL', String(state.model ?? defaultModelFor(state.provider)), '--model')]
         : []),
       ...(state.provider === 'openai'
         ? [detectEnvOverride('STRATUS_BASE_URL', state.baseUrl ?? DEFAULT_OPENAI_BASE_URL, '--base-url')]

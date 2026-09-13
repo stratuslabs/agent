@@ -6,6 +6,7 @@ import {
   DEFAULT_OPENAI_MODEL,
   discoverActiveConfig,
   globalConfigPath,
+  isRegisteredProviderName,
   parseProviderName,
   readNonEmptyString,
   readProcessEnv,
@@ -50,12 +51,17 @@ export const soulPinForNewAgent = (
   const configModelApplies = (activeConfig.provider ?? 'openai') === provider;
   const model = readNonEmptyString(processEnv.STRATUS_MODEL)
     ?? (configModelApplies ? activeConfig.model : undefined)
-    ?? (provider === 'openai'
-      ? DEFAULT_OPENAI_MODEL
-      : provider === 'codex'
-        ? DEFAULT_CODEX_MODEL
-        : DEFAULT_ANTHROPIC_MODEL);
-  return { provider, model };
+    // A contributed provider's default model is its own — pinning a
+    // built-in's into a new soul would point the plugin at a model it
+    // never heard of.
+    ?? (isRegisteredProviderName(provider)
+      ? undefined
+      : provider === 'openai'
+        ? DEFAULT_OPENAI_MODEL
+        : provider === 'codex'
+          ? DEFAULT_CODEX_MODEL
+          : DEFAULT_ANTHROPIC_MODEL);
+  return model !== undefined ? { provider, model } : { provider };
 };
 
 export const runAgentNew = async (

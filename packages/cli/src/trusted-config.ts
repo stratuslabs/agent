@@ -182,14 +182,19 @@ export const loadServeRuntimeSelection = async (
   configPath: string | undefined,
   warn: (line: string) => void,
 ): Promise<string | undefined> => {
-  const block = await readTrustedConfigBlock(key, env, configPath);
+  let block = await readTrustedConfigBlock(key, env, configPath);
   if (block.status === 'untrusted') {
+    // The global file's choice, not the built-in: a clone that cannot
+    // select an executor must not be able to deselect one either — a
+    // repository shipping `"executor": "local"` would otherwise swap the
+    // operator's sandbox for the host, which is the exact downgrade this
+    // block refuses. The same fall-through `principals` uses.
     warn(
       `ignoring ${key} in ${block.path}: a project-local config cannot decide `
       + (key === 'executor' ? 'where this daemon\'s agents run their commands' : 'where this daemon\'s agents keep their memories')
-      + '. Move it to ~/.stratus/config.json, or pass it with --config.',
+      + '. Using ~/.stratus/config.json instead.',
     );
-    return undefined;
+    block = await readGlobalConfigBlock(key, env);
   }
   if (block.status === 'unreadable') {
     warn(`ignoring ${key} (${block.error instanceof Error ? block.error.message : String(block.error)}); using the built-in`);
