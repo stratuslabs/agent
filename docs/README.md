@@ -28,6 +28,7 @@ tree is where the depth lives.
 | Upgrade without losing anything | [Updating](./guides/updating.md) |
 | Figure out why a run used the wrong provider | [Troubleshooting](./guides/troubleshooting.md) |
 | Mount an MCP server's tools | [MCP](./guides/mcp.md) |
+| Run agents on a provider, channel, memory store, or executor a plugin supplies — or write one | [Extending](./guides/extending.md) |
 | Use the web dashboard, or reach a daemon from another machine | [Remote access](./guides/remote-access.md) |
 | Look up a command or flag | [CLI reference](./reference/cli.md) |
 | Look up a config key, or understand precedence | [Configuration](./reference/config.md) |
@@ -52,7 +53,9 @@ tree is where the depth lives.
 Package READMEs stay canonical for their own surface:
 [`channel-slack`](../packages/channel-slack/README.md) for the Slack app
 setup, [`control-api`](../packages/control-api/README.md) for the HTTP + WS
-contract, [`plugin-mcp`](../packages/plugin-mcp/README.md) and the
-[`tool-*`](../packages/tool-fs/README.md) packages for their own settings,
+contract, [`plugin-mcp`](../packages/plugin-mcp/README.md), the
+[`tool-*`](../packages/tool-fs/README.md) packages,
+[`provider-openai`](../packages/provider-openai/README.md), and
+[`memory-sqlite`](../packages/memory-sqlite/README.md) for their own settings,
 and [`search`](../packages/search/README.md) for the `web.search` contract
 every search backend implements.

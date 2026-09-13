@@ -109,18 +109,18 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/restart` | Announce a restart: `{ reason?, drainTimeoutMs? }` → `202 { restarting, reason?, drainTimeoutMs, inflight }`. New turns are refused from here, in-flight ones get the window, and the daemon comes back. `501 restart_unsupported` from a host that cannot bring it back; `409 not_restartable` while the daemon is still starting or already stopping |
 | GET | `/sessions?agent=&limit=` | Durable sessions, newest first. `limit` bounds the result — the table grows for the life of an install |
 | GET | `/sessions/:id` | One session, provider replay state stripped — including `usage`, the token records of every provider call it has made |
-| POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }`. A `schedule:`-prefixed id answers `400 session_id_reserved` — those belong to scheduled firings. An optional `metadata` object is attached to a new session as given, except the keys the daemon writes for itself (`pendingApproval`, `fallbackActive`, `delegatedBy`, `rootSessionId`, `delegationDepth`, `scheduled`, `scheduleId`, `sessionTrust`, `sessionTaintedBy`, `rolledOverFrom`, `rolledOverTo`), which answer `400 metadata_reserved`. `senderTrust` may be set to `unknown` to say the message is from someone the operator has not vouched for; it is read for the turn and never stored. Omitted, the sender is the operator; present with any value but a trust label, the sender reads `unknown` — a misspelled authorization is not one. An existing session whose agent has since left the roster answers `404 agent_not_found` |
+| POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }`. A `schedule:`-prefixed id answers `400 session_id_reserved` — those belong to scheduled firings. An optional `metadata` object is attached to a new session as given, except the keys the daemon writes for itself (`pendingApproval`, `fallbackActive`, `delegatedBy`, `rootSessionId`, `delegationDepth`, `scheduled`, `scheduleId`, `sessionTrust`, `sessionTaintedBy`, `rolledOverFrom`, `rolledOverTo`, `executor`), which answer `400 metadata_reserved`. `senderTrust` may be set to `unknown` to say the message is from someone the operator has not vouched for; it is read for the turn and never stored. Omitted, the sender is the operator; present with any value but a trust label, the sender reads `unknown` — a misspelled authorization is not one. An existing session whose agent has since left the roster answers `404 agent_not_found` |
 | POST | `/sessions/:id/rollover` | Start the conversation over under the same id: the transcript so far is saved as a new session (`<id>:rolledover:<time>-<suffix>`) and the live row is emptied, keeping only the routing metadata a channel needs → `200 { sessionId, archivedAs }`. The remedy for a session from before trust labels existed, which reads `unknown` for as long as it lasts. `409 session_busy` while a turn is running or parked, `409 session_archived` for an archive, `404` for an unknown id |
 | GET | `/approvals` | Calls parked on a human right now |
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }`, where `answer` is `once`, `always`, or `deny` — see [below](#always-means-one-thing-and-the-request-says-which) |
 | GET | `/schedules` | Every schedule the fleet has set — cadence, prompt, pre-authorized destination, next firing. The audit list: each row with a destination is a standing permission to speak |
 | DELETE | `/schedules/:id` | Cancel a schedule. Also revokes the destination grant riding on the row — a still-running firing's next send is gated normally. 404 when no such schedule exists |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
-| GET | `/catalog/tools` | Every registered tool with the risk a call will face, every skill a soul's `skills:` can name, and the plugins that contributed them |
-| GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value |
+| GET | `/catalog/tools` | Every registered tool with the risk a call will face, every skill a soul's `skills:` can name, the plugins that contributed them (with the providers, channels, memory stores, and executors each registered), and `providers` — every name a soul's `provider:` can select on this daemon, built-ins and plugin-registered alike |
+| GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value — and `channels`: which agents have transport secrets stored on each channel kind, ids only |
 | POST | `/credentials/verify` | Live-check a key before storing it: `{ provider, key, type?, baseUrl? }` |
 | PUT | `/credentials/:provider` | Store an `api_key`, or an `oauth_token` for Anthropic (a Claude setup token) or Codex (a marker that the machine's `codex login` sign-in serves runs — the value is never read). A codex key refuses a `baseUrl`: the harness owns its endpoints, so a bound key could never be honored there |
-| PUT | `/credentials/channels/:channel` | Store a channel's tokens (today: `slack`) |
+| PUT | `/credentials/channels/:channel` | Store one agent's transport secrets for a channel kind, under `channels.<kind>.<agentId>`. `slack` takes `{ agentId, appToken, botToken }`; any other kind — one a [channel plugin](../../docs/guides/extending.md#channels) declares — takes `{ agentId, secrets: { name: value, … } }`, the names its README documents. A kind that is not a contribution name answers `400 unknown_channel`; an agent not on the roster `404 agent_not_found`. Saving one kind never disturbs another's |
 
 **Named credentials are not on this API.** The `search.apiKey` an agent
 resolves through its soul's `credentials:` list lives in the same file under
@@ -144,12 +144,15 @@ who counts as the operator on each channel is a trusted-config setting, and
 the only file this endpoint writes is a trusted one — so the GET-modify-PUT
 round trip keeps it. The same goes for `vision`, the boolean that tells a
 text-only OpenAI-compatible model to take images as a note: `GET` returns
-it, so `PUT` takes it back. `PUT /config` does not write the `plugins` block. `GET` returns it, and a
-`PUT` carrying it back is accepted (the round trip has to work) but the value
-is ignored and the file's existing block is preserved rather than deleted by
-the replace. Enabling a plugin runs somebody else's code inside the daemon —
-that is the boundary the whole trust model rests on, and it stays a
-deliberate edit to a file rather than a settings save.
+it, so `PUT` takes it back. `PUT /config` does not write the `plugins` block, nor the `executor` and
+`memoryStore` selections. `GET` returns them, and a `PUT` carrying them back
+is accepted (the round trip has to work) but the values are ignored and the
+file's existing ones are preserved rather than deleted by the replace.
+Enabling a plugin runs somebody else's code inside the daemon — that is the
+boundary the whole trust model rests on — and choosing which of that code
+an agent's commands run in, or where its memories are written, is the same
+boundary one step on; all three stay a deliberate edit to a file rather
+than a settings save.
 
 ### Reload and restart
 

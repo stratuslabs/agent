@@ -4,8 +4,17 @@ import { appendFile, chmod, cp, mkdir, readdir, readFile, readlink, realpath, re
 import os from 'node:os';
 import path from 'node:path';
 
+import {
+  BUILTIN_EXECUTOR_NAME,
+  BUILTIN_MEMORY_STORE_NAME,
+  BUILTIN_PROVIDER_NAMES,
+  type BuiltinProviderName,
+} from '@stratusagent/core';
 import type {
   AgentDefinition,
+  ChannelTransportSecrets,
+  ContributionRegistry,
+  ProviderContribution,
   AgentMemoryStore,
   AvatarTheme,
   CredentialResolver,
@@ -91,7 +100,51 @@ export interface StateEnvironment {
   codexRunTurn?: CodexRunTurn;
 }
 
-export type StratusProviderName = 'demo' | 'openai' | 'anthropic' | 'codex';
+/** The providers this package builds itself — the kernel's list, re-exported from where callers were told to find it. */
+export { BUILTIN_PROVIDER_NAMES, type BuiltinProviderName } from '@stratusagent/core';
+
+/**
+ * The prefix every consumer carries a plugin-registered provider under.
+ * A soul writes `provider: ollama`; resolution carries it as
+ * `plugin:ollama`, and the prefix is what keeps the resolved config a
+ * discriminated union — a bare `string` beside the built-in literals
+ * would stop `config.provider === 'anthropic'` narrowing anywhere.
+ */
+export const REGISTERED_PROVIDER_PREFIX = 'plugin:';
+
+/**
+ * A provider a plugin registered through `PluginContext.providers`, in its
+ * resolved form. Selectable wherever a built-in is — a soul's `provider:`,
+ * the config file, `--provider`, `fallbackProvider` — by its bare name or
+ * this prefixed one; both parse to this.
+ */
+export type RegisteredProviderName = `${typeof REGISTERED_PROVIDER_PREFIX}${string}`;
+
+/** Any provider a run can select: a built-in, or a name a plugin registered. */
+export type StratusProviderName = BuiltinProviderName | RegisteredProviderName;
+
+export const isBuiltinProviderName = (value: string): value is BuiltinProviderName =>
+  (BUILTIN_PROVIDER_NAMES as readonly string[]).includes(value);
+
+export const isRegisteredProviderName = (value: string): value is RegisteredProviderName =>
+  value.startsWith(REGISTERED_PROVIDER_PREFIX);
+
+/** The bare name a plugin registered under: `plugin:ollama` → `ollama`. */
+export const registeredProviderNameOf = (name: RegisteredProviderName): string =>
+  name.slice(REGISTERED_PROVIDER_PREFIX.length);
+
+// The shape a contributed name takes — a plugin manifest's rule, read the
+// same way here so `provider: Ollama` is refused at parse rather than
+// carried to a lookup that can never match.
+const REGISTERED_PROVIDER_NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/**
+ * The names a trusted config's `executor` / `memoryStore` key means the
+ * built-ins by, and what an operator writes to reset one explicitly after
+ * trying a plugin's. The kernel's constants, re-exported from where
+ * callers were told to find them.
+ */
+export { BUILTIN_EXECUTOR_NAME, BUILTIN_MEMORY_STORE_NAME } from '@stratusagent/core';
 
 /**
  * Who may approve one agent's gated calls, and where they are asked.
@@ -276,11 +329,23 @@ export interface StratusConfigFile {
   api?: ApiConfig;
   /** Plugins to load, keyed by package name. Trusted configs only. */
   plugins?: PluginsConfig;
+  /**
+   * Which executor runs tool calls: `local` (the default), or the name a
+   * plugin registered. Trusted configs only — an executor is where an
+   * agent's commands run, and a cloned repository must not be able to
+   * swap a sandbox for the host.
+   */
+  executor?: string;
+  /**
+   * Which store backs agent memory: `file` (the default), or the name a
+   * plugin registered. Trusted configs only, for the same reason.
+   */
+  memoryStore?: string;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */
 export interface FallbackRuntime {
-  provider: 'anthropic' | 'openai' | 'codex';
+  provider: 'anthropic' | 'openai' | 'codex' | RegisteredProviderName;
   model: string;
   baseUrl?: string;
   apiKey?: string;
@@ -415,11 +480,41 @@ type RuntimeConfigVariant =
       /** See the openai variant — the variable that supplied the key. */
       apiKeyEnvVar?: string;
       fallback?: FallbackRuntime;
+    }
+  | {
+      /**
+       * A provider a plugin registered. No key, endpoint, or transport
+       * rides here: a contributed provider takes its settings from its own
+       * config block and its credentials through the manifest-bound
+       * resolver, so resolution has nothing to select for it but the model
+       * — which it may leave unset, in which case the provider's own
+       * default serves.
+       */
+      provider: RegisteredProviderName;
+      model?: string;
+      systemPrompt?: string;
+      /** Carried so a built-in fallback behind a contributed primary inherits the pinned transport. */
+      fetch?: typeof fetch;
+      soul?: ParsedSoul;
+      soulPath?: string;
+      fallback?: FallbackRuntime;
     };
 
 export type RuntimeConfig = RuntimeConfigVariant & {
   ignoredFromUntrustedConfig?: IgnoredUntrustedConfig;
 };
+
+/**
+ * A runtime served by a built-in provider that carries a sign-in of its
+ * own — every variant but `demo` and a plugin's. What the surfaces that
+ * explain credentials (`doctor`, the control API's credential source, the
+ * override warning) narrow on, so a contributed provider reads as "its
+ * plugin's business" there rather than as a missing key.
+ */
+export type SignedInRuntimeConfig = Extract<RuntimeConfig, { provider: CredentialProviderName }>;
+
+export const isSignedInRuntime = (config: RuntimeConfig): config is SignedInRuntimeConfig =>
+  isBuiltinProviderName(config.provider) && config.provider !== 'demo';
 
 /**
  * A stored sign-in for a provider, kept in ~/.stratus/credentials.json.
@@ -787,6 +882,86 @@ export const saveChannelCredentials = async (
   channels: ChannelCredentials,
 ): Promise<void> => {
   const existing = await loadRawCredentialsFile(env);
+  // Authoritative for the kinds it describes, and only those: the file
+  // also holds `channels.<kind>.<agentId>` for every channel a plugin
+  // contributes, and a Slack save that replaced the whole namespace would
+  // erase a Discord bot's tokens on the next `stratus setup`.
+  const current = isPlainRecord(existing.channels) ? { ...existing.channels } : {};
+  if (channels.slack !== undefined) {
+    current.slack = channels.slack;
+  } else {
+    delete current.slack;
+  }
+  existing.channels = current;
+  await writeRawCredentialsFile(env, existing);
+};
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * The host-owned path a contributed channel receives its transport
+ * secrets through: everything under `channels.<kind>.<agentId>`, by agent,
+ * string-valued entries only. The same namespace Slack's tokens live in,
+ * read generically — and, like them, never through the agent-scoped
+ * resolver: an agent must not read the tokens of the transport carrying
+ * it. Re-read per call, like the named credentials, so a token stored
+ * while the daemon runs is there at the next start without an edit.
+ */
+export const loadChannelTransportSecrets = async (
+  env: StateEnvironment,
+  kind: string,
+): Promise<ChannelTransportSecrets> => {
+  const raw = await loadRawCredentialsFile(env);
+  const secrets: ChannelTransportSecrets = {};
+  if (!isPlainRecord(raw.channels) || !isPlainRecord(raw.channels[kind])) {
+    return secrets;
+  }
+  for (const [agentId, entry] of Object.entries(raw.channels[kind])) {
+    if (!isPlainRecord(entry)) {
+      continue;
+    }
+    const values: Record<string, string> = {};
+    for (const [name, value] of Object.entries(entry)) {
+      if (typeof value === 'string') {
+        values[name] = value;
+      }
+    }
+    secrets[agentId] = values;
+  }
+  return secrets;
+};
+
+/** Every channel kind with something stored under `channels.<kind>`, Slack included. */
+export const listChannelKinds = async (env: StateEnvironment): Promise<string[]> => {
+  const raw = await loadRawCredentialsFile(env);
+  return isPlainRecord(raw.channels) ? Object.keys(raw.channels) : [];
+};
+
+/**
+ * Store one agent's transport secrets for a channel kind, merging over the
+ * rest of the namespace. The write side of `loadChannelTransportSecrets`;
+ * the control API's channel-credentials route is its caller.
+ */
+export const saveChannelTransportSecrets = async (
+  env: StateEnvironment,
+  kind: string,
+  agentId: string,
+  secrets: Record<string, string>,
+): Promise<void> => {
+  // The kind is a contribution name and the agent id a real one; keys
+  // that are neither (`__proto__` among them) never reach the object below.
+  if (!REGISTERED_PROVIDER_NAME_PATTERN.test(kind)) {
+    throw new Error(`${JSON.stringify(kind)} is not a channel kind. Use the kind a channel plugin declares (lowercase, hyphens).`);
+  }
+  if (agentId.length === 0 || agentId === '__proto__') {
+    throw new Error(`${JSON.stringify(agentId)} is not an agent id.`);
+  }
+  const existing = await loadRawCredentialsFile(env);
+  const channels = isPlainRecord(existing.channels) ? { ...existing.channels } : {};
+  const byAgent = isPlainRecord(channels[kind]) ? { ...channels[kind] } : {};
+  byAgent[agentId] = secrets;
+  channels[kind] = byAgent;
   existing.channels = channels;
   await writeRawCredentialsFile(env, existing);
 };
@@ -1279,12 +1454,26 @@ export const runStateMigrations = async (env: StateEnvironment): Promise<Applied
   return results;
 };
 
+/**
+ * Read a provider selection into its resolved form. A built-in name is
+ * itself; a name a plugin could register — bare (`ollama`) or already
+ * prefixed (`plugin:ollama`) — becomes `plugin:ollama`. Whether a plugin
+ * has actually registered it is a question for the host that loaded the
+ * plugins, asked when the provider is built; a config file is parsed by
+ * processes that load none.
+ */
 export const parseProviderName = (value: string, label: string): StratusProviderName => {
-  if (value === 'demo' || value === 'openai' || value === 'anthropic' || value === 'codex') {
+  if (isBuiltinProviderName(value)) {
     return value;
   }
+  const bare = isRegisteredProviderName(value) ? registeredProviderNameOf(value) : value;
+  if (REGISTERED_PROVIDER_NAME_PATTERN.test(bare)) {
+    return `${REGISTERED_PROVIDER_PREFIX}${bare}`;
+  }
 
-  throw new Error(`Unsupported provider in ${label}: ${value}`);
+  throw new Error(
+    `Unsupported provider in ${label}: ${value}. Use demo, anthropic, openai, codex, or the name a plugin registers (lowercase, hyphens).`,
+  );
 };
 
 export const readNonEmptyString = <T = string>(
@@ -1385,6 +1574,18 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   }
   if (typeof config.fallbackBaseUrl === 'string' && config.fallbackBaseUrl.length > 0) {
     resolved.fallbackBaseUrl = config.fallbackBaseUrl;
+  }
+  for (const key of ['executor', 'memoryStore'] as const) {
+    const value = config[key];
+    if (value === undefined) {
+      continue;
+    }
+    if (typeof value !== 'string' || !REGISTERED_PROVIDER_NAME_PATTERN.test(value)) {
+      throw new Error(
+        `Invalid ${key} in config ${configPath}: ${JSON.stringify(value)}. Name the built-in (${key === 'executor' ? BUILTIN_EXECUTOR_NAME : BUILTIN_MEMORY_STORE_NAME}) or one a plugin registers (lowercase, hyphens).`,
+      );
+    }
+    resolved[key] = value;
   }
   // Checked against `false` rather than truthiness: this key's whole purpose
   // is turning a default-on behavior off.
@@ -2690,9 +2891,12 @@ export const resolveRuntimeConfig = async (
 
   // Explicit flags and env vars outrank the soul's own provider/model hints,
   // which outrank the config file's defaults.
+  // The soul's pin in resolved form, so a soul saying `ollama` compares
+  // equal to the `plugin:ollama` every other input has been read into.
+  const soulProvider = readNonEmptyString(soul?.provider, (value) => parseProviderName(value, 'soul file'));
   const provider = selection.provider
     ?? readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
-    ?? readNonEmptyString(soul?.provider, (value) => parseProviderName(value, 'soul file'))
+    ?? soulProvider
     ?? fileConfig.provider
     ?? 'demo';
 
@@ -2729,7 +2933,176 @@ export const resolveRuntimeConfig = async (
   // var overrides that provider, the model hint would target the wrong API
   // (e.g. a Claude model sent to OpenAI), so it only applies when the soul
   // names no provider or names the selected one.
-  const soulModelApplies = soul?.provider === undefined || soul.provider === provider;
+  const soulModelApplies = soulProvider === undefined || soulProvider === provider;
+
+  // The same rule as the soul: a preamble that sits above the persona in
+  // every prompt is not something a cloned repo gets to write.
+  const systemPrompt = readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT)
+    ?? (configTrusted === false ? undefined : fileConfig.systemPrompt);
+
+  const credentials = await loadCredentials(env);
+
+  /**
+   * A configured fallback model kicks in when the default model errors
+   * mid-run. It needs its own working sign-in; without one the fallback is
+   * quietly skipped rather than failing the run it exists to rescue.
+   *
+   * One resolver for both primaries. Behind a built-in primary the
+   * fallback may reuse that primary's sign-in and endpoint when the two
+   * share a provider — `primary` carries what it may inherit. Behind a
+   * contributed primary there is nothing to inherit (its plugin holds its
+   * own sign-in), so `primary` is absent and the fallback resolves on its
+   * own credentials alone; a built-in fallback behind a contributed
+   * primary was dropped entirely before this took a parameter.
+   */
+  const resolveFallback = (
+    fallbackProvider: StratusProviderName,
+    primary: {
+      provider: StratusProviderName;
+      envApiKey: string | undefined;
+      envApiKeyEntry: { name: string } | undefined;
+      apiKey: string | undefined;
+      authToken: string | undefined;
+      codexSubscription: boolean;
+      boundBaseUrl: string | undefined;
+      baseUrl: string | undefined;
+    } | undefined,
+  ): FallbackRuntime | undefined => {
+    if (!fileConfig.fallbackModel || fallbackProvider === 'demo') {
+      return undefined;
+    }
+    if (isRegisteredProviderName(fallbackProvider)) {
+      // A contributed fallback needs no sign-in resolved here: its plugin
+      // brings its own. Selected by name, and looked up when the provider
+      // is built, like a contributed primary.
+      return { provider: fallbackProvider, model: fileConfig.fallbackModel };
+    }
+    const sameAsPrimary = primary !== undefined && fallbackProvider === primary.provider;
+    // Same precedence as the primary sign-in: environment keys outrank
+    // the stored credential. And the same endpoint rule: an untrusted
+    // project config's custom fallback URL receives no key at all — not
+    // the fallback's own stored one, not the primary's stored key when
+    // both share a provider, and (see below) not an environment key
+    // either.
+    const fallbackUntrustedUrl = fallbackProvider === 'openai'
+      && configTrusted === false
+      && fileConfig.fallbackBaseUrl !== undefined
+      && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== DEFAULT_OPENAI_BASE_URL;
+    const fallbackEnvKey = readNonEmptyString(processEnv[defaultApiKeyEnvName(fallbackProvider)]);
+    // The primary's rule again, on the URL a fallback actually consumes.
+    // Withholding only the stored key here left the same door open one
+    // step further in: a project config that leaves `baseUrl` alone and
+    // names `fallbackBaseUrl` looks innocent — the primary is the
+    // provider's own endpoint — and collects the environment key the
+    // first time a turn fails over to it.
+    const fallbackEnvKeyName = fallbackEnvKey !== undefined
+      ? defaultApiKeyEnvName(fallbackProvider)
+      : (sameAsPrimary ? primary.envApiKeyEntry?.name : undefined);
+    if (fallbackUntrustedUrl && fallbackEnvKeyName !== undefined) {
+      throw new Error(
+        `The project config at ${configPathShown} sets a custom fallback base URL (${String(fileConfig.fallbackBaseUrl)}), and ${fallbackEnvKeyName} is not sent to an endpoint an auto-discovered config chose. Run with --config ${configPathShown} to trust that file, or move the fallback base URL into ~/.stratus/config.json.`,
+      );
+    }
+    const fallbackCandidate = fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider];
+    // A codex fallback consumes no endpoint URL, so a stored key bound to
+    // one cannot be honored there — and must not silently follow the
+    // harness to a different endpoint. The fallback is quietly skipped,
+    // the same treatment as any other sign-in it cannot use.
+    const fallbackCredential = fallbackProvider === 'codex'
+      && fallbackCandidate?.type === 'api_key'
+      && fallbackCandidate.baseUrl !== undefined
+      ? undefined
+      : fallbackCandidate;
+    const primaryReusable = sameAsPrimary
+      && (primary.envApiKey !== undefined || !fallbackUntrustedUrl);
+    const fallbackApiKey = (primaryReusable ? primary.apiKey : undefined)
+      ?? fallbackEnvKey
+      ?? (fallbackCredential?.type === 'api_key' ? fallbackCredential.value : undefined);
+    const fallbackAuthToken = !sameAsPrimary && fallbackProvider === 'anthropic' && fallbackCredential?.type === 'oauth_token'
+      ? fallbackCredential.value
+      : (primaryReusable ? primary.authToken : undefined);
+    // A codex fallback works keyless only when the subscription marker
+    // says this machine has a `codex login` sign-in — its own stored
+    // marker, or the primary's when both are codex.
+    const fallbackCodexSubscription = fallbackProvider === 'codex' && !fallbackApiKey
+      && (fallbackCredential?.type === 'oauth_token' || (primaryReusable && primary.codexSubscription));
+
+    if (!fallbackApiKey && !fallbackAuthToken && !fallbackCodexSubscription) {
+      return undefined;
+    }
+    // When the fallback key comes out of the credential store (its own
+    // entry, or the primary's reused stored key), its bound endpoint is
+    // authoritative — config URLs cannot redirect it.
+    const fallbackBoundUrl = fallbackCredential?.type === 'api_key'
+      ? fallbackCredential.baseUrl
+      : (primaryReusable && !primary.envApiKey ? primary.boundBaseUrl : undefined);
+    // An anthropic fallback on the same provider keeps the primary's
+    // configured endpoint — retrying the same credential against the
+    // official endpoint instead of the configured service would leak
+    // it and likely fail.
+    const fallbackAnthropicBaseUrl = fallbackProvider === 'anthropic'
+      ? (sameAsPrimary && primary.baseUrl ? String(primary.baseUrl) : undefined)
+        ?? (fallbackCredential?.type === 'api_key' ? fallbackCredential.baseUrl : undefined)
+      : undefined;
+    return {
+      provider: fallbackProvider,
+      model: fileConfig.fallbackModel,
+      // One operator setting for the daemon, so it applies to whichever
+      // Anthropic model ends up serving the turn. Inert on the other two
+      // providers, which do not build their own requests.
+      ...(fileConfig.promptCache !== undefined ? { promptCache: fileConfig.promptCache } : {}),
+      ...(fileConfig.promptCacheTtl ? { promptCacheTtl: fileConfig.promptCacheTtl } : {}),
+      // The one daemon-wide `vision` setting reaches an OpenAI-compatible
+      // fallback too; the other providers never ask.
+      ...(fallbackProvider === 'openai' && fileConfig.vision !== undefined ? { vision: fileConfig.vision } : {}),
+      ...(fallbackProvider === 'openai'
+        ? {
+            baseUrl: fallbackBoundUrl
+              ?? fileConfig.fallbackBaseUrl
+              ?? (sameAsPrimary ? String(primary.baseUrl) : undefined)
+              ?? DEFAULT_OPENAI_BASE_URL,
+          }
+        : (fallbackAnthropicBaseUrl ? { baseUrl: fallbackAnthropicBaseUrl } : {})),
+      ...(fallbackApiKey ? { apiKey: String(fallbackApiKey) } : {}),
+      ...(fallbackAuthToken ? { authToken: fallbackAuthToken } : {}),
+      ...(fallbackCodexSubscription ? { codexSubscription: true as const } : {}),
+      // Here rather than with the primary's transport above, because
+      // the fallback does not exist yet at that point. A subscription
+      // fallback behind an OpenAI primary has no transport to inherit,
+      // so without this it reaches the real Agent SDK the moment the
+      // primary fails.
+      ...(env.queryFn && fallbackProvider === 'anthropic' ? { queryFn: env.queryFn } : {}),
+      ...(env.codexRunTurn && fallbackProvider === 'codex' ? { codexRunTurn: env.codexRunTurn } : {}),
+    };
+  };
+
+  if (isRegisteredProviderName(provider)) {
+    // A contributed provider: nothing here selects a key or an endpoint
+    // for it — its plugin owns both — so what resolution decides is the
+    // model, the preamble, the soul, and a fallback, which resolves on its
+    // own sign-in whether it names a built-in or another plugin.
+    const registeredModel = selection.model
+      ?? readNonEmptyString(processEnv.STRATUS_MODEL)
+      ?? (soulModelApplies ? readNonEmptyString(soul?.model) : undefined)
+      ?? (fileConfigApplies ? fileConfig.model : undefined);
+    const registered: RuntimeConfig = {
+      provider,
+      ...(registeredModel ? { model: String(registeredModel) } : {}),
+      ...(systemPrompt ? { systemPrompt: String(systemPrompt) } : {}),
+      ...(env.fetch ? { fetch: env.fetch } : {}),
+      ...(soul ? { soul } : {}),
+      ...(soulPath ? { soulPath } : {}),
+      ...(ignoredFromUntrustedConfig ? { ignoredFromUntrustedConfig } : {}),
+    };
+    // The same implicit-fallback rule as below: a fallback with no
+    // provider of its own was written for the config's provider.
+    const fallbackProvider = fileConfig.fallbackProvider ?? (fileConfigApplies ? provider : undefined);
+    const fallback = fallbackProvider !== undefined ? resolveFallback(fallbackProvider, undefined) : undefined;
+    if (fallback) {
+      registered.fallback = fallback;
+    }
+    return registered;
+  }
 
   const model = selection.model
     ?? readNonEmptyString(processEnv.STRATUS_MODEL)
@@ -2754,8 +3127,6 @@ export const resolveRuntimeConfig = async (
     && fileConfig.apiKeyEnv !== apiKeyEnvName
     ? fileConfig.apiKeyEnv
     : undefined;
-
-  const credentials = await loadCredentials(env);
 
   // A custom endpoint chosen by an auto-discovered project config is not a
   // place the stored sign-in ever gets sent — a cloned repository could
@@ -2908,11 +3279,6 @@ export const resolveRuntimeConfig = async (
           ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
         };
 
-  // The same rule as the soul: a preamble that sits above the persona in
-  // every prompt is not something a cloned repo gets to write.
-  const systemPrompt = readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT)
-    ?? (configTrusted === false ? undefined : fileConfig.systemPrompt);
-
   if (systemPrompt) {
     resolved.systemPrompt = String(systemPrompt);
   }
@@ -2940,111 +3306,23 @@ export const resolveRuntimeConfig = async (
     resolved.soulPath = soulPath;
   }
 
-  // A configured fallback model kicks in when the default model errors
-  // mid-run. It needs its own working sign-in; without one the fallback is
-  // quietly skipped rather than failing the run it exists to rescue.
   // An implicit fallback (no fallbackProvider key) was written for the
   // config's own provider — when a flag, env var, or soul overrides that
   // provider, the fallback model would target the wrong API, so it is
   // ignored. An explicit fallbackProvider stays valid regardless.
   if (fileConfig.fallbackModel && (fileConfig.fallbackProvider !== undefined || fileConfigApplies)) {
-    const fallbackProvider = fileConfig.fallbackProvider ?? (provider as StratusProviderName);
-    if (fallbackProvider !== 'demo') {
-      // Same precedence as the primary sign-in: environment keys outrank
-      // the stored credential. And the same endpoint rule: an untrusted
-      // project config's custom fallback URL receives no key at all — not
-      // the fallback's own stored one, not the primary's stored key when
-      // both share a provider, and (see below) not an environment key
-      // either.
-      const fallbackUntrustedUrl = fallbackProvider === 'openai'
-        && configTrusted === false
-        && fileConfig.fallbackBaseUrl !== undefined
-        && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== DEFAULT_OPENAI_BASE_URL;
-      const fallbackEnvKey = readNonEmptyString(processEnv[defaultApiKeyEnvName(fallbackProvider)]);
-      // The primary's rule again, on the URL a fallback actually consumes.
-      // Withholding only the stored key here left the same door open one
-      // step further in: a project config that leaves `baseUrl` alone and
-      // names `fallbackBaseUrl` looks innocent — the primary is the
-      // provider's own endpoint — and collects the environment key the
-      // first time a turn fails over to it.
-      const fallbackEnvKeyName = fallbackEnvKey !== undefined
-        ? defaultApiKeyEnvName(fallbackProvider)
-        : (fallbackProvider === provider ? envApiKeyEntry?.name : undefined);
-      if (fallbackUntrustedUrl && fallbackEnvKeyName !== undefined) {
-        throw new Error(
-          `The project config at ${configPathShown} sets a custom fallback base URL (${String(fileConfig.fallbackBaseUrl)}), and ${fallbackEnvKeyName} is not sent to an endpoint an auto-discovered config chose. Run with --config ${configPathShown} to trust that file, or move the fallback base URL into ~/.stratus/config.json.`,
-        );
-      }
-      const fallbackCandidate = fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider];
-      // A codex fallback consumes no endpoint URL, so a stored key bound to
-      // one cannot be honored there — and must not silently follow the
-      // harness to a different endpoint. The fallback is quietly skipped,
-      // the same treatment as any other sign-in it cannot use.
-      const fallbackCredential = fallbackProvider === 'codex'
-        && fallbackCandidate?.type === 'api_key'
-        && fallbackCandidate.baseUrl !== undefined
-        ? undefined
-        : fallbackCandidate;
-      const primaryReusable = fallbackProvider === provider
-        && (envApiKey !== undefined || !fallbackUntrustedUrl);
-      const fallbackApiKey = (primaryReusable ? apiKey : undefined)
-        ?? fallbackEnvKey
-        ?? (fallbackCredential?.type === 'api_key' ? fallbackCredential.value : undefined);
-      const fallbackAuthToken = fallbackProvider !== provider && fallbackProvider === 'anthropic' && fallbackCredential?.type === 'oauth_token'
-        ? fallbackCredential.value
-        : (primaryReusable ? authToken : undefined);
-      // A codex fallback works keyless only when the subscription marker
-      // says this machine has a `codex login` sign-in — its own stored
-      // marker, or the primary's when both are codex.
-      const fallbackCodexSubscription = fallbackProvider === 'codex' && !fallbackApiKey
-        && (fallbackCredential?.type === 'oauth_token' || (primaryReusable && codexSubscription));
-
-      if (fallbackApiKey || fallbackAuthToken || fallbackCodexSubscription) {
-        // When the fallback key comes out of the credential store (its own
-        // entry, or the primary's reused stored key), its bound endpoint is
-        // authoritative — config URLs cannot redirect it.
-        const fallbackBoundUrl = fallbackCredential?.type === 'api_key'
-          ? fallbackCredential.baseUrl
-          : (primaryReusable && !envApiKey ? boundBaseUrl : undefined);
-        // An anthropic fallback on the same provider keeps the primary's
-        // configured endpoint — retrying the same credential against the
-        // official endpoint instead of the configured service would leak
-        // it and likely fail.
-        const fallbackAnthropicBaseUrl = fallbackProvider === 'anthropic'
-          ? (fallbackProvider === provider && baseUrl ? String(baseUrl) : undefined)
-            ?? (fallbackCredential?.type === 'api_key' ? fallbackCredential.baseUrl : undefined)
-          : undefined;
-        resolved.fallback = {
-          provider: fallbackProvider,
-          model: fileConfig.fallbackModel,
-          // One operator setting for the daemon, so it applies to whichever
-          // Anthropic model ends up serving the turn. Inert on the other two
-          // providers, which do not build their own requests.
-          ...(fileConfig.promptCache !== undefined ? { promptCache: fileConfig.promptCache } : {}),
-          ...(fileConfig.promptCacheTtl ? { promptCacheTtl: fileConfig.promptCacheTtl } : {}),
-          // The one daemon-wide `vision` setting reaches an OpenAI-compatible
-          // fallback too; the other providers never ask.
-          ...(fallbackProvider === 'openai' && fileConfig.vision !== undefined ? { vision: fileConfig.vision } : {}),
-          ...(fallbackProvider === 'openai'
-            ? {
-                baseUrl: fallbackBoundUrl
-                  ?? fileConfig.fallbackBaseUrl
-                  ?? (fallbackProvider === provider ? String(baseUrl) : undefined)
-                  ?? DEFAULT_OPENAI_BASE_URL,
-              }
-            : (fallbackAnthropicBaseUrl ? { baseUrl: fallbackAnthropicBaseUrl } : {})),
-          ...(fallbackApiKey ? { apiKey: String(fallbackApiKey) } : {}),
-          ...(fallbackAuthToken ? { authToken: fallbackAuthToken } : {}),
-          ...(fallbackCodexSubscription ? { codexSubscription: true as const } : {}),
-          // Here rather than with the primary's transport above, because
-          // the fallback does not exist yet at that point. A subscription
-          // fallback behind an OpenAI primary has no transport to inherit,
-          // so without this it reaches the real Agent SDK the moment the
-          // primary fails.
-          ...(env.queryFn && fallbackProvider === 'anthropic' ? { queryFn: env.queryFn } : {}),
-          ...(env.codexRunTurn && fallbackProvider === 'codex' ? { codexRunTurn: env.codexRunTurn } : {}),
-        };
-      }
+    const fallback = resolveFallback(fileConfig.fallbackProvider ?? (provider as StratusProviderName), {
+      provider: provider as StratusProviderName,
+      envApiKey: envApiKey !== undefined ? String(envApiKey) : undefined,
+      envApiKeyEntry,
+      apiKey: apiKey !== undefined ? String(apiKey) : undefined,
+      authToken,
+      codexSubscription,
+      boundBaseUrl,
+      baseUrl: baseUrl !== undefined ? String(baseUrl) : undefined,
+    });
+    if (fallback) {
+      resolved.fallback = fallback;
     }
   }
 
@@ -3264,12 +3542,20 @@ const attributeUsage = async (
   return { ...response, usage: attribute(response.usage) };
 };
 
+/**
+ * What a host loaded from its plugins' `providers` handles — the registry
+ * `loadPlugins` committed into, or any lookup shaped like it. Consulted
+ * only for a `plugin:` name; a built-in never goes through it.
+ */
+export type RegisteredProviders = Pick<ContributionRegistry<ProviderContribution>, 'get' | 'names'>;
+
 export const createRuntimeProvider = (
   config: RuntimeConfig,
   onFallback?: (error: unknown) => void,
   executeTool?: HostedToolExecutor,
   maxTurns?: number,
   persistSession?: (session: Session) => Promise<void>,
+  registered?: RegisteredProviders,
 ): ModelProvider => {
   if (config.provider === 'demo') {
     return createDemoProvider();
@@ -3277,7 +3563,7 @@ export const createRuntimeProvider = (
 
   if (config.fallback) {
     const { fallback, ...primaryConfig } = config;
-    const primary = createRuntimeProvider(primaryConfig, undefined, executeTool, maxTurns);
+    const primary = createRuntimeProvider(primaryConfig, undefined, executeTool, maxTurns, undefined, registered);
     const fallbackProvider = createRuntimeProvider({
       ...fallback,
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
@@ -3294,7 +3580,7 @@ export const createRuntimeProvider = (
       // The codex transport travels the same way, for the same reason.
       ...(config.provider === 'codex' && config.codexRunTurn ? { codexRunTurn: config.codexRunTurn } : {}),
       ...(fallback.codexRunTurn ? { codexRunTurn: fallback.codexRunTurn } : {}),
-    } as RuntimeConfig, undefined, executeTool, maxTurns);
+    } as RuntimeConfig, undefined, executeTool, maxTurns, undefined, registered);
     return createFallbackWrappedProvider(primary, fallbackProvider, onFallback ?? (() => {}), persistSession);
   }
 
@@ -3349,15 +3635,38 @@ export const createRuntimeProvider = (
     });
   }
 
-  return createOpenAICompatibleProvider({
-    name: 'openai',
-    model: config.model,
-    apiKey: config.apiKey,
-    baseUrl: config.baseUrl,
-    ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
-    ...(config.vision !== undefined ? { vision: config.vision } : {}),
-    ...(config.fetch ? { fetch: config.fetch } : {}),
-  });
+  if (config.provider === 'openai') {
+    return createOpenAICompatibleProvider({
+      name: 'openai',
+      model: config.model,
+      apiKey: config.apiKey,
+      baseUrl: config.baseUrl,
+      ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+      ...(config.vision !== undefined ? { vision: config.vision } : {}),
+      ...(config.fetch ? { fetch: config.fetch } : {}),
+    });
+  }
+
+  {
+    // The fourth shape, and the one this function does not build: a
+    // plugin's. Looked up by the bare name at build time, because the
+    // config was parsed by a process that may have loaded no plugins, and
+    // the message says what is registered so a typo reads as one.
+    const name = registeredProviderNameOf(config.provider);
+    const contribution = registered?.get(name);
+    if (!contribution) {
+      const known = registered?.names() ?? [];
+      throw new Error(
+        `No provider named ${name} is registered`
+        + (known.length > 0 ? ` (plugins registered: ${known.join(', ')})` : ' (no loaded plugin registers one)')
+        + `. Built in: ${BUILTIN_PROVIDER_NAMES.join(', ')}. Enable the plugin that contributes ${name} in the plugins block of a trusted config, or select another provider.`,
+      );
+    }
+    return contribution.create({
+      ...(config.model ? { model: config.model } : {}),
+      ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+    });
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -3395,6 +3704,23 @@ export interface SoulPinContext {
  * at all: it is a rule about selections, environments, and souls, and it
  * belongs beside the resolver whose precedence it is manipulating.
  */
+/**
+ * Whether two provider selections name one provider, whatever form each
+ * was written in: a soul's `ollama` and a config's `plugin:ollama` are the
+ * same selection. A value that is not a provider name at all is compared
+ * as written, so this never throws where the resolver would.
+ */
+const sameProviderName = (left: string, right: string): boolean => {
+  const normalize = (value: string): string => {
+    try {
+      return parseProviderName(value, 'provider');
+    } catch {
+      return value;
+    }
+  };
+  return normalize(left) === normalize(right);
+};
+
 export const applySoulPins = (
   pins: ParsedSoul,
   selection: RuntimeSelection,
@@ -3420,7 +3746,7 @@ export const applySoulPins = (
   if (pins.provider) {
     delete selection.provider;
     delete processEnv.STRATUS_PROVIDER;
-    if (defaultProvider !== undefined && defaultProvider !== 'demo' && pins.provider !== defaultProvider) {
+    if (defaultProvider !== undefined && defaultProvider !== 'demo' && !sameProviderName(pins.provider, defaultProvider)) {
       // The default model, endpoint, and generic credentials were all
       // chosen for the default provider — none may ride along to the
       // soul's: a base URL would point the pinned provider at the wrong
@@ -4000,7 +4326,9 @@ export const listAgentSummaries = async (
     const envProvider = readNonEmptyString(soulEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'));
     const envModel = readNonEmptyString(soulEnv.STRATUS_MODEL);
 
-    const soulProvider = soul?.provider;
+    // Resolved form, so a soul's `ollama` equals the `plugin:ollama` the
+    // config and environment were read into.
+    const soulProvider = readNonEmptyString(soul?.provider, (value) => parseProviderName(value, 'soul file'));
     const soulModel = soul?.model;
     const provider = envProvider ?? soulProvider ?? activeConfig.provider ?? 'demo';
     if (provider === 'demo') {
@@ -4011,12 +4339,16 @@ export const listAgentSummaries = async (
     const model = envModel
       ?? (soulModelApplies ? soulModel : undefined)
       ?? (configModelApplies ? activeConfig.model : undefined)
-      ?? (provider === 'openai'
-        ? DEFAULT_OPENAI_MODEL
-        : provider === 'codex'
-          ? DEFAULT_CODEX_MODEL
-          : DEFAULT_ANTHROPIC_MODEL);
-    return { provider, model };
+      // A contributed provider's default model is its own; nothing here
+      // knows it, and reporting a built-in's default would be a guess.
+      ?? (isRegisteredProviderName(provider)
+        ? undefined
+        : provider === 'openai'
+          ? DEFAULT_OPENAI_MODEL
+          : provider === 'codex'
+            ? DEFAULT_CODEX_MODEL
+            : DEFAULT_ANTHROPIC_MODEL);
+    return model !== undefined ? { provider, model } : { provider };
   };
 
   // The config's soul under the same trust rule `resolveSoulPath` applies:

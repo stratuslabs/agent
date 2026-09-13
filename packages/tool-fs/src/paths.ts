@@ -3,7 +3,7 @@ import { lstat, open, realpath, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { nameIdentifiesHandle } from '@stratusagent/plugins';
+import { expandHome, nameIdentifiesHandle } from '@stratusagent/plugins';
 
 /** A path that is not inside anything this agent was given. */
 export class PathOutsideRootError extends Error {
@@ -13,16 +13,9 @@ export class PathOutsideRootError extends Error {
   }
 }
 
-/** `~` and `~/x` mean the same thing here as they do in a shell. */
-export const expandHome = (value: string, home = os.homedir()): string => {
-  if (value === '~') {
-    return home;
-  }
-  if (value.startsWith('~/')) {
-    return path.join(home, value.slice(2));
-  }
-  return value;
-};
+// Moved to `@stratusagent/plugins` when a second plugin needed it;
+// re-exported here so nothing that imported it from this package breaks.
+export { expandHome };
 
 /**
  * The roots an agent may reach, canonicalized.

@@ -29,6 +29,7 @@ import {
 import type { ParsedUpdateCommand } from '../parse.ts';
 import {
   FIRST_PARTY_CAPABILITY_PACKAGES,
+  FIRST_PARTY_CONTRIBUTION_PACKAGES,
   FIRST_PARTY_COMPANION_PACKAGES,
 } from '../plugin-catalog.ts';
 
@@ -61,7 +62,7 @@ const readCompanions = async (
 ): Promise<CompanionPackage[]> => {
   const read = env.installedVersionReader ?? defaultInstalledVersionReader;
   const found: CompanionPackage[] = [];
-  for (const name of [...FIRST_PARTY_COMPANION_PACKAGES, ...FIRST_PARTY_CAPABILITY_PACKAGES]) {
+  for (const name of [...FIRST_PARTY_COMPANION_PACKAGES, ...FIRST_PARTY_CAPABILITY_PACKAGES, ...FIRST_PARTY_CONTRIBUTION_PACKAGES]) {
     const version = await read(name);
     if (version !== undefined) {
       found.push({ name, version, stale: compareVersions(target, version) > 0 });

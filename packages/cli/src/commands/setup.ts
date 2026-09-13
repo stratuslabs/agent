@@ -24,7 +24,10 @@ import {
   loadCredentials,
   loadRosterSouls,
   loadSoulFile,
+  isRegisteredProviderName,
   readNonEmptyString,
+  registeredProviderNameOf,
+  type BuiltinProviderName,
   readProcessEnv,
   readWorkingDirectory,
   resolveAgentApprovals,
@@ -128,6 +131,9 @@ interface SetupState {
   approvals?: ApprovalsConfig;
   api?: ApiConfig;
   principals?: PrincipalsConfig;
+  /** Trusted-only selections with no menu here; carried through a save. */
+  executor?: string;
+  memoryStore?: string;
   credentials: CredentialsFile;
   credentialsDirty: boolean;
   /** Channel tokens (Slack apps, keyed by agent id) and whether they changed. */
@@ -223,6 +229,11 @@ export const runSetup = async (
     ...(existing.approvals !== undefined ? { approvals: existing.approvals } : {}),
     ...(existing.api !== undefined ? { api: existing.api } : {}),
     ...(existing.principals !== undefined ? { principals: existing.principals } : {}),
+    // Trusted-only selections setup has no menu for, carried through a
+    // save untouched: a re-run that dropped them would put the operator's
+    // agents back on the host and the file store without a word.
+    ...(existing.executor !== undefined ? { executor: existing.executor } : {}),
+    ...(existing.memoryStore !== undefined ? { memoryStore: existing.memoryStore } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
@@ -250,16 +261,29 @@ export const runSetup = async (
     consumeNotices: () => recentNotices.splice(0),
   });
 
-  const defaultModelFor = (provider: CliProviderName): string =>
+  const builtInDefaultModel = (provider: BuiltinProviderName): string =>
     provider === 'openai'
       ? DEFAULT_OPENAI_MODEL
       : provider === 'codex'
         ? DEFAULT_CODEX_MODEL
         : DEFAULT_ANTHROPIC_MODEL;
+  // A contributed provider's default is its own, so setup has none to
+  // name for it — and none to write into a config or a soul.
+  const defaultModelFor = (provider: CliProviderName): string | undefined =>
+    isRegisteredProviderName(provider) ? undefined : builtInDefaultModel(provider);
   // Widened to CliProviderName only so setup can ask about the provider it
   // currently has selected, `demo` included; the rule itself is the shared one.
   const defaultKeyEnvFor = (provider: CliProviderName): string =>
-    defaultApiKeyEnvName(provider === 'demo' ? 'anthropic' : provider);
+    defaultApiKeyEnvName(credentialProviderOf(provider) ?? 'anthropic');
+
+  /**
+   * The sign-in a selection is stored under, or nothing: the demo provider
+   * has none, and a provider a plugin registered brings its own through
+   * its plugin's config and credentials — setup neither stores nor checks
+   * one for it.
+   */
+  const credentialProviderOf = (provider: CliProviderName): CredentialProviderName | undefined =>
+    provider === 'demo' || isRegisteredProviderName(provider) ? undefined : provider;
 
   const credentialLabel = (provider: CredentialProviderName, credential: StoredCredential): string =>
     credential.type === 'oauth_token'
@@ -307,6 +331,9 @@ export const runSetup = async (
   const signInSummary = (): string => {
     if (state.provider === 'demo') {
       return 'no account needed';
+    }
+    if (isRegisteredProviderName(state.provider)) {
+      return `served by the plugin that registers ${registeredProviderNameOf(state.provider)}, on its own sign-in`;
     }
     const credential = state.credentials[state.provider];
     if (credential) {
@@ -554,7 +581,13 @@ export const runSetup = async (
       ? readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
         ?? state.apiKeyEnv
       : undefined;
-    return state.credentials[provider] !== undefined
+    const stored = credentialProviderOf(provider);
+    // A contributed provider brings its own sign-in; setup cannot check
+    // it and does not claim to.
+    if (stored === undefined) {
+      return isRegisteredProviderName(provider);
+    }
+    return state.credentials[stored] !== undefined
       || readNonEmptyString(processEnv.STRATUS_API_KEY) !== undefined
       || (keyEnvSelector ? readNonEmptyString(processEnv[String(keyEnvSelector)]) !== undefined : false)
       || readNonEmptyString(processEnv[defaultKeyEnvFor(provider)]) !== undefined;
@@ -660,7 +693,8 @@ export const runSetup = async (
       // provider, wherever the default currently points.
       const listed = available.find((entry) => entry.id === typed);
       const inferred = listed?.provider
-        ?? (state.provider !== 'demo' ? state.provider : available[0]!.provider);
+        ?? credentialProviderOf(state.provider)
+        ?? available[0]!.provider;
       return { provider: inferred, id: typed };
     };
 
@@ -775,8 +809,9 @@ export const runSetup = async (
     const name = await prompter.ask('Name your agent (Enter to have one generated): ');
     const instructions = await prompter.ask('Describe their personality in a sentence or two (Enter for a starter you can edit later): ');
     const persona = instructions || DEFAULT_SOUL_STARTER;
+    const pinnedModel = state.model ?? defaultModelFor(state.provider);
     const pin = state.provider !== 'demo'
-      ? { provider: state.provider, model: state.model ?? defaultModelFor(state.provider) }
+      ? { provider: state.provider, ...(pinnedModel !== undefined ? { model: pinnedModel } : {}) }
       : {};
     const claimed = await claimSoulFile(
       env,
@@ -796,7 +831,13 @@ export const runSetup = async (
     if (!state.fallbackModel || state.provider === 'demo') {
       return undefined;
     }
-    const fallbackProvider = (state.fallbackProvider ?? state.provider) as CredentialProviderName;
+    const selectedFallback = state.fallbackProvider ?? state.provider;
+    if (isRegisteredProviderName(selectedFallback)) {
+      // A contributed fallback brings its own sign-in, as a contributed
+      // primary does; the test run selects it by name and no more.
+      return { provider: selectedFallback, model: state.fallbackModel };
+    }
+    const fallbackProvider = selectedFallback as CredentialProviderName;
     const envKey = (fallbackProvider === state.provider
       ? readNonEmptyString(processEnv.STRATUS_API_KEY)
       : undefined)
@@ -861,9 +902,26 @@ export const runSetup = async (
       ?? defaultKeyEnvFor(state.provider);
     const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
       ?? readNonEmptyString(processEnv[String(keyEnv)]);
-    const credential = envKey ? undefined : state.credentials[state.provider];
+    const storedFor = credentialProviderOf(state.provider);
+    const credential = envKey || storedFor === undefined ? undefined : state.credentials[storedFor];
     const boundUrl = credential?.type === 'api_key' ? credential.baseUrl : undefined;
-    const model = state.model ?? defaultModelFor(state.provider);
+
+    if (isRegisteredProviderName(state.provider)) {
+      // A contributed provider brings its own sign-in and its own default
+      // model; the test run selects it and no more, exactly as a real run
+      // resolves it — the configured fallback included, so the test
+      // exercises the failover the saved config would perform.
+      const fallback = buildTestFallback();
+      return {
+        provider: state.provider,
+        ...(state.model ? { model: state.model } : {}),
+        ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
+        ...(env.fetch ? { fetch: env.fetch } : {}),
+        ...(soul ? { soul } : {}),
+        ...(fallback ? { fallback } : {}),
+      };
+    }
+    const model = state.model ?? builtInDefaultModel(state.provider);
 
     if (state.provider === 'anthropic') {
       const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
@@ -2460,8 +2518,9 @@ export const runSetup = async (
     // below are objects, and a `Record<string, string | boolean>` was what
     // made dropping them the path of least resistance.
     const config: CliConfigFile = { provider: state.provider };
-    if (state.provider !== 'demo') {
-      config.model = state.model ?? defaultModelFor(state.provider);
+    const savedModel = state.model ?? defaultModelFor(state.provider);
+    if (state.provider !== 'demo' && savedModel !== undefined) {
+      config.model = savedModel;
     }
     if (state.provider === 'openai') {
       config.baseUrl = state.baseUrl ?? state.credentials.openai?.baseUrl ?? DEFAULT_OPENAI_BASE_URL;
@@ -2510,6 +2569,12 @@ export const runSetup = async (
     }
     if (state.principals !== undefined) {
       config.principals = state.principals;
+    }
+    if (state.executor !== undefined) {
+      config.executor = state.executor;
+    }
+    if (state.memoryStore !== undefined) {
+      config.memoryStore = state.memoryStore;
     }
 
     await saveConfigFile(configPath, config);
@@ -2615,8 +2680,8 @@ export const runSetup = async (
     // would make `stratus run` behave differently from what was just saved.
     const conflicts = [
       detectEnvOverride('STRATUS_PROVIDER', state.provider, '--provider'),
-      ...(state.provider !== 'demo'
-        ? [detectEnvOverride('STRATUS_MODEL', state.model ?? defaultModelFor(state.provider), '--model')]
+      ...(state.provider !== 'demo' && (state.model ?? defaultModelFor(state.provider)) !== undefined
+        ? [detectEnvOverride('STRATUS_MODEL', String(state.model ?? defaultModelFor(state.provider)), '--model')]
         : []),
       ...(state.provider === 'openai'
         ? [detectEnvOverride('STRATUS_BASE_URL', state.baseUrl ?? DEFAULT_OPENAI_BASE_URL, '--base-url')]
@@ -2642,7 +2707,7 @@ export const runSetup = async (
       writeLine(streams.stdout, 'You are ready to go — no account needed. Try:');
     } else if (readNonEmptyString(processEnv.STRATUS_API_KEY)) {
       writeLine(streams.stdout, 'STRATUS_API_KEY is exported and takes precedence over your saved sign-in. You are ready to go. Try:');
-    } else if (state.credentials[state.provider]) {
+    } else if (isRegisteredProviderName(state.provider) || state.credentials[credentialProviderOf(state.provider) ?? 'anthropic']) {
       writeLine(streams.stdout, `You are ${signInSummary()} — ready to go. Try:`);
     } else {
       const keyEnv = state.apiKeyEnv ?? defaultKeyEnvFor(state.provider);

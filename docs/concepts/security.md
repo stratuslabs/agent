@@ -11,10 +11,13 @@ linked own the full story.
   `<id>.whitelist.json`.
 - **Stored sign-ins are endpoint-bound**: a credential saved for one
   endpoint is never sent to an endpoint a project-local config selects.
-- **Slack channel tokens are gateway infrastructure secrets.** They live
-  under `channels.slack.<agentId>` and are never resolvable through an
+- **Channel tokens are gateway infrastructure secrets.** Slack's live under
+  `channels.slack.<agentId>`, and every plugin channel's under
+  `channels.<kind>.<agentId>` beside them; none is resolvable through an
   agent's own credential allowlist — an agent must not be able to read the
-  tokens of the transport carrying it. ([Slack](../guides/slack.md))
+  tokens of the transport carrying it. A channel plugin receives its own
+  kind's secrets through a host-owned handle, never through the resolver
+  agents use. ([Slack](../guides/slack.md), [Extending](../guides/extending.md#channels))
 - **Named credentials are the opposite case, and share the file without
   sharing the door.** `search.apiKey` and its kind live under `named` and
   *are* resolved through an agent's allowlist, because they are an agent

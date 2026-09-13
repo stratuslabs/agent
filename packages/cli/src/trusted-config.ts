@@ -163,3 +163,42 @@ export const loadServePlugins = async (
   }
   return block.status === 'present' ? block.value : {};
 };
+
+/**
+ * The daemon's `executor` or `memoryStore` selection — a name a plugin
+ * registered — under the trust rule `plugins` has, and for the same
+ * reason one step on: the plugins block decides which code runs, and
+ * these decide which of that code an agent's commands run in and where its
+ * memories are written. A cloned repository swapping a sandbox executor
+ * for the host's is the downgrade this refuses.
+ *
+ * Absent, or ignored, means the built-in — the caller substitutes it. A
+ * project config that says nothing leaves the global file's choice in
+ * force, as every trusted block does.
+ */
+export const loadServeRuntimeSelection = async (
+  key: 'executor' | 'memoryStore',
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<string | undefined> => {
+  let block = await readTrustedConfigBlock(key, env, configPath);
+  if (block.status === 'untrusted') {
+    // The global file's choice, not the built-in: a clone that cannot
+    // select an executor must not be able to deselect one either — a
+    // repository shipping `"executor": "local"` would otherwise swap the
+    // operator's sandbox for the host, which is the exact downgrade this
+    // block refuses. The same fall-through `principals` uses.
+    warn(
+      `ignoring ${key} in ${block.path}: a project-local config cannot decide `
+      + (key === 'executor' ? 'where this daemon\'s agents run their commands' : 'where this daemon\'s agents keep their memories')
+      + '. Using ~/.stratus/config.json instead.',
+    );
+    block = await readGlobalConfigBlock(key, env);
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring ${key} (${block.error instanceof Error ? block.error.message : String(block.error)}); using the built-in`);
+    return undefined;
+  }
+  return block.status === 'present' ? block.value : undefined;
+};
