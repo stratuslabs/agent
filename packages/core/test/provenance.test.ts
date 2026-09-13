@@ -430,6 +430,12 @@ test('a fact cannot forge a region heading: every entry renders on one line, con
   ]);
   assert.ok(!rendered.includes('\u001b'));
   assert.equal(escapeControlCharacters('a\tb\rc\u0085d\u2028e'), 'a\\tb\\rc\\u0085d\\u2028e');
+  // The bidi controls too: an override makes a line read differently to a
+  // person than to the model, which is the forged heading's trick again.
+  assert.equal(
+    escapeControlCharacters('\u202eover\u202c \u2066iso\u2069 \u200emark\u200f \u061c'),
+    '\\u202eover\\u202c \\u2066iso\\u2069 \\u200emark\\u200f \\u061c',
+  );
 });
 
 test('a stored session label nobody can read starts the session at unknown, never user', () => {

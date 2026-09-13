@@ -199,6 +199,8 @@ export const createAgentRuntime = async (
     askApproval?: (prompt: string) => Promise<string>;
     runtime: RuntimeConfig;
     approvals?: CliApprovalMode;
+    /** The mode came from `defaultApprovalMode`, not from a flag. */
+    approvalsDefaulted?: boolean;
     maxTurns?: number;
     env?: CliEnvironment;
     /** The config this command was pinned to, for reading its `plugins` block. */
@@ -348,7 +350,13 @@ export const createAgentRuntime = async (
     provider: runtimeProvider,
     tools,
     executor: executor ?? createLocalCommandExecutor(),
-    approvals: createApprovalPolicy(options.approvals ?? 'always', streams, options.env ?? {}, options.askApproval),
+    approvals: createApprovalPolicy(
+      options.approvals ?? 'always',
+      streams,
+      options.env ?? {},
+      options.askApproval,
+      options.approvalsDefaulted ?? false,
+    ),
     bus,
     skills,
     memory,
@@ -445,6 +453,8 @@ export const runSingleLoop = async (
     events?: boolean;
     runtime: RuntimeConfig;
     approvals?: CliApprovalMode;
+    /** The mode came from `defaultApprovalMode`, not from a flag. */
+    approvalsDefaulted?: boolean;
     maxTurns?: number;
     env?: CliEnvironment;
     configPath?: string;

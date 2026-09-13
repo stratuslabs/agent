@@ -25,6 +25,7 @@ import {
   menuPrefixWidth,
   createLogWriter,
   createApprovalPolicy,
+  defaultApprovalMode,
   warnOnUntrustedConfig,
   describePrincipals,
   loadServePrincipals,
@@ -216,7 +217,6 @@ test('parseCommand accepts positional prompts', () => {
     prompt: 'hello demo',
     format: 'text',
     events: true,
-    approvals: 'always',
   });
 });
 
@@ -226,7 +226,6 @@ test('parseCommand can read prompts from stdin', () => {
     prompt: 'inspect this tool',
     format: 'text',
     events: true,
-    approvals: 'always',
   });
 });
 
@@ -247,7 +246,6 @@ test('parseCommand accepts real-provider flags', () => {
     configPath: './config.json',
     format: 'text',
     events: true,
-    approvals: 'always',
   });
 });
 
@@ -258,7 +256,6 @@ test('parseCommand accepts the codex provider', () => {
     provider: 'codex',
     format: 'text',
     events: true,
-    approvals: 'always',
   });
 });
 
@@ -1349,7 +1346,6 @@ test('parseCommand accepts the anthropic provider and soul flag', () => {
     soul: './ava.md',
     format: 'text',
     events: true,
-    approvals: 'always',
   });
 
   // A name a plugin could register parses — whether one did is the run's
@@ -1609,7 +1605,7 @@ test("resolveRuntimeConfig ignores another provider's config file settings", asy
 });
 
 test('parseCommand accepts the chat command with run-style flags', () => {
-  assert.deepEqual(parseCommand(['chat']), { command: 'chat', events: false, approvals: 'always' });
+  assert.deepEqual(parseCommand(['chat']), { command: 'chat', events: false });
   assert.deepEqual(parseCommand(['chat', '--provider', 'anthropic', '--model', 'claude-opus-5', '--soul', './ava.md', '--max-turns', '4', '--events']), {
     command: 'chat',
     provider: 'anthropic',
@@ -1617,7 +1613,6 @@ test('parseCommand accepts the chat command with run-style flags', () => {
     soul: './ava.md',
     maxTurns: 4,
     events: true,
-    approvals: 'always',
   });
   assert.throws(() => parseCommand(['chat', '--approvals', 'sometimes']), /Invalid value for --approvals/);
   assert.throws(() => parseCommand(['chat', '--bogus']), /Unknown option: --bogus/);
@@ -12299,6 +12294,91 @@ test('plugins says a call parks indefinitely when the approval timeout is zero',
 
   assert.match(output.stdout, /approval timeout is 0, so it parks indefinitely/);
   assert.doesNotMatch(output.stdout, /before the timeout denies it/);
+});
+
+test('the approval default is gated at a terminal and always anywhere else', () => {
+  assert.equal(defaultApprovalMode({ terminal: true }), 'gated');
+  assert.equal(defaultApprovalMode({ terminal: false }), 'always');
+  // `--stdin` has already read the terminal, so nothing could take a y/N.
+  assert.equal(defaultApprovalMode({ terminal: true }, true), 'always');
+  // A prompt or approval stream injected by a caller is not a terminal.
+  assert.equal(defaultApprovalMode({ stdin: 'hello' }), 'always');
+  assert.throws(
+    () => parseCommand(['run', '--approvals', 'gated', '--stdin'], { stdin: 'hello' }),
+    /--approvals gated cannot be combined with --stdin/,
+  );
+});
+
+test('gated runs a safe tool without asking and asks about the rest; a defaulted always says so once', async () => {
+  const session = {
+    id: 's-safe',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [],
+    createdAt: '2026-09-04T00:00:00.000Z',
+    updatedAt: '2026-09-04T00:00:00.000Z',
+  } as unknown as Session;
+  const tool: Tool = {
+    name: 'memory.recall',
+    description: 'recall',
+    risk: 'safe',
+    execute: async () => null,
+  };
+  const safeCall = { session, call: { id: 'c1', toolName: 'memory.recall', input: {} }, tool, risk: 'safe' as const };
+  const gatedCall = { session, call: { id: 'c2', toolName: 'shell.run', input: { command: 'ls' } }, tool, risk: 'gated' as const };
+
+  let asks = 0;
+  const gated = createStreams();
+  const gatedPolicy = createApprovalPolicy('gated', gated.streams, {}, async () => {
+    asks += 1;
+    return 'n';
+  });
+  assert.equal(await gatedPolicy.approve(safeCall), true);
+  assert.equal(asks, 0);
+  assert.equal(await gatedPolicy.approve(gatedCall), false);
+  assert.equal(asks, 1);
+
+  // `ask` still means every call — the word says so.
+  const asking = createStreams();
+  const askPolicy = createApprovalPolicy('ask', asking.streams, {}, async () => {
+    asks += 1;
+    return 'y';
+  });
+  assert.equal(await askPolicy.approve(safeCall), true);
+  assert.equal(asks, 2);
+
+  // `always` reached by default, with nobody to ask: runs, and says so on
+  // stderr once, for the first call that would have asked — never for a
+  // safe one, and never when the flag was typed.
+  const defaulted = createStreams();
+  const defaultedPolicy = createApprovalPolicy('always', defaulted.streams, {}, undefined, true);
+  assert.equal(await defaultedPolicy.approve(safeCall), true);
+  assert.equal(defaulted.output.stderr, '');
+  assert.equal(await defaultedPolicy.approve(gatedCall), true);
+  assert.equal(await defaultedPolicy.approve(gatedCall), true);
+  assert.equal(
+    (defaulted.output.stderr.match(/Note: running shell\.run without asking — stdin is not a terminal and --approvals was not given/g) ?? []).length,
+    1,
+  );
+  assert.match(defaulted.output.stderr, /Pass --approvals never to refuse gated tools\./);
+
+  const chosen = createStreams();
+  const chosenPolicy = createApprovalPolicy('always', chosen.streams, {}, undefined, false);
+  assert.equal(await chosenPolicy.approve(gatedCall), true);
+  assert.equal(chosen.output.stderr, '');
+});
+
+test('runCli with no --approvals runs a safe tool at a terminal without a prompt', async () => {
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'please use the echo tool'],
+    streams,
+    env: { terminal: true },
+  });
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /tool.called demo\.echo/);
+  assert.doesNotMatch(output.stderr, /Approve tool call/);
+  assert.equal(output.stderr, '');
 });
 
 test('runCli says what an auto-discovered project config asked for and did not get', async () => {

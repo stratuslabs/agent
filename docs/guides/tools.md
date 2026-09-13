@@ -65,7 +65,14 @@ tool, which is fine for a private agent and is not what you want once a
 shell is installed.
 
 **Omitting `tools:` and writing `tools: []` are opposites.** No key grants
-everything; an empty list grants nothing. A bare `tools:` with nothing
+everything; an empty list grants nothing. Because no key fails open, the
+daemon says so for every roster soul that has none, each time it loads
+the roster:
+
+```
+agent blair has no tools: list, so it may call every tool this daemon loads — add tools: [...] to ~/.stratus/agents/blair.md to say which
+```
+ A bare `tools:` with nothing
 indented under it is the empty list — the shape you get by writing the key
 and not filling it, or by deleting the last entry — so that one is warned
 about too:
