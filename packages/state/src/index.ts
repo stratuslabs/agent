@@ -157,7 +157,19 @@ export interface AgentPrincipalsConfig {
    * which inherits.
    */
   slackUsers?: string[];
+  /**
+   * Who gets a turn at all. `anyone` — the default — admits every sender
+   * the adapter's own checks pass, labelling the unlisted ones `unknown`;
+   * `principals` refuses everyone not in `slackUsers` before a turn
+   * starts, and does not let the agent overhear them either. The label is
+   * provenance; this is authorization, and an agent that holds tools
+   * wants the second — a stranger's message is not merely uncertain, it
+   * is a prompt they chose.
+   */
+  admit?: PrincipalsAdmit;
 }
+
+export type PrincipalsAdmit = 'anyone' | 'principals';
 
 /** The `principals` block of ~/.stratus/config.json. */
 export interface PrincipalsConfig extends AgentPrincipalsConfig {
@@ -312,7 +324,17 @@ export interface FallbackRuntime {
   vision?: boolean;
 }
 
-export type RuntimeConfig =
+/**
+ * What an auto-discovered project-local config asked for and was refused.
+ * Recorded rather than warned about at resolution time, because nothing is
+ * logging yet when a run resolves; the CLI prints it once the run starts.
+ */
+export interface IgnoredUntrustedConfig {
+  path: string;
+  keys: Array<'soul' | 'systemPrompt'>;
+}
+
+type RuntimeConfigVariant =
   | { provider: 'demo'; soul?: ParsedSoul; soulPath?: string }
   | {
       provider: 'openai';
@@ -394,6 +416,10 @@ export type RuntimeConfig =
       apiKeyEnvVar?: string;
       fallback?: FallbackRuntime;
     };
+
+export type RuntimeConfig = RuntimeConfigVariant & {
+  ignoredFromUntrustedConfig?: IgnoredUntrustedConfig;
+};
 
 /**
  * A stored sign-in for a provider, kept in ~/.stratus/credentials.json.
@@ -1376,7 +1402,7 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   if (approvals) {
     resolved.approvals = approvals;
   }
-  const principals = parsePrincipalsConfig(config.principals);
+  const principals = parsePrincipalsConfig(config.principals, configPath);
   if (principals) {
     resolved.principals = principals;
   }
@@ -1589,34 +1615,65 @@ export const resolveAgentApprovals = (
   };
 };
 
-const parsePrincipalsEntry = (raw: unknown): AgentPrincipalsConfig | undefined => {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+const parsePrincipalsEntry = (raw: unknown, configPath: string, where: string): AgentPrincipalsConfig | undefined => {
+  if (raw === undefined) {
     return undefined;
+  }
+  // A block or override in the wrong shape is refused, never dropped: under
+  // admit: "principals" this block is an authorization boundary, and a
+  // dropped override inherits the shared answer — or, for the block itself,
+  // the default `anyone` — which is the door opened by a typo.
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid ${where} in config ${configPath}: expected an object, received ${JSON.stringify(raw)}.`);
   }
   const source = raw as Record<string, unknown>;
   const entry: AgentPrincipalsConfig = {};
-  if (Array.isArray(source.slackUsers)) {
-    // An empty array survives, as `slackApprovers: []` does: it is how an
-    // agent is excluded from a global list, and dropping it would fall back
-    // to exactly the list being excluded.
+  if (source.slackUsers !== undefined) {
+    // A list in the wrong shape is refused rather than dropped: under
+    // admit: "principals" this list is the door, and a per-agent override
+    // that was silently dropped would fall back to the shared list — the
+    // broader one it existed to narrow. An entry that is not an id is
+    // dropped from the list, which only ever narrows it; an empty array
+    // survives, as `slackApprovers: []` does, because it is how an agent
+    // is excluded from a shared list.
+    if (!Array.isArray(source.slackUsers)) {
+      throw new Error(
+        `Invalid ${where}.slackUsers in config ${configPath}: expected a list of Slack user ids, received ${JSON.stringify(source.slackUsers)}.`,
+      );
+    }
     entry.slackUsers = source.slackUsers.filter(
       (candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0,
     );
   }
+  if (source.admit !== undefined) {
+    // Refused rather than defaulted: a misspelt `admit` that quietly meant
+    // `anyone` would be the one setting here whose failure opens the door.
+    if (source.admit !== 'anyone' && source.admit !== 'principals') {
+      throw new Error(
+        `Invalid ${where}.admit in config ${configPath}: expected "anyone" or "principals", received ${JSON.stringify(source.admit)}.`,
+      );
+    }
+    entry.admit = source.admit;
+  }
   return entry;
 };
 
-const parsePrincipalsConfig = (raw: unknown): PrincipalsConfig | undefined => {
-  const shared = parsePrincipalsEntry(raw);
+const parsePrincipalsConfig = (raw: unknown, configPath: string): PrincipalsConfig | undefined => {
+  const shared = parsePrincipalsEntry(raw, configPath, 'principals');
   if (!shared) {
     return undefined;
   }
   const principals: PrincipalsConfig = { ...shared };
   const source = raw as Record<string, unknown>;
+  if (source.agents !== undefined && (typeof source.agents !== 'object' || source.agents === null || Array.isArray(source.agents))) {
+    throw new Error(
+      `Invalid principals.agents in config ${configPath}: expected an object keyed by agent id, received ${JSON.stringify(source.agents)}.`,
+    );
+  }
   if (typeof source.agents === 'object' && source.agents !== null && !Array.isArray(source.agents)) {
     const agents: Record<string, AgentPrincipalsConfig> = {};
     for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
-      const parsed = parsePrincipalsEntry(entry);
+      const parsed = parsePrincipalsEntry(entry, configPath, `principals.agents.${agentId}`);
       if (parsed) {
         agents[agentId] = parsed;
       }
@@ -1640,7 +1697,8 @@ export const resolveAgentPrincipals = (
 ): AgentPrincipalsConfig => {
   const agent = principals?.agents?.[agentId];
   const slackUsers = agent?.slackUsers ?? principals?.slackUsers;
-  return { ...(slackUsers ? { slackUsers } : {}) };
+  const admit = agent?.admit ?? principals?.admit;
+  return { ...(slackUsers ? { slackUsers } : {}), ...(admit ? { admit } : {}) };
 };
 
 export interface ResolvedConfigLocation {
@@ -1763,12 +1821,29 @@ export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
     if (!location) {
       return { status: 'absent' };
     }
-    const value = (await loadConfigFile(location.path))[key];
+    // An untrusted file that fails to load is judged like one that says
+    // nothing: it could not have set a trusted-only block whatever it
+    // contained, and a malformed block in a clone must not be the reason
+    // the operator's own policy is not read — refused is not the same as
+    // unreadable. Its own errors reach the operator through `run` and
+    // `doctor`, which read the file for what it may set.
+    const value = location.trusted
+      ? (await loadConfigFile(location.path))[key]
+      : await loadConfigFile(location.path).then((config) => config[key], () => undefined);
+    if (!location.trusted) {
+      if (value !== undefined) {
+        return { status: 'untrusted', path: location.path };
+      }
+      // The project file says nothing about this block, and it shadows
+      // the global file in discovery: the trusted file is the answer, as
+      // it would be were the project file not there. Otherwise a daemon
+      // started inside any cloned repository would run with none of the
+      // operator's policy — a clone that cannot set a policy must not be
+      // able to make one disappear either.
+      return readGlobalConfigBlock(key, env);
+    }
     if (value === undefined) {
       return { status: 'absent' };
-    }
-    if (!location.trusted) {
-      return { status: 'untrusted', path: location.path };
     }
     return { status: 'present', value: value as NonNullable<StratusConfigFile[K]>, path: location.path };
   } catch (error) {
@@ -1776,17 +1851,49 @@ export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
   }
 };
 
+/**
+ * The global file's block, for a caller that has already refused the
+ * discovered one. Absent only when the file does not exist: a global file
+ * that exists and cannot be read (`EACCES`, a directory where a file
+ * should be) is `unreadable`, so the caller's fail-closed handling applies
+ * — an operator's `admit: "principals"` behind a permission error must not
+ * read as no policy at all, which for the Slack door means `anyone`.
+ */
+export const readGlobalConfigBlock = async <K extends keyof StratusConfigFile>(
+  key: K,
+  env: StateEnvironment,
+): Promise<TrustedConfigBlock<NonNullable<StratusConfigFile[K]>>> => {
+  const globalPath = globalConfigPath(env);
+  try {
+    await stat(globalPath);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { status: 'absent' }
+      : { status: 'unreadable', error };
+  }
+  return readTrustedConfigBlock(key, env, globalPath);
+};
+
 // A soul travels with the run: an explicit soul path outranks STRATUS_SOUL,
 // which outranks the config file's "soul" key.
+//
+// **An untrusted config does not get to name the soul.** The soul is what
+// the model is told it is and what it may do, and an auto-discovered
+// `stratus.config.json` ships in any repository somebody clones — a
+// `soul: ./AGENT.md` in a cloned repo is not a persona setting, it is a
+// system prompt written by whoever pushed the repo, taking effect on
+// `stratus run` in that directory. `--soul` and `STRATUS_SOUL` still name
+// one, because the flag and the environment are the operator's own.
 export const resolveSoulPath = (
   selection: RuntimeSelection,
   env: StateEnvironment,
   fileConfig: StratusConfigFile,
+  configTrusted?: boolean,
 ): string | undefined => {
   const processEnv = readProcessEnv(env);
   const soulPath = selection.soul
     ?? readNonEmptyString(processEnv.STRATUS_SOUL)
-    ?? fileConfig.soul;
+    ?? (configTrusted === false ? undefined : fileConfig.soul);
 
   if (!soulPath) {
     return undefined;
@@ -1799,8 +1906,9 @@ export const resolveSoul = async (
   selection: RuntimeSelection,
   env: StateEnvironment,
   fileConfig: StratusConfigFile,
+  configTrusted?: boolean,
 ): Promise<ParsedSoul | undefined> => {
-  const resolvedPath = resolveSoulPath(selection, env, fileConfig);
+  const resolvedPath = resolveSoulPath(selection, env, fileConfig, configTrusted);
   if (!resolvedPath) {
     return undefined;
   }
@@ -1820,7 +1928,7 @@ export const resolveConfiguredSoul = async (
 ): Promise<{ soul: ParsedSoul; path: string } | undefined> => {
   const configLocation = await resolveConfigLocation(selection, env);
   const fileConfig = configLocation ? await loadConfigFile(configLocation.path) : {};
-  const soulPath = resolveSoulPath(selection, env, fileConfig);
+  const soulPath = resolveSoulPath(selection, env, fileConfig, configLocation?.trusted);
   if (!soulPath) {
     return undefined;
   }
@@ -2519,6 +2627,53 @@ export const resolveEnvApiKey = (
   return undefined;
 };
 
+/**
+ * What an untrusted config asked for and did not get: `soul` and
+ * `systemPrompt`, minus a key the selection or the environment outranked,
+ * which is beaten rather than refused. One rule with three readers —
+ * {@link resolveRuntimeConfig} records it on every run, `stratus doctor`
+ * applies it when no run could resolve, and `stratus serve` says it at
+ * startup from {@link discoverIgnoredUntrustedConfig}, because the served
+ * runtime that fails to resolve (a real provider with no usable credential)
+ * is exactly the one whose record the daemon never sees.
+ */
+export const ignoredUntrustedConfigKeys = (
+  selection: Pick<RuntimeSelection, 'soul'>,
+  fileConfig: StratusConfigFile,
+  location: Pick<ResolvedConfigLocation, 'path' | 'trusted'> | undefined,
+  env: StateEnvironment = {},
+): IgnoredUntrustedConfig | undefined => {
+  if (location === undefined || location.trusted) {
+    return undefined;
+  }
+  const processEnv = readProcessEnv(env);
+  const keys: IgnoredUntrustedConfig['keys'] = [];
+  if (selection.soul === undefined && readNonEmptyString(processEnv.STRATUS_SOUL) === undefined && fileConfig.soul) {
+    keys.push('soul');
+  }
+  if (readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT) === undefined && fileConfig.systemPrompt) {
+    keys.push('systemPrompt');
+  }
+  return keys.length > 0 ? { path: location.path, keys } : undefined;
+};
+
+/**
+ * {@link ignoredUntrustedConfigKeys} for the config a run started here
+ * would discover, without resolving a run: a file that cannot be read is
+ * answered as nothing ignored, because its own error is the run's to report.
+ */
+export const discoverIgnoredUntrustedConfig = async (
+  selection: Pick<RuntimeSelection, 'configPath'>,
+  env: StateEnvironment = {},
+): Promise<IgnoredUntrustedConfig | undefined> => {
+  const location = await resolveConfigLocation(selection, env).catch(() => undefined);
+  if (location === undefined || location.trusted) {
+    return undefined;
+  }
+  const fileConfig = await loadConfigFile(location.path).catch(() => undefined);
+  return fileConfig === undefined ? undefined : ignoredUntrustedConfigKeys({}, fileConfig, location, env);
+};
+
 export const resolveRuntimeConfig = async (
   selection: RuntimeSelection,
   env: StateEnvironment = {},
@@ -2530,7 +2685,7 @@ export const resolveRuntimeConfig = async (
   // is preset, the discovered location otherwise.
   const configTrusted = selection.presetConfig !== undefined ? selection.presetConfig.trusted : configLocation?.trusted;
   const configPathShown = selection.presetConfig !== undefined ? selection.presetConfig.path : configLocation?.path;
-  const soulPath = selection.presetSoul !== undefined ? undefined : resolveSoulPath(selection, env, fileConfig);
+  const soulPath = selection.presetSoul !== undefined ? undefined : resolveSoulPath(selection, env, fileConfig, configTrusted);
   const soul = selection.presetSoul ?? (soulPath ? await loadSoulFile(soulPath) : undefined);
 
   // Explicit flags and env vars outrank the soul's own provider/model hints,
@@ -2541,8 +2696,25 @@ export const resolveRuntimeConfig = async (
     ?? fileConfig.provider
     ?? 'demo';
 
+  // What the untrusted file asked for and did not get, for the CLI to say
+  // once the run is up — a persona that silently failed to apply reads as
+  // the agent ignoring its instructions rather than as a trust decision.
+  // Computed before the demo return: a persona shipped in a clone is
+  // exactly what the demo run in that clone would otherwise pick up.
+  const ignoredFromUntrustedConfig = ignoredUntrustedConfigKeys(
+    selection,
+    fileConfig,
+    configPathShown !== undefined && configTrusted !== undefined ? { path: configPathShown, trusted: configTrusted } : undefined,
+    env,
+  );
+
   if (provider === 'demo') {
-    return { provider: 'demo', ...(soul ? { soul } : {}), ...(soulPath ? { soulPath } : {}) };
+    return {
+      provider: 'demo',
+      ...(soul ? { soul } : {}),
+      ...(soulPath ? { soulPath } : {}),
+      ...(ignoredFromUntrustedConfig ? { ignoredFromUntrustedConfig } : {}),
+    };
   }
 
   // A config file's model/baseUrl/apiKeyEnv were written for the provider
@@ -2736,11 +2908,17 @@ export const resolveRuntimeConfig = async (
           ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
         };
 
+  // The same rule as the soul: a preamble that sits above the persona in
+  // every prompt is not something a cloned repo gets to write.
   const systemPrompt = readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT)
-    ?? fileConfig.systemPrompt;
+    ?? (configTrusted === false ? undefined : fileConfig.systemPrompt);
 
   if (systemPrompt) {
     resolved.systemPrompt = String(systemPrompt);
+  }
+
+  if (ignoredFromUntrustedConfig) {
+    resolved.ignoredFromUntrustedConfig = ignoredFromUntrustedConfig;
   }
 
   if (env.fetch) {
@@ -3627,6 +3805,22 @@ export const collectAvailableModels = async (
  * could have read. `unread` names what could not be answered, so the
  * caller can say which check did not run instead of implying none did.
  */
+/**
+ * A config that is not there at all, which is not a config that could not
+ * be read — the distinction `ConfigFileError.code` exists for.
+ *
+ * Callers here pin the global config deliberately, and pinning is what
+ * turns "no file" into a rejection: an unpinned resolve skips a candidate
+ * that is not there, while a pinned one reports the file it was told to
+ * use. On a machine where `stratus setup` has not run yet there is no
+ * `~/.stratus/config.json`, and the id check has nothing it could miss —
+ * so saying it was skipped named a hazard that does not exist, on the one
+ * path every new install takes. A config that exists and will not read is
+ * still reported: there the ids really are unchecked.
+ */
+const isAbsentConfig = (reason: unknown): boolean =>
+  reason instanceof ConfigFileError && reason.code === 'ENOENT';
+
 export const declaredAgentIds = async (
   env: StateEnvironment,
   configPath?: string,
@@ -3656,7 +3850,7 @@ export const declaredAgentIds = async (
     if (configured.value) {
       ids.add(configured.value.soul.agent.id);
     }
-  } else {
+  } else if (!isAbsentConfig(configured.reason)) {
     unread.push('the configured default soul');
   }
   return { ids, unread };
@@ -3825,8 +4019,10 @@ export const listAgentSummaries = async (
     return { provider, model };
   };
 
+  // The config's soul under the same trust rule `resolveSoulPath` applies:
+  // a project-local file's default is not the default a run would use.
   const defaultSoulPath = readNonEmptyString(processEnv.STRATUS_SOUL)
-    ?? activeConfig.soul;
+    ?? (activeConfigLocation?.trusted === false ? undefined : activeConfig.soul);
   const resolvedDefaultSoul = defaultSoulPath
     ? path.resolve(readWorkingDirectory(env), defaultSoulPath)
     : undefined;

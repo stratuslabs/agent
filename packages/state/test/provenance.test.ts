@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -26,6 +26,7 @@ import {
   resolveAgentPrincipals,
   validateConfigFile,
   withLegacyDefaultMemories,
+  readTrustedConfigBlock,
 } from '../src/index.ts';
 
 const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'stratus-provenance-'));
@@ -173,7 +174,12 @@ test('the principals block parses like approvals: per-agent overrides, an empty 
   assert.deepEqual(resolveAgentPrincipals(config.principals, 'cy'), { slackUsers: ['U01DYLAN'] });
   assert.deepEqual(resolveAgentPrincipals(config.principals, 'dee'), { slackUsers: ['U01DYLAN'] });
   assert.deepEqual(resolveAgentPrincipals(undefined, 'ava'), {});
-  assert.equal(validateConfigFile({ principals: 'U01DYLAN' }, 'test-config').principals, undefined);
+  // A block that is not an object is refused, not dropped: dropped, it
+  // would be the default `anyone` — see the admit test below.
+  assert.throws(
+    () => validateConfigFile({ principals: 'U01DYLAN' }, 'test-config'),
+    /Invalid principals in config test-config: expected an object, received "U01DYLAN"\./,
+  );
 });
 
 // ---- the two harness paths -------------------------------------------------
@@ -357,4 +363,120 @@ test('a stored memory label nobody can read is a recorded unknown, not an absent
   const entries = (await store.list('ava')).entries;
   assert.equal(entries.find((entry) => entry.id === 'ava:memory:1')?.trust, undefined);
   assert.equal(entries.find((entry) => entry.id === 'ava:memory:2')?.trust, 'unknown');
+});
+
+test('principals.admit is inherited like slackUsers, and a misspelling is refused rather than defaulted open', () => {
+  const config = validateConfigFile({
+    principals: {
+      slackUsers: ['U01DYLAN'],
+      admit: 'principals',
+      agents: {
+        ava: { admit: 'anyone' },
+        bea: { slackUsers: ['U01OPS'] },
+      },
+    },
+  }, 'test-config');
+  // Ava opens her door again; Bea keeps the shared answer with her own list;
+  // Cy inherits both; nothing configured says nothing.
+  assert.deepEqual(resolveAgentPrincipals(config.principals, 'ava'), { slackUsers: ['U01DYLAN'], admit: 'anyone' });
+  assert.deepEqual(resolveAgentPrincipals(config.principals, 'bea'), { slackUsers: ['U01OPS'], admit: 'principals' });
+  assert.deepEqual(resolveAgentPrincipals(config.principals, 'cy'), { slackUsers: ['U01DYLAN'], admit: 'principals' });
+  assert.deepEqual(resolveAgentPrincipals(undefined, 'ava'), {});
+
+  // The one setting here whose failure would open the door: a value that
+  // is neither word is an error naming the key, never "anyone".
+  assert.throws(
+    () => validateConfigFile({ principals: { admit: 'principal' } }, 'test-config'),
+    /Invalid principals\.admit in config test-config: expected "anyone" or "principals", received "principal"/,
+  );
+  assert.throws(
+    () => validateConfigFile({ principals: { agents: { ava: { admit: true } } } }, 'test-config'),
+    /Invalid principals\.agents\.ava\.admit in config test-config/,
+  );
+  // The list is the door under admit: "principals", so a list in the wrong
+  // shape is refused too — a per-agent override that was silently dropped
+  // would fall back to the shared list, the broader one it existed to narrow.
+  assert.throws(
+    () => validateConfigFile({ principals: { slackUsers: ['U01DYLAN'], admit: 'principals', agents: { bea: { slackUsers: 'U-BOB' } } } }, 'test-config'),
+    /Invalid principals\.agents\.bea\.slackUsers in config test-config: expected a list of Slack user ids, received "U-BOB"\./,
+  );
+  assert.throws(
+    () => validateConfigFile({ principals: { slackUsers: 'U01DYLAN' } }, 'test-config'),
+    /Invalid principals\.slackUsers in config test-config: expected a list of Slack user ids, received "U01DYLAN"\./,
+  );
+  // An empty list is still how an agent is excluded from the shared one.
+  assert.deepEqual(
+    resolveAgentPrincipals(validateConfigFile({ principals: { slackUsers: ['U01DYLAN'], agents: { bea: { slackUsers: [] } } } }, 'test-config').principals, 'bea'),
+    { slackUsers: [] },
+  );
+  // And so is the block itself, or an override, in the wrong shape: a
+  // dropped block is the default `anyone`, a dropped override the shared
+  // answer — both doors opened by a typo.
+  assert.throws(
+    () => validateConfigFile({ principals: [] }, 'test-config'),
+    /Invalid principals in config test-config: expected an object, received \[\]\./,
+  );
+  assert.throws(
+    () => validateConfigFile({ principals: { admit: 'principals', agents: { bea: [] } } }, 'test-config'),
+    /Invalid principals\.agents\.bea in config test-config: expected an object, received \[\]\./,
+  );
+  assert.throws(
+    () => validateConfigFile({ principals: { admit: 'principals', agents: ['bea'] } }, 'test-config'),
+    /Invalid principals\.agents in config test-config: expected an object keyed by agent id, received \["bea"\]\./,
+  );
+  // Absent is still absent.
+  assert.equal(validateConfigFile({ provider: 'demo' }, 'test-config').principals, undefined);
+});
+
+test('a global config that exists but cannot be read is unreadable behind a silent project config, never absent', async () => {
+  // `~/.stratus` is a file, so the global config's path cannot be resolved
+  // (ENOTDIR — the same class as EACCES). Before, any stat failure read as
+  // "no global file", and an operator's admit: "principals" behind a
+  // permission error became no policy — which for the Slack door is
+  // `anyone`. Only ENOENT is absent; the rest is the caller's fail-closed case.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-global-unreadable-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-global-unreadable-project-'));
+  await writeFile(path.join(home, '.stratus'), 'not a directory');
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  const block = await readTrustedConfigBlock('principals', { homeDir: home, cwd: project, processEnv: {} });
+  assert.equal(block.status, 'unreadable');
+  assert.equal(block.status === 'unreadable' ? (block.error as NodeJS.ErrnoException).code : undefined, 'ENOTDIR');
+});
+
+test('a project config that says nothing about a trusted-only block leaves the global block in force', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shadow-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-shadow-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ principals: { slackUsers: ['U-DYLAN'], admit: 'principals' } }),
+  );
+  // The clone is discovered first and has no principals key. Before, that
+  // read as "absent" and the operator's policy vanished with it.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  const env = { homeDir: home, cwd: project, processEnv: {} };
+  assert.deepEqual(await readTrustedConfigBlock('principals', env), {
+    status: 'present',
+    value: { slackUsers: ['U-DYLAN'], admit: 'principals' },
+    path: path.join(home, '.stratus', 'config.json'),
+  });
+  // A clone that does carry the key is still refused, and still not the
+  // global one's substitute — that is the caller's decision to make.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ principals: { admit: 'anyone' } }));
+  assert.deepEqual(await readTrustedConfigBlock('principals', env), {
+    status: 'untrusted',
+    path: path.join(project, 'stratus.config.json'),
+  });
+  // A clone whose block is malformed is refused, not unreadable: the
+  // operator's own policy is still the answer.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ principals: { admit: 'principal' } }));
+  assert.deepEqual(await readTrustedConfigBlock('principals', env), {
+    status: 'present',
+    value: { slackUsers: ['U-DYLAN'], admit: 'principals' },
+    path: path.join(home, '.stratus', 'config.json'),
+  });
+  // And no global file is absent, as it always was.
+  const bare = await mkdtemp(path.join(os.tmpdir(), 'stratus-shadow-bare-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(await readTrustedConfigBlock('principals', { homeDir: bare, cwd: project, processEnv: {} }), { status: 'absent' });
 });

@@ -88,12 +88,35 @@ export interface SessionRouting {
    * agent had actually answered, and the Slack adapter orders the agents
    * sharing a thread by this to decide whose an untagged follow-up is.
    *
+   * A file counts: a turn whose tool result carried one (`filePathsOf` in
+   * `@stratusagent/core`) put something in the thread, whether or not it
+   * said a word beside it.
+   *
    * Still routing, not transcript: it says *when* an agent spoke, never
    * what was said. Optional because a host may not track it; a caller that
    * needs to order two sessions checks for it rather than assuming, and
    * says what it gives up without it.
    */
   lastSpokeAt?: string;
+  /**
+   * When the agent last answered a message that ADDRESSED it — its newest
+   * reply to a turn somebody asked for, ISO-8601 — and absent when it never
+   * has. The anchor of an attention window: an agent that judges whether
+   * to speak does so for a bounded stretch after being spoken to, and a
+   * reply it chose to give on a turn nobody asked for does not move the
+   * anchor, or a talkative judge would keep itself attentive for good.
+   * `lastSpokeAt` stays the thread rule's answer, which counts every reply.
+   */
+  lastAnsweredAt?: string;
+  /**
+   * How many user messages the session holds after that answer — heard,
+   * judged, or asked and left unanswered — and every one of them when it
+   * never has. With `lastAnsweredAt`, the two halves of the window, both
+   * read from the session rather than remembered in-process, so a restart
+   * forgets nothing about who is still listening. Absent from a host that
+   * does not count.
+   */
+  heardSinceAnswered?: number;
   /**
    * The text the session's latest turn produced (`latestTurnReply` in
    * `@stratusagent/core`, the same rule an adapter finalizes its own turns
@@ -104,6 +127,16 @@ export interface SessionRouting {
    * this, the approval survived the restart and the reply went nowhere.
    */
   reply?: string;
+  /**
+   * Whether the turn the session is on is one nobody asked for — its
+   * newest user message was dispatched `addressed: false`
+   * (`isUnaddressedTurn` in `@stratusagent/core`). Read for a turn the
+   * adapter did not render: a judged turn the daemon died inside is
+   * failed at the next start by a process with no renderer for it, and
+   * an error note posted for a turn nobody asked for, that said nothing,
+   * is the interruption the turn existed to avoid.
+   */
+  unaddressed?: boolean;
 }
 
 export interface GatewayLike {

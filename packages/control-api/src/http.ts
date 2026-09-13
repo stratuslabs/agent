@@ -14,9 +14,12 @@ export const API_PREFIX = '/api/v1';
  *
  * A bound rather than a stream to memory: every body here is a small JSON
  * document (a message, a soul, a config), and an unbounded read is a way to
- * exhaust a daemon's memory from a socket that never closes.
+ * exhaust a daemon's memory from a socket that never closes. The event
+ * stream's inbound frames are bounded by the same number: they are the same
+ * door, and `ws` would otherwise take its own 100 MB default on one side
+ * while the other stopped at 1 MB.
  */
-const MAX_BODY_BYTES = 1_048_576;
+export const MAX_BODY_BYTES = 1_048_576;
 
 /** An error a client can act on: a stable code plus a sentence for a human. */
 export class ApiError extends Error {

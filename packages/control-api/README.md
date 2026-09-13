@@ -101,7 +101,7 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/agents` | The roster as data — soul metadata, avatar palette, resolved provider/model, memory counts, activity |
 | POST | `/agents` | Create an agent: writes a soul file and reloads the roster |
 | GET | `/agents/:id` | One agent in full: complete instructions, the raw soul markdown, its pins |
-| PUT | `/agents/:id` | Edit a soul, by field or as raw markdown |
+| PUT | `/agents/:id` | Edit a soul, by field (`name`, `instructions`, `tools`, `skills`, `credentials`, `provider`, `model`, `listens` — one of `mentions`, `thread`, `judge`, an empty string clearing it; anything else answers `400 invalid_listens`) or as raw markdown |
 | GET | `/agents/:id/grants` | What this agent may do unattended beyond the built-in safe list — its command scopes, origins, and standing tool grants, from `~/.stratus/agents/<id>.whitelist.json`. A tool grant the engine would not honour carries `stale` saying why (the tool is now contributed by another package, or nothing loads it). The id is validated but not looked up: a grant can outlive its agent, and this is how it is found. `501 grants_unavailable` from a daemon started without a grant store |
 | POST | `/agents/:id/grants/revoke` | Take one back: exactly one of `{ tool }`, `{ scope }` (the listed `description`, such as `git push`), or `{ origin }` → `{ revoked: true }`. Through the daemon's own store, so the next call is judged without it — no restart. `404 grant_not_found` when nothing matched; `400 invalid_grant` for none or several; `409 grants_unreadable` when the agent's whitelist file exists but will not parse, since nothing is written over a grant list nobody can read |
 | POST | `/roster/reload` | Re-read the agents directory and the configured default soul |
@@ -413,12 +413,16 @@ makes that a live question rather than a hypothetical.
 ### `always` means one thing, and the request says which
 
 `POST /approvals` takes `answer` as exactly `once`, `always`, or `deny`;
-anything else is `400 invalid_answer`. `actor` is optional and records who
-decided — a channel-native id, such as a Slack user — and a standing grant
-made by that answer records it too, as `grantedBy` in the grants listing. A
-request that has already been decided, has expired, or whose turn was
-cancelled answers `409 approval_not_pending` rather than silently doing
-nothing twice.
+anything else is `400 invalid_answer`. Who decided is recorded on the
+resolution event and, for a standing grant, as `grantedBy` in the grants
+listing. A Slack click records the clicker's user id; a decision through this
+endpoint records how the caller authenticated — `api` for a bearer token,
+`dashboard` for a browser session — with the optional `actor` from the body
+appended after a colon (`api:ops-bot`). The body never sets the recorded
+actor bare, so a request cannot spell a Slack approver's id and read as that
+approver's decision. A request that has already been decided, has expired,
+or whose turn was cancelled answers `409 approval_not_pending` rather than
+silently doing nothing twice.
 
 `once` and `deny` mean what they say, for this call. **`always` is a grant to
 the agent, and it lasts until an operator revokes it** — for every tool but
@@ -552,6 +556,11 @@ Deltas are dropped for a client whose socket has backed up past 1 MB, and only
 deltas: losing a token from a reply is a cosmetic gap, while losing a
 completion, a failure, or an approval leaves a UI stuck on a turn that already
 ended. A `{ "type": "dropped", "deltas": n }` frame says when it happened.
+
+The same 1 MB bounds what a client may send: a request body past it is
+`413 body_too_large`, and a WebSocket frame past it closes the socket with
+code 1009. A subscribe frame is a few hundred bytes; nothing a client has a
+reason to send comes near either.
 
 ## Configuration
 

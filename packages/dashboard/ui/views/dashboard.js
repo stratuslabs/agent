@@ -31,7 +31,7 @@ const approvalCard = () => {
 
   const decide = async (requestId, answer) => {
     try {
-      await api.resolveApproval({ requestId, answer, actor: 'dashboard' });
+      await api.resolveApproval({ requestId, answer });
     } catch {
       // A request that is no longer pending was already decided, expired, or
       // its turn was cancelled. Refreshing shows the truth; retrying would

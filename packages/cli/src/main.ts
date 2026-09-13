@@ -27,10 +27,12 @@ import { runUpdate } from './commands/update.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
 import { HELP_TEXT } from './help.ts';
 import { writeLine, readPromptFromStdin } from './io.ts';
+import { CLI_VERSION } from './npm.ts';
 import { parseCommand, defaultApprovalMode } from './parse.ts';
 import {
   resolveRuntimeConfig,
   warnOnCredentialOverride,
+  warnOnUntrustedConfig,
   runSingleLoop,
   printSessionSummary,
   formatRuntimeBanner,
@@ -55,6 +57,13 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'help') {
       writeLine(streams.stdout, HELP_TEXT);
+      return 0;
+    }
+
+    // Above the migration check below, like help: reporting which build
+    // this is must not depend on the state it would migrate.
+    if (command.command === 'version') {
+      writeLine(streams.stdout, `stratus ${CLI_VERSION}`);
       return 0;
     }
 
@@ -215,6 +224,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     }
 
     const runtime = await resolveRuntimeConfig(command, resolvedEnv);
+    warnOnUntrustedConfig(runtime, streams);
     await warnOnCredentialOverride(runtime, streams, resolvedEnv);
 
     if (command.format === 'text') {
