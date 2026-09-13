@@ -6,7 +6,7 @@ import { formatEvent } from '../events.ts';
 import { writeLine } from '../io.ts';
 import type { ParsedChatCommand } from '../parse.ts';
 import { stratusHeaderLines } from '../prompter.ts';
-import { resolveRuntimeConfig, warnOnCredentialOverride, createAgentRuntime } from '../runtime.ts';
+import { resolveRuntimeConfig, warnOnCredentialOverride, warnOnUntrustedConfig, createAgentRuntime } from '../runtime.ts';
 
 const lastAssistantReply = (session: Session): string => {
   for (let index = session.messages.length - 1; index >= 0; index -= 1) {
@@ -42,6 +42,7 @@ export const runChat = async (
     ...(command.soul ? { soul: command.soul } : {}),
     ...(command.configPath ? { configPath: command.configPath } : {}),
   }, env);
+  warnOnUntrustedConfig(runtime, streams);
   await warnOnCredentialOverride(runtime, streams, env);
 
   // Interactive means the real terminal: an injected stdinStream is by

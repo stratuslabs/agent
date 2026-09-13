@@ -32,6 +32,7 @@ import { parseCommand } from './parse.ts';
 import {
   resolveRuntimeConfig,
   warnOnCredentialOverride,
+  warnOnUntrustedConfig,
   runSingleLoop,
   printSessionSummary,
   formatRuntimeBanner,
@@ -223,6 +224,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     }
 
     const runtime = await resolveRuntimeConfig(command, resolvedEnv);
+    warnOnUntrustedConfig(runtime, streams);
     await warnOnCredentialOverride(runtime, streams, resolvedEnv);
 
     if (command.format === 'text') {

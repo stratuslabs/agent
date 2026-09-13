@@ -116,6 +116,7 @@ export { loadServePrincipals } from './trusted-config.ts';
 export {
   resolveRuntimeConfig,
   warnOnCredentialOverride,
+  warnOnUntrustedConfig,
   runSingleLoop,
   printSessionSummary,
 } from './runtime.ts';
