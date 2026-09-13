@@ -10,7 +10,15 @@ Stratus agents are designed to work like a teammate, not a stateless bot:
   can only resolve the secrets it was granted.
 - **Delegation.** An orchestrator agent uses the `agent.delegate` tool to
   hand a task to a teammate and gets their reply back — the teammate runs
-  with *their own* memory, tools, and credentials.
+  with *their own* memory, tools, and credentials. Who it may hand work to
+  is its soul's `delegates:` list — agent ids, or `*` for anyone on the
+  roster — and, like `credentials:`, omitted means nobody: running a turn
+  as another agent is the lateral move an injected prompt would ask for.
+  Because `*` means anyone, no agent may have it as an id: a soul that
+  declares `id: *` is skipped at load with a message naming the fix, and
+  its sessions, memory, and credentials stay on disk under that id. The
+  registry refuses the id too, so a definition built in code cannot put
+  it on the roster either.
 - **Routing.** `createAgentRouter` maps inbound work (a channel, a mention,
   a message) to the right agent, so the same person consistently answers in
   the same places.

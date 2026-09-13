@@ -38,6 +38,7 @@ Usage:
   stratus doctor
   stratus update
   stratus update --check
+  stratus --version
   stratus service install
   stratus service status
   stratus logs -f
@@ -175,17 +176,20 @@ Commands:
                    and which file or environment variable decided each, then
                    flag anything that would surprise you (--format json)
   update           The whole upgrade dance, in the order that cannot lose
-                   data: stop stratusd, upgrade the package from npm, run
+                   data: stop stratusd, upgrade the package from npm —
+                   together with every optional first-party package this
+                   machine has, which ship in lockstep with it — run
                    pending state migrations, rewrite the service unit with
                    current node/entrypoint paths, restart. --check reports
                    what it would do without doing any of it (exits 1 when
-                   something is actionable). Works offline too — an
-                   unreachable npm skips the upgrade but still migrates and
-                   repairs the unit
+                   something is actionable, a companion left behind
+                   included). Works offline too — an unreachable npm skips
+                   the upgrade but still migrates and repairs the unit
   dashboard        Open the web dashboard: finds a running daemon (or starts one),
                    mints a single-use sign-in link, and opens your browser at it.
                    Needs @stratusagent/control-api and @stratusagent/dashboard
   help             Show this help message
+  version          Print this build's version (also: --version, -v)
 
 Agent options:
   --name           Agent name (omit to have one generated)
@@ -202,7 +206,9 @@ Options:
   --config         Config file path (run: load settings from it, setup: write it)
   --format         Output format: text or json (default: text)
   --no-events      Hide event-by-event progress lines in text mode
-  --approvals      run/chat: tool approval mode — always, ask, or never (default: always)
+  --approvals      run/chat: tool approval mode — always, ask (every call), gated (safe tools
+                   run, the rest ask), or never. Default: gated at a terminal; always
+                   otherwise, said once on stderr the first time a gated tool runs
                    serve: how the daemon reaches a human — headless (refuse every
                    gated call) or remote (ask in Slack). Default headless, or
                    the config file's "approvals.mode"
@@ -227,11 +233,14 @@ Options:
   --api-host       serve: control API interface (default: 127.0.0.1)
   --api-port       serve: control API port (default: 4123, 0 for any free port)
   --help, -h       Show this help message
+  --version, -v    Print this build's version and exit
 
 Config file:
   The CLI looks for ./stratus.config.json first, then a path from --config / STRATUS_CONFIG,
   then the global ~/.stratus/config.json written by \`stratus setup\`.
-  A "soul" key (or STRATUS_SOUL) points at a soul file so every run uses that agent.
+  A "soul" key (or STRATUS_SOUL) points at a soul file so every run uses that agent —
+  from ~/.stratus/config.json or a file named with --config; an auto-discovered
+  ./stratus.config.json does not get to choose a soul or a systemPrompt.
 
 Plugins (tools):
   Capability is optional: install a package, then list it under "plugins" in a
@@ -251,10 +260,12 @@ Plugins (tools):
   Installing one grants no agent anything — each soul lists what it may call.
 
 Soul files:
-  A soul file is markdown with frontmatter (name, provider, model, tools, skills, credentials)
+  A soul file is markdown with frontmatter (name, provider, model, tools, skills, credentials, delegates)
   followed by the agent's persona in prose. See examples/souls/ava.md.
   "tools" takes exact names or a whole toolset: tools: [fs.read, fs.search] or
   tools: [fs.*]. Omitted means every registered tool.
+  "delegates" lists the agent ids this agent may hand work to with agent.delegate,
+  or ['*'] for anyone on the roster; omitted means nobody.
   "skills" is the same allowlist shape over installed skills (see stratus
   skills), except omitted means none — a skill is enabled per agent, never
   by being installed.

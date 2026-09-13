@@ -112,6 +112,25 @@ test('editing a soul round-trips through the parser and refuses an id change', a
     assert.equal(badSkills.status, 400);
     assert.equal((await json<{ error: { code: string } }>(badSkills)).error.code, 'invalid_allowlist');
 
+    // A delegates entry that is not an agent id is the client's error, not
+    // a failed soul round-trip.
+    const badDelegates = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ delegates: ['bea', 'a/b'] }),
+    });
+    assert.equal(badDelegates.status, 400);
+    const badDelegatesBody = await json<{ error: { code: string; message: string } }>(badDelegates);
+    assert.equal(badDelegatesBody.error.code, 'invalid_delegates');
+    assert.match(badDelegatesBody.error.message, /"a\/b" is not an agent id or \*/);
+    const goodDelegates = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ delegates: ['bea', '*'] }),
+    });
+    assert.equal(goodDelegates.status, 200);
+    assert.match(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8'), /delegates:\n  - bea\n  - \*/);
+
     // An id keys sessions, memory, and credentials. Changing it in place
     // would not rename an agent — it would hand this one's history away.
     const renamed = await harness.call('/api/v1/agents/ava', {
@@ -429,7 +448,7 @@ test('a parked approval is listed and resolvable, and a late second click is ref
       body: JSON.stringify({ requestId: parked.requestId, answer: 'once', actor: 'web' }),
     });
     assert.equal(resolved.status, 200);
-    assert.deepEqual(await settles(answer, 'the parked call'), { answer: 'once', actor: 'web' });
+    assert.deepEqual(await settles(answer, 'the parked call'), { answer: 'once', actor: 'api:web' });
 
     // The normal outcome of a button clicked a minute too late. Never a
     // "try again".
@@ -887,6 +906,49 @@ test('the config document round-trips, and bad value types are refused', async (
     });
     assert.equal(wrongType.status, 400);
     assert.equal((await json<{ error: { code: string } }>(wrongType)).error.code, 'invalid_config_value');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('how an agent listens is editable by field, and only to a mode', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  try {
+    const judged = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ listens: 'judge' }),
+    });
+    assert.equal(judged.status, 200);
+    assert.match(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8'), /^listens: judge$/m);
+    assert.equal((await json<{ agent: { listens?: string } }>(await harness.call('/api/v1/agents/ava'))).agent.listens, 'judge');
+
+    // An edit of something else leaves it alone.
+    await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ instructions: 'You are Ava, terse.' }),
+    });
+    assert.match(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8'), /^listens: judge$/m);
+
+    const loudly = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ listens: 'loudly' }),
+    });
+    assert.equal(loudly.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(loudly)).error.code, 'invalid_listens');
+
+    // An empty string clears it back to the default, as it does a pin.
+    const cleared = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ listens: '' }),
+    });
+    assert.equal(cleared.status, 200);
+    assert.doesNotMatch(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8'), /listens:/);
   } finally {
     await harness.stop();
   }
@@ -2297,6 +2359,55 @@ test('a daemon started without a grant store says so rather than listing nothing
     const response = await harness.call('/api/v1/agents/stratus/grants');
     assert.equal(response.status, 501);
     assert.equal((await json<{ error: { code: string } }>(response)).error.code, 'grants_unavailable');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('an approval decided through the API is recorded as the API, never as a channel approver', async () => {
+  const harness = await startApi({ approvals: true });
+  const transport = harness.transport;
+  assert.ok(transport, 'the harness captured the approval transport');
+  const park = (sessionId: string) =>
+    transport.request({
+      session: {
+        id: sessionId,
+        agent: { id: 'stratus', name: 'Stratus' },
+        status: 'running',
+        messages: [],
+        createdAt: '2026-08-19T00:00:00.000Z',
+        updatedAt: '2026-08-19T00:00:00.000Z',
+        metadata: { channel: 'slack', slackChannel: 'C1' },
+      },
+      call: { id: `call-${sessionId}`, toolName: 'shell.run', input: { command: 'ls' } },
+      risk: 'gated',
+    });
+  const decide = async (sessionId: string, body: Record<string, unknown>) => {
+    const listed = await json<{ approvals: Array<{ requestId: string; sessionId: string }> }>(
+      await harness.call('/api/v1/approvals'),
+    );
+    const parked = listed.approvals.find((entry) => entry.sessionId === sessionId);
+    assert.ok(parked, `the call for ${sessionId} is parked`);
+    const resolved = await harness.call('/api/v1/approvals', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId: parked.requestId, ...body }),
+    });
+    assert.equal(resolved.status, 200);
+  };
+  try {
+    // A Slack click records the clicker's user id bare, and the grants
+    // listing and the edited Slack message both show whatever is recorded.
+    // A body that spells a Slack id must not come out looking like that
+    // approver's decision.
+    const spoofed = park('sess-spoof');
+    await decide('sess-spoof', { answer: 'once', actor: 'U-DYLAN' });
+    assert.deepEqual(await settles(spoofed, 'the spoofed call'), { answer: 'once', actor: 'api:U-DYLAN' });
+
+    // And no label at all still says how the decision arrived.
+    const unlabelled = park('sess-plain');
+    await decide('sess-plain', { answer: 'deny' });
+    assert.deepEqual(await settles(unlabelled, 'the unlabelled call'), { answer: 'deny', actor: 'api' });
   } finally {
     await harness.stop();
   }

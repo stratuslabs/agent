@@ -44,7 +44,39 @@ they are the whole model:
    straight after it reaches the agent you just named, and the agent that
    *had* the thread stands down at the same instant rather than whenever its
    own app next catches up.
-5. **Standing down is not leaving.** An agent in a thread hears what is
+5. **How an agent listens is the soul's to say.** Rules 3 and 4 are the
+   `thread` mode, the default. A soul with `listens: mentions` takes only
+   messages that name it, and hears the rest. One with `listens: judge`
+   hears everything and, while attentive — eight messages or fifteen
+   minutes after it last answered a message that named it, whichever ends
+   first — runs a turn nobody asked for on each untagged message, told it
+   may answer with nothing; past the window a message is heard with no
+   turn at all, and a mention re-arms it. A reply it chose to give on its
+   own does not: it takes the thread for the thread rule, and counts
+   against its own window like any other message. A turn that decides on silence posts nothing: its
+   placeholder is opened only on the first text it streams, never on a
+   tool line, and a failed one posts no error note — one the daemon died
+   inside, failed at the next start, included, a line it had already
+   streamed staying as it was. A line an attempt the
+   provider abandoned had already posted is taken back when the retry
+   decides on silence. Neither mode takes
+   part in the holder rule — that rule answers whose an untagged reply is,
+   and for these two the soul already has — so a thread-rule agent stands
+   down for a judging or mentions-only one that spoke last: the judging
+   one decides for itself, and the mentions-only one is being talked to
+   and waits to be named. A judging agent that chooses to speak takes the
+   thread the way any speaker does, recorded once its reply has landed —
+   so a message typed while it was still deciding may be answered by both
+   it and a thread-rule colleague that held the thread before. "Spoke
+   last" is read off the thread, not the clock: the holder is whichever
+   agent's reply sits lowest, since that is the one a reader answers, and
+   a placeholder posted early and filled in slowly sits above a reply
+   posted while it was being written. A colleague's reply is never
+   judged, only heard.
+   The window also counts messages this daemon has dispatched that the
+   session does not hold yet, so a burst typed inside one turn is judged
+   up to the window and heard past it.
+6. **Standing down is not leaving.** An agent in a thread hears what is
    said to the other agent in it — the question that named its colleague,
    the untagged replies that were the colleague's to answer, and what the
    colleague *replied* — into its own session, with no turn run and
@@ -302,6 +334,44 @@ keys one session for everyone in it, so an authorized member can open one
 and a stranger can mention the agent inside it afterwards — the stranger's
 turn lowers the session, and the authorized member's next turn does not
 raise it back.
+
+The list is a **label** by default: an unlisted sender still gets a turn,
+marked `unknown`. For an agent that holds tools that is not enough — a
+stranger's message is not merely uncertain, it is a prompt they chose, and
+`unknown` does not stop `shell.run` from running on it once a listed
+approver clicks. `admit` makes the list a **door**:
+
+```jsonc
+{
+  "principals": {
+    "slackUsers": ["U01DYLAN"],
+    "admit": "principals",
+    "agents": {
+      "bea": { "admit": "anyone" }
+    }
+  }
+}
+```
+
+Under `"admit": "principals"` a sender not in `slackUsers` gets no turn:
+the message is refused before it takes a place in the queue, the agent
+does not overhear it into a thread's transcript either, and nothing is
+posted back — a reply is a conversation the operator chose not to have.
+The refusal is one line in the daemon log naming the agent and the user
+id — one per message, however many times Slack delivers it, and only for a
+message the agent would have taken up: a mention, or a reply in a thread
+the agent holds, whether the daemon remembers that or its sessions do. A
+stranger's reply in a thread the agent was never part of is dropped
+without a line. `"anyone"` is
+the default and today's behavior; the key inherits per agent like
+`slackUsers`, so Bea above stays open while everyone else is closed. A value
+that is neither word is a config error, never `anyone`: this is the one
+setting here whose misspelling would open the door. So is a `slackUsers`
+that is not a list of user ids, and so is a block or a per-agent entry that
+is not an object: dropped for its shape, a per-agent list would fall back to
+the shared one, the broader list it existed to narrow, and the block itself
+would fall back to `anyone`.
+`stratus serve` says at startup which agents refuse unlisted senders.
 
 Like `approvals`, this block is read only from a config you chose —
 `--config`, `STRATUS_CONFIG`, or the global `~/.stratus/config.json`. A

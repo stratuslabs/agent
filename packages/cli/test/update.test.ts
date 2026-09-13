@@ -120,6 +120,98 @@ test('update --check reports what it would do and exits 1 only when something is
   assert.match(settled.output.stdout, /Nothing to do/);
 });
 
+test('update upgrades the companion packages that lag the CLI, in the same npm call', async () => {
+  const home = await freshHome();
+  // The CLI and its companions are separate global installs, so upgrading
+  // the CLI used to leave every one of them at whatever version the day
+  // setup first ran put there — a Slack adapter two releases behind the
+  // daemon loading it, which nothing reported.
+  const installed: Record<string, string> = {
+    '@stratusagent/channel-slack': '0.10.1',
+    '@stratusagent/control-api': '99.0.0',
+    '@stratusagent/tool-fs': '0.9.0',
+  };
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => '99.0.0',
+      installedVersionReader: async (specifier) => installed[specifier],
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+    },
+  });
+  assert.equal(code, 0, `update failed:\n${output.stdout}\n${output.stderr}`);
+
+  // One call: they are one release, and installing them separately leaves a
+  // window where the daemon and the adapter it loads disagree about their
+  // own version. The one already current is not in it.
+  assert.deepEqual(installs, [[
+    '@stratusagent/cli@latest',
+    '@stratusagent/channel-slack@latest',
+    '@stratusagent/tool-fs@latest',
+  ]]);
+  assert.match(output.stdout, /Upgrading @stratusagent\/channel-slack 0\.10\.1 → 99\.0\.0/);
+  assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/control-api/);
+});
+
+test('update --check reports a companion left behind by a CLI that is already current', async () => {
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });
+  const { streams, output } = createStreams();
+  // The shape of the reported bug: `stratus update` said "Nothing to do"
+  // while the installed Slack adapter predated the release that fixed it.
+  const code = await runCli({
+    argv: ['update', '--check'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.10.1' : undefined,
+    },
+  });
+  // Actionable exits 1 so a cron job or script notices.
+  assert.equal(code, 1, output.stdout);
+  assert.match(output.stdout, /up to date/);
+  assert.match(output.stdout, /1 behind/);
+  assert.match(output.stdout, /@stratusagent\/channel-slack 0\.10\.1 → /);
+  assert.doesNotMatch(output.stdout, /Nothing to do/);
+});
+
+test('update --check says none are behind when every companion is current', async () => {
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update', '--check'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? CLI_VERSION : undefined,
+    },
+  });
+  assert.equal(code, 0, output.stdout);
+  assert.match(output.stdout, /1 first-party alongside the CLI, none behind/);
+  assert.match(output.stdout, /Nothing to do/);
+});
+
 test('update stops the service, upgrades, migrates, rewrites the unit with current paths, and preserves its config pin', async () => {
   const home = await freshHome();
   const configPath = path.join(home, 'pinned.config.json');
@@ -143,6 +235,10 @@ test('update stops the service, upgrades, migrates, rewrites the unit with curre
       processEnv: {},
       serviceRunner: runningServiceRunner,
       packageVersionFetcher: async () => '99.0.0',
+      // Nothing of ours beside the CLI, so this stays a test about the CLI
+      // upgrade. Left to the real reader it would answer from the suite's
+      // own node_modules, where every workspace package is installed.
+      installedVersionReader: async () => undefined,
       packageInstaller: async (packages) => {
         installs.push(packages);
         return { ok: true, message: '' };
@@ -188,6 +284,13 @@ test('an unreachable npm still migrates and repairs the unit — the offline cas
       processEnv: {},
       serviceRunner: runningServiceRunner,
       packageVersionFetcher: async () => undefined,
+      // Behind this build, so the installer below is reachable at all: a
+      // companion is measured against the CLI when npm cannot say what
+      // latest is, and `@latest` cannot resolve without the registry
+      // either — the line promising a version would be the only thing that
+      // happened.
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.0.1' : undefined,
       packageInstaller: async () => {
         throw new Error('npm must not be invoked when the registry did not answer');
       },
@@ -196,6 +299,9 @@ test('an unreachable npm still migrates and repairs the unit — the offline cas
   assert.equal(code, 0, output.stderr);
   assert.match(output.stdout, /npm did not answer/);
   assert.match(output.stdout, /Rewriting the service unit/);
+  // Reported, so `--check` still says what an online update would fix.
+  assert.match(output.stdout, /1 behind/);
+  assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/channel-slack/);
   const rewritten = await readServiceCommand({ homeDir: home, cwd: home, run: runningServiceRunner });
   assert.equal(rewritten?.execPath, process.execPath);
 });
@@ -626,4 +732,85 @@ test('doctor names a unit whose interpreter no longer exists', async () => {
     report.problems.some((problem) => problem.includes('interpreter that no longer exists')),
     `expected a stale-interpreter problem, got: ${JSON.stringify(report.problems)}`,
   );
+});
+
+test('a registry answer older than this build does not become the target its companions are held to', async () => {
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  // npm answering with something older than the running CLI is a dist-tag
+  // rollback, a stale mirror, or a CLI installed by explicit version. The
+  // companion must still be held to the build that loads it — aimed at the
+  // registry's answer instead, one matching that answer reads as current
+  // while the process running it is newer.
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => '0.0.1',
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.0.1' : undefined,
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+    },
+  });
+  assert.equal(code, 0, `${output.stdout}\n${output.stderr}`);
+  // The exact version, not `@latest` — which would install the older thing
+  // the target just refused to be.
+  assert.deepEqual(installs, [[`@stratusagent/channel-slack@${CLI_VERSION}`]]);
+  // And the CLI itself is never downgraded to meet it.
+  assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/cli/);
+});
+
+test('compareVersions gives a prerelease SemVer precedence, so the stable release supersedes it', () => {
+  // Split on dots alone, `0.11.2-beta.1` parses as a fourth numeric segment
+  // and reads as NEWER than the `0.11.2` that supersedes it — which left a
+  // prerelease companion behind and stopped a prerelease CLI from ever
+  // seeing the stable release as an upgrade.
+  assert.ok(compareVersions('0.11.2', '0.11.2-beta.1') > 0);
+  assert.ok(compareVersions('0.11.2-beta.1', '0.11.2') < 0);
+  // Two prereleases compare identifier by identifier, and one that runs out
+  // first is the lower.
+  assert.ok(compareVersions('0.11.2-beta.2', '0.11.2-beta.1') > 0);
+  assert.ok(compareVersions('1.0.0-beta', '1.0.0-beta.1') < 0);
+  assert.ok(compareVersions('1.0.0-alpha', '1.0.0-beta') < 0);
+  // Numeric identifiers rank below alphanumeric ones.
+  assert.ok(compareVersions('1.0.0-1', '1.0.0-alpha') < 0);
+  // A newer release still wins outright, prerelease or not.
+  assert.ok(compareVersions('0.12.0-beta.1', '0.11.2') > 0);
+  // Build metadata never affects precedence.
+  assert.equal(compareVersions('1.0.0+build.5', '1.0.0'), 0);
+});
+
+test('a prerelease companion is upgraded to the stable release that supersedes it', async () => {
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? `${CLI_VERSION}-beta.1` : undefined,
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+    },
+  });
+  assert.equal(code, 0, `${output.stdout}\n${output.stderr}`);
+  assert.deepEqual(installs, [['@stratusagent/channel-slack@latest']]);
 });

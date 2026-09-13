@@ -82,9 +82,31 @@ export const createApprovalPolicy = (
   streams: CliStreams,
   env: CliEnvironment,
   ask?: (prompt: string) => Promise<string>,
+  /**
+   * The mode was defaulted rather than chosen. `always` chosen with a
+   * flag needs no commentary; `always` reached because nobody could be
+   * asked gets one line, the first time a call that would have asked runs.
+   */
+  defaulted = false,
 ): ApprovalPolicy => {
   if (mode === 'always') {
-    return new AllowAllApprovalPolicy();
+    if (!defaulted) {
+      return new AllowAllApprovalPolicy();
+    }
+    let noted = false;
+    return {
+      async approve(context) {
+        if (!noted && context.risk !== 'safe') {
+          noted = true;
+          writeLine(
+            streams.stderr,
+            `Note: running ${context.call.toolName} without asking — stdin is not a terminal and --approvals was not given. `
+            + 'Pass --approvals never to refuse gated tools.',
+          );
+        }
+        return true;
+      },
+    };
   }
 
   if (mode === 'never') {
@@ -97,6 +119,19 @@ export const createApprovalPolicy = (
 
   // A caller that already owns stdin (chat's readline) supplies its own
   // asker — two readers on one stream would race for the same bytes.
+  // `gated` is `ask` for the calls that matter: a `safe` tool is what the
+  // daemon runs unattended, and asking a person to confirm a memory read
+  // is how they learn to type `y` without reading the question. `ask`
+  // itself still asks about everything — the word says so.
+  if (mode === 'gated') {
+    const asking = createApprovalPolicy('ask', streams, env, ask);
+    return {
+      async approve(context) {
+        return context.risk === 'safe' ? true : asking.approve(context);
+      },
+    };
+  }
+
   if (ask) {
     return {
       async approve(context) {
@@ -133,13 +168,35 @@ export const createApprovalPolicy = (
 /** One line saying whose messages arrive as the operator's, per Slack agent. */
 export const describePrincipals = (principals: PrincipalsConfig, agentIds: string[]): string => {
   const covered = agentIds.filter((agentId) => (resolveAgentPrincipals(principals, agentId).slackUsers ?? []).length > 0);
+  // Which agents refuse the unlisted outright, so an operator reading the
+  // startup line knows whether the list is a label or a door. Worked out
+  // before the no-list case: a closed agent with nobody listed refuses
+  // everyone, which is a valid configuration and the opposite of "every
+  // sender is unknown".
+  const closed = agentIds.filter((agentId) => resolveAgentPrincipals(principals, agentId).admit === 'principals');
+  const door = closed.length === 0
+    ? '; every agent still admits unlisted senders as unknown (principals.admit: "principals" refuses them)'
+    : closed.length === agentIds.length
+      ? '; unlisted senders are refused'
+      : `; unlisted senders are refused by ${closed.join(', ')} and admitted as unknown by the rest`;
   if (covered.length === 0) {
-    return 'no principals configured, so every Slack sender is unknown and every fact written in Slack carries that label — set principals.slackUsers in ~/.stratus/config.json';
+    return closed.length === 0
+      ? 'no principals configured, so every Slack sender is unknown and every fact written in Slack carries that label — set principals.slackUsers in ~/.stratus/config.json'
+      : `no principals listed, so every Slack sender is unknown${door} — nobody at all can talk to ${closed.join(', ')} until principals.slackUsers names someone`;
   }
+  // An uncovered agent's senders are all unknown only if it admits them: a
+  // closed agent with nobody listed refuses everyone, and saying its
+  // senders are "all unknown" and then "refused" in one line is a summary
+  // that contradicts itself about the one thing it exists to say.
   const uncovered = agentIds.filter((agentId) => !covered.includes(agentId));
-  return uncovered.length === 0
-    ? `principals set for ${covered.join(', ')}`
-    : `principals set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose Slack senders are all unknown`;
+  const uncoveredOpen = uncovered.filter((agentId) => !closed.includes(agentId));
+  const uncoveredClosed = uncovered.filter((agentId) => closed.includes(agentId));
+  return `principals set for ${covered.join(', ')}`
+    + (uncoveredOpen.length > 0 ? `; none for ${uncoveredOpen.join(', ')}, whose Slack senders are all unknown` : '')
+    + (uncoveredClosed.length > 0
+      ? `; none for ${uncoveredClosed.join(', ')}, who refuse every sender until principals.slackUsers names someone`
+      : '')
+    + door;
 };
 
 /**

@@ -4,6 +4,9 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  type Message,
+  filePathsOf,
+  isUnaddressedTurn,
   abortErrorFor,
   AgentRegistry,
   AgentRunner,
@@ -416,8 +419,14 @@ export interface SessionRouting {
    * time, which a mid-turn save moves; see `@stratusagent/channels`.
    */
   lastSpokeAt?: string;
+  /** When the agent last answered a message that addressed it — see `@stratusagent/channels`. */
+  lastAnsweredAt?: string;
+  /** User messages after that answer — see `SessionRouting.heardSinceAnswered` in `@stratusagent/channels`. */
+  heardSinceAnswered?: number;
   /** The latest turn's text (`latestTurnReply`), when it produced any — see `@stratusagent/channels`. */
   reply?: string;
+  /** Whether the turn the session is on is one nobody asked for (`isUnaddressedTurn`) — see `@stratusagent/channels`. */
+  unaddressed?: boolean;
 }
 
 /**
@@ -1415,9 +1424,30 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * built-in definition.
    */
   let lastDefaultAgentId: string | undefined;
+  /**
+   * What the last default resolution read, for the roster load to judge
+   * — the soul is re-read on every resolution, so a `tools:` key removed
+   * after startup is seen here, where the registered source would still
+   * carry the old definition until the next dispatch refreshes it.
+   */
+  let lastDefaultResolved: { soul: ParsedSoul; path: string } | undefined;
   // The last successfully loaded config snapshot, serving dispatches while
   // the file on disk is temporarily broken (an operator mid-edit).
   let lastGoodConfigSnapshot: NonNullable<RuntimeSelection['presetConfig']> | undefined;
+  /**
+   * Said at load, because the allowlist fails open: `tools` omitted is
+   * every registered tool, the opposite of what `skills` and `credentials`
+   * do when omitted, and a soul that never wrote the key holds `shell.run`
+   * the moment that plugin is enabled. The built-in agent is exempt — it
+   * has no file to add the key to.
+   */
+  const warnNoToolsList = (agentId: string, soulPath: string): void => {
+    warn(
+      `agent ${agentId} has no tools: list, so it may call every tool this daemon loads — `
+      + `add tools: [...] to ${soulPath} to say which`,
+    );
+  };
+
   const defaultAgentId = async (): Promise<string> => {
     // Identity only — never full runtime resolution: credential checks do
     // not belong here, or a daemon default provider without installed keys
@@ -1439,8 +1469,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // now the cached answer too, so a later transient read failure
       // cannot resurrect the retired soul's identity.
       lastDefaultAgentId = DEFAULT_STRATUS_AGENT.id;
+      lastDefaultResolved = undefined;
       return DEFAULT_STRATUS_AGENT.id;
     }
+    lastDefaultResolved = resolved;
     const id = resolved.soul.agent.id;
     // The normal setup layout has the default soul in ~/.stratus/agents
     // too: keep the roster registration — its soulPath drives per-dispatch
@@ -1489,6 +1521,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // no correct winner, and refusing to serve beats letting sort order
     // decide whose sessions, memory, and credentials an agent inherits.
     const entries: RosterEntry[] = await loadRosterSouls(env, warn);
+    // Which souls this pass named for having no tools: list, so the
+    // configured default is not named twice when it is one of them.
+    const namedThisPass = new Set<string>();
     for (const entry of entries) {
       // Against ids claimed by THIS pass, not by any earlier one: a reload
       // must be free to re-register the agent it just re-read, and only the
@@ -1502,12 +1537,28 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         continue;
       }
       registerFresh({ definition: entry.soul.agent, soulPath: entry.path, soul: entry.soul });
+      if (entry.soul.agent.tools === undefined) {
+        warnNoToolsList(entry.soul.agent.id, entry.path);
+        namedThisPass.add(entry.path);
+      }
     }
     // The configured default soul is part of the roster too — it is what
     // an agentId-less dispatch answers as. It may live outside the agents
     // directory, and it survives a read failure by name, so what it
     // resolves to is kept whether or not this pass re-registered it.
-    seen.add(await defaultAgentId());
+    const defaultId = await defaultAgentId();
+    seen.add(defaultId);
+    // The same notice for a default soul that lives outside the agents
+    // directory — the one path into the roster that skips the loop above
+    // — on every load, judged on what the resolution just read rather
+    // than on the registered source, so a key removed after startup is
+    // reported at the next reload. A roster-backed default was named by
+    // the loop, and is not named twice.
+    if (lastDefaultResolved !== undefined
+      && lastDefaultResolved.soul.agent.tools === undefined
+      && !namedThisPass.has(lastDefaultResolved.path)) {
+      warnNoToolsList(defaultId, lastDefaultResolved.path);
+    }
 
     for (const id of [...sources.keys()]) {
       if (!seen.has(id)) {
@@ -3056,14 +3107,53 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // checkpoints, and a recovery resuming, all without having said
       // anything. A channel ordering two agents by "who spoke last" has to
       // read the speaking.
-      const lastSpokeAt = session.messages.findLast(
-        (message) => message.role === 'assistant' && message.content.trim().length > 0,
-      )?.createdAt;
+      // Speaking is text, or a file: a tool result carrying one is posted
+      // into the thread by the channel (`filePathsOf`, the kernel's one
+      // reading of that convention), and a chart with no words is the last
+      // thing said as surely as a sentence — the in-process handover record
+      // already treats it so, and the durable answer must agree with it
+      // across a restart. What the session records is what the agent
+      // said, for text and file alike, not what the channel delivered: a
+      // post Slack refused or an upload that failed reads as spoken here.
+      // The channel's own record has the delivery, and this is the
+      // reconstruction for a process that lost it; a delivery record
+      // written back into the session is the open item in roadmap 31.
+      const spoken = (message: Message): boolean =>
+        (message.role === 'assistant' && message.content.trim().length > 0)
+        || (message.role === 'tool' && message.toolResult !== undefined && filePathsOf(message.toolResult).length > 0);
+      const spokeIndex = session.messages.findLastIndex(spoken);
+      const lastSpokeAt = spokeIndex >= 0 ? session.messages[spokeIndex]?.createdAt : undefined;
+      // The attention anchor is narrower than the thread rule's: the newest
+      // reply to a turn somebody ASKED for — one whose message was not
+      // overheard. A reply the agent chose to give on a turn nobody asked
+      // for is speaking, for the thread rule, and not an anchor, or a
+      // judge that likes the sound of its own voice would never drift out.
+      // The trigger of a reply is the nearest user message before it.
+      let answeredIndex = -1;
+      for (let index = session.messages.length - 1; index >= 0 && answeredIndex < 0; index -= 1) {
+        const message = session.messages[index];
+        if (!message || !spoken(message)) {
+          continue;
+        }
+        const trigger = session.messages.slice(0, index).findLast((earlier) => earlier.role === 'user');
+        if (trigger !== undefined && trigger.overheard !== true) {
+          answeredIndex = index;
+        }
+      }
+      const lastAnsweredAt = answeredIndex >= 0 ? session.messages[answeredIndex]?.createdAt : undefined;
+      // The messages after that answer: what it has heard, judged, or been
+      // asked and not answered since — the other half of the window.
+      const heardSinceAnswered = session.messages
+        .slice(answeredIndex + 1)
+        .filter((message) => message.role === 'user').length;
       return {
         agentId: session.agent.id,
         metadata: session.metadata ?? {},
         ...(lastSpokeAt !== undefined ? { lastSpokeAt } : {}),
+        ...(lastAnsweredAt !== undefined ? { lastAnsweredAt } : {}),
+        heardSinceAnswered,
         ...(reply !== undefined ? { reply } : {}),
+        ...(isUnaddressedTurn(session) ? { unaddressed: true } : {}),
       };
     },
 

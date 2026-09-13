@@ -20,6 +20,7 @@ Example — The layout a template uses. Copy this directory to start your own.
 
   agent    Scribe (scribe) — fs.read, fs.list, memory.remember, memory.recall
            may read your stored credentials: SEARCH_API_KEY
+           may hand work to, and run as: editor
   skill    meeting-notes
   plugin   @stratusagent/tool-fs (npm install -g)
   config   /home/you/.stratus/config.json
@@ -77,6 +78,13 @@ credential of that name as soon as the agent is served, and a soul with no
 list reaches none. The review prints the list under the agent it belongs
 to. Installing a template never *stores* a credential — but it can hand an
 agent one you already have.
+
+**And the delegates line.** A soul's `delegates:` list is the third gate
+and the one that reaches furthest: `agent.delegate` runs a turn *as* the
+named agent, with that agent's tools, credentials, and memory, and `*`
+names every agent on your roster — including ones this template never
+saw. The review prints the list under the agent, and says "EVERY agent"
+for the wildcard. A soul with no list delegates to nobody.
 
 ## Writing one
 

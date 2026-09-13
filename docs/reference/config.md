@@ -43,8 +43,8 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `model` | Model for that provider |
 | `baseUrl` | Override the provider API base URL (local models, proxies) |
 | `apiKeyEnv` | Name of the environment variable holding the API key — trusted configs only, see below |
-| `systemPrompt` | System prompt for the run |
-| `soul` | Path to a soul file, resolved relative to the working directory |
+| `systemPrompt` | System prompt for the run — trusted configs only, see below |
+| `soul` | Path to a soul file, resolved relative to the working directory — trusted configs only, see below |
 | `fallbackModel` | Model to retry with when the default model errors mid-run |
 | `fallbackProvider` | Provider serving the fallback model — defaults to the main provider |
 | `fallbackBaseUrl` | Base URL for an OpenAI-compatible fallback (e.g. a local model) |
@@ -52,7 +52,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `promptCacheTtl` | How long a cache entry lives: `5m` (default) or `1h` |
 | `vision` | Whether an OpenAI-compatible model takes images — the main one or the fallback, it is one setting. Default `true`; set `false` for a text-only model, which would otherwise reject every turn of a session an image was sent to — see [Slack](../guides/slack.md#sending-an-image) |
 | `approvals` | Unattended-approval policy for `stratus serve` — trusted configs only, see below |
-| `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), with a per-agent `agents` sub-block — trusted configs only, see below |
+| `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), and whether anyone else gets a turn at all: `admit` (`anyone`, the default, or `principals`), each with a per-agent `agents` sub-block — trusted configs only, see below |
 | `api` | Control API binding for `stratus serve` — trusted configs only, see below |
 | `plugins` | Plugins to load, keyed by package name — trusted configs only, see below |
 
@@ -107,7 +107,10 @@ global `~/.stratus/config.json`, or a file passed with `--config` /
 `STRATUS_CONFIG`. An auto-discovered project-local `stratus.config.json`
 ships in any repository you clone, and none of these is a decision a clone
 gets to make; a project config that tries is ignored. The three blocks say
-so with a warning naming the file. `apiKeyEnv` has no such channel — it is
+so with a warning naming the file. A project config that says nothing
+about a block leaves the global file's block in force — a clone that
+cannot set a policy cannot make one disappear either, so `stratus serve`
+started inside a repository still runs under your own `principals`. `apiKeyEnv` has no such channel — it is
 read while a run's provider is being resolved, before anything is logging —
 so the provider's own default variable is substituted quietly, and the
 setting is named in the missing-key error you get if that variable is not
@@ -120,6 +123,7 @@ set.
 | `principals` | Whose messages an agent takes as its operator's; everyone else's arrive as `unknown` | [Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator), [Memory](../concepts/memory.md#where-a-fact-came-from) |
 | `api` | Which interface and port a daemon binds | [Remote access](../guides/remote-access.md) |
 | `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
+| `soul`, `systemPrompt` | What the agent is told it is and what it may do — a persona in a cloned repo is a system prompt written by whoever pushed it. `--soul` and `STRATUS_SOUL` still name one; the run says once, on stderr, what the file asked for and did not get, and `stratus serve` says it once at startup, whether or not its runtime resolves | [Security](../concepts/security.md) |
 
 Each block's keys and shape are documented in its own guide. `approvals`,
 `principals`, and each plugin's entry also take a per-agent `agents`

@@ -10,6 +10,12 @@ export interface CliEnvironment {
   stdin?: string;
   stdinStream?: NodeJS.ReadableStream;
   approvalInput?: NodeJS.ReadableStream;
+  /**
+   * Whether a person is at a terminal, for the approval default. Read from
+   * `process.stdin.isTTY` when absent; injectable because a test cannot
+   * make its stdin one.
+   */
+  terminal?: boolean;
   setupInput?: NodeJS.ReadableStream;
   templateInput?: NodeJS.ReadableStream;
   processEnv?: NodeJS.ProcessEnv;
@@ -47,6 +53,8 @@ export interface CliEnvironment {
   packageInstaller?: PackageInstaller;
   /** Looks up a package's latest published version. Injected so tests never ask npm. */
   packageVersionFetcher?: PackageVersionFetcher;
+  /** Reads the version an installed package declares. Injected so tests do not assert on their own node_modules. */
+  installedVersionReader?: InstalledVersionReader;
 }
 
 /**
@@ -104,6 +112,9 @@ export type PackageInstaller = (packages: string[]) => Promise<PackageInstallRes
 
 /** The latest published version of a package, or undefined when the registry did not answer. */
 export type PackageVersionFetcher = (packageName: string) => Promise<string | undefined>;
+
+/** The version an installed package declares, or undefined when it is not installed. */
+export type InstalledVersionReader = (specifier: string) => Promise<string | undefined>;
 
 export type CliConfigFile = StratusConfigFile;
 

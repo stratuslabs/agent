@@ -10,8 +10,10 @@ import {
   MAX_SESSION_ID_LENGTH,
   parseSoul,
   type ParsedSoul,
+  isValidDelegateEntry,
 } from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
+import { LISTENS_MODES, isListensMode } from '@stratusagent/core';
 import { describeAgentGrants, WhitelistUnreadableError, type AgentGrantStore } from '@stratusagent/permissions';
 import {
   isScheduleSessionId,
@@ -60,6 +62,18 @@ import {
   readJsonObject,
   requireString,
 } from './http.ts';
+
+/**
+ * The actor recorded for an approval decided through the API: how the caller
+ * authenticated, with the label it offered after a colon — `api` for a bearer
+ * token, `dashboard` for a browser session. Never a bare string the caller
+ * chose: channel-native ids are recorded bare, and the two must not be
+ * spellable as each other.
+ */
+const apiActorFor = (principal: Principal | undefined, label: string | undefined): string => {
+  const source = principal?.kind === 'cookie' ? 'dashboard' : 'api';
+  return label ? `${source}:${label}` : source;
+};
 
 export interface RouteContext {
   gateway: Gateway;
@@ -307,6 +321,24 @@ const allowlist = (value: unknown, field: string): string[] => {
     throw new ApiError(400, 'invalid_allowlist', `"${field}" must be an array of strings.`);
   }
   return value as string[];
+};
+
+/**
+ * A `delegates` edit, checked here rather than left to the soul round-trip:
+ * an entry that is not an agent id or `*` is the client's error, and the
+ * round-trip's failure would answer it as the server's.
+ */
+const delegatesAllowlist = (value: unknown): string[] => {
+  const entries = allowlist(value, 'delegates');
+  const bad = entries.find((entry) => !isValidDelegateEntry(entry));
+  if (bad !== undefined) {
+    throw new ApiError(
+      400,
+      'invalid_delegates',
+      `"delegates" entry ${JSON.stringify(bad)} is not an agent id or *. Each entry names an agent on the roster, or * for any of them.`,
+    );
+  }
+  return entries;
 };
 
 const parseProviderParam = (value: string): CredentialProviderName => {
@@ -604,12 +636,25 @@ export const routes: Route[] = [
       } else {
         const provider = optionalString(body, 'provider');
         const model = optionalString(body, 'model');
+        // Like a pin: an empty string clears it back to the default, an
+        // absent key leaves it alone, and anything but a mode is refused.
+        const listens = optionalString(body, 'listens');
+        if (listens !== undefined && listens.length > 0 && !isListensMode(listens)) {
+          throw new ApiError(
+            400,
+            'invalid_listens',
+            `listens must be one of ${LISTENS_MODES.join(', ')}, not ${JSON.stringify(listens)}.`,
+          );
+        }
         if (provider !== undefined && provider.length > 0) {
           validateProvider(provider, 'provider');
         }
+        // Cleared by an empty string, which the spread below cannot do: a
+        // key the current definition carries has to be taken off it.
+        const { listens: _kept, ...currentAgent } = current.agent;
         next = {
           agent: {
-            ...current.agent,
+            ...(listens === undefined ? current.agent : currentAgent),
             ...(optionalString(body, 'name') !== undefined ? { name: optionalString(body, 'name') as string } : {}),
             ...(optionalString(body, 'instructions') !== undefined
               ? { instructions: optionalString(body, 'instructions') as string }
@@ -617,6 +662,8 @@ export const routes: Route[] = [
             ...(body.tools !== undefined ? { tools: allowlist(body.tools, 'tools') } : {}),
             ...(body.skills !== undefined ? { skills: allowlist(body.skills, 'skills') } : {}),
             ...(body.credentials !== undefined ? { credentials: allowlist(body.credentials, 'credentials') } : {}),
+            ...(body.delegates !== undefined ? { delegates: delegatesAllowlist(body.delegates) } : {}),
+            ...(isListensMode(listens) ? { listens } : {}),
           },
           // An empty string clears a pin; an absent key leaves it alone.
           ...(provider === undefined ? (current.provider ? { provider: current.provider } : {}) : (provider ? { provider } : {})),
@@ -1007,12 +1054,16 @@ export const routes: Route[] = [
       if (answer !== 'once' && answer !== 'always' && answer !== 'deny') {
         throw new ApiError(400, 'invalid_answer', 'answer must be one of: once, always, deny.');
       }
-      const actor = optionalString(body, 'actor');
-      const settled = context.gateway.resolveApproval({
-        requestId,
-        answer,
-        ...(actor ? { actor } : {}),
-      });
+      // Who decided is qualified by how the caller authenticated, never
+      // taken from the body as-is. A Slack click records the clicker's user
+      // id, the edited Slack message renders that id as a mention, and a
+      // standing grant carries it as `grantedBy` — so a body-supplied
+      // `actor` that reached the record unqualified could spell a Slack
+      // approver's id and read, everywhere the record is shown, as a
+      // decision that approver never made. The caller's own label survives
+      // as a suffix, which is all it was ever good for.
+      const actor = apiActorFor(context.principal, optionalString(body, 'actor'));
+      const settled = context.gateway.resolveApproval({ requestId, answer, actor });
       if (!settled) {
         // The normal outcome of a button clicked a minute too late. Never a
         // "try again": the request is gone because it was already decided,

@@ -27,10 +27,12 @@ import { runUpdate } from './commands/update.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
 import { HELP_TEXT } from './help.ts';
 import { writeLine, readPromptFromStdin } from './io.ts';
-import { parseCommand } from './parse.ts';
+import { CLI_VERSION } from './npm.ts';
+import { parseCommand, defaultApprovalMode } from './parse.ts';
 import {
   resolveRuntimeConfig,
   warnOnCredentialOverride,
+  warnOnUntrustedConfig,
   runSingleLoop,
   printSessionSummary,
   formatRuntimeBanner,
@@ -55,6 +57,13 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'help') {
       writeLine(streams.stdout, HELP_TEXT);
+      return 0;
+    }
+
+    // Above the migration check below, like help: reporting which build
+    // this is must not depend on the state it would migrate.
+    if (command.command === 'version') {
+      writeLine(streams.stdout, `stratus ${CLI_VERSION}`);
       return 0;
     }
 
@@ -215,6 +224,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     }
 
     const runtime = await resolveRuntimeConfig(command, resolvedEnv);
+    warnOnUntrustedConfig(runtime, streams);
     await warnOnCredentialOverride(runtime, streams, resolvedEnv);
 
     if (command.format === 'text') {
@@ -224,7 +234,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     const session = await runSingleLoop(command.prompt, streams, {
       events: command.events && command.format === 'text',
       runtime,
-      approvals: command.approvals,
+      // `--stdin` has already read the terminal, so nothing could take a
+      // y/N there — what the parser refuses for an explicit `ask`.
+      approvals: command.approvals ?? defaultApprovalMode(resolvedEnv, argv.includes('--stdin')),
+      approvalsDefaulted: command.approvals === undefined,
       ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
       ...(command.configPath ? { configPath: command.configPath } : {}),
       env: resolvedEnv,
