@@ -2454,7 +2454,8 @@ export const channelClaimKey = (kind: string, agentId: string): string => `${kin
 export class ChannelRegistry {
   private readonly contributions: ChannelContribution[] = [];
 
-  private readonly claims = new Map<string, ChannelContribution>();
+  /** Undefined marks a claim the host made for an adapter it wired itself. */
+  private readonly claims = new Map<string, ChannelContribution | undefined>();
 
   register(contribution: ChannelContribution): void {
     this.contributions.push(contribution);
@@ -2463,7 +2464,21 @@ export class ChannelRegistry {
     }
   }
 
-  /** Whether some adapter already carries this agent on this kind. */
+  /**
+   * Claim (agent, kind) pairs the host carries itself, so a plugin
+   * registering the same kind for the same agent collides with the host's
+   * adapter exactly as it would with another plugin's — two adapters on
+   * one agent's Slack would each answer every message.
+   */
+  claim(kind: string, agentIds: readonly string[]): void {
+    for (const agentId of agentIds) {
+      if (!this.claims.has(channelClaimKey(kind, agentId))) {
+        this.claims.set(channelClaimKey(kind, agentId), undefined);
+      }
+    }
+  }
+
+  /** Whether some adapter — the host's or a plugin's — already carries this agent on this kind. */
   claimed(kind: string, agentId: string): boolean {
     return this.claims.has(channelClaimKey(kind, agentId));
   }

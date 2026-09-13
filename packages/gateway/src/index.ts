@@ -681,6 +681,13 @@ export interface GatewayOptions {
   /** Channel adapters to run (Slack, …). Started on start(), stopped on stop(). */
   channels?: GatewayChannelAdapter[];
   /**
+   * Which (kind, agent) pairs the host's own adapters carry, so a plugin
+   * channel claiming one of them is refused at load rather than started
+   * beside it. The Slack adapter the CLI wires reports its agents here;
+   * a host that omits this lets a plugin double up on a host adapter.
+   */
+  hostChannelClaims?: Array<{ kind: string; agents: readonly string[] }>;
+  /**
    * The policy, or a factory that builds one from the gateway's approval
    * transport. Pass a factory whenever the policy parks turns on a human
    * reached through a channel — `remote` mode — since that policy needs the
@@ -1119,6 +1126,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // channels when serving begins.
   const providerContributions = new ContributionRegistry<ProviderContribution>();
   const channelContributions = new ChannelRegistry();
+  for (const claim of options.hostChannelClaims ?? []) {
+    channelContributions.claim(claim.kind, claim.agents);
+  }
   const memoryContributions = new ContributionRegistry<MemoryStoreContribution>();
   const executorContributions = new ContributionRegistry<ExecutorContribution>();
 
@@ -2300,6 +2310,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     const config = await runtimeForAgent(source);
     const runner = runnerFor(config);
+    // Which executor the turn's tool calls run through — the built-in
+    // under the name `stratus run` has always recorded, a contributed one
+    // under its registered name — so a transcript says where a command
+    // ran, not only which model asked for it.
+    const executorRecord = selectedExecutor && options.executor !== undefined ? options.executor : 'local-command';
 
     const metadata: JsonObject = {
       provider: config.provider,
@@ -2307,13 +2322,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // which case there is none to record.
       ...(config.provider !== 'demo' && config.model !== undefined ? { model: config.model } : {}),
       ...input.metadata,
-      // Which executor the turn's tool calls run through — the built-in
-      // under the name `stratus run` has always recorded, a contributed one
-      // under its registered name — so a transcript says where a command
-      // ran, not only which model asked for it. After the caller's
-      // metadata, and reserved besides: a dispatch that could write it
-      // could make a transcript claim a sandbox ran what the host ran.
-      executor: selectedExecutor && options.executor !== undefined ? options.executor : 'local-command',
+      // After the caller's metadata, and reserved besides: a dispatch that
+      // could write it could make a transcript claim a sandbox ran what
+      // the host ran.
+      [EXECUTOR_METADATA_KEY]: executorRecord,
     };
 
     if (existing && existing.agent.id !== agent.id) {
@@ -2350,6 +2362,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // a later turn of it parks and the daemon dies.
         if (isDelegatedSession(existing) && existing.metadata) {
           existing.metadata = withoutDelegation(existing.metadata);
+        }
+        // The executor record follows the daemon, not the session's first
+        // turn: a restart that selected another executor runs this turn's
+        // commands there, and a session from before the record existed
+        // gets one now rather than never.
+        if (existing.metadata?.[EXECUTOR_METADATA_KEY] !== executorRecord) {
+          existing.metadata = { ...existing.metadata, [EXECUTOR_METADATA_KEY]: executorRecord };
         }
         await store.save(existing);
         // The turn's metadata rides along for the sender's trust: without

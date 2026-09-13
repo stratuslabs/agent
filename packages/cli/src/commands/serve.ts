@@ -466,6 +466,10 @@ const serveHeldHome = async (
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
     ...(channels.length > 0 ? { channels } : {}),
+    // The Slack adapter is host-wired, so its (agent, kind) claims are
+    // declared here; a plugin channel claiming one of them is refused at
+    // load rather than started beside it.
+    ...(slackAdapterUp ? { hostChannelClaims: [{ kind: 'slack', agents: slackAgents.map(([agentId]) => agentId) }] } : {}),
     log,
     warn,
   });

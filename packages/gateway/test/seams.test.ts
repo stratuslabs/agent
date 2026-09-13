@@ -206,6 +206,27 @@ test('a plugin channel starts from its stored transport secrets, receives an inb
   }
   // Channels stop, then plugins dispose — the documented order.
   assert.deepEqual(lifecycle, ['secrets {"ava":{"botToken":"fixture-bot-token"}}', 'start', 'stop', 'dispose']);
+
+  // An agent the host's own adapter already carries on this kind is not
+  // a plugin's to claim: two adapters on one agent's channel would each
+  // answer every message.
+  const warnings: string[] = [];
+  const contested = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-fixture-channel': {} },
+    pluginHost: host,
+    hostChannelClaims: [{ kind: 'fixture', agents: ['ava'] }],
+    log: () => {},
+    warn: (line) => warnings.push(line),
+  });
+  await contested.start();
+  try {
+    assert.ok(warnings.some((line) => /channel collision: fixture for agent ava is already carried by the host/.test(line)), warnings.join('\n'));
+    assert.deepEqual(contested.plugins().filter((entry) => entry.error === undefined), []);
+  } finally {
+    await contested.stop();
+  }
 });
 
 test('a plugin executor selected by the config runs the commands, and a selection nothing registers refuses to start', async () => {
@@ -271,6 +292,33 @@ test('a plugin executor selected by the config runs the commands, and a selectio
   });
   await assert.rejects(refused.start(), /selects executor docker, which no loaded plugin registers \(registered: fixture\)/);
   assert.equal(disposed, 2);
+
+  // The record follows the daemon: a session begun before the executor
+  // was selected is resumed with the executor that now runs its commands.
+  const before = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
+  await before.start();
+  try {
+    const first = await before.dispatch({ sessionId: 'exec-resumed', agentId: 'ava', userMessage: 'hello' });
+    assert.equal(first.metadata?.executor, 'local-command');
+  } finally {
+    await before.stop();
+  }
+  const after = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-fixture-executor': {} },
+    pluginHost: host,
+    executor: 'fixture',
+    log: () => {},
+    warn: () => {},
+  });
+  await after.start();
+  try {
+    const resumed = await after.dispatch({ sessionId: 'exec-resumed', agentId: 'ava', userMessage: 'please use the echo tool' });
+    assert.equal(resumed.metadata?.executor, 'fixture');
+  } finally {
+    await after.stop();
+  }
 
   const noStore = createGateway({
     env: { homeDir: home, cwd: home, processEnv: {} },

@@ -78,3 +78,12 @@ test('a contribution registry is a bare map: it refuses nothing, and the view is
   assert.deepEqual(registry.names(), ['fixture']);
   assert.equal(registry.get('fixture')?.name, 'second');
 });
+
+test('a channel registry lets the host claim pairs its own adapters carry, and a claim is a claim', () => {
+  const registry = new ChannelRegistry();
+  registry.claim('slack', ['ava', 'juno']);
+  assert.equal(registry.claimed('slack', 'ava'), true);
+  assert.equal(registry.claimed('slack', 'bea'), false);
+  // Host claims are not contributions: nothing is listed for a host to start twice.
+  assert.deepEqual(registry.list(), []);
+});

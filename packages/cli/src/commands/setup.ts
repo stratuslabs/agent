@@ -831,7 +831,13 @@ export const runSetup = async (
     if (!state.fallbackModel || state.provider === 'demo') {
       return undefined;
     }
-    const fallbackProvider = (state.fallbackProvider ?? state.provider) as CredentialProviderName;
+    const selectedFallback = state.fallbackProvider ?? state.provider;
+    if (isRegisteredProviderName(selectedFallback)) {
+      // A contributed fallback brings its own sign-in, as a contributed
+      // primary does; the test run selects it by name and no more.
+      return { provider: selectedFallback, model: state.fallbackModel };
+    }
+    const fallbackProvider = selectedFallback as CredentialProviderName;
     const envKey = (fallbackProvider === state.provider
       ? readNonEmptyString(processEnv.STRATUS_API_KEY)
       : undefined)
@@ -903,13 +909,16 @@ export const runSetup = async (
     if (isRegisteredProviderName(state.provider)) {
       // A contributed provider brings its own sign-in and its own default
       // model; the test run selects it and no more, exactly as a real run
-      // resolves it.
+      // resolves it — the configured fallback included, so the test
+      // exercises the failover the saved config would perform.
+      const fallback = buildTestFallback();
       return {
         provider: state.provider,
         ...(state.model ? { model: state.model } : {}),
         ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
         ...(env.fetch ? { fetch: env.fetch } : {}),
         ...(soul ? { soul } : {}),
+        ...(fallback ? { fallback } : {}),
       };
     }
     const model = state.model ?? builtInDefaultModel(state.provider);
