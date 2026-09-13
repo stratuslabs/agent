@@ -87,7 +87,7 @@ stratus dashboard                      # local browser dashboard
 | `--prompt`, `-p` | Pass the prompt explicitly |
 | `--stdin` | Read the prompt from stdin |
 | `--soul <file>` | Run as the agent defined by a soul file (also `STRATUS_SOUL` / config `soul` key) |
-| `--provider` | `anthropic`, `openai`, `codex`, or `demo` (offline, no account) |
+| `--provider` | `anthropic`, `openai`, `codex`, `demo` (offline, no account), or the name a [plugin provider](../guides/extending.md#providers) registers |
 | `--model` | Model for real providers (anthropic default: `claude-opus-5`, codex default: `gpt-5.5`) |
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |

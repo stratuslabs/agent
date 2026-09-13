@@ -199,7 +199,7 @@ Agent options:
 Options:
   --prompt, -p     Prompt to send to the local agent loop
   --stdin          Read the prompt from stdin
-  --provider       Provider to use: anthropic, openai, codex, or demo
+  --provider       Provider to use: anthropic, openai, codex, demo, or the name a plugin registers
   --model          Model name for real providers (anthropic default: ${DEFAULT_ANTHROPIC_MODEL}, openai default: gpt-4.1-mini, codex default: ${DEFAULT_CODEX_MODEL})
   --base-url       Override the provider API base URL
   --soul           Run as the agent defined by a soul file (markdown + frontmatter, see examples/souls)

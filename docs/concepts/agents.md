@@ -86,6 +86,8 @@ Two well-written example souls live in
 [`examples/souls/`](../../examples/souls) — they double as the format docs.
 A soul's provider/model are hints:
 [`--provider`/`--model` flags and `STRATUS_*` env vars still win](../reference/config.md).
+`provider:` may name a built-in or the name a
+[plugin provider](../guides/extending.md#providers) registers.
 
 The `tools:` list is the per-identity gate over everything a plugin
 installs — see [Tools](../guides/tools.md) — and `skills:` opts into

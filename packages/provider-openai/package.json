@@ -1,0 +1,88 @@
+{
+  "name": "@stratusagent/provider-openai",
+  "version": "0.11.3",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "dependencies": {
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/providers": "workspace:*"
+  },
+  "devDependencies": {
+    "@stratusagent/plugins": "workspace:*",
+    "@stratusagent/state": "workspace:*",
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/provider-openai"
+  },
+  "description": "The OpenAI-compatible chat-completions provider as a Stratus plugin: registers `openai-compatible`, selectable by a soul, credentialed per agent through the plugin seam",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "stratus-plugin",
+    "openai",
+    "provider"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "providers": [
+        {
+          "name": "openai-compatible"
+        }
+      ]
+    },
+    "credentials": [
+      "openai.apiKey"
+    ],
+    "config": {
+      "type": "object",
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object"
+        },
+        "vision": {
+          "type": "boolean"
+        },
+        "requestTimeoutMs": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

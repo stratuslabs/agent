@@ -22,6 +22,14 @@ import {
 } from './manifest.ts';
 import { createManifestBoundCredentialResolver } from './credentials.ts';
 import { ManifestBoundToolRegistry, type PluginToolRecord } from './registry.ts';
+import {
+  createContributionOwners,
+  createContributionTargets,
+  ManifestBoundContributions,
+  type ChannelSecretSource,
+  type ContributionTargets,
+  type PluginContributionRecords,
+} from './contributions.ts';
 
 /**
  * The two capabilities loading an optional package needs, taken from the
@@ -204,6 +212,8 @@ export interface LoadedPlugin {
    */
   tools: PluginToolRecord[];
   skills: PluginSkillRecord[];
+  /** The providers, channels, memory stores, and executors it registered. */
+  contributions: PluginContributionRecords;
   /**
    * The plugin itself, so the host can shut it down. A browser plugin holds
    * a Chromium and a listening socket; a daemon that stopped without
@@ -231,6 +241,25 @@ export interface LoadPluginsOptions {
    */
   skills?: SkillRegistry;
   bus: EventBus;
+  /**
+   * The registries a plugin's providers, channels, memory stores, and
+   * executors are committed into once it loads whole — the counterparts
+   * of `tools`. Any omitted is replaced by a private one: the plugin still
+   * loads, its contribution is recorded on `LoadedPlugin`, and it reaches
+   * nothing — the way a contributed skill is ignored by a host with no
+   * catalog. `stratus run` is that host for channels.
+   */
+  providers?: ContributionTargets['providers'];
+  channels?: ContributionTargets['channels'];
+  memory?: ContributionTargets['memory'];
+  executors?: ContributionTargets['executors'];
+  /**
+   * How a channel plugin receives its transport secrets, by kind. A host
+   * that omits it refuses the request with a message saying so — a channel
+   * needs the daemon's credential store, and a host without one cannot
+   * carry a channel at all.
+   */
+  channelSecrets?: ChannelSecretSource;
   /**
    * Handed to every plugin's `setup` as `PluginContext.credentials`. A host
    * that omits it leaves a plugin needing a key with no way to resolve one
@@ -433,6 +462,13 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
   const failures: PluginLoadFailure[] = [];
   // Which package owns each name so far, so a collision can name both.
   const owners = new Map<string, string>();
+  const contributionOwners = createContributionOwners();
+  const targets = createContributionTargets({
+    ...(options.providers ? { providers: options.providers } : {}),
+    ...(options.channels ? { channels: options.channels } : {}),
+    ...(options.memory ? { memory: options.memory } : {}),
+    ...(options.executors ? { executors: options.executors } : {}),
+  });
 
   for (const [specifier, rawBlock] of entries) {
     const block = rawBlock ?? {};
@@ -477,9 +513,19 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       instance = plugin;
 
       const view = new ManifestBoundToolRegistry({ manifest, target: options.tools, trusted: isTrusted, riskOverrides });
+      const contributions = new ManifestBoundContributions({
+        manifest,
+        targets,
+        owners: contributionOwners,
+        ...(options.channelSecrets !== undefined ? { channelSecrets: options.channelSecrets } : {}),
+      });
       await plugin.setup({
         bus: options.bus,
         tools: view,
+        providers: contributions.providers,
+        channels: contributions.channels,
+        memory: contributions.memory,
+        executors: contributions.executors,
         // Bound to what this plugin's manifest declares, never the host's
         // resolver raw: a plugin must not reach a credential it did not
         // declare merely because the calling agent allowlisted it for
@@ -504,7 +550,11 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
           }
         }
       }
+      // The non-tool kinds are checked before the tools commit and landed
+      // after it, so neither half can be live while the other is refused.
+      contributions.preflightCommit();
       const tools = view.commit(owners);
+      const contributed = contributions.commit();
       const skills: PluginSkillRecord[] = [];
       for (const { skill, bareId, record } of stagedSkills) {
         options.skills?.register(skill);
@@ -523,6 +573,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         trusted: isTrusted,
         tools,
         skills,
+        contributions: contributed,
         instance: plugin,
       });
     } catch (error) {

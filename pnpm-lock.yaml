@@ -14,8 +14,36 @@ importers:
       stratus-plugin-fixture:
         specifier: workspace:*
         version: link:fixtures/stratus-plugin-fixture
+      stratus-plugin-fixture-channel:
+        specifier: workspace:*
+        version: link:fixtures/stratus-plugin-fixture-channel
+      stratus-plugin-fixture-executor:
+        specifier: workspace:*
+        version: link:fixtures/stratus-plugin-fixture-executor
+      stratus-plugin-fixture-memory:
+        specifier: workspace:*
+        version: link:fixtures/stratus-plugin-fixture-memory
+      stratus-plugin-fixture-provider:
+        specifier: workspace:*
+        version: link:fixtures/stratus-plugin-fixture-provider
 
   fixtures/stratus-plugin-fixture: {}
+
+  fixtures/stratus-plugin-fixture-channel: {}
+
+  fixtures/stratus-plugin-fixture-executor:
+    dependencies:
+      '@stratusagent/executor-local':
+        specifier: workspace:*
+        version: link:../../packages/executor-local
+
+  fixtures/stratus-plugin-fixture-memory:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+
+  fixtures/stratus-plugin-fixture-provider: {}
 
   packages/agents:
     dependencies:
@@ -110,9 +138,15 @@ importers:
       '@stratusagent/dashboard':
         specifier: workspace:*
         version: link:../dashboard
+      '@stratusagent/memory-sqlite':
+        specifier: workspace:*
+        version: link:../memory-sqlite
       '@stratusagent/plugin-mcp':
         specifier: workspace:*
         version: link:../plugin-mcp
+      '@stratusagent/provider-openai':
+        specifier: workspace:*
+        version: link:../provider-openai
       '@stratusagent/tool-browser':
         specifier: workspace:*
         version: link:../tool-browser
@@ -253,6 +287,22 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/memory-sqlite:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/permissions:
     dependencies:
       '@stratusagent/core':
@@ -354,6 +404,28 @@ importers:
         specifier: workspace:*
         version: link:../providers
     devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/provider-openai:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/providers':
+        specifier: workspace:*
+        version: link:../providers
+    devDependencies:
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
+      '@stratusagent/state':
+        specifier: workspace:*
+        version: link:../state
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.2

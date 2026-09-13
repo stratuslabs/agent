@@ -23,6 +23,19 @@ export const FIRST_PARTY_CAPABILITY_PACKAGES = [
 ];
 
 /**
+ * The first-party plugins that contribute something other than tools — a
+ * provider a soul selects, a memory store a trusted config selects. Listed
+ * apart from the capability packages because setup's Plugins menu is a
+ * tools menu: it says what a package *grants* and prints the `tools:` line
+ * to paste, neither of which means anything for these. `stratus plugins`
+ * and `stratus update` sweep both lists.
+ */
+export const FIRST_PARTY_CONTRIBUTION_PACKAGES = [
+  '@stratusagent/provider-openai',
+  '@stratusagent/memory-sqlite',
+];
+
+/**
  * The optional first-party packages a machine installs alongside the CLI:
  * the ones that are not plugins and so appear in no `plugins` block —
  * the Slack channel, the control API, the dashboard it serves.

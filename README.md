@@ -42,6 +42,7 @@ line, 23.4+) — details in [Installation](docs/start/installation.md).
 | 🔌 | **Mount MCP servers** — the whole MCP ecosystem under Stratus policy | [MCP](docs/guides/mcp.md) |
 | 🛡 | **Ask before acting** — safe calls run unattended; risky ones ask a human, in Slack if that's where you are | [Approvals](docs/guides/approvals.md) |
 | ⏰ | **Act on their own** — schedules an agent sets for itself, approved once by a human, reporting into Slack | [Schedules](docs/guides/schedules.md) |
+| 🔌 | **Bring your own** — a provider, a channel, a memory store, or an executor arrives as a plugin and registers itself; a soul or a trusted config selects it | [Extending](docs/guides/extending.md) |
 | 📚 | **Learn procedures** — skills installed from any GitHub repo, loaded only when relevant | [Skills](docs/guides/skills.md) |
 | 📦 | **Start from a template** — a folder or repo carrying an agent, its skills, and the plugins behind its tools, installed in one reviewed command | [Templates](docs/guides/templates.md) |
 | 🤝 | **Work as a team** — delegation between agents, routing that keeps the same face in the same places | [Agents](docs/concepts/agents.md) |

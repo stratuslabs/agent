@@ -1,0 +1,19 @@
+{
+  "name": "stratus-plugin-fixture-executor",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A plugin contributing an executor, so the executor seam can be tested through the real loader.",
+  "type": "module",
+  "exports": "./index.js",
+  "dependencies": {
+    "@stratusagent/executor-local": "workspace:*"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "executors": [
+        { "name": "fixture" }
+      ]
+    }
+  }
+}

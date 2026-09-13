@@ -39,14 +39,14 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 
 | Key | What it sets |
 | --- | --- |
-| `provider` | `anthropic`, `openai`, `codex`, or `demo` |
+| `provider` | `anthropic`, `openai`, `codex`, `demo`, or the name a [plugin provider](../guides/extending.md#providers) registers (`ollama`) |
 | `model` | Model for that provider |
 | `baseUrl` | Override the provider API base URL (local models, proxies) |
 | `apiKeyEnv` | Name of the environment variable holding the API key — trusted configs only, see below |
 | `systemPrompt` | System prompt for the run — trusted configs only, see below |
 | `soul` | Path to a soul file, resolved relative to the working directory — trusted configs only, see below |
 | `fallbackModel` | Model to retry with when the default model errors mid-run |
-| `fallbackProvider` | Provider serving the fallback model — defaults to the main provider |
+| `fallbackProvider` | Provider serving the fallback model — defaults to the main provider; a plugin provider's name works here too |
 | `fallbackBaseUrl` | Base URL for an OpenAI-compatible fallback (e.g. a local model) |
 | `promptCache` | Cache the stable head of each Anthropic request. Default `true` — see below |
 | `promptCacheTtl` | How long a cache entry lives: `5m` (default) or `1h` |
@@ -55,11 +55,19 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), and whether anyone else gets a turn at all: `admit` (`anyone`, the default, or `principals`), each with a per-agent `agents` sub-block — trusted configs only, see below |
 | `api` | Control API binding for `stratus serve` — trusted configs only, see below |
 | `plugins` | Plugins to load, keyed by package name — trusted configs only, see below |
+| `executor` | Which executor runs tool calls: `local` (the default) or the name a [plugin executor](../guides/extending.md#executors) registers — trusted configs only, see below |
+| `memoryStore` | Which store backs agent memory: `file` (the default) or the name a [plugin memory store](../guides/extending.md#memory-stores) registers — trusted configs only, see below |
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
 endpoint is never sent to an endpoint a project-local config selects. See
 [Security](../concepts/security.md).
+
+That file also holds every **channel's transport secrets**, under
+`channels.<kind>.<agentId>` — Slack's app and bot tokens, and whatever a
+[plugin channel](../guides/extending.md#channels) documents for its kind.
+They are the daemon's own, never an agent's: nothing resolves them through
+a soul's `credentials:` list.
 
 That file also holds **named credentials** — the `search.apiKey` a search
 backend asks for, and whatever the ecosystem asks for next. They are a
@@ -119,6 +127,7 @@ set.
 | Setting | Decides | Documented in |
 | --- | --- | --- |
 | `plugins` | Which code runs in the daemon's process, with what settings | [Tools](../guides/tools.md) |
+| `executor`, `memoryStore` | Which of that code an agent's commands run in, and where its memories are written — a cloned repo swapping a sandbox for the host is the downgrade this refuses | [Extending](../guides/extending.md) |
 | `approvals` | Who may authorize an agent's tool calls, and how | [Approvals](../guides/approvals.md) |
 | `principals` | Whose messages an agent takes as its operator's; everyone else's arrive as `unknown` | [Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator), [Memory](../concepts/memory.md#where-a-fact-came-from) |
 | `api` | Which interface and port a daemon binds | [Remote access](../guides/remote-access.md) |

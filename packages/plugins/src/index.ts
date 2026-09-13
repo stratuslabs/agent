@@ -17,16 +17,31 @@ export {
   validatePluginConfig,
   HOST_CONFIG_KEYS,
   PLUGIN_MANIFEST_VERSION,
+  PLUGIN_NAMED_CONTRIBUTION_KINDS,
   PluginConfigError,
   PluginManifestError,
   type PluginContributions,
   type PluginManifest,
+  type PluginNamedContributionKind,
+  type PluginNamedDeclaration,
   type PluginNamespaceDeclaration,
   type PluginSkillDeclaration,
   type PluginToolDeclaration,
 } from './manifest.ts';
 
 export { createManifestBoundCredentialResolver } from './credentials.ts';
+
+export { expandHome } from './home.ts';
+
+export {
+  createContributionOwners,
+  createContributionTargets,
+  ManifestBoundContributions,
+  type ChannelSecretSource,
+  type ContributionOwners,
+  type ContributionTargets,
+  type PluginContributionRecords,
+} from './contributions.ts';
 
 export {
   ManifestBoundToolRegistry,
