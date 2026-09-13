@@ -1149,9 +1149,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     agentId: string,
     destination: ScheduleDestination,
   ): Promise<{ post(text: string): Promise<unknown> }> => {
-    const adapter = startedChannels.find(
+    const candidates = startedChannels.filter(
       (candidate) => candidate.name === destination.channel && candidate.resolveOutbound,
     );
+    // One kind may be served by several adapters carrying disjoint
+    // agents — two plugins, or the host's adapter beside a plugin's — and
+    // the one that speaks for this agent is the one whose claims include
+    // it: a contribution's agent list, or the host's declared claims for
+    // an adapter no plugin contributed. With one candidate there is
+    // nothing to choose; with several and no claim, the first stands, as
+    // it always did.
+    const contributed = channelContributions.list();
+    const adapter = candidates.length <= 1
+      ? candidates[0]
+      : candidates.find((candidate) =>
+        contributed.some((entry) => entry.adapter === candidate && entry.agents.includes(agentId)))
+        ?? ((options.hostChannelClaims ?? []).some((claim) => claim.kind === destination.channel && claim.agents.includes(agentId))
+          ? candidates.find((candidate) => !contributed.some((entry) => entry.adapter === candidate))
+          : undefined)
+        ?? candidates[0];
     if (!adapter?.resolveOutbound) {
       throw new Error(
         `No running channel can deliver to '${destination.channel}' destinations — `

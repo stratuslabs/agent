@@ -229,6 +229,63 @@ test('a plugin channel starts from its stored transport secrets, receives an inb
   }
 });
 
+test('outbound speech goes to the adapter that carries the agent when one kind has several', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: sender\ntools: [message.send]\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'juno.md', '---\nname: Juno\nid: juno\nprovider: sender\ntools: [message.send]\n---\n\nYou are Juno.\n');
+  const posted: string[] = [];
+  const channelPlugin = (label: string, agents: string[]) => plugin(label, (context) => {
+    context.channels!.register({
+      agents,
+      adapter: {
+        name: 'fixture',
+        async start() {},
+        async stop() {},
+        async resolveOutbound(address) {
+          return { async post(text: string) { posted.push(`${label} for ${address.agentId}: ${text}`); } };
+        },
+      },
+    });
+  });
+  const host = await hostFor({
+    'stratus-plugin-chan-a': { manifest: manifest({ channels: [{ name: 'fixture' }] }), module: channelPlugin('a', ['ava']) },
+    'stratus-plugin-chan-b': { manifest: manifest({ channels: [{ name: 'fixture' }] }), module: channelPlugin('b', ['juno']) },
+    'stratus-plugin-sender': {
+      manifest: manifest({ providers: [{ name: 'sender' }] }),
+      module: plugin('sender', (context) => {
+        context.providers!.register({
+          name: 'sender',
+          create: () => ({
+            name: 'sender',
+            async generate({ session }): Promise<ProviderResponse> {
+              if (session.messages.at(-1)?.role === 'tool') {
+                return { parts: [{ type: 'text', text: 'sent' }] };
+              }
+              return { parts: [{ type: 'tool-call', call: { id: `${session.id}:send`, toolName: 'message.send', input: { destination: { channel: 'fixture', to: 'C1' }, text: `from ${session.agent.id}` } } }] };
+            },
+          }),
+        });
+      }),
+    },
+  });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-chan-b': {}, 'stratus-plugin-sender': {} },
+    pluginHost: host,
+    log: () => {},
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'out-juno', agentId: 'juno', userMessage: 'say something' });
+    await gateway.dispatch({ sessionId: 'out-ava', agentId: 'ava', userMessage: 'say something' });
+    assert.deepEqual(posted, ['b for juno: from juno', 'a for ava: from ava']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a plugin executor selected by the config runs the commands, and a selection nothing registers refuses to start', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
