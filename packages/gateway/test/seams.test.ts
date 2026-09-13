@@ -245,8 +245,13 @@ test('a plugin executor selected by the config runs the commands, and a selectio
     const session = await gateway.dispatch({ sessionId: 'exec-1', agentId: 'ava', userMessage: 'please use the echo tool' });
     assert.equal(session.status, 'completed');
     assert.deepEqual(ran, ['demo.echo']);
-    // The transcript says where its commands ran, under the registered name.
+    // The transcript says where its commands ran, under the registered name
+    // — and no caller can say otherwise: the key is the daemon's.
     assert.equal(session.metadata?.executor, 'fixture');
+    await assert.rejects(
+      gateway.dispatch({ sessionId: 'exec-2', agentId: 'ava', userMessage: 'hi', metadata: { executor: 'sandbox' } }),
+      /Session metadata key "executor" is reserved/,
+    );
     assert.deepEqual(gateway.plugins()[0]?.executors, ['fixture']);
   } finally {
     await gateway.stop();

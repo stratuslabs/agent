@@ -79,6 +79,35 @@ test('a fallbackProvider naming a plugin provider resolves behind a built-in pri
   const behindPlugin = await resolveRuntimeConfig({}, { ...env, processEnv: {} });
   assert.equal(behindPlugin.provider, 'plugin:vllm');
   assert.deepEqual(behindPlugin.provider === 'plugin:vllm' ? behindPlugin.fallback : undefined, { provider: 'plugin:ollama', model: 'llama3' });
+
+  // A built-in fallback behind a plugin primary resolves on its own
+  // sign-in — the operator configured it, and it must not be dropped for
+  // the primary having none to lend.
+  await saveConfigFile(path.join(home, '.stratus', 'config.json'), {
+    provider: parseProviderName('vllm', 'test'),
+    fallbackModel: 'gpt-4.1-mini',
+    fallbackProvider: 'openai',
+  });
+  const builtInBehindPlugin = await resolveRuntimeConfig({}, env);
+  assert.deepEqual(builtInBehindPlugin.provider === 'plugin:vllm' ? builtInBehindPlugin.fallback : undefined, {
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: 'sk-test',
+  });
+  // And without a sign-in it is quietly skipped, as behind a built-in.
+  const unsigned = await resolveRuntimeConfig({}, { ...env, processEnv: {} });
+  assert.equal(unsigned.provider === 'plugin:vllm' ? unsigned.fallback : 'wrong', undefined);
+
+  // An implicit fallback (no fallbackProvider) was written for the config's
+  // own provider — here the plugin itself, on another model.
+  await saveConfigFile(path.join(home, '.stratus', 'config.json'), {
+    provider: parseProviderName('vllm', 'test'),
+    model: 'big',
+    fallbackModel: 'small',
+  });
+  const implicit = await resolveRuntimeConfig({}, { ...env, processEnv: {} });
+  assert.deepEqual(implicit.provider === 'plugin:vllm' ? implicit.fallback : undefined, { provider: 'plugin:vllm', model: 'small' });
 });
 
 test('createRuntimeProvider builds a registered provider from the registry, once per selection, and names what exists otherwise', () => {

@@ -290,6 +290,16 @@ test('a manifest may not declare a built-in provider name, nor a name that is no
     () => parsePluginManifest({ name: 'stratus-plugin-x', ...manifest({ memory: [{ name: 'a' }, { name: 'a' }] }) }, 'stratus-plugin-x'),
     /declares "a" twice/,
   );
+  // The names the host reads as "the built-in": a plugin under one would
+  // load and never be looked up.
+  assert.throws(
+    () => parsePluginManifest({ name: 'stratus-plugin-x', ...manifest({ executors: [{ name: 'local' }] }) }, 'stratus-plugin-x'),
+    /executor local is the built-in's name/,
+  );
+  assert.throws(
+    () => parsePluginManifest({ name: 'stratus-plugin-x', ...manifest({ memory: [{ name: 'file' }] }) }, 'stratus-plugin-x'),
+    /memory store file is the built-in's name/,
+  );
   const parsed = parsePluginManifest({ name: 'stratus-plugin-x', ...manifest({ channels: [{ name: 'discord' }] }) }, 'stratus-plugin-x');
   assert.deepEqual(parsed.contributes.channels, [{ name: 'discord' }]);
   assert.deepEqual(parsed.contributes.providers, []);

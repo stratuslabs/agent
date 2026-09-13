@@ -1044,6 +1044,9 @@ export const ROLLED_OVER_TO_METADATA_KEY = 'rolledOverTo';
 /** The segment a rollover mints into the archived transcript's id. */
 export const ROLLED_OVER_SESSION_ID_MARKER = ':rolledover:';
 
+/** Where the session's tool calls ran: `local-command`, or a contributed executor's registered name. */
+export const EXECUTOR_METADATA_KEY = 'executor';
+
 export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
   PENDING_APPROVAL_METADATA_KEY,
   FALLBACK_ACTIVE_METADATA_KEY,
@@ -1058,6 +1061,10 @@ export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
   SESSION_TAINTED_BY_METADATA_KEY,
   ROLLED_OVER_FROM_METADATA_KEY,
   ROLLED_OVER_TO_METADATA_KEY,
+  // Which executor ran the turn's tool calls is the daemon's record of
+  // where a command ran, and the one audit question a caller must not be
+  // able to answer for it.
+  EXECUTOR_METADATA_KEY,
 ];
 
 /**
@@ -2299,12 +2306,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // A contributed provider may leave the model to its own default, in
       // which case there is none to record.
       ...(config.provider !== 'demo' && config.model !== undefined ? { model: config.model } : {}),
+      ...input.metadata,
       // Which executor the turn's tool calls run through — the built-in
       // under the name `stratus run` has always recorded, a contributed one
       // under its registered name — so a transcript says where a command
-      // ran, not only which model asked for it.
+      // ran, not only which model asked for it. After the caller's
+      // metadata, and reserved besides: a dispatch that could write it
+      // could make a transcript claim a sandbox ran what the host ran.
       executor: selectedExecutor && options.executor !== undefined ? options.executor : 'local-command',
-      ...input.metadata,
     };
 
     if (existing && existing.agent.id !== agent.id) {

@@ -131,6 +131,9 @@ interface SetupState {
   approvals?: ApprovalsConfig;
   api?: ApiConfig;
   principals?: PrincipalsConfig;
+  /** Trusted-only selections with no menu here; carried through a save. */
+  executor?: string;
+  memoryStore?: string;
   credentials: CredentialsFile;
   credentialsDirty: boolean;
   /** Channel tokens (Slack apps, keyed by agent id) and whether they changed. */
@@ -226,6 +229,11 @@ export const runSetup = async (
     ...(existing.approvals !== undefined ? { approvals: existing.approvals } : {}),
     ...(existing.api !== undefined ? { api: existing.api } : {}),
     ...(existing.principals !== undefined ? { principals: existing.principals } : {}),
+    // Trusted-only selections setup has no menu for, carried through a
+    // save untouched: a re-run that dropped them would put the operator's
+    // agents back on the host and the file store without a word.
+    ...(existing.executor !== undefined ? { executor: existing.executor } : {}),
+    ...(existing.memoryStore !== undefined ? { memoryStore: existing.memoryStore } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
@@ -2552,6 +2560,12 @@ export const runSetup = async (
     }
     if (state.principals !== undefined) {
       config.principals = state.principals;
+    }
+    if (state.executor !== undefined) {
+      config.executor = state.executor;
+    }
+    if (state.memoryStore !== undefined) {
+      config.memoryStore = state.memoryStore;
     }
 
     await saveConfigFile(configPath, config);

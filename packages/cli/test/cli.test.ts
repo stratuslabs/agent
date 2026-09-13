@@ -12752,6 +12752,42 @@ test('a plugin provider serves a run selected with --provider, through the real 
   assert.match(output.stdout, /provider=plugin:fixture model=tiny/);
   assert.match(output.stdout, /hello from the fixture \(model: tiny\)/);
   assert.ok(!output.stderr.includes('did not load'), output.stderr);
+
+  // A non-demo run records where its commands ran, like a demo one.
+  const asJson = createStreams();
+  assert.equal(await runCli({
+    argv: ['run', '--provider', 'fixture', '--prompt', 'hi', '--format', 'json'],
+    streams: asJson.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  }), 0, asJson.output.stderr);
+  const payload = JSON.parse(asJson.output.stdout) as { session: { metadata: Record<string, unknown> } };
+  assert.equal(payload.session.metadata.provider, 'plugin:fixture');
+  assert.equal(payload.session.metadata.executor, 'local-command');
+});
+
+test('re-running setup keeps the executor and memoryStore selections it has no menu for', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ provider: 'demo', executor: 'sandbox', memoryStore: 'vector' })}\n`,
+  );
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => true,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) as Record<string, unknown>;
+  assert.equal(config.executor, 'sandbox');
+  assert.equal(config.memoryStore, 'vector');
 });
 
 test('a provider nobody registered is refused by name, with what is registered', async () => {

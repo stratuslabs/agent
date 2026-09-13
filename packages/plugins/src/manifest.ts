@@ -1,4 +1,6 @@
 import {
+  BUILTIN_EXECUTOR_NAME,
+  BUILTIN_MEMORY_STORE_NAME,
   BUILTIN_PROVIDER_NAMES,
   DEFAULT_TOOL_RISK,
   matchesToolAllowlist,
@@ -73,6 +75,13 @@ export interface PluginContributions {
 
 /** The contribution kinds a manifest declares by name alone. */
 export type PluginNamedContributionKind = 'providers' | 'channels' | 'memory' | 'executors';
+
+const KIND_WORD: Record<PluginNamedContributionKind, string> = {
+  providers: 'provider',
+  channels: 'channel',
+  memory: 'memory store',
+  executors: 'executor',
+};
 
 export const PLUGIN_NAMED_CONTRIBUTION_KINDS: readonly PluginNamedContributionKind[] = [
   'providers',
@@ -296,6 +305,14 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
       if (kind === 'providers' && (BUILTIN_PROVIDER_NAMES as readonly string[]).includes(entry.name)) {
         throw new PluginManifestError(
           `Plugin ${packageName}: provider ${entry.name} is built in and cannot be contributed by a plugin. Register it under a name of your own.`,
+        );
+      }
+      // The names the host's selection reads as "the built-in": a plugin
+      // registering under one would load and be unreachable forever.
+      if ((kind === 'executors' && entry.name === BUILTIN_EXECUTOR_NAME)
+        || (kind === 'memory' && entry.name === BUILTIN_MEMORY_STORE_NAME)) {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: ${KIND_WORD[kind]} ${entry.name} is the built-in's name and cannot be contributed by a plugin. Register it under a name of your own.`,
         );
       }
       if (named[kind].some((declared) => declared.name === entry.name)) {

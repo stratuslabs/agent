@@ -2314,6 +2314,17 @@ export const BUILTIN_PROVIDER_NAMES = ['demo', 'openai', 'anthropic', 'codex'] a
 export type BuiltinProviderName = (typeof BUILTIN_PROVIDER_NAMES)[number];
 
 /**
+ * The names a trusted config's `executor` and `memoryStore` keys mean the
+ * built-ins by — the local child-process executor and the file store —
+ * and so the names a plugin may not register: the host's selection
+ * special-cases them and would never look a contribution up under them.
+ * Here for the same reason the provider list is: the manifest parser and
+ * the selection logic live in packages that never import each other.
+ */
+export const BUILTIN_EXECUTOR_NAME = 'local';
+export const BUILTIN_MEMORY_STORE_NAME = 'file';
+
+/**
  * What a soul's `provider:` and `model:` pick, handed to a contributed
  * provider so it can build the right client. `systemPrompt` is the
  * operator's preamble from the config file — the persona itself arrives on

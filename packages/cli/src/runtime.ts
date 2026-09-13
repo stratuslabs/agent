@@ -404,15 +404,19 @@ export const createAgentRuntime = async (
   }
 
 
+  // The built-in executor keeps the name it has always recorded; a
+  // contributed one records the name it registered under — on every
+  // provider's session, since where a command ran is not a question only
+  // demo runs get to answer.
+  const executorRecord = executor ? executorName : 'local-command';
   const metadata: JsonObject = options.runtime.provider === 'demo'
-    // The built-in keeps the name it has always recorded; a contributed
-    // executor records the name it registered under.
-    ? { provider: 'demo', executor: executor ? executorName : 'local-command' }
+    ? { provider: 'demo', executor: executorRecord }
     : {
         provider: options.runtime.provider,
         // A contributed provider may leave the model to its own default.
         ...(options.runtime.model !== undefined ? { model: options.runtime.model } : {}),
         ...(options.runtime.provider === 'openai' ? { baseUrl: options.runtime.baseUrl } : {}),
+        executor: executorRecord,
       };
 
   // Handed back so a command can release what a plugin acquired — a browser
