@@ -31,6 +31,8 @@ export {
 
 export { createManifestBoundCredentialResolver } from './credentials.ts';
 
+export { expandHome } from './home.ts';
+
 export {
   createContributionOwners,
   createContributionTargets,

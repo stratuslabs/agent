@@ -1,7 +1,13 @@
 # 19 — Registration seams: providers, channels, and memory stores as real plugins
 
-**Status: 19A shipped; 19B next.** The roadmap [table](./README.md) carries
-the record of what landed. Of the open questions below: a soul's `provider:`
+**Status: 19A shipped; 19B shipped for the provider and the memory store,
+with Discord left to [20](./20-channel-discord.md).** The roadmap
+[table](./README.md) carries the record of what landed. The converted
+provider is the OpenAI-compatible adapter, as the open question below
+leaned — `@stratusagent/provider-openai`, registering `openai-compatible`
+beside the built-in `openai` rather than replacing it, since the built-in
+carries the stored-sign-in and endpoint-binding rules a plugin deliberately
+does not; the non-default store is `@stratusagent/memory-sqlite`. Of the open questions below: a soul's `provider:`
 selects a registered provider by its **name**, not a package — provider
 names are unique per install, as tool names are, so the qualifier skills
 need has nothing to disambiguate here; and the fixtures live one per kind in

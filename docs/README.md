@@ -53,7 +53,9 @@ tree is where the depth lives.
 Package READMEs stay canonical for their own surface:
 [`channel-slack`](../packages/channel-slack/README.md) for the Slack app
 setup, [`control-api`](../packages/control-api/README.md) for the HTTP + WS
-contract, [`plugin-mcp`](../packages/plugin-mcp/README.md) and the
-[`tool-*`](../packages/tool-fs/README.md) packages for their own settings,
+contract, [`plugin-mcp`](../packages/plugin-mcp/README.md), the
+[`tool-*`](../packages/tool-fs/README.md) packages,
+[`provider-openai`](../packages/provider-openai/README.md), and
+[`memory-sqlite`](../packages/memory-sqlite/README.md) for their own settings,
 and [`search`](../packages/search/README.md) for the `web.search` contract
 every search backend implements.

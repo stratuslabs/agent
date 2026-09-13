@@ -21,6 +21,7 @@ import type { ParsedPluginsCommand } from '../parse.ts';
 import {
   PLUGIN_MARKETPLACE_URL,
   FIRST_PARTY_CAPABILITY_PACKAGES,
+  FIRST_PARTY_CONTRIBUTION_PACKAGES,
   KERNEL_TOOL_NAMES,
 } from '../plugin-catalog.ts';
 import { soulGrantsTool, rosterSoulsWithConfigured } from '../roster.ts';
@@ -173,7 +174,7 @@ export const collectPluginsReport = async (
   const configured = Object.keys(pluginsConfig);
   const packages = [
     ...configured,
-    ...FIRST_PARTY_CAPABILITY_PACKAGES.filter((name) => !configured.includes(name)),
+    ...[...FIRST_PARTY_CAPABILITY_PACKAGES, ...FIRST_PARTY_CONTRIBUTION_PACKAGES].filter((name) => !configured.includes(name)),
   ];
 
   const plugins: PluginReport[] = [];

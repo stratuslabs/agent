@@ -12874,3 +12874,28 @@ test('plugins lists what a manifest declares besides tools, and how each is sele
   assert.match(output.stdout, /memory store fixture\s+a trusted config selects it with memoryStore:/);
   assert.match(output.stdout, /executor fixture\s+a trusted config selects it with executor:/);
 });
+
+test('the SQLite memory store plugin backs a run end to end, selected by a trusted config', async () => {
+  const home = await seamHome({});
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({
+    memoryStore: 'sqlite',
+    plugins: {
+      'stratus-plugin-fixture-provider': { mode: 'memory', reply: 'kept' },
+      '@stratusagent/memory-sqlite': { path: path.join(home, 'memories.sqlite') },
+    },
+  })}\n`);
+  const soulPath = path.join(home, 'ava.md');
+  await writeFile(soulPath, '---\nname: Ava\nid: ava\nprovider: fixture\nmodel: tea\ntools: [memory.remember, memory.recall]\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  assert.equal(await runCli({
+    argv: ['run', '--soul', soulPath, '--prompt', 'hi'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  }), 0, output.stderr);
+  assert.match(output.stdout, /kept; recalled .*ava likes tea/);
+  // The file is where the config said, and owner-only.
+  assert.equal((await stat(path.join(home, 'memories.sqlite'))).mode & 0o777, 0o600);
+  const fileStore = await readFile(memoryFilePath({ homeDir: home }), 'utf8').catch(() => '');
+  assert.ok(!fileStore.includes('likes'), fileStore);
+});

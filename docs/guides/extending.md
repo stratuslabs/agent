@@ -84,6 +84,12 @@ A plugin provider works as a **fallback target** too: `fallbackProvider:
 ollama` with a `fallbackModel` fails over to it when the primary errors
 mid-run, under the same sticky-fallback rules as a built-in.
 
+The first-party one is
+[`@stratusagent/provider-openai`](../../packages/provider-openai): the same
+chat-completions adapter the built-in `openai` selection uses, registered
+as `openai-compatible`, with its endpoint in its config block and its key
+resolved per agent from the `openai.apiKey` named credential.
+
 ## Channels
 
 A channel plugin registers an adapter for a **kind** — `discord`, `matrix` —
@@ -143,6 +149,12 @@ A `memoryStore` naming something no loaded plugin registers **refuses to
 start** rather than falling back to the file store: a daemon writing
 memories somewhere the operator did not select is a daemon whose agents
 remember into the wrong place.
+
+The first-party one is
+[`@stratusagent/memory-sqlite`](../../packages/memory-sqlite): the same
+contract on one owner-only SQLite file, with no derived index, selected
+with `memoryStore: sqlite` and a `path` in its config block. Nothing is
+migrated between stores when you switch.
 
 ## Executors
 
