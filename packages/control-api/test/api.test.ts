@@ -112,6 +112,25 @@ test('editing a soul round-trips through the parser and refuses an id change', a
     assert.equal(badSkills.status, 400);
     assert.equal((await json<{ error: { code: string } }>(badSkills)).error.code, 'invalid_allowlist');
 
+    // A delegates entry that is not an agent id is the client's error, not
+    // a failed soul round-trip.
+    const badDelegates = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ delegates: ['bea', 'a/b'] }),
+    });
+    assert.equal(badDelegates.status, 400);
+    const badDelegatesBody = await json<{ error: { code: string; message: string } }>(badDelegates);
+    assert.equal(badDelegatesBody.error.code, 'invalid_delegates');
+    assert.match(badDelegatesBody.error.message, /"a\/b" is not an agent id or \*/);
+    const goodDelegates = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ delegates: ['bea', '*'] }),
+    });
+    assert.equal(goodDelegates.status, 200);
+    assert.match(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8'), /delegates:\n  - bea\n  - \*/);
+
     // An id keys sessions, memory, and credentials. Changing it in place
     // would not rename an agent — it would hand this one's history away.
     const renamed = await harness.call('/api/v1/agents/ava', {

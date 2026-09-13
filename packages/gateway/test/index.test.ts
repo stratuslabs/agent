@@ -358,6 +358,8 @@ test('delegation runs the target on the target\'s own provider config', async ()
     'model: model-a',
     'tools:',
     '  - agent.delegate',
+    'delegates:',
+    '  - bea',
     '---',
     '',
     'You are Ava, an orchestrator.',
@@ -976,7 +978,7 @@ test('the watchdog suspends across a slow tool phase and re-arms for the next pr
   // the watchdog must suspend at provider.response and only re-arm once the
   // tool settles — otherwise every slow tool or approval wait dies at the
   // idle timeout.
-  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\ndelegates:\n  - bea\n---\n\nYou are Ava.\n');
   await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-b\n---\n\nYou are Bea.\n');
 
   // Two independent constraints, and the first is the one a contended CI
@@ -1513,7 +1515,7 @@ test('the watchdog observes activity ahead of slow external event consumers', as
   const home = await newHome();
   await writeSoul(home, 'ava.md', [
     '---', 'name: Ava', 'provider: anthropic', 'model: model-a',
-    'tools:', '  - agent.delegate', '---', '', 'You are Ava.', '',
+    'tools:', '  - agent.delegate', 'delegates:', '  - bea', '---', '', 'You are Ava.', '',
   ].join('\n'));
   await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-b\n---\n\nYou are Bea.\n');
 
@@ -2815,7 +2817,7 @@ test('a hosted tool phase holds the watchdog, on a provider that never announces
   const home = await newHome();
   await writeSoul(home, 'ava.md', [
     '---', 'name: Ava', 'provider: anthropic',
-    'tools:', '  - agent.delegate', '---', '', 'You are Ava.', '',
+    'tools:', '  - agent.delegate', 'delegates:', '  - bea', '---', '', 'You are Ava.', '',
   ].join('\n'));
   await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-b\n---\n\nYou are Bea.\n');
   await mkdir(path.join(home, '.stratus'), { recursive: true });
