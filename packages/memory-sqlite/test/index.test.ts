@@ -21,7 +21,12 @@ const newFile = async (): Promise<string> => path.join(await mkdtemp(path.join(o
 
 test('a fact remembered is recalled by whole-token AND matching, newest first, and survives reopening the file', async () => {
   const file = await newFile();
-  const first = createSqliteMemoryStore(file);
+  // A clock that ticks per call: three appends inside one real
+  // millisecond would tie on createdAt and order by id instead, which is
+  // the contract's rule and not what this test is about.
+  let tick = Date.parse('2026-03-01T00:00:00.000Z');
+  const now = () => new Date((tick += 1));
+  const first = createSqliteMemoryStore(file, { now });
   await first.append('ava', 'Postgres 16 runs on the staging box');
   await first.append('ava', 'The postgresql migration guide is bookmarked');
   await first.append('ava', 'staging box reboots on Sundays', { source: 'ops' }, { trust: 'user', origin: { sessionId: 's1' } });
