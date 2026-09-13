@@ -17,7 +17,7 @@ import {
   type DashboardSession,
 } from './auth.ts';
 import { createEventStream, type EventFilter } from './events.ts';
-import { API_PREFIX, ApiError, isStateChanging, sendError, sendJson } from './http.ts';
+import { API_PREFIX, ApiError, MAX_BODY_BYTES, isStateChanging, sendError, sendJson } from './http.ts';
 import { allowedMethodsFor, resolveRoute, type RouteContext } from './routes.ts';
 
 export { API_PREFIX } from './http.ts';
@@ -384,7 +384,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       auth.adoptSessions(pendingSessions);
       pendingSessions = [];
       stream = createEventStream(gateway);
-      wss = new WebSocketServer({ noServer: true });
+      wss = new WebSocketServer({ noServer: true, maxPayload: MAX_BODY_BYTES });
 
       server = createServer((request, response) => {
         // Tracked so stop() can let an answer already being written reach

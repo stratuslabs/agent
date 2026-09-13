@@ -413,12 +413,16 @@ makes that a live question rather than a hypothetical.
 ### `always` means one thing, and the request says which
 
 `POST /approvals` takes `answer` as exactly `once`, `always`, or `deny`;
-anything else is `400 invalid_answer`. `actor` is optional and records who
-decided — a channel-native id, such as a Slack user — and a standing grant
-made by that answer records it too, as `grantedBy` in the grants listing. A
-request that has already been decided, has expired, or whose turn was
-cancelled answers `409 approval_not_pending` rather than silently doing
-nothing twice.
+anything else is `400 invalid_answer`. Who decided is recorded on the
+resolution event and, for a standing grant, as `grantedBy` in the grants
+listing. A Slack click records the clicker's user id; a decision through this
+endpoint records how the caller authenticated — `api` for a bearer token,
+`dashboard` for a browser session — with the optional `actor` from the body
+appended after a colon (`api:ops-bot`). The body never sets the recorded
+actor bare, so a request cannot spell a Slack approver's id and read as that
+approver's decision. A request that has already been decided, has expired,
+or whose turn was cancelled answers `409 approval_not_pending` rather than
+silently doing nothing twice.
 
 `once` and `deny` mean what they say, for this call. **`always` is a grant to
 the agent, and it lasts until an operator revokes it** — for every tool but
@@ -552,6 +556,11 @@ Deltas are dropped for a client whose socket has backed up past 1 MB, and only
 deltas: losing a token from a reply is a cosmetic gap, while losing a
 completion, a failure, or an approval leaves a UI stuck on a turn that already
 ended. A `{ "type": "dropped", "deltas": n }` frame says when it happened.
+
+The same 1 MB bounds what a client may send: a request body past it is
+`413 body_too_large`, and a WebSocket frame past it closes the socket with
+code 1009. A subscribe frame is a few hundred bytes; nothing a client has a
+reason to send comes near either.
 
 ## Configuration
 
