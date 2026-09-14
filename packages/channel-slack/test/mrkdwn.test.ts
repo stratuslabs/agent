@@ -205,6 +205,15 @@ test('a link is read from the characters its destination was written with', () =
     // A break between the brackets ends the search on its own; a newline
     // hidden inside a single code token has to end it too.
     ['[label `a\nb`](https://x)', '[label `a\nb`](https://x)'],
+    // A closing bracket spends its opener whether or not a destination
+    // follows it, the way Markdown's own does. Kept, the opener let a
+    // `](…)` further along reach back past the bracket that had already
+    // answered it, and the text in between disappeared into a label.
+    ['[not a link] text](https://example.com)', '[not a link] text](https://example.com)'],
+    ['[a] and [b](https://h/x)', '[a] and <https://h/x|b>'],
+    ['see [1] and the [docs](https://h/d)', 'see [1] and the <https://h/d|docs>'],
+    // The nearest opener is the one a bracket answers.
+    ['[outer [inner](https://h/x)', '[outer <https://h/x|inner>'],
   ]);
 });
 

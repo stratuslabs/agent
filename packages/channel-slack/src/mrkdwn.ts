@@ -317,8 +317,18 @@ const findLinks = (tokens: readonly Token[]): Map<number, Link> => {
       opener = at;
       continue;
     }
+    if (token.text !== ']') {
+      continue;
+    }
+    // A closing bracket spends its opener whether or not a destination
+    // follows, the way Markdown's own does. Kept, it would let a `](…)`
+    // further along the line reach back past the bracket that already
+    // answered it: `[not a link] text](https://example.com)` became one
+    // link over the lot, hiding the text in between inside a label.
+    const candidate = opener;
+    opener = -1;
     const after = tokens[at + 1];
-    if (token.text !== ']' || opener === -1 || after?.kind !== 'punct' || after.text !== '(') {
+    if (candidate === -1 || after?.kind !== 'punct' || after.text !== '(') {
       continue;
     }
     let close = -1;
@@ -335,7 +345,7 @@ const findLinks = (tokens: readonly Token[]): Map<number, Link> => {
     if (close === -1) {
       continue;
     }
-    const spans = tokens.slice(opener + 1, close);
+    const spans = tokens.slice(candidate + 1, close);
     if (spans.some((inner) => inner.kind === 'code' && inner.text.includes('\n'))) {
       continue;
     }
@@ -343,8 +353,7 @@ const findLinks = (tokens: readonly Token[]): Map<number, Link> => {
     if (!LINK_DESTINATION.test(destination)) {
       continue;
     }
-    links.set(opener, { label: [opener + 1, at], destination, through: close });
-    opener = -1;
+    links.set(candidate, { label: [candidate + 1, at], destination, through: close });
     at = close;
   }
   return links;
