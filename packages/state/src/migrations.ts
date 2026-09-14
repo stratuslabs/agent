@@ -1,0 +1,397 @@
+import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
+import path from 'node:path';
+import type { MemoryEntry } from '@stratusagent/core';
+import { type StateEnvironment, readWorkingDirectory } from './environment.ts';
+import {
+  MEMORY_FILENAME,
+  stratusHomePath,
+  logsDirPath,
+  credentialsPath,
+  memoryFilePath,
+  gatewayTokenPath,
+  gatewayInfoPath,
+} from './paths.ts';
+
+// Memory used to live under the working directory. Fold any such file into
+// the global store the first time a run happens from that directory, then
+// archive it — an upgrade must never look like the agent forgot.
+//
+// Every import first takes exclusive ownership by atomically renaming its
+// source to a unique claim file: of any competing processes, exactly one
+// wins the rename and the rest see ENOENT. A crash mid-import leaves the
+// claim file behind; later runs re-claim it the same way and finish the
+// job, with entries deduped against the global store by id. Only records
+// that parse as real memory entries are imported — malformed lines stay in
+// the archive instead of poisoning the global store for every agent.
+const isMemoryEntryLine = (line: string): boolean => {
+  try {
+    const parsed = JSON.parse(line) as Partial<MemoryEntry> | null;
+    return typeof parsed === 'object' && parsed !== null
+      && typeof parsed.id === 'string'
+      && typeof parsed.agentId === 'string'
+      && typeof parsed.content === 'string';
+  } catch {
+    return false;
+  }
+};
+
+export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> => {
+  const legacyPath = path.join(readWorkingDirectory(env), '.stratus', MEMORY_FILENAME);
+  const globalPath = memoryFilePath(env);
+  if (legacyPath === globalPath) {
+    return;
+  }
+  const legacyDir = path.dirname(legacyPath);
+  const archivePath = `${legacyPath}.migrated`;
+
+  const claimAndImport = async (sourcePath: string): Promise<void> => {
+    const claimPath = path.join(legacyDir, `${MEMORY_FILENAME}.migrating-${randomUUID()}`);
+    try {
+      await rename(sourcePath, claimPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return; // another process owns it, or there is nothing to migrate
+      }
+      throw error;
+    }
+
+    const claimed = await readFile(claimPath, 'utf8');
+
+    let existingIds: Set<string>;
+    try {
+      existingIds = new Set(
+        (await readFile(globalPath, 'utf8'))
+          .split('\n')
+          .filter(isMemoryEntryLine)
+          .map((line) => (JSON.parse(line) as MemoryEntry).id),
+      );
+    } catch {
+      existingIds = new Set();
+    }
+
+    const entries = claimed
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .filter(isMemoryEntryLine)
+      .filter((line) => !existingIds.has((JSON.parse(line) as MemoryEntry).id));
+    if (entries.length > 0) {
+      await mkdir(path.dirname(globalPath), { recursive: true });
+      await appendFile(globalPath, `${entries.join('\n')}\n`);
+    }
+
+    // Archive by appending (never overwriting an earlier archive), then
+    // drop the claim — its content is fully preserved in the archive.
+    if (claimed.length > 0) {
+      await appendFile(archivePath, claimed.endsWith('\n') || claimed.length === 0 ? claimed : `${claimed}\n`);
+    }
+    await unlink(claimPath);
+  };
+
+  await claimAndImport(legacyPath);
+
+  // Finish any claims a crashed run left behind (both the current unique
+  // names and the fixed .migrating name from earlier versions).
+  let leftovers: string[];
+  try {
+    leftovers = await readdir(legacyDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  for (const name of leftovers) {
+    if (name.startsWith(`${MEMORY_FILENAME}.migrating`)) {
+      await claimAndImport(path.join(legacyDir, name));
+    }
+  }
+};
+
+// ---- versioned state and migrations ----------------------------------------
+//
+// ~/.stratus is a real on-disk format — config, credentials, souls, memory,
+// the session database — and until now nothing stamped it with a version.
+// Without a stamp, nothing can know which compatibility shims a given home
+// directory has been through, no shim can ever be retired, and a build has
+// no way to notice it is looking at state written by a NEWER build — the
+// case most likely to corrupt something.
+//
+// `state.json` is that stamp: a schema version plus the ids of applied
+// migrations. Migrations are ordered, idempotent, and record themselves as
+// applied one at a time, so a crash mid-sequence re-runs only what never
+// recorded itself. They run on first use of a newer build — every install
+// path, not only `stratus update` — because state that migrates only
+// sometimes is worse than state that never migrates: the two populations
+// diverge silently.
+
+const STATE_FILENAME = 'state.json';
+
+/**
+ * The schema version this build writes. Bump it when a migration lands
+ * whose absence a newer build must be able to detect — the daemon refuses
+ * to run against a HIGHER version than it understands.
+ */
+export const STATE_SCHEMA_VERSION = 2;
+
+export const stateFilePath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), STATE_FILENAME);
+
+export interface StateStamp {
+  schemaVersion: number;
+  /** Ids of migrations that have run to completion, in application order. */
+  applied: string[];
+}
+
+export interface StateMigration {
+  /** Stable id, never reused. Ordering comes from the registry, not the id. */
+  id: string;
+  /** What applying it does, present tense, for reports. */
+  description: string;
+  /**
+   * Idempotent: applying twice must equal applying once, because two
+   * processes can race the stamp and a crash can lose the record of a
+   * completed run. Returns a line describing what actually changed, or
+   * undefined when there was nothing to do.
+   *
+   * Must also be safe to run while a daemon is serving: migrations run
+   * automatically on the first command of a newer build, and that path
+   * does not stop the managed service — only `stratus update` brackets
+   * with a stop/restart. A migration needing exclusive access to shared
+   * state (the SQLite session database, above all) must NOT be registered
+   * until this registry grows a way to require that bracket — a
+   * `requiresExclusive` marker the automatic path defers on — because a
+   * migration that is only safe under `update` is unsafe under every
+   * other install path.
+   */
+  apply(env: StateEnvironment): Promise<string | undefined>;
+}
+
+/**
+ * The first recorded migration retires a real class of drift: every file
+ * mode in ~/.stratus is enforced on write, but a file created by an older
+ * install under a looser umask keeps its old permissions until something
+ * writes it again — which for a long-lived credentials file may be never.
+ */
+const OWNER_ONLY_STATE_FILES_MIGRATION: StateMigration = {
+  id: '0001-owner-only-state-files',
+  description: 'tighten pre-existing state files to owner-only permissions',
+  async apply(env) {
+    const tightened: string[] = [];
+    const tightenFile = async (filePath: string): Promise<void> => {
+      let info;
+      try {
+        info = await stat(filePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return;
+        }
+        throw error;
+      }
+      if (!info.isFile() || (info.mode & 0o077) === 0) {
+        return;
+      }
+      await chmod(filePath, 0o600);
+      tightened.push(path.basename(filePath));
+    };
+    await tightenFile(credentialsPath(env));
+    await tightenFile(memoryFilePath(env));
+    await tightenFile(`${memoryFilePath(env)}.index`);
+    await tightenFile(gatewayTokenPath(env));
+    await tightenFile(gatewayInfoPath(env));
+    await tightenFile(path.join(logsDirPath(env), 'stratusd.jsonl'));
+    try {
+      const logs = await stat(logsDirPath(env));
+      if (logs.isDirectory() && (logs.mode & 0o077) !== 0) {
+        await chmod(logsDirPath(env), 0o700);
+        tightened.push('logs/');
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
+    return tightened.length > 0 ? `tightened ${tightened.join(', ')}` : undefined;
+  },
+};
+
+/** Ordered. Append only — an id that has shipped is never reordered or reused. */
+/**
+ * Schema 2 changes nothing on disk and exists to be refused: memory
+ * entries, sessions, schedules, and the filesystem provenance ledger now
+ * carry trust labels, and a build that predates them would read an
+ * `external` fact as the agent's own conclusion and keep writing unlabelled
+ * state beside the labelled kind. Stamping the version is what makes a
+ * downgraded daemon stop at the door instead.
+ */
+const PROVENANCE_LABELS_MIGRATION: StateMigration = {
+  id: '0002-provenance-labels',
+  description: 'stamp the state as carrying provenance labels, so an older build refuses it rather than ignoring them',
+  async apply() {
+    return undefined;
+  },
+};
+
+export const STATE_MIGRATIONS: readonly StateMigration[] = [
+  OWNER_ONLY_STATE_FILES_MIGRATION,
+  PROVENANCE_LABELS_MIGRATION,
+];
+
+const unversionedStamp = (): StateStamp => ({ schemaVersion: 0, applied: [] });
+
+/**
+ * Missing, or something other than a file where the stamp belongs (a
+ * directory, a path through one): unversioned, like a corrupt stamp. The
+ * write that follows fails on the same obstacle, and that failure is what
+ * refuses a state-writing command — see the CLI.
+ */
+const isAbsentStamp = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'EISDIR' || code === 'ENOTDIR';
+};
+
+const parseStateStamp = (raw: string): StateStamp => {
+  try {
+    const parsed = JSON.parse(raw) as Partial<StateStamp> | null;
+    if (typeof parsed === 'object' && parsed !== null && typeof parsed.schemaVersion === 'number') {
+      return {
+        schemaVersion: parsed.schemaVersion,
+        applied: Array.isArray(parsed.applied) ? parsed.applied.filter((id): id is string => typeof id === 'string') : [],
+      };
+    }
+  } catch {
+    // Fall through: an unreadable stamp is treated as unversioned.
+  }
+  // A corrupt stamp reads as schema 0 rather than an error: every
+  // migration is idempotent, so re-running them costs nothing, while
+  // refusing to run would brick every command over a file this build can
+  // simply rewrite.
+  return unversionedStamp();
+};
+
+/**
+ * The stamp as it stands. A missing file — every install that predates
+ * versioning, and every fresh one — reads as schema 0 with nothing applied:
+ * all migrations pending, each of which must therefore be a no-op on a home
+ * directory it has nothing to do in.
+ */
+export const readStateStamp = async (env: StateEnvironment): Promise<StateStamp> => {
+  let raw: string;
+  try {
+    raw = await readFile(stateFilePath(env), 'utf8');
+  } catch (error) {
+    if (isAbsentStamp(error)) {
+      return unversionedStamp();
+    }
+    throw error;
+  }
+  return parseStateStamp(raw);
+};
+
+/**
+ * The same stamp, read without yielding to the event loop. The gateway
+ * checks it inside its start-up, between the control API announcing its
+ * address and the daemon marking itself serving, and any I/O in that
+ * stretch is a window in which a restart asked for the moment the address
+ * appears is refused as "still starting" — CI's restart tests hit it twice.
+ * One small file, read synchronously the way the SQLite stores already
+ * read, keeps that stretch to microtasks.
+ */
+const readStateStampSync = (env: StateEnvironment): StateStamp => {
+  let raw: string;
+  try {
+    raw = readFileSync(stateFilePath(env), 'utf8');
+  } catch (error) {
+    if (isAbsentStamp(error)) {
+      return unversionedStamp();
+    }
+    throw error;
+  }
+  return parseStateStamp(raw);
+};
+
+const writeStateStamp = async (env: StateEnvironment, stamp: StateStamp): Promise<void> => {
+  await mkdir(stratusHomePath(env), { recursive: true });
+  // Atomically, via rename: `writeFile` truncates before it writes, so a
+  // crash in between would leave partial JSON — which reads as schema 0,
+  // exactly the state that lets an older binary past the newer-schema
+  // refusal. A rename either lands the whole stamp or leaves the old one.
+  const target = stateFilePath(env);
+  const temp = `${target}.tmp-${randomUUID()}`;
+  await writeFile(temp, `${JSON.stringify(stamp, null, 2)}\n`);
+  await rename(temp, target);
+};
+
+/** The refusal line, phrased for the person who just downgraded without meaning to. */
+export const newerStateMessage = (found: number): string =>
+  `~/.stratus was written by a newer Stratus build (state schema ${found}; this build understands ${STATE_SCHEMA_VERSION}).\n`
+  + 'Running an older build against it risks corrupting state the newer format relies on.\n'
+  + 'Upgrade this install (`npm install -g @stratusagent/cli`), or point STRATUS home at a different directory.';
+
+/**
+ * Throws when the stamp was written by a newer schema than this build knows.
+ * Synchronous on purpose — see `readStateStampSync`.
+ */
+export const assertStateCompatible = (env: StateEnvironment): void => {
+  const stamp = readStateStampSync(env);
+  if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {
+    throw new Error(newerStateMessage(stamp.schemaVersion));
+  }
+};
+
+/** Migrations not yet recorded as applied, in the order they would run. */
+export const pendingStateMigrations = async (env: StateEnvironment): Promise<StateMigration[]> => {
+  const stamp = await readStateStamp(env);
+  const applied = new Set(stamp.applied);
+  return STATE_MIGRATIONS.filter((migration) => !applied.has(migration.id));
+};
+
+export interface AppliedStateMigration {
+  id: string;
+  description: string;
+  /** What actually changed; absent when the migration had nothing to do. */
+  detail?: string;
+}
+
+/**
+ * Run every pending migration in order and stamp the result. Refuses a
+ * stamp from a newer schema outright — migrating state this build does not
+ * understand is the corruption path versioning exists to close. The stamp
+ * is rewritten after each migration, not once at the end, so a crash
+ * between two migrations re-runs only the one that never recorded itself.
+ */
+export const runStateMigrations = async (env: StateEnvironment): Promise<AppliedStateMigration[]> => {
+  const stamp = await readStateStamp(env);
+  if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {
+    throw new Error(newerStateMessage(stamp.schemaVersion));
+  }
+  const results: AppliedStateMigration[] = [];
+  const applied = new Set(stamp.applied);
+  for (const migration of STATE_MIGRATIONS) {
+    if (applied.has(migration.id)) {
+      continue;
+    }
+    const detail = await migration.apply(env);
+    stamp.applied.push(migration.id);
+    applied.add(migration.id);
+    await writeStateStamp(env, { schemaVersion: STATE_SCHEMA_VERSION, applied: stamp.applied });
+    results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
+  }
+  if (results.length === 0 && stamp.schemaVersion !== STATE_SCHEMA_VERSION) {
+    // Nothing to run but the stamp is old (or missing): record the version
+    // so the next build can tell this home directory has been looked at.
+    await writeStateStamp(env, { schemaVersion: STATE_SCHEMA_VERSION, applied: stamp.applied });
+  }
+  return results;
+};
