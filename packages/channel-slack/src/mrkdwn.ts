@@ -427,57 +427,116 @@ interface Context {
   readonly edits: ReadonlyMap<number, string>;
 }
 
+type Run = Extract<Token, { readonly kind: 'run' }>;
+
+/**
+ * A range being rendered, and what encloses it.
+ *
+ * `after` is where the enclosing range picks back up once this one is
+ * finished — past the pair's closing run, or past the whole of the link.
+ */
+type Frame =
+  | { readonly kind: 'range'; readonly to: number; readonly parts: Rendered[] }
+  | {
+      readonly kind: 'pair';
+      readonly to: number;
+      readonly parts: Rendered[];
+      readonly after: number;
+      readonly open: Run;
+      readonly close: Run;
+      readonly use: number;
+    }
+  | { readonly kind: 'label'; readonly to: number; readonly parts: Rendered[]; readonly after: number; readonly link: Link };
+
+/**
+ * The tokens from `from` to `to`, rendered.
+ *
+ * What a pair encloses is a range in its own right, and so is a link's
+ * label, which reads as recursion and was written that way. It cannot be:
+ * nesting deep enough — a few thousand pairs one inside the next, which is
+ * a runaway model or a pasted file, not a person — exhausted the call stack
+ * and threw, and the throw lands in the edit timer, evaluated synchronously
+ * outside anything catching, so the reply took the adapter down with it.
+ * The depth lives in this array instead, where it costs an entry.
+ */
 const renderRange = (context: Context, from: number, to: number): Rendered => {
-  const parts: Rendered[] = [];
+  const stack: Frame[] = [{ kind: 'range', to, parts: [] }];
   let at = from;
 
-  while (at < to) {
-    const token = context.tokens[at];
+  for (;;) {
+    const frame = stack[stack.length - 1];
+    if (frame === undefined) {
+      return EMPTY;
+    }
+    const token = at < frame.to ? context.tokens[at] : undefined;
+
     if (token === undefined) {
-      break;
+      const inner = frame.parts.length > 0 ? joined(frame.parts) : EMPTY;
+      stack.pop();
+      // Only the range this call was asked for has nothing around it.
+      if (frame.kind === 'range') {
+        return inner;
+      }
+      const parent = stack[stack.length - 1];
+      if (parent === undefined) {
+        return inner;
+      }
+      if (frame.kind === 'pair') {
+        const [open, close] = wrapperFor(frame.open.char, frame.use);
+        // The characters of each run the pair did not consume are text, and
+        // stay on the outside of it where they were written.
+        const before = frame.open.char.repeat(frame.open.length - frame.use);
+        const after = frame.close.char.repeat(frame.close.length - frame.use);
+        // Every character the wrapper is spelled with, not just its first:
+        // `***both***` is written `*_…_*`, and an underscore already loose
+        // inside it would break the italic half exactly as a stray asterisk
+        // breaks the bold one.
+        const nests = [...open].some((char) => inner.loose.has(char)) || inner.unclosed;
+        parent.parts.push(nests
+          ? joined([literal(sourceOf(frame.open)), inner, literal(sourceOf(frame.close))])
+          : joined([literal(before), literal(open), inner, literal(close), literal(after)]));
+      } else {
+        parent.parts.push({
+          text: `<${frame.link.destination}|${inner.text}>`,
+          loose: new Set([...inner.loose, ...[...frame.link.destination].filter((char) => char in DELIMITERS)]),
+          unclosed: inner.unclosed,
+          wraps: inner.wraps,
+        });
+      }
+      at = frame.after;
+      continue;
     }
 
     const link = context.links.get(at);
-    if (link !== undefined && link.through < to) {
-      const label = renderRange(context, link.label[0], link.label[1]);
-      parts.push({
-        text: `<${link.destination}|${label.text}>`,
-        loose: new Set([...label.loose, ...[...link.destination].filter((char) => char in DELIMITERS)]),
-        unclosed: label.unclosed,
-        wraps: label.wraps,
-      });
-      at = link.through + 1;
+    if (link !== undefined && link.through < frame.to) {
+      stack.push({ kind: 'label', to: link.label[1], parts: [], after: link.through + 1, link });
+      at = link.label[0];
       continue;
     }
 
     if (token.kind === 'run') {
       const pair = context.pairs.get(at);
       const closer = pair === undefined ? undefined : context.tokens[pair.close];
-      if (pair?.open === at && pair.close < to && closer?.kind === 'run') {
-        const inner = renderRange(context, at + 1, pair.close);
-        const [open, close] = wrapperFor(token.char, pair.use);
-        // The characters of each run the pair did not consume are text, and
-        // stay on the outside of it where they were written.
-        const before = token.char.repeat(token.length - pair.use);
-        const after = token.char.repeat(closer.length - pair.use);
-        // Every character the wrapper is spelled with, not just its first:
-        // `***both***` is written `*_…_*`, and an underscore already loose
-        // inside it would break the italic half exactly as a stray asterisk
-        // breaks the bold one.
-        const nests = [...open].some((char) => inner.loose.has(char)) || inner.unclosed;
-        parts.push(nests
-          ? joined([literal(sourceOf(token)), inner, literal(sourceOf(closer))])
-          : joined([literal(before), literal(open), inner, literal(close), literal(after)]));
-        at = pair.close + 1;
+      if (pair?.open === at && pair.close < frame.to && closer?.kind === 'run') {
+        stack.push({
+          kind: 'pair',
+          to: pair.close,
+          parts: [],
+          after: pair.close + 1,
+          open: token,
+          close: closer,
+          use: pair.use,
+        });
+        at += 1;
         continue;
       }
-      parts.push(literal(sourceOf(token)));
+      frame.parts.push(literal(sourceOf(token)));
       at += 1;
       continue;
     }
 
     if (token.kind === 'code') {
-      parts.push({
+      frame.parts.push({
         text: token.text,
         loose: new Set(),
         unclosed: !token.closed,
@@ -487,11 +546,9 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
       continue;
     }
 
-    parts.push(literal(context.edits.get(at) ?? sourceOf(token)));
+    frame.parts.push(literal(context.edits.get(at) ?? sourceOf(token)));
     at += 1;
   }
-
-  return parts.length > 0 ? joined(parts) : EMPTY;
 };
 
 /**

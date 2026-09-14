@@ -136,7 +136,27 @@ test('an emphasis run reaches its closer across a snippet', () => {
     ['*the `fs.read` tool*', '_the `fs.read` tool_'],
     ['~~the `fs.read` tool~~', '~the `fs.read` tool~'],
     ['**a `x` b `y` c**', '*a `x` b `y` c*'],
+    // Including a snippet with a newline in it. The run is not crossing a
+    // line — the newline is inside the span, so the prose around it never
+    // breaks — and Slack pairs its own delimiters across newlines, which
+    // is the same thing that makes a fence one code run to it. The old
+    // converter left these as literal asterisks, for the fragment reason
+    // above rather than a decision about what Slack does.
+    ['**before `a\nb` after**', '*before `a\nb` after*'],
+    ['~~gone `p\nq` now~~', '~gone `p\nq` now~'],
   ]);
+});
+
+test('a reply nested past the call stack converts instead of taking the process down', () => {
+  // A few thousand pairs one inside the next is a runaway model or a pasted
+  // file rather than a person, and the throw lands in the edit timer, which
+  // evaluates the conversion synchronously outside anything catching it —
+  // so the reply took the adapter with it. Depth belongs in an array.
+  const depth = 10_000;
+  const reply = `${'*a '.repeat(depth)}z${' a*'.repeat(depth)}`;
+  const converted = toSlackMrkdwn(reply);
+  assert.equal(converted.includes('z'), true);
+  assert.equal([...converted].filter((char) => char === 'a').length, depth * 2);
 });
 
 test('a wrapper is not emitted when its own character is loose in what it wraps', () => {
