@@ -257,11 +257,14 @@ interface Pair {
  */
 const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map<number, Pair> => {
   const pairs = new Map<number, Pair>();
-  let openers: number[] = [];
+  // Shortened in place rather than replaced: a copy per closing run is a
+  // copy of nearly the whole stack when a reply nests deeply, which made
+  // pairing quadratic in the nesting depth on its own.
+  const openers: number[] = [];
 
   tokens.forEach((token, index) => {
     if (token.kind === 'break') {
-      openers = [];
+      openers.length = 0;
       return;
     }
     if (token.kind !== 'run' || inert.has(index)) {
@@ -277,7 +280,7 @@ const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map
           pairs.set(candidate, pair);
           pairs.set(index, pair);
           // Everything opened inside this pair and never closed is text.
-          openers = openers.slice(0, slot);
+          openers.length = slot;
           return;
         }
       }
@@ -389,22 +392,6 @@ interface Rendered {
   readonly wraps: boolean;
 }
 
-const EMPTY: Rendered = { text: '', loose: new Set(), unclosed: false, wraps: false };
-
-const joined = (parts: readonly Rendered[]): Rendered => ({
-  text: parts.map((part) => part.text).join(''),
-  loose: new Set(parts.flatMap((part) => [...part.loose])),
-  unclosed: parts.some((part) => part.unclosed),
-  wraps: parts.some((part) => part.wraps),
-});
-
-const literal = (text: string): Rendered => ({
-  text,
-  loose: new Set([...text].filter((char) => char in DELIMITERS)),
-  unclosed: false,
-  wraps: false,
-});
-
 /** What each style is spelled with once it is Slack's. */
 const wrapperFor = (char: string, use: number): readonly [string, string] => {
   if (char === '~') {
@@ -432,21 +419,46 @@ type Run = Extract<Token, { readonly kind: 'run' }>;
 /**
  * A range being rendered, and what encloses it.
  *
- * `after` is where the enclosing range picks back up once this one is
- * finished — past the pair's closing run, or past the whole of the link.
+ * What the range has written so far is in the shared chunk list rather than
+ * the frame: its markup goes on both ends of that, and appending to a list
+ * is the only way to add to the front of something in constant time. `slot`
+ * is the chunk reserved for the opening half before the range was entered,
+ * filled in once the range is finished and its wrapper can be decided;
+ * `after` is where the enclosing range picks back up — past the pair's
+ * closing run, or past the whole of the link.
+ *
+ * The rest is what the range turned out to hold, which is what the wrapper
+ * decision reads. Each one is folded into the enclosing frame on the way
+ * out.
  */
-type Frame =
-  | { readonly kind: 'range'; readonly to: number; readonly parts: Rendered[] }
-  | {
-      readonly kind: 'pair';
-      readonly to: number;
-      readonly parts: Rendered[];
-      readonly after: number;
-      readonly open: Run;
-      readonly close: Run;
-      readonly use: number;
-    }
-  | { readonly kind: 'label'; readonly to: number; readonly parts: Rendered[]; readonly after: number; readonly link: Link };
+interface FrameBase {
+  readonly to: number;
+  readonly loose: Set<string>;
+  unclosed: boolean;
+  wraps: boolean;
+}
+
+interface RangeFrame extends FrameBase {
+  readonly kind: 'range';
+}
+
+interface PairFrame extends FrameBase {
+  readonly kind: 'pair';
+  readonly slot: number;
+  readonly after: number;
+  readonly open: Run;
+  readonly close: Run;
+  readonly use: number;
+}
+
+interface LabelFrame extends FrameBase {
+  readonly kind: 'label';
+  readonly slot: number;
+  readonly after: number;
+  readonly link: Link;
+}
+
+type Frame = RangeFrame | PairFrame | LabelFrame;
 
 /**
  * The tokens from `from` to `to`, rendered.
@@ -458,28 +470,43 @@ type Frame =
  * and threw, and the throw lands in the edit timer, evaluated synchronously
  * outside anything catching, so the reply took the adapter down with it.
  * The depth lives in this array instead, where it costs an entry.
+ *
+ * Every range writes into one chunk list and nothing re-reads what it
+ * wrote. Collecting each range's text and joining it into its enclosing
+ * range copies everything below once per level, which is quadratic in the
+ * nesting depth — 80 000 pairs took forty seconds of the adapter's event
+ * loop, and the converter this replaced took milliseconds. A range reserves
+ * its opening chunk before it starts and fills it in when it ends, so the
+ * markup reaches the front of the range without moving what follows.
  */
 const renderRange = (context: Context, from: number, to: number): Rendered => {
-  const stack: Frame[] = [{ kind: 'range', to, parts: [] }];
+  const chunks: string[] = [];
+  const stack: Frame[] = [{ kind: 'range', to, loose: new Set(), unclosed: false, wraps: false }];
   let at = from;
+
+  /** Text that is prose: it contributes whatever delimiters stand in it. */
+  const write = (frame: Frame, text: string): void => {
+    chunks.push(text);
+    for (const char of text) {
+      if (char in DELIMITERS) {
+        frame.loose.add(char);
+      }
+    }
+  };
 
   for (;;) {
     const frame = stack[stack.length - 1];
     if (frame === undefined) {
-      return EMPTY;
+      return { text: '', loose: new Set(), unclosed: false, wraps: false };
     }
     const token = at < frame.to ? context.tokens[at] : undefined;
 
     if (token === undefined) {
-      const inner = frame.parts.length > 0 ? joined(frame.parts) : EMPTY;
       stack.pop();
-      // Only the range this call was asked for has nothing around it.
-      if (frame.kind === 'range') {
-        return inner;
-      }
       const parent = stack[stack.length - 1];
-      if (parent === undefined) {
-        return inner;
+      // Only the range this call was asked for has nothing around it.
+      if (frame.kind === 'range' || parent === undefined) {
+        return { text: chunks.join(''), loose: frame.loose, unclosed: frame.unclosed, wraps: frame.wraps };
       }
       if (frame.kind === 'pair') {
         const [open, close] = wrapperFor(frame.open.char, frame.use);
@@ -491,25 +518,51 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
         // `***both***` is written `*_…_*`, and an underscore already loose
         // inside it would break the italic half exactly as a stray asterisk
         // breaks the bold one.
-        const nests = [...open].some((char) => inner.loose.has(char)) || inner.unclosed;
-        parent.parts.push(nests
-          ? joined([literal(sourceOf(frame.open)), inner, literal(sourceOf(frame.close))])
-          : joined([literal(before), literal(open), inner, literal(close), literal(after)]));
+        const nests = [...open].some((char) => frame.loose.has(char)) || frame.unclosed;
+        chunks[frame.slot] = nests ? sourceOf(frame.open) : before + open;
+        // Both halves are prose to whatever encloses this, wrappers this
+        // pass emitted included — which is why a heading that already holds
+        // bold is not bolded again.
+        write(parent, nests ? sourceOf(frame.close) : close + after);
+        for (const char of chunks[frame.slot] ?? '') {
+          if (char in DELIMITERS) {
+            parent.loose.add(char);
+          }
+        }
       } else {
-        parent.parts.push({
-          text: `<${frame.link.destination}|${inner.text}>`,
-          loose: new Set([...inner.loose, ...[...frame.link.destination].filter((char) => char in DELIMITERS)]),
-          unclosed: inner.unclosed,
-          wraps: inner.wraps,
-        });
+        chunks[frame.slot] = `<${frame.link.destination}|`;
+        chunks.push('>');
+        // The destination is an address rather than markup, so its
+        // delimiters pair with nothing — but they are still standing there,
+        // and a wrapper spelled with one of them would break on them.
+        for (const char of frame.link.destination) {
+          if (char in DELIMITERS) {
+            parent.loose.add(char);
+          }
+        }
       }
+      for (const char of frame.loose) {
+        parent.loose.add(char);
+      }
+      parent.unclosed = parent.unclosed || frame.unclosed;
+      parent.wraps = parent.wraps || frame.wraps;
       at = frame.after;
       continue;
     }
 
     const link = context.links.get(at);
     if (link !== undefined && link.through < frame.to) {
-      stack.push({ kind: 'label', to: link.label[1], parts: [], after: link.through + 1, link });
+      chunks.push('');
+      stack.push({
+        kind: 'label',
+        to: link.label[1],
+        loose: new Set(),
+        unclosed: false,
+        wraps: false,
+        slot: chunks.length - 1,
+        after: link.through + 1,
+        link,
+      });
       at = link.label[0];
       continue;
     }
@@ -518,10 +571,14 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
       const pair = context.pairs.get(at);
       const closer = pair === undefined ? undefined : context.tokens[pair.close];
       if (pair?.open === at && pair.close < frame.to && closer?.kind === 'run') {
+        chunks.push('');
         stack.push({
           kind: 'pair',
           to: pair.close,
-          parts: [],
+          loose: new Set(),
+          unclosed: false,
+          wraps: false,
+          slot: chunks.length - 1,
           after: pair.close + 1,
           open: token,
           close: closer,
@@ -530,23 +587,21 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
         at += 1;
         continue;
       }
-      frame.parts.push(literal(sourceOf(token)));
+      write(frame, sourceOf(token));
       at += 1;
       continue;
     }
 
     if (token.kind === 'code') {
-      frame.parts.push({
-        text: token.text,
-        loose: new Set(),
-        unclosed: !token.closed,
-        wraps: token.text.includes('\n'),
-      });
+      // Not through `write`: what stands in a snippet is not markup.
+      chunks.push(token.text);
+      frame.unclosed = frame.unclosed || !token.closed;
+      frame.wraps = frame.wraps || token.text.includes('\n');
       at += 1;
       continue;
     }
 
-    frame.parts.push(literal(context.edits.get(at) ?? sourceOf(token)));
+    write(frame, context.edits.get(at) ?? sourceOf(token));
     at += 1;
   }
 };

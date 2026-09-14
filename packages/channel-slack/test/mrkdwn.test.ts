@@ -91,6 +91,18 @@ test('a run spends only what its style has, and the rest stays text', () => {
   ]);
 });
 
+test('a run that has been answered is not there to answer a second closer', () => {
+  // The same rule as the bracket that spends its opener, and for the same
+  // reason. Left standing, the `*` that had already closed `*a*` was still
+  // the nearest opener when the stray one at the end arrived, and the
+  // italic landed on `a* b` — a span the reply does not contain.
+  converts([
+    ['*a* b*', '_a_ b*'],
+    ['~~a~~ b~~', '~a~ b~~'],
+    ['**a** b* c*', '*a* b* c*'],
+  ]);
+});
+
 test('a delimiter has to hug what it marks, or it is arithmetic and names', () => {
   converts([
     ['3 * 4 * 5', '3 * 4 * 5'],
