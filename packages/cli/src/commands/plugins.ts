@@ -21,6 +21,7 @@ import type { ParsedPluginsCommand } from '../parse.ts';
 import {
   PLUGIN_MARKETPLACE_URL,
   FIRST_PARTY_CAPABILITY_PACKAGES,
+  FIRST_PARTY_CONTRIBUTION_PACKAGES,
   KERNEL_TOOL_NAMES,
 } from '../plugin-catalog.ts';
 import { soulGrantsTool, rosterSoulsWithConfigured } from '../roster.ts';
@@ -61,6 +62,18 @@ export interface PluginReport {
   /** Configured and not switched off. */
   enabled: boolean;
   tools: PluginToolReport[];
+  /**
+   * What the manifest declares besides tools and skills: the provider,
+   * channel, memory-store, and executor names its `setup()` may register.
+   * Declarations, read without loading — whether `setup()` registers each
+   * is the daemon's to report (`GET /catalog/tools`), not a manifest's.
+   */
+  contributes?: {
+    providers: string[];
+    channels: string[];
+    memory: string[];
+    executors: string[];
+  };
   /**
    * Why a daemon would register nothing for this plugin, when it would —
    * an unreadable manifest, or settings its own schema rejects. Enabled and
@@ -161,7 +174,7 @@ export const collectPluginsReport = async (
   const configured = Object.keys(pluginsConfig);
   const packages = [
     ...configured,
-    ...FIRST_PARTY_CAPABILITY_PACKAGES.filter((name) => !configured.includes(name)),
+    ...[...FIRST_PARTY_CAPABILITY_PACKAGES, ...FIRST_PARTY_CONTRIBUTION_PACKAGES].filter((name) => !configured.includes(name)),
   ];
 
   const plugins: PluginReport[] = [];
@@ -359,6 +372,15 @@ export const collectPluginsReport = async (
           claimedSkills.set(qualified, specifier);
         }
       }
+      const named = {
+        providers: manifest.contributes.providers.map((entry) => entry.name),
+        channels: manifest.contributes.channels.map((entry) => entry.name),
+        memory: manifest.contributes.memory.map((entry) => entry.name),
+        executors: manifest.contributes.executors.map((entry) => entry.name),
+      };
+      if (Object.values(named).some((names) => names.length > 0)) {
+        base.contributes = named;
+      }
       base.tools = declared.map((tool) => {
         // Never on the namespace row. `parseToolRiskOverrides` accepts a
         // namespace-shaped key, but the registry looks an override up by
@@ -453,6 +475,24 @@ export const runPlugins = async (
     }
     for (const warning of plugin.warnings ?? []) {
       writeLine(streams.stdout, `  warning: ${warning}`);
+    }
+    for (const [kind, names] of Object.entries(plugin.contributes ?? {})) {
+      if (names.length === 0) {
+        continue;
+      }
+      const label = kind === 'providers'
+        ? 'provider'
+        : kind === 'channels'
+          ? 'channel'
+          : kind === 'memory'
+            ? 'memory store'
+            : 'executor';
+      const how = kind === 'providers'
+        ? 'a soul selects it with provider:'
+        : kind === 'channels'
+          ? 'starts for the agents with tokens under channels.<kind> in credentials.json'
+          : `a trusted config selects it with ${kind === 'memory' ? 'memoryStore' : 'executor'}:`;
+      writeLine(streams.stdout, `  ${`${label} ${names.join(', ')}`.padEnd(28)}${how}`);
     }
     for (const tool of plugin.tools) {
       const granted = report.rosterUnreadable

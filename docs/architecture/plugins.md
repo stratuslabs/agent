@@ -36,10 +36,10 @@ plugin can *register* one through the entrypoint, and today most cannot:
 | tools | `Tool` → `ToolRegistry` | **yes**, `context.tools` |
 | hooks | `EventBus.subscribe` | **yes**, `context.bus` |
 | skills | `Skill` → `SkillRegistry` | **n/a — the host loads them from the manifest** ([09](../roadmap/09-skills.md)) |
-| providers | `ModelProvider` | **not yet** |
-| channels | `ChannelAdapter` | **not yet** |
-| memory | `AgentMemoryStore` | **not yet** |
-| executors | `Executor` | **not yet** |
+| providers | `ModelProvider`, behind a `ProviderContribution` factory | **yes**, `context.providers` ([19](../roadmap/19-registration-seams.md)) |
+| channels | `ChannelAdapter`, as a `ChannelContribution` | **yes**, `context.channels` |
+| memory | `AgentMemoryStore`, as a `MemoryStoreContribution` | **yes**, `context.memory` |
+| executors | `Executor`, as an `ExecutorContribution` | **yes**, `context.executors` |
 
 Skills are the one kind that never needed a registration handle: a skill is
 prose the manifest points at (`contributes.skills`, an id and a path inside
@@ -61,10 +61,10 @@ export interface Plugin {
 }
 ```
 
-`PluginContext` is `{ bus, tools }` plus three optional slots: a `log` /
+`PluginContext` is `{ bus, tools }` plus optional slots. A `log` /
 `warn` pair — the host's log, which in the daemon is the structured file
 `stratus logs` reads; a host that omits them leaves a plugin to its own
-stderr — and a `credentials` resolver, scoped per call to the agent whose
+stderr. A `credentials` resolver, scoped per call to the agent whose
 call the plugin is serving, so a plugin declares what it needs by name in its
 manifest instead of reaching into ambient environment. That resolver is the
 first half of kernel change 9 to land, and it landed because
@@ -72,8 +72,16 @@ first half of kernel change 9 to land, and it landed because
 *calling* agent's key, which a `search(query, options)` seam could not
 express. A host that omits it leaves a plugin needing a key with no way to
 get one, and such a plugin must fail the call naming what is missing rather
-than falling back to the environment. `AgentRunner.initialize` still calls
-`plugins.loadAll({ bus, tools })` with nothing else.
+than falling back to the environment. And the second half, from
+[19](../roadmap/19-registration-seams.md): four registration handles —
+`providers`, `channels`, `memory`, `executors` — each a manifest-bound view
+following the shape `tools` established, and each optional for the same
+reason `credentials` is: `AgentRunner.initialize` still calls
+`plugins.loadAll({ bus, tools })` with nothing else, and a plugin that needs
+a handle and finds it absent fails its `setup` naming the kind rather than
+registering nothing and reporting itself loaded. The `@stratusagent/plugins`
+loader supplies all four. See
+[Registering providers, channels, memory stores, and executors](#registering-providers-channels-memory-stores-and-executors).
 
 A tool also says **where its output comes from**, and that is part of the
 contract rather than a courtesy: a result written by a party the operator
@@ -91,12 +99,14 @@ outside (`fs.read` of a file the agent downloaded, `memory.recall` of an
 work. The rule is a rule, not a list the kernel keeps — a newly registered
 third-party tool that declares itself a producer is labelled with no change
 to kernel code, which is what makes the ecosystem's tools first-class here.
-**So four of the seven kinds have an interface but no registration path.**
-An implementation of `ChannelAdapter` exists (`@stratusagent/channel-slack`),
-and the way it reaches the runtime is that the CLI constructs it and hands it to
-`createGateway({ channels: [...] })` — the host wires it, not the plugin. The
-same is true of providers (`createRuntimeProvider`) and memory stores (passed to
-the runner).
+**All seven kinds now register.** The first-party implementations that
+predate the seams are still host-wired — `@stratusagent/channel-slack` is
+constructed by the CLI and handed to `createGateway({ channels: [...] })`,
+and the three built-in providers are built inside `createRuntimeProvider` —
+and converting them is [19B](../roadmap/19-registration-seams.md)'s work,
+not a gap in the contract: a plugin contributing any of the four registers
+it through its handle today, and the fixture plugins under `fixtures/` are
+the proof.
 
 ### What the module exports
 
@@ -147,15 +157,12 @@ A package may export additional, more specific factories for direct import
 entirely). Those are conveniences; `createPlugin` is the one the loader knows,
 and a package without it is not loadable however well it is written.
 
-That gap is deliberate to state and not deliberate to keep. Naming the kinds
-before the seams exist is the point of this document — a third-party developer
-should be able to see what is contractual today and what is coming — but a
-table that read "exists" for all seven would be a promise the entrypoint cannot
-keep. The registration handles for providers, channels, memory, and executors
-are enumerated as kernel-budget item 9 in
-[`stratus-v2.md`](./stratus-v2.md) and land with the plugin loader; until they
-do, **a plugin contributing one of those four kinds is configuration the host
-reads, not code the plugin registers.**
+The registration handles for providers, channels, memory, and executors
+were enumerated as kernel-budget item 9 in [`stratus-v2.md`](./stratus-v2.md)
+and landed in [19A](../roadmap/19-registration-seams.md). Until then a
+plugin contributing one of those four kinds was configuration the host read,
+not code the plugin registered; that is no longer true, and the section
+below is the contract.
 
 A plugin depends on `core` (and on `channels` or `executors` where relevant) —
 **never on the gateway** — so it behaves identically in a CLI one-shot, in the
@@ -215,7 +222,12 @@ A `"stratus"` field in `package.json`:
       ],
       "skills": [
         { "id": "pr-review", "path": "./skills/pr-review/SKILL.md" }
-      ]
+      ],
+      "//": "and, for the four kinds that are not tools, the names setup() may register:",
+      "providers": [{ "name": "ollama" }],
+      "channels":  [{ "name": "discord" }],
+      "memory":    [{ "name": "vectors" }],
+      "executors": [{ "name": "sandbox" }]
     },
     "credentials": ["GITHUB_TOKEN"],
     "config": { "type": "object", "properties": { "org": { "type": "string" } } }
@@ -280,6 +292,103 @@ what risk, not *what*. That is why [12](../roadmap/12-plugin-registry.md) has
 `stratus plugin install` render such a declaration as what it is — "registers
 tools under `mcp.*`, discovered at runtime, all `gated`" — rather than showing
 an empty tool list and implying the plugin contributes nothing.
+
+## Registering providers, channels, memory stores, and executors
+
+The four kinds that are not tools register the way tools do — through a
+handle on `PluginContext` that is **a manifest-bound view, never the raw
+registry** — and the manifest declares each by name under
+`contributes.providers`, `contributes.channels`, `contributes.memory`, and
+`contributes.executors`. A name is lowercase runs joined by hyphens
+(`ollama`, `vector-db`); a provider may not take a built-in name
+(`anthropic`, `openai`, `codex`, `demo`), because `provider: anthropic` in a
+soul has to keep meaning the first-party adapter, and a plugin that could
+shadow it could receive every key the operator stored for it.
+
+```ts
+async setup(context) {
+  context.providers?.register({ name: 'ollama', create: (selection) => makeProvider(selection.model) });
+  context.memory?.register({ name: 'vectors', store });
+  context.executors?.register({ name: 'sandbox', executor });
+  const secrets = await context.channels?.transportSecrets('discord');   // { [agentId]: { botToken } }
+  context.channels?.register({ adapter, agents: Object.keys(secrets ?? {}) });
+}
+```
+
+What each contribution is, and why it is not the bare interface:
+
+- **A provider is a factory**, `ProviderContribution { name, create(selection), streams? }`.
+  A provider is built for a model, and one soul's `model:` and the next
+  soul's have to reach it — a registered `ModelProvider` instance would
+  serve one model for the whole fleet. The host calls `create` once per
+  distinct selection (model and the operator's system-prompt preamble) and
+  keeps the result; the persona itself arrives on every request as
+  `session.agent`, as it always has. `streams` says whether the providers
+  built here report progress through `onDelta` — the host arms its stall
+  watchdog only for those, and reads silence from a provider that did not
+  say as "not streaming". A soul selects the provider by its registered
+  name; resolution carries it as `plugin:<name>` (which is what keeps the
+  resolved config a discriminated union) and looks it up when the provider
+  is built, since a config file is parsed by processes that load no
+  plugins. A name nothing registers is refused there, naming what is.
+- **A channel is an adapter plus the agents it carries**,
+  `ChannelContribution { adapter, agents }`, where `adapter.name` is the
+  kind. Channels key on **(agent, kind)**, not on the agent alone: one
+  agent reachable on Slack and on Discord is two registrations that do not
+  collide; two adapters both claiming Discord for that agent do, and the
+  second plugin is refused whole. The gateway starts registered adapters
+  after the host's own, in `plugins`-block order, and stops them before any
+  plugin is disposed.
+- **A memory store is `{ name, store }`**, and it is per-agent-resolvable
+  by construction: every `AgentMemoryStore` method takes the agent id. A
+  plugin that closed over one agent at setup would hand every agent the
+  first agent's memories, the way a `tool-fs` that cached its roots would
+  hand every agent the first agent's files. The host selects one by name
+  (`memoryStore` in a trusted config) behind a store that routes per call,
+  so the memory tools built before any plugin loaded still reach it.
+- **An executor is `{ name, executor }`**, selected by `executor` in a
+  trusted config.
+
+**The manifest is enforced, not advisory.** A plugin that declares a
+channel and registers a provider fails at load, naming the package and the
+undeclared kind. Two plugins registering the same provider (or memory
+store, or executor) name fail at load rather than one silently winning —
+the same rule as a duplicate tool name. Registrations are staged until the
+whole plugin has loaded, so a plugin that registers a provider and then
+throws leaves nothing live; and unlike the tool view, nothing here stays
+live after commit — a provider has no reconnect-time discovery to serve,
+and a registration after `setup()` returned is refused as the mistake it is.
+
+**Channel transport secrets have a host-owned path, and it is a
+prerequisite rather than an open question.** The invariant is firm: a
+channel token lives under `channels.<kind>.<agentId>` in the credential
+store, is the daemon's own, and is never resolved through the agent-scoped
+`credentials` resolver, because an agent must not read the tokens of the
+transport carrying it. A channel plugin therefore could not initialize at
+all without some other defined way to receive them — it has no other way
+to learn which agents it carries. `context.channels.transportSecrets(kind)`
+is that way: the host hands over every agent's entries for a kind the
+manifest declares (an undeclared kind is refused, like an undeclared
+credential), string-valued, and says what the plugin does not get to know —
+what the names mean. `stratus run` has no channel store and says so when
+asked; `stratus serve` reads the file, re-read per call, so a token stored
+while the daemon runs is there at the next start. Read what this does and
+does not buy, the same way the credential resolver's section does: it is
+the honest path, not an isolation boundary.
+
+**Selection is deterministic and the operator's.** Load order is the
+`plugins` block's order, so a fleet whose behavior depended on which plugin
+loaded first is a fleet whose config shows it. `executor` and `memoryStore`
+are trusted-config keys for the reason `plugins` is, one step on — they
+decide where an agent's commands run and where its memories are written —
+and a name no loaded plugin registers **refuses the daemon's start** rather
+than falling back to the built-in: a sandbox the operator selected that
+silently became the host is the downgrade the rule exists to refuse.
+
+What `dispose` means is unchanged and matters more: a channel plugin holds
+a socket, an executor may hold a subprocess. Shutdown order is the
+documented one — channels stop, in-flight turns drain, then plugins
+dispose.
 
 ## Configuration
 

@@ -1,0 +1,74 @@
+{
+  "name": "@stratusagent/memory-sqlite",
+  "version": "0.11.4",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "dependencies": {
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/plugins": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/memory-sqlite"
+  },
+  "description": "A SQLite-backed agent memory store for Stratus Agent, as a plugin: one owner-only database file, the kernel's memory contract, no FTS index",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "stratus-plugin",
+    "memory",
+    "sqlite"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "memory": [
+        {
+          "name": "sqlite"
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -45,13 +45,19 @@ of what needs a restart is in
 [Always on](../guides/always-on.md#what-needs-a-restart-and-what-does-not).
 
 Today's optional packages predate that rule and each keeps its own path, so
-be precise about which is which. A **channel** starts when *its credentials
-are stored* — a decision you already made when you connected the app. The
-**control API** starts whenever it is *installed*, and binds a port;
-installing it is how you say you want one open, and `--no-api` or
+be precise about which is which. The **Slack channel** starts when *its
+credentials are stored* — a decision you already made when you connected
+the app. The **control API** starts whenever it is *installed*, and binds a
+port; installing it is how you say you want one open, and `--no-api` or
 `api.enabled: false` is how you say you don't. The **dashboard** follows
 the control API. None of those is the enablement gate above, and none of
 them is a precedent for a plugin that wants one.
+
+A plugin that contributes a **provider, channel, memory store, or
+executor** is under the rule, not the exception: it loads only when
+enabled, and then a soul selects its provider, an agent's stored tokens
+bring its channel up, and a trusted config's `executor` or `memoryStore`
+key selects the other two. See [Extending](../guides/extending.md).
 
 ## The optional packages that exist today
 
@@ -76,6 +82,13 @@ them is a precedent for a plugin that wants one.
   See [Tools](../guides/tools.md).
 - [`@stratusagent/plugin-mcp`](../../packages/plugin-mcp) — any MCP
   server's tools under the same policy. See [MCP](../guides/mcp.md).
+- [`@stratusagent/provider-openai`](../../packages/provider-openai) — the
+  OpenAI-compatible adapter as a plugin: a provider named
+  `openai-compatible` a soul selects, credentialed per agent through
+  `openai.apiKey`. See [Extending](../guides/extending.md#providers).
+- [`@stratusagent/memory-sqlite`](../../packages/memory-sqlite) — agent
+  memory on one SQLite file, selected with `memoryStore: sqlite`. See
+  [Extending](../guides/extending.md#memory-stores).
 - [`@stratusagent/egress`](../../packages/egress) — the shared address
   policy both network packs use; arrives as their dependency.
 - [`@stratusagent/search`](../../packages/search) — the `web.search`

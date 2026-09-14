@@ -550,12 +550,34 @@ test('credentials are writable but never readable, and channel tokens keep their
     assert.ok(raw.channels?.slack?.ava, 'the token landed in the channels namespace');
     assert.ok(raw.anthropic, 'and the provider credential stayed in its own');
 
-    const wrongChannel = await harness.call('/api/v1/credentials/channels/discord', {
+    // Any other kind is a plugin channel's: its secrets arrive as one
+    // object of strings, and land in the same namespace by kind — without
+    // disturbing Slack's, and never through the provider route.
+    const noSecrets = await harness.call('/api/v1/credentials/channels/discord', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agentId: 'ava', appToken: 'a', botToken: 'b' }),
     });
-    assert.equal(wrongChannel.status, 400);
+    assert.equal(noSecrets.status, 400);
+    const pluginChannel = await harness.call('/api/v1/credentials/channels/discord', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'ava', secrets: { botToken: 'discord-1' } }),
+    });
+    assert.equal(pluginChannel.status, 200);
+    const afterPlugin = JSON.parse(await readFile(path.join(harness.home, '.stratus', 'credentials.json'), 'utf8')) as {
+      channels?: Record<string, Record<string, unknown>>;
+    };
+    assert.deepEqual(afterPlugin.channels?.discord, { ava: { botToken: 'discord-1' } });
+    assert.ok(afterPlugin.channels?.slack?.ava, 'the Slack tokens survived the Discord save');
+    const bindings = await harness.call('/api/v1/credentials');
+    assert.deepEqual((await bindings.json() as { channels: unknown }).channels, { slack: ['ava'], discord: ['ava'] });
+    const notAKind = await harness.call('/api/v1/credentials/channels/Not%20A%20Kind', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'ava', secrets: { token: 'x' } }),
+    });
+    assert.equal(notAKind.status, 400);
 
     const wrongProvider = await harness.call('/api/v1/credentials/slack', {
       method: 'PUT',
@@ -627,16 +649,45 @@ test('config round-trips, and an unknown key is refused rather than quietly kept
 
     // A value the caller typed is their error, not the server's. The shared
     // validator owns this check now, so the code is the generic one and the
-    // message carries which value it objected to.
+    // message carries which value it objected to. A name a plugin *could*
+    // register (`not-a-provider`) is not a typo the validator can see —
+    // whether one did is answered when a run builds the provider — so the
+    // refused value is one no plugin could register.
     const badProvider = await harness.call('/api/v1/config', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ config: { provider: 'not-a-provider' } }),
+      body: JSON.stringify({ config: { provider: 'Not A Provider' } }),
     });
     assert.equal(badProvider.status, 400);
     const rejected = await json<{ error: { code: string; message: string } }>(badProvider);
     assert.equal(rejected.error.code, 'invalid_config_value');
-    assert.match(rejected.error.message, /not-a-provider/);
+    assert.match(rejected.error.message, /Not A Provider/);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('PUT /config neither writes nor deletes the executor and memoryStore selections', async () => {
+  const harness = await startApi();
+  try {
+    await writeFile(
+      path.join(harness.home, '.stratus', 'config.json'),
+      `${JSON.stringify({ provider: 'demo', executor: 'sandbox', memoryStore: 'vector' })}\n`,
+    );
+    // Selecting where an agent's commands run and where its memories go is
+    // the plugins boundary one step on: a settings save carries the
+    // selections across untouched, and a save that names others is
+    // ignored rather than obeyed.
+    const saved = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { provider: 'demo', model: 'x', executor: 'other', memoryStore: 'other' } }),
+    });
+    assert.equal(saved.status, 200);
+    const read = await json<{ config: Record<string, unknown> }>(await harness.call('/api/v1/config'));
+    assert.equal(read.config.executor, 'sandbox');
+    assert.equal(read.config.memoryStore, 'vector');
+    assert.equal(read.config.model, 'x');
   } finally {
     await harness.stop();
   }

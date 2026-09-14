@@ -2299,6 +2299,257 @@ export class InMemorySessionStore implements SessionStore {
   }
 }
 
+// ---- contribution kinds a plugin registers besides tools ------------------
+
+/**
+ * The providers the host builds itself. Here, in the dependency-free
+ * package, because two packages that never import each other need the one
+ * list: `@stratusagent/state` resolves a selection against it, and
+ * `@stratusagent/plugins` refuses a manifest that declares one of these as
+ * a provider of its own — `provider: anthropic` in a soul has to keep
+ * meaning the first-party adapter, and a plugin that could shadow it would
+ * be a plugin that could receive every key the operator stored for it.
+ */
+export const BUILTIN_PROVIDER_NAMES = ['demo', 'openai', 'anthropic', 'codex'] as const;
+export type BuiltinProviderName = (typeof BUILTIN_PROVIDER_NAMES)[number];
+
+/**
+ * The names a trusted config's `executor` and `memoryStore` keys mean the
+ * built-ins by — the local child-process executor and the file store —
+ * and so the names a plugin may not register: the host's selection
+ * special-cases them and would never look a contribution up under them.
+ * Here for the same reason the provider list is: the manifest parser and
+ * the selection logic live in packages that never import each other.
+ */
+export const BUILTIN_EXECUTOR_NAME = 'local';
+export const BUILTIN_MEMORY_STORE_NAME = 'file';
+
+/**
+ * What a soul's `provider:` and `model:` pick, handed to a contributed
+ * provider so it can build the right client. `systemPrompt` is the
+ * operator's preamble from the config file — the persona itself arrives on
+ * every request as `session.agent`, so a provider that ignores this still
+ * speaks as the agent; what it loses is the daemon-wide preamble.
+ */
+export interface ProviderSelection {
+  model?: string;
+  systemPrompt?: string;
+}
+
+/**
+ * A provider contributed by a plugin.
+ *
+ * A factory rather than a `ModelProvider`, and the reason is the soul: a
+ * provider is built for a model, and `model:` in one soul and another in
+ * the next have to reach it. A registered instance would serve one model
+ * for the whole fleet. The host calls `create` once per distinct selection
+ * and keeps the result, so a plugin holding a client per model holds one
+ * per model, never one per turn.
+ */
+export interface ProviderContribution {
+  /** The name a soul's `provider:` selects — `ollama`, never a package name. */
+  name: string;
+  create(selection: ProviderSelection): ModelProvider;
+  /**
+   * Whether providers built here report progress through `onDelta`. A
+   * host arms its stall watchdog only for a streaming provider — silence
+   * from one means a stall, while a non-streaming call is silent until it
+   * answers, and a watchdog armed over it would abort every long turn.
+   * Default false, the safe reading for a provider that did not say.
+   */
+  streams?: boolean;
+}
+
+/**
+ * The slice of a channel adapter the kernel holds: structurally
+ * `@stratusagent/channels`' `ChannelAdapter`, kept structural here so core
+ * carries no dependency on the channels package — the same reason the
+ * gateway declares its own copy. `name` is the channel kind (`slack`,
+ * `discord`); the gateway it is started with is the host's.
+ */
+export interface ChannelAdapterLike {
+  name: string;
+  start(gateway: unknown): Promise<void>;
+  stop(): Promise<void>;
+  required?: boolean;
+  resolveOutbound?(address: { agentId: string; to: string }): Promise<{
+    post(text: string): Promise<unknown>;
+  }>;
+}
+
+/**
+ * A channel contributed by a plugin: the adapter plus the agents it
+ * carries. Channels key on (agent, kind), not on the agent alone — one
+ * agent reachable on Slack and on Discord is two registrations that do
+ * not collide; two adapters both claiming Discord for that agent do.
+ */
+export interface ChannelContribution {
+  /** Its `name` is the channel kind. */
+  adapter: ChannelAdapterLike;
+  /** Agent ids this adapter carries: the (agent, kind) pairs it claims. */
+  agents: readonly string[];
+}
+
+/**
+ * A memory store contributed by a plugin. Every `AgentMemoryStore` method
+ * takes the agent id, and that is what makes a contributed store
+ * per-agent-resolvable rather than process-global: a plugin that closed
+ * over one agent at setup would hand every agent the first agent's
+ * memories, the way a `tool-fs` that cached its roots would hand every
+ * agent the first agent's files.
+ */
+export interface MemoryStoreContribution {
+  name: string;
+  store: AgentMemoryStore;
+}
+
+/** An executor contributed by a plugin, selectable by name in a trusted config. */
+export interface ExecutorContribution {
+  name: string;
+  executor: Executor;
+}
+
+/**
+ * A name-keyed registry for one contribution kind — the counterpart of
+ * `ToolRegistry` for providers, memory stores, and executors. Like it, a
+ * bare `Map.set`: it keeps no provenance and refuses nothing, and a plugin
+ * never touches one directly. The manifest-bound view in
+ * `@stratusagent/plugins` is what refuses an undeclared name or a
+ * collision; this is where a whole plugin's contributions land once it has
+ * loaded.
+ */
+export class ContributionRegistry<T> {
+  private readonly entries = new Map<string, T>();
+
+  register(name: string, value: T): void {
+    this.entries.set(name, value);
+  }
+
+  get(name: string): T | undefined {
+    return this.entries.get(name);
+  }
+
+  has(name: string): boolean {
+    return this.entries.has(name);
+  }
+
+  names(): string[] {
+    return [...this.entries.keys()];
+  }
+
+  list(): T[] {
+    return [...this.entries.values()];
+  }
+}
+
+/** The (agent, kind) key a channel registration claims. */
+export const channelClaimKey = (kind: string, agentId: string): string => `${kind}:${agentId}`;
+
+/**
+ * The registry for contributed channels. Keyed by (agent, kind) rather than
+ * by name, because that is what collides — see `ChannelContribution` — and
+ * listed as adapters, because that is what a host starts. Same discipline
+ * as the other registries: no refusal here, the view refuses.
+ */
+export class ChannelRegistry {
+  private readonly contributions: ChannelContribution[] = [];
+
+  /** Undefined marks a claim the host made for an adapter it wired itself. */
+  private readonly claims = new Map<string, ChannelContribution | undefined>();
+
+  register(contribution: ChannelContribution): void {
+    this.contributions.push(contribution);
+    for (const agentId of contribution.agents) {
+      this.claims.set(channelClaimKey(contribution.adapter.name, agentId), contribution);
+    }
+  }
+
+  /**
+   * Claim (agent, kind) pairs the host carries itself, so a plugin
+   * registering the same kind for the same agent collides with the host's
+   * adapter exactly as it would with another plugin's — two adapters on
+   * one agent's Slack would each answer every message.
+   */
+  claim(kind: string, agentIds: readonly string[]): void {
+    for (const agentId of agentIds) {
+      if (!this.claims.has(channelClaimKey(kind, agentId))) {
+        this.claims.set(channelClaimKey(kind, agentId), undefined);
+      }
+    }
+  }
+
+  /** Whether some adapter — the host's or a plugin's — already carries this agent on this kind. */
+  claimed(kind: string, agentId: string): boolean {
+    return this.claims.has(channelClaimKey(kind, agentId));
+  }
+
+  list(): ChannelContribution[] {
+    return [...this.contributions];
+  }
+}
+
+/**
+ * A memory store that resolves which store serves an agent **per call**.
+ *
+ * The seam a host selects a contributed store through. The runner and the
+ * memory tools are built before any plugin has loaded, so the store they
+ * hold has to be one that can change its mind — and an agent-by-agent
+ * answer is what keeps a contributed store from being process-global.
+ * `reassertTrust` is forwarded only when the chosen store has it: a store
+ * that omitted it cannot be re-asserted, and this must not claim otherwise.
+ */
+export const createRoutedMemoryStore = (
+  storeFor: (agentId: string) => AgentMemoryStore,
+): AgentMemoryStore => ({
+  append: (agentId, content, metadata, provenance) => storeFor(agentId).append(agentId, content, metadata, provenance),
+  list: (agentId, options) => storeFor(agentId).list(agentId, options),
+  search: (agentId, query, limit) => storeFor(agentId).search(agentId, query, limit),
+  forget: (agentId, entryId) => storeFor(agentId).forget(agentId, entryId),
+  audit: (agentId) => storeFor(agentId).audit(agentId),
+  async reassertTrust(agentId, entryId, trust) {
+    const store = storeFor(agentId);
+    if (!store.reassertTrust) {
+      return false;
+    }
+    return store.reassertTrust(agentId, entryId, trust);
+  },
+});
+
+/** The handle a plugin registers providers through. Manifest-bound; see `@stratusagent/plugins`. */
+export interface ProviderRegistrationHandle {
+  register(contribution: ProviderContribution): void;
+}
+
+/**
+ * The transport secrets a channel plugin receives, by agent id: the values
+ * under `channels.<kind>.<agentId>` in the host's credential store. Every
+ * value is a string — a token, an app id — and nothing here is ever
+ * resolved through an agent's own credential allowlist.
+ */
+export type ChannelTransportSecrets = Record<string, Record<string, string>>;
+
+export interface ChannelRegistrationHandle {
+  register(contribution: ChannelContribution): void;
+  /**
+   * The host-owned path for a channel's transport secrets, for a kind
+   * this plugin's manifest declares. Host-owned because the invariant is
+   * firm: a channel token is a gateway infrastructure secret, never
+   * resolvable through the agent-scoped `credentials` resolver, since an
+   * agent must not read the tokens of the transport carrying it. Without
+   * this a channel plugin could not initialize at all — it has no other
+   * defined way to learn which agents it carries.
+   */
+  transportSecrets(kind: string): Promise<ChannelTransportSecrets>;
+}
+
+export interface MemoryRegistrationHandle {
+  register(contribution: MemoryStoreContribution): void;
+}
+
+export interface ExecutorRegistrationHandle {
+  register(contribution: ExecutorContribution): void;
+}
+
 export interface PluginContext {
   bus: EventBus;
   tools: ToolRegistry;
@@ -2316,6 +2567,20 @@ export interface PluginContext {
    * plugin is code, so scoping it is an interface rather than a boundary.
    */
   credentials?: CredentialResolver;
+  /**
+   * The registration handles for the four contribution kinds that are not
+   * tools: each a manifest-bound view, never the raw registry, following
+   * the shape `tools` established. Optional because a bare
+   * `PluginRegistry.loadAll({ bus, tools })` host supplies none; the
+   * `@stratusagent/plugins` loader supplies all four. A plugin that needs
+   * one and finds it absent must fail its `setup` naming the kind, so the
+   * operator learns the host cannot carry it — never register nothing and
+   * report itself loaded.
+   */
+  providers?: ProviderRegistrationHandle;
+  channels?: ChannelRegistrationHandle;
+  memory?: MemoryRegistrationHandle;
+  executors?: ExecutorRegistrationHandle;
   /**
    * The host's log, for what a plugin has to say after `setup` returns —
    * a server that dropped, a reconnect that failed. The daemon's is the

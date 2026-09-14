@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
   AgentRunner,
+  ContributionRegistry,
+  createRoutedMemoryStore,
   EventBus,
   SkillRegistry,
   ToolRegistry,
@@ -8,7 +10,13 @@ import {
   describeToolAllowlistFinding,
   unmatchedToolAllowlist,
   type AgentDefinition,
+  type AgentMemoryStore,
+  type Executor,
+  type ExecutorContribution,
+  type JsonObject,
   type JsonValue,
+  type MemoryStoreContribution,
+  type ProviderContribution,
   type Session,
   type StratusEvent,
 } from '@stratusagent/core';
@@ -21,12 +29,15 @@ import {
   GATEWAY_ONLY_TOOL_NAMES,
 } from '@stratusagent/agents';
 import {
+  BUILTIN_EXECUTOR_NAME,
+  BUILTIN_MEMORY_STORE_NAME,
   createDemoTool,
   createFileCredentialResolver,
   createFileMemoryStore,
   createRuntimeProvider,
   defaultApiKeyEnvName,
   DEFAULT_STRATUS_AGENT,
+  isSignedInRuntime,
   loadCredentials,
   loadOperatorSkills,
   memoryFilePath,
@@ -46,7 +57,7 @@ import { formatEvent } from './events.ts';
 import { writeLine, stringifyValue } from './io.ts';
 import { quoteShellArg } from './prompter.ts';
 import type { CliApprovalMode, ParsedRunCommand } from './parse.ts';
-import { loadServePlugins } from './trusted-config.ts';
+import { loadServePlugins, loadServeRuntimeSelection } from './trusted-config.ts';
 
 /**
  * Kept with its historical CLI signature: a parsed run command is a
@@ -138,7 +149,7 @@ export const warnOnCredentialOverride = async (
   // The resolver records the variable that actually won — guessing it here
   // would name the wrong one whenever a custom apiKeyEnv supplied the key,
   // sending the reader to unset something that was never the cause.
-  const primaryOverride = runtime.apiKey !== undefined
+  const primaryOverride = isSignedInRuntime(runtime) && runtime.apiKey !== undefined
     ? { provider: runtime.provider, envVar: runtime.apiKeyEnvVar }
     : undefined;
   // Both subscription sign-ins demote the same way: a Claude setup token
@@ -198,7 +209,13 @@ export const createAgentRuntime = async (
 ) => {
   const runEnv = options.env ?? {};
   await migrateLegacyMemory(runEnv);
-  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(runEnv)));
+  // Routed, as the daemon's is: the memory tools register before the
+  // plugins load (so a plugin cannot claim their names), and the store
+  // they hold answers per call with whichever the trusted config selected
+  // once the plugins are up.
+  const fileMemory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(runEnv)));
+  let selectedMemory: AgentMemoryStore = fileMemory;
+  const memory = createRoutedMemoryStore(() => selectedMemory);
 
   const tools = new ToolRegistry();
   tools.register(createDemoTool());
@@ -243,6 +260,9 @@ export const createAgentRuntime = async (
     writeLine(streams.stderr, `Warning: ${line}`);
   });
   const loadedPlugins: LoadedPlugin[] = [];
+  const providers = new ContributionRegistry<ProviderContribution>();
+  const memoryStores = new ContributionRegistry<MemoryStoreContribution>();
+  const executors = new ContributionRegistry<ExecutorContribution>();
   if (Object.keys(pluginsConfig).length > 0) {
     const result = await loadPlugins({
       config: pluginsConfig,
@@ -253,6 +273,13 @@ export const createAgentRuntime = async (
       tools,
       skills,
       bus,
+      providers,
+      memory: memoryStores,
+      executors,
+      // No channel registry and no transport secrets: a local run has no
+      // channels, so a channel plugin's registration is recorded and goes
+      // nowhere, and its request for its secrets is refused with a message
+      // that says so rather than answered with an empty roster.
       credentials: createFileCredentialResolver(runEnv),
       workspaceRoot: workspacesDirPath(runEnv),
     });
@@ -262,105 +289,13 @@ export const createAgentRuntime = async (
     }
   }
 
-  // The Claude Code runtime executes kernel tools by calling back into the
-  // runner built just below — late-bound because the runner needs the
-  // provider first.
-  let hostedRunner: AgentRunner | undefined;
-  const runtimeProvider = createRuntimeProvider(
-    options.runtime,
-    (error) => {
-      const fallback = options.runtime.provider === 'demo' ? undefined : options.runtime.fallback;
-      writeLine(
-        streams.stderr,
-        `Warning: the default model failed (${error instanceof Error ? error.message : String(error)}); falling back to ${fallback?.model ?? 'the fallback model'}.`,
-      );
-    },
-    async (session, call, context) => {
-      if (!hostedRunner) {
-        throw new Error('The Stratus runtime is not ready to execute tools yet.');
-      }
-      return hostedRunner.executeHostedToolCall(session, call, context);
-    },
-    options.maxTurns,
-  );
-
-  const runner = new AgentRunner({
-    provider: runtimeProvider,
-    tools,
-    executor: createLocalCommandExecutor(),
-    approvals: createApprovalPolicy(
-      options.approvals ?? 'always',
-      streams,
-      options.env ?? {},
-      options.askApproval,
-      options.approvalsDefaulted ?? false,
-    ),
-    bus,
-    skills,
-    memory,
-    ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
-  });
-
-  hostedRunner = runner;
-  await runner.initialize();
-
-  // A soul is a full identity — without one, every provider serves the
-  // same built-in Stratus persona.
-  const agent: AgentDefinition = options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT;
-
-  // The same advisory the daemon gives at roster load, from the same
-  // kernel check: a soul enabling a skill whose `requires:` its `tools:`
-  // does not cover must warn here too, or the local test stays silent
-  // about a configuration `stratus serve` flags.
-  for (const { skill, missing } of missingSkillRequirements(agent, skills)) {
-    writeLine(
-      streams.stderr,
-      `Warning: agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`,
-    );
-  }
-
-  // And the same for the tools themselves, after `initialize()` so the
-  // plugins have registered theirs: an allowlist entry naming a tool
-  // nothing provides grants nothing and says nothing, and a soul made only
-  // of those runs with no tools while its persona still talks about them.
-  const finding = unmatchedToolAllowlist(
-    agent,
-    tools.describe().map((tool) => tool.name),
-    {
-      mayRegister: loadedPlugins.flatMap(
-        (plugin) => plugin.manifest.contributes.toolsDiscovered.map((declared) => declared.namespace),
-      ),
-      // A local run has no dispatcher, store, or channels, so it registers
-      // none of the daemon's tools. A soul written for `stratus serve` is
-      // not wrong for naming them here — it is in the wrong process.
-      elsewhere: GATEWAY_ONLY_TOOL_NAMES,
-    },
-  );
-  for (const line of finding ? describeToolAllowlistFinding(agent.id, finding) : []) {
-    writeLine(streams.stderr, `Warning: ${line}`);
-  }
-  // The kernel leaves this one to the host, because only the host knows
-  // which process it is not.
-  if (finding && finding.elsewhere.length > 0) {
-    writeLine(
-      streams.stderr,
-      `Warning: agent ${agent.id} lists ${finding.elsewhere.join(', ')}, which only the daemon provides`
-        + ' — the names are right, but stratus run cannot call them; stratus serve can',
-    );
-  }
-
-
-  const metadata = options.runtime.provider === 'demo'
-    ? { provider: 'demo' as const, executor: 'local-command' }
-    : {
-        provider: options.runtime.provider,
-        model: options.runtime.model,
-        ...(options.runtime.provider === 'openai' ? { baseUrl: options.runtime.baseUrl } : {}),
-      };
-
   // Handed back so a command can release what a plugin acquired — a browser
   // above all. A one-shot `stratus run` that left a Chromium behind would
-  // be a leak per invocation.
+  // be a leak per invocation. Defined before anything after the load can
+  // fail, because a refusal below — a selection nothing registers, a
+  // provider factory that throws — has the same plugins to release and no
+  // caller yet to release them: the callers' `finally` only begins once
+  // this returns.
   const disposePlugins = async (): Promise<void> => {
     for (const plugin of loadedPlugins) {
       try {
@@ -374,7 +309,150 @@ export const createAgentRuntime = async (
     }
   };
 
-  return { runner, agent, metadata, disposePlugins };
+  try {
+    // The same selections the daemon makes, from the same trusted keys, and
+    // the same refusal: a run that quietly fell back to the host's executor
+    // when the operator selected a sandbox would be the local test lying
+    // about what the daemon does.
+    const warnTrusted = (line: string): void => {
+      writeLine(streams.stderr, `Warning: ${line}`);
+    };
+    const executorName = (await loadServeRuntimeSelection('executor', runEnv, options.configPath, warnTrusted)) ?? BUILTIN_EXECUTOR_NAME;
+    let executor: Executor | undefined;
+    if (executorName !== BUILTIN_EXECUTOR_NAME) {
+      const contribution = executors.get(executorName);
+      if (!contribution) {
+        throw new Error(
+          `The config selects executor ${executorName}, which no loaded plugin registers`
+          + (executors.names().length > 0 ? ` (registered: ${executors.names().join(', ')})` : '')
+          + `. Enable the plugin that contributes it, or set executor to ${BUILTIN_EXECUTOR_NAME}.`,
+        );
+      }
+      executor = contribution.executor;
+    }
+    const memoryName = (await loadServeRuntimeSelection('memoryStore', runEnv, options.configPath, warnTrusted)) ?? BUILTIN_MEMORY_STORE_NAME;
+    if (memoryName !== BUILTIN_MEMORY_STORE_NAME) {
+      const contribution = memoryStores.get(memoryName);
+      if (!contribution) {
+        throw new Error(
+          `The config selects memoryStore ${memoryName}, which no loaded plugin registers`
+          + (memoryStores.names().length > 0 ? ` (registered: ${memoryStores.names().join(', ')})` : '')
+          + `. Enable the plugin that contributes it, or set memoryStore to ${BUILTIN_MEMORY_STORE_NAME}.`,
+        );
+      }
+      selectedMemory = contribution.store;
+    }
+
+    // The Claude Code runtime executes kernel tools by calling back into the
+    // runner built just below — late-bound because the runner needs the
+    // provider first.
+    let hostedRunner: AgentRunner | undefined;
+    const runtimeProvider = createRuntimeProvider(
+      options.runtime,
+      (error) => {
+        const fallback = options.runtime.provider === 'demo' ? undefined : options.runtime.fallback;
+        writeLine(
+          streams.stderr,
+          `Warning: the default model failed (${error instanceof Error ? error.message : String(error)}); falling back to ${fallback?.model ?? 'the fallback model'}.`,
+        );
+      },
+      async (session, call, context) => {
+        if (!hostedRunner) {
+          throw new Error('The Stratus runtime is not ready to execute tools yet.');
+        }
+        return hostedRunner.executeHostedToolCall(session, call, context);
+      },
+      options.maxTurns,
+      undefined,
+      providers,
+    );
+
+    const runner = new AgentRunner({
+      provider: runtimeProvider,
+      tools,
+      executor: executor ?? createLocalCommandExecutor(),
+      approvals: createApprovalPolicy(
+        options.approvals ?? 'always',
+        streams,
+        options.env ?? {},
+        options.askApproval,
+        options.approvalsDefaulted ?? false,
+      ),
+      bus,
+      skills,
+      memory,
+      ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
+    });
+
+    hostedRunner = runner;
+    await runner.initialize();
+
+    // A soul is a full identity — without one, every provider serves the
+    // same built-in Stratus persona.
+    const agent: AgentDefinition = options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT;
+
+    // The same advisory the daemon gives at roster load, from the same
+    // kernel check: a soul enabling a skill whose `requires:` its `tools:`
+    // does not cover must warn here too, or the local test stays silent
+    // about a configuration `stratus serve` flags.
+    for (const { skill, missing } of missingSkillRequirements(agent, skills)) {
+      writeLine(
+        streams.stderr,
+        `Warning: agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`,
+      );
+    }
+
+    // And the same for the tools themselves, after `initialize()` so the
+    // plugins have registered theirs: an allowlist entry naming a tool
+    // nothing provides grants nothing and says nothing, and a soul made only
+    // of those runs with no tools while its persona still talks about them.
+    const finding = unmatchedToolAllowlist(
+      agent,
+      tools.describe().map((tool) => tool.name),
+      {
+        mayRegister: loadedPlugins.flatMap(
+          (plugin) => plugin.manifest.contributes.toolsDiscovered.map((declared) => declared.namespace),
+        ),
+        // A local run has no dispatcher, store, or channels, so it registers
+        // none of the daemon's tools. A soul written for `stratus serve` is
+        // not wrong for naming them here — it is in the wrong process.
+        elsewhere: GATEWAY_ONLY_TOOL_NAMES,
+      },
+    );
+    for (const line of finding ? describeToolAllowlistFinding(agent.id, finding) : []) {
+      writeLine(streams.stderr, `Warning: ${line}`);
+    }
+    // The kernel leaves this one to the host, because only the host knows
+    // which process it is not.
+    if (finding && finding.elsewhere.length > 0) {
+      writeLine(
+        streams.stderr,
+        `Warning: agent ${agent.id} lists ${finding.elsewhere.join(', ')}, which only the daemon provides`
+          + ' — the names are right, but stratus run cannot call them; stratus serve can',
+      );
+    }
+
+
+    // The built-in executor keeps the name it has always recorded; a
+    // contributed one records the name it registered under — on every
+    // provider's session, since where a command ran is not a question only
+    // demo runs get to answer.
+    const executorRecord = executor ? executorName : 'local-command';
+    const metadata: JsonObject = options.runtime.provider === 'demo'
+      ? { provider: 'demo', executor: executorRecord }
+      : {
+          provider: options.runtime.provider,
+          // A contributed provider may leave the model to its own default.
+          ...(options.runtime.model !== undefined ? { model: options.runtime.model } : {}),
+          ...(options.runtime.provider === 'openai' ? { baseUrl: options.runtime.baseUrl } : {}),
+          executor: executorRecord,
+        };
+
+    return { runner, agent, metadata, disposePlugins };
+  } catch (error) {
+    await disposePlugins();
+    throw error;
+  }
 };
 
 export const runSingleLoop = async (

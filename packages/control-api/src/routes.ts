@@ -33,14 +33,17 @@ import {
   discoverActiveConfig,
   globalConfigPath,
   listAgentSummaries,
+  isSignedInRuntime,
+  listChannelKinds,
   loadChannelCredentials,
+  loadChannelTransportSecrets,
   loadConfigFile,
   loadCredentials,
   loadSoulFile,
   parseProviderName,
   resolveConfigLocation,
   resolveRuntimeConfig,
-  saveChannelCredentials,
+  saveChannelTransportSecrets,
   saveConfigFile,
   saveCredentials,
   validateConfigFile,
@@ -229,6 +232,11 @@ const credentialSource = (runtime: RuntimeConfig): string => {
     // serves the run — the harness holds those tokens itself.
     return 'subscription';
   }
+  if (!isSignedInRuntime(runtime)) {
+    // A contributed provider: its plugin's config and manifest-declared
+    // credentials, which nothing here resolves.
+    return 'plugin';
+  }
   return runtime.apiKeyEnvVar ? `environment (${runtime.apiKeyEnvVar})` : 'stored';
 };
 
@@ -339,6 +347,48 @@ const delegatesAllowlist = (value: unknown): string[] => {
     );
   }
   return entries;
+};
+
+// The shape a channel kind takes: a plugin manifest's contribution name.
+const CHANNEL_KIND_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/**
+ * The `secrets` object of a non-Slack channel binding: every value a
+ * non-empty string, at least one of them, and nothing else — the host
+ * stores what the plugin's README says to store, by name.
+ */
+const readSecretMap = (body: Record<string, unknown>): Record<string, string> => {
+  const raw = body.secrets;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new ApiError(400, 'invalid_body', '"secrets" must be an object of secret name to value.');
+  }
+  const secrets: Record<string, string> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new ApiError(400, 'invalid_body', `secrets.${name} must be a non-empty string.`);
+    }
+    secrets[name] = value;
+  }
+  if (Object.keys(secrets).length === 0) {
+    throw new ApiError(400, 'invalid_body', '"secrets" names no secret; a channel binding with nothing in it would never come online.');
+  }
+  return secrets;
+};
+
+/**
+ * Which agents have transport secrets stored, per channel kind — the ids,
+ * never a value. Slack through its typed reader (the shape the adapter
+ * reads); every other kind generically, from the same namespace.
+ */
+const listChannelBindings = async (env: StateEnvironment): Promise<Record<string, string[]>> => {
+  const channels = await loadChannelCredentials(env);
+  const bindings: Record<string, string[]> = { slack: Object.keys(channels.slack ?? {}) };
+  for (const kind of await listChannelKinds(env)) {
+    if (kind !== 'slack') {
+      bindings[kind] = Object.keys(await loadChannelTransportSecrets(env, kind));
+    }
+  }
+  return bindings;
 };
 
 const parseProviderParam = (value: string): CredentialProviderName => {
@@ -1152,9 +1202,10 @@ export const routes: Route[] = [
       const configChosen = location?.trusted !== false;
       // The codex runtime carries no endpoint at all — the harness owns its
       // endpoints — so only the other providers have one to pass along.
-      const baseUrl = (resolved && resolved.provider !== 'codex' ? resolved.baseUrl : undefined)
+      const signedIn = resolved && isSignedInRuntime(resolved) ? resolved : undefined;
+      const baseUrl = (signedIn && signedIn.provider !== 'codex' ? signedIn.baseUrl : undefined)
         ?? (configApplies && configChosen ? config.baseUrl : undefined);
-      const apiKeyEnv = resolved?.apiKeyEnvVar ?? (configApplies && configChosen ? config.apiKeyEnv : undefined);
+      const apiKeyEnv = signedIn?.apiKeyEnvVar ?? (configApplies && configChosen ? config.apiKeyEnv : undefined);
       const credentials = await loadCredentials(context.env);
       const models = await collectAvailableModels(
         {
@@ -1183,6 +1234,10 @@ export const routes: Route[] = [
         tools: context.gateway.tools(),
         skills: context.gateway.skills(),
         plugins: context.gateway.plugins(),
+        // And the fourth: which names a soul's `provider:` can select on
+        // this daemon, built-ins and plugin-registered alike — a picker
+        // that listed a literal would never offer the second kind.
+        providers: context.gateway.providers(),
       };
     },
   },
@@ -1206,9 +1261,9 @@ export const routes: Route[] = [
             ...(stored?.baseUrl ? { baseUrl: stored.baseUrl } : {}),
           };
         }),
-        channels: {
-          slack: Object.keys(channels.slack ?? {}),
-        },
+        // Every kind with tokens stored, Slack's and any plugin channel's:
+        // agent ids only, never a value.
+        channels: await listChannelBindings(context.env),
       };
     },
   },
@@ -1300,19 +1355,25 @@ export const routes: Route[] = [
     pattern: `${API_PREFIX}/credentials/channels/:channel`,
     async handler(context) {
       const channel = context.params.channel ?? '';
-      if (channel !== 'slack') {
-        throw new ApiError(400, 'unknown_channel', `No channel named ${channel}. Today that is: slack.`);
+      if (!CHANNEL_KIND_PATTERN.test(channel)) {
+        throw new ApiError(400, 'unknown_channel', `${JSON.stringify(channel)} is not a channel kind. Use slack, or the kind a channel plugin declares (lowercase, hyphens).`);
       }
       const body = await readJsonObject(context.request);
       const agentId = requireString(body, 'agentId');
-      const appToken = requireString(body, 'appToken');
-      const botToken = requireString(body, 'botToken');
       if (!context.gateway.agents().some((agent) => agent.id === agentId)) {
         // The adapter skips a binding whose id is not on the roster, so a
-        // typo stores real Slack secrets against an agent that never comes
+        // typo stores real secrets against an agent that never comes
         // online — reported connected here and silently absent there.
-        throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}, so a Slack app bound to it would never come online.`);
+        throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}, so a ${channel} app bound to it would never come online.`);
       }
+      // Slack keeps its named pair, so the dashboard's form and the
+      // adapter's reader agree on the shape. Any other kind takes the
+      // secrets its plugin documents, as one object of strings — the host
+      // stores them and hands them over by kind, and does not know what
+      // they mean.
+      const secrets: Record<string, string> = channel === 'slack'
+        ? { appToken: requireString(body, 'appToken'), botToken: requireString(body, 'botToken') }
+        : readSecretMap(body);
 
       // Channel tokens are gateway infrastructure secrets and live in their
       // own namespace: this is the only route that writes them, and the
@@ -1321,11 +1382,7 @@ export const routes: Route[] = [
       // Same lock as the provider credentials: both halves live in one file,
       // and both are read-modify-write.
       await withCredentialLock(async () => {
-        const channels = await loadChannelCredentials(context.env);
-        await saveChannelCredentials(context.env, {
-          ...channels,
-          slack: { ...(channels.slack ?? {}), [agentId]: { appToken, botToken } },
-        });
+        await saveChannelTransportSecrets(context.env, channel, agentId, secrets);
       });
       return { channel, agentId, stored: true };
     },
@@ -1371,7 +1428,11 @@ export const routes: Route[] = [
         // and `PUT` takes the whole document — a 400 here would break the
         // round trip for everyone who has the block, and the value is
         // preserved below rather than dropped by the replace.
-        if (key === 'plugins') {
+        // `executor` and `memoryStore` are the same boundary one step on:
+        // they select which of that code an agent's commands run in and
+        // where its memories are written, and stay a file edit for the
+        // same reason.
+        if (key === 'plugins' || key === 'executor' || key === 'memoryStore') {
           continue;
         }
         const expected = (CONFIG_KEYS as Record<string, string>)[key];
@@ -1412,6 +1473,11 @@ export const routes: Route[] = [
         const current = await loadConfigFile(configPath);
         if (current.plugins) {
           next.plugins = current.plugins;
+        }
+        for (const key of ['executor', 'memoryStore'] as const) {
+          if (current[key] !== undefined) {
+            next[key] = current[key];
+          }
         }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
