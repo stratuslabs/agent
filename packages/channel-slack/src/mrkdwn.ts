@@ -257,36 +257,47 @@ interface Pair {
  */
 const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map<number, Pair> => {
   const pairs = new Map<number, Pair>();
-  // Shortened in place rather than replaced: a copy per closing run is a
-  // copy of nearly the whole stack when a reply nests deeply, which made
-  // pairing quadratic in the nesting depth on its own.
-  const openers: number[] = [];
+  // One stack per delimiter character rather than one for all of them. A
+  // closer only ever answers an opener spelled the same way, so a single
+  // stack means walking past every opener that is not: 32 000 asterisks
+  // followed by 32 000 `~~` spent ten seconds discovering, each time, that
+  // none of them was a tilde. Each stack is in position order, so its last
+  // entry is the nearest opener of that character, and everything the
+  // closer invalidates is at the end of some stack.
+  const openers = new Map<string, number[]>(Object.keys(DELIMITERS).map((char) => [char, []]));
 
   tokens.forEach((token, index) => {
     if (token.kind === 'break') {
-      openers.length = 0;
+      for (const stack of openers.values()) {
+        stack.length = 0;
+      }
       return;
     }
     if (token.kind !== 'run' || inert.has(index)) {
       return;
     }
-    if (token.closes) {
-      for (let slot = openers.length - 1; slot >= 0; slot -= 1) {
-        const candidate = openers[slot];
-        const opener = candidate === undefined ? undefined : tokens[candidate];
-        if (candidate !== undefined && opener?.kind === 'run' && opener.char === token.char) {
-          const most = DELIMITERS[token.char]?.most ?? 1;
-          const pair: Pair = { open: candidate, close: index, use: Math.min(opener.length, token.length, most) };
-          pairs.set(candidate, pair);
-          pairs.set(index, pair);
-          // Everything opened inside this pair and never closed is text.
-          openers.length = slot;
-          return;
+    const own = openers.get(token.char);
+    if (token.closes && own !== undefined) {
+      const candidate = own[own.length - 1];
+      const opener = candidate === undefined ? undefined : tokens[candidate];
+      if (candidate !== undefined && opener?.kind === 'run') {
+        const most = DELIMITERS[token.char]?.most ?? 1;
+        const pair: Pair = { open: candidate, close: index, use: Math.min(opener.length, token.length, most) };
+        pairs.set(candidate, pair);
+        pairs.set(index, pair);
+        // This opener is spent, and everything opened inside the pair and
+        // never closed is text. Each entry is dropped once however many
+        // closers pass over it, so the whole pass stays linear.
+        for (const stack of openers.values()) {
+          while (stack.length > 0 && (stack[stack.length - 1] ?? -1) >= candidate) {
+            stack.pop();
+          }
         }
+        return;
       }
     }
     if (token.opens) {
-      openers.push(index);
+      own?.push(index);
     }
   });
   return pairs;
