@@ -129,6 +129,11 @@ test('a wrapper is not emitted when its own character is loose in what it wraps'
     // Nested styles are fine when the characters differ.
     ['**_nested_**', '*_nested_*'],
     ['*_odd_*', '*_odd_*'],
+    // Both at once is written `*_…_*`, so a loose underscore inside blocks
+    // it as surely as a loose asterisk would — every character a wrapper is
+    // spelled with has to be clear, not just the one it starts with.
+    ['***both***', '*_both_*'],
+    ['***a _ b***', '***a _ b***'],
     // An asterisk inside a snippet is not loose — Slack reads no markup
     // there, so it cannot pair with the wrapper.
     ['## Match `*.ts` files', '*Match `*.ts` files*'],
@@ -196,7 +201,33 @@ test('a link is read from the characters its destination was written with', () =
     ['[text](notaurl)', '[text](notaurl)'],
     ['[mail](mailto:a@b.c)', '<mailto:a@b.c|mail>'],
     ['[**bold** label](https://h/x)', '<https://h/x|*bold* label>'],
+    // `<url|label>` is one line's worth of markup, so a link is one line.
+    // A break between the brackets ends the search on its own; a newline
+    // hidden inside a single code token has to end it too.
+    ['[label `a\nb`](https://x)', '[label `a\nb`](https://x)'],
   ]);
+});
+
+test('a destination is an address, and its characters are not markup', () => {
+  // A `*` in a path is part of the path. Left pairable it closed the bold
+  // run that opened before the link, and the address went out as
+  // `/files/_.txt` — a URL altered, which is the same defect as a snippet
+  // altered, in the one place the question had not been asked.
+  converts([
+    ['[files](https://host/files/*.txt)', '<https://host/files/*.txt|files>'],
+    ['**[files](https://host/files/*.txt)**', '**<https://host/files/*.txt|files>**'],
+    // An underscore in a path does not block a bold wrapper, because only
+    // a wrapper's own character can pair with what is inside it.
+    ['**[f](https://host/a_b_c)**', '*<https://host/a_b_c|f>*'],
+  ]);
+  // The second line above is the conservative half of a trade worth naming.
+  // The address survives either way now, since a destination's delimiters
+  // are inert here and can never be consumed as markup. What is not known
+  // is whether Slack pairs them when it renders `<url|label>`, and the two
+  // answers differ: bolded, a reader sees bold or a broken run; left alone,
+  // a reader sees two asterisks. Asterisks are the lesser fault, and this
+  // file has been wrong before about what Slack does with a character it
+  // was only assumed to ignore.
 });
 
 test('a marker still being written stays literal until its closing half arrives', () => {

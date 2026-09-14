@@ -236,8 +236,17 @@ interface Pair {
  * does not: a run reaches its partner across a snippet, which is the
  * difference between ``**the `fs.read` tool**`` arriving as bold and
  * arriving as four asterisks.
+ *
+ * `inert` holds the characters of a link's destination, which are no more
+ * markup than a snippet's are. A URL is written to be followed, and a `*`
+ * in a path is part of the path: left pairable, the one in
+ * `**[files](https://host/files/*.txt)**` closed the bold run that opened
+ * before the link, and the address arrived as `/files/_.txt` — a URL
+ * altered, which is the same defect as a snippet altered and was missed in
+ * the same place, by not asking whether anything else in a reply is as
+ * literal as code.
  */
-const pairEmphasis = (tokens: readonly Token[]): Map<number, Pair> => {
+const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map<number, Pair> => {
   const pairs = new Map<number, Pair>();
   let openers: number[] = [];
 
@@ -246,7 +255,7 @@ const pairEmphasis = (tokens: readonly Token[]): Map<number, Pair> => {
       openers = [];
       return;
     }
-    if (token.kind !== 'run') {
+    if (token.kind !== 'run' || inert.has(index)) {
       return;
     }
     if (token.closes) {
@@ -285,6 +294,11 @@ interface Link {
  * space in it and is not a destination, while `https://host/`b`` is. The
  * old rewrite could not see either — it matched a masked stand-in and had
  * to be told separately whether the thing behind it held whitespace.
+ *
+ * `<url|label>` is one line's worth of markup, so a link is one line. A
+ * break between the brackets already ends the search, and a snippet with a
+ * newline inside it has to as well: the newline is hidden in a single
+ * token there, which is exactly what makes it easy to miss.
  */
 const findLinks = (tokens: readonly Token[]): Map<number, Link> => {
   const links = new Map<number, Link>();
@@ -319,6 +333,10 @@ const findLinks = (tokens: readonly Token[]): Map<number, Link> => {
       }
     }
     if (close === -1) {
+      continue;
+    }
+    const spans = tokens.slice(opener + 1, close);
+    if (spans.some((inner) => inner.kind === 'code' && inner.text.includes('\n'))) {
       continue;
     }
     const destination = tokens.slice(at + 2, close).map(sourceOf).join('');
@@ -506,12 +524,17 @@ const renderLine = (context: Context, from: number, to: number): string => {
 
 export const toSlackMrkdwn = (text: string): string => {
   const tokens = scan(text);
-  const context: Context = {
-    tokens,
-    pairs: pairEmphasis(tokens),
-    links: findLinks(tokens),
-    edits: new Map(),
-  };
+  // Links are found before emphasis is paired, because what they turn out
+  // to cover decides what is left for a delimiter to pair with: the
+  // characters of a destination are the address, not markup.
+  const links = findLinks(tokens);
+  const inert = new Set<number>();
+  for (const link of links.values()) {
+    for (let at = link.label[1] + 2; at < link.through; at += 1) {
+      inert.add(at);
+    }
+  }
+  const context: Context = { tokens, pairs: pairEmphasis(tokens, inert), links, edits: new Map() };
 
   const lines: string[] = [];
   let start = 0;
