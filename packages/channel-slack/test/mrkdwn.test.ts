@@ -211,6 +211,11 @@ test('a heading whose closing marker would land in code is not bolded', () => {
     // A fence nobody closed leaves no prose at the end to put it in. This
     // is the mid-stream state, seen on every edit until the block closes.
     ['# Inspect ```first', 'Inspect ```first'],
+    // And what the line ends with is the snippet's, not a closing marker:
+    // the hash and the spaces here are inside the fence, so a heading that
+    // takes its tail from wherever the line happens to end takes them.
+    ['# Inspect ```first #', 'Inspect ```first #'],
+    ['# Inspect ```first  ', 'Inspect ```first  '],
   ]);
 });
 
