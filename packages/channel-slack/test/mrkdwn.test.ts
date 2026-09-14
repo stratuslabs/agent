@@ -366,6 +366,11 @@ test('no reply, however written, has a character taken out of its code', () => {
     'a', 'bc', '.', '[', ']', '(', ')', 'https://h/x', ' ', '　', '\t', 'C#', '*.ts',
     '`v #`', '`v  `', '`v `', '`a\nb`', '```f', '``s ` i``', '**b**', '*i*', '~~s~~',
     '[l](https://h/x)', '[l](https://h/a b)', '**a `c` b**', '# h', '\n# h `c #`\n',
+    // Runs past what a style can spend. These were missing while the table
+    // said every delimiter reached three, and `~~~x~~~` lost two tildes to a
+    // style tildes do not have — a character gone, which is what this check
+    // is for, arriving through the arithmetic rather than through the text.
+    '~~~', '~~~~', '___', '____', '****', '***x***', '~~~x~~~', '___x___',
   ];
   // A fixed seed, so a failure is a case anybody can reproduce from this file.
   let seed = 20260913;
