@@ -41,17 +41,26 @@
  */
 
 /**
- * The delimiters worth reading, and the shortest run of each that means
- * anything here.
+ * The delimiters worth reading, and how many of each a style can spend.
  *
- * Two of them start at two. A single `_` is already italic to Slack, and a
- * single `~` is not a delimiter to either dialect, so a run of one is text
- * in both cases — converting it could only change what a reader sees. A
- * single `*` is the one that has to move: Markdown reads it as italic and
- * Slack as bold, so leaving it alone is the one thing that is certainly
- * wrong.
+ * `least` is the shortest run that means anything. Two of them start at
+ * two: a single `_` is already italic to Slack, and a single `~` is not a
+ * delimiter to either dialect, so a run of one is text in both cases —
+ * converting it could only change what a reader sees. A single `*` is the
+ * one that has to move, since Markdown reads it as italic and Slack as
+ * bold, so leaving it alone is the one thing that is certainly wrong.
+ *
+ * `most` is where the styles stop. Asterisks and underscores reach three,
+ * which is bold and italic together; tildes have only the one style and
+ * stop at two. Spending more than a style has is how characters go
+ * missing: read as three, `~~~obsolete~~~` had two of its tildes charged
+ * to a style that does not exist and simply vanished.
  */
-const DELIMITERS: Readonly<Record<string, number>> = { '*': 1, _: 2, '~': 2 };
+const DELIMITERS: Readonly<Record<string, { readonly least: number; readonly most: number }>> = {
+  '*': { least: 1, most: 3 },
+  _: { least: 2, most: 3 },
+  '~': { least: 2, most: 2 },
+};
 
 /** Where a link's two halves begin and end. Nothing else reads brackets. */
 const BRACKETS = new Set(['[', ']', '(', ')']);
@@ -179,8 +188,8 @@ const scan = (text: string): Token[] => {
       continue;
     }
 
-    const minimum = DELIMITERS[char];
-    if (minimum !== undefined) {
+    const delimiter = DELIMITERS[char];
+    if (delimiter !== undefined) {
       let length = 1;
       while (text[at + length] === char) {
         length += 1;
@@ -192,7 +201,7 @@ const scan = (text: string): Token[] => {
       // `snake_case_name` is a name — which is why the two are separate
       // questions rather than one, since `a**b**c` is bold in Markdown and
       // reads that way in Slack too.
-      const tight = length >= minimum;
+      const tight = length >= delimiter.least;
       const inWord = (side: string | undefined): boolean => side !== undefined && /[\p{L}\p{N}]/u.test(side);
       flush();
       tokens.push({
@@ -263,7 +272,8 @@ const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map
         const candidate = openers[slot];
         const opener = candidate === undefined ? undefined : tokens[candidate];
         if (candidate !== undefined && opener?.kind === 'run' && opener.char === token.char) {
-          const pair: Pair = { open: candidate, close: index, use: Math.min(opener.length, token.length, 3) };
+          const most = DELIMITERS[token.char]?.most ?? 1;
+          const pair: Pair = { open: candidate, close: index, use: Math.min(opener.length, token.length, most) };
           pairs.set(candidate, pair);
           pairs.set(index, pair);
           // Everything opened inside this pair and never closed is text.
@@ -400,10 +410,13 @@ const wrapperFor = (char: string, use: number): readonly [string, string] => {
   if (char === '~') {
     return ['~', '~'];
   }
-  if (char === '_' || use === 2) {
-    return ['*', '*'];
+  // Three is both styles at once, for either character that reaches it —
+  // read as bold alone, `___important___` lost the italic half it asked
+  // for while `***important***` kept it.
+  if (use >= 3) {
+    return ['*_', '_*'];
   }
-  return use >= 3 ? ['*_', '_*'] : ['_', '_'];
+  return char === '_' || use === 2 ? ['*', '*'] : ['_', '_'];
 };
 
 interface Context {

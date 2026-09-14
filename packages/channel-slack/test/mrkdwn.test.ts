@@ -57,6 +57,7 @@ test('the spellings Slack renders differently are the ones that change', () => {
     ['***both***', '*_both_*'],
     ['__bold__', '*bold*'],
     ['~~struck~~', '~struck~'],
+    ['___important___', '*_important_*'],
     ['[the docs](https://example.com/a_b)', '<https://example.com/a_b|the docs>'],
     ['## Four things', '*Four things*'],
     // Already the same in both dialects, so touching them could only be wrong.
@@ -64,6 +65,29 @@ test('the spellings Slack renders differently are the ones that change', () => {
     ['> a quote', '> a quote'],
     ['`inline code`', '`inline code`'],
     ['_italic_', '_italic_'],
+  ]);
+});
+
+test('a run spends only what its style has, and the rest stays text', () => {
+  // Three asterisks or underscores are two styles at once; three tildes are
+  // a style that does not exist. Charged for one anyway, the third tilde on
+  // each side of `~~~obsolete~~~` was spent on nothing and disappeared —
+  // which is the same fault as a character taken out of a snippet, arriving
+  // through the arithmetic rather than through the text.
+  converts([
+    ['~~~obsolete~~~', '~~obsolete~~'],
+    ['___important___', '*_important_*'],
+    ['***both***', '*_both_*'],
+    ['~~ok~~', '~ok~'],
+    ['__bold__', '*bold*'],
+  ]);
+  // Past three there is nothing left to buy, so the surplus stays written
+  // where it was. These read oddly, and they read oddly in Markdown too —
+  // what matters is that no character is charged for a style and lost.
+  converts([
+    ['****quad****', '**_quad_**'],
+    ['____quad____', '_*_quad_*_'],
+    ['~~~~four~~~~', '~~~four~~~'],
   ]);
 });
 
