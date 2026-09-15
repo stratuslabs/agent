@@ -29,7 +29,7 @@ what moves when you rename an agent.
 | --- | --- |
 | `agents/<id>/sessions.db` | Its conversations, whole: messages, status, and the provider replay state a resumed turn needs. `0600`. |
 | `agents/<id>/memory.jsonl` | What it [remembers](../concepts/memory.md), one JSON record per line, plus the derived `memory.jsonl.index` beside it. `0600`. |
-| `agents/<id>/whitelist.json` | What it may do unattended: command scopes, origins, and standing tool grants. See [Approvals](../guides/approvals.md#standing-grants). `0600`. |
+| `agents/<id>/whitelist.json` | What it may do unattended: command scopes, origins, and standing tool grants. See [Approvals](../guides/approvals.md#standing-grants). `0600`. An install still waiting on the upgrade move has this as `agents/<id>.whitelist.json`, and that file is the one read until it moves. |
 
 The agent's **soul stays a file in `agents/`**, not in this directory: a
 soul is your input — edited, copied between machines, read by `stratus
@@ -77,6 +77,7 @@ with the daemon stopped (`stratus service stop`) or copy `*-wal` and
 you lose.
 
 An install upgrading from before this layout is migrated on first use — see
-[Updating](../guides/updating.md), which also says why the session half
-waits for `stratus serve` or `stratus update` and what the originals are
-called afterwards.
+[Updating](../guides/updating.md), which also says why the sessions,
+schedules, and grants wait for `stratus serve` or `stratus update` while
+the memories do not, and what the preserved originals are called
+afterwards.

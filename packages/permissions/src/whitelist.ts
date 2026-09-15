@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { describeCommandScope, parseCommandScope, sameScope, type CommandScope } from './commands.ts';
@@ -150,6 +150,58 @@ export const whitelistPathFor = (directory: string, agentId: string): string =>
   path.join(directory, agentId, 'whitelist.json');
 
 /**
+ * Where the same grants lived before the per-agent directory —
+ * `<agentsDirectory>/<id>.whitelist.json`.
+ *
+ * Kept because the move needs a bracket: it happens with the daemon
+ * stopped, since a serving daemon of the older build holds its grants
+ * cached and would write a later revocation back to this path, leaving the
+ * moved file claiming a grant the operator had taken away. Until that
+ * bracket comes, the file is still here and still authoritative — see
+ * {@link resolveWhitelistPath}.
+ */
+export const LEGACY_WHITELIST_SUFFIX = '.whitelist.json';
+
+export const legacyWhitelistPathFor = (directory: string, agentId: string): string =>
+  path.join(directory, `${agentId}${LEGACY_WHITELIST_SUFFIX}`);
+
+/**
+ * The file that actually holds this agent's grants right now.
+ *
+ * The agent's own directory once the layout migration has run, and the old
+ * `<id>.whitelist.json` while it is still pending — a read that looked only
+ * at the new path in that window would report an agent with no standing
+ * grants at all, which is a misleading answer about a security-relevant
+ * list and, worse, the answer a *revocation* made through the still-serving
+ * old daemon would be hidden behind.
+ *
+ * Reads resolve; writes never do — `save` always writes the new path, so
+ * the daemon that owns the file after the move is the one that decides
+ * where it lives.
+ */
+export const resolveWhitelistPath = async (directory: string, agentId: string): Promise<string> => {
+  const current = whitelistPathFor(directory, agentId);
+  try {
+    await stat(current);
+    return current;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  const legacy = legacyWhitelistPathFor(directory, agentId);
+  try {
+    await stat(legacy);
+    return legacy;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  return current;
+};
+
+/**
  * Thrown by `remember` for an agent whose whitelist exists but could not be
  * read. The policy catches it by type: the answer still holds for the
  * session, and the log says why it was not saved.
@@ -202,8 +254,13 @@ export const createFileCommandWhitelist = (options: {
    * different views of a file somebody edited between them.
    */
   const cache = new Map<string, Promise<Grants>>();
-  /** Files that exist and could not be read, by agent — never written over. */
-  const unreadable = new Map<string, string>();
+  /**
+   * Files that exist and could not be read, by agent — never written over.
+   * The path is kept beside the reason because the read resolves it (see
+   * `resolveWhitelistPath`), and the refusal must name the file that
+   * actually failed rather than the one a write would have gone to.
+   */
+  const unreadable = new Map<string, { file: string; reason: string }>();
 
   const read = (agentId: string): Promise<Grants> => {
     const cached = cache.get(agentId);
@@ -222,7 +279,7 @@ export const createFileCommandWhitelist = (options: {
     // The agent id is a validated invariant by the time it reaches any
     // path join (see 03) — it is a single path segment or it was refused
     // at the parse boundary, so this does not re-check it.
-    const file = whitelistPathFor(options.directory, agentId);
+    const file = await resolveWhitelistPath(options.directory, agentId);
     try {
       const raw = await readFile(file, 'utf8');
       const parsed = JSON.parse(raw) as Partial<WhitelistFile>;
@@ -248,7 +305,7 @@ export const createFileCommandWhitelist = (options: {
       tools = [];
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         const reason = error instanceof Error ? error.message : String(error);
-        unreadable.set(agentId, reason);
+        unreadable.set(agentId, { file, reason });
         options.warn?.(
           `${file} could not be read (${reason}); its scopes are ignored and "always" answers for ${agentId} `
             + 'are not saved over it until it is fixed and the daemon restarted.',
@@ -318,9 +375,9 @@ export const createFileCommandWhitelist = (options: {
 
   /** Nothing is written over a grant list nobody could read. */
   const refuseIfUnreadable = (agentId: string): void => {
-    const reason = unreadable.get(agentId);
-    if (reason !== undefined) {
-      throw new WhitelistUnreadableError(whitelistPathFor(options.directory, agentId), reason);
+    const failed = unreadable.get(agentId);
+    if (failed !== undefined) {
+      throw new WhitelistUnreadableError(failed.file, failed.reason);
     }
   };
 

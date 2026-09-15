@@ -10701,6 +10701,32 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
   assert.match(nothing.output.stdout, /nothing to re-assert/);
 });
 
+test('a shared memory file a pre-15a daemon leaves behind is folded in by any command, not once', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-drain-cli-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const shared = path.join(home, '.stratus', 'memory.jsonl');
+  const line = (id: string, content: string): string =>
+    `${JSON.stringify({ id, agentId: 'ava', content, createdAt: '2026-01-01T00:00:00.000Z' })}\n`;
+
+  // The upgrade: a shared file from before the per-agent layout. Any
+  // command folds it into the agent's own store.
+  await writeFile(shared, line('ava:memory:1', 'likes jazz'));
+  const first = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: first.streams, env }), 0, first.output.stderr);
+  assert.match(first.output.stdout, /likes jazz/);
+
+  // And again, because the daemon of the older build is still serving and
+  // appends by pathname: it recreates the file this just drained. A
+  // one-shot recorded as applied would leave that fact where nothing looks.
+  await writeFile(shared, line('ava:memory:2', 'written by the old daemon'));
+  const second = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: second.streams, env }), 0, second.output.stderr);
+  assert.match(second.output.stdout, /written by the old daemon/);
+  assert.match(second.output.stdout, /likes jazz/);
+  await assert.rejects(() => readFile(shared, 'utf8'));
+});
+
 test('a state migration that cannot stamp the home refuses commands that write state, and only those', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-stamp-'));
   // A stamp that cannot be written: `state.json` is a directory, so the

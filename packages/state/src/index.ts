@@ -121,6 +121,8 @@ export {
   runStateMigrations,
 } from './migrations.ts';
 
+export { drainSharedMemory } from './layout-migration.ts';
+
 export {
   ConfigFileError,
   loadConfigFile,

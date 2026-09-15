@@ -3,7 +3,7 @@ import { appendFile, chmod, mkdir, readdir, readFile, rename, rm, stat } from 'n
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
-import { whitelistPathFor } from '@stratusagent/permissions';
+import { LEGACY_WHITELIST_SUFFIX, whitelistPathFor } from '@stratusagent/permissions';
 import { type StateEnvironment } from './environment.ts';
 import {
   agentMemoryFilePath,
@@ -36,6 +36,17 @@ import {
 //   kill at any boundary resumes rather than redoing, and a second start
 //   finds nothing to do. No stage mistakes a renamed source for a missing
 //   one.
+// - **Nothing races a daemon of the older build.** That daemon is still
+//   writing this state, and each resource answers it differently. The
+//   session database and the grant files move under an exclusive bracket,
+//   because their writers cannot be reconciled after the fact: a SQLite
+//   file is held open, and a grant file is a whole-state document where a
+//   revocation written to the old path after the move would leave the new
+//   one still granting. The memory file needs no bracket, because it is an
+//   append-only log and a *drain* can converge on it — which is why the
+//   memory half is not a stamped migration at all (see
+//   `drainSharedMemory`): stamping it would declare the job done while a
+//   process that has not restarted can still append one more line.
 // - **It walks the data, not the roster.** The gateway deliberately keeps a
 //   missing soul's sessions when it drops the soul, so owners come from the
 //   stored `agent_id` values as well as from the souls on disk: an agent
@@ -264,10 +275,17 @@ const shardMemories = async (env: StateEnvironment, report: LayoutMigrationRepor
 
   // Taken by rename before a byte is read, the way the per-directory import
   // already claims its source: of any processes racing, exactly one wins the
-  // rename and the rest see ENOENT. A daemon of the older build holding the
-  // file open keeps appending to the claimed inode, so its lines are in what
-  // this reads rather than in a file nobody looks at again — which is the
-  // whole reason this half does not wait for an exclusive bracket.
+  // rename and the rest see ENOENT.
+  //
+  // The rename is not the end of it, and this is the part that decides the
+  // shape of the whole memory half. The file store opens the JSONL *by
+  // pathname* on every append, so a daemon of the older build writing one
+  // more fact after the rename does not land in the claimed inode — it
+  // recreates `memory.jsonl`, where nothing would ever look again if this
+  // ran once and recorded itself as done. So it does not: it is a drain
+  // that every command and every daemon start runs until the file stops
+  // coming back, and only a process still running the older build can make
+  // it come back.
   const claimAndSplit = async (sourcePath: string): Promise<void> => {
     const claimPath = path.join(path.dirname(source), `${path.basename(source)}.migrating-${randomUUID()}`);
     try {
@@ -374,9 +392,19 @@ const shardMemories = async (env: StateEnvironment, report: LayoutMigrationRepor
  *
  * A rename, which is atomic and therefore its own marker: the file is in
  * one place or the other, never both, and a second run finds nothing left
- * in the parent directory to move. The destination path comes from
- * `@stratusagent/permissions`, which owns it — the daemon reading one path
- * while the migration wrote another is how a grant list goes quiet.
+ * in the parent directory to move. Both paths come from
+ * `@stratusagent/permissions`, which owns them — the daemon reading one
+ * path while the migration wrote another is how a grant list goes quiet.
+ *
+ * Under the exclusive bracket, with the rest of this migration, and that is
+ * the whole reason the bracket covers grants: a grant file is a
+ * whole-state document, not a log. A daemon of the older build holds its
+ * grants cached for the life of the process and writes the file back whole,
+ * so a revocation made through it after the move would land on the old
+ * path while the moved file still granted — a grant returning from the
+ * dead, which is the ratchet the standing-grant work exists to prevent.
+ * Nothing can merge those two afterwards, because "absent from the old
+ * file" and "granted since the move" are the same shape.
  */
 const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationReport): Promise<void> => {
   const directory = agentsDirPath(env);
@@ -390,10 +418,10 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
     throw error;
   }
   for (const entry of entries) {
-    if (!entry.endsWith('.whitelist.json')) {
+    if (!entry.endsWith(LEGACY_WHITELIST_SUFFIX) || entry === LEGACY_WHITELIST_SUFFIX) {
       continue;
     }
-    const agentId = entry.slice(0, -'.whitelist.json'.length);
+    const agentId = entry.slice(0, -LEGACY_WHITELIST_SUFFIX.length);
     if (!isValidAgentId(agentId)) {
       report.quarantined.push(`${JSON.stringify(agentId)} (grants) — not a single path segment, so it has no directory to own`);
       continue;
@@ -414,16 +442,27 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
 };
 
 /**
- * Whether the shared session database is still there — and therefore
- * whether moving it needs the home to itself.
+ * Whether this home still holds state a daemon of the older build is
+ * writing — and therefore whether the move needs the home to itself.
  *
- * A fresh install has none, needs no bracket, and gets that migration
- * applied as the no-op it is on the next ordinary command. A home that does
- * have one waits for `stratus serve` or `stratus update`, because a daemon
- * of the older build is writing conversations into exactly that file.
+ * The shared session database, or a grant file under its old name. A fresh
+ * install has neither, needs no bracket, and gets the migration applied as
+ * the no-op it is on the next ordinary command rather than being left with
+ * an old schema stamp waiting for a daemon start it may not get for days.
  */
-export const hasLegacySessionDatabase = (env: StateEnvironment): Promise<boolean> =>
-  exists(legacySessionDbPath(env));
+export const hasBracketedLegacyState = async (env: StateEnvironment): Promise<boolean> => {
+  if (await exists(legacySessionDbPath(env))) {
+    return true;
+  }
+  try {
+    return (await readdir(agentsDirPath(env))).some((entry) => entry.endsWith(LEGACY_WHITELIST_SUFFIX));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+};
 
 const emptyReport = (): LayoutMigrationReport => ({
   agentsWithSessions: 0,
@@ -459,52 +498,61 @@ const describe = (report: LayoutMigrationReport): string | undefined => {
 };
 
 /**
- * Memories and grants into `agents/<id>/`. Idempotent, restartable, and a
- * no-op on a home that never had the shared pair.
+ * Fold whatever is in the shared `memory.jsonl` into the agents' own files.
  *
- * Deliberately *not* exclusive, which is what makes it the first of the two
- * halves. Its sources are an append-only file this takes by rename and a
- * set of files a rename moves atomically — safe enough beside a running
- * daemon — while the alternative, deferring it to the next daemon start,
- * would leave every `stratus run`, `stratus agents`, and `stratus memory`
- * between the upgrade and that start reading an agent that remembers
- * nothing. An upgrade must never look like the agent forgot.
+ * Not a migration and deliberately not stamped: run it on every command and
+ * every daemon start, for as long as a home has been through an upgrade.
+ * The reason is in `shardMemories` — the file store opens the JSONL by
+ * pathname on every append, so a daemon of the older build can recreate the
+ * shared file after any single pass, and a pass that recorded itself as
+ * done would leave that last fact where nothing looks. A drain converges
+ * instead: whatever comes back is taken on the next command.
+ *
+ * It is also why the memory half needs no exclusive bracket, which matters
+ * more than it sounds — deferring it would leave every `stratus run`,
+ * `stratus agents`, and `stratus memory` between the upgrade and the next
+ * daemon start reading an agent that remembers nothing, and an upgrade must
+ * never look like the agent forgot.
+ *
+ * Costs one `stat` once the file is gone for good.
  */
-export const applyPerAgentMemoryAndGrants = async (env: StateEnvironment): Promise<string | undefined> => {
+export const drainSharedMemory = async (env: StateEnvironment): Promise<string | undefined> => {
   const report = emptyReport();
   await shardMemories(env, report);
-  await moveWhitelists(env, report);
   return describe(report);
 };
 
 /**
- * Sessions into `agents/<id>/sessions.db`, and the schedule rows that
- * shared their database into `fleet.db`. Idempotent and restartable at
- * every resource boundary.
+ * Sessions into `agents/<id>/sessions.db`, the schedule rows that shared
+ * their database into `fleet.db`, and each agent's grant file into its own
+ * directory. Idempotent and restartable at every resource boundary.
+ *
+ * The three that need the home to themselves — see `hasBracketedLegacyState`
+ * and the note on `moveWhitelists`.
  */
-export const applyPerAgentSessions = async (env: StateEnvironment): Promise<string | undefined> => {
+export const applyPerAgentLayout = async (env: StateEnvironment): Promise<string | undefined> => {
   const report = emptyReport();
   const legacyPath = legacySessionDbPath(env);
-  if (!(await exists(legacyPath))) {
-    return undefined;
-  }
-  const legacyDb = await openDatabase(legacyPath);
-  try {
-    report.schedulesMoved = await moveSchedules(legacyDb, env);
-    await shardSessions(legacyDb, env, report);
-  } finally {
-    legacyDb.close();
-  }
-  // Last, and only once both stages above have returned: the renamed
-  // source is what says they are done, so a kill anywhere before this line
-  // re-runs them — which is safe, because both are keyed writes. The
-  // sidecars move with it; SQLite derives their names from the main file's,
-  // so one left behind belongs to a database that is not there.
-  await rename(legacyPath, `${legacyPath}.migrated`);
-  for (const suffix of ['-wal', '-shm']) {
-    if (await exists(`${legacyPath}${suffix}`)) {
-      await rename(`${legacyPath}${suffix}`, `${legacyPath}.migrated${suffix}`);
+  if (await exists(legacyPath)) {
+    const legacyDb = await openDatabase(legacyPath);
+    try {
+      report.schedulesMoved = await moveSchedules(legacyDb, env);
+      await shardSessions(legacyDb, env, report);
+    } finally {
+      legacyDb.close();
+    }
+    // Last, and only once both stages above have returned: the renamed
+    // source is what says they are done, so a kill anywhere before this
+    // line re-runs them — which is safe, because both are keyed writes. The
+    // sidecars move with it; SQLite derives their names from the main
+    // file's, so one left behind belongs to a database that is not there.
+    await rename(legacyPath, `${legacyPath}.migrated`);
+    for (const suffix of ['-wal', '-shm']) {
+      if (await exists(`${legacyPath}${suffix}`)) {
+        await rename(`${legacyPath}${suffix}`, `${legacyPath}.migrated${suffix}`);
+      }
     }
   }
+  await moveWhitelists(env, report);
   return describe(report);
 };

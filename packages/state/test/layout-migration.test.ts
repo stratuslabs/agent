@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { whitelistPathFor } from '@stratusagent/permissions';
+import { createFileCommandWhitelist, whitelistPathFor } from '@stratusagent/permissions';
 
 import {
   STATE_SCHEMA_VERSION,
@@ -13,6 +13,7 @@ import {
   agentSessionDbPath,
   agentsDirPath,
   createHomeMemoryStore,
+  drainSharedMemory,
   fleetDbPath,
   legacyMemoryFilePath,
   legacySessionDbPath,
@@ -102,9 +103,8 @@ test('the layout migration moves every shared resource and preserves the origina
   await seedSharedState(home);
 
   const applied = await runStateMigrations(env, { exclusive: true });
-  const ids = applied.map((result) => result.id);
-  assert.ok(ids.includes('0003-per-agent-memory-and-grants'), ids.join(', '));
-  assert.ok(ids.includes('0004-per-agent-sessions'), ids.join(', '));
+  assert.ok(applied.map((result) => result.id).includes('0003-per-agent-state-layout'), applied.map((result) => result.id).join(', '));
+  await drainSharedMemory(env);
 
   // Sessions, split by the stored agent id — including an agent whose soul
   // is absent, and a legacy id shape that is path-safe but not a slug.
@@ -156,7 +156,8 @@ test('an id that cannot key a directory is quarantined loudly, never dropped', a
   await seedSharedState(home);
 
   const applied = await runStateMigrations(env, { exclusive: true });
-  const detail = applied.map((result) => result.detail ?? '').join(' ');
+  const drained = await drainSharedMemory(env);
+  const detail = [...applied.map((result) => result.detail ?? ''), drained ?? ''].join(' ');
   assert.match(detail, /QUARANTINED/);
   assert.match(detail, /\.\.\/escape/);
   // "Quarantined" means the rows are still where they were, in the
@@ -176,8 +177,10 @@ test('a second start does not re-migrate, and adds no duplicate rows', async () 
   await seedSharedState(home);
 
   await runStateMigrations(env, { exclusive: true });
+  await drainSharedMemory(env);
   const again = await runStateMigrations(env, { exclusive: true });
   assert.deepEqual(again, []);
+  assert.equal(await drainSharedMemory(env), undefined);
   assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
   const memories = (await readFile(agentMemoryFilePath(env, 'ava'), 'utf8'))
     .split('\n')
@@ -194,13 +197,14 @@ test('a run killed before the sources are renamed resumes without duplicating an
   // destinations are populated and the sources are still there, which must
   // not read as "already done" and must not double the rows on the re-run.
   await runStateMigrations(env, { exclusive: true });
+  await drainSharedMemory(env);
   const sessionsAfterFirst = sessionIdsIn(agentSessionDbPath(env, 'ava'));
   const { rename } = await import('node:fs/promises');
   await rename(`${legacySessionDbPath(env)}.migrated`, legacySessionDbPath(env));
   await rename(`${legacyMemoryFilePath(env)}.migrated`, legacyMemoryFilePath(env));
-  const { applyPerAgentMemoryAndGrants, applyPerAgentSessions } = await import('../src/layout-migration.ts');
-  await applyPerAgentSessions(env);
-  await applyPerAgentMemoryAndGrants(env);
+  const { applyPerAgentLayout } = await import('../src/layout-migration.ts');
+  await applyPerAgentLayout(env);
+  await drainSharedMemory(env);
 
   assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), sessionsAfterFirst);
   const memories = (await readFile(agentMemoryFilePath(env, 'ava'), 'utf8'))
@@ -209,36 +213,90 @@ test('a run killed before the sources are renamed resumes without duplicating an
   assert.equal(memories.length, 1);
 });
 
-test('the session move waits for a caller that holds the home; the memory move does not', async () => {
+test('the sessions and grants wait for a caller that holds the home; the memory drain does not', async () => {
   const home = await newHome();
   const env = { homeDir: home };
   await seedSharedState(home);
 
   // The ordinary path — any command on any install, with a daemon of the
-  // older build possibly still writing that database.
+  // older build possibly still writing that database and that grant file.
   const automatic = await runStateMigrations(env);
   assert.deepEqual(
     automatic.map((result) => result.id),
-    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-memory-and-grants'],
+    ['0001-owner-only-state-files', '0002-provenance-labels'],
   );
   await stat(legacySessionDbPath(env));
-  assert.deepEqual((await pendingStateMigrations(env)).map((migration) => migration.id), ['0004-per-agent-sessions']);
+  await stat(path.join(agentsDirPath(env), 'ava.whitelist.json'));
+  assert.deepEqual((await pendingStateMigrations(env)).map((migration) => migration.id), ['0003-per-agent-state-layout']);
   // And the home is not stamped as fully migrated while the move is
   // pending, so an older build is not refused over state it can still read.
   assert.notEqual((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
 
+  // The memories move anyway, because nothing about them needs the bracket
+  // and an upgrade must never look like the agent forgot.
+  await drainSharedMemory(env);
+  const memory = createHomeMemoryStore(env);
+  assert.deepEqual((await memory.list('ava')).entries.map((entry) => entry.content), ['likes jazz']);
+
   // A caller that does hold the home finishes the job.
   const exclusive = await runStateMigrations(env, { exclusive: true });
-  assert.deepEqual(exclusive.map((result) => result.id), ['0004-per-agent-sessions']);
+  assert.deepEqual(exclusive.map((result) => result.id), ['0003-per-agent-state-layout']);
   assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
   assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
+});
+
+test('a grant file the move has not reached yet is still the one that is read', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // The window the bracket creates: a newer build installed, the older
+  // daemon still serving, so the grants are still under the old name. A
+  // read that looked only at the new path would report an agent with no
+  // standing grants — and would hide a revocation the still-serving daemon
+  // had just written there.
+  await runStateMigrations(env);
+  const store = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  assert.deepEqual((await store.scopesFor('ava')).map((scope) => scope.command), ['git']);
+
+  await runStateMigrations(env, { exclusive: true });
+  const after = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  assert.deepEqual((await after.scopesFor('ava')).map((scope) => scope.command), ['git']);
+});
+
+test('a memory record written after one drain is taken by the next', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // Everything the registry has to say about this home, said: after this
+  // there is no pending migration left to pick anything up.
+  await runStateMigrations(env, { exclusive: true });
+  await drainSharedMemory(env);
+  assert.deepEqual(await runStateMigrations(env, { exclusive: true }), []);
+
+  // The file store opens the JSONL by pathname on every append, so a daemon
+  // of the older build writing one more fact does not land in the claimed
+  // inode — it recreates the shared file. A stamped one-shot would have
+  // recorded itself as done and left this record where nothing looks.
+  const at = '2026-01-02T00:00:00.000Z';
+  await writeFile(
+    legacyMemoryFilePath(env),
+    `${JSON.stringify({ id: 'ava:memory:late', agentId: 'ava', content: 'written after the drain', createdAt: at })}\n`,
+  );
+
+  assert.notEqual(await drainSharedMemory(env), undefined);
+  const memory = createHomeMemoryStore(env);
+  assert.deepEqual(
+    (await memory.list('ava')).entries.map((entry) => entry.content),
+    ['likes jazz', 'written after the drain'],
+  );
+  await assert.rejects(() => stat(legacyMemoryFilePath(env)));
 });
 
 test('a home with nothing shared to move is migrated by the ordinary path', async () => {
   const home = await newHome();
   const env = { homeDir: home };
   const applied = await runStateMigrations(env);
-  assert.ok(applied.map((result) => result.id).includes('0004-per-agent-sessions'));
+  assert.ok(applied.map((result) => result.id).includes('0003-per-agent-state-layout'));
   assert.deepEqual(applied.map((result) => result.detail).filter((detail) => detail !== undefined), []);
   // A fresh install must not be left holding an old stamp waiting for a
   // daemon start it may not get for days.

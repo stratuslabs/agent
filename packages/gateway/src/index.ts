@@ -111,6 +111,7 @@ import {
   createDemoTool,
   createFileCredentialResolver,
   createHomeMemoryStore,
+  drainSharedMemory,
   createRuntimeProvider,
   DEFAULT_STRATUS_AGENT,
   isRegisteredProviderName,
@@ -3076,6 +3077,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     async start() {
       try {
         await migrateLegacyMemory(env);
+        // And anything still in the shared `memory.jsonl` a pre-15a build
+        // left (or a still-running one of those recreated). Not a
+        // migration and never stamped — see `drainSharedMemory`.
+        const drained = await drainSharedMemory(env);
+        if (drained) {
+          log(`shared memory drained: ${drained}`);
+        }
         // Before the roster and before channels: a turn must never arrive
         // for an agent whose soul lists a tool the daemon has not
         // registered yet, which would refuse the call as "not permitted"

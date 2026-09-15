@@ -46,20 +46,28 @@ Schema 3 moves each agent's state into its own directory:
 `~/.stratus/agents/<id>/` now holds that agent's `sessions.db`,
 `memory.jsonl`, and `whitelist.json`, while the schedules move out of the
 shared session database into `~/.stratus/fleet.db` beside a session index.
-[State layout](../reference/state-layout.md) is the map. Two halves, and
-they land at different moments:
+[State layout](../reference/state-layout.md) is the map. What moves when
+is decided by what a daemon of the *older* build — still serving, because
+nothing has restarted it yet — can do to each file:
 
-- **Memories and grants move on the first command of the new build.** Their
-  sources are an append-only file the migration takes by rename and a set
-  of files a rename moves atomically, so they are safe beside a running
-  daemon — and waiting would mean every `run`, `agents`, and `memory`
-  between the upgrade and the next daemon start reading an agent that
-  remembers nothing.
-- **Sessions and schedules wait for `stratus update` or the next `stratus
-  serve`**, because a daemon of the older build is writing conversations
-  into that database and moving it out from under one would lose every turn
-  saved after the split. Until then `stratus schedules` keeps reading the
-  old file, so nothing goes quiet in between.
+- **Sessions, schedules, and grants wait for `stratus update` or the next
+  `stratus serve`**, the two callers that have the home to themselves. That
+  daemon holds the session database open, and moving it out from under one
+  loses every turn saved after the split; it also holds its grants cached
+  and writes that file back whole, so a revocation made through it after a
+  move would land on the old path while the moved file still granted — a
+  grant back from the dead. Nothing can reconcile those afterwards, so the
+  move waits instead. Until it happens, `stratus schedules` keeps reading
+  the old database and `stratus grants` keeps reading the old grant file,
+  so nothing goes quiet or reads as revoked in between.
+- **Memories move on the first command of the new build**, and keep
+  moving. The JSONL is an append-only log opened by pathname on every
+  write, so an old daemon can recreate it after any single pass — which is
+  why folding it in is not a one-shot migration at all but a drain every
+  command and every daemon start runs until the file stops coming back.
+  Waiting for a restart here would mean every `run`, `agents`, and `memory`
+  in between reading an agent that remembers nothing, and an upgrade must
+  never look like the agent forgot.
 
 Nothing is deleted: the shared database and the shared memory file stay on
 disk as `sessions.db.migrated` and `memory.jsonl.migrated`, and the old

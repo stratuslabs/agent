@@ -15,11 +15,7 @@ import path from 'node:path';
 import type { MemoryEntry } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
 import { type StateEnvironment, readWorkingDirectory } from './environment.ts';
-import {
-  applyPerAgentMemoryAndGrants,
-  applyPerAgentSessions,
-  hasLegacySessionDatabase,
-} from './layout-migration.ts';
+import { applyPerAgentLayout, hasBracketedLegacyState } from './layout-migration.ts';
 import {
   MEMORY_FILENAME,
   stratusHomePath,
@@ -297,41 +293,29 @@ const PROVENANCE_LABELS_MIGRATION: StateMigration = {
 };
 
 /**
- * Step 15's layer A, first half: an agent's memories and grants move under
- * `agents/<id>/`.
+ * Step 15's layer A: the sessions shard into `agents/<id>/sessions.db`, the
+ * schedule rows that shared their database move to `fleet.db`, and each
+ * agent's grant file moves into its own directory.
  *
- * Not exclusive, on purpose — see `applyPerAgentMemoryAndGrants` for why
- * these two can move beside a running daemon and why waiting would be the
- * worse failure.
+ * Exclusive wherever any of that is still in its old place, because a
+ * daemon of the older build is writing it: moving a session database out
+ * from under one loses every turn saved after the split, and moving a grant
+ * file leaves a later revocation on the old path while the moved file still
+ * grants. An agent's memories are the one resource that needs no bracket
+ * and so are not here at all — `drainSharedMemory` converges on them
+ * instead, and says why.
  */
-const PER_AGENT_MEMORY_MIGRATION: StateMigration = {
-  id: '0003-per-agent-memory-and-grants',
-  description: "move each agent's memories and grants under agents/<id>/",
-  apply: applyPerAgentMemoryAndGrants,
-};
-
-/**
- * The same layer's second half: the sessions shard into
- * `agents/<id>/sessions.db`, and the schedule rows that shared their
- * database move to `fleet.db`.
- *
- * Exclusive wherever there is a shared session database left, because a
- * daemon of the older build is writing conversations into that file and a
- * migration that moved it out from under one would lose every turn saved
- * after the split.
- */
-const PER_AGENT_SESSIONS_MIGRATION: StateMigration = {
-  id: '0004-per-agent-sessions',
-  description: "shard the session database into agents/<id>/sessions.db, and move the schedules into fleet.db",
-  requiresExclusive: hasLegacySessionDatabase,
-  apply: applyPerAgentSessions,
+const PER_AGENT_LAYOUT_MIGRATION: StateMigration = {
+  id: '0003-per-agent-state-layout',
+  description: "shard the session database into agents/<id>/sessions.db, move the grants beside it, and the schedules into fleet.db",
+  requiresExclusive: hasBracketedLegacyState,
+  apply: applyPerAgentLayout,
 };
 
 export const STATE_MIGRATIONS: readonly StateMigration[] = [
   OWNER_ONLY_STATE_FILES_MIGRATION,
   PROVENANCE_LABELS_MIGRATION,
-  PER_AGENT_MEMORY_MIGRATION,
-  PER_AGENT_SESSIONS_MIGRATION,
+  PER_AGENT_LAYOUT_MIGRATION,
 ];
 
 const unversionedStamp = (): StateStamp => ({ schemaVersion: 0, applied: [] });
