@@ -489,15 +489,16 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     // But a span that closes on the line is no obstacle: the marker goes
     // just past it, in prose, so this heading is bolded.
     '*Run `npm test`*',
-    // And nothing on this line is stripped at all. Closing hashes are the
-    // heading's own syntax only while they are the heading's: this line
-    // ends inside a span, where the same hash is somebody's snippet.
-    '# show `value #',
+    // The opening hashes go, because they are the heading's and they are
+    // in prose. The hash at the end stays, because it is inside the span —
+    // and so does the space beside it. Which characters are the heading's
+    // is decided by which token holds them, rather than by a pattern that
+    // has to agree with the trim beside it about what whitespace is.
+    'show `value #',
     'next`',
-    // The same for a no-break space, which the pattern's `[ \t]` does not
-    // know about but `trim` takes anyway — the gap between those two sets
-    // is exactly where a character goes missing.
-    '# show `other ',
+    // The same line with a no-break space, the character that disagreement
+    // used to lose: the pattern knew `[ \t]` and the trim took more.
+    'show `other ',
     'lines`',
     // While a hash whose line begins inside a fence is somebody's comment.
     '```sh',
