@@ -24,12 +24,16 @@ state is still visible: "is there anything in the old place" is a question
 about right now, and a daemon of the older build starting a moment later
 creates exactly what the check just failed to see — leaving the home
 recorded as migrated while it fills with state nothing will move. A run that
-has to defer records the migrations before it and stamps the schema *those*
-establish, so a home waiting for its bracket reads as schema 2 rather than
-as this build's 3: provenance labels present, the per-agent move not yet
-made. Nothing reads it as fully migrated, no older build is refused over a
-move that has not happened, and the schema-2 refusal below is armed from the
-first command either way.) The ones it ran are idempotent and simply run again on
+has to defer records which migrations it ran but proposes **no schema
+version**, so it can raise nothing and lower nothing: only a run that
+finished everything sets the version. Stamping the part it finished would
+read as the better answer and is not, because two runs overlap — the
+ordinary one reads the stamp before the exclusive one records the move, its
+write lands last, and the home is marked as not having had a move it has
+just had. A stamp that *under*-reports is the one that admits an older build
+to state it cannot read. So a home waiting for its bracket reads as schema 0
+until its first `stratus serve` or `stratus update`, which is also the
+truthful answer to an older build asking whether it may write there.) The ones it ran are idempotent and simply run again on
 the next command, which is the cheaper half of that trade: a run that
 recorded a partial set could have its record land on top of the complete
 one written by the `stratus update` beside it, and take the finished move

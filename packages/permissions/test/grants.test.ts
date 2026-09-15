@@ -392,3 +392,34 @@ test('a grant is never written through a symlinked agent directory', async () =>
   assert.deepEqual((await createFileCommandWhitelist({ directory: agents }).grantsFor('bea')).tools.map((grant) => grant.tool), ['web.fetch']);
   await rm(home, { recursive: true, force: true });
 });
+
+test('a whitelist.json that is a symlink is refused, even inside a real directory', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-file-link-'));
+  const agents = path.join(home, 'agents');
+  await mkdir(path.join(agents, 'ava'), { recursive: true });
+  await mkdir(path.join(agents, 'bea'), { recursive: true });
+  const beas = whitelistPathFor(agents, 'bea');
+  await createFileCommandWhitelist({ directory: agents }).rememberTool('bea', {
+    tool: 'web.fetch',
+    grantedAt: '2026-03-01T00:00:00.000Z',
+  });
+  // The directory is real; only the file is a link. Followed, it makes Bea's
+  // list authoritative for Ava — and the migration would read the
+  // destination as populated and archive Ava's real legacy grants.
+  await symlink(beas, whitelistPathFor(agents, 'ava'));
+
+  const store = createFileCommandWhitelist({ directory: agents });
+  await assert.rejects(
+    () => store.grantsFor('ava'),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  await assert.rejects(
+    () => store.rememberTool('ava', { tool: 'shell.run', grantedAt: '2026-03-01T00:00:00.000Z' }),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  assert.deepEqual(
+    (await createFileCommandWhitelist({ directory: agents }).grantsFor('bea')).tools.map((grant) => grant.tool),
+    ['web.fetch'],
+  );
+  await rm(home, { recursive: true, force: true });
+});

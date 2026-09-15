@@ -449,33 +449,13 @@ export const mergeStateStamp = (latest: StateStamp, next: StateStamp): StateStam
       applied.push(id);
     }
   }
+  const complete = STATE_MIGRATIONS.every((migration) => applied.includes(migration.id));
   return {
-    schemaVersion: Math.max(latest.schemaVersion, schemaVersionFor(applied)),
+    schemaVersion: Math.max(latest.schemaVersion, complete ? STATE_SCHEMA_VERSION : next.schemaVersion),
     applied,
   };
 };
 
-/**
- * The schema a set of applied migrations establishes: the length of the
- * registry prefix that has run.
- *
- * Prefix rather than count, because a migration that has not run is a shape
- * the state may still be in — 0003 deferred means the per-agent move has not
- * happened, whatever has run after it. One migration per schema version is
- * the registry's shape and this is where that correspondence is written
- * down; a version is not a tally of work done but a claim about what the
- * files look like.
- */
-const schemaVersionFor = (applied: readonly string[]): number => {
-  let version = 0;
-  for (const migration of STATE_MIGRATIONS) {
-    if (!applied.includes(migration.id)) {
-      break;
-    }
-    version += 1;
-  }
-  return Math.min(version, STATE_SCHEMA_VERSION);
-};
 
 const writeStateStamp = async (env: StateEnvironment, stamp: StateStamp): Promise<void> => {
   await mkdir(stratusHomePath(env), { recursive: true });
@@ -598,6 +578,7 @@ export const runStateMigrations = async (
   for (const migration of STATE_MIGRATIONS) {
     runnable.set(migration.id, applied.has(migration.id) || await runnableNow(migration, env, options));
   }
+  const deferring = STATE_MIGRATIONS.some((migration) => runnable.get(migration.id) !== true);
   for (const migration of STATE_MIGRATIONS) {
     if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
       continue;
@@ -607,13 +588,30 @@ export const runStateMigrations = async (
     applied.add(migration.id);
     results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
   }
-  // One write, at the end, carrying everything this run knows to have run —
-  // which for a run that deferred an exclusive migration is the prefix
-  // before it, and for a run that finished is all of them. The version comes
-  // from that set rather than from this build's constant, so a home that has
-  // not had the per-agent move reads as the schema it actually is, and the
-  // stamp still arms the refusal the schema below it exists for.
-  const version = schemaVersionFor(stamp.applied);
+  // One write, at the end, and none at all from a run that deferred
+  // something.
+  //
+  // Recording the prefix it did finish reads as the better answer — the home
+  // really is at that schema — and it is not, because a partial stamp can
+  // *under*-report. Two runs overlap, the ordinary one reads the stamp
+  // before the exclusive one records 0003, and its rename lands last: the
+  // home is then marked as not having had the per-agent move it has just
+  // had, and the downgrade guard waves an older build into a sharded home.
+  // Over-reporting and under-reporting are not symmetric, and this is the
+  // direction that loses data.
+  //
+  // A run that finishes everything writes the same bytes as any other run
+  // that finishes everything, so those cannot disagree. A run that defers
+  // proposes **no version at all** — it writes 0, and `mergeStateStamp`
+  // floors that against what is recorded, so it can raise nothing and lower
+  // nothing. The worst it can do is lose an id from `applied` to that same
+  // interleaving, which costs an idempotent re-run and leaves the version,
+  // the thing the downgrade guard reads, untouched.
+  //
+  // It writes rather than skipping so that a home whose stamp *cannot* be
+  // written is found by the commands that write state, instead of only by
+  // the next daemon start.
+  const version = deferring ? 0 : STATE_SCHEMA_VERSION;
   if (results.length > 0 || stamp.schemaVersion !== version) {
     await writeStateStamp(env, { schemaVersion: version, applied: stamp.applied });
   }

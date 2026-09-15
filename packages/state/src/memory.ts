@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, chmod, mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { isSymlinkedStatePath, symlinkedStateDirectoryMessage } from '@stratusagent/permissions';
+import { isSymlinkedStatePath, symlinkedStateDirectoryMessage, symlinkedStateFileMessage } from '@stratusagent/permissions';
 
 import {
   assertMemoryContentWithinCap,
@@ -430,6 +430,16 @@ export const createFileMemoryStore = (
       // below would tighten whatever it points at.
       if (await isSymlinkedStatePath(dir)) {
         throw new Error(symlinkedStateDirectoryMessage(dir));
+      }
+      // And the files themselves, which a real directory says nothing
+      // about. A linked `memory.jsonl` puts this agent's memories outside
+      // the home or into another agent's file — the drain would place them
+      // there during an upgrade — and a linked `.index` hands SQLite an
+      // external database to open, write and chmod.
+      for (const candidate of [filePath, indexPath]) {
+        if (await isSymlinkedStatePath(candidate)) {
+          throw new Error(symlinkedStateFileMessage(candidate));
+        }
       }
     }
     await mkdir(dir, { recursive: true, ...(options.ownedDirectory ? { mode: 0o700 } : {}) });

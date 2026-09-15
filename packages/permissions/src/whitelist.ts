@@ -1,6 +1,6 @@
 import { chmod, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { isSymlinkedStatePath, symlinkedStateDirectoryMessage } from './state-directory.ts';
+import { isSymlinkedStatePath, symlinkedStateDirectoryMessage, symlinkedStateFileMessage } from './state-directory.ts';
 
 import { describeCommandScope, parseCommandScope, sameScope, type CommandScope } from './commands.ts';
 import { parseToolGrant, sameToolGrant, type ToolGrant } from './grants.ts';
@@ -191,6 +191,15 @@ export const resolveWhitelistPath = async (directory: string, agentId: string): 
   const own = path.dirname(current);
   if (await isSymlinkedStatePath(own)) {
     throw new Error(symlinkedStateDirectoryMessage(own));
+  }
+  // And the grant file itself: a real `agents/<id>/` can hold a linked
+  // `whitelist.json`, which the `stat` below would follow and make
+  // authoritative — the migration would then see the destination as
+  // populated and archive the real legacy file, after which this agent
+  // reads another's unattended grants and writes its revocations through
+  // the link.
+  if (await isSymlinkedStatePath(current)) {
+    throw new Error(symlinkedStateFileMessage(current));
   }
   try {
     await stat(current);

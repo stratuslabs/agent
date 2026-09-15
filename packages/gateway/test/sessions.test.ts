@@ -356,3 +356,18 @@ test('a sessions.db that is a symlink is neither swept nor opened', async () => 
 
   assert.equal((await stat(elsewhere)).size, 0);
 });
+
+test('a symlinked state home is still usable: the fleet index is not an agent directory', async () => {
+  const real = await newStateDir();
+  const linked = path.join(await newStateDir(), 'home');
+  await symlink(real, linked);
+
+  // A home on another disk, reached through a link — a supported setup, and
+  // the one the per-agent symlink refusal must not reach. `~/.stratus` is
+  // the operator's path to choose; `agents/<id>` is one Stratus picks.
+  const store = new ShardedSessionStore({ stateDir: linked, ownedDirectory: true });
+  const opened = await store.create(session('a-1', 'ava'));
+  assert.equal(opened.agent.id, 'ava');
+  assert.equal((await store.get('a-1'))?.agent.id, 'ava');
+  store.close();
+});

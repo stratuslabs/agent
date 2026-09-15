@@ -324,9 +324,10 @@ test('every command migrates on first use of a newer build, and serve refuses ne
   assert.equal(listed, 0);
   assert.match(agents.output.stderr, /state migration 0001-owner-only-state-files/);
   assert.equal((await stat(loose)).mode & 0o777, 0o600);
-  // The schema those migrations establish, not this build's: 0003 waits for
-  // a caller holding the home, so an ordinary command leaves the home at 2.
-  assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, STATE_SCHEMA_VERSION - 1);
+  // Still 0: 0003 waits for a caller holding the home, and a run that
+  // defers proposes no version — it records what it ran so an unwritable
+  // stamp is still found, and leaves the version to the run that finishes.
+  assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, 0);
 
   // State written by a newer build: read-only commands warn and continue…
   await writeFile(stateFilePath({ homeDir: home }), JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [] }));

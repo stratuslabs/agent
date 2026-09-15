@@ -232,13 +232,18 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
   );
   await stat(legacySessionDbPath(env));
   await stat(path.join(agentsDirPath(env), 'ava.whitelist.json'));
-  // A deferring run records the prefix it finished and stamps the schema
-  // that prefix establishes — schema 2 here, which is what this home is:
-  // provenance labels present, the per-agent move not yet made. Holding the
-  // version back to 0 would leave the schema-2 refusal unarmed on a home
-  // that has been through 0002.
+  // A deferring run records *nothing*, not even the two it just ran.
+  // Recording the prefix reads as the better answer — the home really is at
+  // that schema — but a partial stamp can *under*-report: two runs overlap,
+  // this one read the stamp before the exclusive one recorded 0003, and its
+  // rename lands last, marking a home that has just been sharded as one
+  // that has not. That is the direction that admits an older build.
+  // Recorded, but proposing no version: 0 is floored against whatever is
+  // there, so a deferring run can raise nothing and lower nothing. It still
+  // writes, so a home whose stamp cannot be written is found by the
+  // commands that write state rather than only at the next daemon start.
   assert.deepEqual(await readStateStamp(env), {
-    schemaVersion: 2,
+    schemaVersion: 0,
     applied: ['0001-owner-only-state-files', '0002-provenance-labels'],
   });
   assert.deepEqual(
@@ -344,10 +349,11 @@ test('a home with nothing shared to move still waits for a caller holding it', a
   // move, and 0003 — stamped — would never run again.
   const ordinary = await runStateMigrations(env);
   assert.deepEqual(ordinary.map((result) => result.id), ['0001-owner-only-state-files', '0002-provenance-labels']);
-  // Recorded as the schema those two establish, not as this build's — the
-  // per-agent move has not happened, and the stamp says so.
+  // Recorded, at version 0: a deferring run never proposes a version, so it
+  // cannot mark a home that a concurrent exclusive run has just sharded as
+  // one that has not been.
   assert.deepEqual(await readStateStamp(env), {
-    schemaVersion: 2,
+    schemaVersion: 0,
     applied: ['0001-owner-only-state-files', '0002-provenance-labels'],
   });
 
@@ -863,4 +869,21 @@ test('a retry does not rename a recreated grant file over the archive it already
 
   // The first pass's grants are still there, not replaced by the empty list.
   assert.equal(await readFile(path.join(agentsDirPath(env), 'blocked.md.whitelist.json.migrated'), 'utf8'), archived);
+});
+
+test('a memory file that is a symlink is refused, even inside a real directory', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const elsewhere = path.join(home, 'elsewhere.jsonl');
+  await writeFile(elsewhere, '');
+  // A real `agents/ava/` says nothing about the files in it: the drain would
+  // place this agent's memories through the link, outside the home.
+  await mkdir(path.dirname(agentMemoryFilePath(env, 'ava')), { recursive: true });
+  await symlink(elsewhere, agentMemoryFilePath(env, 'ava'));
+
+  await assert.rejects(
+    () => createHomeMemoryStore(env).append('ava', 'likes jazz'),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  assert.equal((await stat(elsewhere)).size, 0);
 });

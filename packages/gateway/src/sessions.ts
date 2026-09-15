@@ -106,6 +106,17 @@ export interface SqliteSessionStoreOptions {
    * project directory must never be chmodded implicitly.
    */
   ownedDirectory?: boolean;
+  /**
+   * Whether this file is one agent's own state, under a directory Stratus
+   * creates — `agents/<id>/sessions.db`. Implies `ownedDirectory`.
+   *
+   * Separate from it because the two are different claims, and conflating
+   * them broke a supported setup: Stratus tightens `~/.stratus`, but the
+   * *operator* chose that path and may have linked it to another disk,
+   * while `agents/<id>` is a path Stratus picks, where nothing legitimate
+   * is a link. Only the second may refuse one.
+   */
+  perAgent?: boolean;
 }
 
 /**
@@ -140,15 +151,16 @@ const shardFileExists = async (filePath: string): Promise<boolean> => {
  */
 const openStratusDatabase = (filePath: string, options: SqliteSessionStoreOptions = {}): DatabaseSync => {
   const dir = path.dirname(filePath);
-  if (options.ownedDirectory) {
-    // Never a symlink — see `isSymlinkedStateDirectory`, which owns that
-    // rule. Refused rather than quarantined, unlike the migration: at
-    // runtime there is no report to name it in, and a turn that cannot be
-    // stored must not read as stored.
+  if (options.perAgent) {
+    // Never a symlink — see `isSymlinkedStatePath`, which owns that rule.
+    // Refused rather than quarantined, unlike the migration: at runtime
+    // there is no report to name it in, and a turn that cannot be stored
+    // must not read as stored.
     //
-    // Only for a directory this store owns: `~/.stratus` itself is a symlink
-    // on plenty of real installs (a home on another disk), and the fleet
-    // index and the schedule store live directly in it.
+    // Under `perAgent` and not `ownedDirectory`, which is the distinction
+    // this comment used to describe while the code ignored it: `~/.stratus`
+    // is a symlink on plenty of real installs (a home on another disk), and
+    // the fleet index and the schedule store live directly in it.
     if (isSymlinkedStatePathSync(dir)) {
       throw new Error(symlinkedStateDirectoryMessage(dir));
     }
@@ -160,7 +172,7 @@ const openStratusDatabase = (filePath: string, options: SqliteSessionStoreOption
     }
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (options.ownedDirectory) {
+  if (options.ownedDirectory === true || options.perAgent === true) {
     chmodSync(dir, 0o700);
   }
   const db = new DatabaseSync(filePath);
@@ -476,7 +488,7 @@ export class ShardedSessionStore implements SessionStore {
     }
     // Always owner-only: a per-agent directory is state this repository
     // creates, never a path an embedder pointed at something shared.
-    const shard = new SqliteSessionStore(agentSessionDbIn(this.stateDir, agentId), { ownedDirectory: true });
+    const shard = new SqliteSessionStore(agentSessionDbIn(this.stateDir, agentId), { perAgent: true });
     this.shards.set(agentId, shard);
     return shard;
   }
@@ -575,7 +587,7 @@ export class ShardedSessionStore implements SessionStore {
       // store on disk, and holding one descriptor per agent from start-up
       // would make a big roster pay at rest for a sweep that runs once.
       const cached = this.shards.get(agentId);
-      const shard = cached ?? new SqliteSessionStore(agentSessionDbIn(this.stateDir, agentId), { ownedDirectory: true });
+      const shard = cached ?? new SqliteSessionStore(agentSessionDbIn(this.stateDir, agentId), { perAgent: true });
       try {
         for (const row of shard.rows()) {
           const seen = owners.get(row.id);
