@@ -15,7 +15,7 @@ import {
   startService,
   stopService,
 } from '../service.ts';
-import { serviceEnvFor } from '../daemon.ts';
+import { legacyDaemonServing, serviceEnvFor } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
 import {
@@ -88,6 +88,42 @@ const readCompanions = async (
  * check and package upgrade but still migrates and rewrites the unit —
  * which is exactly the repair the offline case needs.
  */
+/**
+ * Hold the home for the duration of the migration, or say why we could not.
+ *
+ * `stratus update` stops the *managed* service, which is not the same
+ * question as whether anything is serving: a daemon in a foreground
+ * `stratus serve`, or under a supervisor this command knows nothing about,
+ * leaves `readServiceStatus` with nothing to report and nothing to stop.
+ * Asserting exclusivity there would move the session database and the grant
+ * files out from under a daemon still writing them — losing the turns it
+ * saves afterwards, and reviving the grants it revokes.
+ *
+ * So the same two checks `serve` uses decide it: the home claim, and the
+ * probe for a daemon old enough to predate the claim. Failing either, the
+ * marked migrations stay pending and the operator is told what to stop —
+ * a deferral is recoverable, and moving live state is not.
+ */
+const claimExclusiveHome = async (
+  env: CliEnvironment,
+): Promise<{ held: boolean; reason: string; release: () => void }> => {
+  const { claimHome, HomeClaimedError } = await import('@stratusagent/gateway');
+  let claim: { release: () => void };
+  try {
+    claim = claimHome(env);
+  } catch (error) {
+    if (error instanceof HomeClaimedError) {
+      return { held: false, reason: 'its lock is held', release: () => {} };
+    }
+    throw error;
+  }
+  if (await legacyDaemonServing(env)) {
+    claim.release();
+    return { held: false, reason: 'a daemon predating the lock is still answering', release: () => {} };
+  }
+  return { held: true, reason: '', release: () => claim.release() };
+};
+
 export const runUpdate = async (
   command: ParsedUpdateCommand,
   streams: CliStreams,
@@ -252,12 +288,27 @@ export const runUpdate = async (
       : 'Package already up to date.');
   }
 
+  // Stopping the *managed* service is not the same as having the home to
+  // ourselves, and the marked migrations are told which one this is. A
+  // daemon running in a foreground `stratus serve`, or under a supervisor
+  // this command knows nothing about, leaves `readServiceStatus` reporting
+  // nothing to stop — and asserting exclusivity there would move the
+  // session database and the grant files out from under a daemon still
+  // writing them. So exclusivity is *established*, the way `serve`
+  // establishes it, rather than assumed from the stop above.
+  const claim = await claimExclusiveHome(env);
   let applied: AppliedStateMigration[];
   try {
-    // The service is stopped above, so this is the one caller that can
-    // promise the exclusive migrations the home to themselves.
-    applied = await runStateMigrations(env, { exclusive: true });
+    if (!claim.held) {
+      writeLine(
+        streams.stderr,
+        `Another stratusd is serving this home (${claim.reason}), so the per-agent state move is left pending — `
+        + 'everything else still applied. Stop that daemon and run `stratus update` again to finish it.',
+      );
+    }
+    applied = await runStateMigrations(env, claim.held ? { exclusive: true } : {});
   } catch (error) {
+    claim.release();
     // A daemon stopped for an update that then failed must not stay down:
     // the old unit is still in place (the rewrite has not happened), so
     // restarting restores the world the update found. The failure is still
@@ -274,6 +325,10 @@ export const runUpdate = async (
     }
     return 1;
   }
+  // Before the restart below: the replacement claims the home next, and a
+  // claim this process still held would refuse it. Idempotent, so the
+  // failure path above having released it already costs nothing.
+  claim.release();
   if (applied.length === 0) {
     out('No pending state migrations.');
   }

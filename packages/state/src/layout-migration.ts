@@ -498,15 +498,19 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
       report.quarantined.push(`${JSON.stringify(agentId)} (grants) — not a single path segment, so it has no directory to own`);
       continue;
     }
+    // The directory before anything under it, for the reason the memory
+    // copy gives: `exists` on a path beneath a regular file throws ENOTDIR,
+    // and from here that would abort the whole migration and leave the
+    // daemon unable to start.
+    if (!(await agentDirectoryOrQuarantine(env, agentId, 'grants', report))) {
+      continue;
+    }
     const target = whitelistPathFor(directory, agentId);
     if (await exists(target)) {
       // Both spellings present: the agent's own directory is the one the
       // daemon reads, so the older file stays put rather than overwriting
       // grants somebody has since changed. Named, not silently skipped.
       report.quarantined.push(`${entry} — ${path.relative(directory, target)} already exists, so the old file was left alone`);
-      continue;
-    }
-    if (!(await agentDirectoryOrQuarantine(env, agentId, 'grants', report))) {
       continue;
     }
     await rename(path.join(directory, entry), target);

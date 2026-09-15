@@ -814,3 +814,85 @@ test('a prerelease companion is upgraded to the stable release that supersedes i
   assert.equal(code, 0, `${output.stdout}\n${output.stderr}`);
   assert.deepEqual(installs, [['@stratusagent/channel-slack@latest']]);
 });
+
+test('update leaves the per-agent move pending when something still holds the home', async () => {
+  const home = await freshHome();
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: {},
+    serviceRunner: runningServiceRunner,
+    packageVersionFetcher: async () => CLI_VERSION,
+  };
+  const { legacySessionDbPath, hasBracketedLegacyState } = await import('@stratusagent/state');
+  const { DatabaseSync } = await import('node:sqlite');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A pre-layout session database with a conversation in it.
+  const seeded = new DatabaseSync(legacySessionDbPath(env));
+  seeded.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, status TEXT NOT NULL,
+      body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )
+  `);
+  seeded
+    .prepare('INSERT INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('live-1', 'ava', 'completed', '{}', 'x', 'x');
+  seeded.close();
+
+  // And something serving it that stopping the managed service does not
+  // touch — a foreground `stratus serve`, or a supervisor this command
+  // knows nothing about. Stopping the unit is not the same question as
+  // having the home to ourselves, and moving the database out from under a
+  // live daemon loses every turn it saves afterwards.
+  const { claimHome } = await import('@stratusagent/gateway');
+  const held = claimHome(env);
+
+  const output = createStreams();
+  try {
+    assert.equal(await runCli({ argv: ['update'], streams: output.streams, env }), 0, output.output.stderr);
+  } finally {
+    held.release();
+  }
+
+  assert.match(output.output.stderr, /is serving this home/);
+  assert.match(output.output.stderr, /left pending/);
+  // The database is where it was, and the home still reads as un-migrated.
+  await stat(legacySessionDbPath(env));
+  assert.equal(await hasBracketedLegacyState(env), true);
+});
+
+test('update finishes the per-agent move when nothing else holds the home', async () => {
+  const home = await freshHome();
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: {},
+    serviceRunner: runningServiceRunner,
+    packageVersionFetcher: async () => CLI_VERSION,
+  };
+  const { legacySessionDbPath, agentSessionDbPath, hasBracketedLegacyState } = await import('@stratusagent/state');
+  const { DatabaseSync } = await import('node:sqlite');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const seeded = new DatabaseSync(legacySessionDbPath(env));
+  seeded.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, status TEXT NOT NULL,
+      body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )
+  `);
+  seeded
+    .prepare('INSERT INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('live-1', 'ava', 'completed', '{}', 'x', 'x');
+  seeded.close();
+
+  const output = createStreams();
+  assert.equal(await runCli({ argv: ['update'], streams: output.streams, env }), 0, output.output.stderr);
+
+  // Moved, and the claim let go again so the restart can take it.
+  await stat(agentSessionDbPath(env, 'ava'));
+  await stat(`${legacySessionDbPath(env)}.migrated`);
+  assert.equal(await hasBracketedLegacyState(env), false);
+  const { claimHome } = await import('@stratusagent/gateway');
+  claimHome(env).release();
+});

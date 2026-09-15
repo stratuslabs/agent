@@ -479,6 +479,31 @@ test('a directory name the platform refuses is quarantined like any other unusab
   assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
 });
 
+test('a grant file whose agent directory is a file is quarantined, not a crash', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // The grant stage's version of the collision: `agents/blocked.md` is a
+  // file, `blocked.md` is a valid legacy id, and its grants sit beside the
+  // souls under the old name. Probing the target under that file throws
+  // ENOTDIR, which from inside the migration aborts the upgrade and leaves
+  // the daemon unable to start.
+  await writeFile(path.join(agentsDirPath(env), 'blocked.md'), 'a soul file in the way');
+  await writeFile(
+    path.join(agentsDirPath(env), 'blocked.md.whitelist.json'),
+    `${JSON.stringify({ version: 1, scopes: [] })}\n`,
+  );
+
+  const applied = await runStateMigrations(env, { exclusive: true });
+  const detail = applied.map((result) => result.detail ?? '').join(' ');
+  assert.match(detail, /QUARANTINED/);
+  assert.match(detail, /blocked\.md/);
+  // The upgrade completed around it: the archive exists and the other
+  // agents moved.
+  await stat(`${legacySessionDbPath(env)}.migrated`);
+  assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
+});
+
 test('a legacy database that will not answer counts as holding something', async () => {
   const home = await newHome();
   const env = { homeDir: home };
