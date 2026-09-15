@@ -9,13 +9,16 @@ import {
   boundMemoryList,
   boundMemoryRead,
   clampMemoryRecallLimit,
+  collectMemoryTopics,
   compareMemoryChronology,
   memoryContentByteLength,
-  mergeMemoryTopics,
   pinnedCapRefusal,
+  MEMORY_RECALL_MAX_LIMIT,
   type MemoryEntry,
+  type MemoryListOptions,
   type MemoryPinnedOptions,
   type MemoryPinOutcome,
+  type MemoryReadResult,
 } from '@stratusagent/core';
 import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
@@ -56,13 +59,6 @@ const LEGACY_DEFAULT_AGENT_IDS = ['demo-agent', 'anthropic-agent', 'openai-agent
  * addressable, and showing the second was a promise the wrapper could not
  * keep. The audit read deliberately keeps both, because saying what the
  * record holds is the one job it has.
- *
- * One thing this does not de-duplicate, and does not need to: `topics`
- * merges per-alias topic *lists* rather than entries, so a colliding id
- * counts under both. That is a count rather than a control — it can make a
- * topic look busier than it is and nothing else — and paying for an entry
- * read per alias to correct it would cost more than the hand-edited case
- * it serves.
  */
 const firstByAliasOrder = (entries: readonly MemoryEntry[]): MemoryEntry[] => {
   const seen = new Set<string>();
@@ -99,7 +95,54 @@ const earlierAliasOwners = async (
   return owners;
 };
 
-// Every method is alias-aware, not just `list`: a `search` or `forget` that// Every method is alias-aware, not just `list`: a `search` or `forget` that
+/**
+ * The merged candidate pool under id precedence: every alias's answer minus
+ * the ids an *earlier* alias owns, re-reading any alias whose own bound hid
+ * the entries that filter then discarded.
+ *
+ * The filter is what makes precedence a property of the id rather than of
+ * the query. Without it a bounded read picks whichever copy happened to
+ * come back — the legacy one when the current owner's copy sat outside its
+ * alias's own window — while `forget`, `pin` and supersession all resolve
+ * the same id to the current owner. The model would then revise a fact it
+ * never read.
+ *
+ * The re-read is what keeps the filter from silently shortening the answer.
+ * An alias whose bounded batch is entirely shadowed would otherwise
+ * contribute nothing while its unshadowed entries sat one row past the
+ * bound, and the merged read would report `truncated` over a page it had
+ * emptied itself. It costs a second query only when ownership removed
+ * something from a batch the bound had already capped; an install with no
+ * inherited entries never reaches either half.
+ */
+const settleAliasPrecedence = async (
+  ids: readonly string[],
+  batches: readonly MemoryReadResult[],
+  held: (agentId: string) => Promise<readonly MemoryEntry[]>,
+  refill: (agentId: string) => Promise<MemoryReadResult>,
+): Promise<{ entries: MemoryEntry[]; truncated: boolean }> => {
+  const owners = await earlierAliasOwners(ids, batches, held);
+  const settled = await Promise.all(batches.map(async (batch, index) =>
+    index > 0 && batch.truncated && batch.entries.some((entry) => owners[index]!.has(entry.id))
+      ? refill(ids[index]!)
+      : batch));
+  return {
+    entries: firstByAliasOrder(settled.flatMap((batch, index) =>
+      batch.entries.filter((entry) => index === 0 || !owners[index]!.has(entry.id)))),
+    truncated: settled.some((batch) => batch.truncated),
+  };
+};
+
+/**
+ * The caller's `list` without its bound, for a refill. Written out field by
+ * field rather than spread with `limit: undefined`, which
+ * `exactOptionalPropertyTypes` refuses — a field added to
+ * `MemoryListOptions` has to be added here too.
+ */
+const unboundedList = (options?: MemoryListOptions): MemoryListOptions | undefined =>
+  options?.validity !== undefined ? { validity: options.validity } : undefined;
+
+// Every method is alias-aware, not just `list`: a `search` or `forget` that
 // delegated on agentId alone would compile, satisfy the interface, and
 // quietly make every inherited entry unfindable and unforgettable — visible
 // in `list`, absent from `recall`. Merged batches sort with everything else
@@ -178,14 +221,25 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       if (ids.length === 1) {
         return store.list(agentId, options);
       }
-      const batches = await Promise.all(ids.map((id) => store.list(id, options)));
-      const merged = firstByAliasOrder(batches.flatMap((batch) => batch.entries));
-      const anyTruncated = batches.some((batch) => batch.truncated);
+      // Bounded per alias first, then settled: `firstByAliasOrder` alone
+      // only picks the earliest alias among those that *returned* an id,
+      // so a current entry outside its own alias's window would lose to a
+      // legacy copy of the same id and the recency tail would inject
+      // content no mutation resolves to.
+      const settled = await settleAliasPrecedence(
+        ids,
+        await Promise.all(ids.map((id) => store.list(id, options))),
+        async (id) => (await store.list(id, { validity: 'all' })).entries,
+        // Refilled unbounded rather than by a raised limit: what shadows
+        // this alias is whatever the earlier aliases hold, so "limit plus
+        // that" is asking for the whole alias the long way round.
+        (id) => store.list(id, unboundedList(options)),
+      );
       if (options?.limit === undefined) {
-        return { entries: merged.sort(compareMemoryChronology), truncated: anyTruncated };
+        return { entries: settled.entries.sort(compareMemoryChronology), truncated: settled.truncated };
       }
-      const bounded = boundMemoryList(merged, options.limit);
-      return { entries: bounded.entries, truncated: bounded.truncated || anyTruncated };
+      const bounded = boundMemoryList(settled.entries, options.limit);
+      return { entries: bounded.entries, truncated: bounded.truncated || settled.truncated };
     },
     async search(agentId, query, options) {
       const ids = aliasIds(agentId);
@@ -194,33 +248,30 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       }
       // Known imprecision, bounded and deliberate: each alias counts a
       // recall for its own winners, and the merge below then discards some
-      // of them, so a multi-alias hit over-counts by at most
-      // (aliases - 1) x limit. Usage is an observation that nothing ranks
-      // or deletes on, and keeping it exact here would need the stores to
-      // defer counting and the wrapper to record the merged winners —
-      // two additions to the contract for a statistic on one legacy id.
-      // A ranking strategy that ever reads these is what changes that.
+      // of them, so a multi-alias hit over-counts by at most (aliases - 1)
+      // times whatever each alias was asked for — the caller's limit, or
+      // the ceiling when a refill raised it. Usage is an observation that
+      // nothing ranks or deletes on, and keeping it exact here would need
+      // the stores to defer counting and the wrapper to record the merged
+      // winners: two additions to the contract for a statistic on one
+      // legacy id. A ranking strategy that ever reads these changes that.
       const batches = await Promise.all(ids.map((id) => store.search(id, query, options)));
-      // Precedence belongs to the id, not to the query. `list` and `pinned`
-      // merge whole sets, so de-duplicating their concatenation already
-      // picks the first alias that holds an id; a search filters first, so
-      // a query matching only a legacy copy would return it while `list`
-      // showed the current one and every id-based mutation — forget, pin,
-      // supersede — resolved to the current one. The model would revise a
-      // fact it never read. So ownership is settled before the filter, and
-      // only when a later alias actually produced something: on an install
-      // with no inherited entries this costs nothing at all.
-      const owners = await earlierAliasOwners(ids, batches, async (id) =>
-        (await store.list(id, { validity: 'all' })).entries);
-      const merged = firstByAliasOrder(batches.flatMap((batch, index) =>
-        batch.entries.filter((entry) => index === 0 || !owners[index]!.has(entry.id))));
-      const bounded = boundMemoryRead(merged, clampMemoryRecallLimit(options?.limit));
+      const settled = await settleAliasPrecedence(
+        ids,
+        batches,
+        async (id) => (await store.list(id, { validity: 'all' })).entries,
+        // A search has no unbounded form — every limit is clamped — so a
+        // refill asks for the store's own ceiling. Past that the single
+        // alias path cannot see either, and `truncated` says so.
+        (id) => store.search(id, query, { ...options, limit: MEMORY_RECALL_MAX_LIMIT }),
+      );
+      const bounded = boundMemoryRead(settled.entries, clampMemoryRecallLimit(options?.limit));
       // Every batch came from the same store, so they agree on the ordering
       // it served; reporting the first is reporting all of them.
       const strategy = batches[0]?.strategy;
       return {
         entries: bounded.entries,
-        truncated: bounded.truncated || batches.some((batch) => batch.truncated),
+        truncated: bounded.truncated || settled.truncated,
         ...(strategy !== undefined ? { strategy } : {}),
       };
     },
@@ -317,10 +368,31 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
             if (ids.length === 1) {
               return store.topics!(agentId);
             }
-            // Merged through the shared rule rather than concatenated: a
-            // topic an agent wrote about under both ids is one topic with
-            // one count, which is what two lists would not give.
-            return mergeMemoryTopics(...await Promise.all(ids.map((id) => store.topics!(id))));
+            const lists = await Promise.all(ids.map((id) => store.topics!(id)));
+            const contributing = lists.filter((list) => list.length > 0);
+            // One alias holding all of them is every install that never
+            // wrote under a second id, and there is nothing to reconcile:
+            // no id is in two places at once.
+            if (contributing.length <= 1) {
+              return contributing[0] ?? [];
+            }
+            // Otherwise rebuilt from the deduplicated entry view the other
+            // reads serve, not merged from per-alias lists. Those lists are
+            // already aggregated, so a colliding id is counted under both
+            // with no way left to apply precedence: the copy `list` and
+            // `search` hide would still reach the prompt with its own
+            // `about` spelling, and an `external` hidden copy would lower
+            // the topic's trust and taint every session through the
+            // runner's topic-trust term.
+            const settled = await settleAliasPrecedence(
+              ids,
+              await Promise.all(ids.map((id) => store.list(id))),
+              async (id) => (await store.list(id, { validity: 'all' })).entries,
+              // Unbounded already, so nothing was capped and the refill is
+              // unreachable — it is the same read either way.
+              (id) => store.list(id),
+            );
+            return collectMemoryTopics(settled.entries);
           },
         }
       : {}),

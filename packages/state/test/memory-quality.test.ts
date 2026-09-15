@@ -754,3 +754,75 @@ test('one id under two aliases resolves to one entry, the earlier alias winning'
   assert.equal(await store.forget(DEFAULT_STRATUS_AGENT.id, 'shared:1'), true);
   assert.deepEqual((await store.list(DEFAULT_STRATUS_AGENT.id)).entries.map((entry) => entry.content), ['the inherited copy of the rota']);
 });
+
+test('the current owner of an id wins a bounded list even when its own window dropped it', async () => {
+  const filePath = await newFile();
+  // The current alias holds `shared:1`, but as its *oldest* entry, so its
+  // own bounded batch never returns it — while the inherited copy carries a
+  // newer timestamp and sorts straight into the merged window. Picking the
+  // first alias that *returned* an id is not the same rule as picking the
+  // first alias that *holds* it, and the difference here injects content
+  // that forget, pin, and supersession all resolve somewhere else.
+  await writeFile(filePath, [
+    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the current copy of the rota', createdAt: '2026-01-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'stratus:memory:2', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the rookery survey is quarterly', createdAt: '2026-02-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'stratus:memory:3', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the deploy runs on Postgres', createdAt: '2026-03-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'the inherited copy of the rota', createdAt: '2026-05-01T00:00:00.000Z' }),
+    '',
+  ].join('\n'));
+  const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
+
+  const listed = await store.list(DEFAULT_STRATUS_AGENT.id, { limit: 2 });
+  assert.deepEqual(listed.entries.map((entry) => entry.id), ['stratus:memory:2', 'stratus:memory:3']);
+  assert.equal(listed.truncated, true);
+  // And the prompt the agent actually gets carries the same answer.
+  const prompt = await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id);
+  assert.ok(prompt.includes('the current copy of the rota'));
+  assert.ok(!prompt.includes('the inherited copy of the rota'));
+});
+
+test('a bounded search refills an alias whose whole batch the current owner shadowed', async () => {
+  const filePath = await newFile();
+  // Both of the legacy alias's newest matches are ids the current alias
+  // owns, and the current alias's copies do not match the query — so the
+  // ownership filter is right to discard the whole batch. What it must not
+  // do is stop there: the unshadowed match sat one row past the bound the
+  // alias was asked for, and reporting `truncated` over an empty page hides
+  // a fact the single-alias path would have returned.
+  await writeFile(filePath, [
+    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the rota is on Tuesdays', createdAt: '2026-01-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:2', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the deploy runs on Postgres', createdAt: '2026-01-02T00:00:00.000Z' }),
+    JSON.stringify({ id: 'demo-agent:memory:3', agentId: 'demo-agent', content: 'the rookery survey is quarterly', createdAt: '2026-02-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'the rookery gate code changed', createdAt: '2026-03-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:2', agentId: 'demo-agent', content: 'the rookery path floods', createdAt: '2026-04-01T00:00:00.000Z' }),
+    '',
+  ].join('\n'));
+  const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
+
+  const found = await store.search(DEFAULT_STRATUS_AGENT.id, 'rookery', { limit: 2 });
+  assert.deepEqual(found.entries.map((entry) => entry.id), ['demo-agent:memory:3']);
+  assert.equal(found.truncated, false);
+});
+
+test('the topic index follows the same id precedence every other read does', async () => {
+  const filePath = await newFile();
+  // Per-alias topic lists are already aggregated, so merging them has no
+  // way left to apply precedence: the copy `list` and `search` hide counts
+  // again, contributes its own `about` spelling, and — the part that
+  // reaches past the block — drags the topic's trust down to `external`,
+  // which the runner folds into the taint of the whole session.
+  await writeFile(filePath, [
+    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the rota is on Tuesdays', createdAt: '2026-01-01T00:00:00.000Z', about: ['rota'], trust: 'agent' }),
+    JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'a page said the rota moved', createdAt: '2026-02-01T00:00:00.000Z', about: ['rota', 'scraped-page'], trust: 'external' }),
+    JSON.stringify({ id: 'demo-agent:memory:2', agentId: 'demo-agent', content: 'the rookery survey is quarterly', createdAt: '2026-03-01T00:00:00.000Z', about: ['rookery'], trust: 'agent' }),
+    '',
+  ].join('\n'));
+  const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
+
+  const topics = await store.topics!(DEFAULT_STRATUS_AGENT.id);
+  assert.deepEqual(topics.map((topic) => [topic.name, topic.count, topic.trust]), [
+    ['rookery', 1, 'agent'],
+    ['rota', 1, 'agent'],
+  ]);
+  assert.ok(!(await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id)).includes('scraped-page'));
+});

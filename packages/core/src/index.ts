@@ -1767,34 +1767,6 @@ export const collectMemoryTopics = (entries: readonly MemoryEntry[]): MemoryTopi
 };
 
 /**
- * Two topic lists over disjoint entries, as one. Counts add, the newest
- * `lastUpdatedAt` wins, and trust combines downward — the same answers
- * `collectMemoryTopics` would have given over the union, which is the
- * property that matters: a host merging two stores must not advertise a
- * different shape from one that read them together.
- */
-export const mergeMemoryTopics = (...lists: readonly (readonly MemoryTopic[])[]): MemoryTopic[] => {
-  const merged = new Map<string, MemoryTopic>();
-  for (const list of lists) {
-    for (const topic of list) {
-      const folded = topic.name.normalize('NFC').toLowerCase();
-      const existing = merged.get(folded);
-      if (existing === undefined) {
-        merged.set(folded, { ...topic });
-        continue;
-      }
-      existing.count += topic.count;
-      if (topic.lastUpdatedAt > existing.lastUpdatedAt) {
-        existing.lastUpdatedAt = topic.lastUpdatedAt;
-      }
-      existing.trust = leastTrusted(existing.trust, topic.trust);
-    }
-  }
-  return [...merged.values()].sort((a, b) =>
-    b.count !== a.count ? b.count - a.count : a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-};
-
-/**
  * The three bounded blocks a turn injects, in place of the one recency
  * slice memory used to send.
  *
@@ -1849,12 +1821,26 @@ export const selectMemoryInjection = (input: {
   // pays for. The scaffolding is reserved up front from the labels present
   // in the whole candidate list, which can only over-reserve — selecting
   // fewer topics never adds a region.
-  let topicBytes = memoryContentByteLength(MEMORY_INDEX_INTRO) + TOPIC_BLOCK_SEPARATOR_BYTES;
+  let scaffoldBytes = memoryContentByteLength(MEMORY_INDEX_INTRO) + TOPIC_BLOCK_SEPARATOR_BYTES;
   for (const trust of new Set(input.topics.map((topic) => topic.trust))) {
-    topicBytes += memoryContentByteLength(memoryRegionHeading(trust)) + TOPIC_BLOCK_SEPARATOR_BYTES;
+    scaffoldBytes += memoryContentByteLength(memoryRegionHeading(trust)) + TOPIC_BLOCK_SEPARATOR_BYTES;
   }
+  let topicBytes = scaffoldBytes;
   for (const topic of input.topics) {
     const size = memoryContentByteLength(renderMemoryTopicLine(topic)) + 1;
+    // A line no selection could ever admit — an `about` key long enough to
+    // fill the block beside the scaffolding on its own, which import and a
+    // hand-edited record both allow — is skipped rather than allowed to end
+    // the scan, the same way `boundMemoryRead` skips an entry over its
+    // budget. Breaking on it would cost the whole topic index over one
+    // oversized name, and the index is what turns `memory.recall` from a
+    // guess into a targeted read.
+    if (scaffoldBytes + size > MEMORY_INDEX_MAX_BYTES) {
+      continue;
+    }
+    // Merely running out of room does end it, also like `boundMemoryRead`:
+    // the block stays the top of the ranking rather than whatever happened
+    // to pack into the remainder.
     if (topicBytes + size > MEMORY_INDEX_MAX_BYTES) {
       break;
     }

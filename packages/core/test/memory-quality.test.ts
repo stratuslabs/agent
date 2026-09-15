@@ -15,7 +15,6 @@ import {
   memoryEntryTokens,
   memoryQueryMatches,
   memoryValidityAt,
-  mergeMemoryTopics,
   renderMemorySection,
   selectMemoryInjection,
   MEMORY_INDEX_MAX_BYTES,
@@ -106,14 +105,6 @@ test('the topic index counts entities, orders by weight, and never rises above t
     { name: 'Deploy Pipeline', count: 2, lastUpdatedAt: '2026-03-01T00:00:00.000Z', trust: 'external' },
     { name: 'Hermes', count: 1, lastUpdatedAt: '2026-01-01T00:00:00.000Z', trust: 'user' },
   ]);
-  // Merging two stores' lists gives what reading them together would have.
-  assert.deepEqual(
-    mergeMemoryTopics(topics, [{ name: 'hermes', count: 3, lastUpdatedAt: '2026-04-01T00:00:00.000Z', trust: 'agent' }]),
-    [
-      { name: 'Hermes', count: 4, lastUpdatedAt: '2026-04-01T00:00:00.000Z', trust: 'agent' },
-      { name: 'Deploy Pipeline', count: 2, lastUpdatedAt: '2026-03-01T00:00:00.000Z', trust: 'external' },
-    ],
-  );
 });
 
 test('the injected slice keeps its blocks disjoint and never lets volume push the pinned core out', async () => {
@@ -346,12 +337,27 @@ test('two spellings of one entity are one topic, as they are one token to search
     entry('m2', 'two', { about: [decomposed] }),
   ]);
   assert.deepEqual(topics.map((topic) => topic.count), [2]);
-  assert.deepEqual(
-    mergeMemoryTopics(topics, [{ name: decomposed, count: 1, lastUpdatedAt: '2026-05-01T00:00:00.000Z', trust: 'agent' }])
-      .map((topic) => topic.count),
-    [3],
-  );
   // And the two spellings on one entry are one `about` key, for the same
   // reason the search sees one token.
   assert.deepEqual(memoryEntryAbout({ about: [composed, decomposed] }), [composed]);
+});
+
+test('a topic line no budget could admit is skipped, not the end of the index', () => {
+  // `about` keys come from imports and hand-edited records as well as from
+  // the agent, so one can be long enough to fill the block on its own.
+  // Ranked first, it used to end the scan and cost the whole topic index —
+  // the block that turns `memory.recall` from a guess into a targeted read.
+  const topics: MemoryTopic[] = [
+    { name: 'x'.repeat(MEMORY_INDEX_MAX_BYTES), count: 99, lastUpdatedAt: '2026-01-01T00:00:00.000Z', trust: 'agent' },
+    { name: 'rookery', count: 4, lastUpdatedAt: '2026-01-02T00:00:00.000Z', trust: 'agent' },
+    { name: 'rota', count: 2, lastUpdatedAt: '2026-01-03T00:00:00.000Z', trust: 'agent' },
+  ];
+  const selected = selectMemoryInjection({ pinned: [], topics, recent: [] });
+  assert.deepEqual(selected.topics.map((topic) => topic.name), ['rookery', 'rota']);
+  const rendered = renderMemorySection(selected) ?? '';
+  assert.ok(rendered.includes('rookery'), 'the admissible topics still reach the prompt');
+  assert.ok(
+    memoryContentByteLength(rendered) <= MEMORY_INDEX_MAX_BYTES,
+    `the index block ran to ${memoryContentByteLength(rendered)} bytes, over ${MEMORY_INDEX_MAX_BYTES}`,
+  );
 });
