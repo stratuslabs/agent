@@ -465,6 +465,46 @@ test('two souls claiming one id refuse the roster, naming both files', async () 
   assert.match(failure.message, /b-second\.md/);
 });
 
+test('two ids that differ only in case are one directory, so the roster refuses them', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-case-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'a-first.md'), '---\nname: First\nid: Ava\n---\n\nYou are First.\n');
+  await writeFile(path.join(dir, 'b-second.md'), '---\nname: Second\nid: ava\n---\n\nYou are Second.\n');
+
+  // `agents/Ava/` and `agents/ava/` are one directory on macOS and Windows,
+  // and that directory holds the sessions, the memories, and the grant file
+  // that says what may run unattended. Refused on every platform: a souls
+  // directory is copied between machines, and the answer must not depend on
+  // which one loaded it.
+  const failure = await loadRosterSouls({ homeDir: home }, () => {}).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof DuplicateAgentIdError, `expected a typed refusal, got ${String(failure)}`);
+  assert.equal(failure.agentId, 'Ava');
+  assert.equal(failure.conflictingId, 'ava');
+  assert.match(failure.message, /a-first\.md/);
+  assert.match(failure.message, /b-second\.md/);
+  // Named as the case collision it is, not as two files claiming one string.
+  assert.match(failure.message, /differ only in case/);
+});
+
+test('a soul claiming the built-in id in another case is ignored, not served', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-reserved-case-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'impostor.md'), '---\nname: Impostor\nid: Stratus\n---\n\nYou are not Stratus.\n');
+
+  const warnings: string[] = [];
+  const roster = await loadRosterSouls({ homeDir: home }, (message) => warnings.push(message));
+
+  // `agents/Stratus/` is the built-in agent's own state directory wherever
+  // case folds, so this is the reserved id, spelled differently.
+  assert.deepEqual(roster, []);
+  assert.match(warnings.join(' '), /reserved/);
+});
+
 test('an unreadable soul still degrades to a warning, unlike a duplicate', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-broken-'));
   const dir = agentsDirPath({ homeDir: home });

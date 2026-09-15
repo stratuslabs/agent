@@ -106,7 +106,8 @@ cleaned up — `id: ../../escape` is refused, not rewritten to `escape`.
 
 Anything else is yours. An id like `Ava_1` or `team.alpha` is unusual but
 harmless, and it is already keying that agent's sessions and sign-ins, so
-it is left exactly as written. Omit `id:` and one is derived from the name
+it is left exactly as written. Mixed case is fine on its own; what is not
+is *two* ids that differ only in case, which is a collision — see below. Omit `id:` and one is derived from the name
 as a plain slug (`ava`); a generated agent's id is also capped at 64
 characters, but a slug derived from a name you chose is used whole, because
 shortening an id moves the agent it belongs to.
@@ -133,4 +134,14 @@ warning — one broken file never takes the team down. A collision has no
 correct winner, which is the difference.) The built-in `stratus` id is
 reserved: souls claiming it are skipped — including two of them, since
 neither was going to get the id, so their agreeing on it is not a collision
-to refuse over.
+to refuse over — in any case it is spelled, since `agents/Stratus/` is the
+built-in agent's own state directory wherever the filesystem folds case.
+
+Two ids that differ **only in case** are the same collision, and are
+refused the same way. An id names the agent's directory under
+`~/.stratus/agents/`, and macOS and Windows resolve `Ava` and `ava` to one
+of them — so the two agents would share their conversations, their
+memories, and the file that says what each may do unattended. It is refused
+on every platform, Linux included: a souls directory is copied between
+machines, and a roster that loads on the server and refuses on the laptop
+finds the problem at the worst moment. Rename one of the two.

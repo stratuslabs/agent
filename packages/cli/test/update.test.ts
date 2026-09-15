@@ -450,7 +450,10 @@ test('update fails loudly when it cannot restore a deliberately stopped daemon',
 
 test('update and --check treat state from a newer build as a refusal, before any side effect', async () => {
   const home = await freshHome();
-  await runStateMigrations({ homeDir: home });
+  // Made here rather than as a side effect of `runStateMigrations`: a run
+  // that defers the exclusive half writes no stamp at all now, so it no
+  // longer creates `~/.stratus` on the way past.
+  await mkdir(path.dirname(stateFilePath({ homeDir: home })), { recursive: true });
   await writeFile(stateFilePath({ homeDir: home }), JSON.stringify({
     schemaVersion: STATE_SCHEMA_VERSION + 1,
     // Every known migration already applied — the case where pending-only

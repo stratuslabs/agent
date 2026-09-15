@@ -24,20 +24,20 @@ state is still visible: "is there anything in the old place" is a question
 about right now, and a daemon of the older build starting a moment later
 creates exactly what the check just failed to see — leaving the home
 recorded as migrated while it fills with state nothing will move. A run that
-has to defer records which migrations it ran but proposes **no schema
-version**, so it can raise nothing and lower nothing: only a run that
-finished everything sets the version. Stamping the part it finished would
-read as the better answer and is not, because two runs overlap — the
-ordinary one reads the stamp before the exclusive one records the move, its
-write lands last, and the home is marked as not having had a move it has
-just had. A stamp that *under*-reports is the one that admits an older build
-to state it cannot read. So a home waiting for its bracket reads as schema 0
-until its first `stratus serve` or `stratus update`, which is also the
-truthful answer to an older build asking whether it may write there.) The ones it ran are idempotent and simply run again on
-the next command, which is the cheaper half of that trade: a run that
-recorded a partial set could have its record land on top of the complete
-one written by the `stratus update` beside it, and take the finished move
-back out of the stamp.)
+has to defer **records nothing at all** — not a schema version, not even
+the migrations it did run. The stamp is read, merged with what is on disk,
+and renamed into place, and the gap between that read and the rename stays
+open: the complete stamp an overlapping `stratus update` writes inside it
+is replaced by the partial one, and a stamp that *under*-reports is exactly
+what admits an older build to state it cannot read. The migrations a
+deferring run applied are idempotent and simply run again on the next
+command, which is the cheap half of that trade. So a home waiting for its
+bracket reads as schema 0 until its first `stratus serve` or `stratus
+update` — which is also the truthful answer to an older build asking
+whether it may write there. What a deferring run still checks is that
+`state.json` is something it *could* have written: a home where it is not
+is refused by the command that found it, rather than several
+state-changing commands later.)
 
 Schema 2 is the first stamp that exists only to be refused: since
 [provenance](../concepts/memory.md#where-a-fact-came-from) landed, memory
@@ -95,10 +95,12 @@ disk as `sessions.db.migrated` and `memory.jsonl.migrated`, and the old
 whose soul is absent keeps its rows — the migration walks the stored agent
 ids, not the roster — so restoring the soul later finds its history where
 the layout says it lives. An id with no directory to own — one that is not a
-single path segment, one whose name is already a file, one the platform
-refuses — keeps its rows in the preserved original, and the migration names
-it and the reason on the way past rather than dropping it silently or
-failing the upgrade over it. Its grant file is archived too, as
+single path segment, one whose name is already a file or a symlink, one the
+platform refuses, one that differs from another stored id only in case (see
+[State layout](../reference/state-layout.md#one-directory-per-agent)) —
+keeps its rows in the preserved original, and the migration names it and
+the reason on the way past rather than dropping it silently or failing the
+upgrade over it. Its grant file is archived too, as
 `agents/<id>.whitelist.json.migrated`: left under the old name it would
 read as a home the move never reached, and the daemon would refuse to start
 over a file no later run was going to pick up. That agent has no standing

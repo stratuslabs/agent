@@ -238,17 +238,14 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
   // this one read the stamp before the exclusive one recorded 0003, and its
   // rename lands last, marking a home that has just been sharded as one
   // that has not. That is the direction that admits an older build.
-  // Recorded, but proposing no version: 0 is floored against whatever is
-  // there, so a deferring run can raise nothing and lower nothing. It still
-  // writes, so a home whose stamp cannot be written is found by the
-  // commands that write state rather than only at the next daemon start.
-  assert.deepEqual(await readStateStamp(env), {
-    schemaVersion: 0,
-    applied: ['0001-owner-only-state-files', '0002-provenance-labels'],
-  });
+  // A deferring run records nothing. Writing what it finished — in any
+  // form, including a version-0 floor — cannot be made safe: the merge
+  // reads at the write, but the gap between that read and the rename is
+  // still open, so an exclusive run's stamp landing in it is replaced.
+  assert.deepEqual(await readStateStamp(env), { schemaVersion: 0, applied: [] });
   assert.deepEqual(
     (await pendingStateMigrations(env)).map((migration) => migration.id),
-    ['0003-per-agent-state-layout'],
+    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout'],
   );
 
   // The memories move anyway, because nothing about them needs the bracket
@@ -259,7 +256,10 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
 
   // A caller that does hold the home finishes the job.
   const exclusive = await runStateMigrations(env, { exclusive: true });
-  assert.deepEqual(exclusive.map((result) => result.id), ['0003-per-agent-state-layout']);
+  assert.deepEqual(
+    exclusive.map((result) => result.id),
+    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout'],
+  );
   assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
   // And now the stamp, once and whole.
   assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
@@ -349,13 +349,9 @@ test('a home with nothing shared to move still waits for a caller holding it', a
   // move, and 0003 — stamped — would never run again.
   const ordinary = await runStateMigrations(env);
   assert.deepEqual(ordinary.map((result) => result.id), ['0001-owner-only-state-files', '0002-provenance-labels']);
-  // Recorded, at version 0: a deferring run never proposes a version, so it
-  // cannot mark a home that a concurrent exclusive run has just sharded as
-  // one that has not been.
-  assert.deepEqual(await readStateStamp(env), {
-    schemaVersion: 0,
-    applied: ['0001-owner-only-state-files', '0002-provenance-labels'],
-  });
+  // Nothing recorded: see the deferral test above for why not even the
+  // part it finished.
+  assert.deepEqual(await readStateStamp(env), { schemaVersion: 0, applied: [] });
 
   // The claim holder finishes it, and on a home with nothing in the old
   // place that is still a no-op with nothing to report.
@@ -886,6 +882,93 @@ test('a memory file that is a symlink is refused, even inside a real directory',
     (error: unknown) => error instanceof Error && /symlink/.test(error.message),
   );
   assert.equal((await stat(elsewhere)).size, 0);
+});
+
+test('a sessions.db destination that is a symlink is quarantined, not copied through', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  const elsewhere = path.join(home, 'elsewhere.db');
+  await writeFile(elsewhere, '');
+  // A real `agents/ava/` says nothing about the file in it, and the
+  // migration opens this one through its own `DatabaseSync` rather than
+  // through the store's guarded open — so the conversations would be
+  // written outside the home, and then rejected by the startup sweep,
+  // which leaves them unreachable from either side.
+  await mkdir(path.dirname(agentSessionDbPath(env, 'ava')), { recursive: true });
+  await symlink(elsewhere, agentSessionDbPath(env, 'ava'));
+
+  const applied = await runStateMigrations(env, { exclusive: true });
+  const detail = applied.map((result) => result.detail ?? '').join(' ');
+  assert.match(detail, /QUARANTINED/);
+  assert.match(detail, /sessions\.db is a symlink/);
+
+  // Nothing went through the link, and the rest of the fleet moved.
+  assert.equal((await stat(elsewhere)).size, 0);
+  assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ghost')), ['g-1']);
+  // And ava's rows are still in the preserved original.
+  assert.ok(sessionIdsIn(`${legacySessionDbPath(env)}.migrated`).includes('a-1'));
+});
+
+test('a memory.jsonl destination that is a symlink is quarantined by the drain', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  const elsewhere = path.join(home, 'elsewhere.jsonl');
+  await writeFile(elsewhere, '');
+  // Same rule as the session database, and the drain reaches it first: it
+  // appends to this path directly, not through `createFileMemoryStore`.
+  await mkdir(path.dirname(agentMemoryFilePath(env, 'ava')), { recursive: true });
+  await symlink(elsewhere, agentMemoryFilePath(env, 'ava'));
+
+  const drained = await drainSharedMemory(env);
+  assert.match(drained ?? '', /memory\.jsonl is a symlink/);
+
+  assert.equal((await stat(elsewhere)).size, 0);
+  // The agents whose files are their own still moved.
+  assert.match(await readFile(agentMemoryFilePath(env, 'ghost'), 'utf8'), /a dropped soul remembers/);
+});
+
+test('two stored ids that differ only in case are not merged into one directory', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // Two agents by every rule the roster applies — and one directory on
+  // macOS and Windows. Stored ids never went through the roster's refusal:
+  // this walks the data, for agents whose souls may be long gone. Without
+  // a rule here the second one's conversations land in the first one's
+  // store, and its grant file is renamed over the first one's.
+  const db = new DatabaseSync(legacySessionDbPath(env));
+  const at = '2026-01-01T00:00:00.000Z';
+  const insert = db.prepare('INSERT OR REPLACE INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
+  for (const [id, agentId] of [['t-1', 'Twin'], ['t-2', 'twin']] as const) {
+    const body = JSON.stringify({ id, agent: { id: agentId, name: agentId }, status: 'completed', messages: [], createdAt: at, updatedAt: at });
+    insert.run(id, agentId, 'completed', body, at, at);
+  }
+  db.close();
+
+  const applied = await runStateMigrations(env, { exclusive: true });
+  const detail = applied.map((result) => result.detail ?? '').join(' ');
+  // Named as the case collision it is; which of the two spellings arrived
+  // first is SQLite's business, so the phrase is what this asserts.
+  assert.match(detail, /only in case/);
+
+  // Exactly one of the two spellings was given a store, and it holds only
+  // its own row — which spelling wins does not matter, and is not asserted.
+  const stores: string[] = [];
+  for (const agentId of ['Twin', 'twin']) {
+    try {
+      await stat(agentSessionDbPath(env, agentId));
+      stores.push(agentId);
+    } catch {
+      // no store for this spelling, which is the quarantined one
+    }
+  }
+  assert.deepEqual(stores.length, 1, `one store, got ${stores.join(', ')}`);
+  assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, stores[0] as string)).length, 1);
+  // The quarantined rows are in the preserved original, not lost.
+  const archived = sessionIdsIn(`${legacySessionDbPath(env)}.migrated`);
+  assert.ok(archived.includes('t-1') && archived.includes('t-2'));
 });
 
 test('an agent directory that was already there is tightened, not left as it was', async () => {

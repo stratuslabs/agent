@@ -203,6 +203,29 @@ export const fleetDbIn = (stateDir: string): string =>
   path.join(stateDir, FLEET_DB_FILENAME);
 
 /**
+ * The name two ids collide on, when a filesystem is the one deciding.
+ *
+ * An id is a *directory name* — `agents/<id>/` holds that agent's sessions,
+ * its memories, and the grant file saying what it may do unattended — and
+ * macOS and Windows resolve `Ava` and `ava` to one directory. Two agents
+ * that are distinct by every other rule here would share all three, so one
+ * could act unattended on grants the operator gave the other.
+ *
+ * Callers refuse a collision on every platform, not only where the
+ * filesystem folds: a souls directory is copied between machines, and a
+ * roster that loads on the Linux server and refuses on the operator's
+ * laptop finds the problem at the worst moment. `toLowerCase` is not any
+ * one filesystem's folding table — APFS and NTFS each have their own — but
+ * it is deterministic and it over-approximates the pairs they merge, and
+ * for a rule about shared grants the direction to err in is refusing.
+ *
+ * Exported so `loadRosterSouls` and the layout migration ask the same
+ * question: the roster is what stops two *souls* colliding, and the
+ * migration walks stored ids no roster ever saw.
+ */
+export const foldedAgentId = (agentId: string): string => agentId.toLowerCase();
+
+/**
  * Thrown rather than sanitized: an id that cannot key a path is a bug or an
  * attack, and rewriting `../../escape` into `escape` hands back an agent
  * nobody asked for, keyed to resources nobody named.

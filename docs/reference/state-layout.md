@@ -51,6 +51,16 @@ that are worth knowing:
 - **Renaming an agent's `id:` re-keys all of it.** The old directory stays
   where it is under the old id; nothing moves it, because nothing can tell
   a rename from a new agent.
+- **Two ids that differ only in case are one directory**, because macOS and
+  Windows fold `agents/Ava/` and `agents/ava/` onto the same name — and one
+  directory holding two agents is the sessions, the memories, and the
+  unattended grants of both. The roster refuses to load rather than serve
+  them, on every platform including the ones that would keep the two apart:
+  a souls directory gets copied between machines, and this must not be an
+  answer that changes with the machine. The upgrade move applies the same
+  rule to the ids it finds in *stored* rows, where no soul had to exist:
+  the second spelling is quarantined and named, its rows left in the
+  preserved original.
 
 ## What stays fleet-wide, and why
 

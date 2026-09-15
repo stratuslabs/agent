@@ -10,7 +10,7 @@ import {
   readWorkingDirectory,
   readNonEmptyString,
 } from './environment.ts';
-import { agentsDirPath } from './paths.ts';
+import { agentsDirPath, foldedAgentId } from './paths.ts';
 
 // The agent every run uses when no soul is configured. A Stratus agent is
 // a Stratus agent — never "the model" — whichever provider serves it.
@@ -112,7 +112,8 @@ export interface RosterEntry {
 }
 
 /**
- * Two soul files claiming the same agent id.
+ * Two soul files claiming the same agent id — or claiming two ids that a
+ * filesystem would make the same.
  *
  * Typed so diagnostic callers can report it as a finding rather than
  * surfacing a stack trace, while the daemon lets it stop a start.
@@ -120,15 +121,26 @@ export interface RosterEntry {
 export class DuplicateAgentIdError extends Error {
   readonly agentId: string;
   readonly paths: [string, string];
+  /**
+   * The id the second file declared: the same string as {@link agentId} for
+   * an exact duplicate, the other spelling when the two collide by case.
+   */
+  readonly conflictingId: string;
 
-  constructor(agentId: string, paths: [string, string]) {
+  constructor(agentId: string, paths: [string, string], conflictingId: string = agentId) {
     super(
-      `Two soul files declare the agent id ${agentId}: ${paths[0]} and ${paths[1]}. `
-      + 'Ids key sessions, memory, and credentials, so one of them has to change.',
+      agentId === conflictingId
+        ? `Two soul files declare the agent id ${agentId}: ${paths[0]} and ${paths[1]}. `
+          + 'Ids key sessions, memory, and credentials, so one of them has to change.'
+        : `The agent ids ${agentId} and ${conflictingId} differ only in case: ${paths[0]} and ${paths[1]}. `
+          + 'An id names a directory under ~/.stratus/agents, and macOS and Windows fold those two names onto '
+          + 'one — the agents would share their sessions, their memories, and the grant file that says what '
+          + 'may run unattended. One of them has to change.',
     );
     this.name = 'DuplicateAgentIdError';
     this.agentId = agentId;
     this.paths = paths;
+    this.conflictingId = conflictingId;
   }
 }
 
@@ -141,7 +153,10 @@ export class DuplicateAgentIdError extends Error {
  * Picking a winner between two files claiming one id makes an agent
  * silently inherit another's sessions, memory, and credentials, with the
  * winner decided by filename sort order — there is no degraded behaviour
- * that is right, so this refuses instead of guessing.
+ * that is right, so this refuses instead of guessing. Two ids that differ
+ * only in case are that same collision on the filesystems most operators
+ * run, so they count as duplicates here too — `foldedAgentId` in
+ * `paths.ts` carries the reason.
  */
 export const loadRosterSouls = async (
   env: StateEnvironment,
@@ -160,7 +175,7 @@ export const loadRosterSouls = async (
   }
 
   const entries: RosterEntry[] = [];
-  const byId = new Map<string, string>();
+  const byId = new Map<string, { id: string; path: string }>();
   for (const soulPath of rosterFiles) {
     let entry: RosterEntry;
     try {
@@ -170,22 +185,24 @@ export const loadRosterSouls = async (
       continue;
     }
     // Reserved ids are dropped BEFORE collision detection, and the order
-    // matters. A soul claiming the built-in id is skipped either way — it
-    // may not take the documented fallback over — so two of them are not
-    // an ambiguity to refuse over: neither was going to get the id. Left
+    // matters. A soul claiming the built-in id — in whatever case, since
+    // `agents/Stratus/` is the built-in agent's own state directory
+    // wherever case folds — is skipped either way, because it may not take
+    // the documented fallback over. So two of them are not an ambiguity to
+    // refuse over: neither was going to get the id. Left
     // after the check, a repository could take a daemon down simply by
     // shipping two souls named `stratus`, turning a guard against hijack
     // into a way to deny service.
-    if (entry.soul.agent.id === DEFAULT_STRATUS_AGENT.id) {
+    if (foldedAgentId(entry.soul.agent.id) === DEFAULT_STRATUS_AGENT.id) {
       warn(`agent id ${entry.soul.agent.id} is reserved for the built-in agent; ignoring ${soulPath}`);
       continue;
     }
 
-    const claimed = byId.get(entry.soul.agent.id);
+    const claimed = byId.get(foldedAgentId(entry.soul.agent.id));
     if (claimed !== undefined) {
-      throw new DuplicateAgentIdError(entry.soul.agent.id, [claimed, soulPath]);
+      throw new DuplicateAgentIdError(claimed.id, [claimed.path, soulPath], entry.soul.agent.id);
     }
-    byId.set(entry.soul.agent.id, soulPath);
+    byId.set(foldedAgentId(entry.soul.agent.id), { id: entry.soul.agent.id, path: soulPath });
     entries.push(entry);
   }
   return entries;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -153,6 +153,88 @@ test('a cwd memory file for an id whose directory is a file does not block every
   assert.match(await readFile(path.join(project, '.stratus', 'memory.jsonl.migrated'), 'utf8'), /nowhere to go/);
   const left = (await readdir(path.join(project, '.stratus'))).filter((name) => name.includes('migrating'));
   assert.deepEqual(left, []);
+});
+
+test('a home whose stamp cannot be written is refused by a run that records nothing', async () => {
+  const home = await freshHome();
+  const env = { homeDir: home };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  // Whatever put it there, `state.json` is not a file this build can write,
+  // so nothing it does to this home can ever be recorded. A run deferring
+  // the exclusive half writes no stamp at all now — which is the whole
+  // reason this check is separate from the write: without it the home
+  // would look fine until the next `stratus serve`, by which point several
+  // commands have changed state that nothing recorded.
+  await mkdir(stateFilePath(env), { recursive: true });
+
+  await assert.rejects(
+    () => runStateMigrations(env),
+    (error: unknown) => error instanceof Error
+      && error.message.includes(stateFilePath(env))
+      && /run the command again/.test(error.message),
+  );
+});
+
+test('a cwd memory file with two ids that differ only in case keeps them apart', async () => {
+  const home = await freshHome();
+  const project = await freshHome();
+  const env = { homeDir: home, cwd: project };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await mkdir(path.join(project, '.stratus'), { recursive: true });
+  const at = '2026-01-01T00:00:00.000Z';
+  // One directory on macOS and Windows, so the second agent's memories
+  // would be appended to the first agent's file.
+  await writeFile(path.join(project, '.stratus', 'memory.jsonl'), [
+    JSON.stringify({ id: 'Twin:memory:1', agentId: 'Twin', content: 'the first twin', createdAt: at }),
+    JSON.stringify({ id: 'twin:memory:1', agentId: 'twin', content: 'the second twin', createdAt: at }),
+  ].join('\n') + '\n');
+
+  await migrateLegacyMemory(env);
+
+  assert.match(await readFile(agentMemoryFilePath(env, 'Twin'), 'utf8'), /the first twin/);
+  // The second spelling was given no directory at all. That is what this
+  // can assert here: a case-sensitive runner keeps the two apart by itself,
+  // so the file contents look right either way and only the refusal to
+  // create the second directory distinguishes the rule from its absence.
+  await assert.rejects(
+    () => stat(path.dirname(agentMemoryFilePath(env, 'twin'))),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
+  );
+  // And its records are in the archive, not lost.
+  assert.match(
+    await readFile(path.join(project, '.stratus', 'memory.jsonl.migrated'), 'utf8'),
+    /the second twin/,
+  );
+});
+
+test('a cwd memory file is never imported through a symlinked destination', async () => {
+  const home = await freshHome();
+  const project = await freshHome();
+  const env = { homeDir: home, cwd: project };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await mkdir(path.join(project, '.stratus'), { recursive: true });
+  const elsewhere = path.join(home, 'elsewhere.jsonl');
+  await writeFile(elsewhere, '');
+  // A real `agents/ava/` says nothing about the file in it, and this
+  // importer appends directly rather than through the store's guarded open.
+  await mkdir(path.dirname(agentMemoryFilePath(env, 'ava')), { recursive: true });
+  await symlink(elsewhere, agentMemoryFilePath(env, 'ava'));
+  const at = '2026-01-01T00:00:00.000Z';
+  await writeFile(path.join(project, '.stratus', 'memory.jsonl'), [
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'likes jazz', createdAt: at }),
+    JSON.stringify({ id: 'bea:memory:1', agentId: 'bea', content: 'likes tea', createdAt: at }),
+  ].join('\n') + '\n');
+
+  await migrateLegacyMemory(env);
+
+  assert.equal((await stat(elsewhere)).size, 0);
+  // The agent whose file is its own still moved, and the skipped lines are
+  // in the archive rather than lost.
+  assert.match(await readFile(agentMemoryFilePath(env, 'bea'), 'utf8'), /likes tea/);
+  assert.match(
+    await readFile(path.join(project, '.stratus', 'memory.jsonl.migrated'), 'utf8'),
+    /likes jazz/,
+  );
 });
 
 test('a stamp write merges with what is on disk, so a stale snapshot cannot un-apply a migration', () => {

@@ -13,6 +13,7 @@ import {
   agentsDirIn,
   agentsDirPath,
   fleetDbPath,
+  foldedAgentId,
   legacySessionDbIn,
   stratusHomePath,
   legacyMemoryFilePath,
@@ -197,20 +198,106 @@ export const makeAgentStateDirectory = async (
   }
 };
 
-/** {@link makeAgentStateDirectory}, naming what it could not make in `report`. */
+/**
+ * Which id owns which state directory *name*, for one run.
+ *
+ * `foldedAgentId` owns the rule and the reason. What is left to this is
+ * that the roster enforces it over *souls*, and this migration walks the
+ * *data*: stored `agent_id` values and grant filenames, for agents whose
+ * souls may be long gone, which no roster ever refused. Without a record
+ * of which name is taken, the second of two spellings copies its sessions
+ * into the first's store, appends its memories to the first's file, and
+ * renames its grant file over the first's — two agents merged, silently,
+ * by an upgrade.
+ *
+ * The loser is quarantined, not dropped: its rows stay in the preserved
+ * original, which is what a rename makes recoverable.
+ */
+export interface StateDirectoryNames {
+  /**
+   * The id already holding the directory `agentId` would join to, when that
+   * is a different spelling of it; undefined when the name is free or
+   * already this agent's.
+   */
+  heldBy(agentId: string): string | undefined;
+  /** Record `agentId` as the owner of the name it joins to. */
+  hold(agentId: string): void;
+}
+
+export const createStateDirectoryNames = (): StateDirectoryNames => {
+  const byName = new Map<string, string>();
+  return {
+    heldBy: (agentId) => {
+      const claimed = byName.get(foldedAgentId(agentId));
+      return claimed === undefined || claimed === agentId ? undefined : claimed;
+    },
+    hold: (agentId) => {
+      byName.set(foldedAgentId(agentId), agentId);
+    },
+  };
+};
+
+/**
+ * The destination file, or undefined when it is a link.
+ *
+ * The migration writes its own way into these — `shardSessions` through its
+ * local `openDatabase`, `placeRecords` by appending — so neither passes the
+ * guard the live stores apply. A real `agents/<id>/` says nothing about the
+ * files in it: a linked `sessions.db` is copied into whatever it points at
+ * and then rejected by the startup sweep, leaving those conversations
+ * unreachable, and a linked `memory.jsonl` takes an agent's whole history
+ * outside the home.
+ */
+const usableStateFile = async (
+  filePath: string,
+  agentId: string,
+  what: string,
+  report: LayoutMigrationReport,
+): Promise<string | undefined> => {
+  if (!(await isSymlinkedStatePath(filePath))) {
+    return filePath;
+  }
+  report.quarantined.push(
+    `${JSON.stringify(agentId)} (${what}) — ${path.basename(filePath)} is a symlink, which is never this agent's file`,
+  );
+  return undefined;
+};
+
+/**
+ * {@link makeAgentStateDirectory}, naming what it could not make in
+ * `report` and holding the directory name against the rest of the run
+ * (see {@link StateDirectoryNames}).
+ *
+ * The name is held only once the directory exists, so an id quarantined
+ * for some other reason does not take the name away from a second
+ * spelling that would have been fine.
+ */
 const agentDirectoryOrQuarantine = async (
   env: StateEnvironment,
   agentId: string,
   what: string,
   report: LayoutMigrationReport,
-): Promise<string | undefined> =>
-  makeAgentStateDirectory(env, agentId, (code) => {
+): Promise<string | undefined> => {
+  const holder = report.directoryNames.heldBy(agentId);
+  if (holder !== undefined) {
+    report.quarantined.push(
+      `${JSON.stringify(agentId)} (${what}) — differs from ${JSON.stringify(holder)} only in case, and one `
+      + 'directory cannot be both agents on macOS or Windows; rename one of the two ids',
+    );
+    return undefined;
+  }
+  const directory = await makeAgentStateDirectory(env, agentId, (code) => {
     report.quarantined.push(
       `${JSON.stringify(agentId)} (${what}) — `
       + `${path.relative(stratusHomePath(env), agentStateDirPath(env, agentId))} cannot be a directory `
       + `(${code}); this agent has no directory to own, so rename its id`,
     );
   });
+  if (directory !== undefined) {
+    report.directoryNames.hold(agentId);
+  }
+  return directory;
+};
 
 const openDatabase = async (filePath: string): Promise<SqliteDatabase> => {
   const { DatabaseSync } = await loadSqlite();
@@ -222,7 +309,11 @@ const openDatabase = async (filePath: string): Promise<SqliteDatabase> => {
   return db;
 };
 
-/** What one run of the migration changed, for the line it reports. */
+/**
+ * What one run of the migration changed, for the line it reports — plus
+ * the bookkeeping its stages share, which rides here because the report is
+ * already the one per-run object every stage is handed.
+ */
 interface LayoutMigrationReport {
   agentsWithSessions: number;
   sessionsMoved: number;
@@ -232,6 +323,8 @@ interface LayoutMigrationReport {
   whitelistsMoved: number;
   /** Agent ids whose rows could not be given a directory, and what held them back. */
   quarantined: string[];
+  /** Which id owns which directory name in this run. */
+  directoryNames: StateDirectoryNames;
 }
 
 /**
@@ -327,7 +420,15 @@ const shardSessions = async (
     if (!(await agentDirectoryOrQuarantine(env, owner.agent_id, `${owner.total} session(s)`, report))) {
       continue;
     }
-    const shardPath = agentSessionDbPath(env, owner.agent_id);
+    const shardPath = await usableStateFile(
+      agentSessionDbPath(env, owner.agent_id),
+      owner.agent_id,
+      `${owner.total} session(s)`,
+      report,
+    );
+    if (shardPath === undefined) {
+      continue;
+    }
     const shard = await openDatabase(shardPath);
     try {
       if (!hasTable(shard, 'sessions')) {
@@ -443,7 +544,15 @@ const placeRecords = async (
     if (!(await agentDirectoryOrQuarantine(env, agentId, `${lines.length} memory record(s)`, report))) {
       continue;
     }
-    const destination = agentMemoryFilePath(env, agentId);
+    const destination = await usableStateFile(
+      agentMemoryFilePath(env, agentId),
+      agentId,
+      `${lines.length} memory record(s)`,
+      report,
+    );
+    if (destination === undefined) {
+      continue;
+    }
     let existing = new Set<string>();
     try {
       existing = new Set((await readFile(destination, 'utf8')).split('\n'));
@@ -837,6 +946,7 @@ const emptyReport = (): LayoutMigrationReport => ({
   memoriesMoved: 0,
   whitelistsMoved: 0,
   quarantined: [],
+  directoryNames: createStateDirectoryNames(),
 });
 
 const describe = (report: LayoutMigrationReport): string | undefined => {

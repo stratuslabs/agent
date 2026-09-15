@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import {
   appendFile,
   chmod,
+  lstat,
   mkdir,
   readdir,
   readFile,
@@ -14,8 +15,14 @@ import {
 import path from 'node:path';
 import type { MemoryEntry } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
+import { isSymlinkedStatePath } from '@stratusagent/permissions';
 import { type StateEnvironment, readWorkingDirectory } from './environment.ts';
-import { applyPerAgentLayout, hasBracketedLegacyState, makeAgentStateDirectory } from './layout-migration.ts';
+import {
+  applyPerAgentLayout,
+  createStateDirectoryNames,
+  hasBracketedLegacyState,
+  makeAgentStateDirectory,
+} from './layout-migration.ts';
 import {
   MEMORY_FILENAME,
   stratusHomePath,
@@ -93,7 +100,14 @@ export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> 
       byAgent.set(entry.agentId, lines);
     }
 
+    // Two ids that differ only in case are one directory on macOS and
+    // Windows, and the second would append its memories to the first
+    // agent's file — see `StateDirectoryNames`, which owns that rule.
+    const directoryNames = createStateDirectoryNames();
     for (const [agentId, lines] of byAgent) {
+      if (directoryNames.heldBy(agentId) !== undefined) {
+        continue;
+      }
       // The directory before anything reads a path *under* it, and never
       // by throwing: an id whose directory name is already taken by its own
       // soul file (`id: ava.md` beside `agents/ava.md`) makes `mkdir` fail
@@ -105,7 +119,16 @@ export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> 
       if (await makeAgentStateDirectory(env, agentId) === undefined) {
         continue;
       }
+      directoryNames.hold(agentId);
       const destination = agentMemoryFilePath(env, agentId);
+      // A real directory says nothing about the file in it, and this
+      // importer appends directly rather than through the store's guarded
+      // open — see `usableStateFile` in the layout migration, which is the
+      // same rule. Skipped rather than thrown: the lines stay in the
+      // archive, and this runs before every command.
+      if (await isSymlinkedStatePath(destination)) {
+        continue;
+      }
       let existingIds: Set<string>;
       try {
         existingIds = new Set(
@@ -457,6 +480,36 @@ export const mergeStateStamp = (latest: StateStamp, next: StateStamp): StateStam
 };
 
 
+/**
+ * Refuse a home whose stamp could never be written, without writing it.
+ *
+ * A run that defers an exclusive migration records nothing (see
+ * `runStateMigrations`), so it no longer discovers an unwritable stamp by
+ * failing to write one — and a command that goes on to write state into a
+ * home that cannot record what it is is the case this guard exists for.
+ * Asking about the shape of the path is what is left: a `state.json` that is
+ * a directory, or anything else that is not a regular file, is a home no
+ * stamp will ever land in.
+ */
+const assertStampWritable = async (env: StateEnvironment): Promise<void> => {
+  const target = stateFilePath(env);
+  let found;
+  try {
+    found = await lstat(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  if (!found.isFile()) {
+    throw new Error(
+      `${target} is not a regular file, so this build cannot record what it has done to ${stratusHomePath(env)}. `
+      + 'Move or remove it and run the command again.',
+    );
+  }
+};
+
 const writeStateStamp = async (env: StateEnvironment, stamp: StateStamp): Promise<void> => {
   await mkdir(stratusHomePath(env), { recursive: true });
   // Against the stamp as it is *now*, not as this run found it — see
@@ -601,19 +654,20 @@ export const runStateMigrations = async (
   // direction that loses data.
   //
   // A run that finishes everything writes the same bytes as any other run
-  // that finishes everything, so those cannot disagree. A run that defers
-  // proposes **no version at all** — it writes 0, and `mergeStateStamp`
-  // floors that against what is recorded, so it can raise nothing and lower
-  // nothing. The worst it can do is lose an id from `applied` to that same
-  // interleaving, which costs an idempotent re-run and leaves the version,
-  // the thing the downgrade guard reads, untouched.
+  // that finishes everything, so those cannot disagree. A run that deferred
+  // one **writes nothing at all**, and the two attempts before this to keep
+  // it writing were both wrong in the same way: `mergeStateStamp` reads at the
+  // write, but there is still a gap between that read and the rename, so a
+  // floor computed from what this run read is no compare-and-swap. An
+  // exclusive run's stamp landing in that gap is replaced by a schema-0 one,
+  // and the downgrade guard is off over already-sharded state.
   //
-  // It writes rather than skipping so that a home whose stamp *cannot* be
-  // written is found by the commands that write state, instead of only by
-  // the next daemon start.
-  const version = deferring ? 0 : STATE_SCHEMA_VERSION;
-  if (results.length > 0 || stamp.schemaVersion !== version) {
-    await writeStateStamp(env, { schemaVersion: version, applied: stamp.applied });
+  // What that costs is the unwritable-stamp guard on ordinary commands,
+  // which only fired because something tried to write. `assertStampWritable`
+  // keeps the part that matters without writing anything.
+  await assertStampWritable(env);
+  if (!deferring && (results.length > 0 || stamp.schemaVersion !== STATE_SCHEMA_VERSION)) {
+    await writeStateStamp(env, { schemaVersion: STATE_SCHEMA_VERSION, applied: stamp.applied });
   }
   return results;
 };
