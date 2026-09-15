@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   AgentRunner,
   InMemoryAgentMemoryStore,
+  memoryInjectionEntries,
   ToolRegistry,
   type AgentDefinition,
   type ModelProvider,
@@ -85,7 +86,7 @@ test('memory persists per agent across sessions and channels', async () => {
   const provider: ModelProvider = {
     name: 'memory-provider',
     async generate({ session, memory: entries }) {
-      seenMemory.push((entries ?? []).map((entry) => entry.content));
+      seenMemory.push(memoryInjectionEntries(entries).map((entry) => entry.content));
       if (session.messages.at(-1)?.role === 'tool') {
         return { parts: [{ type: 'text', text: 'Noted.' }] };
       }

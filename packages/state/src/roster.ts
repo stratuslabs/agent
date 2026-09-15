@@ -9,6 +9,8 @@ import {
   boundMemoryRead,
   clampMemoryRecallLimit,
   compareMemoryChronology,
+  mergeMemoryTopics,
+  type MemoryEntry,
 } from '@stratusagent/core';
 import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
@@ -48,7 +50,7 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       ? [DEFAULT_STRATUS_AGENT.id, ...LEGACY_DEFAULT_AGENT_IDS]
       : [agentId];
   return {
-    append: (agentId, content, metadata, provenance) => store.append(agentId, content, metadata, provenance),
+    append: (agentId, content, options) => store.append(agentId, content, options),
     async list(agentId, options) {
       const ids = aliasIds(agentId);
       if (ids.length === 1) {
@@ -63,16 +65,20 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       const bounded = boundMemoryList(merged, options.limit);
       return { entries: bounded.entries, truncated: bounded.truncated || anyTruncated };
     },
-    async search(agentId, query, limit) {
+    async search(agentId, query, options) {
       const ids = aliasIds(agentId);
       if (ids.length === 1) {
-        return store.search(agentId, query, limit);
+        return store.search(agentId, query, options);
       }
-      const batches = await Promise.all(ids.map((id) => store.search(id, query, limit)));
-      const bounded = boundMemoryRead(batches.flatMap((batch) => batch.entries), clampMemoryRecallLimit(limit));
+      const batches = await Promise.all(ids.map((id) => store.search(id, query, options)));
+      const bounded = boundMemoryRead(batches.flatMap((batch) => batch.entries), clampMemoryRecallLimit(options?.limit));
+      // Every batch came from the same store, so they agree on the ordering
+      // it served; reporting the first is reporting all of them.
+      const strategy = batches[0]?.strategy;
       return {
         entries: bounded.entries,
         truncated: bounded.truncated || batches.some((batch) => batch.truncated),
+        ...(strategy !== undefined ? { strategy } : {}),
       };
     },
     async forget(agentId, entryId) {
@@ -91,8 +97,67 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       const batches = await Promise.all(ids.map((id) => store.audit(id)));
       return batches.flat().sort(compareMemoryChronology);
     },
-    // Alias-aware like `forget`, for the same reason: a legacy entry is
-    // exactly the one an operator re-asserts, and it lives under a legacy id.
+    // Alias-aware like `forget`, for the same reason: a legacy entry under
+    // a legacy id is exactly the one an operator pins or re-asserts.
+    ...(store.pin
+      ? {
+          async pin(agentId: string, entryId: string) {
+            const ids = aliasIds(agentId);
+            if (ids.length === 1) {
+              return store.pin!(agentId, entryId);
+            }
+            let lastFailure: unknown;
+            for (const id of ids) {
+              try {
+                return await store.pin!(id, entryId);
+              } catch (error) {
+                lastFailure = error;
+              }
+            }
+            throw lastFailure;
+          },
+        }
+      : {}),
+    ...(store.unpin
+      ? {
+          async unpin(agentId: string, entryId: string) {
+            for (const id of aliasIds(agentId)) {
+              if (await store.unpin!(id, entryId)) {
+                return true;
+              }
+            }
+            return false;
+          },
+        }
+      : {}),
+    ...(store.pinned
+      ? {
+          async pinned(agentId: string) {
+            const batches = await Promise.all(aliasIds(agentId).map((id) => store.pinned!(id)));
+            return batches.flat().sort(compareMemoryChronology);
+          },
+        }
+      : {}),
+    ...(store.topics
+      ? {
+          async topics(agentId: string) {
+            const ids = aliasIds(agentId);
+            if (ids.length === 1) {
+              return store.topics!(agentId);
+            }
+            // Merged through the shared rule rather than concatenated: a
+            // topic an agent wrote about under both ids is one topic with
+            // one count, which is what two lists would not give.
+            return mergeMemoryTopics(...await Promise.all(ids.map((id) => store.topics!(id))));
+          },
+        }
+      : {}),
+    // Import writes under the agent's own id, never a legacy alias: the
+    // aliases exist to *read* what an older build wrote, and a new write
+    // filed under one would be creating history nobody had.
+    ...(store.importEntries
+      ? { importEntries: (agentId: string, entries: readonly MemoryEntry[]) => store.importEntries!(agentId, entries) }
+      : {}),
     ...(store.reassertTrust
       ? {
           async reassertTrust(agentId, entryId, trust) {

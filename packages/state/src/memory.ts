@@ -3,21 +3,37 @@ import { appendFile, chmod, mkdir, open, readFile, rm, stat } from 'node:fs/prom
 import path from 'node:path';
 
 import {
+  applyMemoryPinBudget,
   assertMemoryContentWithinCap,
+  assertSupersedableMemoryEntry,
   boundMemoryList,
   boundMemoryRead,
   clampMemoryRecallLimit,
+  collectMemoryTopics,
   compareMemoryChronology,
+  importableMemoryEntry,
+  isMemoryEntryCurrent,
   isTrustLevel,
+  memoryContentByteLength,
+  memoryEntryFields,
+  MEMORY_PINNED_MAX_BYTES,
+  memoryEntryTokens,
+  pinnedCapRefusal,
+  supersededMemoryIdsAt,
   tokenizeMemoryText,
   type AgentMemoryStore,
-  type JsonObject,
+  type MemoryAppendOptions,
   type MemoryAuditEntry,
   type MemoryEntry,
+  type MemoryImportResult,
   type MemoryListOptions,
   type MemoryOrigin,
-  type MemoryProvenance,
+  type MemoryPinOutcome,
+  type MemoryRankingStrategy,
   type MemoryReadResult,
+  type MemorySearchOptions,
+  type MemoryTopic,
+  type MemoryUsage,
   type TrustLevel,
 } from '@stratusagent/core';
 
@@ -64,18 +80,40 @@ interface MemoryReassertion {
   createdAt: string;
 }
 
-type MemoryRecord = MemoryEntry | MemoryTombstone | MemoryReassertion;
+/**
+ * A pin, or its undo. `pinned` cannot be a field on the entry: pinning is a
+ * toggle, from the agent and from the operator's CLI and console alike, and
+ * a toggle on an append-only line is a rewrite. So it is a record naming
+ * the entry, and the entry's own line stays byte-identical forever.
+ */
+interface MemoryPin {
+  pins: string;
+  agentId: string;
+  /** False for the undo. Spelled out rather than a second record type: one shape, one replay. */
+  pinned: boolean;
+  createdAt: string;
+}
+
+type MemoryRecord = MemoryEntry | MemoryTombstone | MemoryReassertion | MemoryPin;
 
 interface MemoryFileRecords {
   entries: MemoryEntry[];
   tombstones: MemoryTombstone[];
   reassertions: MemoryReassertion[];
+  /** In file order, which is the order the pin budget is allocated in. */
+  pins: MemoryPin[];
 }
 
 const isTombstoneRecord = (value: unknown): value is MemoryTombstone =>
   typeof value === 'object' && value !== null && typeof (value as MemoryTombstone).forgets === 'string'
   && typeof (value as MemoryTombstone).agentId === 'string'
   && typeof (value as MemoryTombstone).createdAt === 'string';
+
+const isPinRecord = (value: unknown): value is MemoryPin =>
+  typeof value === 'object' && value !== null && typeof (value as MemoryPin).pins === 'string'
+  && typeof (value as MemoryPin).agentId === 'string'
+  && typeof (value as MemoryPin).pinned === 'boolean'
+  && typeof (value as MemoryPin).createdAt === 'string';
 
 const isReassertionRecord = (value: unknown): value is MemoryReassertion =>
   typeof value === 'object' && value !== null && typeof (value as MemoryReassertion).reasserts === 'string'
@@ -136,7 +174,7 @@ const parseOrderedRecords = (raw: string, filePath: string): MemoryRecord[] => {
     // well-formed record would otherwise surface later as a TypeError in a
     // read or an undefined bound into the index — errors that never name
     // the file the way this one does.
-    if (!isTombstoneRecord(parsed) && !isReassertionRecord(parsed) && !isEntryRecord(parsed)) {
+    if (!isTombstoneRecord(parsed) && !isReassertionRecord(parsed) && !isPinRecord(parsed) && !isEntryRecord(parsed)) {
       throw new Error(`Memory file has an invalid line: ${filePath}`);
     }
     ordered.push(parsed);
@@ -148,16 +186,19 @@ const parseMemoryRecords = (raw: string, filePath: string): MemoryFileRecords =>
   const entries: MemoryEntry[] = [];
   const tombstones: MemoryTombstone[] = [];
   const reassertions: MemoryReassertion[] = [];
+  const pins: MemoryPin[] = [];
   for (const record of parseOrderedRecords(raw, filePath)) {
     if (isTombstoneRecord(record)) {
       tombstones.push(record);
     } else if (isReassertionRecord(record)) {
       reassertions.push(record);
+    } else if (isPinRecord(record)) {
+      pins.push(record);
     } else {
       entries.push(record);
     }
   }
-  return { entries, tombstones, reassertions };
+  return { entries, tombstones, reassertions, pins };
 };
 
 /**
@@ -177,26 +218,43 @@ const reassertedTrustFor = (records: MemoryFileRecords, agentId: string): Map<st
   return reasserted;
 };
 
-/** An entry as read back: provenance fields validated, any re-assertion applied. */
+/**
+ * An entry as read back: optional fields validated, any re-assertion
+ * applied. The four required fields pass through untouched, so a
+ * hand-added line carrying only those is exactly what comes back.
+ */
 const presentEntry = (entry: MemoryEntry, reasserted: Map<string, TrustLevel>): MemoryEntry => {
-  const { trust: _trust, origin: _origin, ...rest } = entry;
+  const {
+    trust: _trust, origin: _origin, kind: _kind, about: _about,
+    validFrom: _validFrom, validUntil: _validUntil, supersedes: _supersedes,
+    usage: _usage, ...rest
+  } = entry;
   const provenance = provenanceOf(entry);
   const reassertedTrust = reasserted.get(entry.id);
   return {
     ...rest,
+    ...memoryEntryFields(entry),
     ...provenance,
     ...(reassertedTrust !== undefined ? { trust: reassertedTrust } : {}),
   };
 };
 
 /**
- * The live view of the record for one agent: deduped by id (first wins, as
- * `list` has always read), minus every entry a tombstone anywhere in the
- * file retires. Order-independent on purpose — a hand-edited file where a
- * tombstone precedes its entry still means the entry is forgotten.
+ * Every entry of one agent that no tombstone retires: deduped by id (first
+ * wins, as `list` has always read).
+ *
+ * The tombstone filter is **scoped to the entry's own agent**, which makes
+ * the per-agent boundary structural rather than a rule every future writer
+ * has to remember: a record naming a stranger's id is inert wherever it
+ * came from, not merely refused by the one write path that checks. The
+ * order-independence the original filter protected survives — a hand-edited
+ * file where a tombstone precedes its entry still means forgotten, as long
+ * as the two agree about whose entry it is.
  */
-const liveEntriesFor = (records: MemoryFileRecords, agentId: string): MemoryEntry[] => {
-  const forgotten = new Set(records.tombstones.map((tombstone) => tombstone.forgets));
+const untombstonedEntriesFor = (records: MemoryFileRecords, agentId: string): MemoryEntry[] => {
+  const forgotten = new Set(
+    records.tombstones.filter((tombstone) => tombstone.agentId === agentId).map((tombstone) => tombstone.forgets),
+  );
   const reasserted = reassertedTrustFor(records, agentId);
   const seen = new Set<string>();
   const live: MemoryEntry[] = [];
@@ -210,12 +268,65 @@ const liveEntriesFor = (records: MemoryFileRecords, agentId: string): MemoryEntr
   return live;
 };
 
+/**
+ * The live view: un-tombstoned, minus everything a *current* successor
+ * supersedes. Supersession is scoped to the agent for free — the successors
+ * considered are this agent's own entries — and to the clock deliberately,
+ * so a future-dated revision leaves the fact it replaces standing until it
+ * takes effect.
+ */
+const liveEntriesFor = (records: MemoryFileRecords, agentId: string, at: Date): MemoryEntry[] => {
+  const kept = untombstonedEntriesFor(records, agentId);
+  const superseded = supersededMemoryIdsAt(kept, at);
+  return kept.filter((entry) => !superseded.has(entry.id));
+};
+
+/**
+ * The pin lane replayed in file order — `O_APPEND`'s total order, which is
+ * the one no later writer can insert itself into. A pin already held is not
+ * re-added (so re-pinning cannot move an entry to the back of the budget),
+ * and an unpin removes it. Scoped to the agent for the same structural
+ * reason the tombstone filter is.
+ */
+const pinnedIdsFor = (records: MemoryFileRecords, agentId: string): string[] => {
+  const ordered: string[] = [];
+  for (const record of records.pins) {
+    if (record.agentId !== agentId) {
+      continue;
+    }
+    const held = ordered.indexOf(record.pins);
+    if (record.pinned && held === -1) {
+      ordered.push(record.pins);
+    } else if (!record.pinned && held !== -1) {
+      ordered.splice(held, 1);
+    }
+  }
+  return ordered;
+};
+
+/** The effective pinned set and what it costs, over one agent's live entries. */
+const pinBudgetFor = (
+  records: MemoryFileRecords,
+  agentId: string,
+  at: Date,
+): { effective: string[]; bytes: number; live: Map<string, MemoryEntry> } => {
+  const live = new Map(liveEntriesFor(records, agentId, at).map((entry) => [entry.id, entry]));
+  const budget = applyMemoryPinBudget(
+    pinnedIdsFor(records, agentId),
+    (id) => (live.has(id) ? memoryContentByteLength(live.get(id)!.content) : undefined),
+  );
+  return { effective: budget.effective, bytes: budget.bytes, live };
+};
+
 // ---- the derived FTS5 index ------------------------------------------------
 
 // Bumped when the row shape changes: an index stamped with an older version
 // is rebuilt from the record, which is the only cost a derived file has.
 // '2' added `trust` and `origin` columns and the `reasserted` table.
-const INDEX_SCHEMA_VERSION = '2';
+// '3' added the `about`/`kind`/validity columns, tokenized `about` into the
+// searchable column, agent-scoped `forgotten`, the `revisions` table
+// supersession is computed from, and the `usage` counters.
+const INDEX_SCHEMA_VERSION = '3';
 
 // Loaded on first `search`, never at module load: see the note at the top.
 type SqliteModule = typeof import('node:sqlite');
@@ -230,16 +341,39 @@ type SqliteDatabase = InstanceType<SqliteModule['DatabaseSync']>;
 // `remove_diacritics 0`: the in-memory implementation does not fold
 // diacritics, so the index must not either — `café` and `cafe` are
 // different words in both stores or the two implementations diverge.
-// Only `tokens` is searchable; it holds the content re-tokenized by the
-// shared tokenizer, so FTS5 sees exactly the token stream the in-memory
-// store matches on rather than applying its own boundaries to raw text.
-// `trust` and `origin` ride along unindexed so a search hit carries its
-// label without a second read of the JSONL; `reasserted` mirrors
-// `forgotten` for the record type that changes a label after the fact.
+// Only `tokens` is searchable; it holds `memoryEntryTokens` — the content
+// *and* the `about` keys re-tokenized by the shared tokenizer — so FTS5
+// sees exactly the token stream the in-memory store matches on rather than
+// applying its own boundaries to raw text. An implementation that indexed
+// one and not the other would be a divergence, not a preference: the topic
+// index advertises `about` keys as things to search for.
+// `trust`, `origin`, and `fields` (the optional entry shape, as stored)
+// ride along unindexed so a search hit carries everything a caller needs
+// without a second read of the JSONL; `reasserted` mirrors `forgotten` for
+// the record type that changes a label after the fact.
+//
+// `revisions` is what supersession is computed from at query time rather
+// than baked into the rows: which entries are retired depends on the clock,
+// so the answer cannot be a deletion. The bounds are stored as epoch
+// milliseconds — parsed by the same `Date.parse` the kernel's
+// `memoryValidityAt` uses — because comparing ISO *strings* would disagree
+// with it the moment a hand-edited line spells an offset instead of `Z`.
+//
+// `usage` is the one table here that is not reconstructible from the
+// record, and that is the stated bargain: deleting the index loses your
+// usage statistics, never your memories.
 const INDEX_SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS forgotten (id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS forgotten (id TEXT NOT NULL, agent_id TEXT NOT NULL, PRIMARY KEY (id, agent_id));
 CREATE TABLE IF NOT EXISTS reasserted (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, trust TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS revisions (
+  successor_id TEXT PRIMARY KEY,
+  target_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  valid_from_ms INTEGER,
+  valid_until_ms INTEGER
+);
+CREATE TABLE IF NOT EXISTS usage (id TEXT PRIMARY KEY, recall_count INTEGER NOT NULL, last_recalled_at TEXT NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   tokens,
   id UNINDEXED,
@@ -248,6 +382,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   created_at UNINDEXED,
   trust UNINDEXED,
   origin UNINDEXED,
+  fields UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 0'
 );
 `;
@@ -291,8 +426,12 @@ const writeWatermark = (db: SqliteDatabase, watermark: IndexWatermark): void => 
   upsert.run('mtime_ms', watermark.mtimeMs);
 };
 
+// `usage` is deliberately spared: a rebuild re-derives everything the
+// record holds, and the counters are not in the record. Clearing them
+// because an unrelated line was hand-edited would lose the only data here
+// a rebuild cannot restore.
 const clearIndex = (db: SqliteDatabase): void => {
-  db.exec('DELETE FROM memory_fts; DELETE FROM forgotten; DELETE FROM reasserted; DELETE FROM meta;');
+  db.exec('DELETE FROM memory_fts; DELETE FROM forgotten; DELETE FROM reasserted; DELETE FROM revisions; DELETE FROM meta;');
 };
 
 /**
@@ -304,22 +443,30 @@ const clearIndex = (db: SqliteDatabase): void => {
  * re-assertion re-labels its entry whether it arrives before or after it.
  */
 const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
-  const hasEntry = db.prepare('SELECT 1 FROM memory_fts WHERE id = ?');
-  const isForgotten = db.prepare('SELECT 1 FROM forgotten WHERE id = ?');
+  const hasEntry = db.prepare('SELECT 1 FROM memory_fts WHERE id = ? AND agent_id = ?');
+  const isForgotten = db.prepare('SELECT 1 FROM forgotten WHERE id = ? AND agent_id = ?');
   const reassertedFor = db.prepare('SELECT trust FROM reasserted WHERE id = ? AND agent_id = ?');
   const insertEntry = db.prepare(
-    'INSERT INTO memory_fts (tokens, id, agent_id, content, created_at, trust, origin) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO memory_fts (tokens, id, agent_id, content, created_at, trust, origin, fields) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   );
-  const insertForgotten = db.prepare('INSERT OR IGNORE INTO forgotten (id) VALUES (?)');
+  const insertForgotten = db.prepare('INSERT OR IGNORE INTO forgotten (id, agent_id) VALUES (?, ?)');
   const upsertReasserted = db.prepare(
     'INSERT INTO reasserted (id, agent_id, trust) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET agent_id = excluded.agent_id, trust = excluded.trust',
   );
   const relabelEntry = db.prepare('UPDATE memory_fts SET trust = ? WHERE id = ? AND agent_id = ?');
-  const deleteEntry = db.prepare('DELETE FROM memory_fts WHERE id = ?');
+  const deleteEntry = db.prepare('DELETE FROM memory_fts WHERE id = ? AND agent_id = ?');
+  const deleteRevision = db.prepare('DELETE FROM revisions WHERE successor_id = ?');
+  const insertRevision = db.prepare(
+    'INSERT OR REPLACE INTO revisions (successor_id, target_id, agent_id, valid_from_ms, valid_until_ms) VALUES (?, ?, ?, ?, ?)',
+  );
   for (const record of ordered) {
     if (isTombstoneRecord(record)) {
-      insertForgotten.run(record.forgets);
-      deleteEntry.run(record.forgets);
+      insertForgotten.run(record.forgets, record.agentId);
+      deleteEntry.run(record.forgets, record.agentId);
+      // A forgotten successor stops retiring what it replaced, the same way
+      // the record read does: a revision the agent took back leaves the
+      // fact it replaced standing.
+      deleteRevision.run(record.forgets);
       continue;
     }
     if (isReassertionRecord(record)) {
@@ -327,25 +474,64 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
       relabelEntry.run(record.trust, record.reasserts, record.agentId);
       continue;
     }
-    if (hasEntry.get(record.id) !== undefined || isForgotten.get(record.id) !== undefined) {
+    // Pins never reach the index: `pinned` reads the record directly, and a
+    // budget replayed from a partially caught-up index would be a second
+    // answer to a question that has one.
+    if (isPinRecord(record)) {
+      continue;
+    }
+    if (hasEntry.get(record.id, record.agentId) !== undefined || isForgotten.get(record.id, record.agentId) !== undefined) {
       continue;
     }
     const provenance = provenanceOf(record);
+    const fields = memoryEntryFields(record);
     const reasserted = reassertedFor.get(record.id, record.agentId) as { trust: string } | undefined;
     const trust = reasserted?.trust ?? provenance.trust ?? null;
     insertEntry.run(
-      tokenizeMemoryText(record.content).join(' '),
+      memoryEntryTokens({ content: record.content, ...(fields.about ? { about: fields.about } : {}) }).join(' '),
       record.id,
       record.agentId,
       record.content,
       record.createdAt,
       trust,
       provenance.origin ? JSON.stringify(provenance.origin) : null,
+      Object.keys(fields).length > 0 ? JSON.stringify(fields) : null,
     );
+    if (fields.supersedes !== undefined) {
+      insertRevision.run(
+        record.id,
+        fields.supersedes,
+        record.agentId,
+        instantMs(fields.validFrom),
+        instantMs(fields.validUntil),
+      );
+    }
   }
 };
 
-export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
+/** A bound as the index compares it: epoch millis, or null for absent and unparseable. */
+const instantMs = (value: string | undefined): number | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+export interface FileMemoryStoreOptions {
+  /**
+   * Test seam: the clock every validity and supersession question is
+   * answered against. A window asserted against a fixed date is not
+   * testable otherwise, and neither is a `createdAt` tie.
+   */
+  now?: () => Date;
+}
+
+export const createFileMemoryStore = (
+  filePath: string,
+  options: FileMemoryStoreOptions = {},
+): AgentMemoryStore => {
+  const now = options.now ?? (() => new Date());
   const indexPath = `${filePath}.index`;
   let db: SqliteDatabase | undefined;
 
@@ -366,7 +552,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       raw = await readFile(filePath, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { entries: [], tombstones: [], reassertions: [] };
+        return { entries: [], tombstones: [], reassertions: [], pins: [] };
       }
       throw error;
     }
@@ -442,7 +628,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       // the next catch-up a full rebuild from the record, which is the
       // only cost a derived file can have.
       const hasCurrentShape = (): boolean => (opened.prepare('PRAGMA table_info(memory_fts)').all() as Array<{ name: string }>)
-        .some((column) => column.name === 'trust');
+        .some((column) => column.name === 'fields');
       if (!hasCurrentShape()) {
         // Under the same write lock catch-up takes, and re-checked once it
         // is held: the daemon and a `stratus run` opening an upgraded
@@ -454,6 +640,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
         try {
           if (!hasCurrentShape()) {
             opened.exec('DROP TABLE memory_fts; DROP TABLE forgotten; DROP TABLE reasserted; DROP TABLE meta;');
+            opened.exec('DROP TABLE IF EXISTS revisions;');
             opened.exec(INDEX_SCHEMA);
           }
           opened.exec('COMMIT;');
@@ -631,55 +818,92 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
   };
 
   return {
-    async append(agentId: string, content: string, metadata?: JsonObject, provenance?: MemoryProvenance) {
+    async append(agentId: string, content: string, appendOptions: MemoryAppendOptions = {}) {
       assertMemoryContentWithinCap(content);
+      // Resolved against the caller's own live set *before* anything is
+      // appended. `untombstonedEntriesFor` computes its forgotten set from
+      // the file, and this is the second writer into that lane: without the
+      // check, agent A could retire agent B's memory by naming its id — gone
+      // from B's list, its search, and its prompt, with B's own `forget`
+      // never called.
+      if (appendOptions.supersedes !== undefined) {
+        assertSupersedableMemoryEntry(liveEntriesFor(await readRecords(), agentId, now()), appendOptions.supersedes);
+      }
+      const fields = memoryEntryFields(appendOptions);
       const entry: MemoryEntry = {
         id: `${agentId}:memory:${randomUUID()}`,
         agentId,
         content,
-        createdAt: new Date().toISOString(),
-        ...(metadata ? { metadata } : {}),
-        ...(provenance ? { trust: provenance.trust } : {}),
-        ...(provenance?.origin ? { origin: provenance.origin } : {}),
+        createdAt: now().toISOString(),
+        ...fields,
+        ...(appendOptions.metadata ? { metadata: appendOptions.metadata } : {}),
+        ...(appendOptions.provenance ? { trust: appendOptions.provenance.trust } : {}),
+        ...(appendOptions.provenance?.origin ? { origin: appendOptions.provenance.origin } : {}),
       };
       await appendRecord(entry);
       return entry;
     },
 
-    async list(agentId: string, options: MemoryListOptions = {}) {
-      const live = liveEntriesFor(await readRecords(), agentId);
-      if (options.limit === undefined) {
-        return { entries: live.sort(compareMemoryChronology), truncated: false };
+    async list(agentId: string, listOptions: MemoryListOptions = {}) {
+      const at = now();
+      const live = liveEntriesFor(await readRecords(), agentId, at);
+      // Out of its validity window is not out of the record: `all` is what
+      // the operator's views read, so an expired fact can be shown *as*
+      // expired rather than vanishing.
+      const current = listOptions.validity === 'all'
+        ? live
+        : live.filter((entry) => isMemoryEntryCurrent(entry, at));
+      if (listOptions.limit === undefined) {
+        return { entries: current.sort(compareMemoryChronology), truncated: false };
       }
       // The bound applies after the tombstone filter — a store whose recent
       // entries are mostly forgotten still fills its slice with live ones.
-      return boundMemoryList(live, options.limit);
+      return boundMemoryList(current, listOptions.limit);
     },
 
-    async search(agentId: string, query: string, limit?: number): Promise<MemoryReadResult> {
+    async search(agentId: string, query: string, searchOptions: MemorySearchOptions = {}): Promise<MemoryReadResult> {
       // The query means its literal text: tokenize and quote each term
       // rather than forwarding the string, so `C++`, an unmatched quote,
       // and a sentence containing AND are searches, never syntax errors.
       const tokens = tokenizeMemoryText(query);
+      // BM25 is right there in FTS5 and the in-memory store cannot
+      // reproduce it, so this store implements `recency` only and says so.
+      // A caller asking for another ordering is served, not refused.
+      const strategy: MemoryRankingStrategy = 'recency';
       if (tokens.length === 0) {
-        return { entries: [], truncated: false };
+        return { entries: [], truncated: false, strategy };
       }
       const database = await withIndexLock(async () => {
         const opened = await openIndex();
         await ensureIndexCurrent(opened);
         return opened;
       });
-      const clamped = clampMemoryRecallLimit(limit);
+      const clamped = clampMemoryRecallLimit(searchOptions.limit);
       const match = tokens.map((token) => `"${token}"`).join(' ');
+      const at = now().getTime();
+      // Superseded entries leave `search` exactly as forgotten ones do, and
+      // which are superseded depends on the clock — hence a join against
+      // `revisions` rather than a deletion. Entries outside their *own*
+      // validity window stay: keeping an expired fact findable is the point
+      // of separating validity from supersession, and the caller reads its
+      // status from the bounds that come back with it.
       const rows = database.prepare(
-        'SELECT id, agent_id, content, created_at, trust, origin FROM memory_fts WHERE memory_fts MATCH ? AND agent_id = ? ORDER BY created_at DESC, id ASC LIMIT ?',
-      ).all(match, agentId, clamped + 1) as {
+        'SELECT id, agent_id, content, created_at, trust, origin, fields FROM memory_fts'
+        + ' WHERE memory_fts MATCH ? AND agent_id = ?'
+        + ' AND id NOT IN ('
+        + '   SELECT target_id FROM revisions WHERE agent_id = ?'
+        + '     AND (valid_from_ms IS NULL OR valid_from_ms <= ?)'
+        + '     AND (valid_until_ms IS NULL OR valid_until_ms > ?)'
+        + ' )'
+        + ' ORDER BY created_at DESC, id ASC LIMIT ?',
+      ).all(match, agentId, agentId, at, at, clamped + 1) as {
         id: string;
         agent_id: string;
         content: string;
         created_at: string;
         trust: string | null;
         origin: string | null;
+        fields: string | null;
       }[];
       const candidates: MemoryEntry[] = rows.map((row) => {
         const origin = parseOrigin(row.origin);
@@ -688,20 +912,32 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
           agentId: row.agent_id,
           content: row.content,
           createdAt: row.created_at,
+          ...parseFields(row.fields),
           ...(isTrustLevel(row.trust) ? { trust: row.trust } : {}),
           ...(origin !== undefined ? { origin } : {}),
         };
       });
-      return boundMemoryRead(candidates, clamped);
+      const bounded = boundMemoryRead(candidates, clamped);
+      // Counted for the entries actually returned, never for everything the
+      // match found: usage is meant to say what reached a prompt.
+      const counted = noteRecalled(database, bounded.entries, now().toISOString());
+      return {
+        entries: bounded.entries.map((entry) => {
+          const usage = counted.get(entry.id);
+          return usage === undefined ? entry : { ...entry, usage };
+        }),
+        truncated: bounded.truncated,
+        strategy,
+      };
     },
 
     async forget(agentId: string, entryId: string) {
-      const live = liveEntriesFor(await readRecords(), agentId);
+      const live = liveEntriesFor(await readRecords(), agentId, now());
       const entry = live.find((candidate) => candidate.id === entryId);
       if (!entry) {
         return false;
       }
-      await appendRecord({ forgets: entry.id, agentId: entry.agentId, createdAt: new Date().toISOString() });
+      await appendRecord({ forgets: entry.id, agentId: entry.agentId, createdAt: now().toISOString() });
       return true;
     },
 
@@ -709,7 +945,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       const records = await readRecords();
       const forgottenAt = new Map<string, string>();
       for (const tombstone of records.tombstones) {
-        if (!forgottenAt.has(tombstone.forgets)) {
+        if (tombstone.agentId === agentId && !forgottenAt.has(tombstone.forgets)) {
           forgottenAt.set(tombstone.forgets, tombstone.createdAt);
         }
       }
@@ -731,13 +967,125 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       // Resolved from the caller's own live set first, like `forget`: the
       // record lane is shared, and a writer that skipped this would let one
       // agent's operator surface re-label another agent's memory by id.
-      const live = liveEntriesFor(await readRecords(), agentId);
+      const live = liveEntriesFor(await readRecords(), agentId, now());
       const entry = live.find((candidate) => candidate.id === entryId);
       if (!entry) {
         return false;
       }
-      await appendRecord({ reasserts: entry.id, agentId: entry.agentId, trust, createdAt: new Date().toISOString() });
+      await appendRecord({ reasserts: entry.id, agentId: entry.agentId, trust, createdAt: now().toISOString() });
       return true;
     },
+
+    async pin(agentId: string, entryId: string): Promise<MemoryPinOutcome> {
+      const { effective, bytes, live } = pinBudgetFor(await readRecords(), agentId, now());
+      const entry = live.get(entryId);
+      if (!entry) {
+        throw new Error(`No live memory entry with id ${entryId} belongs to this agent — nothing was pinned.`);
+      }
+      if (effective.includes(entryId)) {
+        return { pinned: true, bytes };
+      }
+      const size = memoryContentByteLength(entry.content);
+      // The write path refusing is the rule, and it is not the whole story:
+      // two processes at the limit can both read this total and both
+      // append. `applyMemoryPinBudget` decides that race deterministically
+      // on replay, so the losing pin is recorded and inert rather than
+      // silently evicting one that was already effective.
+      if (bytes + size > MEMORY_PINNED_MAX_BYTES) {
+        return { pinned: false, reason: pinnedCapRefusal(bytes, size), bytes };
+      }
+      await appendRecord({ pins: entry.id, agentId: entry.agentId, pinned: true, createdAt: now().toISOString() });
+      return { pinned: true, bytes: bytes + size };
+    },
+
+    async unpin(agentId: string, entryId: string) {
+      const records = await readRecords();
+      if (!pinnedIdsFor(records, agentId).includes(entryId)) {
+        return false;
+      }
+      await appendRecord({ pins: entryId, agentId, pinned: false, createdAt: now().toISOString() });
+      return true;
+    },
+
+    async pinned(agentId: string) {
+      const at = now();
+      const { effective, live } = pinBudgetFor(await readRecords(), agentId, at);
+      // A pinned fact that is not true now does not reach the prompt — one
+      // rule, both bounds, the pinned core included. It keeps its place in
+      // the budget, which is a property of the record rather than of the
+      // clock, and comes back the moment its window opens.
+      return effective
+        .map((id) => live.get(id))
+        .filter((entry): entry is MemoryEntry => entry !== undefined && isMemoryEntryCurrent(entry, at))
+        .sort(compareMemoryChronology);
+    },
+
+    async topics(agentId: string): Promise<MemoryTopic[]> {
+      const at = now();
+      const live = liveEntriesFor(await readRecords(), agentId, at);
+      return collectMemoryTopics(live.filter((entry) => isMemoryEntryCurrent(entry, at)));
+    },
+
+    async importEntries(agentId: string, entries: readonly MemoryEntry[]): Promise<MemoryImportResult> {
+      // Against the record, not the live set: an id this agent forgot is
+      // still an id it holds, and re-importing it would resurrect a fact
+      // under a line the tombstone already names.
+      const held = new Set(
+        (await readRecords()).entries.filter((entry) => entry.agentId === agentId).map((entry) => entry.id),
+      );
+      const skipped: string[] = [];
+      let imported = 0;
+      for (const entry of entries) {
+        if (held.has(entry.id)) {
+          skipped.push(entry.id);
+          continue;
+        }
+        held.add(entry.id);
+        await appendRecord(importableMemoryEntry(entry, agentId));
+        imported += 1;
+      }
+      return { imported, skipped };
+    },
   };
+};
+
+/** The optional fields as the index stored them, validated on the way back out. */
+const parseFields = (raw: string | null): Pick<MemoryEntry, 'kind' | 'about' | 'validFrom' | 'validUntil' | 'supersedes'> => {
+  if (raw === null) {
+    return {};
+  }
+  try {
+    return memoryEntryFields(JSON.parse(raw) as MemoryEntry);
+  } catch {
+    return {};
+  }
+};
+
+/**
+ * Count a read. Usage lives only here, in the derived index, because
+ * `lastRecalledAt` and `recallCount` are observations about reading rather
+ * than facts the agent learned — putting them in the JSONL would make every
+ * recall a write to the record.
+ */
+const noteRecalled = (
+  db: SqliteDatabase,
+  entries: readonly MemoryEntry[],
+  at: string,
+): Map<string, MemoryUsage> => {
+  const counted = new Map<string, MemoryUsage>();
+  if (entries.length === 0) {
+    return counted;
+  }
+  const bump = db.prepare(
+    'INSERT INTO usage (id, recall_count, last_recalled_at) VALUES (?, 1, ?)'
+    + ' ON CONFLICT(id) DO UPDATE SET recall_count = recall_count + 1, last_recalled_at = excluded.last_recalled_at'
+    + ' RETURNING recall_count, last_recalled_at',
+  );
+  for (const entry of entries) {
+    const row = bump.get(entry.id, at) as { recall_count: number; last_recalled_at: string } | undefined;
+    if (row !== undefined) {
+      counted.set(entry.id, { recallCount: row.recall_count, lastRecalledAt: row.last_recalled_at });
+    }
+  }
+  return counted;
 };

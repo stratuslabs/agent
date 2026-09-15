@@ -74,6 +74,9 @@ export {
   createRecallTool,
   FORGET_TOOL_NAME,
   createForgetTool,
+  PIN_TOOL_NAME,
+  createPinTool,
+  type MemoryToolOptions,
 } from './tools/memory.ts';
 
 export {

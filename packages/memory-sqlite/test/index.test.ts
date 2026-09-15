@@ -29,7 +29,7 @@ test('a fact remembered is recalled by whole-token AND matching, newest first, a
   const first = createSqliteMemoryStore(file, { now });
   await first.append('ava', 'Postgres 16 runs on the staging box');
   await first.append('ava', 'The postgresql migration guide is bookmarked');
-  await first.append('ava', 'staging box reboots on Sundays', { source: 'ops' }, { trust: 'user', origin: { sessionId: 's1' } });
+  await first.append('ava', 'staging box reboots on Sundays', { metadata: { source: 'ops' }, provenance: { trust: 'user', origin: { sessionId: 's1' } } });
   first.close();
 
   const reopened = createSqliteMemoryStore(file);
@@ -79,8 +79,8 @@ test('bounded reads and the byte budget agree with the kernel\'s in-memory store
     await sqlite.append('ava', content);
     await reference.append('ava', content);
   }
-  const fromSqlite = await sqlite.search('ava', 'release', 50);
-  const fromReference = await reference.search('ava', 'release', 50);
+  const fromSqlite = await sqlite.search('ava', 'release', { limit: 50 });
+  const fromReference = await reference.search('ava', 'release', { limit: 50 });
   assert.deepEqual(fromSqlite.entries.map((entry) => entry.content), fromReference.entries.map((entry) => entry.content));
   assert.equal(fromSqlite.truncated, fromReference.truncated);
   const listed = await sqlite.list('ava', { limit: 5 });
@@ -95,7 +95,7 @@ test('bounded reads and the byte budget agree with the kernel\'s in-memory store
   for (let index = 0; index < 12; index += 1) {
     await tied.append('ava', `tied fact ${index}`);
   }
-  const recalled = await tied.search('ava', 'tied fact', 12);
+  const recalled = await tied.search('ava', 'tied fact', { limit: 12 });
   assert.deepEqual(recalled.entries.map((entry) => entry.content), Array.from({ length: 12 }, (_, index) => `tied fact ${index}`));
   tied.close();
 });

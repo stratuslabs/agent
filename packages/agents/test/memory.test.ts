@@ -5,7 +5,8 @@ import {
   AgentRunner,
   InMemoryAgentMemoryStore,
   MEMORY_ENTRY_MAX_BYTES,
-  MEMORY_INJECTION_LIMIT,
+  MEMORY_RECENCY_INJECTION_LIMIT,
+  memoryInjectionEntries,
   ToolRegistry,
   renderSystemPrompt,
   type ModelProvider,
@@ -28,8 +29,11 @@ test('memory.recall searches the calling agent’s store; nothing learned yet is
   const recall = createRecallTool(store);
   assert.equal(recall.risk, 'safe');
 
-  const empty = await recall.execute({ query: 'anything at all' }, sessionFor('ava')) as { results: unknown[]; truncated: boolean };
-  assert.deepEqual(empty, { results: [], truncated: false });
+  const empty = await recall.execute({ query: 'anything at all' }, sessionFor('ava')) as { results: unknown[]; truncated: boolean; strategy: string };
+  // The ordering the store served comes back even on an empty result: a
+  // caller cannot tell a store that ranked by relevance from one that fell
+  // back to recency unless every result says which it was.
+  assert.deepEqual(empty, { results: [], truncated: false, strategy: 'recency' });
 
   await store.append('ava', 'the deploy runs from the blue runner');
   await store.append('scout', 'the deploy runs from the red runner');
@@ -67,13 +71,13 @@ test('memory.remember refuses an over-cap fact and stores nothing', async () => 
   assert.deepEqual((await store.list('ava')).entries, []);
 });
 
-test('turn injection is a bounded recent slice, and a forgotten entry never reaches the prompt', async () => {
+test('the recency tail is bounded, and a forgotten entry never reaches the prompt', async () => {
   // A ticking clock: appends in one loop share a real millisecond, and the
   // point here is recency selection, not the tie-break.
   let tick = 0;
   const memory = new InMemoryAgentMemoryStore({ now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, 0, (tick += 1))) });
   const agent = defineAgent({ name: 'Juno Mercer', tools: ['memory.*'] });
-  for (let i = 0; i < MEMORY_INJECTION_LIMIT + 5; i += 1) {
+  for (let i = 0; i < MEMORY_RECENCY_INJECTION_LIMIT + 5; i += 1) {
     await memory.append(agent.id, `numbered fact ${i}`);
   }
   const dropped = await memory.append(agent.id, 'the regrettable fact about pineapples');
@@ -84,7 +88,7 @@ test('turn injection is a bounded recent slice, and a forgotten entry never reac
     name: 'prompt-capture',
     async generate(request: ProviderRequest) {
       prompts.push(renderSystemPrompt(request) ?? '');
-      injected.push((request.memory ?? []).map((entry) => entry.content));
+      injected.push(memoryInjectionEntries(request.memory).map((entry) => entry.content));
       return { parts: [{ type: 'text', text: 'ok' }] };
     },
   };
@@ -95,7 +99,7 @@ test('turn injection is a bounded recent slice, and a forgotten entry never reac
   const runner = new AgentRunner({ provider, tools, memory, agents: createAgentTeam([agent]) });
 
   await runner.run({ sessionId: 's-before', agent, userMessage: 'hi' });
-  assert.equal(injected[0]?.length, MEMORY_INJECTION_LIMIT, 'the prompt carries the bounded slice, not the store');
+  assert.equal(injected[0]?.length, MEMORY_RECENCY_INJECTION_LIMIT, 'the prompt carries the bounded slice, not the store');
   assert.match(prompts[0] ?? '', /pineapples/, 'the newest entry is in the slice');
   assert.ok(!injected[0]?.includes('numbered fact 0'), 'the oldest entries arrive via recall instead');
 
@@ -104,5 +108,5 @@ test('turn injection is a bounded recent slice, and a forgotten entry never reac
   // Asserted against the injected prompt itself, not recall alone — the
   // prompt path is the half a search-only forget would have missed.
   assert.doesNotMatch(prompts[1] ?? '', /pineapples/);
-  assert.equal(injected[1]?.length, MEMORY_INJECTION_LIMIT, 'the slice refills from live entries');
+  assert.equal(injected[1]?.length, MEMORY_RECENCY_INJECTION_LIMIT, 'the slice refills from live entries');
 });

@@ -1079,14 +1079,78 @@ export interface ToolDescriptor {
 }
 
 /**
+ * What sort of thing a fact is. One flat bucket is why a long-lived store
+ * goes noisy: these have different useful lifetimes and different injection
+ * value, and no policy can tell them apart from prose.
+ *
+ * - `semantic` — a fact about the world.
+ * - `episodic` — a thing that happened.
+ * - `procedural` — how something is done.
+ * - `preference` — how the people it works with want things.
+ */
+export type MemoryEntryKind = 'semantic' | 'episodic' | 'procedural' | 'preference';
+
+/** Every kind, in the order the tool description lists them. */
+export const MEMORY_ENTRY_KINDS = ['semantic', 'episodic', 'procedural', 'preference'] as const;
+
+export const isMemoryEntryKind = (value: unknown): value is MemoryEntryKind =>
+  typeof value === 'string' && (MEMORY_ENTRY_KINDS as readonly string[]).includes(value);
+
+/**
  * One remembered fact. Memory is keyed by agent, never by session or
  * channel, so an agent carries the same knowledge everywhere it appears.
+ *
+ * Everything past the first four fields is optional and additive, and that
+ * is a promise rather than an accident: a JSONL line carrying only `id`,
+ * `agentId`, `content`, and `createdAt` still loads, is still recallable,
+ * and still reaches the prompt. A richer shape is the thing most likely to
+ * break the hand-edit promise, so nothing here may ever become required.
  */
 export interface MemoryEntry {
   id: string;
   agentId: string;
   content: string;
   createdAt: string;
+  /** What sort of fact this is — see `MemoryEntryKind`. Absent means nobody said. */
+  kind?: MemoryEntryKind;
+  /**
+   * The entities this fact concerns, as the writer named them. This is what
+   * turns "everything I know about the deploy pipeline" into a lookup rather
+   * than a guess at query terms, and it is what the prompt's topic index is
+   * built from.
+   *
+   * It also *participates in matching*, in every store: an index block that
+   * advertised a topic the search could not find would invite exactly the
+   * query it then missed. `memoryEntryTokens` is where that is written once.
+   */
+  about?: string[];
+  /**
+   * When the fact starts and stops being true — validity time, a different
+   * axis from `createdAt`, which is transaction time. Conflating the two is
+   * why assistants confidently report where someone used to work.
+   *
+   * Both bounds are ISO-8601 instants; `validUntil` is the moment the fact
+   * stops holding, exclusive. Outside the window an entry leaves what is
+   * true now — the pinned core, the topic index, the recency tail — and
+   * stays findable by `search`, marked. That is one rule for both bounds:
+   * a `validFrom` in the future is the same error running the other way,
+   * and an entry that is not true *yet* reaching the prompt would be
+   * presented as true now.
+   */
+  validFrom?: string;
+  validUntil?: string;
+  /**
+   * The id of the entry this one replaces. The successor carries the
+   * retirement itself — one appended record, never a tombstone plus an
+   * entry, because the store's only atomicity is one `O_APPEND` record and
+   * stopping between two of them loses a fact.
+   *
+   * The retirement is scoped to *this* entry's validity window: a successor
+   * dated from next Monday leaves its predecessor standing until then, and
+   * an already-expired successor displaces nothing. See
+   * `supersededMemoryIdsAt`.
+   */
+  supersedes?: string;
   metadata?: JsonObject;
   /**
    * Where the fact came from — the least trusted thing the writing session
@@ -1105,6 +1169,22 @@ export interface MemoryEntry {
    * reading the store, and travels with the entry as ordinary data.
    */
   origin?: MemoryOrigin;
+  /**
+   * How often this entry has been read back, and when last — **derived, and
+   * never part of the record**. These are observations about *reading*, not
+   * facts the agent learned, so they live in whatever index a store keeps
+   * and a store that keeps none simply omits them. The consequence is exact
+   * and is the documented one: deleting the index loses your usage
+   * statistics, never your memories. Ranking may read them; nothing
+   * deletes on them.
+   */
+  usage?: MemoryUsage;
+}
+
+/** See `MemoryEntry.usage`. Counted by the store on each `search` that returns the entry. */
+export interface MemoryUsage {
+  recallCount: number;
+  lastRecalledAt: string;
 }
 
 export interface MemoryOrigin {
@@ -1152,12 +1232,40 @@ export const MEMORY_ENTRY_MAX_BYTES = 4096;
  * several cap-size entries still fit (see `MEMORY_ENTRY_MAX_BYTES`).
  */
 export const MEMORY_READ_MAX_BYTES = 16384;
+/**
+ * The recall tool's name, defined here because the prompt's topic index
+ * tells the agent what to call — a block advertising a tool by a name the
+ * registry does not use would be a dead pointer. `@stratusagent/agents`
+ * builds the tool itself and re-exports this as `RECALL_TOOL_NAME`.
+ */
+export const MEMORY_RECALL_TOOL_NAME = 'memory.recall';
 /** Results a `search` returns when the caller names no limit. */
 export const MEMORY_RECALL_DEFAULT_LIMIT = 10;
 /** Ceiling a `search` limit is clamped to, whatever the caller asked for. */
 export const MEMORY_RECALL_MAX_LIMIT = 50;
-/** How many recent entries the runner injects into the system prompt. */
-export const MEMORY_INJECTION_LIMIT = 20;
+/**
+ * The pinned core's hard cap, in UTF-8 bytes of content. It **refuses
+ * rather than evicts**, on the same reasoning as the per-entry cap: a
+ * pinned set that silently drops its oldest member is a pin that does not
+ * mean anything.
+ */
+export const MEMORY_PINNED_MAX_BYTES = 2048;
+/**
+ * The topic index's budget, in UTF-8 bytes of rendered block. Roughly a
+ * thousand tokens: enough to tell the agent the shape of its own store,
+ * which is what turns `memory.recall` from a guess into a targeted read.
+ */
+export const MEMORY_INDEX_MAX_BYTES = 4096;
+/**
+ * The recency tail — deliberately smaller than the twenty entries that
+ * were the whole of injection before the pinned core and the topic index
+ * existed, so a cold store with nothing pinned and nothing indexed still
+ * behaves roughly as it did, and a warm one spends its budget on the two
+ * blocks that are correlated with what the agent knows.
+ */
+export const MEMORY_RECENCY_INJECTION_LIMIT = 8;
+/** Byte budget for the recency tail, applied like every other bounded read. */
+export const MEMORY_RECENCY_MAX_BYTES = 4096;
 
 const utf8Encoder = new TextEncoder();
 
@@ -1185,17 +1293,143 @@ export const tokenizeMemoryText = (text: string): string[] =>
   text.normalize('NFC').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
 
 /**
- * Whether content matches a tokenized query: every query token must be
- * present as a whole token. A query that tokenized to nothing matches
- * nothing — recall with no searchable terms is a question that was not
- * asked, not a request for everything.
+ * An entry's `about` keys, cleaned the one way every consumer reads them:
+ * trimmed, empty ones dropped, duplicates collapsed case-insensitively
+ * with the first spelling kept. A hand-edited line whose `about` is not an
+ * array of strings contributes nothing rather than throwing — the record
+ * is the operator's to edit, and a bad key is not worth losing a fact over.
  */
-export const memoryQueryMatches = (content: string, queryTokens: readonly string[]): boolean => {
+export const memoryEntryAbout = (entry: Pick<MemoryEntry, 'about'>): string[] => {
+  if (!Array.isArray(entry.about)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const keys: string[] = [];
+  for (const raw of entry.about) {
+    if (typeof raw !== 'string') {
+      continue;
+    }
+    const key = raw.trim();
+    const folded = key.toLowerCase();
+    if (key.length === 0 || seen.has(folded)) {
+      continue;
+    }
+    seen.add(folded);
+    keys.push(key);
+  }
+  return keys;
+};
+
+/**
+ * Everything about an entry a query is matched against: its content and its
+ * `about` keys, through the shared tokenizer.
+ *
+ * `about` participating is the point rather than an edge. An entry reading
+ * "it now uses Postgres" with `about: ["deploy pipeline"]` is listed under
+ * that topic in the prompt's index, and a store matching content alone
+ * would then miss the very query the listing invites — an alias in `about`
+ * against a pronoun in `content` is the case the field exists to serve.
+ * Written once here so the FTS `tokens` column and the in-memory filter
+ * cannot disagree about what a store holds.
+ */
+export const memoryEntryTokens = (entry: Pick<MemoryEntry, 'content' | 'about'>): string[] => [
+  ...tokenizeMemoryText(entry.content),
+  ...memoryEntryAbout(entry).flatMap(tokenizeMemoryText),
+];
+
+/**
+ * Whether an entry matches a tokenized query: every query token must be
+ * present as a whole token of its content or of one of its `about` keys. A
+ * query that tokenized to nothing matches nothing — recall with no
+ * searchable terms is a question that was not asked, not a request for
+ * everything.
+ */
+export const memoryQueryMatches = (
+  entry: Pick<MemoryEntry, 'content' | 'about'>,
+  queryTokens: readonly string[],
+): boolean => {
   if (queryTokens.length === 0) {
     return false;
   }
-  const tokens = new Set(tokenizeMemoryText(content));
+  const tokens = new Set(memoryEntryTokens(entry));
   return queryTokens.every((token) => tokens.has(token));
+};
+
+/**
+ * Where an entry sits relative to its validity window at a given instant.
+ * `current` is the only status that is true *now*; both others leave the
+ * injected slice and stay findable by `search`, marked.
+ */
+export type MemoryValidity = 'current' | 'not-yet-valid' | 'expired';
+
+// A bound that is not a parseable instant is no bound — a hand-edited line
+// reading `validUntil: "soon"` must not quietly retire the fact it is on.
+const validityInstant = (value: string | undefined): number | undefined => {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? undefined : parsed;
+};
+
+/**
+ * One rule, both bounds: a fact holds from `validFrom` (inclusive) until
+ * `validUntil` (exclusive). Pure in the entry and the clock, so both store
+ * implementations compute the same answer from the record alone.
+ */
+export const memoryValidityAt = (
+  entry: Pick<MemoryEntry, 'validFrom' | 'validUntil'>,
+  at: Date,
+): MemoryValidity => {
+  const now = at.getTime();
+  const from = validityInstant(entry.validFrom);
+  if (from !== undefined && now < from) {
+    return 'not-yet-valid';
+  }
+  const until = validityInstant(entry.validUntil);
+  if (until !== undefined && now >= until) {
+    return 'expired';
+  }
+  return 'current';
+};
+
+/** Shorthand for the only status that is true now. */
+export const isMemoryEntryCurrent = (
+  entry: Pick<MemoryEntry, 'validFrom' | 'validUntil'>,
+  at: Date,
+): boolean => memoryValidityAt(entry, at) === 'current';
+
+/**
+ * The ids retired by supersession at a given instant, over one agent's
+ * un-tombstoned entries.
+ *
+ * An entry is retired exactly while a successor of it is *current*, which
+ * is the only reading that keeps supersession and validity from cancelling
+ * each other: a successor dated from next Monday retiring its predecessor
+ * today would leave neither fact available as true now — the old one
+ * retired, the new one excluded as not-yet-valid — so the agent forgets
+ * something it still believes and gains nothing for it.
+ *
+ * Two successors of the same entry both retire it, in either order, and
+ * both stay live. The invariant is the *retirement*, not a unique
+ * replacement: each successor is a fact the agent wrote, and retiring one
+ * to make the other unique would delete a write nobody asked to retract.
+ * Two live successors that disagree are a contradiction in content, which
+ * is the maintenance pass's job and not a storage race.
+ *
+ * Callers pass the agent's un-tombstoned entries, so forgetting a successor
+ * releases the entry it retired — a revision the agent took back leaves the
+ * fact it replaced standing, which is the recoverable direction in a store
+ * whose whole posture is that nothing is lost.
+ */
+export const supersededMemoryIdsAt = (entries: readonly MemoryEntry[], at: Date): Set<string> => {
+  const retired = new Set<string>();
+  for (const entry of entries) {
+    if (typeof entry.supersedes === 'string' && entry.supersedes.length > 0 && isMemoryEntryCurrent(entry, at)) {
+      retired.add(entry.supersedes);
+    }
+  }
+  return retired;
 };
 
 /**
@@ -1220,10 +1454,34 @@ export const compareMemoryChronology = (a: MemoryEntry, b: MemoryEntry): number 
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 };
 
+/**
+ * How a read orders what it found. Named in the request and reported in the
+ * result, rather than frozen in the contract.
+ *
+ * `recency` is mandatory, is the default, and is what the parity tests
+ * assert. `relevance` and `hybrid` are optional: a store that lacks the one
+ * asked for **serves `recency` and says so** rather than erroring, so two
+ * implementations stay honest about ordering without memory being frozen at
+ * clock order forever — and an embeddings-backed store behind a plugin seam
+ * becomes an additive capability rather than a contract break.
+ */
+export type MemoryRankingStrategy = 'recency' | 'relevance' | 'hybrid';
+
+export const MEMORY_RANKING_STRATEGIES = ['recency', 'relevance', 'hybrid'] as const;
+
+export const isMemoryRankingStrategy = (value: unknown): value is MemoryRankingStrategy =>
+  typeof value === 'string' && (MEMORY_RANKING_STRATEGIES as readonly string[]).includes(value);
+
 export interface MemoryReadResult {
   entries: MemoryEntry[];
   /** True when live entries beyond these existed — the entry limit or the byte budget bound, whichever bit first. */
   truncated: boolean;
+  /**
+   * The ordering the store actually applied. Present on a `search`, where
+   * the caller may have asked for one the store does not implement; absent
+   * on `list`, which is chronological by definition.
+   */
+  strategy?: MemoryRankingStrategy;
 }
 
 export interface MemoryListOptions {
@@ -1235,6 +1493,43 @@ export interface MemoryListOptions {
    * feed a model always pass a bound.
    */
   limit?: number;
+  /**
+   * Which entries count as live for this read. `current` — the default,
+   * and what "what is true now" means — drops entries outside their
+   * validity window; `all` keeps them, for the operator views that exist
+   * to show an expired fact *as* expired. Superseded and forgotten entries
+   * are out of both: those are retirements, not calendar questions.
+   */
+  validity?: 'current' | 'all';
+}
+
+export interface MemorySearchOptions {
+  /** Clamped by `clampMemoryRecallLimit`; the store bounds it either way. */
+  limit?: number;
+  /** The ordering asked for. See `MemoryRankingStrategy` — an unsupported one is served as `recency`. */
+  strategy?: MemoryRankingStrategy;
+}
+
+/**
+ * What a writer says about a new entry beyond its text. Every field is
+ * optional, and an `append` that passes none writes exactly the four-field
+ * line an older build would have written.
+ */
+export interface MemoryAppendOptions {
+  metadata?: JsonObject;
+  provenance?: MemoryProvenance;
+  kind?: MemoryEntryKind;
+  about?: string[];
+  validFrom?: string;
+  validUntil?: string;
+  /**
+   * The entry this one replaces. The store resolves it against the
+   * caller's **own** live entries before anything is appended and throws
+   * otherwise: the record lane is shared across agents, and a writer that
+   * skipped the check would let one agent retire another's memory by
+   * naming its id.
+   */
+  supersedes?: string;
 }
 
 /** Clamp a caller-chosen search limit into the store's own bounds. */
@@ -1300,6 +1595,257 @@ export const boundMemoryList = (candidates: readonly MemoryEntry[], limit: numbe
 };
 
 /**
+ * What the pin write path decides, and the sentence it says when it
+ * refuses. Split out because the refusal has to name the cap — an operator
+ * who cannot see why a pin bounced will assume it worked.
+ */
+export interface MemoryPinOutcome {
+  pinned: boolean;
+  /** Present when `pinned` is false: what happened, as a full sentence. */
+  reason?: string;
+  /** Content bytes the effective pinned set holds after this call. */
+  bytes: number;
+}
+
+/**
+ * The pinned set the record produces, and the rule both stores replay it
+ * by: **pins take effect in the order their records appear in the file,
+ * until the cap, and the remainder are recorded but inert.**
+ *
+ * The write path refusing an over-cap pin is the common case and stays the
+ * rule. This is for the race it cannot see: the CLI and the daemon build
+ * separate stores over the same file and coordinate by `O_APPEND` alone, so
+ * two processes pinning near the limit can both read the same total, both
+ * accept, and both append. Replay gives them one effective set instead of
+ * an injected slice that either overruns its budget or drops a pin by
+ * whichever order it happened to read.
+ *
+ * **Append order, not `(createdAt, id)`.** A timestamp is the wrong key for
+ * a budget: a pin written later with a skewed-earlier clock would sort
+ * ahead of a pin that is already effective and consume the budget out from
+ * under it, making an accepted pin inert after the fact and contradicting
+ * the refusal the cap promises. `O_APPEND` already supplies a total order
+ * no later writer can insert itself into. Recall ordering keeps its
+ * `(createdAt, id)` rule — presenting facts newest-first is about meaning,
+ * allocating a scarce budget is about arrival.
+ *
+ * Validity is deliberately *not* consulted here. The budget is a property
+ * of the record, so it must not change when a clock ticks past a
+ * `validUntil`; an out-of-window pin holds its place and is dropped from
+ * the rendered core by `selectMemoryInjection`, which is where "true now"
+ * is decided.
+ */
+export const applyMemoryPinBudget = (
+  pinnedIds: readonly string[],
+  contentBytesFor: (id: string) => number | undefined,
+  maxBytes: number = MEMORY_PINNED_MAX_BYTES,
+): { effective: string[]; inert: string[]; bytes: number } => {
+  const effective: string[] = [];
+  const inert: string[] = [];
+  let bytes = 0;
+  for (const id of pinnedIds) {
+    const size = contentBytesFor(id);
+    if (size === undefined) {
+      // The entry is gone from the live set — forgotten, or never there.
+      // Its pin record stands in the file and costs nothing.
+      continue;
+    }
+    if (inert.length > 0 || bytes + size > maxBytes) {
+      // Once one pin overruns, everything behind it is inert too: "the
+      // remainder" is a prefix rule, so an effective set never depends on
+      // how large the *next* pin happens to be.
+      inert.push(id);
+      continue;
+    }
+    effective.push(id);
+    bytes += size;
+  }
+  return { effective, inert, bytes };
+};
+
+/** One line of the prompt's topic index: what the agent knows about, and how much. */
+export interface MemoryTopic {
+  /** The `about` key, in the spelling the first entry to use it wrote. */
+  name: string;
+  count: number;
+  /** The newest `createdAt` among the entries filed under it. */
+  lastUpdatedAt: string;
+  /**
+   * The least trusted label among those entries. The topic index is a view
+   * derived from entries, so it renders under the labelling invariant like
+   * every other one: an entity name an `external` entry supplied must not
+   * appear under the heading for the agent's own conclusions.
+   */
+  trust: TrustLevel;
+}
+
+/**
+ * The topic index, built from `about` keys over the entries a store holds:
+ * not facts, but what the agent *knows about*. Counts and last-updated,
+ * ordered by count descending then name, so the block is stable across
+ * turns and the biggest topics survive the budget.
+ *
+ * Shared rather than per-store for the usual reason: two implementations
+ * building this differently would advertise different stores over the same
+ * record.
+ */
+export const collectMemoryTopics = (entries: readonly MemoryEntry[]): MemoryTopic[] => {
+  const topics = new Map<string, MemoryTopic>();
+  for (const entry of entries) {
+    const trust = memoryEntryTrust(entry);
+    for (const key of memoryEntryAbout(entry)) {
+      const folded = key.toLowerCase();
+      const existing = topics.get(folded);
+      if (existing === undefined) {
+        topics.set(folded, { name: key, count: 1, lastUpdatedAt: entry.createdAt, trust });
+        continue;
+      }
+      existing.count += 1;
+      if (entry.createdAt > existing.lastUpdatedAt) {
+        existing.lastUpdatedAt = entry.createdAt;
+      }
+      existing.trust = leastTrusted(existing.trust, trust);
+    }
+  }
+  return [...topics.values()].sort((a, b) =>
+    b.count !== a.count ? b.count - a.count : a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+};
+
+/**
+ * Two topic lists over disjoint entries, as one. Counts add, the newest
+ * `lastUpdatedAt` wins, and trust combines downward — the same answers
+ * `collectMemoryTopics` would have given over the union, which is the
+ * property that matters: a host merging two stores must not advertise a
+ * different shape from one that read them together.
+ */
+export const mergeMemoryTopics = (...lists: readonly (readonly MemoryTopic[])[]): MemoryTopic[] => {
+  const merged = new Map<string, MemoryTopic>();
+  for (const list of lists) {
+    for (const topic of list) {
+      const folded = topic.name.toLowerCase();
+      const existing = merged.get(folded);
+      if (existing === undefined) {
+        merged.set(folded, { ...topic });
+        continue;
+      }
+      existing.count += topic.count;
+      if (topic.lastUpdatedAt > existing.lastUpdatedAt) {
+        existing.lastUpdatedAt = topic.lastUpdatedAt;
+      }
+      existing.trust = leastTrusted(existing.trust, topic.trust);
+    }
+  }
+  return [...merged.values()].sort((a, b) =>
+    b.count !== a.count ? b.count - a.count : a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+};
+
+/**
+ * The three bounded blocks a turn injects, in place of the one recency
+ * slice memory used to send.
+ *
+ * They are three blocks *within* one `memory` section, never three sections
+ * of their own — an adapter that places the volatile section separately
+ * finds it by kind, so siblings sharing the kind would move one and drop
+ * the rest of the request on the floor.
+ */
+export interface MemoryInjection {
+  /**
+   * Always present when anything is pinned, hard-capped at
+   * `MEMORY_PINNED_MAX_BYTES`. This is what makes an agent still know the
+   * basics after a year with no search at all.
+   */
+  pinned: MemoryEntry[];
+  /** What the agent knows about — the block that turns `memory.recall` from a guess into a targeted read. */
+  topics: MemoryTopic[];
+  /** The recency tail, so a cold store with nothing pinned behaves as it did before. */
+  recent: MemoryEntry[];
+}
+
+/** Empty in all three blocks — what a host with no memory store injects. */
+export const emptyMemoryInjection = (): MemoryInjection => ({ pinned: [], topics: [], recent: [] });
+
+// A topic line is its name plus roughly `- name (4 facts, last 2026-03-01)`.
+// Budgeting the name plus a flat allowance keeps the bound a pure function
+// of the topic rather than of the renderer's current wording.
+const TOPIC_LINE_OVERHEAD_BYTES = 40;
+
+/**
+ * Bound the three blocks against their budgets and keep them disjoint: a
+ * pinned fact already in context is not worth a second copy in the tail,
+ * and the tail is the block that shrinks, never the pinned core. The
+ * pinned set is never pushed out by volume — that is the whole reason it
+ * is a separate budget rather than a ranking bonus.
+ */
+export const selectMemoryInjection = (input: {
+  pinned: readonly MemoryEntry[];
+  topics: readonly MemoryTopic[];
+  recent: readonly MemoryEntry[];
+}): MemoryInjection => {
+  const pinned = boundMemoryRead([...input.pinned], input.pinned.length, MEMORY_PINNED_MAX_BYTES)
+    .entries.sort(compareMemoryChronology);
+  const pinnedIds = new Set(pinned.map((entry) => entry.id));
+  const recent = boundMemoryList(
+    input.recent.filter((entry) => !pinnedIds.has(entry.id)),
+    MEMORY_RECENCY_INJECTION_LIMIT,
+  ).entries;
+  const topics: MemoryTopic[] = [];
+  let topicBytes = 0;
+  for (const topic of input.topics) {
+    const size = memoryContentByteLength(topic.name) + TOPIC_LINE_OVERHEAD_BYTES;
+    if (topicBytes + size > MEMORY_INDEX_MAX_BYTES) {
+      break;
+    }
+    topics.push(topic);
+    topicBytes += size;
+  }
+  return { pinned, topics, recent };
+};
+
+/**
+ * Read the three blocks out of a store. The policy — what counts as
+ * current, what the budgets are, which block a fact lands in — lives in
+ * `selectMemoryInjection` and the store's own `list`, so a store that
+ * implements none of the optional methods still injects a recency tail and
+ * nothing is special-cased at the call site.
+ */
+export const buildMemoryInjection = async (
+  store: AgentMemoryStore,
+  agentId: string,
+): Promise<MemoryInjection> => {
+  const [pinned, topics, recent] = await Promise.all([
+    store.pinned ? store.pinned(agentId) : Promise.resolve([]),
+    store.topics ? store.topics(agentId) : Promise.resolve([]),
+    store.list(agentId, { limit: MEMORY_RECENCY_INJECTION_LIMIT }).then((result) => result.entries),
+  ]);
+  return selectMemoryInjection({ pinned, topics, recent });
+};
+
+/**
+ * The three blocks as a request may carry them: a bare array is the recency
+ * tail alone, which is what `memory` meant before pinning and the topic
+ * index existed and is still what a host building a request by hand may
+ * pass.
+ */
+export const asMemoryInjection = (
+  memory: readonly MemoryEntry[] | MemoryInjection | undefined,
+): MemoryInjection => {
+  if (memory === undefined) {
+    return emptyMemoryInjection();
+  }
+  return Array.isArray(memory)
+    ? { pinned: [], topics: [], recent: [...memory] }
+    : (memory as MemoryInjection);
+};
+
+/** Every entry a turn injects, in the order they reach the prompt — what taints the session. */
+export const memoryInjectionEntries = (
+  injection: readonly MemoryEntry[] | MemoryInjection | undefined,
+): MemoryEntry[] => {
+  const blocks = asMemoryInjection(injection);
+  return [...blocks.pinned, ...blocks.recent];
+};
+
+/**
  * Durable, searchable memory an agent writes and reads deliberately. The
  * per-agent key is the access boundary — every method takes the agent id the
  * caller resolved from the session, never one captured at startup.
@@ -1318,19 +1864,30 @@ export const boundMemoryList = (candidates: readonly MemoryEntry[], limit: numbe
  *   `MEMORY_READ_MAX_BYTES` when a limit is in play; `forget` tombstones
  *   rather than deletes, and `audit` is where tombstoned entries remain
  *   visible to an operator.
+ * - An entry is **not live** when a tombstone retires it or a *current*
+ *   successor supersedes it (`supersededMemoryIdsAt`). An entry outside its
+ *   validity window is a different thing: still live, out of `list` by
+ *   default because it is not true now, and still found by `search` — where
+ *   the caller reads its status with `memoryValidityAt`.
  */
 export interface AgentMemoryStore {
   /**
    * Refuses content over `MEMORY_ENTRY_MAX_BYTES` rather than truncating it.
-   * `provenance` is what the writer knows about where the fact came from;
-   * an append without one stores an entry that reads as `unknown`, which
-   * is the honest label for a writer that did not say.
+   * `options.provenance` is what the writer knows about where the fact came
+   * from; an append without one stores an entry that reads as `unknown`,
+   * which is the honest label for a writer that did not say. Throws when
+   * `options.supersedes` names an id that is not a live entry of this agent.
    */
-  append(agentId: string, content: string, metadata?: JsonObject, provenance?: MemoryProvenance): Promise<MemoryEntry>;
-  /** Live entries, oldest first. See `MemoryListOptions` for the bounded form. */
+  append(agentId: string, content: string, options?: MemoryAppendOptions): Promise<MemoryEntry>;
+  /** Live entries, oldest first. See `MemoryListOptions` for the bounded and the out-of-window forms. */
   list(agentId: string, options?: MemoryListOptions): Promise<MemoryReadResult>;
-  /** Live entries matching the literal query, newest first, bounded. */
-  search(agentId: string, query: string, limit?: number): Promise<MemoryReadResult>;
+  /**
+   * Live entries matching the literal query, newest first, bounded —
+   * entries outside their validity window included, because keeping an
+   * expired fact findable is the point of separating validity from
+   * supersession. Matching covers content and `about` keys alike.
+   */
+  search(agentId: string, query: string, options?: MemorySearchOptions): Promise<MemoryReadResult>;
   /** Tombstones a live entry. False when no live entry of this agent has that id. */
   forget(agentId: string, entryId: string): Promise<boolean>;
   /** The operator's audit read: every entry, tombstoned included, oldest first. */
@@ -1347,30 +1904,162 @@ export interface AgentMemoryStore {
    * operator has no way out of `unknown` but rewriting the record.
    */
   reassertTrust?(agentId: string, entryId: string, trust: TrustLevel): Promise<boolean>;
+  /**
+   * Pin a live entry into the core the prompt always carries. Refuses over
+   * `MEMORY_PINNED_MAX_BYTES` naming the cap, and **never evicts**: a
+   * pinned set that silently drops its oldest member is a pin that does not
+   * mean anything. Like `supersedes`, it resolves the id against the
+   * caller's own live entries before recording anything.
+   *
+   * Optional: a host whose store omits it gets no pinned core — injection
+   * falls back to the topic index and the recency tail, which is what
+   * memory did before pinning existed.
+   */
+  pin?(agentId: string, entryId: string): Promise<MemoryPinOutcome>;
+  /** Undo a pin. False when this agent has no effective pin on that id. */
+  unpin?(agentId: string, entryId: string): Promise<boolean>;
+  /** The effective pinned set, oldest first. See `applyMemoryPinBudget` for what "effective" means. */
+  pinned?(agentId: string): Promise<MemoryEntry[]>;
+  /**
+   * What the agent knows *about*, from the `about` keys of everything true
+   * now. Built with `collectMemoryTopics` so no two stores can advertise
+   * the same record differently.
+   *
+   * Optional: a host whose store omits it gets no topic index, and its
+   * agent is back to guessing query terms.
+   */
+  topics?(agentId: string): Promise<MemoryTopic[]>;
+  /**
+   * Append entries verbatim — ids, timestamps, kinds, validity and all —
+   * under this agent's key. The operator's import path and the eval
+   * harness's corpus loader; no tool reaches it, because an agent able to
+   * choose its own entry ids could name one another record already refers
+   * to.
+   *
+   * Entries whose id the agent already holds are skipped rather than
+   * duplicated, so a re-run of an import is a no-op rather than a second
+   * copy of everything.
+   */
+  importEntries?(agentId: string, entries: readonly MemoryEntry[]): Promise<MemoryImportResult>;
 }
+
+/** What an import did: what landed, and what was already there. */
+export interface MemoryImportResult {
+  imported: number;
+  /** Ids skipped because this agent already holds an entry with that id. */
+  skipped: string[];
+}
+
+/**
+ * The refusal an over-cap pin says, naming the cap. An operator who cannot
+ * see why a pin bounced will assume it worked, which is the failure the
+ * refuse-never-evict rule exists to avoid in the first place.
+ */
+export const pinnedCapRefusal = (heldBytes: number, wantedBytes: number): string =>
+  `The pinned core is capped at ${MEMORY_PINNED_MAX_BYTES} UTF-8 bytes and holds ${heldBytes}; `
+  + `this entry needs ${wantedBytes}. Nothing was pinned and nothing was dropped — unpin something first.`;
+
+/**
+ * The write-path half of the per-agent boundary, shared by every store: an
+ * id a new record names must resolve to a live entry the caller owns
+ * *before* anything is appended.
+ *
+ * This is a security requirement rather than input hygiene. A store's
+ * forgotten set is computed from the record without an agent filter, so a
+ * writer that skipped this would let agent A retire agent B's memory by
+ * naming its id — gone from B's `list`, its `search`, and its prompt, with
+ * B's own `forget` never called.
+ */
+export const assertSupersedableMemoryEntry = (live: readonly MemoryEntry[], entryId: string): void => {
+  if (!live.some((entry) => entry.id === entryId)) {
+    throw new Error(
+      `No live memory entry with id ${entryId} belongs to this agent, so nothing was superseded and nothing was stored. `
+      + 'memory.recall shows the ids you can supersede.',
+    );
+  }
+};
+
+/**
+ * An entry's optional fields as they are safe to read back from a record
+ * nobody validated — a hand-edited line, an imported file, a newer build's
+ * output. A field of the wrong shape is dropped rather than thrown over:
+ * the record is the operator's to edit, and a bad `about` is not worth
+ * losing a fact for. Written once so the file store's parser and the import
+ * path cannot disagree about what a line means.
+ */
+export const memoryEntryFields = (
+  value: Pick<MemoryEntry, 'kind' | 'about' | 'validFrom' | 'validUntil' | 'supersedes'>,
+): Pick<MemoryEntry, 'kind' | 'about' | 'validFrom' | 'validUntil' | 'supersedes'> => {
+  const raw = value as Record<string, unknown>;
+  const about = memoryEntryAbout(value);
+  return {
+    ...(isMemoryEntryKind(raw.kind) ? { kind: raw.kind } : {}),
+    ...(about.length > 0 ? { about } : {}),
+    ...(typeof raw.validFrom === 'string' ? { validFrom: raw.validFrom } : {}),
+    ...(typeof raw.validUntil === 'string' ? { validUntil: raw.validUntil } : {}),
+    ...(typeof raw.supersedes === 'string' && raw.supersedes.length > 0 ? { supersedes: raw.supersedes } : {}),
+  };
+};
+
+/**
+ * One entry as an import should store it: re-keyed to the importing agent,
+ * optional fields validated, and `usage` dropped — usage is an observation
+ * about reading this install did, never something a file carries in.
+ */
+export const importableMemoryEntry = (entry: MemoryEntry, agentId: string): MemoryEntry => ({
+  id: entry.id,
+  agentId,
+  content: entry.content,
+  createdAt: entry.createdAt,
+  ...memoryEntryFields(entry),
+  ...(entry.metadata ? { metadata: entry.metadata } : {}),
+  ...(isTrustLevel(entry.trust) ? { trust: entry.trust } : {}),
+  ...(entry.origin ? { origin: entry.origin } : {}),
+});
 
 export class InMemoryAgentMemoryStore implements AgentMemoryStore {
   private entries = new Map<string, MemoryAuditEntry[]>();
+  /**
+   * The pin lane, per agent, in append order — the same total order the
+   * file store gets from `O_APPEND`, and for the same reason: a budget is
+   * allocated by arrival, never by timestamp. A pin already held is not
+   * re-appended, so re-pinning cannot move an entry to the back.
+   */
+  private pins = new Map<string, string[]>();
+  private usage = new Map<string, MemoryUsage>();
   private counter = 0;
   private readonly now: () => Date;
 
   // `now` is a test seam: the ordering tie-break only shows itself when two
-  // entries share a createdAt, which a real clock makes non-deterministic.
+  // entries share a createdAt, which a real clock makes non-deterministic —
+  // and so does anything asserting a validity window against a fixed date.
   constructor(options: { now?: () => Date } = {}) {
     this.now = options.now ?? (() => new Date());
   }
 
-  async append(agentId: string, content: string, metadata?: JsonObject, provenance?: MemoryProvenance): Promise<MemoryEntry> {
+  async append(agentId: string, content: string, options: MemoryAppendOptions = {}): Promise<MemoryEntry> {
     assertMemoryContentWithinCap(content);
+    // Resolved against this agent's own live set before anything is
+    // recorded: the per-agent boundary is the access model the whole store
+    // rests on, and a successor naming a stranger's id would retire it.
+    if (options.supersedes !== undefined) {
+      assertSupersedableMemoryEntry(this.live(agentId, this.now()), options.supersedes);
+    }
+    const about = memoryEntryAbout(options);
     this.counter += 1;
     const entry: MemoryAuditEntry = {
       id: `${agentId}:memory:${this.counter}`,
       agentId,
       content,
       createdAt: this.now().toISOString(),
-      ...(metadata ? { metadata } : {}),
-      ...(provenance ? { trust: provenance.trust } : {}),
-      ...(provenance?.origin ? { origin: provenance.origin } : {}),
+      ...(options.kind !== undefined ? { kind: options.kind } : {}),
+      ...(about.length > 0 ? { about } : {}),
+      ...(options.validFrom !== undefined ? { validFrom: options.validFrom } : {}),
+      ...(options.validUntil !== undefined ? { validUntil: options.validUntil } : {}),
+      ...(options.supersedes !== undefined ? { supersedes: options.supersedes } : {}),
+      ...(options.metadata ? { metadata: options.metadata } : {}),
+      ...(options.provenance ? { trust: options.provenance.trust } : {}),
+      ...(options.provenance?.origin ? { origin: options.provenance.origin } : {}),
     };
     const existing = this.entries.get(agentId) ?? [];
     existing.push(entry);
@@ -1378,27 +2067,56 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     return { ...entry };
   }
 
-  private live(agentId: string): MemoryEntry[] {
-    return (this.entries.get(agentId) ?? [])
+  /** Not tombstoned and not superseded by a successor that is current at `at`. */
+  private live(agentId: string, at: Date): MemoryEntry[] {
+    const kept = (this.entries.get(agentId) ?? [])
       .filter((entry) => entry.forgottenAt === undefined)
       .map(({ forgottenAt: _unused, ...entry }) => entry);
+    const superseded = supersededMemoryIdsAt(kept, at);
+    return kept
+      .filter((entry) => !superseded.has(entry.id))
+      .map((entry) => this.withUsage(entry));
+  }
+
+  private withUsage(entry: MemoryEntry): MemoryEntry {
+    const usage = this.usage.get(entry.id);
+    return usage ? { ...entry, usage: { ...usage } } : entry;
   }
 
   async list(agentId: string, options: MemoryListOptions = {}): Promise<MemoryReadResult> {
-    const live = this.live(agentId);
+    const at = this.now();
+    const live = options.validity === 'all'
+      ? this.live(agentId, at)
+      : this.live(agentId, at).filter((entry) => isMemoryEntryCurrent(entry, at));
     if (options.limit === undefined) {
       return { entries: live.sort(compareMemoryChronology), truncated: false };
     }
     return boundMemoryList(live, options.limit);
   }
 
-  async search(agentId: string, query: string, limit?: number): Promise<MemoryReadResult> {
+  async search(agentId: string, query: string, options: MemorySearchOptions = {}): Promise<MemoryReadResult> {
     const tokens = tokenizeMemoryText(query);
+    // `recency` is the only ordering this store implements; a caller asking
+    // for another gets it, and is told so, rather than an error.
+    const strategy: MemoryRankingStrategy = 'recency';
     if (tokens.length === 0) {
-      return { entries: [], truncated: false };
+      return { entries: [], truncated: false, strategy };
     }
-    const matches = this.live(agentId).filter((entry) => memoryQueryMatches(entry.content, tokens));
-    return boundMemoryRead(matches, clampMemoryRecallLimit(limit));
+    const matches = this.live(agentId, this.now()).filter((entry) => memoryQueryMatches(entry, tokens));
+    const bounded = boundMemoryRead(matches, clampMemoryRecallLimit(options.limit));
+    this.noteRecalled(bounded.entries);
+    return { ...bounded, strategy };
+  }
+
+  // Usage counters are an observation about reading, not a fact the agent
+  // learned: they live beside the record here the way they live in the file
+  // store's index, and nothing ranks or deletes on them yet.
+  private noteRecalled(entries: readonly MemoryEntry[]): void {
+    const at = this.now().toISOString();
+    for (const entry of entries) {
+      const previous = this.usage.get(entry.id);
+      this.usage.set(entry.id, { recallCount: (previous?.recallCount ?? 0) + 1, lastRecalledAt: at });
+    }
   }
 
   async forget(agentId: string, entryId: string): Promise<boolean> {
@@ -1425,6 +2143,73 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     }
     entry.trust = trust;
     return true;
+  }
+
+  private pinBudget(agentId: string): { effective: string[]; bytes: number; live: Map<string, MemoryEntry> } {
+    const live = new Map(this.live(agentId, this.now()).map((entry) => [entry.id, entry]));
+    const budget = applyMemoryPinBudget(
+      this.pins.get(agentId) ?? [],
+      (id) => (live.has(id) ? memoryContentByteLength(live.get(id)!.content) : undefined),
+    );
+    return { effective: budget.effective, bytes: budget.bytes, live };
+  }
+
+  async pin(agentId: string, entryId: string): Promise<MemoryPinOutcome> {
+    const { effective, bytes, live } = this.pinBudget(agentId);
+    const entry = live.get(entryId);
+    if (!entry) {
+      throw new Error(`No live memory entry with id ${entryId} belongs to this agent — nothing was pinned.`);
+    }
+    if (effective.includes(entryId)) {
+      return { pinned: true, bytes };
+    }
+    const size = memoryContentByteLength(entry.content);
+    if (bytes + size > MEMORY_PINNED_MAX_BYTES) {
+      return { pinned: false, reason: pinnedCapRefusal(bytes, size), bytes };
+    }
+    this.pins.set(agentId, [...(this.pins.get(agentId) ?? []), entryId]);
+    return { pinned: true, bytes: bytes + size };
+  }
+
+  async unpin(agentId: string, entryId: string): Promise<boolean> {
+    const pins = this.pins.get(agentId) ?? [];
+    if (!pins.includes(entryId)) {
+      return false;
+    }
+    this.pins.set(agentId, pins.filter((id) => id !== entryId));
+    return true;
+  }
+
+  async pinned(agentId: string): Promise<MemoryEntry[]> {
+    const at = this.now();
+    const { effective, live } = this.pinBudget(agentId);
+    return effective
+      .map((id) => live.get(id))
+      .filter((entry): entry is MemoryEntry => entry !== undefined && isMemoryEntryCurrent(entry, at))
+      .sort(compareMemoryChronology);
+  }
+
+  async topics(agentId: string): Promise<MemoryTopic[]> {
+    const at = this.now();
+    return collectMemoryTopics(this.live(agentId, at).filter((entry) => isMemoryEntryCurrent(entry, at)));
+  }
+
+  async importEntries(agentId: string, entries: readonly MemoryEntry[]): Promise<MemoryImportResult> {
+    const existing = this.entries.get(agentId) ?? [];
+    const held = new Set(existing.map((entry) => entry.id));
+    const skipped: string[] = [];
+    let imported = 0;
+    for (const entry of entries) {
+      if (held.has(entry.id)) {
+        skipped.push(entry.id);
+        continue;
+      }
+      held.add(entry.id);
+      existing.push({ ...importableMemoryEntry(entry, agentId) });
+      imported += 1;
+    }
+    this.entries.set(agentId, existing);
+    return { imported, skipped };
   }
 }
 
@@ -1614,8 +2399,13 @@ export const totalTokenUsage = (records: readonly TokenUsage[]): TokenUsage | un
 export interface ProviderRequest {
   session: Session;
   tools?: ToolDescriptor[];
-  /** Agent-scoped long-term memory, newest last. */
-  memory?: MemoryEntry[];
+  /**
+   * Agent-scoped long-term memory as the turn injects it: the pinned core,
+   * the topic index, and the recency tail. A bare array is the tail alone —
+   * what `memory` meant before the three blocks existed, and still what a
+   * host building a request by hand may pass.
+   */
+  memory?: MemoryEntry[] | MemoryInjection;
   /**
    * The skills enabled for this agent — descriptors only, one prompt line
    * each. Bodies never travel here; they arrive through `skill.read` when
@@ -2495,15 +3285,19 @@ export class ChannelRegistry {
  * memory tools are built before any plugin has loaded, so the store they
  * hold has to be one that can change its mind — and an agent-by-agent
  * answer is what keeps a contributed store from being process-global.
- * `reassertTrust` is forwarded only when the chosen store has it: a store
- * that omitted it cannot be re-asserted, and this must not claim otherwise.
+ * Every optional method is forwarded only when the chosen store has it: a
+ * store that omitted one cannot do that thing, and this must not claim
+ * otherwise. The routed store declares them all, because which store
+ * serves an agent is not known until the call — so the honest answer for a
+ * store that lacks one is the same answer the seam's own default gives
+ * (nothing pinned, no topics, no re-assertion).
  */
 export const createRoutedMemoryStore = (
   storeFor: (agentId: string) => AgentMemoryStore,
 ): AgentMemoryStore => ({
-  append: (agentId, content, metadata, provenance) => storeFor(agentId).append(agentId, content, metadata, provenance),
+  append: (agentId, content, options) => storeFor(agentId).append(agentId, content, options),
   list: (agentId, options) => storeFor(agentId).list(agentId, options),
-  search: (agentId, query, limit) => storeFor(agentId).search(agentId, query, limit),
+  search: (agentId, query, options) => storeFor(agentId).search(agentId, query, options),
   forget: (agentId, entryId) => storeFor(agentId).forget(agentId, entryId),
   audit: (agentId) => storeFor(agentId).audit(agentId),
   async reassertTrust(agentId, entryId, trust) {
@@ -2512,6 +3306,32 @@ export const createRoutedMemoryStore = (
       return false;
     }
     return store.reassertTrust(agentId, entryId, trust);
+  },
+  async pin(agentId, entryId) {
+    const store = storeFor(agentId);
+    if (!store.pin) {
+      return { pinned: false, reason: 'This memory store does not support pinning.', bytes: 0 };
+    }
+    return store.pin(agentId, entryId);
+  },
+  async unpin(agentId, entryId) {
+    const store = storeFor(agentId);
+    return store.unpin ? store.unpin(agentId, entryId) : false;
+  },
+  async pinned(agentId) {
+    const store = storeFor(agentId);
+    return store.pinned ? store.pinned(agentId) : [];
+  },
+  async topics(agentId) {
+    const store = storeFor(agentId);
+    return store.topics ? store.topics(agentId) : [];
+  },
+  async importEntries(agentId, entries) {
+    const store = storeFor(agentId);
+    if (!store.importEntries) {
+      throw new Error('This memory store cannot import entries.');
+    }
+    return store.importEntries(agentId, entries);
   },
 });
 
@@ -2991,17 +3811,6 @@ export const memoryRegionHeading = (trust: TrustLevel): string => {
 };
 
 /**
- * The memory block, one region per trust label present, most trusted
- * first, entries in the order given within each.
- *
- * The invariant this enforces: nothing in the prompt derived from an entry
- * renders under a higher label than that entry carries. Stated over the
- * whole ordering rather than over `external` alone, because `unknown`
- * stopped being only a legacy artifact the moment an unauthorized sender's
- * message started producing it. An entry with no label renders in the
- * `unknown` region — never as the agent's own conclusion.
- */
-/**
  * Unicode's `Bidi_Control` property as a character-class fragment: the
  * marks, the Arabic letter mark, the embeddings and overrides, and the
  * isolates. Exported so every escaper spells out the same set — text that
@@ -3033,24 +3842,86 @@ export const escapeControlCharacters = (text: string): string =>
     }
   });
 
-export const renderMemorySection = (memory: readonly MemoryEntry[] | undefined): string | undefined => {
-  if (!memory || memory.length === 0) {
-    return undefined;
-  }
+/**
+ * A run of lines grouped one region per trust label present, most trusted
+ * first, in the order given within each.
+ *
+ * The invariant this enforces: nothing in the prompt derived from an entry
+ * renders under a higher label than that entry carries. Stated over the
+ * whole ordering rather than over `external` alone, because `unknown`
+ * stopped being only a legacy artifact the moment an unauthorized sender's
+ * message started producing it. An entry with no label renders in the
+ * `unknown` region — never as the agent's own conclusion. It applies to the
+ * topic index as much as to facts: an entity name an `external` entry
+ * supplied is still a stranger's words.
+ */
+const renderTrustRegions = <T>(
+  items: readonly T[],
+  trustOf: (item: T) => TrustLevel,
+  lineOf: (item: T) => string,
+): string[] => {
   const regions: string[] = [];
   for (const trust of TRUST_LEVELS) {
-    const entries = memory.filter((entry) => memoryEntryTrust(entry) === trust);
-    if (entries.length === 0) {
+    const matching = items.filter((item) => trustOf(item) === trust);
+    if (matching.length === 0) {
       continue;
     }
-    // One line per fact, so the region a fact sits under is the region it
+    // One line per item, so the region a fact sits under is the region it
     // was filed under: a page's text that ends in a newline and a copy of
     // the operator's heading would otherwise open a forged trusted region
     // inside the external one.
-    const facts = entries.map((entry) => `- ${escapeControlCharacters(entry.content)}`).join('\n');
-    regions.push(`${memoryRegionHeading(trust)}\n${facts}`);
+    regions.push(`${memoryRegionHeading(trust)}\n${matching.map(lineOf).join('\n')}`);
   }
-  return regions.join('\n\n');
+  return regions;
+};
+
+/** What the pinned core and the topic index say they are, before their regions. */
+const MEMORY_PINNED_INTRO = 'Kept in front of you on purpose — the facts you or your operator pinned:';
+const MEMORY_INDEX_INTRO = `What your long-term memory holds, by topic — a count and when each last changed, not the facts themselves. Use ${MEMORY_RECALL_TOOL_NAME} with a topic name to read them:`;
+const MEMORY_RECENT_INTRO = 'Recently remembered:';
+
+const renderMemoryTopicLine = (topic: MemoryTopic): string =>
+  `- ${escapeControlCharacters(topic.name)} (${topic.count} fact${topic.count === 1 ? '' : 's'}, last ${topic.lastUpdatedAt.slice(0, 10)})`;
+
+/**
+ * The memory block: the pinned core, the topic index, and the recency tail,
+ * each grouped into trust regions, joined into **one** section.
+ *
+ * One section rather than three is a requirement rather than a formatting
+ * preference. An adapter that places the volatile section separately finds
+ * it with `parts.find((part) => part.kind === 'memory')` and strips it with
+ * the matching filter, so three sections sharing the kind would send the
+ * first to the tail and drop the other two from the request entirely —
+ * and three new kinds would leave them on the cached prefix, which is
+ * exactly what memory was moved off.
+ *
+ * A bare array is accepted and read as the recency tail alone: that is what
+ * `memory` meant before the three blocks existed, and a provider test or a
+ * host building a request by hand should not have to know about pinning.
+ */
+export const renderMemorySection = (
+  memory: readonly MemoryEntry[] | MemoryInjection | undefined,
+): string | undefined => {
+  if (memory === undefined) {
+    return undefined;
+  }
+  const injection = asMemoryInjection(memory);
+  const blocks: string[] = [];
+  const fact = (entry: MemoryEntry): string => `- ${escapeControlCharacters(entry.content)}`;
+  const push = (intro: string, regions: string[]): void => {
+    if (regions.length > 0) {
+      blocks.push(`${intro}\n\n${regions.join('\n\n')}`);
+    }
+  };
+  push(MEMORY_PINNED_INTRO, renderTrustRegions(injection.pinned, memoryEntryTrust, fact));
+  push(MEMORY_INDEX_INTRO, renderTrustRegions(injection.topics, (topic) => topic.trust, renderMemoryTopicLine));
+  // The tail keeps the bare heading it has always had when it is the only
+  // block, so a cold store's prompt reads exactly as it did before.
+  if (injection.recent.length > 0) {
+    const regions = renderTrustRegions(injection.recent, memoryEntryTrust, fact);
+    blocks.push(blocks.length === 0 ? regions.join('\n\n') : `${MEMORY_RECENT_INTRO}\n\n${regions.join('\n\n')}`);
+  }
+  return blocks.length > 0 ? blocks.join('\n\n') : undefined;
 };
 
 /**
@@ -3888,20 +4759,28 @@ export class AgentRunner {
           continue;
         }
 
-        // A bounded slice — the most recent entries, chronological — not the
-        // whole store. Everything older reaches the model through
-        // `memory.recall`; injecting it all is what gave the store a horizon
-        // measured in weeks.
+        // Three bounded blocks, not the whole store and not a recency slice
+        // either: the pinned core the agent keeps whatever the conversation
+        // is, a topic index telling it what it knows about, and a short
+        // tail. Everything else reaches the model through `memory.recall`,
+        // which the index exists to aim.
         const memory = this.memory
-          ? (await this.memory.list(session.agent.id, { limit: MEMORY_INJECTION_LIMIT })).entries
-          : [];
+          ? await buildMemoryInjection(this.memory, session.agent.id)
+          : emptyMemoryInjection();
         // What enters the context taints the session, not only what a tool
         // returned: an `external` entry arriving here is a stranger's text
         // in the prompt, and without this the store launders its own
         // contents on the next restart — a fresh session reads the fact,
-        // restates it, remembers it, and the copy is `agent`.
-        if (memory.length > 0) {
-          await this.taint(session, leastTrusted(...memory.map(memoryEntryTrust)), 'memory');
+        // restates it, remembers it, and the copy is `agent`. The topic
+        // index counts too — an entity name an `external` entry supplied is
+        // still a stranger's words reaching the prompt.
+        const injected = memoryInjectionEntries(memory);
+        const injectedTrust = leastTrusted(
+          ...injected.map(memoryEntryTrust),
+          ...memory.topics.map((topic) => topic.trust),
+        );
+        if (injected.length > 0 || memory.topics.length > 0) {
+          await this.taint(session, injectedTrust, 'memory');
         }
 
         // Deltas re-emit on the bus through a serial chain that is drained
@@ -3933,7 +4812,7 @@ export class AgentRunner {
         const response = await this.options.provider.generate({
           session,
           ...(tools.length > 0 ? { tools } : {}),
-          ...(memory.length > 0 ? { memory } : {}),
+          ...(injected.length > 0 || memory.topics.length > 0 ? { memory } : {}),
           ...(enabledSkills.length > 0 ? { skills: enabledSkills } : {}),
           ...(this.streaming ? { onDelta } : {}),
           onUsage,
