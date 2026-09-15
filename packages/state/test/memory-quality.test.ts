@@ -263,19 +263,27 @@ test('two processes pinning at the cap produce one effective set, with the overf
   // Started together, so both read the same total before either appends:
   // the race the write-path check cannot see, since `O_APPEND` is the only
   // coordination between two processes over one file.
-  await Promise.all([left.pin!('ava', first.id), right.pin!('ava', second.id)]);
+  const outcomes = await Promise.all([left.pin!('ava', first.id), right.pin!('ava', second.id)]);
+  assert.deepEqual(outcomes.map((outcome) => outcome.pinned), [true, true], 'the race did not happen');
+
+  // Which of the two won is whatever order the appends landed in, and that
+  // is the point: replay reads the file, so every reader agrees, and the
+  // winner is the record that arrived first rather than whoever read last.
+  const pinRecords = (await lines(filePath))
+    .map((line) => JSON.parse(line) as { pins?: string })
+    .filter((record): record is { pins: string } => typeof record.pins === 'string');
+  assert.deepEqual(pinRecords.map((record) => record.pins).sort(), [first.id, second.id].sort());
+  const winner = pinRecords[0]!.pins;
 
   const effective = await Promise.all(
     [left, right, createFileMemoryStore(filePath, frozen())].map(async (store) =>
       (await store.pinned!('ava')).map((pinned) => pinned.id)),
   );
-  // One effective set, identical in all of them — replay decides, in file
-  // order, rather than whichever process happened to read last.
-  assert.deepEqual(effective, [[first.id], [first.id], [first.id]]);
+  assert.deepEqual(effective, [[winner], [winner], [winner]]);
   // The overflow is recorded, not lost: its record is in the file and
   // unpinning it is a real operation.
   assert.equal((await lines(filePath)).length, 4);
-  assert.equal(await right.unpin!('ava', second.id), true);
+  assert.equal(await right.unpin!('ava', pinRecords[1]!.pins), true);
 });
 
 test('a pin appended later with an earlier or tied timestamp does not displace an already-effective pin', async () => {
@@ -285,16 +293,24 @@ test('a pin appended later with an earlier or tied timestamp does not displace a
   const second = await seed.append('ava', 'b'.repeat(1400));
   const third = await seed.append('ava', 'c'.repeat(1400));
 
-  // The accepted pin, on the clock everyone else agrees about.
-  await createFileMemoryStore(filePath, frozen(new Date('2026-06-01T00:00:00.000Z'))).pin!('ava', first.id);
+  // The records are appended directly, because that is the only way to
+  // reach the case: the write-path check refuses the second and third pins
+  // when it can see the first, so the losing writes only exist when two
+  // processes raced — and a race with a chosen interleaving is a file with
+  // a chosen line order.
+  const pinRecord = (id: string, createdAt: string): string =>
+    `${JSON.stringify({ pins: id, agentId: 'ava', pinned: true, createdAt })}\n`;
+  await appendFile(filePath, pinRecord(first.id, '2026-06-01T00:00:00.000Z'));
   // A peer whose clock runs an hour slow, and a peer in the same
   // millisecond. A `(createdAt, id)` key would sort either ahead of the pin
-  // already in force and make it inert after the fact.
-  await createFileMemoryStore(filePath, frozen(new Date('2026-05-31T23:00:00.000Z'))).pin!('ava', second.id);
-  await createFileMemoryStore(filePath, frozen(new Date('2026-06-01T00:00:00.000Z'))).pin!('ava', third.id);
+  // already in force and make it inert after the fact, turning the cap's
+  // promised refusal into a silent eviction.
+  await appendFile(filePath, pinRecord(second.id, '2026-05-31T23:00:00.000Z'));
+  await appendFile(filePath, pinRecord(third.id, '2026-06-01T00:00:00.000Z'));
 
   const store = createFileMemoryStore(filePath, frozen());
   assert.deepEqual((await store.pinned!('ava')).map((pinned) => pinned.id), [first.id]);
+  assert.match(await injectedPrompt(store, 'ava'), /a{1400}/);
 });
 
 test('an agent cannot pin another agent’s entry, and that entry stays live for its owner', async () => {
