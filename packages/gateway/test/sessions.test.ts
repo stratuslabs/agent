@@ -325,6 +325,31 @@ test('a save claims the id before it writes, so a concurrent save cannot take it
   bea.close();
 });
 
+test('a failed save leaves an existing session\'s index row as the store still has it', async () => {
+  const stateDir = await newStateDir();
+  const store = new ShardedSessionStore({ stateDir });
+  const opened = await store.create(session('s-1', 'ava', 'pending_approval'));
+  assert.deepEqual(await store.listIdsByStatus('pending_approval'), ['s-1']);
+
+  // The shard write fails: the agent's own store is gone from under it, so
+  // `saveReturning` throws after the claim has already run. Claiming an id
+  // that already has a conversation must take the id and nothing else —
+  // writing the row it was handed would announce a transition the store
+  // never made, and a live daemon would then omit a still-pending session
+  // from recovery until the next restart reconciled it.
+  store.close();
+  await rm(agentSessionDbIn(stateDir, 'ava'), { force: true });
+  await mkdir(agentSessionDbIn(stateDir, 'ava'), { recursive: true });
+  const reopened = new ShardedSessionStore({ stateDir });
+
+  await assert.rejects(() => reopened.save({ ...opened, status: 'completed' }));
+
+  // Still pending, because that is what the store still holds.
+  assert.deepEqual(await reopened.listIdsByStatus('pending_approval'), ['s-1']);
+  assert.deepEqual(await reopened.listIdsByStatus('completed'), []);
+  reopened.close();
+});
+
 test('a directory under agents/ that holds no shard is not an agent to reconcile', async () => {
   const stateDir = await newStateDir();
   const store = new ShardedSessionStore({ stateDir });

@@ -405,6 +405,14 @@ export const createFileCommandWhitelist = (options: {
         throw new Error(symlinkedStateDirectoryMessage(directory));
       }
       await mkdir(directory, { recursive: true, mode: 0o700 });
+      // `mkdir`'s mode applies only to what it creates, so an `agents/<id>/`
+      // an older build or an operator already left is whatever it was — and
+      // this file is the one saying what the agent may do unattended, so a
+      // group- or world-writable directory lets another local account
+      // replace it wholesale and hand the agent grants nobody approved.
+      // The memory and session stores tighten on the same reasoning; this
+      // was the third site of that rule and the one it mattered most at.
+      await chmod(directory, 0o700);
       await writeFile(target, body, { mode: 0o600 });
       await chmod(target, 0o600);
     } else {

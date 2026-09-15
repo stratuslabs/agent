@@ -296,9 +296,16 @@ export const runUpdate = async (
   // session database and the grant files out from under a daemon still
   // writing them. So exclusivity is *established*, the way `serve`
   // establishes it, rather than assumed from the stop above.
-  const claim = await claimExclusiveHome(env);
+  // Inside the recovery block, not before it. Establishing exclusivity can
+  // fail on its own — a lock file that will not open, a home whose
+  // permissions changed — and this command has already stopped the managed
+  // service by the time it gets here. Thrown from outside, that left the
+  // fleet down with no restart and no unit rewrite, over an error that had
+  // nothing to do with the migrations.
+  let claim: Awaited<ReturnType<typeof claimExclusiveHome>> | undefined;
   let applied: AppliedStateMigration[];
   try {
+    claim = await claimExclusiveHome(env);
     if (!claim.held) {
       writeLine(
         streams.stderr,
@@ -308,7 +315,7 @@ export const runUpdate = async (
     }
     applied = await runStateMigrations(env, claim.held ? { exclusive: true } : {});
   } catch (error) {
-    claim.release();
+    claim?.release();
     // A daemon stopped for an update that then failed must not stay down:
     // the old unit is still in place (the rewrite has not happened), so
     // restarting restores the world the update found. The failure is still

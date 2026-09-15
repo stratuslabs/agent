@@ -18,6 +18,7 @@ import type { MemoryEntry } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
 import { isSymlinkedStatePath } from '@stratusagent/permissions';
 import { type StateEnvironment, readWorkingDirectory } from './environment.ts';
+import { memoryAppendNeedsNewline } from './memory.ts';
 import {
   applyPerAgentLayout,
   createStateDirectoryNames,
@@ -145,7 +146,9 @@ export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> 
       if (fresh.length === 0) {
         continue;
       }
-      await appendFile(destination, `${fresh.join('\n')}\n`, { mode: 0o600 });
+      // Same rule as the layout migration's placement, same home for it.
+      const prefix = (await memoryAppendNeedsNewline(destination)) ? '\n' : '';
+      await appendFile(destination, `${prefix}${fresh.join('\n')}\n`, { mode: 0o600 });
       await chmod(destination, 0o600);
     }
 

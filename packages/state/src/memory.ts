@@ -414,6 +414,47 @@ export interface FileMemoryStoreOptions {
   ownedDirectory?: boolean;
 }
 
+/**
+ * Whether an append to `filePath` has to start with a newline of its own.
+ *
+ * A JSONL file whose last byte is not a newline — a torn write, a
+ * hand-edit, a process killed mid-append — fuses the next appended record
+ * onto the last one and makes a line that is not JSON, which takes the
+ * agent's *whole* memory file out of every list, search and audit until
+ * someone repairs it. Prefixing a newline when the last byte needs one
+ * keeps the record parseable, and if a concurrent append lands in between,
+ * the false-positive prefix is only a blank line, which every reader skips.
+ *
+ * Exported because three writers append to these files and only one of them
+ * is the store: the layout migration places the shared file's records
+ * directly, and the cwd importer does the same for a project-local one.
+ * Both wrote a bare `\n`-joined block, so either could be the append that
+ * fuses — and a migration that corrupts the file it is rescuing is the
+ * worst version of this bug.
+ */
+export const memoryAppendNeedsNewline = async (filePath: string): Promise<boolean> => {
+  let handle;
+  try {
+    handle = await open(filePath, 'r');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+  try {
+    const { size } = await handle.stat();
+    if (size === 0) {
+      return false;
+    }
+    const lastByte = new Uint8Array(1);
+    await handle.read(lastByte, 0, 1, size - 1);
+    return lastByte[0] !== 0x0a;
+  } finally {
+    await handle.close();
+  }
+};
+
 export const createFileMemoryStore = (
   filePath: string,
   options: FileMemoryStoreOptions = {},
@@ -503,28 +544,7 @@ export const createFileMemoryStore = (
   // needs one keeps the record parseable — and if a concurrent append lands
   // in between, the false-positive prefix is only a blank line, which every
   // reader skips.
-  const needsLeadingNewline = async (): Promise<boolean> => {
-    let handle;
-    try {
-      handle = await open(filePath, 'r');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return false;
-      }
-      throw error;
-    }
-    try {
-      const { size } = await handle.stat();
-      if (size === 0) {
-        return false;
-      }
-      const lastByte = new Uint8Array(1);
-      await handle.read(lastByte, 0, 1, size - 1);
-      return lastByte[0] !== 0x0a;
-    } finally {
-      await handle.close();
-    }
-  };
+  const needsLeadingNewline = (): Promise<boolean> => memoryAppendNeedsNewline(filePath);
 
   const appendRecord = async (record: MemoryRecord): Promise<void> => {
     await ensureDirectory();

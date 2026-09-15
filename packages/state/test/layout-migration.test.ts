@@ -1074,6 +1074,49 @@ test('a directory an earlier command made already holds its name', async () => {
   assert.ok(sessionIdsIn(`${legacySessionDbPath(env)}.migrated`).includes('a-1'));
 });
 
+test('a grant write tightens an agent directory an older build left loose', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // `mkdir`'s mode applies only to what it creates, and this file is the
+  // one saying what the agent may do unattended: a group- or
+  // world-writable directory lets another local account replace it whole
+  // and hand the agent grants nobody approved. The memory and session
+  // stores already tightened on this reasoning; the grant store did not.
+  const directory = path.dirname(agentMemoryFilePath(env, 'ava'));
+  await mkdir(directory, { recursive: true });
+  await chmod(directory, 0o755);
+
+  const whitelist = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  await whitelist.remember('ava', { command: 'git', args: ['push'] });
+
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
+  assert.equal((await stat(whitelistPathFor(agentsDirPath(env), 'ava'))).mode & 0o777, 0o600);
+});
+
+test('a migrated record never fuses onto a memory file with no trailing newline', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  const at = '2026-01-01T00:00:00.000Z';
+  // What a torn write or a hand-edit leaves: a last line with no newline
+  // after it. Appending straight onto that makes one line out of two JSON
+  // objects, and a single unparseable line takes the agent's WHOLE memory
+  // file out of every list, search and audit.
+  const destination = agentMemoryFilePath(env, 'ava');
+  await mkdir(path.dirname(destination), { recursive: true });
+  await writeFile(
+    destination,
+    JSON.stringify({ id: 'ava:memory:0', agentId: 'ava', content: 'written before the upgrade', createdAt: at }),
+  );
+
+  await drainSharedMemory(env);
+
+  const listed = await createHomeMemoryStore(env).list('ava');
+  const contents = listed.entries.map((entry) => entry.content);
+  assert.ok(contents.includes('written before the upgrade'), contents.join(' | '));
+  assert.ok(contents.includes('likes jazz'), contents.join(' | '));
+});
+
 test('an agent directory that was already there is tightened, not left as it was', async () => {
   const home = await newHome();
   const env = { homeDir: home };

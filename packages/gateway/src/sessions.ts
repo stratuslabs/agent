@@ -322,8 +322,17 @@ export class FleetSessionIndex {
    * before the shard write, so a crash between the two leaves a claim with
    * no conversation — which the reconcile releases — rather than a
    * conversation no lookup can reach. Re-claiming an id this agent already
-   * holds is a no-op, because `create` on an existing id is how a caller
-   * re-opens its own session.
+   * holds is genuinely a no-op: `create` on an existing id is how a caller
+   * re-opens its own session, and `save` claims every id it writes.
+   *
+   * Taking the id is all this does. It deliberately does NOT write the row
+   * it was handed, because the id it is claiming may already have a
+   * conversation: overwriting that row's status and timestamps here would
+   * announce a transition the shard write has not made yet, and a write
+   * that then fails leaves the live daemon answering from a lifecycle row
+   * no store agrees with — a pending session missing from recovery until
+   * the next restart reconciles it. The row is written by the caller,
+   * after the shard write, from what the store actually stored.
    */
   claim(row: SessionIndexRow): void {
     // The insert is what decides, not a read before it. `DO NOTHING` makes
@@ -340,7 +349,6 @@ export class FleetSessionIndex {
     if (held !== undefined && held !== row.agentId) {
       throw new SessionIdTakenError(row.id, held, row.agentId);
     }
-    this.record(row);
   }
 
   /** Write the row as it now stands. Called after every shard write. */

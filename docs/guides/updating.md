@@ -155,7 +155,12 @@ and `stratus doctor` flags a stale unit path as a problem. Every step
 degrades independently — with npm unreachable, `update` skips the package
 upgrade but still migrates and repairs the unit, which is exactly what the
 offline case needs. A daemon that was deliberately stopped before the
-update is left stopped after it.
+update is left stopped after it — and one that `update` stopped itself is
+never left down by a failure. Anything that goes wrong between the stop and
+the unit rewrite, whether the migrations themselves or the step that
+establishes exclusive access to the home before them, restarts the daemon
+on the unit it was already running and reports the failure; the rewrite is
+skipped, because it must not run over state that was not migrated.
 
 ## The companion packages go up with it
 

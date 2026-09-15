@@ -6,6 +6,7 @@ import path from 'node:path';
 import { isValidAgentId } from '@stratusagent/agents';
 import { LEGACY_WHITELIST_SUFFIX, isSymlinkedStatePath, whitelistPathFor } from '@stratusagent/permissions';
 import { type StateEnvironment } from './environment.ts';
+import { memoryAppendNeedsNewline } from './memory.ts';
 import { DEFAULT_STRATUS_AGENT } from './souls.ts';
 import {
   agentMemoryFilePath,
@@ -627,7 +628,10 @@ const placeRecords = async (
     // Two copiers racing can each append the same line — which is what the
     // store's read-time dedupe by entry id is already for, and why this
     // needs no claim of its own.
-    await appendFile(destination, `${fresh.join('\n')}\n`, { mode: 0o600 });
+    // A destination whose last byte is not a newline fuses the first
+    // record onto it — see `memoryAppendNeedsNewline`, which owns the rule.
+    const prefix = (await memoryAppendNeedsNewline(destination)) ? '\n' : '';
+    await appendFile(destination, `${prefix}${fresh.join('\n')}\n`, { mode: 0o600 });
     await chmod(destination, 0o600);
     report.agentsWithMemories += 1;
     report.memoriesMoved += fresh.length;

@@ -558,6 +558,54 @@ test('a migration failure after the service stop restarts the daemon on its prev
   assert.ok(!output.stdout.includes('Rewriting the service unit'), 'the rewrite must not run on unmigrated state');
 });
 
+test('a home claim that fails after the service stop still restarts the daemon', async () => {
+  const home = await freshHome();
+  const starts: string[][] = [];
+  const runner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && args.includes('is-active')) {
+      return { code: 0, stdout: 'active', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('is-enabled')) {
+      return { code: 0, stdout: 'enabled', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('restart')) {
+      starts.push([command, ...args]);
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    {},
+  );
+  // Establishing exclusivity can fail on its own, and by then this command
+  // has already stopped the managed service. A directory where the lock
+  // file goes makes the open fail with EISDIR — not a held lock, so it is
+  // thrown rather than reported as "somebody else is serving" — and works
+  // whoever runs the test, root included.
+  await mkdir(path.join(home, '.stratus', 'stratusd.lock'), { recursive: true });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: runner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+
+  assert.equal(code, 1);
+  // Down after an update that failed before it migrated anything is the
+  // outcome this recovery path exists to prevent.
+  assert.ok(starts.length > 0, 'the daemon must be restarted after the failed claim');
+  assert.match(output.stderr, /restarted on its previous unit/);
+  assert.ok(!output.stdout.includes('Rewriting the service unit'), 'the rewrite must not run on unmigrated state');
+});
+
 test('update refuses when the manager cannot say whether the daemon is running', async () => {
   const home = await freshHome();
   // is-active answers garbage — previously collapsed to "not running",
