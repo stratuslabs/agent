@@ -21,6 +21,7 @@ import {
   MEMORY_READ_MAX_BYTES,
   memoryEntryTokens,
   pinnedCapRefusal,
+  pinnedInertRefusal,
   supersededMemoryIdsAt,
   tokenizeMemoryText,
   type AgentMemoryStore,
@@ -321,13 +322,13 @@ const pinnedIdsFor = (records: MemoryFileRecords, agentId: string): string[] => 
 const pinBudgetFor = (
   records: MemoryFileRecords,
   agentId: string,
-): { effective: string[]; bytes: number; allocated: Map<string, MemoryEntry> } => {
+): { effective: string[]; inert: string[]; bytes: number; allocated: Map<string, MemoryEntry> } => {
   const allocated = new Map(untombstonedEntriesFor(records, agentId).map((entry) => [entry.id, entry]));
   const budget = applyMemoryPinBudget(
     pinnedIdsFor(records, agentId),
     (id) => (allocated.has(id) ? memoryContentByteLength(allocated.get(id)!.content) : undefined),
   );
-  return { effective: budget.effective, bytes: budget.bytes, allocated };
+  return { effective: budget.effective, inert: budget.inert, bytes: budget.bytes, allocated };
 };
 
 // ---- the derived FTS5 index ------------------------------------------------
@@ -1044,7 +1045,7 @@ export const createFileMemoryStore = (
 
     async pin(agentId: string, entryId: string): Promise<MemoryPinOutcome> {
       const records = await readRecords();
-      const { effective, bytes, allocated } = pinBudgetFor(records, agentId);
+      const { effective, inert, bytes, allocated } = pinBudgetFor(records, agentId);
       // Pinnable means live — a superseded or forgotten entry is not the
       // agent's to pin — while the *budget* above is allocated over the
       // record, which is a different question.
@@ -1054,6 +1055,14 @@ export const createFileMemoryStore = (
       }
       if (effective.includes(entryId)) {
         return { pinned: true, bytes };
+      }
+      // The inert pin the race below can leave behind blocks everything
+      // after it, whatever its size, because the budget is a prefix. Tested
+      // before the byte total and not instead of it: the effective set is
+      // under the cap in exactly this case, so the total would wave a small
+      // pin through and `pinned` would drop it on the next read.
+      if (inert[0] !== undefined) {
+        return { pinned: false, reason: pinnedInertRefusal(inert[0]), bytes };
       }
       const size = memoryContentByteLength(entry.content);
       // The write path refusing is the rule, and it is not the whole story:

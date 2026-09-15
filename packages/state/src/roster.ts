@@ -114,16 +114,20 @@ const earlierAliasOwners = async (
  * emptied itself. It costs a second query only when ownership removed
  * something from a batch the bound had already capped; an install with no
  * inherited entries never reaches either half.
+ *
+ * `refill` is omitted by the callers whose reads carry no bound at all —
+ * nothing was capped there, so there is nothing to re-read.
  */
 const settleAliasPrecedence = async (
   ids: readonly string[],
   batches: readonly MemoryReadResult[],
   held: (agentId: string) => Promise<readonly MemoryEntry[]>,
-  refill: (agentId: string) => Promise<MemoryReadResult>,
+  refill?: (agentId: string) => Promise<MemoryReadResult>,
 ): Promise<{ entries: MemoryEntry[]; truncated: boolean }> => {
   const owners = await earlierAliasOwners(ids, batches, held);
   const settled = await Promise.all(batches.map(async (batch, index) =>
-    index > 0 && batch.truncated && batch.entries.some((entry) => owners[index]!.has(entry.id))
+    refill !== undefined && index > 0 && batch.truncated
+    && batch.entries.some((entry) => owners[index]!.has(entry.id))
       ? refill(ids[index]!)
       : batch));
   return {
@@ -173,7 +177,19 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
     // free their bytes, admit a later pin, and drop it again when a window
     // opened. The caller's own filter is applied afterwards.
     const batches = await Promise.all(ids.map((id) => store.pinned!(id, { include: 'allocated' })));
-    const merged = new Map(firstByAliasOrder(batches.flat()).map((entry) => [entry.id, entry]));
+    // Under the same id precedence every other read applies, and it has to
+    // be resolved from the full entry sets rather than from these batches:
+    // a pin-only batch does not contain the current owner's copy at all
+    // when the owner simply has not pinned it, so de-duplicating the
+    // concatenation would admit the legacy copy and put content into the
+    // pinned core that `list`, `search`, and every id-based mutation hide.
+    // Pinned reads carry no bound, so there is nothing to refill.
+    const settled = await settleAliasPrecedence(
+      ids,
+      batches.map((entries) => ({ entries, truncated: false })),
+      async (id) => (await store.list(id, { validity: 'all' })).entries,
+    );
+    const merged = new Map(settled.entries.map((entry) => [entry.id, entry]));
     const sizeOf = new Map([...merged].map(([id, entry]) => [id, memoryContentByteLength(entry.content)]));
     const budget = applyMemoryPinBudget([...merged.keys()], (id) => sizeOf.get(id));
     // What renders is each store's own answer to "current", intersected
@@ -369,12 +385,16 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
               return store.topics!(agentId);
             }
             const lists = await Promise.all(ids.map((id) => store.topics!(id)));
-            const contributing = lists.filter((list) => list.length > 0);
-            // One alias holding all of them is every install that never
-            // wrote under a second id, and there is nothing to reconcile:
-            // no id is in two places at once.
-            if (contributing.length <= 1) {
-              return contributing[0] ?? [];
+            // Safe only when the *current* alias is the only contributor:
+            // every topic then comes from the alias precedence would pick
+            // anyway, and a later alias with no topics has no unshadowed
+            // entry to add one. The mirror image is not safe and was the
+            // bug — a later alias as the sole contributor says nothing
+            // about ownership, because the current alias can hold the same
+            // id with no `about` on its copy, and the hidden copy's topic
+            // and its trust would pass straight through to the prompt.
+            if (lists.slice(1).every((list) => list.length === 0)) {
+              return lists[0] ?? [];
             }
             // Otherwise rebuilt from the deduplicated entry view the other
             // reads serve, not merged from per-alias lists. Those lists are
@@ -388,9 +408,6 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
               ids,
               await Promise.all(ids.map((id) => store.list(id))),
               async (id) => (await store.list(id, { validity: 'all' })).entries,
-              // Unbounded already, so nothing was capped and the refill is
-              // unreachable — it is the same read either way.
-              (id) => store.list(id),
             );
             return collectMemoryTopics(settled.entries);
           },

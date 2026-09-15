@@ -20,6 +20,7 @@ import {
   memoryEntryFields,
   memoryQueryMatches,
   pinnedCapRefusal,
+  pinnedInertRefusal,
   supersededMemoryIdsAt,
   tokenizeMemoryText,
   type AgentMemoryStore,
@@ -278,7 +279,7 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
    * admit a later pin, and make that later pin inert the moment the
    * successor was forgotten — an accepted pin dropped after the fact.
    */
-  const pinBudget = (agentId: string): { effective: string[]; bytes: number; allocated: Map<string, MemoryEntry> } => {
+  const pinBudget = (agentId: string): { effective: string[]; inert: string[]; bytes: number; allocated: Map<string, MemoryEntry> } => {
     const allocated = new Map(
       (selectLive.all(agentId) as unknown as Row[]).map((row) => [row.id, live(toEntry(row))]),
     );
@@ -287,7 +288,7 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
       ordered,
       (id) => (allocated.has(id) ? memoryContentByteLength(allocated.get(id)!.content) : undefined),
     );
-    return { effective: budget.effective, bytes: budget.bytes, allocated };
+    return { effective: budget.effective, inert: budget.inert, bytes: budget.bytes, allocated };
   };
 
   return {
@@ -408,7 +409,7 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
     },
 
     async pin(agentId, entryId): Promise<MemoryPinOutcome> {
-      const { effective, bytes, allocated } = pinBudget(agentId);
+      const { effective, inert, bytes, allocated } = pinBudget(agentId);
       // Pinnable means live; the budget above is a different question.
       const entry = liveEntries(agentId, now()).find((candidate) => candidate.id === entryId);
       if (!entry || !allocated.has(entryId)) {
@@ -416,6 +417,11 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
       }
       if (effective.includes(entryId)) {
         return { pinned: true, bytes };
+      }
+      // An inert pin blocks everything after it whatever its size — the
+      // budget is a prefix — and the effective total below cannot see that.
+      if (inert[0] !== undefined) {
+        return { pinned: false, reason: pinnedInertRefusal(inert[0]), bytes };
       }
       const size = memoryContentByteLength(entry.content);
       if (bytes + size > MEMORY_PINNED_MAX_BYTES) {

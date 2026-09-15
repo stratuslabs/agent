@@ -2013,6 +2013,24 @@ export const pinnedCapRefusal = (heldBytes: number, wantedBytes: number): string
   + `this entry needs ${wantedBytes}. Nothing was pinned and nothing was dropped — unpin something first.`;
 
 /**
+ * The other refusal, and the one a byte total cannot express: an inert pin
+ * already stands in the record.
+ *
+ * `applyMemoryPinBudget` is a **prefix** rule, so once one pin overruns the
+ * cap nothing recorded after it takes effect, whatever its size. A write
+ * path that tested only the effective byte total would therefore accept a
+ * small pin, append it, and report success for something `pinned` omits on
+ * the very next read — an eviction wearing the refusal's clothes, which is
+ * the one thing the cap promises cannot happen. The blocking id is named
+ * because it is the only thing the operator can act on: the effective set
+ * is under the cap and unpinning from *it* frees nothing.
+ */
+export const pinnedInertRefusal = (blockingId: string): string =>
+  `The pinned core is a prefix of the pins in the order they were made, and the pin on ${blockingId} `
+  + `overran the ${MEMORY_PINNED_MAX_BYTES}-byte cap — nothing recorded after it takes effect. `
+  + `Nothing was pinned: unpin ${blockingId} first.`;
+
+/**
  * The write-path half of the per-agent boundary, shared by every store: an
  * id a new record names must resolve to a live entry the caller owns
  * *before* anything is appended.
@@ -2248,7 +2266,7 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
    * superseded pin's bytes, admit a later pin into the space, and make that
    * later pin inert the moment the successor was forgotten.
    */
-  private pinBudget(agentId: string): { effective: string[]; bytes: number; allocated: Map<string, MemoryEntry> } {
+  private pinBudget(agentId: string): { effective: string[]; inert: string[]; bytes: number; allocated: Map<string, MemoryEntry> } {
     const allocated = new Map(
       (this.entries.get(agentId) ?? [])
         .filter((entry) => entry.forgottenAt === undefined)
@@ -2258,11 +2276,11 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
       this.pins.get(agentId) ?? [],
       (id) => (allocated.has(id) ? memoryContentByteLength(allocated.get(id)!.content) : undefined),
     );
-    return { effective: budget.effective, bytes: budget.bytes, allocated };
+    return { effective: budget.effective, inert: budget.inert, bytes: budget.bytes, allocated };
   }
 
   async pin(agentId: string, entryId: string): Promise<MemoryPinOutcome> {
-    const { effective, bytes, allocated } = this.pinBudget(agentId);
+    const { effective, inert, bytes, allocated } = this.pinBudget(agentId);
     // Pinnable means live; the budget above is a different question.
     const entry = this.live(agentId, this.now()).find((candidate) => candidate.id === entryId);
     if (!entry || !allocated.has(entryId)) {
@@ -2270,6 +2288,9 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     }
     if (effective.includes(entryId)) {
       return { pinned: true, bytes };
+    }
+    if (inert[0] !== undefined) {
+      return { pinned: false, reason: pinnedInertRefusal(inert[0]), bytes };
     }
     const size = memoryContentByteLength(entry.content);
     if (bytes + size > MEMORY_PINNED_MAX_BYTES) {

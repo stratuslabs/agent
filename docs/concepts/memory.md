@@ -81,6 +81,15 @@ The pinned core is capped at **2 KiB of content** and **refuses rather than
 evicting**: a pinned set that silently dropped its oldest member would be a
 pin that did not mean anything. Unpin something first.
 
+The budget is a **prefix** of the pins in the order they were made, so one
+pin that overruns the cap makes every pin recorded after it inert too,
+whatever its size. Two daemons pinning at once can produce that: each reads
+a total that does not yet include the other's write, and both append. The
+replay resolves it the same way in every store rather than evicting either
+one — and a later pin then refuses **naming the pin that is blocking it**,
+because the effective set is under the cap in that state and unpinning from
+*it* would free nothing.
+
 The budget is allocated over the record, not over what is true today. A
 pinned fact that is superseded, or outside its validity window, keeps its
 place and simply stops rendering — otherwise a later pin would be accepted

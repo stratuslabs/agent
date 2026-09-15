@@ -826,3 +826,73 @@ test('the topic index follows the same id precedence every other read does', asy
   ]);
   assert.ok(!(await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id)).includes('scraped-page'));
 });
+
+test('a pin refuses while an inert pin stands in front of it, however small it is', async () => {
+  const filePath = await newFile();
+  // Written as records rather than through `pin`, because the write path
+  // refuses an over-cap pin: an inert one only arises from the two-process
+  // race the budget resolves on replay, and the file store is the one whose
+  // record lane can represent that race deterministically. The guard the
+  // test covers is the same three lines in all three stores.
+  await writeFile(filePath, [
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'a'.repeat(1500), createdAt: '2026-01-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'ava:memory:2', agentId: 'ava', content: 'b'.repeat(1000), createdAt: '2026-01-02T00:00:00.000Z' }),
+    JSON.stringify({ id: 'ava:memory:3', agentId: 'ava', content: 'the rota is on Tuesdays', createdAt: '2026-01-03T00:00:00.000Z' }),
+    // Both accepted by their own process against a total that did not yet
+    // include the other; replay puts the second behind the cap.
+    JSON.stringify({ pins: 'ava:memory:1', agentId: 'ava', pinned: true, createdAt: '2026-01-04T00:00:00.000Z' }),
+    JSON.stringify({ pins: 'ava:memory:2', agentId: 'ava', pinned: true, createdAt: '2026-01-04T00:00:00.000Z' }),
+    '',
+  ].join('\n'));
+  const store = createFileMemoryStore(filePath, frozen());
+  assert.deepEqual((await store.pinned!('ava')).map((entry) => entry.id), ['ava:memory:1']);
+
+  // The effective set holds 1500 of 2048, so a 23-byte fact clears the byte
+  // total — and lands behind the inert pin, where the prefix rule makes it
+  // inert too. Reporting success here is the eviction the cap promises
+  // never happens, wearing the refusal's clothes.
+  const outcome = await store.pin!('ava', 'ava:memory:3');
+  assert.equal(outcome.pinned, false);
+  assert.match(outcome.reason ?? '', /ava:memory:2/);
+  assert.deepEqual((await store.pinned!('ava')).map((entry) => entry.id), ['ava:memory:1']);
+  // And nothing was written: the refusal is the whole of it.
+  assert.equal((await lines(filePath)).filter((line) => line.includes('"pins"')).length, 2);
+});
+
+test('the pinned core follows id precedence even though a pin read cannot see the owner', async () => {
+  const filePath = await newFile();
+  // The current alias owns `shared:1` and has not pinned it, so it is absent
+  // from every pin-only batch — there is nothing there to out-rank the
+  // legacy copy, and de-duplicating the batches alone would put inherited
+  // content into the one block the agent always reads.
+  await writeFile(filePath, [
+    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the current copy of the rota', createdAt: '2026-01-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'the inherited copy of the rota', createdAt: '2026-02-01T00:00:00.000Z' }),
+    JSON.stringify({ pins: 'shared:1', agentId: 'demo-agent', pinned: true, createdAt: '2026-03-01T00:00:00.000Z' }),
+    '',
+  ].join('\n'));
+  const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
+
+  assert.deepEqual(await store.pinned!(DEFAULT_STRATUS_AGENT.id), []);
+  assert.deepEqual(await store.pinned!(DEFAULT_STRATUS_AGENT.id, { include: 'allocated' }), []);
+  const prompt = await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id);
+  assert.ok(prompt.includes('the current copy of the rota'));
+  assert.ok(!prompt.includes('the inherited copy of the rota'));
+});
+
+test('a legacy alias alone in the topic index is not evidence that it owns the id', async () => {
+  const filePath = await newFile();
+  // The current alias owns `shared:1` and its copy carries no `about`, so it
+  // contributes no topics at all. A shortcut that asked "did only one alias
+  // contribute?" therefore saw one list and took it — handing the prompt a
+  // topic from the copy every other read hides, at the hidden copy's trust.
+  await writeFile(filePath, [
+    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the rota is on Tuesdays', createdAt: '2026-01-01T00:00:00.000Z', trust: 'agent' }),
+    JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'a page said the rota moved', createdAt: '2026-02-01T00:00:00.000Z', about: ['scraped-page'], trust: 'external' }),
+    '',
+  ].join('\n'));
+  const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
+
+  assert.deepEqual(await store.topics!(DEFAULT_STRATUS_AGENT.id), []);
+  assert.ok(!(await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id)).includes('scraped-page'));
+});
