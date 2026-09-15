@@ -501,8 +501,13 @@ test('the pinned core is one budget for an agent’s legacy aliases, not one eac
   })}\n`);
 
   assert.equal((await store.pin!(DEFAULT_STRATUS_AGENT.id, current.id)).pinned, true);
-  // Accepted under its own alias, because that store saw an empty budget.
-  assert.equal((await store.pin!(DEFAULT_STRATUS_AGENT.id, 'demo-agent:memory:legacy')).pinned, true);
+  // The alias store would accept this one against its own empty budget, so
+  // the wrapper has to refuse on the merged total — telling the caller it
+  // was pinned when the merged replay makes it inert is the eviction the
+  // cap promises never happens, wearing a different hat.
+  const refused = await store.pin!(DEFAULT_STRATUS_AGENT.id, 'demo-agent:memory:legacy');
+  assert.equal(refused.pinned, false);
+  assert.match(refused.reason ?? '', new RegExp(`capped at ${MEMORY_PINNED_MAX_BYTES} UTF-8 bytes`));
 
   const pinned = await store.pinned!(DEFAULT_STRATUS_AGENT.id);
   const bytes = pinned.reduce((sum, entry) => sum + memoryContentByteLength(entry.content), 0);
@@ -512,4 +517,36 @@ test('the pinned core is one budget for an agent’s legacy aliases, not one eac
   // "refuses rather than evicts" has to mean once the merge is in play.
   const injection = await buildMemoryInjection(store, DEFAULT_STRATUS_AGENT.id);
   assert.deepEqual(injection.pinned.map((entry) => entry.id), [current.id]);
+});
+
+test('the file store’s usage counters are keyed by agent, and an older index is rebuilt for it', async () => {
+  const filePath = await newFile();
+  const store = createFileMemoryStore(filePath, frozen());
+  const shared: MemoryEntry = {
+    id: 'shared:1',
+    agentId: 'somewhere',
+    content: 'the survey is quarterly',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+  await store.importEntries!('ava', [shared]);
+  await store.importEntries!('juno', [shared]);
+
+  assert.equal((await store.search('juno', 'survey')).entries[0]?.usage?.recallCount, 1);
+  assert.equal((await store.search('juno', 'survey')).entries[0]?.usage?.recallCount, 2);
+  assert.equal((await store.search('ava', 'survey')).entries[0]?.usage?.recallCount, 1);
+
+  // An index whose `usage` is keyed by id alone attributes one agent's
+  // reads to the other, so it is dropped rather than carried forward —
+  // losing statistics is the stated cost of a derived file, and a counter
+  // on the wrong agent is worse than no counter.
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(`${filePath}.index`);
+  db.exec('DROP TABLE usage');
+  db.exec('CREATE TABLE usage (id TEXT PRIMARY KEY, recall_count INTEGER NOT NULL, last_recalled_at TEXT NOT NULL)');
+  db.exec("INSERT INTO usage (id, recall_count, last_recalled_at) VALUES ('shared:1', 99, '2026-01-01T00:00:00.000Z')");
+  db.close();
+
+  const reopened = createFileMemoryStore(filePath, frozen());
+  assert.equal((await reopened.search('ava', 'survey')).entries[0]?.usage?.recallCount, 1);
+  assert.deepEqual((await reopened.search('ava', 'survey')).entries.map((entry) => entry.content), ['the survey is quarterly']);
 });

@@ -265,3 +265,31 @@ test('one exported corpus imports for two agents, and an older file is rebuilt t
   assert.equal((await upgraded.list('juno')).entries.length, 2);
   upgraded.close();
 });
+
+test('usage counts per agent, and a superseded entry is not the agent’s to forget', async () => {
+  const at = new Date('2026-06-01T00:00:00.000Z');
+  const store = createSqliteMemoryStore(await newFile(), { now: () => at });
+  const shared = { id: 'shared:1', agentId: 'somewhere', content: 'the survey is quarterly', createdAt: '2026-01-01T00:00:00.000Z' };
+  await store.importEntries!('ava', [shared]);
+  await store.importEntries!('juno', [shared]);
+
+  // Import lets two agents hold one id, so a counter keyed by the id alone
+  // would report one agent's reads on the other's entry.
+  assert.equal((await store.search('juno', 'survey')).entries[0]?.usage?.recallCount, 1);
+  assert.equal((await store.search('juno', 'survey')).entries[0]?.usage?.recallCount, 2);
+  assert.equal((await store.search('ava', 'survey')).entries[0]?.usage?.recallCount, 1);
+
+  // And a mutation resolves against the live view, like the file store:
+  // forgetting a superseded predecessor would stick and silently prevent
+  // the documented release when its successor is forgotten.
+  const old = await store.append('ava', 'the deploy runs on MySQL');
+  const next = await store.append('ava', 'the deploy runs on Postgres', { supersedes: old.id });
+  assert.equal(await store.forget('ava', old.id), false);
+  assert.equal(await store.reassertTrust!('ava', old.id, 'user'), false);
+  assert.equal(await store.forget('ava', next.id), true);
+  assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.content).sort(), [
+    'the deploy runs on MySQL',
+    'the survey is quarterly',
+  ]);
+  store.close();
+});

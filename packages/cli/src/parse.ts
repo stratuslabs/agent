@@ -216,6 +216,15 @@ export interface ParsedMemoryCommand {
 export const memoryCommandWritesState = (action: ParsedMemoryCommand['action']): boolean =>
   action !== 'list' && action !== 'search' && action !== 'audit' && action !== 'export';
 
+// `search` is a read despite touching `memory.jsonl.index`, and the
+// distinction is the one the stamp is about: the index is *derived*. An
+// older build that opens it finds a stamp it does not know, rebuilds from
+// the record, and the next newer build does the same in reverse — the
+// failure direction is a rebuild, never data. Nothing under the newer
+// format is discarded by it, and refusing would take away a diagnostic
+// read at exactly the moment someone is trying to understand what their
+// store holds, which is what the read-only exemption exists for.
+
 export interface ParsedSessionCommand {
   command: 'session';
   action: 'rollover';

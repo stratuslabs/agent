@@ -98,7 +98,9 @@ agent that does not know what it knows cannot know to ask.
 These counters live in the derived index, never in the record, because they
 are observations about *reading* rather than facts the agent learned. The
 consequence is exact: **deleting the index loses your usage statistics,
-never your memories.** Nothing is ever deleted on them.
+never your memories** — and an upgrade that changes how they are keyed
+drops them for the same reason, since a count attributed to the wrong agent
+is worse than no count. Nothing is ever deleted on them.
 
 ## Where remembered facts travel in a request
 

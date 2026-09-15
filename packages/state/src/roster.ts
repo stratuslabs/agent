@@ -12,7 +12,9 @@ import {
   compareMemoryChronology,
   memoryContentByteLength,
   mergeMemoryTopics,
+  pinnedCapRefusal,
   type MemoryEntry,
+  type MemoryPinOutcome,
 } from '@stratusagent/core';
 import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
@@ -51,6 +53,33 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
     agentId === DEFAULT_STRATUS_AGENT.id
       ? [DEFAULT_STRATUS_AGENT.id, ...LEGACY_DEFAULT_AGENT_IDS]
       : [agentId];
+  /**
+   * One budget for the merged identity, not one per alias. Each alias
+   * accepts its own pins against its own 2 KiB, so concatenating them can
+   * exceed the cap the injected slice would then trim by recency — which is
+   * the silent eviction the cap exists to refuse. Allocated here in alias
+   * order (and within an alias, that store's append order), so the write
+   * path above and the read below cannot disagree about which pins are
+   * effective.
+   */
+  const mergedPinBudget = async (ids: readonly string[]): Promise<{
+    effective: MemoryEntry[];
+    ids: Set<string>;
+    bytes: number;
+    sizeOf: Map<string, number>;
+  }> => {
+    const batches = await Promise.all(ids.map((id) => store.pinned!(id)));
+    const merged = new Map(batches.flat().map((entry) => [entry.id, entry]));
+    const sizeOf = new Map([...merged].map(([id, entry]) => [id, memoryContentByteLength(entry.content)]));
+    const budget = applyMemoryPinBudget([...merged.keys()], (id) => sizeOf.get(id));
+    return {
+      effective: budget.effective.map((id) => merged.get(id)!),
+      ids: new Set(budget.effective),
+      bytes: budget.bytes,
+      sizeOf,
+    };
+  };
+
   return {
     append: (agentId, content, options) => store.append(agentId, content, options),
     async list(agentId, options) {
@@ -72,6 +101,14 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       if (ids.length === 1) {
         return store.search(agentId, query, options);
       }
+      // Known imprecision, bounded and deliberate: each alias counts a
+      // recall for its own winners, and the merge below then discards some
+      // of them, so a multi-alias hit over-counts by at most
+      // (aliases - 1) x limit. Usage is an observation that nothing ranks
+      // or deletes on, and keeping it exact here would need the stores to
+      // defer counting and the wrapper to record the merged winners —
+      // two additions to the contract for a statistic on one legacy id.
+      // A ranking strategy that ever reads these is what changes that.
       const batches = await Promise.all(ids.map((id) => store.search(id, query, options)));
       const bounded = boundMemoryRead(batches.flatMap((batch) => batch.entries), clampMemoryRecallLimit(options?.limit));
       // Every batch came from the same store, so they agree on the ordering
@@ -110,11 +147,33 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
             }
             let lastFailure: unknown;
             for (const id of ids) {
+              let outcome: MemoryPinOutcome;
               try {
-                return await store.pin!(id, entryId);
+                outcome = await store.pin!(id, entryId);
               } catch (error) {
                 lastFailure = error;
+                continue;
               }
+              if (!outcome.pinned) {
+                return outcome;
+              }
+              // The alias that took the pin saw only its own budget, so it
+              // can accept one the merged replay then makes inert — and
+              // reporting success for a pin that never reaches the prompt
+              // is the eviction the cap promises never happens, wearing a
+              // different hat. Retract it and refuse instead, naming the
+              // merged total.
+              const effective = await mergedPinBudget(ids);
+              if (effective.ids.has(entryId)) {
+                return { pinned: true, bytes: effective.bytes };
+              }
+              await store.unpin?.(id, entryId);
+              const held = await mergedPinBudget(ids);
+              return {
+                pinned: false,
+                reason: pinnedCapRefusal(held.bytes, effective.sizeOf.get(entryId) ?? 0),
+                bytes: held.bytes,
+              };
             }
             throw lastFailure;
           },
@@ -139,21 +198,8 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
             if (ids.length === 1) {
               return store.pinned!(agentId);
             }
-            // One budget for the merged identity, not one per alias. Each
-            // alias accepted its own pins against its own 2 KiB, so
-            // concatenating them can exceed the cap the injected slice then
-            // trims by recency — which is the silent eviction the cap
-            // exists to refuse. Re-allocating here in alias order (and
-            // within an alias, that store's append order) makes the
-            // overflow *inert*, which is what the cap's replay rule says
-            // happens to a pin two writers overspent the budget on.
-            const batches = await Promise.all(ids.map((id) => store.pinned!(id)));
-            const merged = new Map(batches.flat().map((entry) => [entry.id, entry]));
-            const budget = applyMemoryPinBudget(
-              [...merged.keys()],
-              (id) => memoryContentByteLength(merged.get(id)!.content),
-            );
-            return budget.effective.map((id) => merged.get(id)!).sort(compareMemoryChronology);
+            const budget = await mergedPinBudget(ids);
+            return budget.effective.map((entry) => entry).sort(compareMemoryChronology);
           },
         }
       : {}),

@@ -330,7 +330,8 @@ const pinBudgetFor = (
 // '4' keyed `revisions` by (successor, agent): import preserves entry ids
 // while re-keying them to the importing agent, so one corpus imported for
 // two agents legitimately produces the same successor id twice.
-const INDEX_SCHEMA_VERSION = '4';
+// '5' keyed `usage` the same way, for the same reason.
+const INDEX_SCHEMA_VERSION = '5';
 
 // Loaded on first `search`, never at module load: see the note at the top.
 type SqliteModule = typeof import('node:sqlite');
@@ -378,7 +379,13 @@ CREATE TABLE IF NOT EXISTS revisions (
   valid_until_ms INTEGER,
   PRIMARY KEY (successor_id, agent_id)
 );
-CREATE TABLE IF NOT EXISTS usage (id TEXT PRIMARY KEY, recall_count INTEGER NOT NULL, last_recalled_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS usage (
+  id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  recall_count INTEGER NOT NULL,
+  last_recalled_at TEXT NOT NULL,
+  PRIMARY KEY (id, agent_id)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   tokens,
   id UNINDEXED,
@@ -643,7 +650,8 @@ export const createFileMemoryStore = (
         const columns = (name: string): Array<{ name: string; pk: number }> =>
           opened.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string; pk: number }>;
         return columns('memory_fts').some((column) => column.name === 'fields')
-          && columns('revisions').some((column) => column.name === 'agent_id' && column.pk > 0);
+          && columns('revisions').some((column) => column.name === 'agent_id' && column.pk > 0)
+          && columns('usage').some((column) => column.name === 'agent_id' && column.pk > 0);
       };
       if (!hasCurrentShape()) {
         // Under the same write lock catch-up takes, and re-checked once it
@@ -657,6 +665,11 @@ export const createFileMemoryStore = (
           if (!hasCurrentShape()) {
             opened.exec('DROP TABLE memory_fts; DROP TABLE forgotten; DROP TABLE reasserted; DROP TABLE meta;');
             opened.exec('DROP TABLE IF EXISTS revisions;');
+            // The one table a rebuild cannot restore, dropped anyway when
+            // its *key* is wrong: a counter attributed to the wrong agent
+            // is worse than no counter, and losing statistics is the stated
+            // cost of a derived file.
+            opened.exec('DROP TABLE IF EXISTS usage;');
             opened.exec(INDEX_SCHEMA);
           }
           opened.exec('COMMIT;');
@@ -937,7 +950,7 @@ export const createFileMemoryStore = (
       const bounded = boundMemoryRead(candidates, clamped);
       // Counted for the entries actually returned, never for everything the
       // match found: usage is meant to say what reached a prompt.
-      const counted = noteRecalled(database, bounded.entries, now().toISOString());
+      const counted = noteRecalled(database, agentId, bounded.entries, now().toISOString());
       return {
         entries: bounded.entries.map((entry) => {
           const usage = counted.get(entry.id);
@@ -1086,6 +1099,7 @@ const parseFields = (raw: string | null): Pick<MemoryEntry, 'kind' | 'about' | '
  */
 const noteRecalled = (
   db: SqliteDatabase,
+  agentId: string,
   entries: readonly MemoryEntry[],
   at: string,
 ): Map<string, MemoryUsage> => {
@@ -1094,12 +1108,12 @@ const noteRecalled = (
     return counted;
   }
   const bump = db.prepare(
-    'INSERT INTO usage (id, recall_count, last_recalled_at) VALUES (?, 1, ?)'
-    + ' ON CONFLICT(id) DO UPDATE SET recall_count = recall_count + 1, last_recalled_at = excluded.last_recalled_at'
+    'INSERT INTO usage (id, agent_id, recall_count, last_recalled_at) VALUES (?, ?, 1, ?)'
+    + ' ON CONFLICT(id, agent_id) DO UPDATE SET recall_count = recall_count + 1, last_recalled_at = excluded.last_recalled_at'
     + ' RETURNING recall_count, last_recalled_at',
   );
   for (const entry of entries) {
-    const row = bump.get(entry.id, at) as { recall_count: number; last_recalled_at: string } | undefined;
+    const row = bump.get(entry.id, agentId, at) as { recall_count: number; last_recalled_at: string } | undefined;
     if (row !== undefined) {
       counted.set(entry.id, { recallCount: row.recall_count, lastRecalledAt: row.last_recalled_at });
     }

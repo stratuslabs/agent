@@ -290,3 +290,40 @@ test('the topic index the prompt carries is bounded, and the biggest topics surv
     `the index block ran to ${memoryContentByteLength(escapedBlock)} bytes once escaped`,
   );
 });
+
+test('an imported id is never minted again, and usage is counted per agent', async () => {
+  const store = new InMemoryAgentMemoryStore({ now: () => AT });
+  // Import preserves ids, so the generator has to skip past what it took —
+  // two entries sharing an id are indistinguishable to tombstones,
+  // supersession, pins, and usage alike.
+  await store.importEntries!('ava', [
+    { id: 'ava:memory:1', agentId: 'somewhere', content: 'the survey is quarterly', createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'ava:memory:2', agentId: 'somewhere', content: 'the hide needs repainting', createdAt: '2026-01-02T00:00:00.000Z' },
+  ]);
+  const minted = await store.append('ava', 'a fact of its own');
+  assert.ok(!['ava:memory:1', 'ava:memory:2'].includes(minted.id), `minted a taken id: ${minted.id}`);
+  assert.equal(new Set((await store.audit('ava')).map((entry) => entry.id)).size, 3);
+
+  // The same corpus under a second agent is the ordinary case, and its
+  // reads must not move the first agent's counters.
+  await store.importEntries!('juno', [
+    { id: 'ava:memory:1', agentId: 'somewhere', content: 'the survey is quarterly', createdAt: '2026-01-01T00:00:00.000Z' },
+  ]);
+  assert.equal((await store.search('juno', 'survey')).entries[0]?.usage?.recallCount, 1);
+  assert.equal((await store.search('juno', 'survey')).entries[0]?.usage?.recallCount, 2);
+  assert.equal((await store.search('ava', 'survey')).entries[0]?.usage?.recallCount, 1);
+});
+
+test('a superseded entry is not the agent’s to forget or re-assert', async () => {
+  const store = new InMemoryAgentMemoryStore({ now: () => AT });
+  const old = await store.append('ava', 'the deploy runs on MySQL');
+  const next = await store.append('ava', 'the deploy runs on Postgres', { supersedes: old.id });
+
+  // Not live, so not mutable — and the reason matters: forgetting the
+  // successor is documented to release the predecessor, which a tombstone
+  // on the predecessor would silently prevent.
+  assert.equal(await store.forget('ava', old.id), false);
+  assert.equal(await store.reassertTrust!('ava', old.id, 'user'), false);
+  assert.equal(await store.forget('ava', next.id), true);
+  assert.deepEqual((await store.list('ava', { limit: 5 })).entries.map((entry) => entry.id), [old.id]);
+});

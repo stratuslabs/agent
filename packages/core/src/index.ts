@@ -2066,7 +2066,20 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
    * re-appended, so re-pinning cannot move an entry to the back.
    */
   private pins = new Map<string, string[]>();
+  /**
+   * Keyed by (agent, entry), never by entry alone: `importEntries`
+   * preserves ids while re-keying entries, so two agents legitimately hold
+   * the same id and one agent's reads must not move the other's counters.
+   */
   private usage = new Map<string, MemoryUsage>();
+  /**
+   * Every id this store holds, minted or imported. `append` skips past the
+   * ones already taken, because an import that preserved `a:memory:1` and
+   * left the counter at zero would mint that id again — and two entries
+   * sharing an id are indistinguishable to tombstones, supersession, pins,
+   * and usage alike.
+   */
+  private takenIds = new Set<string>();
   private counter = 0;
   private readonly now: () => Date;
 
@@ -2087,9 +2100,14 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     }
     const about = memoryEntryAbout(options);
     assertMemoryAboutWithinCap(about);
-    this.counter += 1;
+    let id: string;
+    do {
+      this.counter += 1;
+      id = `${agentId}:memory:${this.counter}`;
+    } while (this.takenIds.has(id));
+    this.takenIds.add(id);
     const entry: MemoryAuditEntry = {
-      id: `${agentId}:memory:${this.counter}`,
+      id,
       agentId,
       content,
       createdAt: this.now().toISOString(),
@@ -2141,7 +2159,7 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     // Counted, then reported, for the entries actually returned — usage is
     // meant to say what reached a prompt, and only a `search` carries it:
     // `list` reads the record, where these counters deliberately are not.
-    const counted = this.noteRecalled(bounded.entries);
+    const counted = this.noteRecalled(agentId, bounded.entries);
     return {
       entries: bounded.entries.map((entry) => {
         const usage = counted.get(entry.id);
@@ -2155,22 +2173,41 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
   // Usage counters are an observation about reading, not a fact the agent
   // learned: they live beside the record here the way they live in the file
   // store's index, and nothing ranks or deletes on them yet.
-  private noteRecalled(entries: readonly MemoryEntry[]): Map<string, MemoryUsage> {
+  private usageKey(agentId: string, entryId: string): string {
+    return `${agentId}\u0000${entryId}`;
+  }
+
+  private noteRecalled(agentId: string, entries: readonly MemoryEntry[]): Map<string, MemoryUsage> {
     const at = this.now().toISOString();
     const counted = new Map<string, MemoryUsage>();
     for (const entry of entries) {
-      const previous = this.usage.get(entry.id);
+      const key = this.usageKey(agentId, entry.id);
+      const previous = this.usage.get(key);
       const usage: MemoryUsage = { recallCount: (previous?.recallCount ?? 0) + 1, lastRecalledAt: at };
-      this.usage.set(entry.id, usage);
+      this.usage.set(key, usage);
       counted.set(entry.id, usage);
     }
     return counted;
   }
 
-  async forget(agentId: string, entryId: string): Promise<boolean> {
-    const entry = (this.entries.get(agentId) ?? []).find(
+  /**
+   * The entry a mutation may touch: live, which means un-tombstoned *and*
+   * not superseded. Resolving against the raw array instead would let an
+   * agent forget a predecessor a current successor retired — and forgetting
+   * that successor is documented to release it, which a tombstone on the
+   * predecessor would then silently prevent.
+   */
+  private mutable(agentId: string, entryId: string): MemoryAuditEntry | undefined {
+    if (!this.live(agentId, this.now()).some((entry) => entry.id === entryId)) {
+      return undefined;
+    }
+    return (this.entries.get(agentId) ?? []).find(
       (candidate) => candidate.id === entryId && candidate.forgottenAt === undefined,
     );
+  }
+
+  async forget(agentId: string, entryId: string): Promise<boolean> {
+    const entry = this.mutable(agentId, entryId);
     if (!entry) {
       return false;
     }
@@ -2183,9 +2220,7 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
   }
 
   async reassertTrust(agentId: string, entryId: string, trust: TrustLevel): Promise<boolean> {
-    const entry = (this.entries.get(agentId) ?? []).find(
-      (candidate) => candidate.id === entryId && candidate.forgottenAt === undefined,
-    );
+    const entry = this.mutable(agentId, entryId);
     if (!entry) {
       return false;
     }
@@ -2253,6 +2288,7 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
         continue;
       }
       held.add(entry.id);
+      this.takenIds.add(entry.id);
       existing.push({ ...importableMemoryEntry(entry, agentId) });
       imported += 1;
     }

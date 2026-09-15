@@ -162,7 +162,25 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
   // Derived, and the one table here a rebuild could not restore: usage is
   // an observation about reading, never a fact the agent learned. Dropping
   // it loses statistics, never memories.
-  db.exec('CREATE TABLE IF NOT EXISTS usage (id TEXT PRIMARY KEY, recall_count INTEGER NOT NULL, last_recalled_at TEXT NOT NULL)');
+  // Keyed by (agent, entry), never by entry alone: import preserves ids
+  // while re-keying entries, so two agents legitimately hold the same id
+  // and one agent's reads must not move the other's counters. An older
+  // table keyed by id alone is dropped rather than migrated — these are
+  // statistics, and losing them is the stated cost of a derived table.
+  const usageKeyedByAgent = (db.prepare('PRAGMA table_info(usage)').all() as Array<{ name: string; pk: number }>)
+    .some((column) => column.name === 'agent_id' && column.pk > 0);
+  if (!usageKeyedByAgent) {
+    db.exec('DROP TABLE IF EXISTS usage');
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS usage (
+      id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      recall_count INTEGER NOT NULL,
+      last_recalled_at TEXT NOT NULL,
+      PRIMARY KEY (id, agent_id)
+    )
+  `);
   // An upgrade over a store written before the wider entry shape: adding
   // the column is the whole migration, because everything it holds is
   // optional and an old row's NULL reads exactly as "nobody said".
@@ -233,10 +251,10 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
   const selectPins = db.prepare('SELECT id FROM pins WHERE agent_id = ? ORDER BY seq');
   const insertPin = db.prepare('INSERT OR IGNORE INTO pins (id, agent_id) VALUES (?, ?)');
   const deletePin = db.prepare('DELETE FROM pins WHERE id = ? AND agent_id = ?');
-  const selectUsage = db.prepare('SELECT recall_count, last_recalled_at FROM usage WHERE id = ?');
+  const selectUsage = db.prepare('SELECT recall_count, last_recalled_at FROM usage WHERE id = ? AND agent_id = ?');
   const bumpUsage = db.prepare(
-    'INSERT INTO usage (id, recall_count, last_recalled_at) VALUES (?, 1, ?)'
-    + ' ON CONFLICT(id) DO UPDATE SET recall_count = recall_count + 1, last_recalled_at = excluded.last_recalled_at',
+    'INSERT INTO usage (id, agent_id, recall_count, last_recalled_at) VALUES (?, ?, 1, ?)'
+    + ' ON CONFLICT(id, agent_id) DO UPDATE SET recall_count = recall_count + 1, last_recalled_at = excluded.last_recalled_at',
   );
 
   /** Un-tombstoned, minus everything a successor that is current at `at` retires. */
@@ -330,8 +348,8 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
       const bounded = boundMemoryRead(matches, clampMemoryRecallLimit(searchOptions.limit));
       const recalledAt = now().toISOString();
       const entries = bounded.entries.map((entry) => {
-        bumpUsage.run(entry.id, recalledAt);
-        const counted = selectUsage.get(entry.id) as { recall_count: number; last_recalled_at: string } | undefined;
+        bumpUsage.run(entry.id, agentId, recalledAt);
+        const counted = selectUsage.get(entry.id, agentId) as { recall_count: number; last_recalled_at: string } | undefined;
         return counted === undefined
           ? entry
           : { ...entry, usage: { recallCount: counted.recall_count, lastRecalledAt: counted.last_recalled_at } };
@@ -340,6 +358,14 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
     },
 
     async forget(agentId, entryId) {
+      // Against the live view, not any un-tombstoned row: forgetting a
+      // predecessor a current successor already retired would stick, and
+      // forgetting that successor is documented to release it — which the
+      // predecessor's own tombstone would then silently prevent. The file
+      // store resolves the same way.
+      if (!liveEntries(agentId, now()).some((entry) => entry.id === entryId)) {
+        return false;
+      }
       return tombstone.run(now().toISOString(), agentId, entryId).changes > 0;
     },
 
@@ -348,6 +374,9 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
     },
 
     async reassertTrust(agentId, entryId, trust) {
+      if (!liveEntries(agentId, now()).some((entry) => entry.id === entryId)) {
+        return false;
+      }
       return relabel.run(trust, agentId, entryId).changes > 0;
     },
 
