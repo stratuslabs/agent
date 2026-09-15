@@ -234,6 +234,10 @@ interface Pair {
   readonly close: number;
   /** How many of each run's characters the pair consumed: 1 italic, 2 bold, 3 both. */
   readonly use: number;
+  /** Characters of the opening run nothing spent, which stay text outside this pair. */
+  readonly before: number;
+  /** The same for the closing run. */
+  readonly after: number;
 }
 
 /**
@@ -255,8 +259,20 @@ interface Pair {
  * the same place, by not asking whether anything else in a reply is as
  * literal as code.
  */
-const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map<number, Pair> => {
-  const pairs = new Map<number, Pair>();
+const pairEmphasis = (
+  tokens: readonly Token[],
+  inert: ReadonlySet<number>,
+  labelled: readonly number[],
+): Map<number, Pair[]> => {
+  // In creation order, which is innermost first at any run they share: a
+  // closer answers the nearest opener before it reaches the one further
+  // out, and an opener is spent from the end nearest what it marks.
+  const made: Array<{ open: number; close: number; use: number }> = [];
+  // What each run has left to spend. A run is not one marker but a purse:
+  // `**bold and *italic***` ends on three asterisks that have two jobs, and
+  // answering only the nearest opener left the outer `**` unanswered and
+  // its asterisks on the line.
+  const left = new Map<number, number>();
   // One stack per delimiter character rather than one for all of them. A
   // closer only ever answers an opener spelled the same way, so a single
   // stack means walking past every opener that is not: 32 000 asterisks
@@ -283,57 +299,130 @@ const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map
       return;
     }
     const own = openers.get(token.char);
+    const least = DELIMITERS[token.char]?.least ?? 1;
+    const most = DELIMITERS[token.char]?.most ?? 1;
+    let purse = token.length;
+    let spent = false;
+    // Each opener answers this closer at most once. Without that, a run
+    // with characters to spare pairs with itself again — `****quad****`
+    // would buy a second style with the asterisks it could not spend the
+    // first time, where today they stay on the line as written.
+    let ceiling = tokens.length;
+
     if (token.closes && own !== undefined) {
-      // Markdown's rule of three: where either half could face both ways,
-      // runs whose lengths add to a multiple of three do not pair, unless
-      // both are multiples of three. It is what keeps the `*` in
-      // `**cost 2*3**` a multiplication sign — answered by the `**` before
-      // it, it italicised `cost 2`, text the reply never marked at all, and
-      // left the closing `**` with nothing.
-      const kind = `${token.char}${token.length % 3}${token.opens ? 'o' : ''}`;
-      const bottom = floor.get(kind) ?? -1;
-      let candidate = -1;
-      for (let slot = own.length - 1; slot >= 0; slot -= 1) {
-        const standing = own[slot];
-        if (standing === undefined || standing <= bottom) {
+      while (purse >= least) {
+        // Markdown's rule of three: where either half could face both ways,
+        // runs whose lengths add to a multiple of three do not pair, unless
+        // both are multiples of three. It is what keeps the `*` in
+        // `**cost 2*3**` a multiplication sign — answered by the `**` before
+        // it, it italicised `cost 2`, text the reply never marked at all, and
+        // left the closing `**` with nothing.
+        const kind = `${token.char}${token.length % 3}${token.opens ? 'o' : ''}`;
+        const bottom = floor.get(kind) ?? -1;
+        let candidate = -1;
+        for (let slot = own.length - 1; slot >= 0; slot -= 1) {
+          const standing = own[slot];
+          if (standing === undefined || standing <= bottom) {
+            break;
+          }
+          if (standing >= ceiling) {
+            continue;
+          }
+          // A pair lies wholly inside a link's label or wholly outside it,
+          // never half of each. There is no way to render one that straddles
+          // the boundary — the label is written as `<url|label>`, so a
+          // wrapper cannot begin outside it and end inside — and every
+          // attempt to leaves characters behind: `*a [**b***](https://x)`
+          // lost the link outright, and `*a [**b](https://x)***` lost the
+          // asterisks the unrenderable pair had claimed.
+          if (labelled[standing] !== labelled[index]) {
+            continue;
+          }
+          const waiting = tokens[standing];
+          if (waiting?.kind !== 'run') {
+            continue;
+          }
+          const faces = token.opens || waiting.closes;
+          const thirds = (waiting.length + token.length) % 3 === 0;
+          const both = waiting.length % 3 === 0 && token.length % 3 === 0;
+          if (!(faces && thirds && !both)) {
+            candidate = standing;
+            break;
+          }
+        }
+        if (candidate === -1) {
+          // Everything *before* this closer, not including it: a closer the
+          // rule turned away is still an opener for what comes after, and
+          // shutting the door on itself is what stopped `2*3 and 4*5`
+          // pairing. Only worth recording while nothing has been spent —
+          // once it has, this closer is not the one a later one can learn
+          // from, because what it could not reach it never looked for.
+          if (!spent) {
+            floor.set(kind, index - 1);
+          }
           break;
         }
-        const waiting = tokens[standing];
-        if (waiting?.kind !== 'run') {
-          continue;
-        }
-        const faces = token.opens || waiting.closes;
-        const thirds = (waiting.length + token.length) % 3 === 0;
-        const both = waiting.length % 3 === 0 && token.length % 3 === 0;
-        if (!(faces && thirds && !both)) {
-          candidate = standing;
+        const purseOfOpener = left.get(candidate) ?? 0;
+        const use = Math.min(purseOfOpener, purse, most);
+        if (use < least) {
           break;
         }
-      }
-      const opener = candidate === -1 ? undefined : tokens[candidate];
-      if (opener?.kind === 'run') {
-        const most = DELIMITERS[token.char]?.most ?? 1;
-        const pair: Pair = { open: candidate, close: index, use: Math.min(opener.length, token.length, most) };
-        pairs.set(candidate, pair);
-        pairs.set(index, pair);
-        // This opener is spent, and everything opened inside the pair and
-        // never closed is text — including whatever the rule above stepped
-        // over, which sits above this one. Each entry is dropped once
-        // however many closers pass over it, so the whole pass stays linear.
+        made.push({ open: candidate, close: index, use });
+        left.set(candidate, purseOfOpener - use);
+        purse -= use;
+        spent = true;
+        ceiling = candidate;
+        // Everything opened inside the pair and never closed is text —
+        // including whatever the rule above stepped over, which sits above
+        // this one. The opener itself stays only while it has something
+        // left to spend on a closer further along. Each entry is dropped
+        // once however many closers pass over it, so the pass stays linear.
         for (const stack of openers.values()) {
-          while (stack.length > 0 && (stack[stack.length - 1] ?? -1) >= candidate) {
+          while (stack.length > 0 && (stack[stack.length - 1] ?? -1) > candidate) {
             stack.pop();
           }
         }
-        return;
+        if ((left.get(candidate) ?? 0) < least && own[own.length - 1] === candidate) {
+          own.pop();
+        }
       }
-      // Everything *before* this closer, not including it: a closer the
-      // rule turned away is still an opener for what comes after, and
-      // shutting the door on itself is what stopped `2*3 and 4*5` pairing.
-      floor.set(kind, index - 1);
     }
-    if (token.opens) {
+    left.set(index, purse);
+    // A run that spent anything closing does not go on to open: the
+    // renderer enters a pair at its opening run and leaves past its
+    // closing one, so a run that is both would have to be stopped at
+    // twice, and the second stop is the one that does not exist yet.
+    // `**bold***italic*` is bold then italic in Markdown and comes out as
+    // two bold runs here, as it did before this branch.
+    if (!spent && token.opens) {
       own?.push(index);
+    }
+  });
+
+  // What is left of a run is text, and belongs to the outermost pair that
+  // touches it — the last one made there, since pairs are made from the
+  // inside out.
+  const pairs = new Map<number, Pair[]>();
+  const outermost = new Map<number, number>();
+  made.forEach((entry, at) => {
+    outermost.set(entry.open, at);
+    outermost.set(entry.close, at);
+  });
+  made.forEach((entry, at) => {
+    const pair: Pair = {
+      open: entry.open,
+      close: entry.close,
+      use: entry.use,
+      before: outermost.get(entry.open) === at ? left.get(entry.open) ?? 0 : 0,
+      after: outermost.get(entry.close) === at ? left.get(entry.close) ?? 0 : 0,
+    };
+    const opening = pairs.get(entry.open);
+    if (opening === undefined) {
+      pairs.set(entry.open, [pair]);
+    } else {
+      // Outermost first, so the range it covers is entered before the ones
+      // inside it and its markup is written to the outside of theirs.
+      opening.unshift(pair);
     }
   });
   return pairs;
@@ -474,7 +563,7 @@ const wrapperFor = (char: string, use: number): readonly [string, string] => {
 
 interface Context {
   readonly tokens: readonly Token[];
-  readonly pairs: ReadonlyMap<number, Pair>;
+  readonly pairs: ReadonlyMap<number, readonly Pair[]>;
   readonly links: ReadonlyMap<number, Link>;
   /** Text to use in place of a token's own — how a heading sheds its hashes. */
   readonly edits: ReadonlyMap<number, string>;
@@ -515,6 +604,8 @@ interface PairFrame extends FrameBase {
   readonly open: Run;
   readonly close: Run;
   readonly use: number;
+  /** What nothing spent of the opening and closing runs, for this pair to keep. */
+  readonly spare: readonly [number, number];
 }
 
 interface LabelFrame extends FrameBase {
@@ -576,20 +667,25 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
       }
       if (frame.kind === 'pair') {
         const [open, close] = wrapperFor(frame.open.char, frame.use);
-        // The characters of each run the pair did not consume are text, and
-        // stay on the outside of it where they were written.
-        const before = frame.open.char.repeat(frame.open.length - frame.use);
-        const after = frame.close.char.repeat(frame.close.length - frame.use);
+        // The characters of a run nothing spent are text, and stay on the
+        // outside of the pair where they were written. A run two pairs
+        // share hands them to the outer one, so they are counted here
+        // rather than taken from the run's own length.
+        const before = frame.open.char.repeat(frame.spare[0]);
+        const after = frame.close.char.repeat(frame.spare[1]);
         // Every character the wrapper is spelled with, not just its first:
         // `***both***` is written `*_…_*`, and an underscore already loose
         // inside it would break the italic half exactly as a stray asterisk
         // breaks the bold one.
         const nests = [...open].some((char) => frame.loose.has(char)) || frame.unclosed;
-        chunks[frame.slot] = nests ? sourceOf(frame.open) : before + open;
+        // Only what this pair spends, for the same reason: the run may have
+        // written the other half of somebody else's markup already.
+        const kept = frame.open.char.repeat(frame.use);
+        chunks[frame.slot] = nests ? before + kept : before + open;
         // Both halves are prose to whatever encloses this, wrappers this
         // pass emitted included — which is why a heading that already holds
         // bold is not bolded again.
-        write(parent, nests ? sourceOf(frame.close) : close + after);
+        write(parent, nests ? frame.close.char.repeat(frame.use) + after : close + after);
         for (const char of chunks[frame.slot] ?? '') {
           if (char in DELIMITERS) {
             parent.loose.add(char);
@@ -634,22 +730,46 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
     }
 
     if (token.kind === 'run') {
-      const pair = context.pairs.get(at);
-      const closer = pair === undefined ? undefined : context.tokens[pair.close];
-      if (pair?.open === at && pair.close < frame.to && closer?.kind === 'run') {
-        chunks.push('');
-        stack.push({
-          kind: 'pair',
-          to: pair.close,
-          loose: new Set(),
-          unclosed: false,
-          wraps: false,
-          slot: chunks.length - 1,
-          after: pair.close + 1,
-          open: token,
-          close: closer,
-          use: pair.use,
-        });
+      // Every pair this run opens, outermost first, so each is entered
+      // before the ones it contains. A run can open more than one: the
+      // three asterisks of `***a** b*` buy an italic that ends at the last
+      // one and a bold that ends before it.
+      // `<=`, not `<`: a pair inside another that ends on the same run
+      // closes where its parent does. Nothing is expected to be filtered
+      // out here — a pair never crosses a line, never leaves the pair
+      // around it, and since pairing kept them out of link labels, never
+      // leaves one of those either — but a pair dropped here would take
+      // the characters it had claimed with it, so the condition earns its
+      // place by making that impossible rather than by catching it.
+      const here = (context.pairs.get(at) ?? []).filter((pair) => {
+        const closer = context.tokens[pair.close];
+        return pair.close <= frame.to && closer?.kind === 'run';
+      });
+      if (here.length > 0) {
+        for (const pair of here) {
+          const closer = context.tokens[pair.close];
+          if (closer?.kind !== 'run') {
+            continue;
+          }
+          chunks.push('');
+          stack.push({
+            kind: 'pair',
+            to: pair.close,
+            loose: new Set(),
+            unclosed: false,
+            wraps: false,
+            slot: chunks.length - 1,
+            // Past the closing run for every pair that ends on it, the
+            // ones inside included: whatever encloses a pair sharing a run
+            // ends on that same run, so it is finished either way and takes
+            // its closing markup from the frame rather than from the token.
+            after: pair.close + 1,
+            open: token,
+            close: closer,
+            use: pair.use,
+            spare: [pair.before, pair.after],
+          });
+        }
         at += 1;
         continue;
       }
@@ -734,7 +854,15 @@ export const toSlackMrkdwn = (text: string): string => {
       inert.add(at);
     }
   }
-  const context: Context = { tokens, pairs: pairEmphasis(tokens, inert), links, edits: new Map() };
+  // Where the label each token sits in begins, so pairing can tell that
+  // reaching further back would cross out of a link.
+  const labelled = new Array<number>(tokens.length).fill(-1);
+  for (const [opener, link] of links) {
+    for (let at = link.label[0]; at < link.label[1]; at += 1) {
+      labelled[at] = opener;
+    }
+  }
+  const context: Context = { tokens, pairs: pairEmphasis(tokens, inert, labelled), links, edits: new Map() };
 
   const lines: string[] = [];
   let start = 0;

@@ -91,6 +91,47 @@ test('a run spends only what its style has, and the rest stays text', () => {
   ]);
 });
 
+test('a run with characters to spare answers more than one opener', () => {
+  // A run is not one marker but a purse. `**bold and *italic***` ends on
+  // three asterisks with two jobs — one closes the italic, two close the
+  // bold — and a closer that answered only its nearest opener left the
+  // outer `**` unanswered, with its asterisks on the line for the reader.
+  converts([
+    ['**bold and *italic***', '*bold and _italic_*'],
+    ['**a *b***', '*a _b_*'],
+    // The same the other way about: one opening run, two closers, spent
+    // from the end nearest what it marks so the styles nest as written.
+    ['***a** b*', '_*a* b_'],
+    // Strictly inside has always worked, and still does.
+    ['**a *b* c**', '*a _b_ c*'],
+    // A pair lies wholly inside a link's label or wholly outside it. One
+    // that straddles the boundary cannot be written at all — the label
+    // becomes `<url|label>`, so a wrapper cannot start outside it and end
+    // inside — and each of these was an attempt to render one: the first
+    // came out as text with no link in it, the second two asterisks short.
+    ['*a [**b***](https://x)', '*a <https://x|*b**>'],
+    ['*a [**b](https://x)***', '_a <https://x|**b>_**'],
+    ['[***a**](https://x) b*', '<https://x|**a*> b*'],
+    // Which also settles one that was broken before any of this: a single
+    // pair reaching across the boundary turned the whole link into text.
+    ['*a [*b**](https://x)', '*a <https://x|*b**>'],
+  ]);
+  // Each opener answers a given closer once, so a run cannot buy the same
+  // style twice over with characters the first pairing could not spend.
+  converts([
+    ['****quad****', '**_quad_**'],
+    ['~~~obsolete~~~', '~~obsolete~~'],
+  ]);
+  // Those two pass either way, and it took the mutation sweep to say so:
+  // let an opener answer twice and the second wrapper is refused anyway,
+  // because the first one's markup is by then a loose asterisk inside it.
+  // That rule and this one agree nearly everywhere — 300 000 generated
+  // replies of asterisks and letters found no shape where they disagree.
+  // This is one, because the tildes break up what would otherwise be
+  // loose, so the second pairing goes through and rewrites the line.
+  converts([['*****~~*~~****', '*****~*~****']]);
+});
+
 test('a run that has been answered is not there to answer a second closer', () => {
   // The same rule as the bracket that spends its opener, and for the same
   // reason. Left standing, the `*` that had already closed `*a*` was still
