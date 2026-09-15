@@ -103,6 +103,26 @@ test('a run that has been answered is not there to answer a second closer', () =
   ]);
 });
 
+test('runs whose lengths add to three do not pair, so arithmetic stays arithmetic', () => {
+  // Markdown's rule of three: where either half of a would-be pair could
+  // face both ways, lengths adding to a multiple of three do not pair —
+  // unless both are multiples of three. Without it the `*` in
+  // `**cost 2*3**` answered the `**` before it, italicising `cost 2`, text
+  // the reply never marked at all, and leaving the closing `**` with
+  // nothing to pair with.
+  converts([
+    ['**cost 2*3**', '**cost 2*3**'],
+    ['**a*b**', '**a*b**'],
+    // A closer the rule turns away is still an opener for what follows it,
+    // which is the whole of why the second `*` here finds the first.
+    ['2*3 and 4*5', '2_3 and 4_5'],
+    ['**x*y*z**', '*x_y_z*'],
+    // Both lengths multiples of three is the exception the rule carves out,
+    // and it needs a run that faces both ways to be exercised at all.
+    ['a***b***c', 'a*_b_*c'],
+  ]);
+});
+
 test('a delimiter has to hug what it marks, or it is arithmetic and names', () => {
   converts([
     ['3 * 4 * 5', '3 * 4 * 5'],
@@ -294,6 +314,14 @@ test('a destination is an address, and its characters are not markup', () => {
   converts([
     ['[files](https://host/files/*.txt)', '<https://host/files/*.txt|files>'],
     ['**[files](https://host/files/*.txt)**', '**<https://host/files/*.txt|files>**'],
+    // The line above stopped proving anything when the rule of three
+    // arrived: `**` and the path's lone `*` add to three, so that pairing
+    // is refused for a second reason now and the case passes either way.
+    // These do not — each is a length the rule allows, so the destination
+    // being inert is the only thing holding the address together.
+    ['*[f](https://h/a*b)*', '_<https://h/a*b|f>_'],
+    ['**[f](https://h/a**b)**', '**<https://h/a**b|f>**'],
+    ['~~[f](https://h/a~~b)~~', '~~<https://h/a~~b|f>~~'],
     // An underscore in a path does not block a bold wrapper, because only
     // a wrapper's own character can pair with what is inside it.
     ['**[f](https://host/a_b_c)**', '*<https://host/a_b_c|f>*'],

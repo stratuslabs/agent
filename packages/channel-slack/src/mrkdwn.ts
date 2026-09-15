@@ -265,6 +265,12 @@ const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map
   // entry is the nearest opener of that character, and everything the
   // closer invalidates is at the end of some stack.
   const openers = new Map<string, number[]>(Object.keys(DELIMITERS).map((char) => [char, []]));
+  // How far down a closer of a given kind still has to look. A closer that
+  // found nothing tells every later closer of its kind that there is
+  // nothing below it either, because the stack under it only ever shrinks
+  // — without which the rule below would put back the walk over every
+  // standing opener that the one-stack-per-character change took out.
+  const floor = new Map<string, number>();
 
   tokens.forEach((token, index) => {
     if (token.kind === 'break') {
@@ -278,16 +284,42 @@ const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map
     }
     const own = openers.get(token.char);
     if (token.closes && own !== undefined) {
-      const candidate = own[own.length - 1];
-      const opener = candidate === undefined ? undefined : tokens[candidate];
-      if (candidate !== undefined && opener?.kind === 'run') {
+      // Markdown's rule of three: where either half could face both ways,
+      // runs whose lengths add to a multiple of three do not pair, unless
+      // both are multiples of three. It is what keeps the `*` in
+      // `**cost 2*3**` a multiplication sign — answered by the `**` before
+      // it, it italicised `cost 2`, text the reply never marked at all, and
+      // left the closing `**` with nothing.
+      const kind = `${token.char}${token.length % 3}${token.opens ? 'o' : ''}`;
+      const bottom = floor.get(kind) ?? -1;
+      let candidate = -1;
+      for (let slot = own.length - 1; slot >= 0; slot -= 1) {
+        const standing = own[slot];
+        if (standing === undefined || standing <= bottom) {
+          break;
+        }
+        const waiting = tokens[standing];
+        if (waiting?.kind !== 'run') {
+          continue;
+        }
+        const faces = token.opens || waiting.closes;
+        const thirds = (waiting.length + token.length) % 3 === 0;
+        const both = waiting.length % 3 === 0 && token.length % 3 === 0;
+        if (!(faces && thirds && !both)) {
+          candidate = standing;
+          break;
+        }
+      }
+      const opener = candidate === -1 ? undefined : tokens[candidate];
+      if (opener?.kind === 'run') {
         const most = DELIMITERS[token.char]?.most ?? 1;
         const pair: Pair = { open: candidate, close: index, use: Math.min(opener.length, token.length, most) };
         pairs.set(candidate, pair);
         pairs.set(index, pair);
         // This opener is spent, and everything opened inside the pair and
-        // never closed is text. Each entry is dropped once however many
-        // closers pass over it, so the whole pass stays linear.
+        // never closed is text — including whatever the rule above stepped
+        // over, which sits above this one. Each entry is dropped once
+        // however many closers pass over it, so the whole pass stays linear.
         for (const stack of openers.values()) {
           while (stack.length > 0 && (stack[stack.length - 1] ?? -1) >= candidate) {
             stack.pop();
@@ -295,6 +327,10 @@ const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map
         }
         return;
       }
+      // Everything *before* this closer, not including it: a closer the
+      // rule turned away is still an opener for what comes after, and
+      // shutting the door on itself is what stopped `2*3 and 4*5` pairing.
+      floor.set(kind, index - 1);
     }
     if (token.opens) {
       own?.push(index);
