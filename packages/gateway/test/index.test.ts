@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -29,7 +29,7 @@ import {
   MEMORY_TOOL_NAME,
 } from '@stratusagent/agents';
 import { SKILL_READ_TOOL_NAME } from '@stratusagent/core';
-import { fleetDbIn } from '@stratusagent/state';
+import { createHomeMemoryStore, fleetDbIn, legacyMemoryFilePath } from '@stratusagent/state';
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-'));
 
@@ -4390,4 +4390,35 @@ test('a dispatch carrying images stores them on the turn it opens and on the tur
   assert.deepEqual(opened.messages[0]?.images, [shot]);
   const asked = resumed.messages.filter((message) => message.role === 'user');
   assert.deepEqual(asked.map((message) => message.images?.[0]?.name), ['shot.png', 'other.png']);
+});
+
+test('a shared memory.jsonl a pre-per-agent build left is folded in by start(), not only by the CLI', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    legacyMemoryFilePath(env),
+    `${JSON.stringify({
+      id: 'ava:memory:1',
+      agentId: 'ava',
+      content: 'likes jazz',
+      createdAt: new Date().toISOString(),
+    })}\n`,
+  );
+
+  // The documented host path — `createGateway()` then `start()` — with no
+  // CLI in front of it to have run the drain. Shared memory is not part of
+  // what `start()` refuses over, because it does not need to be: the drain
+  // below is unconditional and runs before anything serves.
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  await gateway.stop();
+
+  // The store the gateway serves reads per-agent files only, so memories
+  // still sitting in the shared file are memories the agent has lost.
+  const memory = createHomeMemoryStore(env);
+  assert.deepEqual((await memory.list('ava')).entries.map((entry) => entry.content), ['likes jazz']);
+  // Copied, not moved: a pre-per-agent daemon still serving keeps reading
+  // its own file. Retiring it belongs to the exclusive bracket.
+  await stat(legacyMemoryFilePath(env));
 });
