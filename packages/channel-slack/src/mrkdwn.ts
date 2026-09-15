@@ -328,14 +328,15 @@ const pairEmphasis = (
           if (standing >= ceiling) {
             continue;
           }
-          // A run that has already bought something does not go shopping
-          // outside the label it is standing in. `*a [**b***](https://x)`
-          // has three asterisks closing the label's bold and, with one
-          // still in hand, reaching back past the `[` for the `*` before
-          // it — a pair that starts outside a link and ends inside its
-          // label, which leaves no link for the renderer to write at all.
-          if (spent && standing < (labelled[index] ?? -1)) {
-            break;
+          // A pair lies wholly inside a link's label or wholly outside it,
+          // never half of each. There is no way to render one that straddles
+          // the boundary — the label is written as `<url|label>`, so a
+          // wrapper cannot begin outside it and end inside — and every
+          // attempt to leaves characters behind: `*a [**b***](https://x)`
+          // lost the link outright, and `*a [**b](https://x)***` lost the
+          // asterisks the unrenderable pair had claimed.
+          if (labelled[standing] !== labelled[index]) {
+            continue;
           }
           const waiting = tokens[standing];
           if (waiting?.kind !== 'run') {
@@ -733,24 +734,18 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
       // before the ones it contains. A run can open more than one: the
       // three asterisks of `***a** b*` buy an italic that ends at the last
       // one and a bold that ends before it.
+      // `<=`, not `<`: a pair inside another that ends on the same run
+      // closes where its parent does. Nothing is expected to be filtered
+      // out here — a pair never crosses a line, never leaves the pair
+      // around it, and since pairing kept them out of link labels, never
+      // leaves one of those either — but a pair dropped here would take
+      // the characters it had claimed with it, so the condition earns its
+      // place by making that impossible rather than by catching it.
       const here = (context.pairs.get(at) ?? []).filter((pair) => {
         const closer = context.tokens[pair.close];
-        // `<=`, not `<`: a pair inside another that ends on the same run
-        // closes where its parent does, and hands the run back rather than
-        // stepping past it.
         return pair.close <= frame.to && closer?.kind === 'run';
       });
       if (here.length > 0) {
-        // Whatever the pairs rendered here do not account for is the run's
-        // own again, and it sits outside them, so it is written first. A
-        // pair closing beyond this range is left out above — `[***a**](url)
-        // b*` opens a bold that ends inside the label and an italic that
-        // ends after it — and the characters it had claimed went with it,
-        // which is one taken out of the reply rather than a style declined.
-        const kept = here.reduce((sum, pair) => sum + pair.use + pair.before, 0);
-        if (token.length > kept) {
-          write(frame, token.char.repeat(token.length - kept));
-        }
         for (const pair of here) {
           const closer = context.tokens[pair.close];
           if (closer?.kind !== 'run') {

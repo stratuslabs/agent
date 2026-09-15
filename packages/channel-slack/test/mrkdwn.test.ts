@@ -104,17 +104,17 @@ test('a run with characters to spare answers more than one opener', () => {
     ['***a** b*', '_*a* b_'],
     // Strictly inside has always worked, and still does.
     ['**a *b* c**', '*a _b_ c*'],
-    // And it does not go shopping outside the label it stands in: three
-    // asterisks closing the label's bold, with one still in hand, reached
-    // back past the `[` for the `*` before it, and a pair that starts
-    // outside a link and ends inside its label leaves no link at all.
+    // A pair lies wholly inside a link's label or wholly outside it. One
+    // that straddles the boundary cannot be written at all — the label
+    // becomes `<url|label>`, so a wrapper cannot start outside it and end
+    // inside — and each of these was an attempt to render one: the first
+    // came out as text with no link in it, the second two asterisks short.
     ['*a [**b***](https://x)', '*a <https://x|*b**>'],
-    // A run can also buy a pair that ends outside the range being rendered,
-    // and that pair is not written there. What it had claimed is the run's
-    // own again and has to be written as text, or the reply comes out a
-    // character short: here the bold ends inside the label and the italic
-    // after it, and the leading asterisk had been going to the italic.
+    ['*a [**b](https://x)***', '_a <https://x|**b>_**'],
     ['[***a**](https://x) b*', '<https://x|**a*> b*'],
+    // Which also settles one that was broken before any of this: a single
+    // pair reaching across the boundary turned the whole link into text.
+    ['*a [*b**](https://x)', '*a <https://x|*b**>'],
   ]);
   // Each opener answers a given closer once, so a run cannot buy the same
   // style twice over with characters the first pairing could not spend.
