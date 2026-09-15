@@ -180,14 +180,26 @@ export interface ParsedGrantsCommand {
 
 export interface ParsedMemoryCommand {
   command: 'memory';
-  action: 'list' | 'reassert';
+  action: 'list' | 'search' | 'forget' | 'audit' | 'pin' | 'unpin' | 'export' | 'import' | 'reassert';
   agentId: string;
   /** list: show only entries at this label. reassert: the label to record. */
   trust?: TrustLevel;
-  /** reassert: the entries to re-label, by id. */
+  /** reassert, forget, pin, unpin: the entries to act on, by id. */
   ids: string[];
   /** reassert: every live entry currently reading `unknown` — the upgrade case. */
   allUnknown: boolean;
+  /** search: the literal words to look for. */
+  query?: string;
+  /** search: how many hits, before the store's own clamp. */
+  limit?: number;
+  /** export: where the JSONL goes; omitted means stdout. import: where it comes from. */
+  file?: string;
+  /**
+   * import: keep each entry's recorded trust instead of re-labelling it
+   * `external`. The migration path — moving an agent to a new machine,
+   * where a person vouches for the file.
+   */
+  preserveTrust: boolean;
   format: 'text' | 'json';
 }
 
@@ -1050,14 +1062,27 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     if (action === undefined || action === '--help' || action === '-h') {
       return { command: 'help' };
     }
-    if (action !== 'list' && action !== 'reassert') {
-      throw new Error(`Unknown memory subcommand: ${action}. Try: stratus memory list <agent>, stratus memory reassert <agent> --trust user <id>...`);
+    const actions = ['list', 'search', 'forget', 'audit', 'pin', 'unpin', 'export', 'import', 'reassert'] as const;
+    if (!(actions as readonly string[]).includes(action)) {
+      throw new Error(
+        `Unknown memory subcommand: ${action}. Try one of ${actions.join(', ')} — for example stratus memory list <agent>.`,
+      );
     }
+    const memoryAction = action as ParsedMemoryCommand['action'];
+    // Which subcommands take bare arguments after the agent, and what they
+    // mean. Named here rather than re-tested at each branch, so adding a
+    // subcommand is one line and not four.
+    const takesIds = memoryAction === 'reassert' || memoryAction === 'forget'
+      || memoryAction === 'pin' || memoryAction === 'unpin';
     let agentId: string | undefined;
     let trust: TrustLevel | undefined;
     let format: 'text' | 'json' = 'text';
     let allUnknown = false;
+    let limit: number | undefined;
+    let file: string | undefined;
+    let preserveTrust = false;
     const ids: string[] = [];
+    const words: string[] = [];
     for (let index = 0; index < memoryRest.length; index += 1) {
       const token = memoryRest[index];
       if (!token) {
@@ -1084,7 +1109,25 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         index += 1;
         continue;
       }
-      if (token === '--all-unknown' && action === 'reassert') {
+      if (token === '--limit' && memoryAction === 'search') {
+        const value = Number(readOptionValue(memoryRest, index, '--limit'));
+        if (!Number.isFinite(value) || value < 1) {
+          throw new Error('--limit needs a positive number of results.');
+        }
+        limit = Math.floor(value);
+        index += 1;
+        continue;
+      }
+      if (token === '--file' && (memoryAction === 'export' || memoryAction === 'import')) {
+        file = readOptionValue(memoryRest, index, '--file');
+        index += 1;
+        continue;
+      }
+      if (token === '--preserve-trust' && memoryAction === 'import') {
+        preserveTrust = true;
+        continue;
+      }
+      if (token === '--all-unknown' && memoryAction === 'reassert') {
         allUnknown = true;
         continue;
       }
@@ -1095,16 +1138,20 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         agentId = token;
         continue;
       }
-      if (action === 'reassert') {
+      if (takesIds) {
         ids.push(token);
         continue;
       }
-      throw new Error(`Unexpected argument: ${token}. Try: stratus memory list <agent>`);
+      if (memoryAction === 'search') {
+        words.push(token);
+        continue;
+      }
+      throw new Error(`Unexpected argument: ${token}. Try: stratus memory ${memoryAction} <agent>`);
     }
     if (!agentId) {
-      throw new Error(`memory ${action} needs the agent id: stratus memory ${action} <agent>${action === 'reassert' ? ' --trust user <id>...' : ''}.`);
+      throw new Error(`memory ${memoryAction} needs the agent id: stratus memory ${memoryAction} <agent>${memoryAction === 'reassert' ? ' --trust user <id>...' : ''}.`);
     }
-    if (action === 'reassert') {
+    if (memoryAction === 'reassert') {
       if (trust === undefined) {
         throw new Error('memory reassert needs --trust <user|agent|external|unknown>: the label you are vouching for.');
       }
@@ -1112,13 +1159,26 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         throw new Error('memory reassert needs entry ids, or --all-unknown to re-label every entry that has no recorded origin.');
       }
     }
+    if (takesIds && memoryAction !== 'reassert' && ids.length === 0) {
+      throw new Error(`memory ${memoryAction} needs at least one entry id: stratus memory ${memoryAction} ${agentId} <id>...`);
+    }
+    if (memoryAction === 'search' && words.length === 0) {
+      throw new Error(`memory search needs something to look for: stratus memory search ${agentId} deploy pipeline.`);
+    }
+    if (memoryAction === 'import' && file === undefined) {
+      throw new Error(`memory import needs --file <path>: the JSONL a stratus memory export wrote.`);
+    }
     return {
       command: 'memory',
-      action,
+      action: memoryAction,
       agentId,
       ...(trust !== undefined ? { trust } : {}),
       ids,
       allUnknown,
+      ...(words.length > 0 ? { query: words.join(' ') } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+      ...(file !== undefined ? { file } : {}),
+      preserveTrust,
       format,
     };
   }

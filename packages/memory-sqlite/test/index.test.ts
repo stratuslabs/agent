@@ -11,6 +11,7 @@ import {
   InMemoryAgentMemoryStore,
   MEMORY_ENTRY_MAX_BYTES,
   ToolRegistry,
+  type AgentMemoryStore,
   type MemoryStoreContribution,
 } from '@stratusagent/core';
 import { loadPlugins } from '@stratusagent/plugins';
@@ -149,4 +150,78 @@ test('the plugin registers the store at the configured path through the real loa
     () => noPath.setup({ bus: new EventBus(), tools: new ToolRegistry(), memory: { register() {} } }),
     /needs a path/,
   );
+});
+
+test('the wider entry shape behaves the same here as in the kernel store: validity, supersession, pinning, topics', async () => {
+  const at = new Date('2026-06-01T00:00:00.000Z');
+  const sqlite = createSqliteMemoryStore(await newFile(), { now: () => at });
+  const reference = new InMemoryAgentMemoryStore({ now: () => at });
+  const seed = async (store: AgentMemoryStore): Promise<void> => {
+    const old = await store.append('ava', 'the deploy runs on MySQL', { about: ['deploy'], kind: 'semantic' });
+    await store.append('ava', 'the deploy runs on Postgres', { about: ['deploy'], supersedes: old.id });
+    await store.append('ava', 'the hide is closed in winter', { about: ['hide'], validUntil: '2026-03-01T00:00:00.000Z' });
+    await store.append('ava', 'Ada joins in September', { about: ['Ada'], validFrom: '2026-09-01T00:00:00.000Z' });
+    await store.append('juno', 'Juno keeps the vault code', { about: ['vault'] });
+  };
+  await seed(sqlite);
+  await seed(reference);
+
+  for (const [label, store] of [['sqlite', sqlite], ['in-memory', reference]] as const) {
+    // Superseded leaves everything; out of window leaves only what is true now.
+    assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.content), ['the deploy runs on Postgres'], label);
+    assert.equal((await store.search('ava', 'MySQL')).entries.length, 0, label);
+    assert.equal((await store.search('ava', 'winter')).entries.length, 1, label);
+    assert.equal((await store.search('ava', 'September')).entries.length, 1, label);
+    // `about` participates in matching in every store.
+    assert.deepEqual((await store.search('ava', 'deploy')).entries.map((entry) => entry.content), ['the deploy runs on Postgres'], label);
+    assert.deepEqual((await store.topics!('ava')).map((topic) => topic.name), ['deploy'], label);
+    assert.equal((await store.search('ava', 'deploy')).strategy, 'recency', label);
+    // The per-agent boundary holds across every new field.
+    const junos = (await store.list('juno')).entries[0]!;
+    await assert.rejects(
+      () => store.append('ava', 'not mine to replace', { supersedes: junos.id }),
+      /belongs to this agent/,
+      label,
+    );
+    assert.deepEqual((await store.list('juno')).entries.map((entry) => entry.content), ['Juno keeps the vault code'], label);
+  }
+
+  // Pinning: a record, capped, refusing rather than evicting, and an
+  // out-of-window pin does not reach the core.
+  const live = (await sqlite.list('ava')).entries[0]!;
+  assert.equal((await sqlite.pin!('ava', live.id)).pinned, true);
+  const future = (await sqlite.search('ava', 'September')).entries[0]!;
+  assert.equal((await sqlite.pin!('ava', future.id)).pinned, true);
+  assert.deepEqual((await sqlite.pinned!('ava')).map((entry) => entry.id), [live.id]);
+  assert.equal(await sqlite.unpin!('ava', live.id), true);
+  assert.deepEqual(await sqlite.pinned!('ava'), []);
+  sqlite.close();
+});
+
+test('usage counters live beside the record here, and never in it', async () => {
+  const store = createSqliteMemoryStore(await newFile());
+  const written = await store.append('ava', 'the heron rookery is on the north bank');
+  assert.equal(written.usage, undefined);
+  assert.equal((await store.list('ava')).entries[0]?.usage, undefined);
+  assert.equal((await store.search('ava', 'heron')).entries[0]?.usage?.recallCount, 1);
+  assert.equal((await store.search('ava', 'heron')).entries[0]?.usage?.recallCount, 2);
+  assert.equal((await store.audit('ava'))[0]?.usage, undefined);
+  store.close();
+});
+
+test('an import lands entries verbatim under the importing agent, and re-running one is a no-op', async () => {
+  const store = createSqliteMemoryStore(await newFile());
+  const entries = [
+    { id: 'from-elsewhere:1', agentId: 'somewhere', content: 'the survey is quarterly', createdAt: '2026-01-01T00:00:00.000Z', about: ['rookery'], trust: 'external' as const },
+    { id: 'from-elsewhere:2', agentId: 'somewhere', content: 'the hide needs repainting', createdAt: '2026-01-02T00:00:00.000Z', trust: 'external' as const },
+  ];
+  assert.deepEqual(await store.importEntries!('ava', entries), { imported: 2, skipped: [] });
+  const back = (await store.list('ava')).entries;
+  assert.deepEqual(back.map((entry) => entry.id), ['from-elsewhere:1', 'from-elsewhere:2']);
+  // Re-keyed to the importing agent — the id is opaque, the ownership is not.
+  assert.deepEqual(back.map((entry) => entry.agentId), ['ava', 'ava']);
+  assert.deepEqual(back[0]?.about, ['rookery']);
+  assert.deepEqual(await store.importEntries!('ava', entries), { imported: 0, skipped: ['from-elsewhere:1', 'from-elsewhere:2'] });
+  assert.equal((await store.list('ava')).entries.length, 2);
+  store.close();
 });

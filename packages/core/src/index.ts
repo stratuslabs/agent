@@ -1588,8 +1588,12 @@ export const boundMemoryRead = (
  * presentation order are different things; conflating them is the bug this
  * helper exists so nobody writes three times.
  */
-export const boundMemoryList = (candidates: readonly MemoryEntry[], limit: number): MemoryReadResult => {
-  const bounded = boundMemoryRead(candidates, Math.max(1, Math.floor(limit)));
+export const boundMemoryList = (
+  candidates: readonly MemoryEntry[],
+  limit: number,
+  maxBytes: number = MEMORY_READ_MAX_BYTES,
+): MemoryReadResult => {
+  const bounded = boundMemoryRead(candidates, Math.max(1, Math.floor(limit)), maxBytes);
   bounded.entries.sort(compareMemoryChronology);
   return bounded;
 };
@@ -1787,6 +1791,7 @@ export const selectMemoryInjection = (input: {
   const recent = boundMemoryList(
     input.recent.filter((entry) => !pinnedIds.has(entry.id)),
     MEMORY_RECENCY_INJECTION_LIMIT,
+    MEMORY_RECENCY_MAX_BYTES,
   ).entries;
   const topics: MemoryTopic[] = [];
   let topicBytes = 0;
@@ -2073,14 +2078,7 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
       .filter((entry) => entry.forgottenAt === undefined)
       .map(({ forgottenAt: _unused, ...entry }) => entry);
     const superseded = supersededMemoryIdsAt(kept, at);
-    return kept
-      .filter((entry) => !superseded.has(entry.id))
-      .map((entry) => this.withUsage(entry));
-  }
-
-  private withUsage(entry: MemoryEntry): MemoryEntry {
-    const usage = this.usage.get(entry.id);
-    return usage ? { ...entry, usage: { ...usage } } : entry;
+    return kept.filter((entry) => !superseded.has(entry.id));
   }
 
   async list(agentId: string, options: MemoryListOptions = {}): Promise<MemoryReadResult> {
@@ -2104,19 +2102,33 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     }
     const matches = this.live(agentId, this.now()).filter((entry) => memoryQueryMatches(entry, tokens));
     const bounded = boundMemoryRead(matches, clampMemoryRecallLimit(options.limit));
-    this.noteRecalled(bounded.entries);
-    return { ...bounded, strategy };
+    // Counted, then reported, for the entries actually returned — usage is
+    // meant to say what reached a prompt, and only a `search` carries it:
+    // `list` reads the record, where these counters deliberately are not.
+    const counted = this.noteRecalled(bounded.entries);
+    return {
+      entries: bounded.entries.map((entry) => {
+        const usage = counted.get(entry.id);
+        return usage === undefined ? entry : { ...entry, usage };
+      }),
+      truncated: bounded.truncated,
+      strategy,
+    };
   }
 
   // Usage counters are an observation about reading, not a fact the agent
   // learned: they live beside the record here the way they live in the file
   // store's index, and nothing ranks or deletes on them yet.
-  private noteRecalled(entries: readonly MemoryEntry[]): void {
+  private noteRecalled(entries: readonly MemoryEntry[]): Map<string, MemoryUsage> {
     const at = this.now().toISOString();
+    const counted = new Map<string, MemoryUsage>();
     for (const entry of entries) {
       const previous = this.usage.get(entry.id);
-      this.usage.set(entry.id, { recallCount: (previous?.recallCount ?? 0) + 1, lastRecalledAt: at });
+      const usage: MemoryUsage = { recallCount: (previous?.recallCount ?? 0) + 1, lastRecalledAt: at };
+      this.usage.set(entry.id, usage);
+      counted.set(entry.id, usage);
     }
+    return counted;
   }
 
   async forget(agentId: string, entryId: string): Promise<boolean> {

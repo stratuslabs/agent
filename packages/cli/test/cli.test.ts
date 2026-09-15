@@ -10601,22 +10601,42 @@ test('a local y/N does not run a browser action once the page has moved under it
 
 test('parseCommand reads the memory and session commands', () => {
   assert.deepEqual(parseCommand(['memory', 'list', 'ava']), {
-    command: 'memory', action: 'list', agentId: 'ava', ids: [], allUnknown: false, format: 'text',
+    command: 'memory', action: 'list', agentId: 'ava', ids: [], allUnknown: false, preserveTrust: false, format: 'text',
   });
   assert.deepEqual(parseCommand(['memory', 'list', 'ava', '--trust', 'unknown', '--format', 'json']), {
-    command: 'memory', action: 'list', agentId: 'ava', trust: 'unknown', ids: [], allUnknown: false, format: 'json',
+    command: 'memory', action: 'list', agentId: 'ava', trust: 'unknown', ids: [], allUnknown: false, preserveTrust: false, format: 'json',
   });
   assert.deepEqual(parseCommand(['memory', 'reassert', 'ava', '--trust', 'user', 'ava:memory:1', 'ava:memory:2']), {
-    command: 'memory', action: 'reassert', agentId: 'ava', trust: 'user', ids: ['ava:memory:1', 'ava:memory:2'], allUnknown: false, format: 'text',
+    command: 'memory', action: 'reassert', agentId: 'ava', trust: 'user', ids: ['ava:memory:1', 'ava:memory:2'], allUnknown: false, preserveTrust: false, format: 'text',
   });
   assert.deepEqual(parseCommand(['memory', 'reassert', 'ava', '--all-unknown', '--trust', 'agent']), {
-    command: 'memory', action: 'reassert', agentId: 'ava', trust: 'agent', ids: [], allUnknown: true, format: 'text',
+    command: 'memory', action: 'reassert', agentId: 'ava', trust: 'agent', ids: [], allUnknown: true, preserveTrust: false, format: 'text',
   });
   assert.throws(() => parseCommand(['memory', 'reassert', 'ava', 'ava:memory:1']), /--trust/);
   assert.throws(() => parseCommand(['memory', 'reassert', 'ava', '--trust', 'user']), /--all-unknown/);
   assert.throws(() => parseCommand(['memory', 'reassert', 'ava', '--trust', 'trusted']), /Unsupported trust level/);
   assert.throws(() => parseCommand(['memory', 'list']), /agent id/);
   assert.deepEqual(parseCommand(['memory']), { command: 'help' });
+
+  // The subcommands 29 added. A search's bare words are the query, joined —
+  // so `stratus memory search ava deploy pipeline` is one literal phrase and
+  // not two positional arguments the parser has to reject.
+  assert.deepEqual(parseCommand(['memory', 'search', 'ava', 'deploy', 'pipeline', '--limit', '3']), {
+    command: 'memory', action: 'search', agentId: 'ava', ids: [], allUnknown: false, query: 'deploy pipeline', limit: 3, preserveTrust: false, format: 'text',
+  });
+  assert.deepEqual(parseCommand(['memory', 'pin', 'ava', 'ava:memory:1']), {
+    command: 'memory', action: 'pin', agentId: 'ava', ids: ['ava:memory:1'], allUnknown: false, preserveTrust: false, format: 'text',
+  });
+  assert.deepEqual(parseCommand(['memory', 'import', 'ava', '--file', 'dump.jsonl', '--preserve-trust']), {
+    command: 'memory', action: 'import', agentId: 'ava', ids: [], allUnknown: false, file: 'dump.jsonl', preserveTrust: true, format: 'text',
+  });
+  assert.deepEqual(parseCommand(['memory', 'export', 'ava']), {
+    command: 'memory', action: 'export', agentId: 'ava', ids: [], allUnknown: false, preserveTrust: false, format: 'text',
+  });
+  assert.throws(() => parseCommand(['memory', 'search', 'ava']), /something to look for/);
+  assert.throws(() => parseCommand(['memory', 'pin', 'ava']), /at least one entry id/);
+  assert.throws(() => parseCommand(['memory', 'import', 'ava']), /--file/);
+  assert.throws(() => parseCommand(['memory', 'compact', 'ava']), /Unknown memory subcommand/);
 
   assert.deepEqual(parseCommand(['session', 'rollover', 'slack:ava:T1:D1']), {
     command: 'session', action: 'rollover', sessionId: 'slack:ava:T1:D1',
