@@ -19,10 +19,17 @@ is serving, because this path does not stop the managed service — only
 daemon holds open says so, and is deferred here until a caller that has the
 home to itself runs it: `stratus update`, which stops the service first, or
 `stratus serve`, which holds the claim and is about to open the stores
-anyway. A run that has to defer one records *nothing* — not even the
-migrations it did run — so the home keeps its old schema version, nothing
-reads it as fully migrated, and no older build is refused over a move that
-has not happened. The ones it ran are idempotent and simply run again on
+anyway. Schema 3 asks for that bracket **always**, not only when the old
+state is still visible: "is there anything in the old place" is a question
+about right now, and a daemon of the older build starting a moment later
+creates exactly what the check just failed to see — leaving the home
+recorded as migrated while it fills with state nothing will move. A run that
+has to defer records the migrations before it and stamps the schema *those*
+establish, so a home waiting for its bracket reads as schema 2 rather than
+as this build's 3: provenance labels present, the per-agent move not yet
+made. Nothing reads it as fully migrated, no older build is refused over a
+move that has not happened, and the schema-2 refusal below is armed from the
+first command either way.) The ones it ran are idempotent and simply run again on
 the next command, which is the cheaper half of that trade: a run that
 recorded a partial set could have its record land on top of the complete
 one written by the `stratus update` beside it, and take the finished move

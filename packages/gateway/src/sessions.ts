@@ -1,5 +1,5 @@
 import { chmodSync, mkdirSync } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -10,8 +10,9 @@ import {
   agentsDirIn,
   assertPathSafeAgentId,
   fleetDbIn,
-  isSymlinkedStateDirectorySync,
+  isSymlinkedStatePathSync,
   symlinkedStateDirectoryMessage,
+  symlinkedStateFileMessage,
 } from '@stratusagent/state';
 
 /**
@@ -107,10 +108,19 @@ export interface SqliteSessionStoreOptions {
   ownedDirectory?: boolean;
 }
 
-/** Whether a regular file is there — the sweep's test for "this directory holds a shard". */
-const fileExists = async (filePath: string): Promise<boolean> => {
+/**
+ * Whether a real file is there — the sweep's test for "this directory holds
+ * a shard".
+ *
+ * `lstat`, so a symlink is not one. `stat` follows it, which would classify
+ * a directory holding a linked `sessions.db` as an agent's and hand the
+ * sweep a store it then creates, indexes and tightens somewhere outside the
+ * home. The old layout reserved none of these names, so an operator's
+ * `agents/<something>/sessions.db` pointing elsewhere is theirs, not ours.
+ */
+const shardFileExists = async (filePath: string): Promise<boolean> => {
   try {
-    return (await stat(filePath)).isFile();
+    return (await lstat(filePath)).isFile();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return false;
@@ -139,8 +149,14 @@ const openStratusDatabase = (filePath: string, options: SqliteSessionStoreOption
     // Only for a directory this store owns: `~/.stratus` itself is a symlink
     // on plenty of real installs (a home on another disk), and the fleet
     // index and the schedule store live directly in it.
-    if (isSymlinkedStateDirectorySync(dir)) {
+    if (isSymlinkedStatePathSync(dir)) {
       throw new Error(symlinkedStateDirectoryMessage(dir));
+    }
+    // And the database itself. A link here is followed just as readily:
+    // the table is created, the rows indexed and the mode tightened in
+    // whatever it points at.
+    if (isSymlinkedStatePathSync(filePath)) {
+      throw new Error(symlinkedStateFileMessage(filePath));
     }
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -638,7 +654,7 @@ export class ShardedSessionStore implements SessionStore {
     // nothing to reconcile either, which is the same answer.
     const held: string[] = [];
     for (const name of named) {
-      if (await fileExists(agentSessionDbIn(this.stateDir, name))) {
+      if (await shardFileExists(agentSessionDbIn(this.stateDir, name))) {
         held.push(name);
       }
     }

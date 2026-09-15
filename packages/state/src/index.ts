@@ -230,7 +230,8 @@ export {
  * what the one home exists to prevent.
  */
 export {
-  isSymlinkedStateDirectory,
-  isSymlinkedStateDirectorySync,
+  isSymlinkedStatePath,
+  isSymlinkedStatePathSync,
   symlinkedStateDirectoryMessage,
+  symlinkedStateFileMessage,
 } from '@stratusagent/permissions';

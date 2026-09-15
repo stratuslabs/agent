@@ -109,7 +109,9 @@ test('update --check reports what it would do and exits 1 only when something is
   // --check does none of it: no stamp was written.
   await assert.rejects(() => stat(stateFilePath(env)));
 
-  await runStateMigrations(env);
+  // Exclusive, because settling now means 0003 too, and 0003 belongs to a
+  // caller holding the home — which `stratus update` itself is.
+  await runStateMigrations(env, { exclusive: true });
   const settled = createStreams();
   const second = await runCli({
     argv: ['update', '--check'],
@@ -192,7 +194,7 @@ test('update --check reports a companion left behind by a CLI that is already cu
 
 test('update --check says none are behind when every companion is current', async () => {
   const home = await freshHome();
-  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });
+  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} }, { exclusive: true });
   const { streams, output } = createStreams();
   const code = await runCli({
     argv: ['update', '--check'],
@@ -322,7 +324,9 @@ test('every command migrates on first use of a newer build, and serve refuses ne
   assert.equal(listed, 0);
   assert.match(agents.output.stderr, /state migration 0001-owner-only-state-files/);
   assert.equal((await stat(loose)).mode & 0o777, 0o600);
-  assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, STATE_SCHEMA_VERSION);
+  // The schema those migrations establish, not this build's: 0003 waits for
+  // a caller holding the home, so an ordinary command leaves the home at 2.
+  assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, STATE_SCHEMA_VERSION - 1);
 
   // State written by a newer build: read-only commands warn and continue…
   await writeFile(stateFilePath({ homeDir: home }), JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [] }));

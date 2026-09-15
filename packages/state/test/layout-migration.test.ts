@@ -232,15 +232,18 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
   );
   await stat(legacySessionDbPath(env));
   await stat(path.join(agentsDirPath(env), 'ava.whitelist.json'));
-  // A deferring run records *nothing*, not even the two it just ran: a
-  // partial stamp written from its snapshot is what can land on top of a
-  // complete one written by the exclusive run beside it, and take migration
-  // 0003 back out of the record. The two it ran are idempotent and run
-  // again next time, which is the cheaper half of that trade.
-  assert.deepEqual(await readStateStamp(env), { schemaVersion: 0, applied: [] });
+  // A deferring run records the prefix it finished and stamps the schema
+  // that prefix establishes — schema 2 here, which is what this home is:
+  // provenance labels present, the per-agent move not yet made. Holding the
+  // version back to 0 would leave the schema-2 refusal unarmed on a home
+  // that has been through 0002.
+  assert.deepEqual(await readStateStamp(env), {
+    schemaVersion: 2,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels'],
+  });
   assert.deepEqual(
     (await pendingStateMigrations(env)).map((migration) => migration.id),
-    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout'],
+    ['0003-per-agent-state-layout'],
   );
 
   // The memories move anyway, because nothing about them needs the bracket
@@ -251,10 +254,7 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
 
   // A caller that does hold the home finishes the job.
   const exclusive = await runStateMigrations(env, { exclusive: true });
-  assert.deepEqual(
-    exclusive.map((result) => result.id),
-    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout'],
-  );
+  assert.deepEqual(exclusive.map((result) => result.id), ['0003-per-agent-state-layout']);
   assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
   // And now the stamp, once and whole.
   assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
@@ -333,14 +333,29 @@ test('the drain copies, so a daemon of the older build keeps reading its own fil
   await stat(`${legacyMemoryFilePath(env)}.migrated`);
 });
 
-test('a home with nothing shared to move is migrated by the ordinary path', async () => {
+test('a home with nothing shared to move still waits for a caller holding it', async () => {
   const home = await newHome();
   const env = { homeDir: home };
-  const applied = await runStateMigrations(env);
-  assert.ok(applied.map((result) => result.id).includes('0003-per-agent-state-layout'));
-  assert.deepEqual(applied.map((result) => result.detail).filter((detail) => detail !== undefined), []);
-  // A fresh install must not be left holding an old stamp waiting for a
-  // daemon start it may not get for days.
+  // "Nothing to move" is a statement about right now, and right now is not
+  // the question: a pre-layout `stratus serve` starting a moment later
+  // creates the shared database this predicate just failed to see. An
+  // ordinary command that applied and stamped 0003 on that evidence would
+  // record the home as migrated while it fills with state nothing will
+  // move, and 0003 — stamped — would never run again.
+  const ordinary = await runStateMigrations(env);
+  assert.deepEqual(ordinary.map((result) => result.id), ['0001-owner-only-state-files', '0002-provenance-labels']);
+  // Recorded as the schema those two establish, not as this build's — the
+  // per-agent move has not happened, and the stamp says so.
+  assert.deepEqual(await readStateStamp(env), {
+    schemaVersion: 2,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels'],
+  });
+
+  // The claim holder finishes it, and on a home with nothing in the old
+  // place that is still a no-op with nothing to report.
+  const exclusive = await runStateMigrations(env, { exclusive: true });
+  assert.ok(exclusive.map((result) => result.id).includes('0003-per-agent-state-layout'));
+  assert.deepEqual(exclusive.map((result) => result.detail).filter((detail) => detail !== undefined), []);
   assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
 });
 

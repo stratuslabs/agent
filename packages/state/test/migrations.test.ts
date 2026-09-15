@@ -32,7 +32,9 @@ test('a home directory that predates versioning reads as schema 0 with everythin
 
 test('running migrations stamps the home directory and a second run has nothing to do', async () => {
   const env = { homeDir: await freshHome() };
-  const first = await runStateMigrations(env);
+  // Exclusive, because that is what a run that finishes everything is now:
+  // 0003 belongs to a caller holding the home, whatever the home holds.
+  const first = await runStateMigrations(env, { exclusive: true });
   assert.deepEqual(first.map((migration) => migration.id), STATE_MIGRATIONS.map((migration) => migration.id));
 
   const stamp = await readStateStamp(env);
@@ -83,7 +85,7 @@ test('a corrupt stamp reads as unversioned and is rewritten, not an error', asyn
   await writeFile(stateFilePath(env), 'not json at all');
 
   assert.deepEqual(await readStateStamp(env), { schemaVersion: 0, applied: [] });
-  await runStateMigrations(env);
+  await runStateMigrations(env, { exclusive: true });
   assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
 });
 
@@ -114,10 +116,11 @@ test('provenance labels are a schema bump with nothing to rewrite, so a downgrad
   const migration = STATE_MIGRATIONS.find((candidate) => candidate.id === '0002-provenance-labels');
   assert.ok(migration);
   const env = { homeDir: await freshHome() };
-  const applied = await runStateMigrations(env);
+  const applied = await runStateMigrations(env, { exclusive: true });
   assert.equal(applied.find((result) => result.id === '0002-provenance-labels')?.detail, undefined);
-  // A home with nothing shared to move is fully migrated by the ordinary
-  // path, so the stamp reaches this build's version without a daemon start.
+  // The stamp reaches this build's version once a run finishes every
+  // migration, which is a run holding the home — `stratus serve` or
+  // `stratus update`, both of which a daemonised install reaches at once.
   assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
 });
 

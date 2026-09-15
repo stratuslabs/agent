@@ -4,7 +4,7 @@ import { appendFile, chmod, mkdir, readdir, readFile, rename, rm, stat } from 'n
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
-import { LEGACY_WHITELIST_SUFFIX, isSymlinkedStateDirectory, whitelistPathFor } from '@stratusagent/permissions';
+import { LEGACY_WHITELIST_SUFFIX, isSymlinkedStatePath, whitelistPathFor } from '@stratusagent/permissions';
 import { type StateEnvironment } from './environment.ts';
 import {
   agentMemoryFilePath,
@@ -174,7 +174,7 @@ export const makeAgentStateDirectory = async (
   // Quarantined rather than thrown here: this runs inside a migration that
   // has a report to name the agent in, and the rest of the fleet should
   // still move.
-  if (await isSymlinkedStateDirectory(directory)) {
+  if (await isSymlinkedStatePath(directory)) {
     onUnusable?.('ELOOP');
     return undefined;
   }

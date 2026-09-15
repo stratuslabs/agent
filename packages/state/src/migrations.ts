@@ -318,7 +318,29 @@ const PROVENANCE_LABELS_MIGRATION: StateMigration = {
 const PER_AGENT_LAYOUT_MIGRATION: StateMigration = {
   id: '0003-per-agent-state-layout',
   description: "shard the session database into agents/<id>/sessions.db, move the grants beside it, and the schedules into fleet.db",
-  requiresExclusive: hasBracketedLegacyState,
+  /**
+   * Always, rather than only when the old state is there to see.
+   *
+   * Asking `hasBracketedLegacyState` looked right — a home with nothing in
+   * the old place has nothing to move, so why wait for a claim — and it is
+   * wrong for the reason a check of the present tense usually is. On a fresh
+   * home an ordinary command sees no legacy database because a pre-layout
+   * `stratus serve` has not created it *yet*: the command then applies and
+   * stamps 0003 unclaimed, that daemon passes its own schema check in the
+   * window before the stamp lands, and it goes on to write sessions and
+   * grants through the legacy paths. The home is then recorded as migrated
+   * while filling up with state nothing will move — and 0003, being stamped,
+   * never runs again.
+   *
+   * The question is not "is there legacy state now" but "can a build that
+   * predates this layout still write some", and nothing that does not hold
+   * the home can answer that. So the answer is the honest one: this
+   * migration belongs to a caller that has the home to itself. A run that
+   * defers it records nothing at all (see `runStateMigrations`), so a fresh
+   * install simply reads as schema 0 until its first `stratus serve` or
+   * `stratus update`, which is what it is.
+   */
+  requiresExclusive: async () => true,
   apply: applyPerAgentLayout,
 };
 
@@ -427,11 +449,32 @@ export const mergeStateStamp = (latest: StateStamp, next: StateStamp): StateStam
       applied.push(id);
     }
   }
-  const complete = STATE_MIGRATIONS.every((migration) => applied.includes(migration.id));
   return {
-    schemaVersion: Math.max(latest.schemaVersion, complete ? STATE_SCHEMA_VERSION : next.schemaVersion),
+    schemaVersion: Math.max(latest.schemaVersion, schemaVersionFor(applied)),
     applied,
   };
+};
+
+/**
+ * The schema a set of applied migrations establishes: the length of the
+ * registry prefix that has run.
+ *
+ * Prefix rather than count, because a migration that has not run is a shape
+ * the state may still be in — 0003 deferred means the per-agent move has not
+ * happened, whatever has run after it. One migration per schema version is
+ * the registry's shape and this is where that correspondence is written
+ * down; a version is not a tally of work done but a claim about what the
+ * files look like.
+ */
+const schemaVersionFor = (applied: readonly string[]): number => {
+  let version = 0;
+  for (const migration of STATE_MIGRATIONS) {
+    if (!applied.includes(migration.id)) {
+      break;
+    }
+    version += 1;
+  }
+  return Math.min(version, STATE_SCHEMA_VERSION);
 };
 
 const writeStateStamp = async (env: StateEnvironment, stamp: StateStamp): Promise<void> => {
@@ -555,8 +598,6 @@ export const runStateMigrations = async (
   for (const migration of STATE_MIGRATIONS) {
     runnable.set(migration.id, applied.has(migration.id) || await runnableNow(migration, env, options));
   }
-  const deferring = STATE_MIGRATIONS.some((migration) => runnable.get(migration.id) !== true);
-
   for (const migration of STATE_MIGRATIONS) {
     if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
       continue;
@@ -566,8 +607,15 @@ export const runStateMigrations = async (
     applied.add(migration.id);
     results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
   }
-  if (!deferring && (results.length > 0 || stamp.schemaVersion !== STATE_SCHEMA_VERSION)) {
-    await writeStateStamp(env, { schemaVersion: STATE_SCHEMA_VERSION, applied: stamp.applied });
+  // One write, at the end, carrying everything this run knows to have run —
+  // which for a run that deferred an exclusive migration is the prefix
+  // before it, and for a run that finished is all of them. The version comes
+  // from that set rather than from this build's constant, so a home that has
+  // not had the per-agent move reads as the schema it actually is, and the
+  // stamp still arms the refusal the schema below it exists for.
+  const version = schemaVersionFor(stamp.applied);
+  if (results.length > 0 || stamp.schemaVersion !== version) {
+    await writeStateStamp(env, { schemaVersion: version, applied: stamp.applied });
   }
   return results;
 };

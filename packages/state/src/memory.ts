@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, chmod, mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { isSymlinkedStateDirectory, symlinkedStateDirectoryMessage } from '@stratusagent/permissions';
+import { isSymlinkedStatePath, symlinkedStateDirectoryMessage } from '@stratusagent/permissions';
 
 import {
   assertMemoryContentWithinCap,
@@ -428,7 +428,7 @@ export const createFileMemoryStore = (
       // for the same reason: a memory this agent was told it had remembered
       // must not be written through a link to somewhere else, and the chmod
       // below would tighten whatever it points at.
-      if (await isSymlinkedStateDirectory(dir)) {
+      if (await isSymlinkedStatePath(dir)) {
         throw new Error(symlinkedStateDirectoryMessage(dir));
       }
     }

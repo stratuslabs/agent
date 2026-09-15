@@ -1,6 +1,6 @@
 import { chmod, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { isSymlinkedStateDirectory, symlinkedStateDirectoryMessage } from './state-directory.ts';
+import { isSymlinkedStatePath, symlinkedStateDirectoryMessage } from './state-directory.ts';
 
 import { describeCommandScope, parseCommandScope, sameScope, type CommandScope } from './commands.ts';
 import { parseToolGrant, sameToolGrant, type ToolGrant } from './grants.ts';
@@ -189,7 +189,7 @@ export const resolveWhitelistPath = async (directory: string, agentId: string): 
   // agent's. Refused on the read path as well as the write, since inheriting
   // another identity's grants is the failure, not just recording them there.
   const own = path.dirname(current);
-  if (await isSymlinkedStateDirectory(own)) {
+  if (await isSymlinkedStatePath(own)) {
     throw new Error(symlinkedStateDirectoryMessage(own));
   }
   try {
@@ -355,7 +355,7 @@ export const createFileCommandWhitelist = (options: {
       // so each inherits what the other was granted unattended and a
       // revocation for one silently revokes for both.
       const directory = path.dirname(target);
-      if (await isSymlinkedStateDirectory(directory)) {
+      if (await isSymlinkedStatePath(directory)) {
         throw new Error(symlinkedStateDirectoryMessage(directory));
       }
       await mkdir(directory, { recursive: true, mode: 0o700 });

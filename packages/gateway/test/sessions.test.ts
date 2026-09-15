@@ -331,3 +331,28 @@ test('an agent directory that is a symlink is refused at the live shard, not wri
 
   assert.deepEqual(await readdir(elsewhere), []);
 });
+
+test('a sessions.db that is a symlink is neither swept nor opened', async () => {
+  const stateDir = await newStateDir();
+  const elsewhere = path.join(stateDir, 'elsewhere.db');
+  const theirs = path.join(stateDir, 'agents', 'archive');
+  await mkdir(theirs, { recursive: true });
+  await writeFile(elsewhere, '');
+  await symlink(elsewhere, path.join(theirs, 'sessions.db'));
+
+  const store = new ShardedSessionStore({ stateDir });
+  await store.create(session('a-1', 'ava'));
+
+  // The sweep must not read this as an agent's shard: following the link
+  // creates the table, indexes the rows and tightens the mode in whatever
+  // it points at, none of which is ours.
+  assert.deepEqual(await store.reconcile(), { released: [], reindexed: [] });
+  // And a live open through the link is refused rather than followed.
+  await assert.rejects(
+    () => store.create(session('b-1', 'archive')),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  store.close();
+
+  assert.equal((await stat(elsewhere)).size, 0);
+});
