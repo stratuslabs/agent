@@ -667,3 +667,28 @@ test('an agent directory an older build left world-readable is tightened by the 
   // its own step or an upgrade keeps whatever the old build left.
   assert.equal((await stat(directory)).mode & 0o777, 0o700);
 });
+
+test('a memory that lands in the shared file as it is retired is not left in the archive', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  const at = '2026-04-01T00:00:00.000Z';
+
+  // The state that window leaves: a record that reached the shared file
+  // after the copy read it, carried into the archive by the rename. A
+  // writer that does not honour the home claim — a one-shot CLI of a build
+  // older than the claim — is what puts it there. Nothing reads the old
+  // pathname again, so a pass that stops at the rename loses it.
+  await writeFile(
+    `${legacyMemoryFilePath(env)}.migrated`,
+    `${JSON.stringify({ id: 'ava:memory:late', agentId: 'ava', content: 'remembered on the way out', createdAt: at })}\n`,
+  );
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const memory = createHomeMemoryStore(env);
+  assert.deepEqual(
+    (await memory.list('ava')).entries.map((entry) => entry.content).sort(),
+    ['likes jazz', 'remembered on the way out'],
+  );
+});

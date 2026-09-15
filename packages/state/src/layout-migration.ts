@@ -1,5 +1,5 @@
 import type { Dirent } from 'node:fs';
-import { appendFile, chmod, mkdir, readdir, readFile, rename, stat } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
@@ -369,8 +369,11 @@ const agentIdOfLine = (line: string): string | undefined => {
  * attribute (a hand edit, a truncated write) stays in the source, where it
  * is recoverable, rather than being guessed into somebody's store.
  */
-const copySharedMemory = async (env: StateEnvironment, report: LayoutMigrationReport): Promise<void> => {
-  const source = legacyMemoryFilePath(env);
+const copySharedMemory = async (
+  env: StateEnvironment,
+  report: LayoutMigrationReport,
+  source: string = legacyMemoryFilePath(env),
+): Promise<void> => {
   let raw: string;
   try {
     raw = await readFile(source, 'utf8');
@@ -462,10 +465,28 @@ const copySharedMemory = async (env: StateEnvironment, report: LayoutMigrationRe
  */
 const retireSharedMemory = async (env: StateEnvironment): Promise<void> => {
   const source = legacyMemoryFilePath(env);
-  if (!(await exists(source))) {
-    return;
+  const archive = `${source}.migrated`;
+  if (await exists(source)) {
+    // Appended and then removed, never renamed over the archive: a
+    // `memory.jsonl` can come back after a retirement — the file store
+    // opens it by pathname on every append, so a daemon or CLI of the older
+    // build recreates it — and a rename would take the earlier archive with
+    // it, which is the one copy of anything that pass could not place. The
+    // rule `migrateLegacyMemory` already follows for its own claim file.
+    //
+    // Not atomic, unlike the rename it replaces, and that is the right way
+    // round: a crash between the two leaves the records in both places,
+    // where the next pass dedupes them by line, rather than in neither.
+    const raw = await readFile(source, 'utf8');
+    if (raw.trim().length > 0) {
+      await appendFile(archive, raw.endsWith('\n') ? raw : `${raw}\n`, { mode: 0o600 });
+      await chmod(archive, 0o600);
+    }
+    await rm(source, { force: true });
   }
-  await rename(source, `${source}.migrated`);
+  // The derived index is rebuilt from whatever the record says, so this one
+  // may clobber: an index of records that are no longer at that pathname is
+  // not something to keep two of.
   if (await exists(`${source}.index`)) {
     await rename(`${source}.index`, `${source}.index.migrated`);
   }
@@ -696,8 +717,11 @@ const describe = (report: LayoutMigrationReport): string | undefined => {
     return undefined;
   }
   const summary = moved.length > 0 ? `moved ${moved.join(', ')}` : 'moved nothing';
-  return report.quarantined.length > 0
-    ? `${summary}; QUARANTINED, left in the preserved originals: ${report.quarantined.join('; ')}`
+  // Deduped: the archive pass re-reads what the pass before it already saw,
+  // so an id with nowhere to land would otherwise be named twice.
+  const quarantined = [...new Set(report.quarantined)];
+  return quarantined.length > 0
+    ? `${summary}; QUARANTINED, left in the preserved originals: ${quarantined.join('; ')}`
     : summary;
 };
 
@@ -762,6 +786,15 @@ export const applyPerAgentLayout = async (env: StateEnvironment): Promise<string
   // also take the source away.
   await copySharedMemory(env, report);
   await retireSharedMemory(env);
+  // And once more from the archive, because the rename is not the boundary
+  // the copy above assumed. A writer that does not honour the home claim —
+  // a one-shot CLI of a build older than the claim itself — can append
+  // between that read and this rename, and the rename carries its record
+  // into the archive by the inode. Nothing reads the old pathname again, so
+  // without this the fact the operator just told an agent is on disk in a
+  // file no reader will ever open. Deduped by line like every other pass,
+  // so on the ordinary path it copies nothing and costs one read.
+  await copySharedMemory(env, report, `${legacyMemoryFilePath(env)}.migrated`);
   await moveWhitelists(env, report);
   return describe(report);
 };
