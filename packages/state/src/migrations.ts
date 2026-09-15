@@ -536,13 +536,23 @@ const assertStampWritable = async (env: StateEnvironment): Promise<void> => {
  * or a link to one, or one whose permissions mean no command will ever
  * record a schema version there — so the command that found it says so,
  * instead of every later command quietly changing state nothing can stamp.
+ *
+ * Followed, not `lstat`ed, and the difference is the whole symlink rule
+ * here: `~/.stratus` is a path the *operator* chose, and a home that is a
+ * link to a directory somewhere else is a supported layout. It is the
+ * paths Stratus itself derives — `agents/<id>/` and the files under it —
+ * that may never be links, because a link there is not a layout decision
+ * anyone made. Checking this one with `lstat` refused every linked home on
+ * its first command, before it could write a stamp at all.
  */
 const assertStampDirectoryWritable = async (env: StateEnvironment): Promise<void> => {
   const home = stratusHomePath(env);
   let found;
   try {
-    found = await lstat(home);
+    found = await stat(home);
   } catch (error) {
+    // A dangling link answers ENOENT here, the same as no home at all. The
+    // write is what reports that, with the errno naming the link.
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return;
     }

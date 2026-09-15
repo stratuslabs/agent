@@ -1320,6 +1320,40 @@ test('an agentId-less dispatch answers as the configured default soul', async ()
   assert.equal(session.status, 'completed');
 });
 
+test('a configured default soul that would share a roster agent\'s directory is ignored', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  // A roster agent, and a config-only default declaring the same id in
+  // another case. `loadRosterSouls` folds ids against each other, but it
+  // never sees this soul — it is resolved by path and registered by exact
+  // id — so the two would open one `agents/<id>/`: one sessions.db, one
+  // memory.jsonl, and one whitelist.json saying what may run unattended.
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n',
+  );
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\nid: Ava\n---\n\nYou are Nova.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+
+  const warnings: string[] = [];
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  await gateway.start();
+
+  // Dropped, not served: an agentId-less dispatch falls back to the
+  // built-in, which is the documented answer when there is no usable
+  // default — rather than running as a second agent on Ava's state.
+  const session = await gateway.dispatch({ sessionId: 'folded-default-1', userMessage: 'hello' });
+  await gateway.stop();
+
+  assert.equal(session.agent.id, 'stratus');
+  assert.match(warnings.join(' '), /same state directory as ava/);
+  assert.match(warnings.join(' '), /rename one of the two ids/);
+  // And the roster agent is untouched — this refuses the newcomer, it does
+  // not take the established agent down.
+  assert.ok(gateway.agents().some((agent) => agent.id === 'ava'), 'ava stays on the roster');
+});
+
 test('a config-only default soul keeps its provider pin over the gateway selection', async () => {
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });

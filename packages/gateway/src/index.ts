@@ -142,6 +142,7 @@ import {
   type PluginsConfig,
   type RuntimeSelection,
   type StateEnvironment,
+  foldedAgentId,
 } from '@stratusagent/state';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
@@ -1333,6 +1334,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   /**
+   * An id already registered that would open `agentId`'s state directory
+   * while being a different id — `ava` when asked about `Ava`, on the
+   * filesystems that fold them together.
+   *
+   * `foldedAgentId` owns which pairs those are. What this adds is the
+   * "already registered" half, for the one registration that does not come
+   * through `loadRosterSouls` and so was never folded against anything.
+   */
+  const stateDirectoryPeer = (agentId: string): string | undefined => {
+    const folded = foldedAgentId(agentId);
+    for (const other of sources.keys()) {
+      if (other !== agentId && foldedAgentId(other) === folded) {
+        return other;
+      }
+    }
+    return undefined;
+  };
+
+  /**
    * The agent an agentId-less dispatch routes to: the configured default
    * soul when one is set (what `stratus setup` writes to config.json),
    * the built-in Stratus definition otherwise. Re-resolved per call so an
@@ -1390,8 +1410,32 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       lastDefaultResolved = undefined;
       return DEFAULT_STRATUS_AGENT.id;
     }
-    lastDefaultResolved = resolved;
     const id = resolved.soul.agent.id;
+    // The roster refuses two *souls* whose ids name one state directory,
+    // but this soul never went through it: a config-only default is
+    // resolved here, by path, and registered by exact id. So `Ava` in
+    // config beside `ava` on the roster — or `Stratus` beside the built-in
+    // — passed as two agents sharing one `agents/<id>/`, which is one
+    // `whitelist.json` and therefore one agent acting on the other's
+    // unattended grants.
+    //
+    // Warned and dropped rather than thrown: this runs on every
+    // agentId-less dispatch, and a configuration mistake must not turn
+    // every such turn into an error. Dropping routes to the built-in,
+    // which is the documented answer when there is no usable default, and
+    // leaves the colliding agent serving from its own directory alone.
+    const peer = stateDirectoryPeer(id);
+    if (peer !== undefined) {
+      warn(
+        `the configured default soul at ${resolved.path} declares the agent id ${id}, which names the same `
+        + `state directory as ${peer} — sessions, memories, and the grants that say what may run unattended. `
+        + `Ignoring it and routing to ${DEFAULT_STRATUS_AGENT.id}; rename one of the two ids.`,
+      );
+      lastDefaultAgentId = DEFAULT_STRATUS_AGENT.id;
+      lastDefaultResolved = undefined;
+      return DEFAULT_STRATUS_AGENT.id;
+    }
+    lastDefaultResolved = resolved;
     // The normal setup layout has the default soul in ~/.stratus/agents
     // too: keep the roster registration — its soulPath drives per-dispatch
     // refresh. A config-only soul registers with the path it resolved

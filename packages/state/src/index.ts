@@ -50,6 +50,7 @@ export {
   fleetDbPath,
   fleetDbIn,
   assertPathSafeAgentId,
+  foldedAgentId,
   gatewayTokenPath,
   gatewayInfoPath,
 } from './paths.ts';

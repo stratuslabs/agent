@@ -9000,6 +9000,26 @@ test('stratus schedules lists the daemon database and cancel revokes a row', asy
   await rm(home, { recursive: true, force: true });
 });
 
+test('a schedule database that will not answer is reported, not read as empty', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-broken-'));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // `~/.stratus` as a regular file, so the `stat` on each schedule
+  // database fails with ENOTDIR rather than ENOENT. Swallowing that would
+  // print "No schedules set" over a fleet this command cannot see — and,
+  // worse, let `schedules cancel` report a missing id while the schedule
+  // and its standing destination grant stay live.
+  await writeFile(path.join(home, '.stratus'), 'not a directory');
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['schedules'], streams: listing.streams, env }), 1);
+  assert.doesNotMatch(listing.output.stdout, /No schedules set/);
+
+  const cancel = createStreams();
+  assert.equal(await runCli({ argv: ['schedules', 'cancel', 'sched-1'], streams: cancel.streams, env }), 1);
+  assert.doesNotMatch(cancel.output.stderr, /No schedule with id sched-1/);
+  await rm(home, { recursive: true, force: true });
+});
+
 /** A daemon's control API as the CLI discovers it: the info file and the token. */
 const publishGateway = async (home: string, url: string): Promise<void> => {
   await mkdir(path.join(home, '.stratus'), { recursive: true });

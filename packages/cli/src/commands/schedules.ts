@@ -93,12 +93,26 @@ const cancelEverywhere = async (env: CliEnvironment, id: string): Promise<Schedu
   return cancelled;
 };
 
+/**
+ * Whether the database is there — and only "no" when it is genuinely not.
+ *
+ * Anything else propagates, because the alternative is this surface's
+ * worst failure mode wearing a confident face: a permission error or a
+ * failing disk swallowed here makes `stratus schedules` print "No
+ * schedules set" over a fleet that is about to fire, and makes `schedules
+ * cancel` report an id that does not exist while the schedule — and the
+ * standing destination grant riding on it — stays live. Opening the one
+ * database used to surface those; reading two must not lose them.
+ */
 const pathExists = async (filePath: string): Promise<boolean> => {
   try {
     await stat(filePath);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
   }
 };
 

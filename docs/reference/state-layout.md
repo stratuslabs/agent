@@ -60,8 +60,9 @@ that are worth knowing:
   store that will not *place* a memory through a link but answers happily
   with what is on the far side of one has only moved the leak. A daemon
   refuses; the upgrade move quarantines and says which file. This is about
-  Stratus's own paths only — `~/.stratus` itself may be a symlink, and a
-  soul file in `agents/` may be one too (see
+  Stratus's own paths only — `~/.stratus` itself may be a symlink to a
+  directory elsewhere (another volume, a synced folder), and is followed
+  wherever it is checked; a soul file in `agents/` may be one too (see
   [Templates](../guides/templates.md)).
 - **Two ids a filesystem reads as one name are one directory**, because
   macOS and Windows fold `agents/Ava/` and `agents/ava/` onto the same name

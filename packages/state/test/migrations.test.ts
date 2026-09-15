@@ -176,6 +176,25 @@ test('a home whose stamp cannot be written is refused by a run that records noth
   );
 });
 
+test('a ~/.stratus that is a symlink to a directory still gets its first stamp', async () => {
+  const home = await freshHome();
+  const elsewhere = await freshHome();
+  const env = { homeDir: home };
+  // A supported layout — the home is a path the *operator* chose, and a
+  // link to a directory somewhere else (another volume, a synced folder)
+  // is theirs to make. It is `agents/<id>/` and the files under it, which
+  // Stratus derives, that may never be links. Checking this one without
+  // following refused every linked home on its first command, before it
+  // could write a stamp at all.
+  await symlink(path.join(elsewhere, 'real-home'), stratusHomePath(env));
+  await mkdir(path.join(elsewhere, 'real-home', 'agents'), { recursive: true });
+
+  const applied = await runStateMigrations(env, { exclusive: true });
+
+  assert.ok(applied.length > 0, 'the migrations ran');
+  assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
+});
+
 test('a home that is a file, with no stamp to judge by, is refused by name', async () => {
   const home = await freshHome();
   const env = { homeDir: home };

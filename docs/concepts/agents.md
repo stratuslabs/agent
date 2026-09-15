@@ -152,3 +152,10 @@ one directory there and two different strings everywhere else. Both count.
 It is refused on every platform, Linux included: a souls directory is
 copied between machines, and a roster that loads on the server and refuses
 on the laptop finds the problem at the worst moment. Rename one of the two.
+
+The configured default soul is held to the same rule from the other side.
+It does not live on the roster, so it is checked against the agents already
+registered when it resolves: a default whose id would open a roster agent's
+directory — or the built-in `stratus`'s — is ignored with a line saying so,
+and agentId-less turns route to the built-in until you rename one of them.
+The roster agent keeps serving either way.
