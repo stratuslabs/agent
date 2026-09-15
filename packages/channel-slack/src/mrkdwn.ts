@@ -326,6 +326,25 @@ interface Link {
  */
 const findLinks = (tokens: readonly Token[]): Map<number, Link> => {
   const links = new Map<number, Link>();
+  // Where the `)` that could close a destination starting here is, and how
+  // many snippets with a newline in them have been passed. Both were walked
+  // per candidate, and a reply can hold a great many candidates that come to
+  // nothing: `[x](` sixteen thousand times sent every one of them looking
+  // through the whole of the rest for a `)` that is not there.
+  //
+  // The scan stops at whitespace as well as at a break, because a
+  // destination cannot hold either — reaching a `)` past a space would only
+  // build a string for the pattern below to reject.
+  const closeFrom = new Array<number>(tokens.length + 1).fill(-1);
+  const wrapped = new Array<number>(tokens.length + 1).fill(0);
+  for (let at = tokens.length - 1; at >= 0; at -= 1) {
+    const token = tokens[at];
+    const stops = token === undefined || token.kind === 'break' || /\s/.test(sourceOf(token));
+    const closes = token?.kind === 'punct' && token.text === ')';
+    closeFrom[at] = closes ? at : (stops ? -1 : (closeFrom[at + 1] ?? -1));
+    wrapped[at] = (wrapped[at + 1] ?? 0) + (token?.kind === 'code' && token.text.includes('\n') ? 1 : 0);
+  }
+
   let opener = -1;
 
   for (let at = 0; at < tokens.length; at += 1) {
@@ -355,22 +374,11 @@ const findLinks = (tokens: readonly Token[]): Map<number, Link> => {
     if (candidate === -1 || after?.kind !== 'punct' || after.text !== '(') {
       continue;
     }
-    let close = -1;
-    for (let scan = at + 2; scan < tokens.length; scan += 1) {
-      const inner = tokens[scan];
-      if (inner?.kind === 'break') {
-        break;
-      }
-      if (inner?.kind === 'punct' && inner.text === ')') {
-        close = scan;
-        break;
-      }
-    }
+    const close = closeFrom[at + 2] ?? -1;
     if (close === -1) {
       continue;
     }
-    const spans = tokens.slice(candidate + 1, close);
-    if (spans.some((inner) => inner.kind === 'code' && inner.text.includes('\n'))) {
+    if ((wrapped[candidate + 1] ?? 0) - (wrapped[close] ?? 0) > 0) {
       continue;
     }
     const destination = tokens.slice(at + 2, close).map(sourceOf).join('');
