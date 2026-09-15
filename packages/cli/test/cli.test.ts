@@ -10757,6 +10757,45 @@ test('stratus schedules reads where the rows are, not which database files exist
   assert.match(listed.output.stdout, /sched-1 {2}\[ava\]/);
 });
 
+test('schedules lists what is in both databases, so a move in flight hides nothing', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-list-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const { SqliteScheduleStore } = await import('@stratusagent/gateway');
+  const { legacySessionDbPath, fleetDbPath: fleetPath } = await import('@stratusagent/state');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+
+  const row = (id: string, agentId: string) => ({
+    id,
+    agentId,
+    cadence: { kind: 'every', intervalMs: 3_600_000 },
+    prompt: 'check the repo',
+    createdAt: '2026-08-29T00:00:00.000Z',
+    nextFireAt: '2026-08-30T07:00:00.000Z',
+  }) as const;
+
+  // Mid-move: one row already copied into the fleet database and still in
+  // the legacy one, plus a row only the legacy file has. Resolving to a
+  // single file reports whichever it picked — and if the rename lands in
+  // the gap between resolving and opening, it reports an empty fleet while
+  // every row is safe in the other file.
+  const legacy = new SqliteScheduleStore(legacySessionDbPath(env));
+  legacy.insert(row('sched-both', 'ava'));
+  legacy.insert(row('sched-legacy', 'bea'));
+  legacy.close();
+  const fleet = new SqliteScheduleStore(fleetPath(env));
+  fleet.insert(row('sched-both', 'ava'));
+  fleet.insert(row('sched-fleet', 'cid'));
+  fleet.close();
+
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['schedules', '--format', 'json'], streams: listed.streams, env }), 0, listed.output.stderr);
+  const parsed = JSON.parse(listed.output.stdout) as { schedules: Array<{ id: string }> };
+  // Every id, each once: the migration copies by id, so a row caught
+  // mid-move is the same row in both places.
+  assert.deepEqual(parsed.schedules.map((record) => record.id).sort(), ['sched-both', 'sched-fleet', 'sched-legacy']);
+  await rm(home, { recursive: true, force: true });
+});
+
 test('cancelling a schedule the move has since copied takes the row out of both databases', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-race-'));
   const env = { cwd: home, homeDir: home, processEnv: {} };

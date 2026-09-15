@@ -887,3 +887,19 @@ test('a memory file that is a symlink is refused, even inside a real directory',
   );
   assert.equal((await stat(elsewhere)).size, 0);
 });
+
+test('an agent directory that was already there is tightened, not left as it was', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // An `agents/ava/` an older build or an operator already made, loose.
+  // `mkdir` applies its mode only to what it creates, and an agent whose
+  // move carries only memories or grants passes through no other chmod.
+  const directory = path.dirname(agentMemoryFilePath(env, 'ava'));
+  await mkdir(directory, { recursive: true });
+  await chmod(directory, 0o755);
+
+  await runStateMigrations(env, { exclusive: true });
+
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
+});

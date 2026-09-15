@@ -180,6 +180,12 @@ export const makeAgentStateDirectory = async (
   }
   try {
     await mkdir(directory, { recursive: true, mode: 0o700 });
+    // `mkdir`'s mode applies only to what it creates, so an `agents/<id>/`
+    // an older build or an operator already left is whatever it was — and
+    // an agent whose migration moves only memories or grants passes through
+    // no other chmod, so it would stay loose indefinitely with this agent's
+    // state inside it.
+    await chmod(directory, 0o700);
     return directory;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code ?? '';
@@ -580,7 +586,20 @@ const placeClaim = async (env: StateEnvironment, claim: string, report: LayoutMi
   // never existed. This is the smallest destruction available, and a claim
   // that did grow is left for the next command's `drainRetiring` rather than
   // removed.
-  if ((await stat(claim)).size !== bytes.length) {
+  let left;
+  try {
+    left = await stat(claim);
+  } catch (error) {
+    // Gone: another process finished this claim while we were placing it.
+    // Both of us read the same bytes and both placed them, so the work is
+    // done — and throwing here would abort a daemon start, or refuse an
+    // unrelated command, over a peer having been helpful.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  if (left.size !== bytes.length) {
     return;
   }
   await rm(claim, { force: true });
