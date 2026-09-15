@@ -231,10 +231,16 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
   );
   await stat(legacySessionDbPath(env));
   await stat(path.join(agentsDirPath(env), 'ava.whitelist.json'));
-  assert.deepEqual((await pendingStateMigrations(env)).map((migration) => migration.id), ['0003-per-agent-state-layout']);
-  // And the home is not stamped as fully migrated while the move is
-  // pending, so an older build is not refused over state it can still read.
-  assert.notEqual((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
+  // A deferring run records *nothing*, not even the two it just ran: a
+  // partial stamp written from its snapshot is what can land on top of a
+  // complete one written by the exclusive run beside it, and take migration
+  // 0003 back out of the record. The two it ran are idempotent and run
+  // again next time, which is the cheaper half of that trade.
+  assert.deepEqual(await readStateStamp(env), { schemaVersion: 0, applied: [] });
+  assert.deepEqual(
+    (await pendingStateMigrations(env)).map((migration) => migration.id),
+    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout'],
+  );
 
   // The memories move anyway, because nothing about them needs the bracket
   // and an upgrade must never look like the agent forgot.
@@ -244,9 +250,14 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
 
   // A caller that does hold the home finishes the job.
   const exclusive = await runStateMigrations(env, { exclusive: true });
-  assert.deepEqual(exclusive.map((result) => result.id), ['0003-per-agent-state-layout']);
+  assert.deepEqual(
+    exclusive.map((result) => result.id),
+    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout'],
+  );
   assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
+  // And now the stamp, once and whole.
   assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
+  assert.deepEqual(await pendingStateMigrations(env), []);
 });
 
 test('a grant file the move has not reached yet is still the one that is read', async () => {

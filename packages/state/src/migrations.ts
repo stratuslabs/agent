@@ -505,9 +505,37 @@ export interface AppliedStateMigration {
 /**
  * Run every pending migration in order and stamp the result. Refuses a
  * stamp from a newer schema outright — migrating state this build does not
- * understand is the corruption path versioning exists to close. The stamp
- * is rewritten after each migration, not once at the end, so a crash
- * between two migrations re-runs only the one that never recorded itself.
+ * understand is the corruption path versioning exists to close.
+ *
+ * **One stamp write per run, at the end, and only for a run that applied
+ * everything.** Both halves of that are load-bearing, and both are about
+ * the same thing: two processes reach this with snapshots taken at
+ * different moments, and the stamp is what arms the downgrade guard, so a
+ * write that records *less* than has actually happened hands an older build
+ * a home it will recreate legacy state in.
+ *
+ * A *partial* write is the vehicle. Rewriting after each migration — which
+ * this used to do, to make a crash re-run only the migration that never
+ * recorded itself — means a run is briefly claiming a truthful but
+ * incomplete set, and a concurrent run that has already recorded the
+ * complete one is the loser. Writing once, at the end, with everything,
+ * means every writer writes the same bytes: whichever order they land in,
+ * the home ends up with the same stamp, and the interleaving stops
+ * mattering rather than being narrowed.
+ *
+ * A run that has to *defer* an exclusive migration writes nothing at all,
+ * for the same reason turned around: it can only ever have a subset, so
+ * there is no moment at which its write is the truth. The home stays
+ * reading as un-migrated until a run that holds the claim finishes the job,
+ * which is exactly what it is — and an older build reading it then is
+ * reading it correctly.
+ *
+ * What this gives up is the incremental record: a crash mid-sequence
+ * re-runs every migration rather than resuming after the last one that
+ * stamped. That is affordable because migrations are required to be
+ * idempotent and are written that way — 0001 re-stats a handful of files
+ * and changes nothing once they are owner-only, 0002 does nothing at all,
+ * and 0003 finds its sources already renamed and returns.
  */
 export const runStateMigrations = async (
   env: StateEnvironment,
@@ -519,31 +547,27 @@ export const runStateMigrations = async (
   }
   const results: AppliedStateMigration[] = [];
   const applied = new Set(stamp.applied);
-  /**
-   * The version to stamp: this build's only once every migration has run.
-   * A home with an exclusive one still deferred is not at this schema yet,
-   * and stamping it as though it were would refuse the older build that
-   * can still read the state as it actually stands — and let this one
-   * believe the move has happened.
-   */
-  const versionNow = (): number =>
-    STATE_MIGRATIONS.every((migration) => applied.has(migration.id))
-      ? STATE_SCHEMA_VERSION
-      : Math.min(stamp.schemaVersion, STATE_SCHEMA_VERSION);
+  // Asked once, before anything runs, rather than per migration inside the
+  // loop: `requiresExclusive` is a filesystem question, and 0003 is the
+  // migration that changes its own answer — asking after it has run would
+  // report a home as un-deferred because the deferral already happened.
+  const runnable = new Map<string, boolean>();
   for (const migration of STATE_MIGRATIONS) {
-    if (applied.has(migration.id) || !(await runnableNow(migration, env, options))) {
+    runnable.set(migration.id, applied.has(migration.id) || await runnableNow(migration, env, options));
+  }
+  const deferring = STATE_MIGRATIONS.some((migration) => runnable.get(migration.id) !== true);
+
+  for (const migration of STATE_MIGRATIONS) {
+    if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
       continue;
     }
     const detail = await migration.apply(env);
     stamp.applied.push(migration.id);
     applied.add(migration.id);
-    await writeStateStamp(env, { schemaVersion: versionNow(), applied: stamp.applied });
     results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
   }
-  if (results.length === 0 && stamp.schemaVersion !== versionNow()) {
-    // Nothing to run but the stamp is old (or missing): record the version
-    // so the next build can tell this home directory has been looked at.
-    await writeStateStamp(env, { schemaVersion: versionNow(), applied: stamp.applied });
+  if (!deferring && (results.length > 0 || stamp.schemaVersion !== STATE_SCHEMA_VERSION)) {
+    await writeStateStamp(env, { schemaVersion: STATE_SCHEMA_VERSION, applied: stamp.applied });
   }
   return results;
 };

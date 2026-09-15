@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -129,6 +129,35 @@ test('the latest re-assertion in file order stands, in both stores', async () =>
     assert.equal((await store.list('ava')).entries[0]?.trust, 'external');
     assert.equal((await store.search('ava', 'uncertain')).entries[0]?.trust, 'external');
   }
+});
+
+test('a re-assertion that lands out of order does not undo a newer one', async () => {
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  const entry = await store.append('ava', 'a fact of uncertain standing');
+  await store.reassertTrust!('ava', entry.id, 'user');
+
+  // What the shared-memory drain can leave behind: it copies a line it read
+  // before the operator re-labelled the entry, so an *older* re-assertion
+  // lands after a newer one. Read by position that answers 'external' —
+  // the label the operator replaced — and the command reports one trust
+  // level while every later read uses another.
+  await appendFile(
+    filePath,
+    `${JSON.stringify({
+      reasserts: entry.id,
+      agentId: 'ava',
+      trust: 'external',
+      createdAt: '2020-01-01T00:00:00.000Z',
+    })}\n`,
+  );
+
+  // The file as it now stands, read fresh — the interleaving that produces
+  // it needs two processes, so this pins the state rather than the race.
+  const fresh = createFileMemoryStore(filePath);
+  assert.equal((await fresh.list('ava')).entries[0]?.trust, 'user');
+  assert.equal((await fresh.search('ava', 'uncertain')).entries[0]?.trust, 'user');
+  assert.equal((await fresh.audit('ava'))[0]?.trust, 'user');
 });
 
 test('the legacy-alias wrapper carries provenance through and re-asserts under legacy ids', async () => {

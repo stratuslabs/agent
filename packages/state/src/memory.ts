@@ -161,20 +161,44 @@ const parseMemoryRecords = (raw: string, filePath: string): MemoryFileRecords =>
 };
 
 /**
- * The trust each re-asserted entry now carries: the last record in file
- * order wins, which is the one total order no later writer can insert
- * itself into. Scoped to the entry's own agent — a re-assertion naming
- * another agent's entry is inert, so the per-agent boundary the store rests
- * on is not breached by a record in a shared file.
+ * The trust each re-asserted entry now carries: the one it was given last,
+ * by `createdAt` rather than by position in the file.
+ *
+ * File order was the rule while one append-only file had one writer
+ * discipline — every append landed after every earlier one, so the last
+ * line was the latest intent. The per-agent move broke that: the drain
+ * copies lines from the shared file into an agent's own, so a re-assertion
+ * an operator made *after* the copy read the source can be followed by that
+ * older line landing on top of it. Entries and tombstones survive a
+ * duplicate because they are set membership; a re-assertion is a value, and
+ * last-one-wins over a reordered file answers with the label the operator
+ * replaced. Reading by recorded time makes a duplicate harmless again,
+ * which is what the drain's "copy until it converges" already assumes.
+ *
+ * Unparseable or equal timestamps fall back to file order, so a
+ * hand-written line with no real clock behaves exactly as it used to.
+ * Scoped to the entry's own agent — a re-assertion naming another agent's
+ * entry is inert, so the per-agent boundary the store rests on is not
+ * breached by a record in a shared file.
  */
+const notOlderThan = (candidate: string, current: string): boolean => {
+  const at = Date.parse(candidate);
+  const against = Date.parse(current);
+  return Number.isNaN(at) || Number.isNaN(against) ? true : at >= against;
+};
+
 const reassertedTrustFor = (records: MemoryFileRecords, agentId: string): Map<string, TrustLevel> => {
-  const reasserted = new Map<string, TrustLevel>();
+  const latest = new Map<string, MemoryReassertion>();
   for (const record of records.reassertions) {
-    if (record.agentId === agentId) {
-      reasserted.set(record.reasserts, record.trust);
+    if (record.agentId !== agentId) {
+      continue;
+    }
+    const current = latest.get(record.reasserts);
+    if (current === undefined || notOlderThan(record.createdAt, current.createdAt)) {
+      latest.set(record.reasserts, record);
     }
   }
-  return reasserted;
+  return new Map([...latest].map(([id, record]) => [id, record.trust]));
 };
 
 /** An entry as read back: provenance fields validated, any re-assertion applied. */
@@ -215,7 +239,7 @@ const liveEntriesFor = (records: MemoryFileRecords, agentId: string): MemoryEntr
 // Bumped when the row shape changes: an index stamped with an older version
 // is rebuilt from the record, which is the only cost a derived file has.
 // '2' added `trust` and `origin` columns and the `reasserted` table.
-const INDEX_SCHEMA_VERSION = '2';
+const INDEX_SCHEMA_VERSION = '3';
 
 // Loaded on first `search`, never at module load: see the note at the top.
 type SqliteModule = typeof import('node:sqlite');
@@ -239,7 +263,7 @@ type SqliteDatabase = InstanceType<SqliteModule['DatabaseSync']>;
 const INDEX_SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS forgotten (id TEXT PRIMARY KEY);
-CREATE TABLE IF NOT EXISTS reasserted (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, trust TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reasserted (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, trust TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   tokens,
   id UNINDEXED,
@@ -311,8 +335,17 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
     'INSERT INTO memory_fts (tokens, id, agent_id, content, created_at, trust, origin) VALUES (?, ?, ?, ?, ?, ?, ?)',
   );
   const insertForgotten = db.prepare('INSERT OR IGNORE INTO forgotten (id) VALUES (?)');
+  // The same rule `notOlderThan` reads the file by, spelled out in SQL
+  // because this index is incremental and cannot re-sort what it has
+  // already applied: a re-assertion that is *older* than the one recorded
+  // must not take the label back, however late in the file it arrives. The
+  // two unparseable cases fall through to "the later record wins", which is
+  // the file order this read by before, and what the file path does too.
   const upsertReasserted = db.prepare(
-    'INSERT INTO reasserted (id, agent_id, trust) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET agent_id = excluded.agent_id, trust = excluded.trust',
+    'INSERT INTO reasserted (id, agent_id, trust, created_at) VALUES (?, ?, ?, ?) '
+    + 'ON CONFLICT(id) DO UPDATE SET agent_id = excluded.agent_id, trust = excluded.trust, created_at = excluded.created_at '
+    + 'WHERE unixepoch(excluded.created_at) IS NULL OR unixepoch(reasserted.created_at) IS NULL '
+    + 'OR unixepoch(excluded.created_at) >= unixepoch(reasserted.created_at)',
   );
   const relabelEntry = db.prepare('UPDATE memory_fts SET trust = ? WHERE id = ? AND agent_id = ?');
   const deleteEntry = db.prepare('DELETE FROM memory_fts WHERE id = ?');
@@ -323,8 +356,14 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
       continue;
     }
     if (isReassertionRecord(record)) {
-      upsertReasserted.run(record.reasserts, record.agentId, record.trust);
-      relabelEntry.run(record.trust, record.reasserts, record.agentId);
+      upsertReasserted.run(record.reasserts, record.agentId, record.trust, record.createdAt);
+      // The label that won, which is not always this record's — see the
+      // upsert above. Relabelling with this one unconditionally would let
+      // an older re-assertion overwrite the entry it just lost to.
+      const winner = reassertedFor.get(record.reasserts, record.agentId) as { trust: string } | undefined;
+      if (winner !== undefined) {
+        relabelEntry.run(winner.trust, record.reasserts, record.agentId);
+      }
       continue;
     }
     if (hasEntry.get(record.id) !== undefined || isForgotten.get(record.id) !== undefined) {

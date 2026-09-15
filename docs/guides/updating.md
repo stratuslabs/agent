@@ -9,8 +9,8 @@ upgrading is more than `npm install -g`. Two pieces handle it.
 `~/.stratus/state.json` records a schema version and which migrations have
 been applied. On the first command of a newer build — whatever installed
 it: npm directly, Homebrew, a pinned version in CI — any pending migrations
-run automatically, each one idempotent, applied in order, and recorded as
-it completes. This is deliberate: an upgrade path that migrates only
+run automatically, each one idempotent, applied in order, and recorded once
+the last of them has run. This is deliberate: an upgrade path that migrates only
 through one blessed command leaves the other install methods on unmigrated
 state, and the two populations diverge silently. (One constraint that keeps
 the automatic path honest: a migration must be safe to run while a daemon
@@ -19,9 +19,14 @@ is serving, because this path does not stop the managed service — only
 daemon holds open says so, and is deferred here until a caller that has the
 home to itself runs it: `stratus update`, which stops the service first, or
 `stratus serve`, which holds the claim and is about to open the stores
-anyway. While one is deferred the home keeps its old schema version, so
-nothing reads it as fully migrated and no older build is refused over a
-move that has not happened.)
+anyway. A run that has to defer one records *nothing* — not even the
+migrations it did run — so the home keeps its old schema version, nothing
+reads it as fully migrated, and no older build is refused over a move that
+has not happened. The ones it ran are idempotent and simply run again on
+the next command, which is the cheaper half of that trade: a run that
+recorded a partial set could have its record land on top of the complete
+one written by the `stratus update` beside it, and take the finished move
+back out of the stamp.)
 
 Schema 2 is the first stamp that exists only to be refused: since
 [provenance](../concepts/memory.md#where-a-fact-came-from) landed, memory
