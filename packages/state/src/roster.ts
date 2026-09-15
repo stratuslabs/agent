@@ -69,7 +69,37 @@ const firstByAliasOrder = (entries: readonly MemoryEntry[]): MemoryEntry[] => {
   return entries.filter((entry) => (seen.has(entry.id) ? false : (seen.add(entry.id), true)));
 };
 
-// Every method is alias-aware, not just `list`: a `search` or `forget` that
+/**
+ * For each alias after the first, the ids some *earlier* alias holds — so a
+ * query-filtered read can drop a hit that an earlier alias owns even though
+ * this query did not match it there.
+ *
+ * Lazy on purpose. It reads an alias's whole live set, which is the price of
+ * asking "does this alias hold this id" against a contract that has no such
+ * method, so it runs only for the aliases that returned something and only
+ * when more than one alias is in play. An install with no inherited entries
+ * never reaches the read at all.
+ */
+const earlierAliasOwners = async (
+  ids: readonly string[],
+  batches: readonly { entries: MemoryEntry[] }[],
+  held: (agentId: string) => Promise<readonly MemoryEntry[]>,
+): Promise<Array<Set<string>>> => {
+  const owners: Array<Set<string>> = ids.map(() => new Set<string>());
+  let earlier = new Set<string>();
+  for (let index = 0; index < ids.length; index += 1) {
+    owners[index] = earlier;
+    // Only worth loading the next alias's ids if a later alias has hits to
+    // judge against them.
+    if (batches.slice(index + 1).every((batch) => batch.entries.length === 0)) {
+      break;
+    }
+    earlier = new Set([...earlier, ...(await held(ids[index]!)).map((entry) => entry.id)]);
+  }
+  return owners;
+};
+
+// Every method is alias-aware, not just `list`: a `search` or `forget` that// Every method is alias-aware, not just `list`: a `search` or `forget` that
 // delegated on agentId alone would compile, satisfy the interface, and
 // quietly make every inherited entry unfindable and unforgettable — visible
 // in `list`, absent from `recall`. Merged batches sort with everything else
@@ -171,10 +201,20 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       // two additions to the contract for a statistic on one legacy id.
       // A ranking strategy that ever reads these is what changes that.
       const batches = await Promise.all(ids.map((id) => store.search(id, query, options)));
-      const bounded = boundMemoryRead(
-        firstByAliasOrder(batches.flatMap((batch) => batch.entries)),
-        clampMemoryRecallLimit(options?.limit),
-      );
+      // Precedence belongs to the id, not to the query. `list` and `pinned`
+      // merge whole sets, so de-duplicating their concatenation already
+      // picks the first alias that holds an id; a search filters first, so
+      // a query matching only a legacy copy would return it while `list`
+      // showed the current one and every id-based mutation — forget, pin,
+      // supersede — resolved to the current one. The model would revise a
+      // fact it never read. So ownership is settled before the filter, and
+      // only when a later alias actually produced something: on an install
+      // with no inherited entries this costs nothing at all.
+      const owners = await earlierAliasOwners(ids, batches, async (id) =>
+        (await store.list(id, { validity: 'all' })).entries);
+      const merged = firstByAliasOrder(batches.flatMap((batch, index) =>
+        batch.entries.filter((entry) => index === 0 || !owners[index]!.has(entry.id))));
+      const bounded = boundMemoryRead(merged, clampMemoryRecallLimit(options?.limit));
       // Every batch came from the same store, so they agree on the ordering
       // it served; reporting the first is reporting all of them.
       const strategy = batches[0]?.strategy;

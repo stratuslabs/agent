@@ -730,6 +730,15 @@ test('one id under two aliases resolves to one entry, the earlier alias winning'
   const listed = (await store.list(DEFAULT_STRATUS_AGENT.id)).entries;
   assert.deepEqual(listed.map((entry) => entry.content), ['the current copy of the rota']);
   assert.deepEqual((await store.search(DEFAULT_STRATUS_AGENT.id, 'rota')).entries.map((entry) => entry.id), ['shared:1']);
+  // Precedence belongs to the id, not to the query: a query that matches
+  // only the inherited copy must not recall it, or the model would revise
+  // a fact it never read — every id-based mutation resolves to the current
+  // copy, which is the one `list` showed.
+  assert.deepEqual((await store.search(DEFAULT_STRATUS_AGENT.id, 'inherited')).entries, []);
+  assert.deepEqual(
+    (await store.search(DEFAULT_STRATUS_AGENT.id, 'current')).entries.map((entry) => entry.content),
+    ['the current copy of the rota'],
+  );
   // The audit read keeps both, because saying what the record holds is the
   // one job it has.
   assert.equal((await store.audit(DEFAULT_STRATUS_AGENT.id)).filter((entry) => entry.id === 'shared:1').length, 2);
