@@ -619,3 +619,23 @@ test('a grant file the move could not take does not leave the home unservable', 
   await stat(path.join(agentsDirPath(env), 'blocked.md.whitelist.json.migrated'));
   await assert.rejects(() => stat(path.join(agentsDirPath(env), 'blocked.md.whitelist.json')));
 });
+
+test('an agent id ending in .whitelist.json is a state directory, not a legacy grant file', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // Legal, because ids are held to path safety rather than to a slug
+  // shape — and this one's state directory is spelled exactly like a
+  // legacy grant file. Read as one, it refuses the home for good: 0003 is
+  // stamped by then and would never clear it.
+  const stateDir = path.join(agentsDirPath(env), 'team.whitelist.json');
+  await mkdir(stateDir, { recursive: true });
+
+  await runStateMigrations(env, { exclusive: true });
+
+  assert.equal(await hasBracketedLegacyState(env), false);
+  // And the move left it alone: renaming it would have carried one agent's
+  // whole directory inside another agent's.
+  assert.equal((await stat(stateDir)).isDirectory(), true);
+  assert.equal((await stat(whitelistPathFor(agentsDirPath(env), 'ava'))).isFile(), true);
+});

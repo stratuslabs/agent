@@ -181,10 +181,15 @@ const parseMemoryRecords = (raw: string, filePath: string): MemoryFileRecords =>
  * entry is inert, so the per-agent boundary the store rests on is not
  * breached by a record in a shared file.
  */
+const recordedAt = (value: string): number | undefined => {
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : at;
+};
+
 const notOlderThan = (candidate: string, current: string): boolean => {
-  const at = Date.parse(candidate);
-  const against = Date.parse(current);
-  return Number.isNaN(at) || Number.isNaN(against) ? true : at >= against;
+  const at = recordedAt(candidate);
+  const against = recordedAt(current);
+  return at === undefined || against === undefined ? true : at >= against;
 };
 
 const reassertedTrustFor = (records: MemoryFileRecords, agentId: string): Map<string, TrustLevel> => {
@@ -263,7 +268,7 @@ type SqliteDatabase = InstanceType<SqliteModule['DatabaseSync']>;
 const INDEX_SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS forgotten (id TEXT PRIMARY KEY);
-CREATE TABLE IF NOT EXISTS reasserted (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, trust TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reasserted (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, trust TEXT NOT NULL, recorded_at INTEGER);
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   tokens,
   id UNINDEXED,
@@ -335,17 +340,24 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
     'INSERT INTO memory_fts (tokens, id, agent_id, content, created_at, trust, origin) VALUES (?, ?, ?, ?, ?, ?, ?)',
   );
   const insertForgotten = db.prepare('INSERT OR IGNORE INTO forgotten (id) VALUES (?)');
-  // The same rule `notOlderThan` reads the file by, spelled out in SQL
-  // because this index is incremental and cannot re-sort what it has
-  // already applied: a re-assertion that is *older* than the one recorded
-  // must not take the label back, however late in the file it arrives. The
-  // two unparseable cases fall through to "the later record wins", which is
-  // the file order this read by before, and what the file path does too.
+  // The rule `notOlderThan` reads the file by, applied here too because
+  // this index is incremental and cannot re-sort what it has already
+  // applied: a re-assertion *older* than the one recorded must not take the
+  // label back, however late in the file it arrives.
+  //
+  // The column holds `recordedAt`'s answer — the instant, already parsed by
+  // the same function the file reader uses — rather than the timestamp
+  // text. SQL date functions are a second parser with its own precision
+  // (`unixepoch` truncates to the second, so two re-assertions made in the
+  // same second compared equal and `list` disagreed with `search`), and one
+  // rule read two ways is the defect this pair keeps producing. A NULL is a
+  // timestamp neither reader can parse, which falls through to "the later
+  // record wins" — the file order this read by before.
   const upsertReasserted = db.prepare(
-    'INSERT INTO reasserted (id, agent_id, trust, created_at) VALUES (?, ?, ?, ?) '
-    + 'ON CONFLICT(id) DO UPDATE SET agent_id = excluded.agent_id, trust = excluded.trust, created_at = excluded.created_at '
-    + 'WHERE unixepoch(excluded.created_at) IS NULL OR unixepoch(reasserted.created_at) IS NULL '
-    + 'OR unixepoch(excluded.created_at) >= unixepoch(reasserted.created_at)',
+    'INSERT INTO reasserted (id, agent_id, trust, recorded_at) VALUES (?, ?, ?, ?) '
+    + 'ON CONFLICT(id) DO UPDATE SET agent_id = excluded.agent_id, trust = excluded.trust, recorded_at = excluded.recorded_at '
+    + 'WHERE excluded.recorded_at IS NULL OR reasserted.recorded_at IS NULL '
+    + 'OR excluded.recorded_at >= reasserted.recorded_at',
   );
   const relabelEntry = db.prepare('UPDATE memory_fts SET trust = ? WHERE id = ? AND agent_id = ?');
   const deleteEntry = db.prepare('DELETE FROM memory_fts WHERE id = ?');
@@ -356,7 +368,7 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
       continue;
     }
     if (isReassertionRecord(record)) {
-      upsertReasserted.run(record.reasserts, record.agentId, record.trust, record.createdAt);
+      upsertReasserted.run(record.reasserts, record.agentId, record.trust, recordedAt(record.createdAt) ?? null);
       // The label that won, which is not always this record's — see the
       // upsert above. Relabelling with this one unconditionally would let
       // an older re-assertion overwrite the entry it just lost to.
@@ -480,8 +492,17 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       // has the old shape and no stamp at all. Dropping everything makes
       // the next catch-up a full rebuild from the record, which is the
       // only cost a derived file can have.
-      const hasCurrentShape = (): boolean => (opened.prepare('PRAGMA table_info(memory_fts)').all() as Array<{ name: string }>)
-        .some((column) => column.name === 'trust');
+      // Every column a later schema added, not just the first one: this
+      // check is the *only* thing that rebuilds a table, and a new column
+      // it does not name is an upgrade that empties the rows and then fails
+      // on the first insert — which is this comment's own failure, missed
+      // once already when `reasserted` grew a column and only `memory_fts`
+      // was asked about.
+      const hasColumn = (table: string, column: string): boolean =>
+        (opened.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+          .some((found) => found.name === column);
+      const hasCurrentShape = (): boolean =>
+        hasColumn('memory_fts', 'trust') && hasColumn('reasserted', 'recorded_at');
       if (!hasCurrentShape()) {
         // Under the same write lock catch-up takes, and re-checked once it
         // is held: the daemon and a `stratus run` opening an upgraded

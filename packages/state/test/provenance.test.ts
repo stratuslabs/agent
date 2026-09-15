@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFile, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -158,6 +159,48 @@ test('a re-assertion that lands out of order does not undo a newer one', async (
   assert.equal((await fresh.list('ava')).entries[0]?.trust, 'user');
   assert.equal((await fresh.search('ava', 'uncertain')).entries[0]?.trust, 'user');
   assert.equal((await fresh.audit('ava'))[0]?.trust, 'user');
+});
+
+test('two re-assertions in the same second are ordered by milliseconds, in both readers', async () => {
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  await writeFile(filePath, legacyLine('ava:memory:one', 'ava', 'the staging cluster is named tortoise', '2026-01-01T00:00:00.000Z'));
+  const reassertion = (trust: string, createdAt: string): string =>
+    `${JSON.stringify({ reasserts: 'ava:memory:one', agentId: 'ava', trust, createdAt })}\n`;
+  // The newer label, then an older one from the same second — what the
+  // drain's copy can produce. A reader that truncates to the second sees
+  // them as equal and lets the one that arrives last win, which is the one
+  // the operator replaced.
+  await appendFile(filePath, reassertion('user', '2026-03-01T12:00:00.900Z'));
+  await appendFile(filePath, reassertion('external', '2026-03-01T12:00:00.100Z'));
+
+  const store = createFileMemoryStore(filePath);
+  // Both readers, because they are two mechanisms over one rule: the file
+  // parsed directly, and the FTS index applying records one at a time.
+  assert.equal((await store.list('ava')).entries[0]?.trust, 'user');
+  assert.equal((await store.search('ava', 'tortoise')).entries[0]?.trust, 'user');
+});
+
+test('an index left by the previous schema is rebuilt, not emptied and then written to', async () => {
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const built = createFileMemoryStore(filePath);
+  const entry = await built.append('ava', 'the staging cluster is named tortoise');
+  await built.reassertTrust!('ava', entry.id, 'user');
+  // Build the index, so there is a real one on disk to age.
+  assert.equal((await built.search('ava', 'tortoise')).entries[0]?.trust, 'user');
+
+  // Age it to the shape the previous schema left: `reasserted` without the
+  // column this build added, and a stamp naming the older schema. That is
+  // every home that has used memory before this upgrade — the stale stamp
+  // empties the rows but leaves the table standing, so the first insert
+  // after it fails on a column the table does not have.
+  const aged = new DatabaseSync(`${filePath}.index`);
+  aged.exec('ALTER TABLE reasserted DROP COLUMN recorded_at');
+  aged.prepare('UPDATE meta SET value = ? WHERE key = ?').run('2', 'schema_version');
+  aged.close();
+
+  const upgraded = createFileMemoryStore(filePath);
+  assert.equal((await upgraded.search('ava', 'tortoise')).entries[0]?.trust, 'user');
+  assert.equal((await upgraded.list('ava')).entries[0]?.trust, 'user');
 });
 
 test('the legacy-alias wrapper carries provenance through and re-asserts under legacy ids', async () => {

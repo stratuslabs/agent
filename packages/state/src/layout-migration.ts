@@ -1,3 +1,4 @@
+import type { Dirent } from 'node:fs';
 import { appendFile, chmod, mkdir, readdir, readFile, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -491,9 +492,9 @@ const retireSharedMemory = async (env: StateEnvironment): Promise<void> => {
  */
 const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationReport): Promise<void> => {
   const directory = agentsDirPath(env);
-  let entries: string[];
+  let entries: Dirent[];
   try {
-    entries = await readdir(directory);
+    entries = await readdir(directory, { withFileTypes: true });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return;
@@ -523,10 +524,15 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
     return path.basename(to);
   };
 
-  for (const entry of entries) {
-    if (!entry.endsWith(LEGACY_WHITELIST_SUFFIX) || entry === LEGACY_WHITELIST_SUFFIX) {
+  for (const found of entries) {
+    // Files only, for the reason `hasBracketedLegacyStateIn` gives: the
+    // state directory of an agent whose id ends in `.whitelist.json` has
+    // this suffix, and renaming *that* would move one agent's whole
+    // directory inside another's.
+    if (!found.isFile() || !found.name.endsWith(LEGACY_WHITELIST_SUFFIX) || found.name === LEGACY_WHITELIST_SUFFIX) {
       continue;
     }
+    const entry = found.name;
     const agentId = entry.slice(0, -LEGACY_WHITELIST_SUFFIX.length);
     if (!isValidAgentId(agentId)) {
       report.quarantined.push(
@@ -642,7 +648,14 @@ export const hasBracketedLegacyStateIn = async (stateDir: string): Promise<boole
     }
   }
   try {
-    return (await readdir(agentsDirIn(stateDir))).some((entry) => entry.endsWith(LEGACY_WHITELIST_SUFFIX));
+    // With types, because a *directory* of that name is not a legacy grant
+    // file: an agent whose id ends in `.whitelist.json` has a state
+    // directory spelled exactly like one, and reading it as un-migrated
+    // state would refuse the home for good — 0003 is stamped and would
+    // never clear it. Held to path safety rather than a slug shape, such an
+    // id is legal, so the distinction has to be made here.
+    const entries = await readdir(agentsDirIn(stateDir), { withFileTypes: true });
+    return entries.some((entry) => entry.isFile() && entry.name.endsWith(LEGACY_WHITELIST_SUFFIX));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return false;
