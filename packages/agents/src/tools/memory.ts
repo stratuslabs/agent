@@ -42,7 +42,13 @@ const optionalString = (value: unknown): string | undefined => {
  * other way: the fact reads as unbounded and outlives the thing it was
  * about. So the shape is asserted first, then the value.
  */
-const ISO_8601_INSTANT = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+// A date alone is UTC midnight by specification, so it is unambiguous
+// wherever the daemon runs. A *time* without an offset is not: it reads as
+// the host's local zone, so the same requested bound would become a
+// different instant in Los Angeles than in UTC, and a fact would activate
+// or expire at a deployment-dependent hour. So the offset is required
+// whenever a time is given.
+const ISO_8601_INSTANT = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}))?$/;
 
 const validityBound = (value: unknown, field: string): string | undefined => {
   const raw = optionalString(value);
@@ -51,7 +57,8 @@ const validityBound = (value: unknown, field: string): string | undefined => {
   }
   const parsed = Date.parse(raw);
   if (!ISO_8601_INSTANT.test(raw) || Number.isNaN(parsed)) {
-    throw new Error(`${field} must be an ISO-8601 instant such as 2026-04-01T00:00:00Z; ${raw} is not one. Nothing was stored.`);
+    throw new Error(`${field} must be an ISO-8601 instant such as 2026-04-01 or 2026-04-01T00:00:00Z — a time needs Z or an offset, `
+      + `or it means something different on every machine. ${raw} is not one, and nothing was stored.`);
   }
   return new Date(parsed).toISOString();
 };

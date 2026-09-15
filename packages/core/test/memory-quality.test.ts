@@ -6,6 +6,7 @@ import {
   asMemoryInjection,
   buildMemoryInjection,
   collectMemoryTopics,
+  memoryEntryAbout,
   InMemoryAgentMemoryStore,
   isMemoryEntryCurrent,
   MEMORY_PINNED_MAX_BYTES,
@@ -331,4 +332,26 @@ test('a superseded entry is not the agent’s to forget or re-assert', async () 
   assert.equal(await store.reassertTrust!('ava', old.id, 'user'), false);
   assert.equal(await store.forget('ava', next.id), true);
   assert.deepEqual((await store.list('ava', { limit: 5 })).entries.map((entry) => entry.id), [old.id]);
+});
+
+test('two spellings of one entity are one topic, as they are one token to search', () => {
+  // Composed and decomposed `café` tokenize to the same thing, so a topic
+  // index that folded without normalizing would render them as duplicates
+  // with split counts and spend the block's budget twice.
+  const composed = 'café';
+  const decomposed = 'café';
+  assert.notEqual(composed, decomposed);
+  const topics = collectMemoryTopics([
+    entry('m1', 'one', { about: [composed] }),
+    entry('m2', 'two', { about: [decomposed] }),
+  ]);
+  assert.deepEqual(topics.map((topic) => topic.count), [2]);
+  assert.deepEqual(
+    mergeMemoryTopics(topics, [{ name: decomposed, count: 1, lastUpdatedAt: '2026-05-01T00:00:00.000Z', trust: 'agent' }])
+      .map((topic) => topic.count),
+    [3],
+  );
+  // And the two spellings on one entry are one `about` key, for the same
+  // reason the search sees one token.
+  assert.deepEqual(memoryEntryAbout({ about: [composed, decomposed] }), [composed]);
 });

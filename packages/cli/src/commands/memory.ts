@@ -120,7 +120,11 @@ export const runMemory = async (
       ...(unlabelled(entry) ? ['(no recorded origin)'] : []),
       ...(entry.supersedes ? [`(replaces ${escapeControlCharacters(entry.supersedes)})`] : []),
     ];
-    writeLine(streams.stdout, `${entry.id}  ${marks.join('  ')}`);
+    // The id is escaped like everything else off the record. `import`
+    // validates only that it is a string, so an untrusted corpus can carry
+    // a newline or an escape sequence in one — and this line is the frame
+    // every other line hangs off, so a forged one forges an entry.
+    writeLine(streams.stdout, `${escapeControlCharacters(entry.id)}  ${marks.join('  ')}`);
     writeLine(streams.stdout, `  ${escapeControlCharacters(entry.content)}`);
     if (entry.about && entry.about.length > 0) {
       writeLine(streams.stdout, `  about: ${entry.about.map(escapeControlCharacters).join(', ')}`);

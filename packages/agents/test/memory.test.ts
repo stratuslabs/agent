@@ -140,6 +140,11 @@ test('memory.remember carries the wider shape, and refuses a supersession that i
     '04/01/2026',
     '1',
     'Wed, 01 Apr 2026 00:00:00 GMT',
+    // A time with no offset reads as the host's local zone, so the same
+    // requested bound would be a different instant in Los Angeles than in
+    // UTC and the fact would activate at a deployment-dependent hour.
+    '2026-04-01T00:00',
+    '2026-04-01T00:00:00',
   ]) {
     await assert.rejects(
       () => remember.execute({ fact: 'x', validUntil: bound }, sessionFor('ava')),
@@ -148,6 +153,8 @@ test('memory.remember carries the wider shape, and refuses a supersession that i
     );
   }
   // The shapes ISO-8601 actually names are taken, date-only included.
+  // A date alone is UTC midnight by specification, so it is unambiguous
+  // wherever the daemon runs; the rest carry their offset.
   for (const bound of ['2026-04-01', '2026-04-01T09:30Z', '2026-04-01T09:30:00.000Z', '2026-04-01T09:30:00+01:00']) {
     await remember.execute({ fact: `valid until ${bound}`, validUntil: bound }, sessionFor('ava'));
   }

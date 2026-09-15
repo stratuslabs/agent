@@ -25,7 +25,7 @@ A fact is more than its text. Beyond the four fields every line must have —
 | --- | --- |
 | `kind` | `semantic` (about the world), `episodic` (something that happened), `procedural` (how something is done), or `preference`. These have different useful lifetimes, and one flat bucket is how a store goes noisy. |
 | `about` | The entities the fact concerns — people, systems, projects. This is what the prompt's topic index is built from, and it **participates in search**: a fact reading "it now runs on Postgres" with `about: ["deploy pipeline"]` is found by a search for the pipeline. |
-| `validFrom`, `validUntil` | When the fact starts and stops being true. A different axis from `createdAt`, which is when it was written — conflating the two is why assistants confidently report where someone used to work. |
+| `validFrom`, `validUntil` | When the fact starts and stops being true. A different axis from `createdAt`, which is when it was written — conflating the two is why assistants confidently report where someone used to work. ISO-8601; a date alone is UTC midnight, and a *time* must carry `Z` or an offset, or the same bound would mean a different instant on every machine. |
 | `supersedes` | The id of a fact this one replaces. |
 
 Every one of them is optional and additive. A line carrying only the four

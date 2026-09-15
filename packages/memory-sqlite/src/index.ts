@@ -148,7 +148,6 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
       UNIQUE (agent_id, id)
     )
   `);
-  db.exec('CREATE INDEX IF NOT EXISTS entries_by_agent ON entries (agent_id, forgotten_at)');
   // The pin lane, in arrival order — `seq`, not a timestamp, for the same
   // reason the file store replays `O_APPEND` order: a budget is allocated
   // by arrival, and a clock that skewed backwards would make an accepted
@@ -232,6 +231,11 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
       throw error;
     }
   }
+  // After the rebuild, never before it: `ALTER TABLE ... RENAME` carries an
+  // existing index to the renamed table and `DROP TABLE` takes it away
+  // again, so an index created above would leave every upgraded database
+  // doing full scans for exactly the agent-scoped reads it exists to serve.
+  db.exec('CREATE INDEX IF NOT EXISTS entries_by_agent ON entries (agent_id, forgotten_at)');
   for (const sidecar of [`${filePath}-wal`, `${filePath}-shm`]) {
     try {
       chmodSync(sidecar, 0o600);

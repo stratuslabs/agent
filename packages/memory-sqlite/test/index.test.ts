@@ -313,3 +313,26 @@ test('a generated id never collides with one an import preserved', async () => {
   assert.equal((await store.list('ava')).entries.length, 5);
   store.close();
 });
+
+test('the agent index survives the rebuild an older file needs', async () => {
+  const file = await newFile();
+  const { DatabaseSync } = await import('node:sqlite');
+  const legacy = new DatabaseSync(file);
+  legacy.exec(`
+    CREATE TABLE entries (
+      seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, agent_id TEXT NOT NULL, content TEXT NOT NULL,
+      created_at TEXT NOT NULL, metadata TEXT, trust TEXT, origin TEXT, forgotten_at TEXT
+    )
+  `);
+  legacy.exec('CREATE INDEX entries_by_agent ON entries (agent_id, forgotten_at)');
+  legacy.close();
+
+  // `ALTER TABLE ... RENAME` carries the index to the renamed table and
+  // `DROP TABLE` takes it away, so an index created before the rebuild
+  // leaves every upgraded database doing full scans for exactly the
+  // agent-scoped reads it exists to serve.
+  const store = createSqliteMemoryStore(file);
+  const indexes = new DatabaseSync(file).prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'entries'").all() as Array<{ name: string }>;
+  assert.ok(indexes.some((index) => index.name === 'entries_by_agent'), `indexes were ${JSON.stringify(indexes)}`);
+  store.close();
+});

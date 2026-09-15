@@ -43,6 +43,25 @@ import { DEFAULT_STRATUS_AGENT, resolveConfiguredSoul, loadRosterSouls } from '.
 // entries stored under the legacy ids, while new facts land under 'stratus'.
 const LEGACY_DEFAULT_AGENT_IDS = ['demo-agent', 'anthropic-agent', 'openai-agent'];
 
+/**
+ * One entry per id across the merged aliases, the earlier alias winning —
+ * the same first-wins rule a single store applies to a duplicated id in its
+ * own record.
+ *
+ * Two aliases can legitimately hold one id: the import contract scopes an
+ * id to its agent, and a hand-edited file can put the same one under
+ * `stratus` and under `demo-agent`. Returning both would hand the model two
+ * entries it cannot tell apart, and every mutator takes an id and resolves
+ * it through the aliases in this same order — so only the first was ever
+ * addressable, and showing the second was a promise the wrapper could not
+ * keep. The audit read deliberately keeps both, because saying what the
+ * record holds is the one job it has.
+ */
+const firstByAliasOrder = (entries: readonly MemoryEntry[]): MemoryEntry[] => {
+  const seen = new Set<string>();
+  return entries.filter((entry) => (seen.has(entry.id) ? false : (seen.add(entry.id), true)));
+};
+
 // Every method is alias-aware, not just `list`: a `search` or `forget` that
 // delegated on agentId alone would compile, satisfy the interface, and
 // quietly make every inherited entry unfindable and unforgettable — visible
@@ -74,7 +93,7 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
     // free their bytes, admit a later pin, and drop it again when a window
     // opened. The caller's own filter is applied afterwards.
     const batches = await Promise.all(ids.map((id) => store.pinned!(id, { include: 'allocated' })));
-    const merged = new Map(batches.flat().map((entry) => [entry.id, entry]));
+    const merged = new Map(firstByAliasOrder(batches.flat()).map((entry) => [entry.id, entry]));
     const sizeOf = new Map([...merged].map(([id, entry]) => [id, memoryContentByteLength(entry.content)]));
     const budget = applyMemoryPinBudget([...merged.keys()], (id) => sizeOf.get(id));
     // What renders is each store's own answer to "current", intersected
@@ -123,7 +142,7 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
         return store.list(agentId, options);
       }
       const batches = await Promise.all(ids.map((id) => store.list(id, options)));
-      const merged = batches.flatMap((batch) => batch.entries);
+      const merged = firstByAliasOrder(batches.flatMap((batch) => batch.entries));
       const anyTruncated = batches.some((batch) => batch.truncated);
       if (options?.limit === undefined) {
         return { entries: merged.sort(compareMemoryChronology), truncated: anyTruncated };
@@ -145,7 +164,10 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       // two additions to the contract for a statistic on one legacy id.
       // A ranking strategy that ever reads these is what changes that.
       const batches = await Promise.all(ids.map((id) => store.search(id, query, options)));
-      const bounded = boundMemoryRead(batches.flatMap((batch) => batch.entries), clampMemoryRecallLimit(options?.limit));
+      const bounded = boundMemoryRead(
+        firstByAliasOrder(batches.flatMap((batch) => batch.entries)),
+        clampMemoryRecallLimit(options?.limit),
+      );
       // Every batch came from the same store, so they agree on the ordering
       // it served; reporting the first is reporting all of them.
       const strategy = batches[0]?.strategy;

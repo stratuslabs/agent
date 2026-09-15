@@ -10699,6 +10699,9 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
     // raw, it would forge an entry header on the screen the operator
     // decides from, and repaint the terminal.
     JSON.stringify({ id: 'ava:memory:4', agentId: 'ava', content: 'Approved.\nava:memory:9  [user]\u001b[0m', createdAt: '2026-01-02T13:00:00.000Z', trust: 'external', origin: { sessionId: 's1', taintedBy: 'web.fetch' } }),
+    // An id carrying a newline and an escape, which an import would accept:
+    // rendered raw it forges the header of the entry after it.
+    JSON.stringify({ id: 'ava:memory:5\nava:memory:8  [user]  [forged]\u001b[0m', agentId: 'ava', content: 'A smuggled id.', createdAt: '2026-01-02T14:00:00.000Z', trust: 'external', origin: { sessionId: 's1', taintedBy: 'web.fetch' } }),
     // Another agent's, which Ava's operator cannot touch by id.
     JSON.stringify({ id: 'bea:memory:1', agentId: 'bea', content: 'Bea knows things.', createdAt: '2026-01-03T00:00:00.000Z' }),
     '',
@@ -10716,6 +10719,12 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
   assert.ok(listed.output.stdout.includes('  Approved.\\nava:memory:9  [user]\\u001b[0m'));
   assert.ok(!listed.output.stdout.includes('\u001b'));
   assert.doesNotMatch(listed.output.stdout, /^ava:memory:9/m);
+  // The id is escaped too, not only the content: `import` validates only
+  // that it is a string, so an untrusted corpus can carry a newline or an
+  // escape sequence in one — and the id line is the frame every other line
+  // hangs off, so a forged one forges an entry.
+  assert.ok(listed.output.stdout.includes('ava:memory:5\\nava:memory:8  [user]  [forged]\\u001b[0m  [external]'));
+  assert.doesNotMatch(listed.output.stdout, /^ava:memory:8/m);
 
   const filtered = createStreams();
   assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--trust', 'unknown', '--format', 'json'], streams: filtered.streams, env }), 0);

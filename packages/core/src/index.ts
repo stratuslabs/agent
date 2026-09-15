@@ -1342,7 +1342,9 @@ export const memoryEntryAbout = (entry: Pick<MemoryEntry, 'about'>): string[] =>
       continue;
     }
     const key = raw.trim();
-    const folded = key.toLowerCase();
+    // Folded the way the tokenizer normalizes, so two spellings of one
+    // entity are one key here as they are one token to search.
+    const folded = key.normalize('NFC').toLowerCase();
     if (key.length === 0 || seen.has(folded)) {
       continue;
     }
@@ -1743,7 +1745,11 @@ export const collectMemoryTopics = (entries: readonly MemoryEntry[]): MemoryTopi
   for (const entry of entries) {
     const trust = memoryEntryTrust(entry);
     for (const key of memoryEntryAbout(entry)) {
-      const folded = key.toLowerCase();
+      // NFC before folding, the way `tokenizeMemoryText` normalizes: a
+      // composed and a decomposed `café` are one topic to search, and two
+      // topics here would render as duplicates with their counts split and
+      // spend the block's budget twice on the same thing.
+      const folded = key.normalize('NFC').toLowerCase();
       const existing = topics.get(folded);
       if (existing === undefined) {
         topics.set(folded, { name: key, count: 1, lastUpdatedAt: entry.createdAt, trust });
@@ -1771,7 +1777,7 @@ export const mergeMemoryTopics = (...lists: readonly (readonly MemoryTopic[])[])
   const merged = new Map<string, MemoryTopic>();
   for (const list of lists) {
     for (const topic of list) {
-      const folded = topic.name.toLowerCase();
+      const folded = topic.name.normalize('NFC').toLowerCase();
       const existing = merged.get(folded);
       if (existing === undefined) {
         merged.set(folded, { ...topic });

@@ -711,3 +711,29 @@ test('an oversized match never starves the admissible ones behind it', async () 
   // The skipped ones are still live entries beyond what came back.
   assert.equal(found.truncated, true);
 });
+
+test('one id under two aliases resolves to one entry, the earlier alias winning', async () => {
+  const filePath = await newFile();
+  // A hand-edited file can put one id under the default agent and under a
+  // legacy alias it inherits. Returning both hands the model two entries it
+  // cannot tell apart, and every mutator takes an id and resolves it
+  // through the aliases in this same order — so only the first was ever
+  // addressable, and showing the second promised something the wrapper
+  // could not keep.
+  await writeFile(filePath, [
+    JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'the inherited copy of the rota', createdAt: '2026-01-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the current copy of the rota', createdAt: '2026-01-02T00:00:00.000Z' }),
+    '',
+  ].join('\n'));
+  const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
+
+  const listed = (await store.list(DEFAULT_STRATUS_AGENT.id)).entries;
+  assert.deepEqual(listed.map((entry) => entry.content), ['the current copy of the rota']);
+  assert.deepEqual((await store.search(DEFAULT_STRATUS_AGENT.id, 'rota')).entries.map((entry) => entry.id), ['shared:1']);
+  // The audit read keeps both, because saying what the record holds is the
+  // one job it has.
+  assert.equal((await store.audit(DEFAULT_STRATUS_AGENT.id)).filter((entry) => entry.id === 'shared:1').length, 2);
+  // And the mutator reaches the one the reads showed.
+  assert.equal(await store.forget(DEFAULT_STRATUS_AGENT.id, 'shared:1'), true);
+  assert.deepEqual((await store.list(DEFAULT_STRATUS_AGENT.id)).entries.map((entry) => entry.content), ['the inherited copy of the rota']);
+});
