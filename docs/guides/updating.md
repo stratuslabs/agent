@@ -1,8 +1,8 @@
 # Updating
 
-`~/.stratus` is a real on-disk format — config, credentials, souls, memory,
-the session database — so upgrading is more than `npm install -g`. Two
-pieces handle it.
+`~/.stratus` is a real on-disk format — config, credentials, souls, and
+each agent's own [state directory](../reference/state-layout.md) — so
+upgrading is more than `npm install -g`. Two pieces handle it.
 
 ## State is versioned, and migrations run themselves
 
@@ -15,8 +15,13 @@ through one blessed command leaves the other install methods on unmigrated
 state, and the two populations diverge silently. (One constraint that keeps
 the automatic path honest: a migration must be safe to run while a daemon
 is serving, because this path does not stop the managed service — only
-`stratus update` does. A migration needing exclusive access to shared state
-is not registered until the registry can require that bracket.)
+`stratus update` does. A migration that needs exclusive access to state a
+daemon holds open says so, and is deferred here until a caller that has the
+home to itself runs it: `stratus update`, which stops the service first, or
+`stratus serve`, which holds the claim and is about to open the stores
+anyway. While one is deferred the home keeps its old schema version, so
+nothing reads it as fully migrated and no older build is refused over a
+move that has not happened.)
 
 Schema 2 is the first stamp that exists only to be refused: since
 [provenance](../concepts/memory.md#where-a-fact-came-from) landed, memory
@@ -37,8 +42,36 @@ shape — the same thing `stratus service stop` lets an in-flight turn do —
 which is why `stratus update` stops the service *before* it migrates
 rather than relying on the stamp to do it.
 
+Schema 3 moves each agent's state into its own directory:
+`~/.stratus/agents/<id>/` now holds that agent's `sessions.db`,
+`memory.jsonl`, and `whitelist.json`, while the schedules move out of the
+shared session database into `~/.stratus/fleet.db` beside a session index.
+[State layout](../reference/state-layout.md) is the map. Two halves, and
+they land at different moments:
+
+- **Memories and grants move on the first command of the new build.** Their
+  sources are an append-only file the migration takes by rename and a set
+  of files a rename moves atomically, so they are safe beside a running
+  daemon — and waiting would mean every `run`, `agents`, and `memory`
+  between the upgrade and the next daemon start reading an agent that
+  remembers nothing.
+- **Sessions and schedules wait for `stratus update` or the next `stratus
+  serve`**, because a daemon of the older build is writing conversations
+  into that database and moving it out from under one would lose every turn
+  saved after the split. Until then `stratus schedules` keeps reading the
+  old file, so nothing goes quiet in between.
+
+Nothing is deleted: the shared database and the shared memory file stay on
+disk as `sessions.db.migrated` and `memory.jsonl.migrated`, and the old
+`agents/<id>.whitelist.json` files are moved rather than copied. An agent
+whose soul is absent keeps its rows — the migration walks the stored agent
+ids, not the roster — so restoring the soul later finds its history where
+the layout says it lives. An id that cannot be a single path segment has no
+directory to own: its rows stay in the preserved original and the migration
+names it on the way past, rather than dropping it silently.
+
 One thing a rollback does lose, and it is not stamped: an agent's
-`origins` and `tools` grants. `<id>.whitelist.json` holds every kind of
+`origins` and `tools` grants. `whitelist.json` holds every kind of
 grant under the same version, so a daemon predating
 [browser actions](./browser.md) or
 [standing grants](./approvals.md#standing-grants) reads it happily and
@@ -70,7 +103,7 @@ stratus update --check    # report all of it, change nothing (exits 1 when
                           # something is actionable, for scripts and cron)
 ```
 
-The service stop comes first so no daemon holds the session database while
+The service stop comes first so no daemon holds a session database while
 state changes, and the unit rewrite is the step nothing else performs: the
 unit runs the daemon by **absolute paths** (see
 [Always on](./always-on.md)), so upgrading node — under nvm, a whole new

@@ -95,6 +95,13 @@ Project-local `stratus.config.json` outranks the global
 to endpoints a project config selects. Details:
 [Configuration](https://github.com/stratuslabs/agent/blob/main/docs/reference/config.md).
 
+Each agent's own state — its conversations, its memories, and what it may
+do unattended — lives in `~/.stratus/agents/<id>/`, owner-only, so no read
+can reach another agent's. What is in a home directory, and what an upgrade
+from the older shared files moves:
+[State layout](https://github.com/stratuslabs/agent/blob/main/docs/reference/state-layout.md)
+· [Updating](https://github.com/stratuslabs/agent/blob/main/docs/guides/updating.md).
+
 ## Optional packages
 
 Out of the box an agent can already echo, remember, recall, delegate, and
