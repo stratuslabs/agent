@@ -378,6 +378,13 @@ const findLinks = (tokens: readonly Token[]): Map<number, Link> => {
     if (candidate === -1 || after?.kind !== 'punct' || after.text !== '(') {
       continue;
     }
+    // Markdown allows an empty label; Slack's spelling has nowhere to put
+    // one. `[](https://example.com)` became `<https://example.com|>`, which
+    // is a link with no text for the reader to see or click, so the line
+    // stays as it was written and the address stays visible in it.
+    if (candidate + 1 === at) {
+      continue;
+    }
     const close = closeFrom[at + 2] ?? -1;
     if (close === -1) {
       continue;

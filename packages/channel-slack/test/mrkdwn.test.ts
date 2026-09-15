@@ -275,6 +275,14 @@ test('a link is read from the characters its destination was written with', () =
     ['see [1] and the [docs](https://h/d)', 'see [1] and the <https://h/d|docs>'],
     // The nearest opener is the one a bracket answers.
     ['[outer [inner](https://h/x)', '[outer <https://h/x|inner>'],
+    // Markdown allows a label with nothing in it; Slack's spelling has
+    // nowhere to put one, and `<url|>` is a link a reader can neither see
+    // nor click. The line keeps the address where it is visible instead.
+    ['[](https://example.com)', '[](https://example.com)'],
+    ['![](https://example.com)', '![](https://example.com)'],
+    ['see [](https://h/x) here', 'see [](https://h/x) here'],
+    // A label with something in it is still a label, whitespace included.
+    ['[ ](https://h/x)', '<https://h/x| >'],
   ]);
 });
 
