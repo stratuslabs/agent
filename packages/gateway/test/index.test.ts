@@ -2566,6 +2566,67 @@ test('a daemon restart finishes the turns that were parked on a human', async ()
   assert.deepEqual(results, ['c1', 'c2'], 'every tool_use ended up with one tool_result');
 });
 
+test('the restart sweep resumes a parked turn in every agent store, not just one', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const stateDir = path.join(home, 'state');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nid: bea\nprovider: demo\n---\n\nYou are Bea.\n');
+
+  // One parked turn per agent, which now means one per database. A sweep
+  // that walked whichever store happened to be open would leave the other
+  // agent's approval parked forever, with nobody watching — the failure the
+  // fleet-wide session index exists to make impossible.
+  const seed = new ShardedSessionStore({ stateDir });
+  const now = new Date().toISOString();
+  for (const [sessionId, agentId, name] of [['parked-ava', 'ava', 'Ava'], ['parked-bea', 'bea', 'Bea']] as const) {
+    await seed.create({
+      id: sessionId,
+      agent: { id: agentId, name },
+      status: 'pending_approval',
+      messages: [
+        { id: 'm1', role: 'user', content: 'go', createdAt: now },
+        { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+      ],
+      metadata: {
+        [PENDING_APPROVAL_METADATA_KEY]: {
+          call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+          remaining: [],
+          parkedAt: now,
+        },
+      },
+    });
+  }
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, selection: { provider: 'demo' } });
+  // Gated on the two completions themselves, never on a sleep: the point of
+  // the test is which sessions the sweep reached, and a timer would pass by
+  // luck on a fast runner and hang on a slow one.
+  const completed = new Set<string>();
+  const bothRecovered = new Promise<void>((resolve) => {
+    gateway.bus.subscribe((event) => {
+      if (event.type === 'session.completed') {
+        completed.add(event.sessionId);
+        if (completed.has('parked-ava') && completed.has('parked-bea')) {
+          resolve();
+        }
+      }
+    });
+  });
+  await gateway.start();
+  await settles(bothRecovered, 'both recovered turns');
+  await gateway.stop();
+
+  const after = new ShardedSessionStore({ stateDir });
+  for (const sessionId of ['parked-ava', 'parked-bea']) {
+    const session = await after.get(sessionId);
+    assert.equal(session?.metadata?.[PENDING_APPROVAL_METADATA_KEY], undefined, sessionId);
+    assert.notEqual(session?.status, 'pending_approval', sessionId);
+  }
+  after.close();
+});
+
 test('a parked turn whose window ran out while the daemon was down is denied, not re-asked', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
