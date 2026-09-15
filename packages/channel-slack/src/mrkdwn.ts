@@ -332,14 +332,18 @@ const findLinks = (tokens: readonly Token[]): Map<number, Link> => {
   // nothing: `[x](` sixteen thousand times sent every one of them looking
   // through the whole of the rest for a `)` that is not there.
   //
-  // The scan stops at whitespace as well as at a break, because a
-  // destination cannot hold either — reaching a `)` past a space would only
-  // build a string for the pattern below to reject.
+  // The scan stops at whitespace and at a `(` as well as at a break, because
+  // a destination holds none of the three — reaching a `)` past one of them
+  // only builds a string for the pattern below to reject, and building it is
+  // the expensive half: `[x](a` eight thousand times, with a single `)` at
+  // the end, had every candidate reach that `)` and join the whole remainder
+  // into a destination before throwing it away.
   const closeFrom = new Array<number>(tokens.length + 1).fill(-1);
   const wrapped = new Array<number>(tokens.length + 1).fill(0);
   for (let at = tokens.length - 1; at >= 0; at -= 1) {
     const token = tokens[at];
-    const stops = token === undefined || token.kind === 'break' || /\s/.test(sourceOf(token));
+    const opens = token?.kind === 'punct' && token.text === '(';
+    const stops = token === undefined || token.kind === 'break' || opens || /\s/.test(sourceOf(token));
     const closes = token?.kind === 'punct' && token.text === ')';
     closeFrom[at] = closes ? at : (stops ? -1 : (closeFrom[at + 1] ?? -1));
     wrapped[at] = (wrapped[at + 1] ?? 0) + (token?.kind === 'code' && token.text.includes('\n') ? 1 : 0);
