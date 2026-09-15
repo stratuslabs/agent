@@ -1,7 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 
 import {
   type Message,
@@ -40,8 +38,6 @@ import {
   type MemoryStoreContribution,
   type ProviderContribution,
   type Session,
-  type SessionStatus,
-  type SessionStore,
   type StratusEvent,
   type ToolRisk,
 } from '@stratusagent/core';

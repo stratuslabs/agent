@@ -514,15 +514,27 @@ export class ShardedSessionStore implements SessionStore {
     const report: SessionReconcileReport = { released: [], reindexed: [] };
     const owners = new Map<string, SessionIndexRow>();
     for (const agentId of await this.shardedAgentIds()) {
-      for (const row of this.shardFor(agentId).rows()) {
-        const seen = owners.get(row.id);
-        if (seen !== undefined) {
-          throw new Error(
-            `Session ${row.id} exists in both ${seen.agentId}'s and ${agentId}'s store. `
-            + 'Two agents cannot share a session id; move or remove one of the two `agents/<id>/sessions.db` rows before starting.',
-          );
+      // Read through a connection this reconcile owns, and let it go again
+      // unless the store was already open: a roster's every agent has a
+      // store on disk, and holding one descriptor per agent from start-up
+      // would make a big roster pay at rest for a sweep that runs once.
+      const cached = this.shards.get(agentId);
+      const shard = cached ?? new SqliteSessionStore(agentSessionDbIn(this.stateDir, agentId), { ownedDirectory: true });
+      try {
+        for (const row of shard.rows()) {
+          const seen = owners.get(row.id);
+          if (seen !== undefined) {
+            throw new Error(
+              `Session ${row.id} exists in both ${seen.agentId}'s and ${agentId}'s store. `
+              + 'Two agents cannot share a session id; move or remove one of the two `agents/<id>/sessions.db` rows before starting.',
+            );
+          }
+          owners.set(row.id, row);
         }
-        owners.set(row.id, row);
+      } finally {
+        if (cached === undefined) {
+          shard.close();
+        }
       }
     }
     const indexed = new Map(this.index.rows().map((row) => [row.id, row]));

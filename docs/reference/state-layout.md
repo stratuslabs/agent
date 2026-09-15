@@ -42,10 +42,12 @@ conversations or memories could come back from: the handle does not exist,
 rather than a filter having remembered to exclude them. Two things follow
 that are worth knowing:
 
-- **Deleting `agents/<id>/` forgets that agent completely** — history,
-  memories, and grants together — and leaves every other agent untouched.
-  Deleting only the soul keeps the directory, which is deliberate: restore
-  the soul later and the agent finds its history where it left it.
+- **Deleting `agents/<id>/` forgets that agent's history, memories, and
+  grants together**, and leaves every other agent untouched. Its
+  `workspaces/<id>/` is separate and outlives it — the files its tools
+  produced are yours, not its state. Deleting only the soul keeps both,
+  which is deliberate: restore the soul later and the agent finds its
+  history where it left it.
 - **Renaming an agent's `id:` re-keys all of it.** The old directory stays
   where it is under the old id; nothing moves it, because nothing can tell
   a rename from a new agent.

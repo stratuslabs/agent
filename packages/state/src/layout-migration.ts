@@ -88,6 +88,20 @@ const tableSchemaOf = (db: SqliteDatabase, table: string): string | undefined =>
 const hasTable = (db: SqliteDatabase, table: string): boolean => tableSchemaOf(db, table) !== undefined;
 
 /**
+ * The source table's own column names, quoted for a copy.
+ *
+ * `INSERT … SELECT *` would do, right up until the destination table has a
+ * column the source does not — the next time this schema grows one, with a
+ * store that creates the new shape and a database written by the build
+ * before it. Naming the columns the *source* has copies exactly what is
+ * there and leaves the rest to their defaults.
+ */
+const columnsOf = (db: SqliteDatabase, schema: string, table: string): string[] => {
+  const rows = db.prepare(`PRAGMA ${schema}.table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.map((row) => `"${row.name.replaceAll('"', '""')}"`);
+};
+
+/**
  * Owner-only, like the credentials file, and the sidecars with it: SQLite
  * derives their permissions from the main file's mode, and a chmod that
  * covered only the database would leave a WAL full of conversation bodies
@@ -151,7 +165,8 @@ const moveSchedules = async (legacyDb: SqliteDatabase, env: StateEnvironment): P
     // with no schedule body making a round trip through this process.
     fleet.prepare('ATTACH ? AS legacy').run(legacySessionDbPath(env));
     try {
-      fleet.exec('INSERT OR REPLACE INTO schedules SELECT * FROM legacy.schedules');
+      const columns = columnsOf(fleet, 'legacy', 'schedules').join(', ');
+      fleet.exec(`INSERT OR REPLACE INTO schedules (${columns}) SELECT ${columns} FROM legacy.schedules`);
       const counted = fleet.prepare('SELECT COUNT(*) AS total FROM legacy.schedules').get() as { total: number };
       return Number(counted.total);
     } finally {
@@ -202,7 +217,10 @@ const shardSessions = async (
       }
       shard.prepare('ATTACH ? AS legacy').run(legacySessionDbPath(env));
       try {
-        shard.prepare('INSERT OR REPLACE INTO sessions SELECT * FROM legacy.sessions WHERE agent_id = ?').run(owner.agent_id);
+        const columns = columnsOf(shard, 'legacy', 'sessions').join(', ');
+        shard
+          .prepare(`INSERT OR REPLACE INTO sessions (${columns}) SELECT ${columns} FROM legacy.sessions WHERE agent_id = ?`)
+          .run(owner.agent_id);
       } finally {
         shard.exec('DETACH legacy');
       }
