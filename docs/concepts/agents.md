@@ -119,9 +119,13 @@ shortening an id moves the agent it belongs to.
 Creating an agent checks the id against every id the served roster holds,
 not against the filenames on disk: what the roster files *declare* (a soul
 at `renamed.md` can declare `id: ava`), the configured default soul even
-when its file lives elsewhere, and the reserved `stratus`. A new agent gets
-a suffixed id (`ava-3f9c`) rather than one that would collide. Its name
-stays the one you chose.
+when its file lives elsewhere, and the reserved `stratus`. It checks by the
+same folded rule the roster and the filesystem use, so an existing `AVA`
+blocks a new `ava` — otherwise the command would report a new agent and
+leave a roster that refuses to load. `stratus template add` applies it to
+the souls a template ships, against each other as well as against yours. A
+new agent gets a suffixed id (`ava-3f9c`) rather than one that would
+collide. Its name stays the one you chose.
 
 ## Two souls cannot share an id
 

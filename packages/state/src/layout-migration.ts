@@ -229,17 +229,61 @@ export interface StateDirectoryNames {
    * is a different spelling of it; undefined when the name is free or
    * already this agent's.
    */
-  heldBy(agentId: string): string | undefined;
+  heldBy(agentId: string): Promise<string | undefined>;
   /** Record `agentId` as the owner of the name it joins to. */
   hold(agentId: string): void;
 }
 
-export const createStateDirectoryNames = (): StateDirectoryNames => {
+export const createStateDirectoryNames = (env: StateEnvironment): StateDirectoryNames => {
   const byName = new Map<string, string>([
     [foldedAgentId(DEFAULT_STRATUS_AGENT.id), DEFAULT_STRATUS_AGENT.id],
   ]);
+  // Once per tracker, on first use rather than at construction, because the
+  // factory is called from synchronous places and most runs never ask.
+  let seeded: Promise<void> | undefined;
+  /**
+   * The directories that are already there, before this run names anything.
+   *
+   * Without this the tracker only knew what *it* had created, and the
+   * dangerous case is the one that spans runs: the memory drain runs on
+   * every ordinary command, so `agents/Ava/` can exist long before the
+   * exclusive migration reaches `ava`'s legacy sessions and grant file.
+   * A fresh tracker would find the name free, `mkdir` would be satisfied by
+   * the directory that is already there, and `ava`'s `whitelist.json` would
+   * land in what `Ava` resolves — one agent handed the other's unattended
+   * grants by an upgrade.
+   *
+   * Directories only, by `Dirent`: `agents/` also holds the souls and, until
+   * the move, the legacy `<id>.whitelist.json` files, and a `Dirent` reports
+   * a symlink as a link rather than a directory — which is right, because a
+   * linked `agents/<id>` is not a state directory and `makeAgentStateDirectory`
+   * refuses it anyway.
+   */
+  const seed = async (): Promise<void> => {
+    let found: Dirent[];
+    try {
+      found = await readdir(agentsDirPath(env), { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return;
+      }
+      throw error;
+    }
+    for (const entry of found) {
+      if (entry.isDirectory()) {
+        // Never over a name already held — the built-in's, or one this run
+        // has claimed: those answers are the ones to keep.
+        const folded = foldedAgentId(entry.name);
+        if (!byName.has(folded)) {
+          byName.set(folded, entry.name);
+        }
+      }
+    }
+  };
   return {
-    heldBy: (agentId) => {
+    heldBy: async (agentId) => {
+      seeded ??= seed();
+      await seeded;
       const claimed = byName.get(foldedAgentId(agentId));
       return claimed === undefined || claimed === agentId ? undefined : claimed;
     },
@@ -290,7 +334,7 @@ const agentDirectoryOrQuarantine = async (
   what: string,
   report: LayoutMigrationReport,
 ): Promise<string | undefined> => {
-  const holder = report.directoryNames.heldBy(agentId);
+  const holder = await report.directoryNames.heldBy(agentId);
   if (holder !== undefined) {
     report.quarantined.push(
       `${JSON.stringify(agentId)} (${what}) — differs from ${JSON.stringify(holder)} only in case, and one `
@@ -950,7 +994,7 @@ export const hasBracketedLegacyStateIn = async (stateDir: string): Promise<boole
 export const hasBracketedLegacyState = (env: StateEnvironment): Promise<boolean> =>
   hasBracketedLegacyStateIn(stratusHomePath(env));
 
-const emptyReport = (): LayoutMigrationReport => ({
+const emptyReport = (env: StateEnvironment): LayoutMigrationReport => ({
   agentsWithSessions: 0,
   sessionsMoved: 0,
   schedulesMoved: 0,
@@ -958,7 +1002,7 @@ const emptyReport = (): LayoutMigrationReport => ({
   memoriesMoved: 0,
   whitelistsMoved: 0,
   quarantined: [],
-  directoryNames: createStateDirectoryNames(),
+  directoryNames: createStateDirectoryNames(env),
 });
 
 const describe = (report: LayoutMigrationReport): string | undefined => {
@@ -1007,7 +1051,7 @@ const describe = (report: LayoutMigrationReport): string | undefined => {
  * Costs one `stat` once the file is gone for good.
  */
 export const drainSharedMemory = async (env: StateEnvironment): Promise<string | undefined> => {
-  const report = emptyReport();
+  const report = emptyReport(env);
   await copySharedMemory(env, report);
   // And any claim a retirement could not finish. `placeClaim` leaves one
   // behind when the file was still growing, and migration 0003 is stamped by
@@ -1028,7 +1072,7 @@ export const drainSharedMemory = async (env: StateEnvironment): Promise<string |
  * and the note on `moveWhitelists`.
  */
 export const applyPerAgentLayout = async (env: StateEnvironment): Promise<string | undefined> => {
-  const report = emptyReport();
+  const report = emptyReport(env);
   const legacyPath = legacySessionDbPath(env);
   if (await exists(legacyPath)) {
     const legacyDb = await openDatabase(legacyPath);

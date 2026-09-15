@@ -104,9 +104,9 @@ export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> 
     // Two ids that differ only in case are one directory on macOS and
     // Windows, and the second would append its memories to the first
     // agent's file — see `StateDirectoryNames`, which owns that rule.
-    const directoryNames = createStateDirectoryNames();
+    const directoryNames = createStateDirectoryNames(env);
     for (const [agentId, lines] of byAgent) {
-      if (directoryNames.heldBy(agentId) !== undefined) {
+      if (await directoryNames.heldBy(agentId) !== undefined) {
         continue;
       }
       // The directory before anything reads a path *under* it, and never

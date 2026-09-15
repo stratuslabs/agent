@@ -1380,7 +1380,10 @@ test('a config that is simply not there leaves the id check with nothing to repo
 
   const absent = await declaredAgentIds({ homeDir: home, cwd: home, processEnv: {} }, configPath);
   assert.deepEqual(absent.unread, []);
-  assert.ok(absent.ids.has('stratus'));
+  assert.ok(absent.holds('stratus'));
+  // And by the rule the filesystem uses, not by the exact string: an id
+  // is claimed against what would name the same directory.
+  assert.ok(absent.holds('Stratus'));
 
   // A config that exists and will not parse is the other case, and stays
   // reported: there the ids really are unchecked.

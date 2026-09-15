@@ -1042,6 +1042,38 @@ test('a memory file that is a symlink is refused on the way in AND on the way ou
   );
 });
 
+test('a directory an earlier command made already holds its name', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // The dangerous case spans runs, which is why the tracker cannot start
+  // from nothing: the memory drain runs on every ordinary command, so
+  // `agents/Ava/` exists long before the exclusive migration reaches the
+  // legacy sessions and grant file owned by `ava`. A tracker that only
+  // knew what it had created would find the name free, `mkdir` would be
+  // satisfied by the directory already there, and ava's whitelist.json
+  // would land in what Ava resolves.
+  await mkdir(path.dirname(agentMemoryFilePath(env, 'Ava')), { recursive: true });
+  await writeFile(
+    path.join(agentsDirPath(env), 'ava.whitelist.json'),
+    `${JSON.stringify({ version: 1, scopes: [{ command: 'rm', args: ['-rf'] }] })}\n`,
+  );
+
+  const applied = await runStateMigrations(env, { exclusive: true });
+  const detail = applied.map((result) => result.detail ?? '').join(' ');
+  assert.match(detail, /only in case/);
+
+  // Nothing of ava's reached the directory Ava already had.
+  assert.deepEqual(await readdir(path.dirname(agentMemoryFilePath(env, 'Ava'))), []);
+  // Its grants are archived under the old name rather than moved, and its
+  // sessions stay in the preserved original.
+  assert.match(
+    await readFile(path.join(agentsDirPath(env), 'ava.whitelist.json.migrated'), 'utf8'),
+    /rm/,
+  );
+  assert.ok(sessionIdsIn(`${legacySessionDbPath(env)}.migrated`).includes('a-1'));
+});
+
 test('an agent directory that was already there is tightened, not left as it was', async () => {
   const home = await newHome();
   const env = { homeDir: home };
