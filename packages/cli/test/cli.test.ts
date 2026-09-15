@@ -10814,6 +10814,32 @@ test('stratus memory search, pin, forget, and audit work the record the way the 
   assert.match(forgotten.output.stderr, /No live memory entry with id ava:memory:missing/);
 });
 
+test('stratus memory shows a pin that holds budget without reaching the prompt', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-pinned-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), [
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Dylan prefers short answers.', createdAt: '2026-01-01T00:00:00.000Z', trust: 'user' }),
+    // Pinned, and not true until 2027: it keeps its place in the 2 KiB
+    // budget while staying out of the prompt, which is exactly the entry an
+    // operator needs to find when a later pin refuses.
+    JSON.stringify({ id: 'ava:memory:2', agentId: 'ava', content: 'Ada takes over in the new year.', createdAt: '2026-01-02T00:00:00.000Z', trust: 'agent', validFrom: '2027-01-01T00:00:00.000Z' }),
+    '',
+  ].join('\n'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  assert.equal(await runCli({ argv: ['memory', 'pin', 'ava', 'ava:memory:2'], streams: createStreams().streams, env }), 0);
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
+  // Marked pinned *and* not-yet-valid: an operator who cannot see it cannot
+  // unpin it, and the refusal it causes would read as arithmetic that does
+  // not add up.
+  assert.match(listed.output.stdout, /ava:memory:2 {2}\[agent\] {2}\[pinned\] {2}\[not-yet-valid\]/);
+  const json = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--format', 'json'], streams: json.streams, env }), 0);
+  const entries = (JSON.parse(json.output.stdout) as { entries: Array<{ id: string; pinned: boolean }> }).entries;
+  assert.deepEqual(entries.filter((entry) => entry.pinned).map((entry) => entry.id), ['ava:memory:2']);
+});
+
 test('stratus memory export then import lands the same entries in order, external unless the operator vouches', async () => {
   const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-export-'));
   await mkdir(path.join(source, '.stratus'), { recursive: true });

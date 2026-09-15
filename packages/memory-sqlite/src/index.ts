@@ -16,6 +16,7 @@ import {
   isMemoryEntryCurrent,
   MEMORY_PINNED_MAX_BYTES,
   memoryContentByteLength,
+  MEMORY_STORE_CONTRACT_VERSION,
   memoryEntryFields,
   memoryQueryMatches,
   pinnedCapRefusal,
@@ -29,6 +30,7 @@ import {
   type MemoryImportResult,
   type MemoryListOptions,
   type MemoryOrigin,
+  type MemoryPinnedOptions,
   type MemoryPinOutcome,
   type MemoryRankingStrategy,
   type MemoryReadResult,
@@ -265,14 +267,23 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
     return kept.filter((entry) => !superseded.has(entry.id));
   };
 
-  const pinBudget = (agentId: string, at: Date): { effective: string[]; bytes: number; live: Map<string, MemoryEntry> } => {
-    const entries = new Map(liveEntries(agentId, at).map((entry) => [entry.id, entry]));
+  /**
+   * Allocated over un-tombstoned rows, never the live view: the budget is a
+   * property of the record and must not move when a successor's window
+   * opens. Sizing it from the live set would free a superseded pin's bytes,
+   * admit a later pin, and make that later pin inert the moment the
+   * successor was forgotten — an accepted pin dropped after the fact.
+   */
+  const pinBudget = (agentId: string): { effective: string[]; bytes: number; allocated: Map<string, MemoryEntry> } => {
+    const allocated = new Map(
+      (selectLive.all(agentId) as unknown as Row[]).map((row) => [row.id, live(toEntry(row))]),
+    );
     const ordered = (selectPins.all(agentId) as unknown as { id: string }[]).map((row) => row.id);
     const budget = applyMemoryPinBudget(
       ordered,
-      (id) => (entries.has(id) ? memoryContentByteLength(entries.get(id)!.content) : undefined),
+      (id) => (allocated.has(id) ? memoryContentByteLength(allocated.get(id)!.content) : undefined),
     );
-    return { effective: budget.effective, bytes: budget.bytes, live: entries };
+    return { effective: budget.effective, bytes: budget.bytes, allocated };
   };
 
   return {
@@ -393,9 +404,10 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
     },
 
     async pin(agentId, entryId): Promise<MemoryPinOutcome> {
-      const { effective, bytes, live: entries } = pinBudget(agentId, now());
-      const entry = entries.get(entryId);
-      if (!entry) {
+      const { effective, bytes, allocated } = pinBudget(agentId);
+      // Pinnable means live; the budget above is a different question.
+      const entry = liveEntries(agentId, now()).find((candidate) => candidate.id === entryId);
+      if (!entry || !allocated.has(entryId)) {
         throw new Error(`No live memory entry with id ${entryId} belongs to this agent — nothing was pinned.`);
       }
       if (effective.includes(entryId)) {
@@ -413,12 +425,14 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
       return deletePin.run(entryId, agentId).changes > 0;
     },
 
-    async pinned(agentId) {
+    async pinned(agentId, pinnedOptions: MemoryPinnedOptions = {}) {
       const at = now();
-      const { effective, live: entries } = pinBudget(agentId, at);
+      const { effective, allocated } = pinBudget(agentId);
+      const alive = new Set(liveEntries(agentId, at).map((entry) => entry.id));
       return effective
-        .map((id) => entries.get(id))
-        .filter((entry): entry is MemoryEntry => entry !== undefined && isMemoryEntryCurrent(entry, at))
+        .map((id) => allocated.get(id))
+        .filter((entry): entry is MemoryEntry => entry !== undefined && alive.has(entry.id)
+          && (pinnedOptions.validity === 'all' || isMemoryEntryCurrent(entry, at)))
         .sort(compareMemoryChronology);
     },
 
@@ -493,7 +507,7 @@ export const createSqliteMemoryPlugin = (config: JsonObject = {}): Plugin => {
         throw new Error('@stratusagent/memory-sqlite needs a path: set path under plugins["@stratusagent/memory-sqlite"] to where the database file should live.');
       }
       store = createSqliteMemoryStore(path.resolve(expandHome(configured)));
-      context.memory.register({ name: SQLITE_MEMORY_STORE_NAME, store });
+      context.memory.register({ name: SQLITE_MEMORY_STORE_NAME, store, contract: MEMORY_STORE_CONTRACT_VERSION });
     },
     dispose() {
       store?.close();

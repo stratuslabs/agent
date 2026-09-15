@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 
 import {
   InMemoryAgentMemoryStore,
+  MEMORY_STORE_CONTRACT_VERSION,
   type AgentDefinition,
   type ModelProvider,
   type PluginContext,
@@ -106,7 +107,7 @@ test('a plugin provider serves a run a soul selected, and a plugin memory store 
             return rememberingProvider('fixture', selection.model);
           },
         });
-        context.memory?.register({ name: 'fixture', store });
+        context.memory?.register({ name: 'fixture', store, contract: MEMORY_STORE_CONTRACT_VERSION });
       }),
     },
   });

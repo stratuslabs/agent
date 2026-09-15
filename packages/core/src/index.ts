@@ -1535,6 +1535,17 @@ export interface MemoryListOptions {
   validity?: 'current' | 'all';
 }
 
+/** Which pins a read wants — see `AgentMemoryStore.pinned`. */
+export interface MemoryPinnedOptions {
+  /**
+   * `current`, the default, is the pinned core as the prompt carries it.
+   * `all` also returns pins that are holding budget while outside their
+   * validity window — an operator cannot unpin what no view admits exists,
+   * and those are exactly the entries that make a later pin refuse.
+   */
+  validity?: 'current' | 'all';
+}
+
 export interface MemorySearchOptions {
   /** Clamped by `clampMemoryRecallLimit`; the store bounds it either way. */
   limit?: number;
@@ -1962,8 +1973,12 @@ export interface AgentMemoryStore {
   pin?(agentId: string, entryId: string): Promise<MemoryPinOutcome>;
   /** Undo a pin. False when this agent has no effective pin on that id. */
   unpin?(agentId: string, entryId: string): Promise<boolean>;
-  /** The effective pinned set, oldest first. See `applyMemoryPinBudget` for what "effective" means. */
-  pinned?(agentId: string): Promise<MemoryEntry[]>;
+  /**
+   * The effective pinned set, oldest first — see `applyMemoryPinBudget` for
+   * what "effective" means, and `MemoryPinnedOptions` for the out-of-window
+   * ones that hold budget without reaching the prompt.
+   */
+  pinned?(agentId: string, options?: MemoryPinnedOptions): Promise<MemoryEntry[]>;
   /**
    * What the agent knows *about*, from the `about` keys of everything true
    * now. Built with `collectMemoryTopics` so no two stores can advertise
@@ -2232,19 +2247,31 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     return true;
   }
 
-  private pinBudget(agentId: string): { effective: string[]; bytes: number; live: Map<string, MemoryEntry> } {
-    const live = new Map(this.live(agentId, this.now()).map((entry) => [entry.id, entry]));
+  /**
+   * Allocated over un-tombstoned entries, never the live view: the budget
+   * is a property of the record and must not move when a successor's
+   * window opens or a clock ticks. Sizing it from the live set would free a
+   * superseded pin's bytes, admit a later pin into the space, and make that
+   * later pin inert the moment the successor was forgotten.
+   */
+  private pinBudget(agentId: string): { effective: string[]; bytes: number; allocated: Map<string, MemoryEntry> } {
+    const allocated = new Map(
+      (this.entries.get(agentId) ?? [])
+        .filter((entry) => entry.forgottenAt === undefined)
+        .map(({ forgottenAt: _unused, ...entry }) => [entry.id, entry as MemoryEntry]),
+    );
     const budget = applyMemoryPinBudget(
       this.pins.get(agentId) ?? [],
-      (id) => (live.has(id) ? memoryContentByteLength(live.get(id)!.content) : undefined),
+      (id) => (allocated.has(id) ? memoryContentByteLength(allocated.get(id)!.content) : undefined),
     );
-    return { effective: budget.effective, bytes: budget.bytes, live };
+    return { effective: budget.effective, bytes: budget.bytes, allocated };
   }
 
   async pin(agentId: string, entryId: string): Promise<MemoryPinOutcome> {
-    const { effective, bytes, live } = this.pinBudget(agentId);
-    const entry = live.get(entryId);
-    if (!entry) {
+    const { effective, bytes, allocated } = this.pinBudget(agentId);
+    // Pinnable means live; the budget above is a different question.
+    const entry = this.live(agentId, this.now()).find((candidate) => candidate.id === entryId);
+    if (!entry || !allocated.has(entryId)) {
       throw new Error(`No live memory entry with id ${entryId} belongs to this agent — nothing was pinned.`);
     }
     if (effective.includes(entryId)) {
@@ -2267,12 +2294,14 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     return true;
   }
 
-  async pinned(agentId: string): Promise<MemoryEntry[]> {
+  async pinned(agentId: string, options: MemoryPinnedOptions = {}): Promise<MemoryEntry[]> {
     const at = this.now();
-    const { effective, live } = this.pinBudget(agentId);
+    const { effective, allocated } = this.pinBudget(agentId);
+    const live = new Set(this.live(agentId, at).map((entry) => entry.id));
     return effective
-      .map((id) => live.get(id))
-      .filter((entry): entry is MemoryEntry => entry !== undefined && isMemoryEntryCurrent(entry, at))
+      .map((id) => allocated.get(id))
+      .filter((entry): entry is MemoryEntry => entry !== undefined && live.has(entry.id)
+        && (options.validity === 'all' || isMemoryEntryCurrent(entry, at)))
       .sort(compareMemoryChronology);
   }
 
@@ -3276,9 +3305,36 @@ export interface ChannelContribution {
  * memories, the way a `tool-fs` that cached its roots would hand every
  * agent the first agent's files.
  */
+/**
+ * The revision of `AgentMemoryStore` a contributed store is built against.
+ *
+ * Bumped when the contract changes shape in a way a plugin compiled against
+ * the old one cannot satisfy — which it *silently* cannot, because the
+ * change that matters here is the shape of an argument rather than the
+ * number of them. A v1 store's `search(agentId, query, limit)` still
+ * accepts three arguments and still returns entries when the host hands it
+ * an options object; it just binds `{ limit: 10 }` where a number belonged,
+ * and answers with an unbounded read or none at all. No runtime check can
+ * tell the two apart from the function, so the plugin declares it.
+ *
+ * - **1** — `append(agentId, content, metadata?, provenance?)` and
+ *   `search(agentId, query, limit?)`, the shape before 29.
+ * - **2** — `append(agentId, content, options?)` and
+ *   `search(agentId, query, options?)`, plus the optional `pin`, `unpin`,
+ *   `pinned`, `topics`, and `importEntries`.
+ */
+export const MEMORY_STORE_CONTRACT_VERSION = 2;
+
 export interface MemoryStoreContribution {
   name: string;
   store: AgentMemoryStore;
+  /**
+   * Must be `MEMORY_STORE_CONTRACT_VERSION`. A store declaring an older
+   * revision — or none, which is what a plugin built before this field
+   * existed produces — is refused at registration rather than routed
+   * traffic it will mishandle without saying so.
+   */
+  contract: typeof MEMORY_STORE_CONTRACT_VERSION;
 }
 
 /** An executor contributed by a plugin, selectable by name in a trusted config. */
@@ -3406,9 +3462,9 @@ export const createRoutedMemoryStore = (
     const store = storeFor(agentId);
     return store.unpin ? store.unpin(agentId, entryId) : false;
   },
-  async pinned(agentId) {
+  async pinned(agentId, options) {
     const store = storeFor(agentId);
-    return store.pinned ? store.pinned(agentId) : [];
+    return store.pinned ? store.pinned(agentId, options) : [];
   },
   async topics(agentId) {
     const store = storeFor(agentId);

@@ -79,7 +79,14 @@ the prompt every turn.
 
 The pinned core is capped at **2 KiB of content** and **refuses rather than
 evicting**: a pinned set that silently dropped its oldest member would be a
-pin that did not mean anything. Unpin something first. Pinning is a record
+pin that did not mean anything. Unpin something first.
+
+The budget is allocated over the record, not over what is true today. A
+pinned fact that is superseded, or outside its validity window, keeps its
+place and simply stops rendering — otherwise a later pin would be accepted
+into space that comes back. `stratus memory list` marks it `[pinned]`
+alongside `[expired]` or `[not-yet-valid]`, because it is the entry to
+unpin when a pin refuses and the arithmetic looks wrong. Pinning is a record
 appended to the file, never a field written onto the entry, so the entry's
 own line stays byte-identical — which is what keeps the append-only
 concurrency model and the hand-edit promise intact.

@@ -150,6 +150,15 @@ store never see each other's entries. `stratus run` reads the same key from
 the same trusted config, so a local test remembers into the store the
 daemon would.
 
+A contributed store declares which **revision** of the contract it is built
+against, and a host serving a newer one refuses it at registration rather
+than routing it traffic. That is not ceremony: the change that broke
+compatibility here was the *shape* of an argument rather than the number of
+them, so an older store still accepts the call and answers wrongly — an
+options object bound where a limit belonged reads as an unbounded search.
+Nothing at runtime can tell the two apart from the function, so the plugin
+says which it is.
+
 Five of the contract's methods are **optional**, and a store that omits one
 gives up exactly the thing it names rather than failing: `reassertTrust`
 leaves its operator no way out of `unknown`; `pin`, `unpin`, and `pinned`

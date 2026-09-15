@@ -550,3 +550,76 @@ test('the file store’s usage counters are keyed by agent, and an older index i
   assert.equal((await reopened.search('ava', 'survey')).entries[0]?.usage?.recallCount, 1);
   assert.deepEqual((await reopened.search('ava', 'survey')).entries.map((entry) => entry.content), ['the survey is quarterly']);
 });
+
+test('a pin keeps its budget while superseded, so a later pin cannot be accepted and then dropped', async () => {
+  const filePath = await newFile();
+  let tick = AT.getTime();
+  const store = createFileMemoryStore(filePath, { now: () => new Date((tick += 1000)) });
+  const held = await store.append('ava', 'a'.repeat(1500));
+  assert.equal((await store.pin!('ava', held.id)).pinned, true);
+
+  // Superseded, so it leaves the prompt — but its bytes are a property of
+  // the record, not of the clock, and must not be handed to the next pin.
+  const successor = await store.append('ava', 'the replacement', { supersedes: held.id });
+  assert.deepEqual(await store.pinned!('ava'), []);
+  const later = await store.append('ava', 'b'.repeat(1000));
+  const refused = await store.pin!('ava', later.id);
+  assert.equal(refused.pinned, false, 'the superseded pin gave up its budget');
+
+  // Because it was refused, forgetting the successor brings the original
+  // back with nothing displaced. Had the later pin been accepted, this is
+  // where it would have gone silently inert.
+  assert.equal(await store.forget('ava', successor.id), true);
+  assert.deepEqual((await store.pinned!('ava')).map((entry) => entry.id), [held.id]);
+});
+
+test('a pin outside its validity window holds budget and is visible to an operator', async () => {
+  const filePath = await newFile();
+  const store = createFileMemoryStore(filePath, frozen());
+  const future = await store.append('ava', 'a'.repeat(1500), { validFrom: '2027-01-01T00:00:00.000Z' });
+  assert.equal((await store.pin!('ava', future.id)).pinned, true);
+
+  // Not in the prompt — one rule, both bounds — but still holding the
+  // budget, which is what makes the next pin refuse.
+  assert.deepEqual(await store.pinned!('ava'), []);
+  const later = await store.append('ava', 'b'.repeat(1000));
+  assert.equal((await store.pin!('ava', later.id)).pinned, false);
+  // And the operator's view can see the one holding the space, or the
+  // refusal reads as arithmetic that does not add up.
+  assert.deepEqual((await store.pinned!('ava', { validity: 'all' })).map((entry) => entry.id), [future.id]);
+});
+
+test('two agents holding one imported id keep their own re-assertions, in list and in search alike', async () => {
+  const filePath = await newFile();
+  const entry = (agentId: string): string => JSON.stringify({
+    id: 'shared:1',
+    agentId,
+    content: 'the survey is quarterly',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    trust: 'external',
+  });
+  const reassertion = (agentId: string, trust: string): string => JSON.stringify({
+    reasserts: 'shared:1',
+    agentId,
+    trust,
+    createdAt: '2026-02-01T00:00:00.000Z',
+  });
+  // Both re-assertions ahead of both entries: a hand-edited or reordered
+  // file, which the record read is order-independent about on purpose. The
+  // index has to be too — and an index keyed by entry alone lets the
+  // second re-assertion overwrite the first, so one agent's `search`
+  // reports the other's label while its `list` reports the right one.
+  await writeFile(filePath, [
+    reassertion('ava', 'user'),
+    reassertion('juno', 'agent'),
+    entry('ava'),
+    entry('juno'),
+    '',
+  ].join('\n'));
+
+  const store = createFileMemoryStore(filePath, frozen());
+  assert.equal((await store.list('ava')).entries[0]?.trust, 'user');
+  assert.equal((await store.list('juno')).entries[0]?.trust, 'agent');
+  assert.equal((await store.search('ava', 'survey')).entries[0]?.trust, 'user');
+  assert.equal((await store.search('juno', 'survey')).entries[0]?.trust, 'agent');
+});

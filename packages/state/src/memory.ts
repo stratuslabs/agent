@@ -29,6 +29,7 @@ import {
   type MemoryImportResult,
   type MemoryListOptions,
   type MemoryOrigin,
+  type MemoryPinnedOptions,
   type MemoryPinOutcome,
   type MemoryRankingStrategy,
   type MemoryReadResult,
@@ -305,18 +306,27 @@ const pinnedIdsFor = (records: MemoryFileRecords, agentId: string): string[] => 
   return ordered;
 };
 
-/** The effective pinned set and what it costs, over one agent's live entries. */
+/**
+ * The effective pinned set and what it costs.
+ *
+ * Allocated over **un-tombstoned** entries, never the live view: the budget
+ * is a property of the record, so it must not move when a clock ticks past
+ * a `validUntil` or a successor's window opens. Sizing it from the live set
+ * would free a superseded pin's bytes, let a later pin be accepted into the
+ * space, and then make that later pin inert the moment the successor was
+ * forgotten — an accepted pin dropped after the fact, which is the eviction
+ * the cap promises never happens. What is *live* decides only what renders.
+ */
 const pinBudgetFor = (
   records: MemoryFileRecords,
   agentId: string,
-  at: Date,
-): { effective: string[]; bytes: number; live: Map<string, MemoryEntry> } => {
-  const live = new Map(liveEntriesFor(records, agentId, at).map((entry) => [entry.id, entry]));
+): { effective: string[]; bytes: number; allocated: Map<string, MemoryEntry> } => {
+  const allocated = new Map(untombstonedEntriesFor(records, agentId).map((entry) => [entry.id, entry]));
   const budget = applyMemoryPinBudget(
     pinnedIdsFor(records, agentId),
-    (id) => (live.has(id) ? memoryContentByteLength(live.get(id)!.content) : undefined),
+    (id) => (allocated.has(id) ? memoryContentByteLength(allocated.get(id)!.content) : undefined),
   );
-  return { effective: budget.effective, bytes: budget.bytes, live };
+  return { effective: budget.effective, bytes: budget.bytes, allocated };
 };
 
 // ---- the derived FTS5 index ------------------------------------------------
@@ -330,8 +340,9 @@ const pinBudgetFor = (
 // '4' keyed `revisions` by (successor, agent): import preserves entry ids
 // while re-keying them to the importing agent, so one corpus imported for
 // two agents legitimately produces the same successor id twice.
-// '5' keyed `usage` the same way, for the same reason.
-const INDEX_SCHEMA_VERSION = '5';
+// '5' keyed `usage` the same way, for the same reason, and '6' `reasserted`
+// — the last of the three id-keyed tables the same import makes ambiguous.
+const INDEX_SCHEMA_VERSION = '6';
 
 // Loaded on first `search`, never at module load: see the note at the top.
 type SqliteModule = typeof import('node:sqlite');
@@ -370,7 +381,12 @@ type SqliteDatabase = InstanceType<SqliteModule['DatabaseSync']>;
 const INDEX_SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS forgotten (id TEXT NOT NULL, agent_id TEXT NOT NULL, PRIMARY KEY (id, agent_id));
-CREATE TABLE IF NOT EXISTS reasserted (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, trust TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reasserted (
+  id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  trust TEXT NOT NULL,
+  PRIMARY KEY (id, agent_id)
+);
 CREATE TABLE IF NOT EXISTS revisions (
   successor_id TEXT NOT NULL,
   target_id TEXT NOT NULL,
@@ -463,7 +479,7 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
   );
   const insertForgotten = db.prepare('INSERT OR IGNORE INTO forgotten (id, agent_id) VALUES (?, ?)');
   const upsertReasserted = db.prepare(
-    'INSERT INTO reasserted (id, agent_id, trust) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET agent_id = excluded.agent_id, trust = excluded.trust',
+    'INSERT INTO reasserted (id, agent_id, trust) VALUES (?, ?, ?) ON CONFLICT(id, agent_id) DO UPDATE SET trust = excluded.trust',
   );
   const relabelEntry = db.prepare('UPDATE memory_fts SET trust = ? WHERE id = ? AND agent_id = ?');
   const deleteEntry = db.prepare('DELETE FROM memory_fts WHERE id = ? AND agent_id = ?');
@@ -651,7 +667,8 @@ export const createFileMemoryStore = (
           opened.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string; pk: number }>;
         return columns('memory_fts').some((column) => column.name === 'fields')
           && columns('revisions').some((column) => column.name === 'agent_id' && column.pk > 0)
-          && columns('usage').some((column) => column.name === 'agent_id' && column.pk > 0);
+          && columns('usage').some((column) => column.name === 'agent_id' && column.pk > 0)
+          && columns('reasserted').some((column) => column.name === 'agent_id' && column.pk > 0);
       };
       if (!hasCurrentShape()) {
         // Under the same write lock catch-up takes, and re-checked once it
@@ -1007,9 +1024,13 @@ export const createFileMemoryStore = (
     },
 
     async pin(agentId: string, entryId: string): Promise<MemoryPinOutcome> {
-      const { effective, bytes, live } = pinBudgetFor(await readRecords(), agentId, now());
-      const entry = live.get(entryId);
-      if (!entry) {
+      const records = await readRecords();
+      const { effective, bytes, allocated } = pinBudgetFor(records, agentId);
+      // Pinnable means live — a superseded or forgotten entry is not the
+      // agent's to pin — while the *budget* above is allocated over the
+      // record, which is a different question.
+      const entry = liveEntriesFor(records, agentId, now()).find((candidate) => candidate.id === entryId);
+      if (!entry || !allocated.has(entryId)) {
         throw new Error(`No live memory entry with id ${entryId} belongs to this agent — nothing was pinned.`);
       }
       if (effective.includes(entryId)) {
@@ -1037,16 +1058,21 @@ export const createFileMemoryStore = (
       return true;
     },
 
-    async pinned(agentId: string) {
+    async pinned(agentId: string, pinnedOptions: MemoryPinnedOptions = {}) {
       const at = now();
-      const { effective, live } = pinBudgetFor(await readRecords(), agentId, at);
+      const records = await readRecords();
+      const { effective, allocated } = pinBudgetFor(records, agentId);
       // A pinned fact that is not true now does not reach the prompt — one
       // rule, both bounds, the pinned core included. It keeps its place in
       // the budget, which is a property of the record rather than of the
-      // clock, and comes back the moment its window opens.
+      // clock, and comes back the moment its window opens; `all` is how the
+      // operator's views see the one holding space they cannot otherwise
+      // account for.
+      const live = new Set(liveEntriesFor(records, agentId, at).map((entry) => entry.id));
       return effective
-        .map((id) => live.get(id))
-        .filter((entry): entry is MemoryEntry => entry !== undefined && isMemoryEntryCurrent(entry, at))
+        .map((id) => allocated.get(id))
+        .filter((entry): entry is MemoryEntry => entry !== undefined && live.has(entry.id)
+          && (pinnedOptions.validity === 'all' || isMemoryEntryCurrent(entry, at)))
         .sort(compareMemoryChronology);
     },
 

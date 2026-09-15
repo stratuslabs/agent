@@ -10,6 +10,7 @@ import {
   ContributionRegistry,
   EventBus,
   InMemoryAgentMemoryStore,
+  MEMORY_STORE_CONTRACT_VERSION,
   ToolRegistry,
   type ChannelAdapterLike,
   type ExecutorContribution,
@@ -59,7 +60,7 @@ const provider = (name: string): ProviderContribution => ({
 
 const adapter = (name: string): ChannelAdapterLike => ({ name, async start() {}, async stop() {} });
 
-const memory = (name: string): MemoryStoreContribution => ({ name, store: new InMemoryAgentMemoryStore() });
+const memory = (name: string): MemoryStoreContribution => ({ name, store: new InMemoryAgentMemoryStore(), contract: MEMORY_STORE_CONTRACT_VERSION });
 
 const executor = (name: string): ExecutorContribution => ({
   name,
@@ -315,4 +316,34 @@ test('a plugin contributing a kind the host does not carry still loads, and the 
   const result = await loadPlugins({ config: { 'stratus-plugin-memory': {} }, host, tools: new ToolRegistry(), bus: new EventBus() });
   assert.deepEqual(result.failures, []);
   assert.deepEqual(result.loaded[0]?.contributions.memory, ['vector']);
+});
+
+test('a memory store built against the previous contract is refused rather than served traffic', async () => {
+  // Nothing about the functions distinguishes a v1 store: `append` and
+  // `search` have the same arity either way, and a v1 `search` handed an
+  // options object binds it where a number belonged and answers an
+  // unbounded read — wrong, silently, on every recall. So it is declared,
+  // and an undeclared one is refused rather than routed traffic.
+  const host = await fakeHost({
+    'stratus-plugin-legacy': {
+      manifest: manifest({ memory: [{ name: 'legacy' }] }),
+      module: pluginModule('legacy', (context) =>
+        context.memory?.register({ name: 'legacy', store: new InMemoryAgentMemoryStore() } as unknown as MemoryStoreContribution)),
+    },
+  });
+  const result = await loadPlugins({ config: { 'stratus-plugin-legacy': {} }, host, tools: new ToolRegistry(), bus: new EventBus() });
+  assert.equal(result.loaded.length, 0);
+  assert.match(result.failures[0]?.reason ?? '', /built against memory contract 1, and this host serves 2/);
+  assert.match(result.failures[0]?.reason ?? '', /Upgrade the plugin/);
+
+  // Nothing of a refused plugin's reaches the host.
+  const current = await fakeHost({
+    'stratus-plugin-legacy': {
+      manifest: manifest({ memory: [{ name: 'legacy' }] }),
+      module: pluginModule('legacy', (context) => context.memory?.register(memory('legacy'))),
+    },
+  });
+  const served = await loadPlugins({ config: { 'stratus-plugin-legacy': {} }, host: current, tools: new ToolRegistry(), bus: new EventBus() });
+  assert.deepEqual(served.failures, []);
+  assert.deepEqual(served.loaded[0]?.contributions.memory, ['legacy']);
 });

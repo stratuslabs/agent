@@ -10,10 +10,12 @@ import {
   boundMemoryRead,
   clampMemoryRecallLimit,
   compareMemoryChronology,
+  isMemoryEntryCurrent,
   memoryContentByteLength,
   mergeMemoryTopics,
   pinnedCapRefusal,
   type MemoryEntry,
+  type MemoryPinnedOptions,
   type MemoryPinOutcome,
 } from '@stratusagent/core';
 import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul } from '@stratusagent/agents';
@@ -48,7 +50,13 @@ const LEGACY_DEFAULT_AGENT_IDS = ['demo-agent', 'anthropic-agent', 'openai-agent
 // in `list`, absent from `recall`. Merged batches sort with everything else
 // by the shared ordering rule, and bounds apply after the merge, never per
 // alias, or a busy legacy id crowds out the others.
-export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryStore => {
+export const withLegacyDefaultMemories = (
+  store: AgentMemoryStore,
+  // A test seam only: the merged pin budget has to decide what is true now
+  // after it has allocated, and a frozen clock is the only way to assert
+  // that against a fixed validity window.
+  { now = () => new Date() }: { now?: () => Date } = {},
+): AgentMemoryStore => {
   const aliasIds = (agentId: string): string[] =>
     agentId === DEFAULT_STRATUS_AGENT.id
       ? [DEFAULT_STRATUS_AGENT.id, ...LEGACY_DEFAULT_AGENT_IDS]
@@ -62,18 +70,25 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
    * path above and the read below cannot disagree about which pins are
    * effective.
    */
-  const mergedPinBudget = async (ids: readonly string[]): Promise<{
+  const mergedPinBudget = async (ids: readonly string[], pinnedOptions?: MemoryPinnedOptions): Promise<{
     effective: MemoryEntry[];
     ids: Set<string>;
     bytes: number;
     sizeOf: Map<string, number>;
   }> => {
-    const batches = await Promise.all(ids.map((id) => store.pinned!(id)));
+    // Always allocated over `all`, whatever the caller asked to see: a
+    // budget that skipped the pins outside their validity window would
+    // free their bytes, admit a later pin, and drop it again when a window
+    // opened. The caller's own filter is applied afterwards.
+    const batches = await Promise.all(ids.map((id) => store.pinned!(id, { validity: 'all' })));
     const merged = new Map(batches.flat().map((entry) => [entry.id, entry]));
     const sizeOf = new Map([...merged].map(([id, entry]) => [id, memoryContentByteLength(entry.content)]));
     const budget = applyMemoryPinBudget([...merged.keys()], (id) => sizeOf.get(id));
+    const visible = pinnedOptions?.validity === 'all'
+      ? budget.effective
+      : budget.effective.filter((id) => isMemoryEntryCurrent(merged.get(id)!, now()));
     return {
-      effective: budget.effective.map((id) => merged.get(id)!),
+      effective: visible.map((id) => merged.get(id)!),
       ids: new Set(budget.effective),
       bytes: budget.bytes,
       sizeOf,
@@ -193,12 +208,12 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       : {}),
     ...(store.pinned
       ? {
-          async pinned(agentId: string) {
+          async pinned(agentId: string, pinnedOptions?: MemoryPinnedOptions) {
             const ids = aliasIds(agentId);
             if (ids.length === 1) {
-              return store.pinned!(agentId);
+              return store.pinned!(agentId, pinnedOptions);
             }
-            const budget = await mergedPinBudget(ids);
+            const budget = await mergedPinBudget(ids, pinnedOptions);
             return budget.effective.map((entry) => entry).sort(compareMemoryChronology);
           },
         }
