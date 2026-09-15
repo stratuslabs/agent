@@ -374,6 +374,12 @@ const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map
       }
     }
     left.set(index, purse);
+    // A run that spent anything closing does not go on to open: the
+    // renderer enters a pair at its opening run and leaves past its
+    // closing one, so a run that is both would have to be stopped at
+    // twice, and the second stop is the one that does not exist yet.
+    // `**bold***italic*` is bold then italic in Markdown and comes out as
+    // two bold runs here, as it did before this branch.
     if (!spent && token.opens) {
       own?.push(index);
     }
