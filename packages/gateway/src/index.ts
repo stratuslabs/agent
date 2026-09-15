@@ -72,6 +72,7 @@ import {
   SCHEDULE_SESSION_ID_PREFIX,
   type SchedulerLimits,
 } from './schedules.ts';
+import { ShardedSessionStore } from './sessions.ts';
 
 export {
   claimHome,
@@ -79,6 +80,17 @@ export {
   HomeClaimedError,
   type HomeClaim,
 } from './lock.ts';
+export {
+  SqliteSessionStore,
+  ShardedSessionStore,
+  FleetSessionIndex,
+  SessionIdTakenError,
+  tightenSqliteFile,
+  type SqliteSessionStoreOptions,
+  type ShardedSessionStoreOptions,
+  type SessionIndexRow,
+  type SessionReconcileReport,
+} from './sessions.ts';
 export {
   SqliteScheduleStore,
   createSchedulerRuntime,
@@ -102,7 +114,7 @@ import {
   BUILTIN_PROVIDER_NAMES,
   createDemoTool,
   createFileCredentialResolver,
-  createFileMemoryStore,
+  createHomeMemoryStore,
   createRuntimeProvider,
   DEFAULT_STRATUS_AGENT,
   isRegisteredProviderName,
@@ -112,7 +124,6 @@ import {
   loadRosterSouls,
   FALLBACK_ACTIVE_METADATA_KEY,
   loadSoulFile,
-  memoryFilePath,
   migrateLegacyMemory,
   PROVIDER_STATE_METADATA_KEYS,
   ConfigFileError,
@@ -124,8 +135,8 @@ import {
   applySoulPins,
   assertStateCompatible,
   stratusHomePath,
+  fleetDbIn,
   workspacesDirPath,
-  withLegacyDefaultMemories,
   type FallbackRuntime,
   type OperatorSkillInfo,
   type RosterEntry,
@@ -135,16 +146,6 @@ import {
   type StateEnvironment,
 } from '@stratusagent/state';
 
-const SESSIONS_DB_FILENAME = 'sessions.db';
-
-/**
- * Where a daemon with no explicit `sessionDbPath` keeps its database — the
- * one rule for it, exported because `stratus schedules` opens the same file
- * from another process and a re-derived copy of this join is how the CLI
- * ends up auditing a database no daemon writes.
- */
-export const defaultSessionDbPath = (env: StateEnvironment = {}): string =>
-  path.join(stratusHomePath(env), SESSIONS_DB_FILENAME);
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
 /**
  * How long a parked call waits for a person. Long enough to survive a
@@ -158,213 +159,6 @@ const DEFAULT_APPROVAL_TIMEOUT_MS = 900_000;
  * 30-day approval window would expire every request almost immediately.
  */
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
-
-/**
- * Durable session storage on node:sqlite (unflagged on Node 22.13+). The
- * whole session — messages, status, and metadata, including provider replay
- * state like the Anthropic raw-turn cache — round-trips as one JSON body,
- * so a conversation resumed after a daemon restart replays exactly.
- */
-export interface SqliteSessionStoreOptions {
-  /**
-   * The database's parent directory is dedicated Stratus state (e.g. the
-   * default ~/.stratus): tighten it to owner-only even when it already
-   * exists, since mkdir's mode only applies to directories it creates and
-   * an upgrade over a looser install must not stay world-readable. Leave
-   * false for caller-supplied paths — a shared parent like /tmp or a
-   * project directory must never be chmodded implicitly.
-   */
-  ownedDirectory?: boolean;
-}
-
-export class SqliteSessionStore implements SessionStore {
-  private readonly db: DatabaseSync;
-
-  constructor(filePath: string, options: SqliteSessionStoreOptions = {}) {
-    // Sessions hold complete conversations (prompts, replies, tool output,
-    // provider replay state) — owner-only, like the credentials file. The
-    // file chmods below cover databases created earlier under a looser
-    // umask too; directories the store creates are born 0700.
-    const dir = path.dirname(filePath);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    if (options.ownedDirectory) {
-      chmodSync(dir, 0o700);
-    }
-    this.db = new DatabaseSync(filePath);
-    // The database file is tightened FIRST: SQLite derives sidecar
-    // permissions from the main file's mode, so everything created later
-    // inherits owner-only.
-    try {
-      chmodSync(filePath, 0o600);
-    } catch (error) {
-      // A database that cannot be tightened must not be used: conversation
-      // bodies would stay readable by other local users for the daemon's
-      // whole lifetime, silently.
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
-    }
-    // WAL, not the default DELETE journal: DELETE mode recreates a
-    // rollback journal on EVERY write, which a one-time chmod could never
-    // cover in a traversable caller-supplied directory. WAL keeps one
-    // persistent sidecar pair per connection — forced into existence here
-    // (the user_version pragma is a real page-one write) so the loop
-    // below covers them for the connection's whole lifetime.
-    this.db.exec('PRAGMA journal_mode = WAL');
-    // A busy timeout, because this file has a second writer: `stratus
-    // schedules cancel` opens its own connection to the schedules table
-    // living here, and WAL serializes writers file-wide — a session save
-    // racing that delete would otherwise throw `database is locked` rather
-    // than wait its brief turn.
-    this.db.exec('PRAGMA busy_timeout = 5000');
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        agent_id TEXT NOT NULL,
-        status TEXT NOT NULL,
-        body TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
-    this.db.exec('PRAGMA user_version = 0');
-    for (const sensitive of [filePath, `${filePath}-wal`, `${filePath}-shm`, `${filePath}-journal`]) {
-      try {
-        chmodSync(sensitive, 0o600);
-      } catch (error) {
-        // A sidecar that does not exist has nothing to tighten; anything
-        // else means session data stays readable — refuse to run over it.
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw error;
-        }
-      }
-    }
-  }
-
-  async create(input: Omit<Session, 'createdAt' | 'updatedAt'>): Promise<Session> {
-    const now = new Date().toISOString();
-    const session: Session = { ...input, createdAt: now, updatedAt: now };
-    this.db
-      .prepare('INSERT OR REPLACE INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(session.id, session.agent.id, session.status, JSON.stringify(session), session.createdAt, session.updatedAt);
-    return session;
-  }
-
-  async get(id: string): Promise<Session | undefined> {
-    const row = this.db.prepare('SELECT body FROM sessions WHERE id = ?').get(id) as
-      | { body: string }
-      | undefined;
-    return row ? (JSON.parse(row.body) as Session) : undefined;
-  }
-
-  async save(session: Session): Promise<void> {
-    const updated: Session = { ...session, updatedAt: new Date().toISOString() };
-    this.db
-      .prepare('INSERT OR REPLACE INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(updated.id, updated.agent.id, updated.status, JSON.stringify(updated), updated.createdAt, updated.updatedAt);
-  }
-
-  /**
-   * Session ids in a state, oldest first — the index a restarting daemon
-   * sweeps for turns parked on a human. The `status` column carries it, so
-   * no conversation body is deserialized to answer the question.
-   */
-  async listIdsByStatus(status: SessionStatus): Promise<string[]> {
-    const rows = this.db
-      .prepare('SELECT id FROM sessions WHERE status = ? ORDER BY updated_at ASC')
-      .all(status) as Array<{ id: string }>;
-    return rows.map((row) => row.id);
-  }
-
-  /**
-   * When each agent last did anything, and how many of its sessions are live
-   * right now.
-   *
-   * One aggregate over the indexed columns — no conversation body is
-   * deserialized, for the same reason `listIdsByStatus` returns ids: a
-   * roster view asks this on every load, and it must not cost a JSON parse
-   * per session to answer.
-   *
-   * Both halves are needed and neither is sufficient. `lastActiveAt` alone
-   * reads a turn parked on a human as idle, because the save that recorded
-   * the park is the last thing that touched the row — and a turn waiting
-   * twenty minutes on an approval is exactly when someone wants to see the
-   * agent lit. `activeSessions` alone loses an agent that finished a moment
-   * ago. The caller decides what window counts as "recent"; a daemon that
-   * baked one in would need upgrading to change it.
-   */
-  /**
-   * How many sessions are in each state.
-   *
-   * A grouped count, not a listing that gets counted. The table grows for the
-   * life of an install and a health endpoint is polled, so materialising one
-   * object per historical session to produce five numbers gets steadily
-   * slower at exactly the thing meant to report that the daemon is fine.
-   */
-  countByStatus(): Record<string, number> {
-    const rows = this.db
-      .prepare('SELECT status, COUNT(*) AS total FROM sessions GROUP BY status')
-      .all() as Array<{ status: string; total: number }>;
-    const counts: Record<string, number> = {};
-    for (const row of rows) {
-      counts[row.status] = Number(row.total);
-    }
-    return counts;
-  }
-
-  lastActivityByAgent(): Record<string, { lastActiveAt: string; activeSessions: number }> {
-    const rows = this.db
-      .prepare(`
-        SELECT agent_id,
-               MAX(updated_at) AS last_active_at,
-               SUM(CASE WHEN status IN ('running', 'pending_approval') THEN 1 ELSE 0 END) AS active_sessions
-        FROM sessions
-        GROUP BY agent_id
-      `)
-      .all() as Array<{ agent_id: string; last_active_at: string; active_sessions: number }>;
-    const activity: Record<string, { lastActiveAt: string; activeSessions: number }> = {};
-    for (const row of rows) {
-      activity[row.agent_id] = {
-        lastActiveAt: row.last_active_at,
-        activeSessions: Number(row.active_sessions),
-      };
-    }
-    return activity;
-  }
-
-  /**
-   * Newest-first session listing for one agent (or all agents).
-   *
-   * `limit` is not decoration: this table grows for the life of an install,
-   * and a surface that renders "recent conversations" would otherwise pull
-   * every session anyone has ever had to show ten of them.
-   */
-  list(agentId?: string, limit?: number): Array<Pick<Session, 'id' | 'status' | 'createdAt' | 'updatedAt'> & { agentId: string }> {
-    // -1 is SQLite's "no limit", so one prepared statement serves both cases
-    // rather than four.
-    const bound = limit !== undefined && Number.isInteger(limit) && limit >= 0 ? limit : -1;
-    const rows = (agentId
-      ? this.db.prepare('SELECT id, agent_id, status, created_at, updated_at FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC LIMIT ?').all(agentId, bound)
-      : this.db.prepare('SELECT id, agent_id, status, created_at, updated_at FROM sessions ORDER BY updated_at DESC LIMIT ?').all(bound)) as Array<{
-      id: string;
-      agent_id: string;
-      status: Session['status'];
-      created_at: string;
-      updated_at: string;
-    }>;
-    return rows.map((row) => ({
-      id: row.id,
-      agentId: row.agent_id,
-      status: row.status,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
-  }
-
-  close(): void {
-    this.db.close();
-  }
-}
 
 /**
  * A soul's provider/model pins, and the daemon-wide defaults they demote.
@@ -706,8 +500,17 @@ export interface GatewayOptions {
    * event, or response resets it. 0 disables. Default 120s.
    */
   idleTimeoutMs?: number;
-  /** Session database path. Default ~/.stratus/sessions.db. */
-  sessionDbPath?: string;
+  /**
+   * Where the per-agent session stores (`agents/<id>/sessions.db`) and the
+   * fleet database (`fleet.db`, holding the schedules and the session
+   * index) live. Default `~/.stratus`.
+   *
+   * A directory rather than the single database path it replaced: after
+   * step 15's layer A there is no one file to point at, which is the
+   * point — a store is opened on one agent's path, so no query can return
+   * another agent's rows.
+   */
+  stateDir?: string;
   /**
    * Scheduler limits — the interval floor, the per-agent cap on concurrent
    * scheduled turns, and the tick cadence. Defaults are production values;
@@ -835,7 +638,7 @@ export interface Gateway {
   /** Live events from every runner, one stream for all consumers. */
   readonly bus: EventBus;
   /** The store shared by every runner (durable across restarts). */
-  readonly store: SqliteSessionStore;
+  readonly store: ShardedSessionStore;
   /** The current roster, default agent included. */
   agents(): AgentDefinition[];
   /**
@@ -1102,20 +905,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const bus = new EventBus({
     onError: (error) => warn(`event handler failed: ${error instanceof Error ? error.message : String(error)}`),
   });
-  // The default database lives in the gateway-owned ~/.stratus, which is
-  // tightened to owner-only; a caller-supplied path may sit in a shared
+  // The default state directory is the gateway-owned ~/.stratus, which is
+  // tightened to owner-only; a caller-supplied one may sit in a shared
   // directory that must not be chmodded from under other processes.
-  const sessionDbPath = options.sessionDbPath ?? defaultSessionDbPath(env);
-  const store = options.sessionDbPath
-    ? new SqliteSessionStore(sessionDbPath)
-    : new SqliteSessionStore(sessionDbPath, { ownedDirectory: true });
+  const stateDir = options.stateDir ?? stratusHomePath(env);
+  const store = new ShardedSessionStore({
+    stateDir,
+    ...(options.stateDir ? {} : { ownedDirectory: true }),
+  });
   // The built-in store, behind a route that can change its mind: the memory
   // tools and every runner are built before a plugin has loaded, so the
   // store they hold is the one that answers *per call* with whichever was
   // selected once the plugins are up. Per call, not per start, is also
   // what keeps a contributed store per-agent-resolvable rather than
   // process-global.
-  const fileMemory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+  const fileMemory = createHomeMemoryStore(env);
   let selectedMemory: AgentMemoryStore = fileMemory;
   const memory = createRoutedMemoryStore(() => selectedMemory);
   let selectedExecutor: Executor | undefined;
@@ -1136,7 +940,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
   // The same database sessions live in — one file to back up — through the
   // schedule store's own connection (see its docs for why).
-  const scheduleStore = new SqliteScheduleStore(sessionDbPath);
+  const scheduleStore = new SqliteScheduleStore(fleetDbIn(stateDir));
 
   /**
    * The write side of an addressable destination, through whichever
@@ -3015,6 +2819,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // it is synchronous for the same reason: the check is a file read, and
     // an async one in that stretch failed CI's restart tests twice.
     assertStateCompatible(env);
+    // Before the sweeps below read a single session id: the index and the
+    // per-agent stores are two durable writes where the shared database had
+    // one primary key, and a crash between them left them disagreeing.
+    // Reconciling here is what makes that disagreement resolve one way —
+    // a claim with no conversation released, a conversation the index lost
+    // re-indexed — rather than leaving an abandoned turn unreachable by the
+    // sweep that was supposed to fail it honestly.
+    const reconciled = await store.reconcile();
+    if (reconciled.released.length > 0 || reconciled.reindexed.length > 0) {
+      log(
+        `session index reconciled: ${reconciled.reindexed.length} re-indexed, `
+        + `${reconciled.released.length} claim(s) released`,
+      );
+    }
     await loadRoster();
     const named = registry.list().map((agent) => agent.name).join(', ');
     log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);

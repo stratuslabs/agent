@@ -1,7 +1,40 @@
+import { stat } from 'node:fs/promises';
+
 import { canonicalDestination, describeCadence, describeSchedule } from '@stratusagent/agents';
+import { fleetDbPath, legacySessionDbPath } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
 import type { ParsedSchedulesCommand } from '../parse.ts';
+
+/**
+ * Where the schedule rows are *right now*.
+ *
+ * `fleet.db` since step 15's layer A, and the shared `sessions.db` before
+ * it. The fallback is not a second layout rule: the per-agent migration is
+ * deferred until a daemon start or `stratus update` (it needs the home to
+ * itself), so between installing a newer build and that moment the rows are
+ * still in the old file — and an audit list that read the new one would
+ * report an empty fleet with every schedule still live in it. A fleet
+ * database that exists is always the answer: nothing creates one before the
+ * migration has run.
+ */
+const scheduleDbPath = async (env: CliEnvironment): Promise<string> => {
+  const fleet = fleetDbPath(env);
+  const legacy = legacySessionDbPath(env);
+  if (await pathExists(fleet) || !(await pathExists(legacy))) {
+    return fleet;
+  }
+  return legacy;
+};
+
+const pathExists = async (filePath: string): Promise<boolean> => {
+  try {
+    await stat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * List and cancel what the fleet has scheduled — against the daemon's own
@@ -17,8 +50,8 @@ export const runSchedules = async (
 ): Promise<number> => {
   // Lazy like the serve path: node:sqlite loads only for the command that
   // needs it.
-  const { SqliteScheduleStore, defaultSessionDbPath } = await import('@stratusagent/gateway');
-  const store = new SqliteScheduleStore(defaultSessionDbPath(env));
+  const { SqliteScheduleStore } = await import('@stratusagent/gateway');
+  const store = new SqliteScheduleStore(await scheduleDbPath(env));
   try {
     if (command.action === 'cancel') {
       const id = command.scheduleId ?? '';

@@ -16,6 +16,7 @@ import {
   ORPHANED_DELEGATION_ERROR,
   RESERVED_SESSION_METADATA_KEYS,
   createGateway,
+  ShardedSessionStore,
   SqliteScheduleStore,
   SqliteSessionStore,
   type ApprovalTransport,
@@ -28,6 +29,7 @@ import {
   MEMORY_TOOL_NAME,
 } from '@stratusagent/agents';
 import { SKILL_READ_TOOL_NAME } from '@stratusagent/core';
+import { fleetDbIn } from '@stratusagent/state';
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-'));
 
@@ -311,7 +313,7 @@ test('observe puts a message into a session with no turn, on the session\'s chai
 
 test('sqlite sessions round-trip metadata (anthropic raw-turn cache included)', async () => {
   const home = await newHome();
-  const store = new SqliteSessionStore(path.join(home, 'sessions.db'));
+  const store = new ShardedSessionStore({ stateDir: path.join(home, 'state') });
   await store.create({
     id: 's1',
     agent: { id: 'ava', name: 'Ava' },
@@ -2509,7 +2511,7 @@ test('a resolution never reaches a subscriber before the request it answers', as
 test('a daemon restart finishes the turns that were parked on a human', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   // Recovery resolves the runtime the way a dispatch would, which starts
   // from the agent's soul — so the roster has to hold the parked agent.
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
@@ -2517,7 +2519,7 @@ test('a daemon restart finishes the turns that were parked on a human', async ()
   // A session left exactly as a kill mid-approval leaves one: the response
   // durable, one call answered, the next checkpointed as parked, and the
   // one behind it never started.
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   await seed.create({
     id: 'parked-session',
@@ -2546,13 +2548,13 @@ test('a daemon restart finishes the turns that were parked on a human', async ()
   });
   seed.close();
 
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, selection: { provider: 'demo' } });
   const recovered = nextEvent(gateway.bus, 'session.completed');
   await gateway.start();
   await settles(recovered, 'the recovered turn');
   await gateway.stop();
 
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const session = await after.get('parked-session');
   after.close();
 
@@ -2567,10 +2569,10 @@ test('a daemon restart finishes the turns that were parked on a human', async ()
 test('a parked turn whose window ran out while the daemon was down is denied, not re-asked', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
 
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   await seed.create({
     id: 'stale-session',
@@ -2595,7 +2597,7 @@ test('a parked turn whose window ran out while the daemon was down is denied, no
   const gateway = createGateway({
     env,
     idleTimeoutMs: 0,
-    sessionDbPath: dbPath,
+    stateDir,
     approvalTimeoutMs: 60_000,
     selection: { provider: 'demo' },
     approvals: () => ({
@@ -2614,7 +2616,7 @@ test('a parked turn whose window ran out while the daemon was down is denied, no
   // window, and downtime is not a reason to extend a security decision.
   assert.deepEqual(asked, []);
 
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const session = await after.get('stale-session');
   after.close();
   const denied = (session?.messages ?? []).find((message) => message.toolResult?.callId === 'c1');
@@ -2625,10 +2627,10 @@ test('a parked turn whose window ran out while the daemon was down is denied, no
 test('recovery runs on the session chain, so an inbound message cannot race it', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
 
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   await seed.create({
     id: 'raced-session',
@@ -2648,7 +2650,7 @@ test('recovery runs on the session chain, so an inbound message cannot race it',
   });
   seed.close();
 
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, selection: { provider: 'demo' } });
   await gateway.start();
   // Channels are live before a sweep finishes, so this is the real race: a
   // message arriving for a session still being recovered. Unserialized,
@@ -2657,7 +2659,7 @@ test('recovery runs on the session chain, so an inbound message cannot race it',
   await gateway.dispatch({ sessionId: 'raced-session', agentId: 'ava', userMessage: 'still there?' });
   await gateway.stop();
 
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const session = await after.get('raced-session');
   after.close();
 
@@ -2672,11 +2674,11 @@ test('recovery runs on the session chain, so an inbound message cannot race it',
 test('a soul that dropped a tool while the daemon was down is honoured on recovery', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   // The current soul allows only memory.remember — demo.echo is gone.
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\ntools:\n  - memory.remember\n---\n\nYou are Ava.\n');
 
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   await seed.create({
     id: 'tightened-session',
@@ -2698,13 +2700,13 @@ test('a soul that dropped a tool while the daemon was down is honoured on recove
   });
   seed.close();
 
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, selection: { provider: 'demo' } });
   const recovered = nextEvent(gateway.bus, 'session.completed');
   await gateway.start();
   await settles(recovered, 'the recovered turn');
   await gateway.stop();
 
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const session = await after.get('tightened-session');
   after.close();
 
@@ -2718,10 +2720,10 @@ test('a soul that dropped a tool while the daemon was down is honoured on recove
 test('one unanswered recovery does not hold up the other parked turns', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
 
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   for (const id of ['parked-a', 'parked-b']) {
     await seed.create({
@@ -2750,7 +2752,7 @@ test('one unanswered recovery does not hold up the other parked turns', async ()
   const gateway = createGateway({
     env,
     idleTimeoutMs: 0,
-    sessionDbPath: dbPath,
+    stateDir,
     selection: { provider: 'demo' },
     approvals: () => ({
       async approve({ session }) {
@@ -3348,9 +3350,9 @@ test('a turn the last stratusd left running is failed, with a reason that says s
   // that turn is still running for as long as the session exists.
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
 
-  const before = new SqliteSessionStore(dbPath);
+  const before = new ShardedSessionStore({ stateDir });
   await before.create({
     id: 'abandoned-1',
     agent: { id: 'ava', name: 'Ava' },
@@ -3365,7 +3367,7 @@ test('a turn the last stratusd left running is failed, with a reason that says s
     processEnv: { OPENAI_API_KEY: 'sk-o' },
     fetch: (async () => openAiText('unused')) as typeof fetch,
   };
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, warn: () => {} });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
   const failed = eventGate(
     gateway,
     (event) => event.type === 'session.failed' && event.sessionId === 'abandoned-1',
@@ -3378,7 +3380,7 @@ test('a turn the last stratusd left running is failed, with a reason that says s
   const event = await failed.seen;
   assert.equal(event.type === 'session.failed' ? event.error : '', ABANDONED_TURN_ERROR);
 
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const session = await after.get('abandoned-1');
   after.close();
   assert.equal(session?.status, 'failed');
@@ -3391,9 +3393,9 @@ test('a parked turn is left to the approval sweep, not failed as abandoned', asy
   // checkpoint that makes that possible.
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
 
-  const before = new SqliteSessionStore(dbPath);
+  const before = new ShardedSessionStore({ stateDir });
   await before.create({
     id: 'parked-not-abandoned-1',
     agent: { id: 'ava', name: 'Ava' },
@@ -3408,11 +3410,11 @@ test('a parked turn is left to the approval sweep, not failed as abandoned', asy
     processEnv: { OPENAI_API_KEY: 'sk-o' },
     fetch: (async () => openAiText('unused')) as typeof fetch,
   };
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, warn: () => {} });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
   await gateway.start();
   await gateway.stop();
 
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const session = await after.get('parked-not-abandoned-1');
   after.close();
   assert.notEqual(session?.lastError, ABANDONED_TURN_ERROR);
@@ -3426,9 +3428,9 @@ test('a message that beats the sweep keeps its turn, and the stale failure with 
   // the sweep.
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
 
-  const before = new SqliteSessionStore(dbPath);
+  const before = new ShardedSessionStore({ stateDir });
   await before.create({
     id: 'raced-1',
     agent: { id: 'ava', name: 'Ava' },
@@ -3456,7 +3458,7 @@ test('a message that beats the sweep keeps its turn, and the stale failure with 
   const gateway = createGateway({
     env,
     idleTimeoutMs: 0,
-    sessionDbPath: dbPath,
+    stateDir,
     channels: [adapter],
     warn: () => {},
   });
@@ -3465,7 +3467,7 @@ test('a message that beats the sweep keeps its turn, and the stale failure with 
 
   assert.match(resumed, /answered on the retry/);
 
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const session = await after.get('raced-1');
   after.close();
   assert.equal(session?.status, 'completed', 'the live turn owns the session, not the sweep');
@@ -3581,7 +3583,7 @@ test('reloading the roster picks up a new soul and forgets a deleted one', async
 
 test('per-agent activity counts a parked turn as live, and listings can be bounded', async () => {
   const home = await newHome();
-  const store = new SqliteSessionStore(path.join(home, 'sessions.db'));
+  const store = new ShardedSessionStore({ stateDir: path.join(home, 'state') });
   const session = (id: string, agentId: string, status: 'completed' | 'pending_approval') => ({
     id,
     agent: { id: agentId, name: agentId },
@@ -3616,7 +3618,7 @@ test('per-agent activity counts a parked turn as live, and listings can be bound
 
 test('session counts come from the database, not from listing every session', async () => {
   const home = await newHome();
-  const store = new SqliteSessionStore(path.join(home, 'sessions.db'));
+  const store = new ShardedSessionStore({ stateDir: path.join(home, 'state') });
   for (const [id, status] of [
     ['a', 'completed'], ['b', 'completed'], ['c', 'running'], ['d', 'pending_approval'],
   ] as const) {
@@ -3629,7 +3631,7 @@ test('session counts come from the database, not from listing every session', as
   // install. An empty store answers with an empty map, not a zeroed one.
   store.close();
 
-  const empty = new SqliteSessionStore(path.join(home, 'empty.db'));
+  const empty = new ShardedSessionStore({ stateDir: path.join(home, 'empty') });
   assert.deepEqual(empty.countByStatus(), {});
   empty.close();
 });
@@ -3668,7 +3670,7 @@ test('a session\'s usage survives a restart and reads back as stored', async () 
 test('a delegated sub-session parked when the daemon died is failed, not re-asked', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
   await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
 
@@ -3677,7 +3679,7 @@ test('a delegated sub-session parked when the daemon died is failed, not re-aske
   // parent still `running` (it is inside its tool call), the child
   // checkpointed on the gated call — and the child carrying the delegation
   // metadata `agent.delegate` stamps on it.
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   await seed.create({
     id: 'orchestrator',
@@ -3713,7 +3715,7 @@ test('a delegated sub-session parked when the daemon died is failed, not re-aske
   // The default policy approves everything, so a re-asked child would run
   // its call and complete — which is exactly the outcome this test exists
   // to rule out.
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, selection: { provider: 'demo' } });
   const events: StratusEvent[] = [];
   const failed = new Set<string>();
   const bothClosed = new Promise<void>((resolve) => {
@@ -3736,7 +3738,7 @@ test('a delegated sub-session parked when the daemon died is failed, not re-aske
     await gateway.stop();
   }
 
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const parent = await after.get('orchestrator');
   const child = await after.get(childId);
   after.close();
@@ -3804,11 +3806,11 @@ test('a sub-session continued from outside stops being a delegation', async () =
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
   await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
 
   // A finished delegation, as agent.delegate leaves one — and as its
   // result reported the id to whoever might message it next.
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   const childId = 'orchestrator:delegate:juno:1:1-abcdefgh';
   await seed.create({
@@ -3823,7 +3825,7 @@ test('a sub-session continued from outside stops being a delegation', async () =
   });
   seed.close();
 
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, selection: { provider: 'demo' } });
   await gateway.start();
   try {
     const continued = await gateway.dispatch({ sessionId: childId, userMessage: 'and now?' });
@@ -3843,11 +3845,11 @@ test('a sub-session continued from outside stops being a delegation', async () =
 test('a message to the parent that lands before the sweep does not turn the orphan back into a live delegation', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
   await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
 
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   await seed.create({
     id: 'orchestrator',
@@ -3893,7 +3895,7 @@ test('a message to the parent that lands before the sweep does not turn the orph
     async stop() {},
   };
 
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' }, channels: [parentPoked] });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, selection: { provider: 'demo' }, channels: [parentPoked] });
   const events: StratusEvent[] = [];
   const childClosed = new Promise<void>((resolve) => {
     gateway.bus.subscribe((event) => {
@@ -3910,7 +3912,7 @@ test('a message to the parent that lands before the sweep does not turn the orph
     await gateway.stop();
   }
 
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const child = await after.get(childId);
   after.close();
   assert.equal(child?.status, 'failed');
@@ -3921,7 +3923,7 @@ test('a message to the parent that lands before the sweep does not turn the orph
 test('only the child the outstanding delegation names is an orphan; a sibling parked on its own is recovered', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
   await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
 
@@ -3929,7 +3931,7 @@ test('only the child the outstanding delegation names is an orphan; a sibling pa
   // finished long ago, and that sub-session was continued from outside
   // under a version that kept its markers; it is now parked on a turn of
   // its own. Both children name this parent in their ids.
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   await seed.create({
     id: 'orchestrator',
@@ -3969,7 +3971,7 @@ test('only the child the outstanding delegation names is an orphan; a sibling pa
   await seed.create(parked(continued, 'look at it'));
   seed.close();
 
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, selection: { provider: 'demo' } });
   const settledIds = new Set<string>();
   const bothSettled = new Promise<void>((resolve) => {
     gateway.bus.subscribe((event) => {
@@ -3988,7 +3990,7 @@ test('only the child the outstanding delegation names is an orphan; a sibling pa
     await gateway.stop();
   }
 
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const orphan = await after.get(genuine);
   const sibling = await after.get(continued);
   after.close();
@@ -4004,14 +4006,14 @@ test('a parked session in the sub-session shape is only an orphan when its paren
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
 
   // A legacy caller could have minted an id containing the marker and
   // written the key, both accepted before the public door refused them.
   // What it could not write is the parent's transcript: the session the id
   // names as parent exists, but holds no agent.delegate call awaiting a
   // reply, so this is an ordinary parked turn and is recovered as one.
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   await seed.create({
     id: 'web:ava:case',
@@ -4042,7 +4044,7 @@ test('a parked session in the sub-session shape is only an orphan when its paren
   });
   seed.close();
 
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, selection: { provider: 'demo' } });
   const recovered = nextEvent(gateway.bus, 'session.completed');
   await gateway.start();
   try {
@@ -4050,7 +4052,7 @@ test('a parked session in the sub-session shape is only an orphan when its paren
   } finally {
     await gateway.stop();
   }
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const session = await after.get('web:ava:case:delegate:notes');
   after.close();
   assert.equal(session?.status, 'completed');
@@ -4061,13 +4063,13 @@ test('a parked session is only an orphan when both halves say it was delegated',
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
 
   // A row from before the public door refused the daemon's own keys: an
   // ordinary conversation whose caller wrote `delegatedBy` into its
   // metadata. Nothing minted its id, so it is not a sub-session, and the
   // restart owes it the recovery any parked turn gets.
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   await seed.create({
     id: 'web:ava:legacy-forged',
@@ -4088,7 +4090,7 @@ test('a parked session is only an orphan when both halves say it was delegated',
   });
   seed.close();
 
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, selection: { provider: 'demo' } });
   const recovered = nextEvent(gateway.bus, 'session.completed');
   await gateway.start();
   try {
@@ -4096,7 +4098,7 @@ test('a parked session is only an orphan when both halves say it was delegated',
   } finally {
     await gateway.stop();
   }
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const session = await after.get('web:ava:legacy-forged');
   after.close();
   assert.equal(session?.status, 'completed');
@@ -4106,14 +4108,14 @@ test('a parked session is only an orphan when both halves say it was delegated',
 test('a one-shot whose parked firing is recovered after a restart is retired when that firing finishes', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
 
   // What a kill leaves behind when a one-shot's firing was parked on a
   // human: the row spent (its slot consumed before the dispatch), kept only
   // as the approval's scope, and the firing's session checkpointed.
   const firingId = 'schedule:once-1:2026-01-01T00:00:00.000Z';
-  const schedules = new SqliteScheduleStore(dbPath);
+  const schedules = new SqliteScheduleStore(fleetDbIn(stateDir));
   schedules.insert({
     id: 'once-1',
     agentId: 'ava',
@@ -4124,7 +4126,7 @@ test('a one-shot whose parked firing is recovered after a restart is retired whe
     lastSessionId: firingId,
   });
   schedules.close();
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   await seed.create({
     id: firingId,
@@ -4146,7 +4148,7 @@ test('a one-shot whose parked firing is recovered after a restart is retired whe
   });
   seed.close();
 
-  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, selection: { provider: 'demo' } });
   const recovered = nextEvent(gateway.bus, 'session.completed');
   await gateway.start();
   try {
@@ -4175,7 +4177,7 @@ test('a one-shot whose parked firing is recovered after a restart is retired whe
 test('a recovered firing retires only its own one-shot row, and does so even when the recovery fails', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
 
   // Two spent one-shots, each the scope of a parked firing. The first
@@ -4186,7 +4188,7 @@ test('a recovered firing retires only its own one-shot row, and does so even whe
   // metadata, which must not let it retire a row that is not its own.
   const failingFiring = 'schedule:once-fail:2026-01-01T00:00:00.000Z';
   const parkedFiring = 'schedule:once-parked:2026-01-01T00:00:00.000Z';
-  const schedules = new SqliteScheduleStore(dbPath);
+  const schedules = new SqliteScheduleStore(fleetDbIn(stateDir));
   for (const [id, lastSessionId] of [['once-fail', failingFiring], ['once-parked', parkedFiring]] as const) {
     schedules.insert({
       id,
@@ -4199,7 +4201,7 @@ test('a recovered firing retires only its own one-shot row, and does so even whe
     });
   }
   schedules.close();
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   const parked = (id: string, metadata: Record<string, unknown>, turn: number) => ({
     id,
@@ -4229,7 +4231,7 @@ test('a recovered firing retires only its own one-shot row, and does so even whe
   const gateway = createGateway({
     env,
     idleTimeoutMs: 0,
-    sessionDbPath: dbPath,
+    stateDir,
     selection: { provider: 'demo' },
     maxTurns: 5,
     approvalTimeoutMs: 0,

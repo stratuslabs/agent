@@ -13,7 +13,7 @@ import {
 import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
 import { DEFAULT_CODEX_MODEL } from '@stratusagent/provider-codex';
-import { createFileMemoryStore } from './memory.ts';
+import { createShardedFileMemoryStore } from './memory.ts';
 import { ConfigFileError } from './config-file.ts';
 import { discoverActiveConfig } from './config-location.ts';
 import {
@@ -22,7 +22,7 @@ import {
   readWorkingDirectory,
   readNonEmptyString,
 } from './environment.ts';
-import { agentsDirPath, memoryFilePath } from './paths.ts';
+import { agentMemoryFilePath, agentsDirPath } from './paths.ts';
 import {
   isRegisteredProviderName,
   DEFAULT_OPENAI_MODEL,
@@ -107,6 +107,20 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       : {}),
   };
 };
+
+/**
+ * The memory every surface in this repository reads and writes: one file
+ * per agent under `agents/<id>/`, with the built-in agent's inherited
+ * aliases folded in.
+ *
+ * One factory rather than the same two-line composition in the gateway, in
+ * `stratus run`, in `stratus memory`, and in the roster listing — the
+ * sharding and the alias merge are both rules, and four hand-rolled copies
+ * are four chances for one surface to answer "what does this agent
+ * remember" differently from the next.
+ */
+export const createHomeMemoryStore = (env: StateEnvironment): AgentMemoryStore =>
+  withLegacyDefaultMemories(createShardedFileMemoryStore((agentId) => agentMemoryFilePath(env, agentId)));
 
 // ---------------------------------------------------------------------------
 // Creating a soul under an id nothing else holds
@@ -294,7 +308,7 @@ export const listAgentSummaries = async (
   /** The config the caller is pinned to; see `discoverActiveConfig`. */
   configPath?: string,
 ): Promise<AgentSummary[]> => {
-  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+  const memory = createHomeMemoryStore(env);
   const processEnv = readProcessEnv(env);
   // Listing must never be blocked by a broken config — it only feeds the
   // default marker and the "runs on" lines.

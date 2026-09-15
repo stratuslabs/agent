@@ -107,11 +107,12 @@ test('provenance labels are a schema bump with nothing to rewrite, so a downgrad
   // needs rewriting; what needs to happen is that a build without the
   // labels stops at the stamp instead of writing unlabelled state beside
   // the labelled kind.
-  assert.equal(STATE_SCHEMA_VERSION, 2);
   const migration = STATE_MIGRATIONS.find((candidate) => candidate.id === '0002-provenance-labels');
   assert.ok(migration);
   const env = { homeDir: await freshHome() };
   const applied = await runStateMigrations(env);
   assert.equal(applied.find((result) => result.id === '0002-provenance-labels')?.detail, undefined);
-  assert.equal((await readStateStamp(env)).schemaVersion, 2);
+  // A home with nothing shared to move is fully migrated by the ordinary
+  // path, so the stamp reaches this build's version without a daemon start.
+  assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
 });

@@ -13,7 +13,7 @@ import {
   globalConfigPath,
   KNOWN_CLAUDE_MODELS,
   listAgentSummaries,
-  memoryFilePath,
+  agentMemoryFilePath,
   saveConfigFile,
   servedRuntimes,
   verifyProviderKey,
@@ -307,5 +307,5 @@ test('saveConfigFile creates the directory and round-trips through loadAgentSumm
   assert.deepEqual(summaries[0]?.runsOn, { provider: 'anthropic', model: 'claude-opus-5' });
   // Nothing has remembered anything yet.
   assert.equal(summaries[0]?.memories, 0);
-  assert.equal(memoryFilePath({ homeDir: home }).endsWith('memory.jsonl'), true);
+  assert.equal(agentMemoryFilePath({ homeDir: home }, 'ava').endsWith(path.join('agents', 'ava', 'memory.jsonl')), true);
 });

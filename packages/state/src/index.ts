@@ -16,7 +16,7 @@ export { BUILTIN_PROVIDER_NAMES, type BuiltinProviderName } from '@stratusagent/
  */
 export { BUILTIN_EXECUTOR_NAME, BUILTIN_MEMORY_STORE_NAME } from '@stratusagent/core';
 
-export { createFileMemoryStore } from './memory.ts';
+export { createFileMemoryStore, createShardedFileMemoryStore } from './memory.ts';
 
 export {
   type StateEnvironment,
@@ -33,10 +33,21 @@ export {
   logsDirPath,
   credentialsPath,
   agentsDirPath,
-  memoryFilePath,
+  legacyMemoryFilePath,
+  legacySessionDbPath,
   workspacesDirPath,
   skillsDirPath,
   agentWorkspacePath,
+  agentStateDirPath,
+  agentStateDirIn,
+  agentsDirIn,
+  agentSessionDbPath,
+  agentSessionDbIn,
+  agentMemoryFilePath,
+  agentMemoryFileIn,
+  fleetDbPath,
+  fleetDbIn,
+  assertPathSafeAgentId,
   gatewayTokenPath,
   gatewayInfoPath,
 } from './paths.ts';
@@ -105,6 +116,7 @@ export {
   newerStateMessage,
   assertStateCompatible,
   pendingStateMigrations,
+  type StateMigrationRunOptions,
   type AppliedStateMigration,
   runStateMigrations,
 } from './migrations.ts';
@@ -192,6 +204,7 @@ export {
 
 export {
   withLegacyDefaultMemories,
+  createHomeMemoryStore,
   declaredAgentIds,
   claimSoulFile,
   personaSnippet,

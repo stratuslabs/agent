@@ -56,7 +56,7 @@ import {
   tailLog,
   npmNeedsShell,
 } from '../src/index.ts';
-import { memoryFilePath, stateFilePath } from '@stratusagent/state';
+import { agentMemoryFilePath, fleetDbPath, stateFilePath } from '@stratusagent/state';
 import type { Session, Tool } from '@stratusagent/core';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -1810,7 +1810,7 @@ test('runCli persists agent memory across runs through memory.remember', async (
   });
 
   assert.equal(firstRun, 0);
-  const stored = (await readFile(path.join(tempHome, '.stratus', 'memory.jsonl'), 'utf8'))
+  const stored = (await readFile(agentMemoryFilePath({ homeDir: tempHome }, 'stratus'), 'utf8'))
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line));
@@ -3853,7 +3853,7 @@ test('discovery honors a secondary anthropic credential bound endpoint', async (
   assert.equal(anthropicUrls[0], 'https://ant-proxy.test/v1/models?limit=100');
 });
 
-test('legacy per-directory memories migrate into the global store on first run', async () => {
+test('legacy per-directory memories migrate into the agent\'s own store on first run', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const projectDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
   // Memories written by a pre-0.2.1 install, in the old per-directory spot.
@@ -3877,8 +3877,8 @@ test('legacy per-directory memories migrate into the global store on first run',
   });
   assert.equal(exitCode, 0);
 
-  // The fact now lives in the global store…
-  const migrated = (await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8'))
+  // The fact now lives in that agent's own store…
+  const migrated = (await readFile(agentMemoryFilePath({ homeDir: home }, 'demo-agent'), 'utf8'))
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line));
@@ -3896,7 +3896,7 @@ test('legacy per-directory memories migrate into the global store on first run',
     streams: createStreams().streams,
     env: { cwd: projectDir, homeDir: home, processEnv: {} },
   });
-  const after = (await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8'))
+  const after = (await readFile(agentMemoryFilePath({ homeDir: home }, 'demo-agent'), 'utf8'))
     .split('\n')
     .filter((line) => line.trim().length > 0);
   assert.equal(after.length, 1);
@@ -3912,11 +3912,12 @@ test('an interrupted memory migration finishes without duplicating facts', async
     createdAt: new Date().toISOString(),
   };
   // Simulate a crash between append and rename: the claimed file still
-  // exists AND the fact already reached the global store.
+  // exists AND the fact already reached the agent's own store.
   await mkdir(path.join(projectDir, '.stratus'), { recursive: true });
   await writeFile(path.join(projectDir, '.stratus', 'memory.jsonl.migrating'), `${JSON.stringify(entry)}\n`);
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), `${JSON.stringify(entry)}\n`);
+  const destination = agentMemoryFilePath({ homeDir: home }, 'demo-agent');
+  await mkdir(path.dirname(destination), { recursive: true });
+  await writeFile(destination, `${JSON.stringify(entry)}\n`);
 
   const exitCode = await runCli({
     argv: ['run', 'hello'],
@@ -3926,7 +3927,7 @@ test('an interrupted memory migration finishes without duplicating facts', async
   assert.equal(exitCode, 0);
 
   // Recovery completed the claim without re-importing the entry…
-  const globalLines = (await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8'))
+  const globalLines = (await readFile(destination, 'utf8'))
     .split('\n')
     .filter((line) => line.trim().length > 0);
   assert.equal(globalLines.length, 1);
@@ -8958,9 +8959,9 @@ test('parseCommand reads the schedules command and its cancel form', () => {
 
 test('stratus schedules lists the daemon database and cancel revokes a row', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-cli-'));
-  const { SqliteScheduleStore, defaultSessionDbPath } = await import('@stratusagent/gateway');
+  const { SqliteScheduleStore } = await import('@stratusagent/gateway');
   const env = { cwd: home, homeDir: home, processEnv: {} };
-  const store = new SqliteScheduleStore(defaultSessionDbPath({ homeDir: home }));
+  const store = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
   store.insert({
     id: 'sched-1',
     agentId: 'ava',
@@ -9052,7 +9053,7 @@ test('parseCommand reads the grants command and its revoke form', () => {
   assert.throws(() => parseCommand(['grants', 'ava', '--tool', 'a']), /Unknown option: --tool/);
   assert.throws(() => parseCommand(['grants', 'ava', 'juno']), /Unexpected argument: juno/);
 
-  // The id is joined into `<id>.whitelist.json`, and the grant store takes it
+  // The id is joined into `<id>/whitelist.json`, and the grant store takes it
   // as an already-validated single segment. Refused here, at the boundary, so
   // no traversal reaches a file read — or, on a revoke, a file write.
   for (const escape of ['../../other', '../peer', 'a/b', '.hidden', '__proto__']) {
@@ -9084,7 +9085,7 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   assert.equal(parsed.agentId, 'ava');
   assert.deepEqual(parsed.scopes.map((row) => row.description), ['git push']);
   assert.deepEqual(parsed.tools.map((row) => row.tool), ['web.fetch']);
-  assert.match(parsed.source, /ava\.whitelist\.json$/);
+  assert.match(parsed.source, /ava[/\\]whitelist\.json$/);
 
   const revoke = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: revoke.streams, env }), 0);
@@ -10705,7 +10706,9 @@ test('a state migration that cannot stamp the home refuses commands that write s
   // A stamp that cannot be written: `state.json` is a directory, so the
   // rename that lands the stamp fails while every other file stays writable.
   await mkdir(path.join(home, '.stratus', 'state.json'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
+  const record = agentMemoryFilePath({ homeDir: home }, 'ava');
+  await mkdir(path.dirname(record), { recursive: true });
+  await writeFile(record, `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
   const env = { cwd: home, homeDir: home, processEnv: {} };
 
   const refused = createStreams();
@@ -10713,7 +10716,7 @@ test('a state migration that cannot stamp the home refuses commands that write s
   assert.match(refused.output.stderr, /State migration failed/);
   assert.match(refused.output.stderr, /Refusing `stratus memory`/);
   // Nothing was re-asserted: the record is exactly the one line it was.
-  assert.equal((await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8')).trim().split('\n').length, 1);
+  assert.equal((await readFile(record, 'utf8')).trim().split('\n').length, 1);
 
   // A rollover rewrites a session in this build's shape — a write — and is
   // refused here before it ever looks for a daemon.
@@ -12918,7 +12921,7 @@ test('a plugin memory store selected by a trusted config backs remember and reca
   assert.doesNotMatch(juno.output.stdout, /ava likes/);
 
   // The built-in store was never written to.
-  const fileStore = await readFile(memoryFilePath({ homeDir: home }), 'utf8').catch(() => '');
+  const fileStore = await readFile(agentMemoryFilePath({ homeDir: home }, 'juno'), 'utf8').catch(() => '');
   assert.ok(!fileStore.includes('likes'), fileStore);
 });
 
@@ -13017,7 +13020,7 @@ test('the SQLite memory store plugin backs a run end to end, selected by a trust
   assert.match(output.stdout, /kept; recalled .*ava likes tea/);
   // The file is where the config said, and owner-only.
   assert.equal((await stat(path.join(home, 'memories.sqlite'))).mode & 0o777, 0o600);
-  const fileStore = await readFile(memoryFilePath({ homeDir: home }), 'utf8').catch(() => '');
+  const fileStore = await readFile(agentMemoryFilePath({ homeDir: home }, 'juno'), 'utf8').catch(() => '');
   assert.ok(!fileStore.includes('likes'), fileStore);
 });
 

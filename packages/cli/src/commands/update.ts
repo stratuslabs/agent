@@ -254,7 +254,9 @@ export const runUpdate = async (
 
   let applied: AppliedStateMigration[];
   try {
-    applied = await runStateMigrations(env);
+    // The service is stopped above, so this is the one caller that can
+    // promise the exclusive migrations the home to themselves.
+    applied = await runStateMigrations(env, { exclusive: true });
   } catch (error) {
     // A daemon stopped for an update that then failed must not stay down:
     // the old unit is still in place (the rewrite has not happened), so

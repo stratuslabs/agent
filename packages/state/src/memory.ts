@@ -741,3 +741,51 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
     },
   };
 };
+
+/**
+ * The same file store, one file per agent — `agents/<id>/memory.jsonl`
+ * rather than one `memory.jsonl` every agent's lines share.
+ *
+ * The routing is the isolation. Every method already takes the agent id, so
+ * the shared file was never how an agent's memories were *found*; it was
+ * only what made a mis-keyed read possible in the first place — a line whose
+ * `agentId` was wrong (a hand edit, a future bug) was another agent's
+ * memory sitting in the same file as yours. On its own path there is no
+ * such line to filter out.
+ *
+ * One store per agent, cached for the life of the process, because the
+ * store each one wraps holds a lazily-opened index connection: rebuilding
+ * it per call would re-open and re-verify the FTS index on every search.
+ * A roster is tens of agents, not thousands — and an id that never
+ * appears costs nothing, since the file store touches no disk until it is
+ * asked something.
+ */
+export const createShardedFileMemoryStore = (fileFor: (agentId: string) => string): AgentMemoryStore => {
+  const stores = new Map<string, AgentMemoryStore>();
+  const storeFor = (agentId: string): AgentMemoryStore => {
+    const existing = stores.get(agentId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    // `fileFor` is what asserts the id can key a path — see
+    // `assertPathSafeAgentId`. Throwing from here rather than returning an
+    // empty store is deliberate: an unsafe id must not read as "this agent
+    // remembers nothing".
+    const store = createFileMemoryStore(fileFor(agentId));
+    stores.set(agentId, store);
+    return store;
+  };
+  return {
+    append: (agentId, content, metadata, provenance) => storeFor(agentId).append(agentId, content, metadata, provenance),
+    list: (agentId, options) => storeFor(agentId).list(agentId, options),
+    search: (agentId, query, limit) => storeFor(agentId).search(agentId, query, limit),
+    forget: (agentId, entryId) => storeFor(agentId).forget(agentId, entryId),
+    audit: (agentId) => storeFor(agentId).audit(agentId),
+    async reassertTrust(agentId, entryId, trust) {
+      const store = storeFor(agentId);
+      // The file store always re-asserts; the guard is for the type, since
+      // the method is optional on the interface.
+      return store.reassertTrust ? store.reassertTrust(agentId, entryId, trust) : false;
+    },
+  };
+};

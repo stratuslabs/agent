@@ -52,6 +52,16 @@ const contextFor = (tool: Tool, agentId = 'ava', input: JsonObject = {}): Approv
 
 const newDirectory = (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-grants-'));
 
+/**
+ * A grant file written by hand, the way an operator edits one. The agent's
+ * own directory is where it lives now, and an operator creating it is
+ * creating that directory too.
+ */
+const writeByHand = async (file: string, contents: string): Promise<void> => {
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, contents);
+};
+
 test('always allow on a gated tool is a standing grant: per agent, past a restart, and never for allow once', async () => {
   const directory = await newDirectory();
   const store = createFileCommandWhitelist({ directory });
@@ -156,7 +166,7 @@ test('a tool that names a command scope can never receive a tool grant, even by 
 
   // And a grant written into the file by hand does not apply either — the
   // exclusion is structural, resolved before the grant tier is consulted.
-  await writeFile(
+  await writeByHand(
     whitelistPathFor(directory, 'ava'),
     JSON.stringify({ version: 1, scopes: [], tools: [{ tool: 'shell.run', grantedAt: '2026-09-07T00:00:00.000Z' }] }),
   );
@@ -190,7 +200,7 @@ test('a dangerous tool cannot receive a standing grant', async () => {
   assert.deepEqual(await store.toolGrantsFor('ava'), []);
 
   // Nor by hand: a `tools` row for a dangerous tool is not consulted.
-  await writeFile(
+  await writeByHand(
     whitelistPathFor(directory, 'ava'),
     JSON.stringify({ version: 1, scopes: [], tools: [{ tool: 'fs.delete', grantedAt: '2026-09-07T00:00:00.000Z' }] }),
   );
@@ -324,7 +334,7 @@ test('a revoke whose write fails leaves the grant standing, rather than dropping
 
 test('grant rows are read leniently and written back whole, beside the scopes they sit with', async () => {
   const directory = await newDirectory();
-  await writeFile(
+  await writeByHand(
     whitelistPathFor(directory, 'ava'),
     JSON.stringify({
       version: 1,

@@ -130,9 +130,24 @@ const WHITELIST_VERSION = 1;
 /** What one agent's file grants, as this store holds it in memory. */
 type Grants = AgentGrants;
 
-/** `<id>.whitelist.json`, beside the agent's soul in ~/.stratus/agents. */
+/**
+ * `<agentsDirectory>/<id>/whitelist.json` — inside the agent's own state
+ * directory, beside its sessions and its memories, rather than the
+ * `<id>.whitelist.json` file it used to be in the shared one.
+ *
+ * Per-agent *directory* rather than a per-agent file in a shared one is
+ * what step 15's layer A is: a store is opened on one agent's path, so
+ * there is no read that could return another agent's grants. The soul
+ * stays a file in the parent directory — it is the operator's input, not
+ * the agent's state.
+ *
+ * The one implementation of the rule. `@stratusagent/state`'s layout
+ * migration imports it rather than re-deriving the join, which is how the
+ * file the daemon reads and the file the migration writes cannot drift
+ * apart.
+ */
 export const whitelistPathFor = (directory: string, agentId: string): string =>
-  path.join(directory, `${agentId}.whitelist.json`);
+  path.join(directory, agentId, 'whitelist.json');
 
 /**
  * Thrown by `remember` for an agent whose whitelist exists but could not be
@@ -250,14 +265,16 @@ export const createFileCommandWhitelist = (options: {
    * loss the unreadable-file guard above exists to prevent.
    */
   const save = async (agentId: string, grants: Grants): Promise<void> => {
-    await mkdir(options.directory, { recursive: true });
+    const target = whitelistPathFor(options.directory, agentId);
+    // The agent's own directory, owner-only like every other per-agent
+    // resource: it holds what this agent may do unattended.
+    await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
     const file: WhitelistFile = {
       version: WHITELIST_VERSION,
       scopes: grants.scopes,
       ...(grants.origins.length > 0 ? { origins: grants.origins } : {}),
       ...(grants.tools.length > 0 ? { tools: grants.tools } : {}),
     };
-    const target = whitelistPathFor(options.directory, agentId);
     await writeFile(target, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
     await chmod(target, 0o600);
     // The cache is updated only once the file holds the same thing, and the

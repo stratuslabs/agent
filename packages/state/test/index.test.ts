@@ -13,7 +13,7 @@ import {
   loadRosterSouls,
   loadSoulFile,
   MAX_APPROVAL_TIMEOUT_MS,
-  memoryFilePath,
+  agentMemoryFilePath,
   resolveAgentApprovals,
   resolveRuntimeConfig,
   saveCredentials,
@@ -22,7 +22,7 @@ import {
 const tempHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-state-'));
 
 test('file memory store appends and lists per agent with read-time dedupe', async () => {
-  const store = createFileMemoryStore(memoryFilePath({ homeDir: tempHome }));
+  const store = createFileMemoryStore(agentMemoryFilePath({ homeDir: tempHome }, 'ava'));
   await store.append('ava', 'likes short answers');
   await store.append('scout', 'reads everything');
   const { entries } = await store.list('ava');
@@ -333,7 +333,7 @@ test('the fallback switch persists before the fallback attempt begins', async ()
 
 test('the memory file is owner-only, pre-existing files included', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-mem-'));
-  const filePath = memoryFilePath({ homeDir: home });
+  const filePath = agentMemoryFilePath({ homeDir: home }, 'ava');
 
   // Simulate a file created earlier under a loose umask.
   await mkdir(path.dirname(filePath), { recursive: true });
