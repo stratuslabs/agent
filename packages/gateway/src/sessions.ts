@@ -467,6 +467,19 @@ export class ShardedSessionStore implements SessionStore {
   async save(session: Session): Promise<void> {
     const agentId = session.agent.id;
     assertPathSafeAgentId(agentId);
+    // One id belongs to one agent, and this is the path that could change
+    // that quietly. `create` claims the id, so a sibling is refused at the
+    // seam; `save` takes whatever agent the session now names. A caller
+    // handing back a session whose `agent.id` has changed would write a
+    // second copy into the new agent's shard and then repoint the index at
+    // it — the original transcript still on disk but in a store nothing
+    // resolves to, and the next start refusing to serve at all, because the
+    // reconcile finds one id in two shards and says so. Refused here, where
+    // the error can still name the agent it belongs to.
+    const heldBy = this.index.agentFor(session.id);
+    if (heldBy !== undefined && heldBy !== agentId) {
+      throw new SessionIdTakenError(session.id, heldBy, agentId);
+    }
     // The conversation is the truth and the index is derived from it, so
     // the shard write goes first: a crash in between leaves an index row
     // one status behind, which the next start reconciles, rather than an

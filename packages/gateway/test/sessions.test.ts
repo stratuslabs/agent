@@ -263,3 +263,30 @@ test('the refusal asks about the state directory the stores were opened on', asy
   await gateway.stop();
   await rm(home, { recursive: true, force: true });
 });
+
+test('a save that moves a session to another agent is refused, not written twice', async () => {
+  const stateDir = await newStateDir();
+  const store = new ShardedSessionStore({ stateDir });
+  const opened = await store.create(session('s-1', 'ava'));
+
+  // What an embedder handing back a session with a changed `agent.id` would
+  // otherwise do: a second copy in bea's shard, the index quietly repointed
+  // at it, ava's transcript still on disk in a store nothing resolves to —
+  // and the next start refusing to serve at all, because the reconcile
+  // finds one id in two shards.
+  await assert.rejects(
+    () => store.save({ ...opened, agent: { id: 'bea', name: 'bea' } }),
+    (error: unknown) => error instanceof SessionIdTakenError && /never cross agent identities/.test(error.message),
+  );
+
+  assert.equal((await store.get('s-1'))?.agent.id, 'ava');
+  // And the reconcile still passes, which is the property the refusal
+  // keeps: one id in two shards is what makes it fail loudly and the next
+  // start refuse the home entirely.
+  assert.deepEqual(await store.reconcile(), { released: [], reindexed: [] });
+  store.close();
+
+  const bea = new SqliteSessionStore(agentSessionDbIn(stateDir, 'bea'));
+  assert.deepEqual(bea.rows(), []);
+  bea.close();
+});

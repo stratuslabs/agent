@@ -9107,6 +9107,33 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   await rm(home, { recursive: true, force: true });
 });
 
+test('stratus grants names the grant file it actually read while the move is pending', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-legacy-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const agents = path.join(home, '.stratus', 'agents');
+  await mkdir(agents, { recursive: true });
+  // The upgrade window: the older daemon still serving, so the grants are
+  // still under the old name and that is the file the store reads and
+  // writes. Reporting the new path here would name a source this command
+  // did not consult — and which does not exist — in the one output whose
+  // job is to say where an agent's standing grants come from.
+  await writeFile(
+    path.join(agents, 'ava.whitelist.json'),
+    `${JSON.stringify({ version: 1, scopes: [{ command: 'git', args: ['push'] }] })}\n`,
+  );
+
+  const asJson = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava', '--format', 'json'], streams: asJson.streams, env }), 0);
+  const parsed = JSON.parse(asJson.output.stdout) as { source: string; scopes: Array<{ description: string }> };
+  assert.deepEqual(parsed.scopes.map((row) => row.description), ['git push']);
+  assert.match(parsed.source, /ava\.whitelist\.json$/);
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: listing.streams, env }), 0);
+  assert.match(listing.output.stdout, /ava\.whitelist\.json/);
+  await rm(home, { recursive: true, force: true });
+});
+
 test('stratus grants goes through the running daemon, whose store is the one the policy reads', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-daemon-'));
   await publishGateway(home, 'http://127.0.0.1:4123');
