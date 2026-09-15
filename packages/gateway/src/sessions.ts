@@ -1,5 +1,5 @@
 import { chmodSync, mkdirSync } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -104,6 +104,18 @@ export interface SqliteSessionStoreOptions {
    */
   ownedDirectory?: boolean;
 }
+
+/** Whether a regular file is there — the sweep's test for "this directory holds a shard". */
+const fileExists = async (filePath: string): Promise<boolean> => {
+  try {
+    return (await stat(filePath)).isFile();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+};
 
 /**
  * Opens the file, tightens it and its sidecars, and puts the connection in
@@ -586,7 +598,7 @@ export class ShardedSessionStore implements SessionStore {
       }
       throw error;
     }
-    return entries
+    const named = entries
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .filter((name) => {
@@ -600,6 +612,22 @@ export class ShardedSessionStore implements SessionStore {
           return false;
         }
       });
+
+    // And only the ones that already hold a shard. This sweep reads what is
+    // there; opening a store *creates* the database and tightens the
+    // directory around it, so treating every well-named subdirectory as an
+    // agent means a start-up that writes `sessions.db` into whatever an
+    // operator keeps under `agents/` — a `backups/` folder, an export — and
+    // chmods it to 0700 on the way past. The old layout reserved no such
+    // names, so nothing warned them. An agent with no conversations yet has
+    // nothing to reconcile either, which is the same answer.
+    const held: string[] = [];
+    for (const name of named) {
+      if (await fileExists(agentSessionDbIn(this.stateDir, name))) {
+        held.push(name);
+      }
+    }
+    return held;
   }
 
   close(): void {

@@ -396,8 +396,38 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
   }
 };
 
-export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
+export interface FileMemoryStoreOptions {
+  /**
+   * Whether the file's directory is dedicated Stratus state and may be
+   * created and tightened to owner-only.
+   *
+   * Off by default, and for the reason the session store gives: a
+   * caller-supplied path can sit in a shared parent — a project directory,
+   * `/tmp` in a test — and a store must never chmod one of those out from
+   * under whoever else uses it. On for `agents/<id>/`, which is one agent's
+   * own directory and is `0700` by contract; without it the first write for
+   * an agent whose directory does not exist yet creates it under the umask,
+   * so a home where memory happened before sessions had its per-agent
+   * directory world-readable.
+   */
+  ownedDirectory?: boolean;
+}
+
+export const createFileMemoryStore = (
+  filePath: string,
+  options: FileMemoryStoreOptions = {},
+): AgentMemoryStore => {
   const indexPath = `${filePath}.index`;
+  /** The directory, made and held to the posture its owner asked for. */
+  const ensureDirectory = async (): Promise<void> => {
+    const dir = path.dirname(filePath);
+    await mkdir(dir, { recursive: true, ...(options.ownedDirectory ? { mode: 0o700 } : {}) });
+    if (options.ownedDirectory) {
+      // `mkdir` only applies its mode when it creates, so an upgrade over a
+      // directory an earlier build left at 0755 would keep it.
+      await chmod(dir, 0o700);
+    }
+  };
   let db: SqliteDatabase | undefined;
 
   // The IMMEDIATE transaction serializes catch-up across processes, but not
@@ -458,7 +488,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
   };
 
   const appendRecord = async (record: MemoryRecord): Promise<void> => {
-    await mkdir(path.dirname(filePath), { recursive: true });
+    await ensureDirectory();
     try {
       await chmod(filePath, 0o600);
     } catch (error) {
@@ -479,7 +509,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       return db;
     }
     const { DatabaseSync } = await loadSqlite();
-    await mkdir(path.dirname(indexPath), { recursive: true });
+    await ensureDirectory();
     const open = (): SqliteDatabase => {
       const opened = new DatabaseSync(indexPath);
       opened.exec('PRAGMA busy_timeout = 5000;');
@@ -831,7 +861,9 @@ export const createShardedFileMemoryStore = (fileFor: (agentId: string) => strin
     // `assertPathSafeAgentId`. Throwing from here rather than returning an
     // empty store is deliberate: an unsafe id must not read as "this agent
     // remembers nothing".
-    const store = createFileMemoryStore(fileFor(agentId));
+    // The agent's own directory, owner-only like every other per-agent
+    // resource — see `FileMemoryStoreOptions.ownedDirectory`.
+    const store = createFileMemoryStore(fileFor(agentId), { ownedDirectory: true });
     stores.set(agentId, store);
     return store;
   };

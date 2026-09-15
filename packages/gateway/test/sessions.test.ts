@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -289,4 +289,24 @@ test('a save that moves a session to another agent is refused, not written twice
   const bea = new SqliteSessionStore(agentSessionDbIn(stateDir, 'bea'));
   assert.deepEqual(bea.rows(), []);
   bea.close();
+});
+
+test('a directory under agents/ that holds no shard is not an agent to reconcile', async () => {
+  const stateDir = await newStateDir();
+  const store = new ShardedSessionStore({ stateDir });
+  await store.create(session('a-1', 'ava'));
+
+  // Something an operator keeps under `agents/` — the old layout reserved
+  // no such names, so nothing told them not to. Opening a store here would
+  // create `sessions.db` inside it and chmod the directory to 0700 on every
+  // start.
+  const theirs = path.join(stateDir, 'agents', 'backups');
+  await mkdir(theirs, { recursive: true, mode: 0o755 });
+  await writeFile(path.join(theirs, 'notes.txt'), 'mine\n');
+
+  assert.deepEqual(await store.reconcile(), { released: [], reindexed: [] });
+  store.close();
+
+  await assert.rejects(() => stat(path.join(theirs, 'sessions.db')));
+  assert.equal((await stat(theirs)).mode & 0o777, 0o755);
 });

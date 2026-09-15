@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -638,4 +638,32 @@ test('an agent id ending in .whitelist.json is a state directory, not a legacy g
   // whole directory inside another agent's.
   assert.equal((await stat(stateDir)).isDirectory(), true);
   assert.equal((await stat(whitelistPathFor(agentsDirPath(env), 'ava'))).isFile(), true);
+});
+
+test('an agent directory made by its first memory write is owner-only', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // Memory before sessions: nothing has made this agent's directory yet, so
+  // the append is what creates it. Under the usual umask a bare recursive
+  // mkdir leaves it 0755, and the per-agent directory is 0700 by contract —
+  // it holds that agent's conversations, memories and grants.
+  await createHomeMemoryStore(env).append('ava', 'likes jazz');
+
+  const directory = path.dirname(agentMemoryFilePath(env, 'ava'));
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
+  assert.equal((await stat(agentMemoryFilePath(env, 'ava'))).mode & 0o777, 0o600);
+});
+
+test('an agent directory an older build left world-readable is tightened by the next write', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const directory = path.dirname(agentMemoryFilePath(env, 'ava'));
+  await mkdir(directory, { recursive: true, mode: 0o755 });
+  await chmod(directory, 0o755);
+
+  await createHomeMemoryStore(env).append('ava', 'likes jazz');
+
+  // `mkdir` applies its mode only when it creates, so the tighten has to be
+  // its own step or an upgrade keeps whatever the old build left.
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
 });
