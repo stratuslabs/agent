@@ -1,4 +1,4 @@
-import { InMemoryAgentMemoryStore } from '@stratusagent/core';
+import { InMemoryAgentMemoryStore, MEMORY_STORE_CONTRACT_VERSION } from '@stratusagent/core';
 
 // A memory store registered through `context.memory`: the kernel's own
 // in-memory implementation of the contract, which is the point — a store
@@ -11,6 +11,6 @@ export const createPlugin = () => ({
     if (!context.memory) {
       throw new Error('This host hands plugins no memory handle, so stratus-plugin-fixture-memory cannot register one.');
     }
-    context.memory.register({ name: 'fixture', store: new InMemoryAgentMemoryStore() });
+    context.memory.register({ name: 'fixture', store: new InMemoryAgentMemoryStore(), contract: MEMORY_STORE_CONTRACT_VERSION });
   },
 });

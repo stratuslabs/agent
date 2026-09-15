@@ -52,8 +52,14 @@ stratus grants ava                     # what ava may do unattended: standing to
 stratus grants revoke ava --tool web.fetch              # take a standing grant back — a running daemon stops honouring it at once
 stratus grants revoke ava --scope "git push"            # or a command scope, by the line the listing shows
 stratus grants revoke ava --origin https://app.example.com
-stratus memory list ava                # every live fact, with the trust label it carries
+stratus memory list ava                # every live fact, with its trust label, pin, and validity
 stratus memory list ava --trust unknown --format json
+stratus memory search ava deploy pipeline               # the way the agent searches: words, and what a fact is about
+stratus memory audit ava               # everything ever written, forgotten included, and what replaced what
+stratus memory pin ava <id>...         # keep facts in the prompt every turn (and memory unpin)
+stratus memory forget ava <id>...      # retire facts; they stay in the record
+stratus memory export ava --file ava.jsonl              # move an agent's memory to another machine
+stratus memory import ava --file ava.jsonl              # lands external unless --preserve-trust
 stratus memory reassert ava --trust user --all-unknown   # re-label every fact with no recorded origin
 stratus memory reassert ava --trust agent <id>...
 stratus session rollover <session-id>  # archive a conversation's transcript and start the same id over
@@ -76,7 +82,10 @@ stratus dashboard                      # local browser dashboard
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `grants`, `grants revoke` | [Approvals](../guides/approvals.md#standing-grants) |
-| `memory list`, `memory reassert` | [Memory](../concepts/memory.md#where-a-fact-came-from) |
+| `memory list`, `memory search`, `memory audit`, `memory forget` | [Memory](../concepts/memory.md#searching-it-yourself) — every `memory` subcommand works the built-in store, and refuses against a fleet whose config selects another |
+| `memory pin`, `memory unpin` | [Memory](../concepts/memory.md#pinned-facts) |
+| `memory export`, `memory import` | [Memory](../concepts/memory.md#moving-an-agents-memory) |
+| `memory reassert` | [Memory](../concepts/memory.md#where-a-fact-came-from) |
 | `session rollover` | [Memory](../concepts/memory.md#the-label-is-yours-to-raise-and-only-yours), [Control API](../../packages/control-api/README.md) |
 | `dashboard` | [Remote access](../guides/remote-access.md) |
 
@@ -107,6 +116,9 @@ stratus dashboard                      # local browser dashboard
 | `--tool`, `--scope`, `--origin` | `stratus grants revoke`: which grant goes — exactly one of them |
 | `--trust <level>` | `stratus memory list`: show only entries at this label. `stratus memory reassert`: the label to record — `user`, `agent`, `unknown`, or `external` |
 | `--all-unknown` | `stratus memory reassert`: every live entry with no recorded origin, the upgrade case; ids may be given as well |
+| `--limit <n>` | `stratus memory search`: maximum hits. The store bounds the read either way |
+| `--file <path>` | `stratus memory export` (omit for stdout) / `stratus memory import`: the JSONL |
+| `--preserve-trust` | `stratus memory import`: keep each entry's recorded trust label instead of landing it `external`. For a file you own and vouch for |
 | `--port`, `--host` | `stratus dashboard`: where a daemon it starts should bind |
 | `--no-open` | `stratus dashboard`: skip automatic browser opening |
 | `--version`, `-v` | Print this build's version and exit — reads nothing but itself, so it answers offline and before any state migration |

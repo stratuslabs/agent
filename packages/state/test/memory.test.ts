@@ -9,6 +9,7 @@ import {
   MEMORY_ENTRY_MAX_BYTES,
   MEMORY_READ_MAX_BYTES,
   memoryContentByteLength,
+  type MemoryEntry,
   type AgentMemoryStore,
 } from '@stratusagent/core';
 
@@ -48,14 +49,29 @@ test('a populated pre-existing JSONL is recallable with no import step', async (
 test('deleting the index reproduces it; a stale schema stamp rebuilds rather than errors', async () => {
   const filePath = path.join(await tempDir(), 'memory.jsonl');
   const store = createFileMemoryStore(filePath);
-  await store.append('ava', 'facts about the heron rookery');
+  await store.append('ava', 'facts about the heron rookery', {
+    kind: 'semantic',
+    about: ['heron rookery'],
+    validUntil: '2030-01-01T00:00:00.000Z',
+  });
   const before = await store.search('ava', 'heron');
   assert.equal(before.entries.length, 1);
+  // Every field is derived from the record, so the comparison is over all
+  // of them — except `usage`, which is the one thing the index holds that
+  // the record does not, and which a rebuild is documented to lose.
+  const facts = (result: { entries: MemoryEntry[] }): MemoryEntry[] =>
+    result.entries.map(({ usage: _usage, ...entry }) => entry);
 
   // Delete the index out from under a fresh store: same answers.
   await rm(`${filePath}.index`);
   const rebuilt = createFileMemoryStore(filePath);
-  assert.deepEqual(await rebuilt.search('ava', 'heron'), before);
+  const afterDelete = await rebuilt.search('ava', 'heron');
+  assert.deepEqual(facts(afterDelete), facts(before));
+  assert.deepEqual(afterDelete.entries[0]?.about, ['heron rookery']);
+  assert.equal(afterDelete.entries[0]?.kind, 'semantic');
+  // The counters reset while no fact is lost — the stated bargain.
+  assert.equal(before.entries[0]?.usage?.recallCount, 1);
+  assert.equal(afterDelete.entries[0]?.usage?.recallCount, 1);
 
   // A wrong schema stamp is a rebuild trigger, not an error.
   const { DatabaseSync } = await import('node:sqlite');
@@ -63,7 +79,7 @@ test('deleting the index reproduces it; a stale schema stamp rebuilds rather tha
   db.exec("UPDATE meta SET value = '0' WHERE key = 'schema_version'");
   db.close();
   const restamped = createFileMemoryStore(filePath);
-  assert.deepEqual(await restamped.search('ava', 'heron'), before);
+  assert.deepEqual(facts(await restamped.search('ava', 'heron')), facts(before));
 });
 
 test('an entry appended to the JSONL by hand — daemon stopped or crashed mid-write — is recallable', async () => {
@@ -195,8 +211,8 @@ test('recall over thousands of entries returns bounded results, and both stores 
     await seeded.append('ava', `numbered fact ${i} about the archive`);
   }
 
-  const fromFile = await fileStore.search('ava', 'archive', 7);
-  const fromMemory = await seeded.search('ava', 'archive', 7);
+  const fromFile = await fileStore.search('ava', 'archive', { limit: 7 });
+  const fromMemory = await seeded.search('ava', 'archive', { limit: 7 });
   assert.equal(fromFile.entries.length, 7);
   assert.equal(fromFile.truncated, true);
   // Same createdAt keys and plenty of ties: the ordering must match entry for

@@ -24,6 +24,7 @@ import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
   createForgetTool,
+  createPinTool,
   createRecallTool,
   createRememberTool,
   GATEWAY_ONLY_TOOL_NAMES,
@@ -222,6 +223,7 @@ export const createAgentRuntime = async (
   tools.register(createRememberTool(memory));
   tools.register(createRecallTool(memory));
   tools.register(createForgetTool(memory));
+  tools.register(createPinTool(memory));
 
   // The same skills the daemon would serve, from the same directory, for
   // the same reason the plugins below match: a skill that routes in

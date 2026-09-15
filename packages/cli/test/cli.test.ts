@@ -5004,7 +5004,7 @@ test('recent records reach back through a rotated generation', async () => {
   assert.deepEqual(records.map((record) => record.msg), Array.from({ length: 10 }, (_, i) => `line ${i}`));
 });
 
-test('the structured log names the memory entry a write or forget touched — and never its content', () => {
+test('the structured log names the memory entry a write, forget, supersession, or pin touched — and never its content', () => {
   const completed = eventDetail({
     type: 'tool.completed',
     sessionId: 'sess-1',
@@ -5037,6 +5037,42 @@ test('the structured log names the memory entry a write or forget touched — an
     },
   });
   assert.deepEqual(recalled, { tool: 'memory.recall', ok: true });
+
+  // A supersession names both halves of the revision — the entry written
+  // and the one it retired — because "when did the agent stop believing
+  // this" is unanswerable later from anything else.
+  const superseded = eventDetail({
+    type: 'tool.completed',
+    sessionId: 'sess-1',
+    result: {
+      callId: 'call-4',
+      toolName: 'memory.remember',
+      ok: true,
+      output: { remembered: true, id: 'ava:memory:new', supersedes: 'ava:memory:old' },
+    },
+  });
+  assert.deepEqual(superseded, { tool: 'memory.remember', ok: true, entry: 'ava:memory:new', supersedes: 'ava:memory:old' });
+
+  const pinned = eventDetail({
+    type: 'tool.completed',
+    sessionId: 'sess-1',
+    result: { callId: 'call-5', toolName: 'memory.pin', ok: true, output: { pinned: true, id: 'ava:memory:abc', bytes: 42 } },
+  });
+  assert.deepEqual(pinned, { tool: 'memory.pin', ok: true, entry: 'ava:memory:abc', pinned: true });
+
+  // A refused pin is still a decision worth a line, and still names only
+  // the id: the refusal text quotes the cap, never the fact.
+  const refused = eventDetail({
+    type: 'tool.completed',
+    sessionId: 'sess-1',
+    result: {
+      callId: 'call-6',
+      toolName: 'memory.pin',
+      ok: true,
+      output: { pinned: false, id: 'ava:memory:abc', bytes: 2000, reason: 'The pinned core is capped at 2048 UTF-8 bytes...' },
+    },
+  });
+  assert.deepEqual(refused, { tool: 'memory.pin', ok: true, entry: 'ava:memory:abc', pinned: false });
 });
 
 test('the structured log does not grow a usage line when a session completes', () => {
@@ -10601,22 +10637,42 @@ test('a local y/N does not run a browser action once the page has moved under it
 
 test('parseCommand reads the memory and session commands', () => {
   assert.deepEqual(parseCommand(['memory', 'list', 'ava']), {
-    command: 'memory', action: 'list', agentId: 'ava', ids: [], allUnknown: false, format: 'text',
+    command: 'memory', action: 'list', agentId: 'ava', ids: [], allUnknown: false, preserveTrust: false, format: 'text',
   });
   assert.deepEqual(parseCommand(['memory', 'list', 'ava', '--trust', 'unknown', '--format', 'json']), {
-    command: 'memory', action: 'list', agentId: 'ava', trust: 'unknown', ids: [], allUnknown: false, format: 'json',
+    command: 'memory', action: 'list', agentId: 'ava', trust: 'unknown', ids: [], allUnknown: false, preserveTrust: false, format: 'json',
   });
   assert.deepEqual(parseCommand(['memory', 'reassert', 'ava', '--trust', 'user', 'ava:memory:1', 'ava:memory:2']), {
-    command: 'memory', action: 'reassert', agentId: 'ava', trust: 'user', ids: ['ava:memory:1', 'ava:memory:2'], allUnknown: false, format: 'text',
+    command: 'memory', action: 'reassert', agentId: 'ava', trust: 'user', ids: ['ava:memory:1', 'ava:memory:2'], allUnknown: false, preserveTrust: false, format: 'text',
   });
   assert.deepEqual(parseCommand(['memory', 'reassert', 'ava', '--all-unknown', '--trust', 'agent']), {
-    command: 'memory', action: 'reassert', agentId: 'ava', trust: 'agent', ids: [], allUnknown: true, format: 'text',
+    command: 'memory', action: 'reassert', agentId: 'ava', trust: 'agent', ids: [], allUnknown: true, preserveTrust: false, format: 'text',
   });
   assert.throws(() => parseCommand(['memory', 'reassert', 'ava', 'ava:memory:1']), /--trust/);
   assert.throws(() => parseCommand(['memory', 'reassert', 'ava', '--trust', 'user']), /--all-unknown/);
   assert.throws(() => parseCommand(['memory', 'reassert', 'ava', '--trust', 'trusted']), /Unsupported trust level/);
   assert.throws(() => parseCommand(['memory', 'list']), /agent id/);
   assert.deepEqual(parseCommand(['memory']), { command: 'help' });
+
+  // The subcommands 29 added. A search's bare words are the query, joined —
+  // so `stratus memory search ava deploy pipeline` is one literal phrase and
+  // not two positional arguments the parser has to reject.
+  assert.deepEqual(parseCommand(['memory', 'search', 'ava', 'deploy', 'pipeline', '--limit', '3']), {
+    command: 'memory', action: 'search', agentId: 'ava', ids: [], allUnknown: false, query: 'deploy pipeline', limit: 3, preserveTrust: false, format: 'text',
+  });
+  assert.deepEqual(parseCommand(['memory', 'pin', 'ava', 'ava:memory:1']), {
+    command: 'memory', action: 'pin', agentId: 'ava', ids: ['ava:memory:1'], allUnknown: false, preserveTrust: false, format: 'text',
+  });
+  assert.deepEqual(parseCommand(['memory', 'import', 'ava', '--file', 'dump.jsonl', '--preserve-trust']), {
+    command: 'memory', action: 'import', agentId: 'ava', ids: [], allUnknown: false, file: 'dump.jsonl', preserveTrust: true, format: 'text',
+  });
+  assert.deepEqual(parseCommand(['memory', 'export', 'ava']), {
+    command: 'memory', action: 'export', agentId: 'ava', ids: [], allUnknown: false, preserveTrust: false, format: 'text',
+  });
+  assert.throws(() => parseCommand(['memory', 'search', 'ava']), /something to look for/);
+  assert.throws(() => parseCommand(['memory', 'pin', 'ava']), /at least one entry id/);
+  assert.throws(() => parseCommand(['memory', 'import', 'ava']), /--file/);
+  assert.throws(() => parseCommand(['memory', 'compact', 'ava']), /Unknown memory subcommand/);
 
   assert.deepEqual(parseCommand(['session', 'rollover', 'slack:ava:T1:D1']), {
     command: 'session', action: 'rollover', sessionId: 'slack:ava:T1:D1',
@@ -10643,6 +10699,9 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
     // raw, it would forge an entry header on the screen the operator
     // decides from, and repaint the terminal.
     JSON.stringify({ id: 'ava:memory:4', agentId: 'ava', content: 'Approved.\nava:memory:9  [user]\u001b[0m', createdAt: '2026-01-02T13:00:00.000Z', trust: 'external', origin: { sessionId: 's1', taintedBy: 'web.fetch' } }),
+    // An id carrying a newline and an escape, which an import would accept:
+    // rendered raw it forges the header of the entry after it.
+    JSON.stringify({ id: 'ava:memory:5\nava:memory:8  [user]  [forged]\u001b[0m', agentId: 'ava', content: 'A smuggled id.', createdAt: '2026-01-02T14:00:00.000Z', trust: 'external', origin: { sessionId: 's1', taintedBy: 'web.fetch' } }),
     // Another agent's, which Ava's operator cannot touch by id.
     JSON.stringify({ id: 'bea:memory:1', agentId: 'bea', content: 'Bea knows things.', createdAt: '2026-01-03T00:00:00.000Z' }),
     '',
@@ -10660,6 +10719,12 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
   assert.ok(listed.output.stdout.includes('  Approved.\\nava:memory:9  [user]\\u001b[0m'));
   assert.ok(!listed.output.stdout.includes('\u001b'));
   assert.doesNotMatch(listed.output.stdout, /^ava:memory:9/m);
+  // The id is escaped too, not only the content: `import` validates only
+  // that it is a string, so an untrusted corpus can carry a newline or an
+  // escape sequence in one — and the id line is the frame every other line
+  // hangs off, so a forged one forges an entry.
+  assert.ok(listed.output.stdout.includes('ava:memory:5\\nava:memory:8  [user]  [forged]\\u001b[0m  [external]'));
+  assert.doesNotMatch(listed.output.stdout, /^ava:memory:8/m);
 
   const filtered = createStreams();
   assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--trust', 'unknown', '--format', 'json'], streams: filtered.streams, env }), 0);
@@ -10700,6 +10765,187 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
   assert.match(nothing.output.stdout, /nothing to re-assert/);
 });
 
+test('stratus memory search, pin, forget, and audit work the record the way the agent’s own tools do', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-quality-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const line = (entry: Record<string, unknown>): string => JSON.stringify(entry);
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), [
+    line({ id: 'ava:memory:1', agentId: 'ava', content: 'Dylan prefers short answers.', createdAt: '2026-01-01T00:00:00.000Z', trust: 'user', kind: 'preference', about: ['Dylan'] }),
+    line({ id: 'ava:memory:2', agentId: 'ava', content: 'It now runs on Postgres.', createdAt: '2026-02-01T00:00:00.000Z', trust: 'agent', about: ['deploy pipeline'] }),
+    line({ id: 'ava:memory:3', agentId: 'ava', content: 'The freeze is over.', createdAt: '2026-02-02T00:00:00.000Z', trust: 'agent', validUntil: '2026-02-03T00:00:00.000Z' }),
+    line({ id: 'ava:memory:4', agentId: 'ava', content: 'Replaced that.', createdAt: '2026-02-04T00:00:00.000Z', trust: 'agent', supersedes: 'ava:memory:1' }),
+    '',
+  ].join('\n'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  // The alias case, from the terminal: the query matches only `about`.
+  const found = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'search', 'ava', 'deploy', 'pipeline', '--format', 'json'], streams: found.streams, env }), 0);
+  const hits = JSON.parse(found.output.stdout) as { strategy: string; entries: Array<{ id: string; validity: string }> };
+  assert.deepEqual(hits.entries.map((entry) => entry.id), ['ava:memory:2']);
+  assert.equal(hits.strategy, 'recency');
+
+  // An expired fact is listed, and listed *as* expired: the operator's read
+  // is the one place it has to stay visible.
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
+  assert.match(listed.output.stdout, /ava:memory:3 {2}\[agent\] {2}\[expired\]/);
+  // The superseded entry is gone from the live read, and the successor says
+  // what it replaced.
+  assert.doesNotMatch(listed.output.stdout, /Dylan prefers short answers/);
+  assert.match(listed.output.stdout, /ava:memory:4 .*\(replaces ava:memory:1\)/);
+
+  // Audit shows both halves of the revision, named in both directions.
+  const audited = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'audit', 'ava'], streams: audited.streams, env }), 0);
+  assert.match(audited.output.stdout, /Dylan prefers short answers/);
+  assert.match(audited.output.stdout, /replaced by: ava:memory:4/);
+
+  // Pinning is a record: the entry's own line is untouched, and the pin
+  // survives into a later read.
+  const before = await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8');
+  const pinned = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'pin', 'ava', 'ava:memory:2'], streams: pinned.streams, env }), 0);
+  assert.match(pinned.output.stdout, /Pinned 1 entry of ava/);
+  const after = await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8');
+  assert.ok(after.startsWith(before), 'pinning rewrote the record instead of appending to it');
+  const withPin = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: withPin.streams, env }), 0);
+  assert.match(withPin.output.stdout, /ava:memory:2 {2}\[agent\] {2}\[pinned\]/);
+  const unpinned = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'unpin', 'ava', 'ava:memory:2'], streams: unpinned.streams, env }), 0);
+  assert.equal(await runCli({ argv: ['memory', 'unpin', 'ava', 'ava:memory:2'], streams: createStreams().streams, env }), 1);
+
+  // Forget names what it could not drop, and exits non-zero for it.
+  const forgotten = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'forget', 'ava', 'ava:memory:3', 'ava:memory:missing'], streams: forgotten.streams, env }), 1);
+  assert.match(forgotten.output.stdout, /Retired 1 entry of ava/);
+  assert.match(forgotten.output.stderr, /No live memory entry with id ava:memory:missing/);
+});
+
+test('stratus memory shows a pin that holds budget without reaching the prompt', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-pinned-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), [
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Dylan prefers short answers.', createdAt: '2026-01-01T00:00:00.000Z', trust: 'user' }),
+    // Pinned, and not true until 2027: it keeps its place in the 2 KiB
+    // budget while staying out of the prompt, which is exactly the entry an
+    // operator needs to find when a later pin refuses.
+    JSON.stringify({ id: 'ava:memory:2', agentId: 'ava', content: 'Ada takes over in the new year.', createdAt: '2026-01-02T00:00:00.000Z', trust: 'agent', validFrom: '2027-01-01T00:00:00.000Z' }),
+    '',
+  ].join('\n'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  assert.equal(await runCli({ argv: ['memory', 'pin', 'ava', 'ava:memory:2'], streams: createStreams().streams, env }), 0);
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
+  // Marked pinned *and* not-yet-valid: an operator who cannot see it cannot
+  // unpin it, and the refusal it causes would read as arithmetic that does
+  // not add up.
+  assert.match(listed.output.stdout, /ava:memory:2 {2}\[agent\] {2}\[pinned\] {2}\[not-yet-valid\]/);
+  const json = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--format', 'json'], streams: json.streams, env }), 0);
+  const entries = (JSON.parse(json.output.stdout) as { entries: Array<{ id: string; pinned: boolean }> }).entries;
+  assert.deepEqual(entries.filter((entry) => entry.pinned).map((entry) => entry.id), ['ava:memory:2']);
+});
+
+test('stratus memory export then import lands the same entries in order, external unless the operator vouches', async () => {
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-export-'));
+  await mkdir(path.join(source, '.stratus'), { recursive: true });
+  await writeFile(path.join(source, '.stratus', 'memory.jsonl'), [
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Dylan prefers short answers.', createdAt: '2026-01-01T00:00:00.000Z', trust: 'user', about: ['Dylan'] }),
+    JSON.stringify({ id: 'ava:memory:2', agentId: 'ava', content: 'The office moved to Southwark.', createdAt: '2026-02-01T00:00:00.000Z', trust: 'agent' }),
+    '',
+  ].join('\n'));
+  const sourceEnv = { cwd: source, homeDir: source, processEnv: {} };
+  const dump = path.join(source, 'ava.jsonl');
+  const exported = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'export', 'ava', '--file', dump], streams: exported.streams, env: sourceEnv }), 0);
+  assert.match(exported.output.stdout, /Wrote 2 entries of ava/);
+
+  const target = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-import-'));
+  const targetEnv = { cwd: target, homeDir: target, processEnv: {} };
+  const imported = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'import', 'ava', '--file', dump, '--format', 'json'], streams: imported.streams, env: targetEnv }), 0);
+  assert.deepEqual(JSON.parse(imported.output.stdout), { agentId: 'ava', imported: 2, skipped: [], preservedTrust: false });
+
+  const back = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--format', 'json'], streams: back.streams, env: targetEnv }), 0);
+  const entries = (JSON.parse(back.output.stdout) as { entries: Array<{ id: string; trust: string }> }).entries;
+  // The same entries in the same order — and deliberately not the same
+  // labels: expecting provenance to survive would assert that the import
+  // safety rule does not work.
+  assert.deepEqual(entries.map((entry) => entry.id), ['ava:memory:1', 'ava:memory:2']);
+  assert.deepEqual(entries.map((entry) => entry.trust), ['external', 'external']);
+
+  // The migration path, where a person vouches for the file.
+  const vouched = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-migrate-'));
+  const vouchedEnv = { cwd: vouched, homeDir: vouched, processEnv: {} };
+  assert.equal(await runCli({ argv: ['memory', 'import', 'ava', '--file', dump, '--preserve-trust'], streams: createStreams().streams, env: vouchedEnv }), 0);
+  const kept = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--format', 'json'], streams: kept.streams, env: vouchedEnv }), 0);
+  assert.deepEqual(
+    (JSON.parse(kept.output.stdout) as { entries: Array<{ trust: string }> }).entries.map((entry) => entry.trust),
+    ['user', 'agent'],
+  );
+
+  // A file that is not a memory record is refused before anything lands.
+  const junk = path.join(source, 'junk.jsonl');
+  await writeFile(junk, 'not json\n');
+  const refused = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'import', 'ava', '--file', junk], streams: refused.streams, env: targetEnv }), 1);
+  assert.match(refused.output.stderr, /line 1 is not JSON. Nothing was imported/);
+});
+
+test('stratus memory refuses when the fleet keeps its memories in a contributed store', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-store-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ memoryStore: 'sqlite' }));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  // Answering from the JSONL would report a store the agent does not use,
+  // and pinning into it would write records nothing reads.
+  for (const argv of [['memory', 'list', 'ava'], ['memory', 'pin', 'ava', 'ava:memory:1'], ['memory', 'export', 'ava']]) {
+    const streams = createStreams();
+    assert.equal(await runCli({ argv, streams: streams.streams, env }), 1, argv.join(' '));
+    assert.match(streams.output.stderr, /selects memoryStore sqlite/);
+    assert.doesNotMatch(streams.output.stdout, /Likes jazz/);
+  }
+
+  // A project-local config cannot make that decision — where an agent keeps
+  // its memories is not a call a cloned repository gets to make — so it is
+  // ignored and the built-in store answers as usual. A separate home,
+  // because the global file above would otherwise be the thing refusing.
+  const plain = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-plain-'));
+  await mkdir(path.join(plain, '.stratus'), { recursive: true });
+  await writeFile(path.join(plain, '.stratus', 'memory.jsonl'), `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ memoryStore: 'sqlite' }));
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env: { cwd: project, homeDir: plain, processEnv: {} } }), 0);
+  assert.match(listed.output.stdout, /Likes jazz/);
+  assert.match(listed.output.stderr, /ignoring memoryStore/);
+});
+
+test('stratus memory export tightens an existing file before the corpus lands in it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-perms-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  // A world-readable path left behind by something else: `writeFile`'s mode
+  // applies only when it creates the file, so without an explicit chmod the
+  // corpus would land under the old permissions.
+  const dump = path.join(home, 'ava.jsonl');
+  await writeFile(dump, 'stale\n');
+  await chmod(dump, 0o644);
+  const exported = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'export', 'ava', '--file', dump], streams: exported.streams, env }), 0);
+  assert.equal((await stat(dump)).mode & 0o777, 0o600);
+  assert.match(await readFile(dump, 'utf8'), /Likes jazz/);
+});
+
 test('a state migration that cannot stamp the home refuses commands that write state, and only those', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-stamp-'));
   // A stamp that cannot be written: `state.json` is a directory, so the
@@ -10721,10 +10967,29 @@ test('a state migration that cannot stamp the home refuses commands that write s
   assert.equal(await runCli({ argv: ['session', 'rollover', 's-1'], streams: rollover.streams, env }), 1);
   assert.match(rollover.output.stderr, /Refusing `stratus session`/);
 
-  const listed = createStreams();
-  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
-  assert.match(listed.output.stderr, /Warning: state migration failed/);
-  assert.match(listed.output.stdout, /ava:memory:1/);
+  // Every memory subcommand that appends a record is refused the same way,
+  // not only `reassert`: a pin, a tombstone, or an import landing in state
+  // a newer format owns is the corruption the stamp exists to prevent.
+  for (const argv of [
+    ['memory', 'forget', 'ava', 'ava:memory:1'],
+    ['memory', 'pin', 'ava', 'ava:memory:1'],
+    ['memory', 'unpin', 'ava', 'ava:memory:1'],
+    ['memory', 'import', 'ava', '--file', path.join(home, 'nothing.jsonl')],
+  ]) {
+    const writer = createStreams();
+    assert.equal(await runCli({ argv, streams: writer.streams, env }), 1, argv.join(' '));
+    assert.match(writer.output.stderr, /Refusing `stratus memory`/, argv.join(' '));
+  }
+  assert.equal((await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8')).trim().split('\n').length, 1);
+
+  // And the reads still work, because reading is how someone diagnoses
+  // their way out of this state.
+  for (const argv of [['memory', 'list', 'ava'], ['memory', 'search', 'ava', 'jazz'], ['memory', 'audit', 'ava']]) {
+    const reader = createStreams();
+    assert.equal(await runCli({ argv, streams: reader.streams, env }), 0, argv.join(' '));
+    assert.match(reader.output.stderr, /Warning: state migration failed/, argv.join(' '));
+    assert.match(reader.output.stdout, /ava:memory:1/, argv.join(' '));
+  }
 });
 
 test('stratus session rollover without a running daemon says so', async () => {

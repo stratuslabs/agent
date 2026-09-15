@@ -1,6 +1,7 @@
 import {
   ChannelRegistry,
   ContributionRegistry,
+  MEMORY_STORE_CONTRACT_VERSION,
   channelClaimKey,
   type ChannelContribution,
   type ChannelRegistrationHandle,
@@ -202,6 +203,19 @@ export class ManifestBoundContributions {
     if (!contribution.store || typeof contribution.store.append !== 'function') {
       throw new PluginManifestError(
         `Plugin ${this.manifest.packageName}: memory store ${contribution.name} is not an AgentMemoryStore.`,
+      );
+    }
+    // Declared, not inferred: a store built against the previous contract
+    // still has an `append` and a `search` of the same arity, so nothing
+    // about the functions distinguishes it. Routed traffic anyway, it binds
+    // an options object where a number belonged and answers an unbounded
+    // read — wrong, silently, on every recall. Refusing names the fix.
+    if (contribution.contract !== MEMORY_STORE_CONTRACT_VERSION) {
+      throw new PluginManifestError(
+        `Plugin ${this.manifest.packageName}: memory store ${contribution.name} is built against memory contract `
+        + `${contribution.contract ?? 1}, and this host serves ${MEMORY_STORE_CONTRACT_VERSION}. `
+        + 'Upgrade the plugin — a store from the older contract reads `search` limits and `append` provenance differently, '
+        + 'and would answer wrongly rather than fail.',
       );
     }
     this.assertUnclaimed('memory', contribution.name, this.stagedMemory);
