@@ -315,6 +315,17 @@ test('an agent cannot pin another agent’s entry, and that entry stays live for
   const reread = createFileMemoryStore(filePath, frozen());
   assert.deepEqual((await reread.list('juno')).entries.map((entry) => entry.id), [victim.id]);
   assert.equal((await reread.search('juno', 'rota')).entries.length, 1);
+
+  // The same for a revision: a stranger's tombstone naming Juno's successor
+  // must not bring back the fact that successor retired. The two reads
+  // answer from different places — the record and the FTS index — and this
+  // is where they would quietly disagree.
+  const replaced = await reread.append('juno', 'Juno moved the rota to the wiki', { supersedes: victim.id });
+  assert.deepEqual((await reread.search('juno', 'rota')).entries.map((entry) => entry.id), [replaced.id]);
+  await appendFile(filePath, `${JSON.stringify({ forgets: replaced.id, agentId: 'ava', createdAt: AT.toISOString() })}\n`);
+  const after = createFileMemoryStore(filePath, frozen());
+  assert.deepEqual((await after.list('juno')).entries.map((entry) => entry.id), [replaced.id]);
+  assert.deepEqual((await after.search('juno', 'rota')).entries.map((entry) => entry.id), [replaced.id]);
 });
 
 test('agent A cannot read agent B’s entries with every new field in play', async () => {

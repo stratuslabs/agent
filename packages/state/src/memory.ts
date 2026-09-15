@@ -456,7 +456,10 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
   );
   const relabelEntry = db.prepare('UPDATE memory_fts SET trust = ? WHERE id = ? AND agent_id = ?');
   const deleteEntry = db.prepare('DELETE FROM memory_fts WHERE id = ? AND agent_id = ?');
-  const deleteRevision = db.prepare('DELETE FROM revisions WHERE successor_id = ?');
+  // Agent-scoped, like the `forgotten` table beside it: a tombstone naming a
+  // stranger's successor must be as inert here as it is in the record read,
+  // or `search` and `list` would disagree about whether a revision stands.
+  const deleteRevision = db.prepare('DELETE FROM revisions WHERE successor_id = ? AND agent_id = ?');
   const insertRevision = db.prepare(
     'INSERT OR REPLACE INTO revisions (successor_id, target_id, agent_id, valid_from_ms, valid_until_ms) VALUES (?, ?, ?, ?, ?)',
   );
@@ -467,7 +470,7 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
       // A forgotten successor stops retiring what it replaced, the same way
       // the record read does: a revision the agent took back leaves the
       // fact it replaced standing.
-      deleteRevision.run(record.forgets);
+      deleteRevision.run(record.forgets, record.agentId);
       continue;
     }
     if (isReassertionRecord(record)) {

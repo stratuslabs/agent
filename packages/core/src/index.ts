@@ -3925,8 +3925,14 @@ const MEMORY_PINNED_INTRO = 'Kept in front of you on purpose — the facts you o
 const MEMORY_INDEX_INTRO = `What your long-term memory holds, by topic — a count and when each last changed, not the facts themselves. Use ${MEMORY_RECALL_TOOL_NAME} with a topic name to read them:`;
 const MEMORY_RECENT_INTRO = 'Recently remembered:';
 
+// Both the name and the date are escaped, because both come off an entry
+// and a hand-edited `createdAt` is as capable of carrying a newline as a
+// fact is — a topic line that opened a line of its own could forge the
+// heading of a more trusted region, which is the whole reason this block
+// renders one item per line.
 const renderMemoryTopicLine = (topic: MemoryTopic): string =>
-  `- ${escapeControlCharacters(topic.name)} (${topic.count} fact${topic.count === 1 ? '' : 's'}, last ${topic.lastUpdatedAt.slice(0, 10)})`;
+  `- ${escapeControlCharacters(topic.name)} (${topic.count} fact${topic.count === 1 ? '' : 's'},`
+  + ` last ${escapeControlCharacters(topic.lastUpdatedAt.slice(0, 10))})`;
 
 /**
  * The memory block: the pinned core, the topic index, and the recency tail,

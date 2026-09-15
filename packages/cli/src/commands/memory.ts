@@ -95,10 +95,14 @@ export const runMemory = async (
       `[${memoryEntryTrust(entry)}]`,
       ...(pinnedIds.has(entry.id) ? ['[pinned]'] : []),
       ...(validity !== 'current' ? [`[${validity}]`] : []),
-      ...(entry.forgottenAt !== undefined ? [`[forgotten ${entry.forgottenAt}]`] : []),
-      ...(entry.origin?.taintedBy ? [`(tainted by ${entry.origin.taintedBy})`] : []),
+      // Escaped like the content below it: these come off the record, and a
+      // hand-edited line's timestamp or `supersedes` can carry a newline
+      // just as a fact can — which would forge the header of the entry
+      // after it on the screen the operator is deciding from.
+      ...(entry.forgottenAt !== undefined ? [`[forgotten ${escapeControlCharacters(entry.forgottenAt)}]`] : []),
+      ...(entry.origin?.taintedBy ? [`(tainted by ${escapeControlCharacters(entry.origin.taintedBy)})`] : []),
       ...(unlabelled(entry) ? ['(no recorded origin)'] : []),
-      ...(entry.supersedes ? [`(replaces ${entry.supersedes})`] : []),
+      ...(entry.supersedes ? [`(replaces ${escapeControlCharacters(entry.supersedes)})`] : []),
     ];
     writeLine(streams.stdout, `${entry.id}  ${marks.join('  ')}`);
     writeLine(streams.stdout, `  ${escapeControlCharacters(entry.content)}`);
@@ -214,7 +218,7 @@ export const runMemory = async (
       printEntry(entry, pinned);
       const successors = replacedBy.get(entry.id);
       if (successors !== undefined) {
-        writeLine(streams.stdout, `  replaced by: ${successors.join(', ')}`);
+        writeLine(streams.stdout, `  replaced by: ${successors.map(escapeControlCharacters).join(', ')}`);
       }
     }
     return 0;
