@@ -112,6 +112,7 @@ import {
   createFileCredentialResolver,
   createHomeMemoryStore,
   drainSharedMemory,
+  hasBracketedLegacyState,
   createRuntimeProvider,
   DEFAULT_STRATUS_AGENT,
   isRegisteredProviderName,
@@ -2816,6 +2817,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // it is synchronous for the same reason: the check is a file read, and
     // an async one in that stretch failed CI's restart tests twice.
     assertStateCompatible(env);
+    // A home whose pre-15a state has not been moved yet is refused rather
+    // than served, because serving it is the quiet failure: the stores open
+    // on the new paths, find nothing, and the fleet starts writing a second
+    // population beside every session, schedule, and grant it already had.
+    //
+    // Refused rather than migrated, even though this process is the daemon:
+    // the move needs the home to *itself*, and holding the claim is
+    // something the host does (`claimHome`) — a gateway that migrated on
+    // its own would be asserting an exclusivity nobody gave it. `stratus
+    // serve` runs the migration before it ever gets here, so this only
+    // fires for a host wiring the gateway up itself.
+    if (await hasBracketedLegacyState(env)) {
+      throw new Error(
+        `${stratusHomePath(env)} still holds pre-per-agent state (a shared sessions.db, or an <id>.whitelist.json beside the souls), `
+        + 'and serving it now would strand every session, schedule, and grant in it. '
+        + 'Run `stratus update`, or — for a host starting the gateway itself — claim the home with `claimHome` and '
+        + "await `runStateMigrations(env, { exclusive: true })` from @stratusagent/state before calling start().",
+      );
+    }
     // Before the sweeps below read a single session id: the index and the
     // per-agent stores are two durable writes where the shared database had
     // one primary key, and a crash between them left them disagreeing.

@@ -58,8 +58,10 @@ nothing has restarted it yet — can do to each file:
   move would land on the old path while the moved file still granted — a
   grant back from the dead. Nothing can reconcile those afterwards, so the
   move waits instead. Until it happens, `stratus schedules` keeps reading
-  the old database and `stratus grants` keeps reading the old grant file,
-  so nothing goes quiet or reads as revoked in between.
+  the old database, and grants are both read *and written* on the old file —
+  one file at a time, whichever is currently the agent's, is what keeps the
+  two builds writing the same list, so nothing goes quiet or comes back
+  from the dead in between.
 - **Memories move on the first command of the new build**, and keep
   moving. The JSONL is an append-only log opened by pathname on every
   write, so an old daemon can recreate it after any single pass — which is

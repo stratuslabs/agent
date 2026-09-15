@@ -321,3 +321,58 @@ test('a grant file already in the new place is never written over by the old one
   assert.deepEqual(kept.tools.map((grant) => grant.tool), ['web.fetch']);
   await stat(path.join(agentsDirPath(env), 'ava.whitelist.json'));
 });
+
+test('an id whose directory name is already a file is quarantined, not a crash', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // A legacy id held to path safety but not to the slug shape — `ava.md` is
+  // a valid id — whose state directory is the name its own soul file
+  // already has. `mkdir` throws EEXIST on that, and an exception here would
+  // abort the migration, leave the shared database unarchived, and stop
+  // `stratus serve` from coming up at all.
+  await writeFile(path.join(agentsDirPath(env), 'collide.md'), '---\nname: Collide\nid: collide.md\n---\n\nYou collide.\n');
+  const at = '2026-01-01T00:00:00.000Z';
+  const db = new DatabaseSync(legacySessionDbPath(env));
+  db.prepare('INSERT OR REPLACE INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('c-1', 'collide.md', 'completed', JSON.stringify({ id: 'c-1' }), at, at);
+  db.close();
+
+  const applied = await runStateMigrations(env, { exclusive: true });
+  const detail = applied.map((result) => result.detail ?? '').join(' ');
+  assert.match(detail, /QUARANTINED/);
+  assert.match(detail, /collide\.md/);
+  // The rest of the fleet moved around it, and the original is archived —
+  // which is what lets the daemon start at all.
+  assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
+  await stat(`${legacySessionDbPath(env)}.migrated`);
+});
+
+test('a grant written before the move lands in the file the move will carry', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  await runStateMigrations(env);
+
+  // The window: the older daemon still serving, so the grants are still
+  // under the old name, and a `stratus grants revoke` that cannot reach a
+  // control API falls back to the files. Writing the NEW path here would
+  // fork the list — the migration would find its destination occupied,
+  // leave the old file aside as it must, and lose every revocation the old
+  // daemon wrote to it afterwards.
+  const store = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  await store.rememberTool('ava', { tool: 'web.fetch', grantedAt: '2026-03-01T00:00:00.000Z' });
+  await assert.rejects(() => stat(whitelistPathFor(agentsDirPath(env), 'ava')));
+  const legacy = JSON.parse(await readFile(path.join(agentsDirPath(env), 'ava.whitelist.json'), 'utf8')) as {
+    scopes: unknown[];
+    tools: Array<{ tool: string }>;
+  };
+  assert.equal(legacy.scopes.length, 1, 'the scope that was already there came through');
+  assert.deepEqual(legacy.tools.map((grant) => grant.tool), ['web.fetch']);
+
+  // And the move then carries the one file, with both grants in it.
+  await runStateMigrations(env, { exclusive: true });
+  const moved = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  assert.deepEqual((await moved.toolGrantsFor('ava')).map((grant) => grant.tool), ['web.fetch']);
+  assert.deepEqual((await moved.scopesFor('ava')).map((scope) => scope.command), ['git']);
+});

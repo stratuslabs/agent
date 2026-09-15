@@ -11,6 +11,7 @@ import {
   agentStateDirPath,
   agentsDirPath,
   fleetDbPath,
+  stratusHomePath,
   legacyMemoryFilePath,
   legacySessionDbPath,
 } from './paths.ts';
@@ -130,6 +131,42 @@ const tighten = async (filePath: string): Promise<void> => {
   }
 };
 
+/**
+ * Make an agent's state directory, or say why it cannot exist.
+ *
+ * `isValidAgentId` answers whether an id is a safe path *segment*, which is
+ * not the same question as whether that segment is free: an id is only held
+ * to path safety on upgrade, deliberately, so `id: ava.md` is a legacy id
+ * this build must keep — and `agents/ava.md` is where its own soul file
+ * already sits. `mkdir` throws `EEXIST` on that, and an exception here
+ * would abort the whole migration, leaving the shared database unarchived
+ * and `stratus serve` unable to start over it. So a collision is
+ * quarantined like an unsafe id: named, with its rows left in the preserved
+ * original, and the rest of the fleet migrated around it.
+ */
+const agentDirectoryOrQuarantine = async (
+  env: StateEnvironment,
+  agentId: string,
+  what: string,
+  report: LayoutMigrationReport,
+): Promise<string | undefined> => {
+  const directory = agentStateDirPath(env, agentId);
+  try {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    return directory;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EEXIST' && code !== 'ENOTDIR') {
+      throw error;
+    }
+    report.quarantined.push(
+      `${JSON.stringify(agentId)} (${what}) — ${path.relative(stratusHomePath(env), directory)} is already a file, `
+      + 'so this agent has no directory to own; rename its id to free the name',
+    );
+    return undefined;
+  }
+};
+
 const openDatabase = async (filePath: string): Promise<SqliteDatabase> => {
   const { DatabaseSync } = await loadSqlite();
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
@@ -219,7 +256,9 @@ const shardSessions = async (
       );
       continue;
     }
-    await mkdir(agentStateDirPath(env, owner.agent_id), { recursive: true, mode: 0o700 });
+    if (!(await agentDirectoryOrQuarantine(env, owner.agent_id, `${owner.total} session(s)`, report))) {
+      continue;
+    }
     const shardPath = agentSessionDbPath(env, owner.agent_id);
     const shard = await openDatabase(shardPath);
     try {
@@ -339,7 +378,9 @@ const shardMemories = async (env: StateEnvironment, report: LayoutMigrationRepor
       if (fresh.length === 0) {
         continue;
       }
-      await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+      if (!(await agentDirectoryOrQuarantine(env, agentId, `${fresh.length} memory record(s)`, report))) {
+        continue;
+      }
       // Appended, never rewritten: the JSONL is append-only because that is
       // its whole concurrency model, and a migration that rewrote the file
       // would be the one writer that could lose a line somebody else added.
@@ -434,7 +475,9 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
       report.quarantined.push(`${entry} — ${path.relative(directory, target)} already exists, so the old file was left alone`);
       continue;
     }
-    await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+    if (!(await agentDirectoryOrQuarantine(env, agentId, 'grants', report))) {
+      continue;
+    }
     await rename(path.join(directory, entry), target);
     await chmod(target, 0o600);
     report.whitelistsMoved += 1;

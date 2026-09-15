@@ -322,9 +322,13 @@ export const createFileCommandWhitelist = (options: {
    * loss the unreadable-file guard above exists to prevent.
    */
   const save = async (agentId: string, grants: Grants): Promise<void> => {
-    const target = whitelistPathFor(options.directory, agentId);
+    // Whichever file is the agent's right now — see `resolveWhitelistPath`.
+    // A write that always took the new path would fork the list while the
+    // move is still pending.
+    const target = await resolveWhitelistPath(options.directory, agentId);
     // The agent's own directory, owner-only like every other per-agent
-    // resource: it holds what this agent may do unattended.
+    // resource: it holds what this agent may do unattended. (A no-op when
+    // the resolved path is still the old one beside the souls.)
     await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
     const file: WhitelistFile = {
       version: WHITELIST_VERSION,
