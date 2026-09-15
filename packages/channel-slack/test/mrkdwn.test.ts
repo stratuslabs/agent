@@ -91,6 +91,36 @@ test('a run spends only what its style has, and the rest stays text', () => {
   ]);
 });
 
+test('a run with characters to spare answers more than one opener', () => {
+  // A run is not one marker but a purse. `**bold and *italic***` ends on
+  // three asterisks with two jobs — one closes the italic, two close the
+  // bold — and a closer that answered only its nearest opener left the
+  // outer `**` unanswered, with its asterisks on the line for the reader.
+  converts([
+    ['**bold and *italic***', '*bold and _italic_*'],
+    ['**a *b***', '*a _b_*'],
+    // The same the other way about: one opening run, two closers, spent
+    // from the end nearest what it marks so the styles nest as written.
+    ['***a** b*', '_*a* b_'],
+    // Strictly inside has always worked, and still does.
+    ['**a *b* c**', '*a _b_ c*'],
+  ]);
+  // Each opener answers a given closer once, so a run cannot buy the same
+  // style twice over with characters the first pairing could not spend.
+  converts([
+    ['****quad****', '**_quad_**'],
+    ['~~~obsolete~~~', '~~obsolete~~'],
+  ]);
+  // Those two pass either way, and it took the mutation sweep to say so:
+  // let an opener answer twice and the second wrapper is refused anyway,
+  // because the first one's markup is by then a loose asterisk inside it.
+  // That rule and this one agree nearly everywhere — 300 000 generated
+  // replies of asterisks and letters found no shape where they disagree.
+  // This is one, because the tildes break up what would otherwise be
+  // loose, so the second pairing goes through and rewrites the line.
+  converts([['*****~~*~~****', '*****~*~****']]);
+});
+
 test('a run that has been answered is not there to answer a second closer', () => {
   // The same rule as the bracket that spends its opener, and for the same
   // reason. Left standing, the `*` that had already closed `*a*` was still
