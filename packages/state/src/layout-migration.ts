@@ -402,6 +402,16 @@ const copySharedMemory = async (
     }
     throw error;
   }
+  await placeRecords(env, report, raw, source);
+};
+
+/** Split `raw` by agent and append each agent's lines to its own file. */
+const placeRecords = async (
+  env: StateEnvironment,
+  report: LayoutMigrationReport,
+  raw: string,
+  source: string,
+): Promise<void> => {
 
   const byAgent = new Map<string, string[]>();
   const unsafe = new Map<string, number>();
@@ -533,9 +543,30 @@ const retireSharedMemory = async (env: StateEnvironment, report: LayoutMigration
 
 /** Copy a claimed file into the agents' stores, fold it into the archive, and drop it. */
 const placeClaim = async (env: StateEnvironment, claim: string, report: LayoutMigrationReport): Promise<void> => {
-  await copySharedMemory(env, report, claim);
+  // Read once, and place *those* bytes. Copying and then re-reading to
+  // archive left a gap between the two: a handle opened before the rename
+  // can still be writing into this inode, and anything landing in that gap
+  // was archived without ever reaching an agent's store — recorded in a
+  // file nothing reads back, which is indistinguishable from lost.
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(claim);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  // Held as bytes, not as the decoded string, because the comparison below
+  // is against the file's size: decoding a torn append — a writer
+  // interrupted mid multi-byte sequence, which is the very thing this
+  // window is about — replaces the broken bytes with U+FFFD and makes the
+  // decoded length longer than the file. Compared that way a claim would
+  // never match its own size, never be unlinked, and be re-placed by every
+  // command from then on.
+  const raw = bytes.toString('utf8');
+  await placeRecords(env, report, raw, claim);
   const archive = `${legacyMemoryFilePath(env)}.migrated`;
-  const raw = await readFile(claim, 'utf8');
   if (raw.trim().length > 0) {
     // Appended, never renamed over — see `retireSharedMemory`. A crash
     // between this and the unlink leaves the claim behind, and `drainRetiring`
@@ -543,6 +574,15 @@ const placeClaim = async (env: StateEnvironment, claim: string, report: LayoutMi
     // archive is a recovery artifact rather than anything that is read back.
     await appendFile(archive, raw.endsWith('\n') ? raw : `${raw}\n`, { mode: 0o600 });
     await chmod(archive, 0o600);
+  }
+  // And unlinked only once it is provably whole. If it grew while this ran,
+  // a writer that predates the home claim still has it open, and removing it
+  // would take bytes nobody has read. Left where it is instead: the next
+  // command's `drainRetiring` reads it again from the top, places what it
+  // finds — the readers dedupe — and removes it when it has finally stopped
+  // moving. Nothing is ever unlinked unplaced, which is the whole point.
+  if ((await stat(claim)).size !== bytes.length) {
+    return;
   }
   await rm(claim, { force: true });
 };

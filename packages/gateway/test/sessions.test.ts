@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -309,4 +309,25 @@ test('a directory under agents/ that holds no shard is not an agent to reconcile
 
   await assert.rejects(() => stat(path.join(theirs, 'sessions.db')));
   assert.equal((await stat(theirs)).mode & 0o777, 0o755);
+});
+
+test('an agent directory that is a symlink is refused at the live shard, not written through', async () => {
+  const stateDir = await newStateDir();
+  const elsewhere = path.join(stateDir, 'elsewhere');
+  await mkdir(elsewhere, { recursive: true });
+  await mkdir(path.join(stateDir, 'agents'), { recursive: true });
+  await symlink(elsewhere, path.join(stateDir, 'agents', 'ava'));
+
+  // The migration quarantines this, but a session created after it is a
+  // different way in: written through the link and indexed as though it
+  // were here, then released at the next start — the sweep reads entry
+  // types and sees no directory — and the conversation is unreachable.
+  const store = new ShardedSessionStore({ stateDir });
+  await assert.rejects(
+    () => store.create(session('a-1', 'ava')),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  store.close();
+
+  assert.deepEqual(await readdir(elsewhere), []);
 });

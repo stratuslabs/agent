@@ -738,3 +738,26 @@ test('an agent directory that is a symlink is quarantined, not written through',
   assert.deepEqual(await readdir(elsewhere), []);
   assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ghost')), ['g-1']);
 });
+
+test('a claim holding bytes that are not valid UTF-8 is still placed and still removed', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  const claim = `${legacyMemoryFilePath(env)}.retiring-3d0c2a81-0000-4000-8000-000000000000`;
+  // A torn append is exactly how this arises: a writer that predates the
+  // home claim is interrupted mid multi-byte sequence. Decoding replaces
+  // the broken bytes with U+FFFD, which is *longer* than what is on disk —
+  // so a claim compared by its decoded length never matches its own size,
+  // is never unlinked, and is re-placed by every command from then on.
+  await writeFile(claim, Buffer.concat([
+    Buffer.from(`${JSON.stringify({ id: 'ava:memory:one', agentId: 'ava', content: 'placed from the claim', createdAt: '2026-04-01T00:00:00.000Z' })}\n`),
+    Buffer.from([0xe2, 0x28]),
+  ]));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const memory = createHomeMemoryStore(env);
+  assert.ok((await memory.list('ava')).entries.some((entry) => entry.content === 'placed from the claim'));
+  const left = (await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-'));
+  assert.deepEqual(left, []);
+});
