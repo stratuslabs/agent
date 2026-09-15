@@ -259,7 +259,11 @@ interface Pair {
  * the same place, by not asking whether anything else in a reply is as
  * literal as code.
  */
-const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map<number, Pair[]> => {
+const pairEmphasis = (
+  tokens: readonly Token[],
+  inert: ReadonlySet<number>,
+  labelled: readonly number[],
+): Map<number, Pair[]> => {
   // In creation order, which is innermost first at any run they share: a
   // closer answers the nearest opener before it reaches the one further
   // out, and an opener is spent from the end nearest what it marks.
@@ -323,6 +327,15 @@ const pairEmphasis = (tokens: readonly Token[], inert: ReadonlySet<number>): Map
           }
           if (standing >= ceiling) {
             continue;
+          }
+          // A run that has already bought something does not go shopping
+          // outside the label it is standing in. `*a [**b***](https://x)`
+          // has three asterisks closing the label's bold and, with one
+          // still in hand, reaching back past the `[` for the `*` before
+          // it — a pair that starts outside a link and ends inside its
+          // label, which leaves no link for the renderer to write at all.
+          if (spent && standing < (labelled[index] ?? -1)) {
+            break;
           }
           const waiting = tokens[standing];
           if (waiting?.kind !== 'run') {
@@ -846,7 +859,15 @@ export const toSlackMrkdwn = (text: string): string => {
       inert.add(at);
     }
   }
-  const context: Context = { tokens, pairs: pairEmphasis(tokens, inert), links, edits: new Map() };
+  // Where the label each token sits in begins, so pairing can tell that
+  // reaching further back would cross out of a link.
+  const labelled = new Array<number>(tokens.length).fill(-1);
+  for (const [opener, link] of links) {
+    for (let at = link.label[0]; at < link.label[1]; at += 1) {
+      labelled[at] = opener;
+    }
+  }
+  const context: Context = { tokens, pairs: pairEmphasis(tokens, inert, labelled), links, edits: new Map() };
 
   const lines: string[] = [];
   let start = 0;

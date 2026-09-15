@@ -104,6 +104,11 @@ test('a run with characters to spare answers more than one opener', () => {
     ['***a** b*', '_*a* b_'],
     // Strictly inside has always worked, and still does.
     ['**a *b* c**', '*a _b_ c*'],
+    // And it does not go shopping outside the label it stands in: three
+    // asterisks closing the label's bold, with one still in hand, reached
+    // back past the `[` for the `*` before it, and a pair that starts
+    // outside a link and ends inside its label leaves no link at all.
+    ['*a [**b***](https://x)', '*a <https://x|*b**>'],
     // A run can also buy a pair that ends outside the range being rendered,
     // and that pair is not written there. What it had claimed is the run's
     // own again and has to be written as text, or the reply comes out a
