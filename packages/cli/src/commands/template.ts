@@ -15,6 +15,7 @@ import { createInterface } from 'node:readline';
 import { escapeControlCharacters, type JsonObject, type JsonValue } from '@stratusagent/core';
 import {
   agentsDirPath,
+  foldedAgentId,
   globalConfigPath,
   discoverSkillsInDirectory,
   installSkillsFromDirectory,
@@ -367,7 +368,7 @@ const planTemplateInstall = async (
   // roster entry the daemon shadows.
   const declared = agentFiles.length > 0
     ? await declaredAgentIds(env, globalConfigPath(env))
-    : { ids: new Set<string>(), unread: [] as string[] };
+    : { holds: () => false, unread: [] as string[] };
   if (declared.unread.length > 0) {
     warn(`could not read ${declared.unread.join(' or ')}, so ids were not checked against what it declares.`);
   }
@@ -393,13 +394,16 @@ const planTemplateInstall = async (
       // Not installed under this name.
     }
     const replacesOwnId = taken && await destinationHoldsId(destination, soul.agent.id);
-    const alsoHere = claimedHere.get(soul.agent.id);
+    // Folded, like every other id claim: a template shipping `Ava` and
+    // `ava` ships two souls one filesystem will give one directory, and
+    // the roster would refuse both on every platform.
+    const alsoHere = claimedHere.get(foldedAgentId(soul.agent.id));
     const blocked = alsoHere !== undefined
       ? `${alsoHere} in this template already claims the id ${soul.agent.id}`
-      : !replacesOwnId && declared.ids.has(soul.agent.id)
+      : !replacesOwnId && declared.holds(soul.agent.id)
         ? `something already claims the id ${soul.agent.id}`
         : undefined;
-    claimedHere.set(soul.agent.id, file);
+    claimedHere.set(foldedAgentId(soul.agent.id), file);
     agents.push({
       file,
       contents,
@@ -599,7 +603,7 @@ export const runTemplateAdd = async (
     // read and the write that `stratus agent new` has.
     const claimedNow = plan.agents.length > 0
       ? await declaredAgentIds(env, globalConfigPath(env))
-      : { ids: new Set<string>() };
+      : { holds: () => false };
     const installedAgents: string[] = [];
     const enabledPackages: Array<{ specifier: string; on: boolean }> = [];
     const refusedAgents: string[] = [];
@@ -612,7 +616,7 @@ export const runTemplateAdd = async (
         blockedAgents.push(`${agent.file} — ${agent.blocked}`);
         continue;
       }
-      if (claimedNow.ids.has(agent.id) && !await destinationHoldsId(destination, agent.id)) {
+      if (claimedNow.holds(agent.id) && !await destinationHoldsId(destination, agent.id)) {
         blockedAgents.push(`${agent.file} — something already claims the id ${agent.id}`);
         continue;
       }

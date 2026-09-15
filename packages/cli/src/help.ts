@@ -144,7 +144,7 @@ Commands:
                    list — its standing tool grants, command scopes, and
                    sites, each an "always allow" somebody answered. From the
                    running daemon when one is serving (--gateway, --token),
-                   else from ~/.stratus/agents/<id>.whitelist.json; --format
+                   else from ~/.stratus/agents/<id>/whitelist.json; --format
                    json. "stratus grants revoke <agent> --tool <name> |
                    --scope "<command>" | --origin <origin>" takes one back,
                    and a running daemon stops honouring it at once

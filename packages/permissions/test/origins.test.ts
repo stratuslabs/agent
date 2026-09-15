@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -267,6 +267,7 @@ test('an unreadable whitelist holds an origin for the process and says it was no
   const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-origins-bad-'));
   const file = whitelistPathFor(directory, 'ava');
   // One trailing comma, the hand edit that already cost a grant list once.
+  await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, '{\n  "version": 1,\n  "scopes": [],\n}\n');
 
   const decisions: PermissionDecision[] = [];

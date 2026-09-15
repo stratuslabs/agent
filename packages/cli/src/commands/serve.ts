@@ -23,6 +23,7 @@ import {
   logsDirPath,
   resolveAgentApprovals,
   resolveAgentPrincipals,
+  runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
 } from '@stratusagent/state';
@@ -148,6 +149,16 @@ const serveHeldHome = async (
     writeLine(streams.stderr, `Warning: ${line}`);
     void logWriter?.write({ ts: new Date().toISOString(), level: 'warn', msg: line });
   };
+
+  // With the home claim in hand, this daemon is the exclusive holder of the
+  // state a migration would move — which is the bracket the marked ones
+  // wait for. Every ordinary command defers them (see `requiresExclusive`),
+  // so for an install that is never updated through `stratus update` this
+  // is where the move actually happens: before the stores are opened, so
+  // nothing here reads a path the migration is still populating.
+  for (const migration of await runStateMigrations(env, { exclusive: true })) {
+    log(`state migration ${migration.id}: ${migration.detail ?? migration.description}`);
+  }
 
   // Agents with stored Slack tokens go live in Slack automatically — the
   // tokens are gateway infrastructure secrets in the channels namespace of

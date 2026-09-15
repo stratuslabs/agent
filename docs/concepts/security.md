@@ -7,8 +7,16 @@ linked own the full story.
 
 - `~/.stratus/credentials.json` is `0600` (owner-read-only), and so are
   `~/.stratus/gateway-token`, `~/.stratus/gateway.json`,
-  `~/.stratus/logs/stratusd.jsonl`, and each agent's
-  `<id>.whitelist.json`.
+  `~/.stratus/logs/stratusd.jsonl`, and everything in each agent's own
+  directory — its `sessions.db`, its `memory.jsonl`, and its
+  `whitelist.json`. The directory itself is `0700`.
+- **An agent's durable state is structurally its own.** Sessions, memories,
+  and grants live under `~/.stratus/agents/<id>/`, so a store is opened on
+  one agent's path and there is no query another agent's rows could come
+  back from — the handle does not exist, rather than a filter having
+  remembered to exclude them. What stays fleet-wide is the schedules and a
+  session index carrying routing and status, never a message.
+  ([State layout](../reference/state-layout.md))
 - **Stored sign-ins are endpoint-bound**: a credential saved for one
   endpoint is never sent to an endpoint a project-local config selects.
 - **Channel tokens are gateway infrastructure secrets.** Slack's live under

@@ -1,8 +1,10 @@
 # Memory
 
 Agents remember: facts saved with the built-in `memory.remember` tool
-persist to `~/.stratus/memory.jsonl`, keyed to the agent — so the Ava you
-talk to tomorrow remembers today, from any directory, in every channel.
+persist to `~/.stratus/agents/<id>/memory.jsonl` — one file per agent, in
+that agent's own [state directory](../reference/state-layout.md) — so the
+Ava you talk to tomorrow remembers today, from any directory, in every
+channel, and no read of hers can reach anybody else's facts.
 
 Recall is something the agent does, not only something done to it: every
 request carries the most recent facts (up to 20, within a byte
@@ -39,8 +41,8 @@ turn, where anything that writes to the agent's input could forge it.
 The JSONL is the record and you may edit it: add a line by hand and it is
 recallable; fix a typo and nothing goes stale. Search is served from a
 derived FTS index the CLI writes alongside,
-`~/.stratus/memory.jsonl.index` — safe to delete at any time, it is rebuilt
-from the JSONL on the next recall.
+`memory.jsonl.index` — safe to delete at any time, it is rebuilt from the
+JSONL on the next recall.
 
 The daemon log never records a fact's contents — a memory write or forget
 records the **entry id** it touched, so "when did the agent learn this" has
