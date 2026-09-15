@@ -56,6 +56,13 @@ const LEGACY_DEFAULT_AGENT_IDS = ['demo-agent', 'anthropic-agent', 'openai-agent
  * addressable, and showing the second was a promise the wrapper could not
  * keep. The audit read deliberately keeps both, because saying what the
  * record holds is the one job it has.
+ *
+ * One thing this does not de-duplicate, and does not need to: `topics`
+ * merges per-alias topic *lists* rather than entries, so a colliding id
+ * counts under both. That is a count rather than a control — it can make a
+ * topic look busier than it is and nothing else — and paying for an entry
+ * read per alias to correct it would cost more than the hand-edited case
+ * it serves.
  */
 const firstByAliasOrder = (entries: readonly MemoryEntry[]): MemoryEntry[] => {
   const seen = new Set<string>();
@@ -239,12 +246,15 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
     ...(store.unpin
       ? {
           async unpin(agentId: string, entryId: string) {
+            // Every alias, not the first that answers: the merged view
+            // shows one entry per id, so unpinning it has to mean the id is
+            // no longer pinned anywhere — a pin left behind under a second
+            // alias would go on holding budget with nothing admitting it.
+            let unpinned = false;
             for (const id of aliasIds(agentId)) {
-              if (await store.unpin!(id, entryId)) {
-                return true;
-              }
+              unpinned = (await store.unpin!(id, entryId)) || unpinned;
             }
-            return false;
+            return unpinned;
           },
         }
       : {}),

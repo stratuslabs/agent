@@ -733,7 +733,15 @@ test('one id under two aliases resolves to one entry, the earlier alias winning'
   // The audit read keeps both, because saying what the record holds is the
   // one job it has.
   assert.equal((await store.audit(DEFAULT_STRATUS_AGENT.id)).filter((entry) => entry.id === 'shared:1').length, 2);
-  // And the mutator reaches the one the reads showed.
+  // And the mutators reach the one the reads showed. Unpinning is the
+  // exception that proves the rule: it clears every alias, because the
+  // merged view says the id is one entry and a pin left under the other
+  // would go on holding budget with nothing admitting it.
+  assert.equal((await store.pin!(DEFAULT_STRATUS_AGENT.id, 'shared:1')).pinned, true);
+  assert.deepEqual((await store.pinned!(DEFAULT_STRATUS_AGENT.id)).map((entry) => entry.content), ['the current copy of the rota']);
+  assert.equal(await store.unpin!(DEFAULT_STRATUS_AGENT.id, 'shared:1'), true);
+  assert.deepEqual(await store.pinned!(DEFAULT_STRATUS_AGENT.id, { include: 'allocated' }), []);
+
   assert.equal(await store.forget(DEFAULT_STRATUS_AGENT.id, 'shared:1'), true);
   assert.deepEqual((await store.list(DEFAULT_STRATUS_AGENT.id)).entries.map((entry) => entry.content), ['the inherited copy of the rota']);
 });
