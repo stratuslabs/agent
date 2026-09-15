@@ -1538,12 +1538,14 @@ export interface MemoryListOptions {
 /** Which pins a read wants — see `AgentMemoryStore.pinned`. */
 export interface MemoryPinnedOptions {
   /**
-   * `current`, the default, is the pinned core as the prompt carries it.
-   * `all` also returns pins that are holding budget while outside their
-   * validity window — an operator cannot unpin what no view admits exists,
-   * and those are exactly the entries that make a later pin refuse.
+   * `current`, the default, is the pinned core as the prompt carries it:
+   * live and true now. `allocated` is everything **holding budget** —
+   * superseded and out-of-window pins included — which is a different
+   * question and the one an operator, or a caller re-allocating a merged
+   * budget, actually has. A pin nothing admits exists is one nobody can
+   * unpin, and it is exactly what makes a later pin refuse.
    */
-  validity?: 'current' | 'all';
+  include?: 'current' | 'allocated';
 }
 
 export interface MemorySearchOptions {
@@ -2297,11 +2299,13 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
   async pinned(agentId: string, options: MemoryPinnedOptions = {}): Promise<MemoryEntry[]> {
     const at = this.now();
     const { effective, allocated } = this.pinBudget(agentId);
+    const pins = effective.map((id) => allocated.get(id)).filter((entry): entry is MemoryEntry => entry !== undefined);
+    if (options.include === 'allocated') {
+      return pins.sort(compareMemoryChronology);
+    }
     const live = new Set(this.live(agentId, at).map((entry) => entry.id));
-    return effective
-      .map((id) => allocated.get(id))
-      .filter((entry): entry is MemoryEntry => entry !== undefined && live.has(entry.id)
-        && (options.validity === 'all' || isMemoryEntryCurrent(entry, at)))
+    return pins
+      .filter((entry) => live.has(entry.id) && isMemoryEntryCurrent(entry, at))
       .sort(compareMemoryChronology);
   }
 

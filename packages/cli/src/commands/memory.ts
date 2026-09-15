@@ -127,12 +127,13 @@ export const runMemory = async (
     }
   };
 
-  // `all`, not the default: a pin outside its validity window still holds
-  // its place in the 2 KiB budget and is exactly what makes a later pin
-  // refuse — an operator who cannot see it cannot unpin it, and the
-  // refusal would look like arithmetic that does not add up.
+  // `allocated`, not the default: a pin that is superseded or outside its
+  // validity window still holds its place in the 2 KiB budget and is
+  // exactly what makes a later pin refuse — an operator who cannot see it
+  // cannot unpin it, and the refusal would look like arithmetic that does
+  // not add up.
   const pinnedIds = async (): Promise<Set<string>> =>
-    new Set((store.pinned ? await store.pinned(command.agentId, { validity: 'all' }) : []).map((entry) => entry.id));
+    new Set((store.pinned ? await store.pinned(command.agentId, { include: 'allocated' }) : []).map((entry) => entry.id));
 
   if (command.action === 'list') {
     // `all`, not the default: an operator has to be able to see an expired

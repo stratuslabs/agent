@@ -428,11 +428,13 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
     async pinned(agentId, pinnedOptions: MemoryPinnedOptions = {}) {
       const at = now();
       const { effective, allocated } = pinBudget(agentId);
+      const pins = effective.map((id) => allocated.get(id)).filter((entry): entry is MemoryEntry => entry !== undefined);
+      if (pinnedOptions.include === 'allocated') {
+        return pins.sort(compareMemoryChronology);
+      }
       const alive = new Set(liveEntries(agentId, at).map((entry) => entry.id));
-      return effective
-        .map((id) => allocated.get(id))
-        .filter((entry): entry is MemoryEntry => entry !== undefined && alive.has(entry.id)
-          && (pinnedOptions.validity === 'all' || isMemoryEntryCurrent(entry, at)))
+      return pins
+        .filter((entry) => alive.has(entry.id) && isMemoryEntryCurrent(entry, at))
         .sort(compareMemoryChronology);
     },
 

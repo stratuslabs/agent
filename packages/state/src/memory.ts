@@ -18,6 +18,7 @@ import {
   memoryContentByteLength,
   memoryEntryFields,
   MEMORY_PINNED_MAX_BYTES,
+  MEMORY_READ_MAX_BYTES,
   memoryEntryTokens,
   pinnedCapRefusal,
   supersededMemoryIdsAt,
@@ -934,16 +935,26 @@ export const createFileMemoryStore = (
       // validity window stay: keeping an expired fact findable is the point
       // of separating validity from supersession, and the caller reads its
       // status from the bounds that come back with it.
-      const rows = database.prepare(
-        'SELECT id, agent_id, content, created_at, trust, origin, fields FROM memory_fts'
+      // The retirement join, and the oversized filter, spelled once: both
+      // reads below have to select from exactly the same candidates.
+      const liveMatch = 'FROM memory_fts'
         + ' WHERE memory_fts MATCH ? AND agent_id = ?'
         + ' AND id NOT IN ('
         + '   SELECT target_id FROM revisions WHERE agent_id = ?'
         + '     AND (valid_from_ms IS NULL OR valid_from_ms <= ?)'
         + '     AND (valid_until_ms IS NULL OR valid_until_ms > ?)'
-        + ' )'
+        + ' )';
+      // An entry no budget could ever admit is skipped by `boundMemoryRead`
+      // rather than allowed to starve everything behind it — but that
+      // helper can only skip what it was handed, and a `LIMIT` that filled
+      // with oversized matches would hand it nothing else. Filtered in SQL
+      // by the same rule, on bytes (`length` over TEXT counts characters),
+      // so the bounded read sees the admissible ones it would have kept.
+      const admissible = `${liveMatch} AND length(CAST(content AS BLOB)) <= ?`;
+      const rows = database.prepare(
+        `SELECT id, agent_id, content, created_at, trust, origin, fields ${admissible}`
         + ' ORDER BY created_at DESC, id ASC LIMIT ?',
-      ).all(match, agentId, agentId, at, at, clamped + 1) as {
+      ).all(match, agentId, agentId, at, at, MEMORY_READ_MAX_BYTES, clamped + 1) as {
         id: string;
         agent_id: string;
         content: string;
@@ -965,6 +976,14 @@ export const createFileMemoryStore = (
         };
       });
       const bounded = boundMemoryRead(candidates, clamped);
+      // A match the filter above removed is still a live entry beyond what
+      // came back, which is what `truncated` means — so it is asked for
+      // rather than inferred, and the flag says the same thing it would
+      // have said had `boundMemoryRead` done the skipping itself.
+      const oversized = bounded.truncated
+        ? undefined
+        : database.prepare(`SELECT 1 ${liveMatch} AND length(CAST(content AS BLOB)) > ? LIMIT 1`)
+          .get(match, agentId, agentId, at, at, MEMORY_READ_MAX_BYTES);
       // Counted for the entries actually returned, never for everything the
       // match found: usage is meant to say what reached a prompt.
       const counted = noteRecalled(database, agentId, bounded.entries, now().toISOString());
@@ -973,7 +992,7 @@ export const createFileMemoryStore = (
           const usage = counted.get(entry.id);
           return usage === undefined ? entry : { ...entry, usage };
         }),
-        truncated: bounded.truncated,
+        truncated: bounded.truncated || oversized !== undefined,
         strategy,
       };
     },
@@ -1062,17 +1081,20 @@ export const createFileMemoryStore = (
       const at = now();
       const records = await readRecords();
       const { effective, allocated } = pinBudgetFor(records, agentId);
+      const pins = effective.map((id) => allocated.get(id)).filter((entry): entry is MemoryEntry => entry !== undefined);
+      // `allocated` is everything holding budget, which is what a caller
+      // re-allocating a merged budget and an operator hunting the entry
+      // behind a refusal both need.
+      if (pinnedOptions.include === 'allocated') {
+        return pins.sort(compareMemoryChronology);
+      }
       // A pinned fact that is not true now does not reach the prompt — one
       // rule, both bounds, the pinned core included. It keeps its place in
       // the budget, which is a property of the record rather than of the
-      // clock, and comes back the moment its window opens; `all` is how the
-      // operator's views see the one holding space they cannot otherwise
-      // account for.
+      // clock, and comes back the moment its window opens.
       const live = new Set(liveEntriesFor(records, agentId, at).map((entry) => entry.id));
-      return effective
-        .map((id) => allocated.get(id))
-        .filter((entry): entry is MemoryEntry => entry !== undefined && live.has(entry.id)
-          && (pinnedOptions.validity === 'all' || isMemoryEntryCurrent(entry, at)))
+      return pins
+        .filter((entry) => live.has(entry.id) && isMemoryEntryCurrent(entry, at))
         .sort(compareMemoryChronology);
     },
 

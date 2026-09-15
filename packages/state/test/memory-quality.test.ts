@@ -8,6 +8,7 @@ import {
   buildMemoryInjection,
   InMemoryAgentMemoryStore,
   MEMORY_PINNED_MAX_BYTES,
+  MEMORY_READ_MAX_BYTES,
   memoryContentByteLength,
   memoryValidityAt,
   renderMemorySection,
@@ -586,7 +587,7 @@ test('a pin outside its validity window holds budget and is visible to an operat
   assert.equal((await store.pin!('ava', later.id)).pinned, false);
   // And the operator's view can see the one holding the space, or the
   // refusal reads as arithmetic that does not add up.
-  assert.deepEqual((await store.pinned!('ava', { validity: 'all' })).map((entry) => entry.id), [future.id]);
+  assert.deepEqual((await store.pinned!('ava', { include: 'allocated' })).map((entry) => entry.id), [future.id]);
 });
 
 test('two agents holding one imported id keep their own re-assertions, in list and in search alike', async () => {
@@ -622,4 +623,91 @@ test('two agents holding one imported id keep their own re-assertions, in list a
   assert.equal((await store.list('juno')).entries[0]?.trust, 'agent');
   assert.equal((await store.search('ava', 'survey')).entries[0]?.trust, 'user');
   assert.equal((await store.search('juno', 'survey')).entries[0]?.trust, 'agent');
+});
+
+test('the merged alias budget counts a superseded pin, which the aliases still reserve', async () => {
+  const filePath = await newFile();
+  let tick = AT.getTime();
+  const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, { now: () => new Date((tick += 1000)) }));
+  // A pinned fact under the current id, then superseded: each store keeps
+  // reserving its bytes, so the wrapper must see them too — a merged budget
+  // that asked only for what renders would hand the space to a legacy pin
+  // and drop it again the moment the successor was forgotten.
+  const held = await store.append(DEFAULT_STRATUS_AGENT.id, 'a'.repeat(1500));
+  assert.equal((await store.pin!(DEFAULT_STRATUS_AGENT.id, held.id)).pinned, true);
+  const successor = await store.append(DEFAULT_STRATUS_AGENT.id, 'the replacement', { supersedes: held.id });
+  await appendFile(filePath, `${JSON.stringify({
+    id: 'demo-agent:memory:legacy',
+    agentId: 'demo-agent',
+    content: 'b'.repeat(1000),
+    createdAt: '2026-01-01T00:00:00.000Z',
+  })}\n`);
+
+  assert.deepEqual(await store.pinned!(DEFAULT_STRATUS_AGENT.id), []);
+  assert.equal((await store.pin!(DEFAULT_STRATUS_AGENT.id, 'demo-agent:memory:legacy')).pinned, false);
+  // And the reserved one is visible to an operator under `allocated`.
+  assert.deepEqual(
+    (await store.pinned!(DEFAULT_STRATUS_AGENT.id, { include: 'allocated' })).map((entry) => entry.id),
+    [held.id],
+  );
+  // Forgetting the successor brings it back with nothing displaced.
+  assert.equal(await store.forget(DEFAULT_STRATUS_AGENT.id, successor.id), true);
+  assert.deepEqual((await store.pinned!(DEFAULT_STRATUS_AGENT.id)).map((entry) => entry.id), [held.id]);
+});
+
+test('an inherited legacy memory can be superseded, by the id recall handed out', async () => {
+  const filePath = await newFile();
+  let tick = AT.getTime();
+  await writeFile(filePath, `${JSON.stringify({
+    id: 'demo-agent:memory:1',
+    agentId: 'demo-agent',
+    content: 'the deploy runs on MySQL',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  })}\n`);
+  const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, { now: () => new Date((tick += 1000)) }));
+
+  // `recall` surfaces the inherited entry under its legacy id, and the tool
+  // tells the model to supersede by recalled id — so the revision has to be
+  // filed where the fact it retires lives, or every inherited fact is
+  // unrevisable.
+  const recalled = (await store.search(DEFAULT_STRATUS_AGENT.id, 'deploy')).entries[0]!;
+  assert.equal(recalled.id, 'demo-agent:memory:1');
+  const revision = await store.append(DEFAULT_STRATUS_AGENT.id, 'the deploy runs on Postgres', { supersedes: recalled.id });
+
+  assert.deepEqual((await store.list(DEFAULT_STRATUS_AGENT.id)).entries.map((entry) => entry.content), ['the deploy runs on Postgres']);
+  assert.deepEqual((await store.search(DEFAULT_STRATUS_AGENT.id, 'deploy')).entries.map((entry) => entry.id), [revision.id]);
+  // An id belonging to nobody still refuses, in the store's own words.
+  await assert.rejects(
+    () => store.append(DEFAULT_STRATUS_AGENT.id, 'not mine', { supersedes: 'someone:else:1' }),
+    /belongs to this agent/,
+  );
+});
+
+test('an oversized match never starves the admissible ones behind it', async () => {
+  const filePath = await newFile();
+  let tick = AT.getTime();
+  const store = createFileMemoryStore(filePath, { now: () => new Date((tick += 1000)) });
+  // Hand-written, from before the per-entry cap: each is larger than any
+  // bounded read could admit. `boundMemoryRead` skips such an entry rather
+  // than letting it starve the read — but it can only skip what it was
+  // handed, and a limit filled with these would hand it nothing else.
+  for (let index = 0; index < 5; index += 1) {
+    await appendFile(filePath, `${JSON.stringify({
+      id: `ava:memory:huge-${index}`,
+      agentId: 'ava',
+      content: `rookery ${'x'.repeat(MEMORY_READ_MAX_BYTES + 10)}`,
+      createdAt: `2026-03-0${index + 1}T00:00:00.000Z`,
+    })}\n`);
+  }
+  await appendFile(filePath, `${JSON.stringify({
+    id: 'ava:memory:small',
+    agentId: 'ava',
+    content: 'the rookery survey is quarterly',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  })}\n`);
+
+  const found = await store.search('ava', 'rookery', { limit: 3 });
+  assert.deepEqual(found.entries.map((entry) => entry.id), ['ava:memory:small']);
+  // The skipped ones are still live entries beyond what came back.
+  assert.equal(found.truncated, true);
 });

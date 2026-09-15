@@ -33,18 +33,24 @@ const optionalString = (value: unknown): string | undefined => {
 };
 
 /**
- * An ISO-8601 instant a model wrote, or a refusal naming the field. A
- * validity bound that silently failed to parse is the worst outcome
- * available: the fact would read as unbounded and outlive the thing it was
- * about, which is the confusion the two fields exist to prevent.
+ * ISO-8601, and checked as ISO-8601 rather than as whatever `Date.parse`
+ * will take. `Date.parse` accepts `04/01/2026` and `1` and gives each an
+ * interpretation — one of them locale-shaped and one of them a year — so
+ * parsing alone would quietly store a different window than the model
+ * meant, and the fact would enter or leave the prompt on the wrong day.
+ * A bound that silently failed to parse is the same hazard running the
+ * other way: the fact reads as unbounded and outlives the thing it was
+ * about. So the shape is asserted first, then the value.
  */
+const ISO_8601_INSTANT = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
 const validityBound = (value: unknown, field: string): string | undefined => {
   const raw = optionalString(value);
   if (raw === undefined) {
     return undefined;
   }
   const parsed = Date.parse(raw);
-  if (Number.isNaN(parsed)) {
+  if (!ISO_8601_INSTANT.test(raw) || Number.isNaN(parsed)) {
     throw new Error(`${field} must be an ISO-8601 instant such as 2026-04-01T00:00:00Z; ${raw} is not one. Nothing was stored.`);
   }
   return new Date(parsed).toISOString();

@@ -131,10 +131,26 @@ test('memory.remember carries the wider shape, and refuses a supersession that i
 
   // A bound the model wrote as prose is refused rather than dropped: an
   // unbounded fact that was meant to expire is the worse outcome.
-  await assert.rejects(
-    () => remember.execute({ fact: 'x', validUntil: 'next Tuesday' }, sessionFor('ava')),
-    /must be an ISO-8601 instant/,
-  );
+  for (const bound of [
+    'next Tuesday',
+    // Parseable, and not what the parameter says: `Date.parse` gives
+    // `04/01/2026` a locale-shaped reading and `1` a year, so accepting
+    // either would store a different window than the model meant and the
+    // fact would enter or leave the prompt on the wrong day.
+    '04/01/2026',
+    '1',
+    'Wed, 01 Apr 2026 00:00:00 GMT',
+  ]) {
+    await assert.rejects(
+      () => remember.execute({ fact: 'x', validUntil: bound }, sessionFor('ava')),
+      /must be an ISO-8601 instant/,
+      bound,
+    );
+  }
+  // The shapes ISO-8601 actually names are taken, date-only included.
+  for (const bound of ['2026-04-01', '2026-04-01T09:30Z', '2026-04-01T09:30:00.000Z', '2026-04-01T09:30:00+01:00']) {
+    await remember.execute({ fact: `valid until ${bound}`, validUntil: bound }, sessionFor('ava'));
+  }
   await assert.rejects(() => remember.execute({ fact: 'x', kind: 'trivia' }, sessionFor('ava')), /"kind" must be one of/);
   // A window that closes before it opens describes nothing: the entry
   // would be not-yet-valid, then expired, and never reach a prompt —

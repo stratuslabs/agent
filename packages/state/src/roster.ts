@@ -10,7 +10,6 @@ import {
   boundMemoryRead,
   clampMemoryRecallLimit,
   compareMemoryChronology,
-  isMemoryEntryCurrent,
   memoryContentByteLength,
   mergeMemoryTopics,
   pinnedCapRefusal,
@@ -50,13 +49,7 @@ const LEGACY_DEFAULT_AGENT_IDS = ['demo-agent', 'anthropic-agent', 'openai-agent
 // in `list`, absent from `recall`. Merged batches sort with everything else
 // by the shared ordering rule, and bounds apply after the merge, never per
 // alias, or a busy legacy id crowds out the others.
-export const withLegacyDefaultMemories = (
-  store: AgentMemoryStore,
-  // A test seam only: the merged pin budget has to decide what is true now
-  // after it has allocated, and a frozen clock is the only way to assert
-  // that against a fixed validity window.
-  { now = () => new Date() }: { now?: () => Date } = {},
-): AgentMemoryStore => {
+export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryStore => {
   const aliasIds = (agentId: string): string[] =>
     agentId === DEFAULT_STRATUS_AGENT.id
       ? [DEFAULT_STRATUS_AGENT.id, ...LEGACY_DEFAULT_AGENT_IDS]
@@ -80,13 +73,21 @@ export const withLegacyDefaultMemories = (
     // budget that skipped the pins outside their validity window would
     // free their bytes, admit a later pin, and drop it again when a window
     // opened. The caller's own filter is applied afterwards.
-    const batches = await Promise.all(ids.map((id) => store.pinned!(id, { validity: 'all' })));
+    const batches = await Promise.all(ids.map((id) => store.pinned!(id, { include: 'allocated' })));
     const merged = new Map(batches.flat().map((entry) => [entry.id, entry]));
     const sizeOf = new Map([...merged].map(([id, entry]) => [id, memoryContentByteLength(entry.content)]));
     const budget = applyMemoryPinBudget([...merged.keys()], (id) => sizeOf.get(id));
-    const visible = pinnedOptions?.validity === 'all'
-      ? budget.effective
-      : budget.effective.filter((id) => isMemoryEntryCurrent(merged.get(id)!, now()));
+    // What renders is each store's own answer to "current", intersected
+    // with the merged budget — the wrapper cannot tell a superseded pin
+    // from a live one by looking at the entry, and validity alone would
+    // let a retired fact through.
+    let visible = budget.effective;
+    if (pinnedOptions?.include !== 'allocated') {
+      const current = new Set(
+        (await Promise.all(ids.map((id) => store.pinned!(id)))).flat().map((entry) => entry.id),
+      );
+      visible = budget.effective.filter((id) => current.has(id));
+    }
     return {
       effective: visible.map((id) => merged.get(id)!),
       ids: new Set(budget.effective),
@@ -96,7 +97,26 @@ export const withLegacyDefaultMemories = (
   };
 
   return {
-    append: (agentId, content, options) => store.append(agentId, content, options),
+    async append(agentId, content, options) {
+      const ids = aliasIds(agentId);
+      if (ids.length === 1 || options?.supersedes === undefined) {
+        return store.append(agentId, content, options);
+      }
+      // A successor has to be filed where the fact it retires lives, or the
+      // retirement does not apply: every store resolves `supersedes` inside
+      // one agent's own entries. `recall` surfaces inherited entries under
+      // their legacy id and the tool tells the model to supersede by
+      // recalled id, so writing the revision under the current id alone
+      // would make every inherited fact unrevisable.
+      for (const id of ids) {
+        if ((await store.list(id, { validity: 'all' })).entries.some((entry) => entry.id === options.supersedes)) {
+          return store.append(id, content, options);
+        }
+      }
+      // Nowhere to file it — let the store say so, in the words it already
+      // has for an id that is not the caller's to supersede.
+      return store.append(agentId, content, options);
+    },
     async list(agentId, options) {
       const ids = aliasIds(agentId);
       if (ids.length === 1) {
