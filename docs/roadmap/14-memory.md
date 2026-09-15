@@ -230,7 +230,7 @@ goes stale, and a memory that is never curated goes noisy.
 
 - **`migrateLegacyMemory` is not the hook for this, and assuming it was is the
   mistake this bullet exists to prevent.** It lives in
-  `packages/state/src/index.ts`, not the gateway, and what it does is relocate a
+  `packages/state/src/migrations.ts`, not the gateway, and what it does is relocate a
   *project-local* `.stratus/memory.jsonl` into the global JSONL file — JSONL to
   JSONL, one directory to another. It has no knowledge of an index and would
   not acquire any.
