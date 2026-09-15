@@ -51,7 +51,11 @@ export const agentsDirPath = (env: StateEnvironment): string =>
  * archive it leaves behind is derived from.
  */
 export const legacyMemoryFilePath = (env: StateEnvironment): string =>
-  path.join(stratusHomePath(env), MEMORY_FILENAME);
+  legacyMemoryFileIn(stratusHomePath(env));
+
+/** {@link legacyMemoryFilePath} against an explicit state directory. */
+export const legacyMemoryFileIn = (stateDir: string): string =>
+  path.join(stateDir, MEMORY_FILENAME);
 
 /**
  * The shared session database the whole fleet used to write to. Same story
@@ -59,7 +63,15 @@ export const legacyMemoryFilePath = (env: StateEnvironment): string =>
  * rows it also held move to {@link fleetDbPath}.
  */
 export const legacySessionDbPath = (env: StateEnvironment): string =>
-  path.join(stratusHomePath(env), SESSIONS_DB_FILENAME);
+  legacySessionDbIn(stratusHomePath(env));
+
+/**
+ * {@link legacySessionDbPath} against an explicit state directory — what a
+ * host that pointed the stores somewhere other than `~/.stratus` has to ask
+ * about, since that is the directory its sessions would be stranded in.
+ */
+export const legacySessionDbIn = (stateDir: string): string =>
+  path.join(stateDir, SESSIONS_DB_FILENAME);
 
 /**
  * Where tools put files they produce — a screenshot a channel then uploads,

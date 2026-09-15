@@ -8,8 +8,10 @@ import {
   agentMemoryFilePath,
   agentSessionDbPath,
   agentStateDirPath,
+  agentsDirIn,
   agentsDirPath,
   fleetDbPath,
+  legacySessionDbIn,
   stratusHomePath,
   legacyMemoryFilePath,
   legacySessionDbPath,
@@ -393,6 +395,14 @@ const copySharedMemory = async (env: StateEnvironment, report: LayoutMigrationRe
     );
   }
   for (const [agentId, lines] of byAgent) {
+    // The directory first, before anything reads a path *under* it. An id
+    // whose directory name is already a file makes the destination read
+    // fail with ENOTDIR, and this copy runs before every CLI command — so
+    // rethrowing that would refuse `serve` and every other state-writing
+    // command indefinitely, over one agent's unusable name.
+    if (!(await agentDirectoryOrQuarantine(env, agentId, `${lines.length} memory record(s)`, report))) {
+      continue;
+    }
     const destination = agentMemoryFilePath(env, agentId);
     let existing = new Set<string>();
     try {
@@ -404,9 +414,6 @@ const copySharedMemory = async (env: StateEnvironment, report: LayoutMigrationRe
     }
     const fresh = lines.filter((line) => !existing.has(line));
     if (fresh.length === 0) {
-      continue;
-    }
-    if (!(await agentDirectoryOrQuarantine(env, agentId, `${fresh.length} memory record(s)`, report))) {
       continue;
     }
     // Appended, never rewritten: the JSONL is append-only because that is
@@ -525,10 +532,10 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
  * A database that will not open or will not answer counts as holding
  * something, because "cannot tell" must not read as "nothing to lose".
  */
-export const legacyStateHeld = async (
-  env: StateEnvironment,
+export const legacyStateHeldIn = async (
+  stateDir: string,
 ): Promise<{ sessions: number; schedules: number } | undefined> => {
-  const filePath = legacySessionDbPath(env);
+  const filePath = legacySessionDbIn(stateDir);
   if (!(await exists(filePath))) {
     return undefined;
   }
@@ -555,22 +562,42 @@ export const legacyStateHeld = async (
   }
 };
 
+/** {@link legacyStateHeldIn} against the state directory `env` names. */
+export const legacyStateHeld = (
+  env: StateEnvironment,
+): Promise<{ sessions: number; schedules: number } | undefined> =>
+  legacyStateHeldIn(stratusHomePath(env));
+
 /**
- * Whether this home still holds state a daemon of the older build is
- * writing — and therefore whether the move needs the home to itself.
+ * Whether this state directory still holds state a daemon of the older
+ * build is writing — and therefore whether the move needs it to itself.
  *
- * The shared session database, or a grant file under its old name. A fresh
- * install has neither, needs no bracket, and gets the migration applied as
- * the no-op it is on the next ordinary command rather than being left with
- * an old schema stamp waiting for a daemon start it may not get for days.
+ * A pre-layout session database counts **whatever its row count**, because
+ * an empty one is not the same as a spent one: a home initialized a minute
+ * ago has no conversations yet and a daemon holding that very file open,
+ * about to write the first. Letting an ordinary command migrate it without
+ * the claim would send that first turn into a file already renamed out of
+ * the way.
+ *
+ * What an empty database *can* mean is a husk — SQLite creates one on open,
+ * and `stratus schedules` resolving the old pathname a moment before the
+ * rename leaves one behind, since `DatabaseSync` has no open-without-create.
+ * The archive beside it is what tells the two apart: a `.migrated` file
+ * means the move already happened here, so an empty database at the old
+ * name is something that came back afterwards and has nothing in it to
+ * lose. Row count alone cannot make that distinction, and an archive alone
+ * cannot either — a restored backup would have both — so this asks for both.
  */
-export const hasBracketedLegacyState = async (env: StateEnvironment): Promise<boolean> => {
-  const held = await legacyStateHeld(env);
-  if (held !== undefined && (held.sessions > 0 || held.schedules > 0)) {
-    return true;
+export const hasBracketedLegacyStateIn = async (stateDir: string): Promise<boolean> => {
+  const held = await legacyStateHeldIn(stateDir);
+  if (held !== undefined) {
+    const spent = await exists(`${legacySessionDbIn(stateDir)}.migrated`);
+    if (!spent || held.sessions > 0 || held.schedules > 0) {
+      return true;
+    }
   }
   try {
-    return (await readdir(agentsDirPath(env))).some((entry) => entry.endsWith(LEGACY_WHITELIST_SUFFIX));
+    return (await readdir(agentsDirIn(stateDir))).some((entry) => entry.endsWith(LEGACY_WHITELIST_SUFFIX));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return false;
@@ -578,6 +605,10 @@ export const hasBracketedLegacyState = async (env: StateEnvironment): Promise<bo
     throw error;
   }
 };
+
+/** {@link hasBracketedLegacyStateIn} against the state directory `env` names. */
+export const hasBracketedLegacyState = (env: StateEnvironment): Promise<boolean> =>
+  hasBracketedLegacyStateIn(stratusHomePath(env));
 
 const emptyReport = (): LayoutMigrationReport => ({
   agentsWithSessions: 0,

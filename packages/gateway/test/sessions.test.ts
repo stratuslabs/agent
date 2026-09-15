@@ -229,3 +229,37 @@ test('a gateway started on a home whose pre-15a state has not moved refuses rath
   await gateway.stop();
   await rm(home, { recursive: true, force: true });
 });
+
+test('the refusal asks about the state directory the stores were opened on', async () => {
+  const { createGateway } = await import('../src/index.ts');
+  const { legacySessionDbIn } = await import('@stratusagent/state');
+  const { DatabaseSync } = await import('node:sqlite');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // A host that pointed the stores somewhere other than ~/.stratus. The
+  // sessions it would strand are in the directory it chose, so asking about
+  // the home instead answers "fine" and strands them silently.
+  const stateDir = path.join(home, 'elsewhere');
+  await mkdir(stateDir, { recursive: true });
+  const seeded = new DatabaseSync(legacySessionDbIn(stateDir));
+  seeded.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, status TEXT NOT NULL,
+      body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )
+  `);
+  seeded
+    .prepare('INSERT INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('old-1', 'ava', 'completed', '{}', 'x', 'x');
+  seeded.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir });
+  await assert.rejects(() => gateway.start(), (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    // Names the directory it actually found the state in, and says that
+    // `stratus update` is not the remedy for a directory it does not know.
+    return message.includes(stateDir) && /state directory of your own choosing/.test(message);
+  });
+  await gateway.stop();
+  await rm(home, { recursive: true, force: true });
+});

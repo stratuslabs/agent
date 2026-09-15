@@ -34,7 +34,9 @@ export {
   credentialsPath,
   agentsDirPath,
   legacyMemoryFilePath,
+  legacyMemoryFileIn,
   legacySessionDbPath,
+  legacySessionDbIn,
   workspacesDirPath,
   skillsDirPath,
   agentWorkspacePath,
@@ -121,7 +123,13 @@ export {
   runStateMigrations,
 } from './migrations.ts';
 
-export { drainSharedMemory, hasBracketedLegacyState, legacyStateHeld } from './layout-migration.ts';
+export {
+  drainSharedMemory,
+  hasBracketedLegacyState,
+  hasBracketedLegacyStateIn,
+  legacyStateHeld,
+  legacyStateHeldIn,
+} from './layout-migration.ts';
 
 export {
   ConfigFileError,

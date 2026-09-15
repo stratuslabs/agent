@@ -112,7 +112,7 @@ import {
   createFileCredentialResolver,
   createHomeMemoryStore,
   drainSharedMemory,
-  hasBracketedLegacyState,
+  hasBracketedLegacyStateIn,
   createRuntimeProvider,
   DEFAULT_STRATUS_AGENT,
   isRegisteredProviderName,
@@ -2828,12 +2828,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // its own would be asserting an exclusivity nobody gave it. `stratus
     // serve` runs the migration before it ever gets here, so this only
     // fires for a host wiring the gateway up itself.
-    if (await hasBracketedLegacyState(env)) {
+    // Against `stateDir` — the directory the stores were actually opened
+    // on — rather than the one `env` names. A host that pointed them
+    // somewhere else would otherwise be told its home is fine while the
+    // sessions it is stranding sit in the directory it chose.
+    if (await hasBracketedLegacyStateIn(stateDir)) {
       throw new Error(
-        `${stratusHomePath(env)} still holds pre-per-agent state (a shared sessions.db, or an <id>.whitelist.json beside the souls), `
+        `${stateDir} still holds pre-per-agent state (a shared sessions.db, or an <id>.whitelist.json beside the souls), `
         + 'and serving it now would strand every session, schedule, and grant in it. '
-        + 'Run `stratus update`, or — for a host starting the gateway itself — claim the home with `claimHome` and '
-        + "await `runStateMigrations(env, { exclusive: true })` from @stratusagent/state before calling start().",
+        + (stateDir === stratusHomePath(env)
+          ? 'Run `stratus update`, or — for a host starting the gateway itself — claim the home with `claimHome` and '
+            + 'await `runStateMigrations(env, { exclusive: true })` from @stratusagent/state before calling start().'
+          : 'This is a state directory of your own choosing, which `stratus update` does not migrate: move that state '
+            + 'into the layout yourself, or point `stateDir` at a directory that has been through it.'),
       );
     }
     // Before the sweeps below read a single session id: the index and the

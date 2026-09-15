@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -19,6 +19,8 @@ import {
   fleetDbPath,
   legacyMemoryFilePath,
   legacySessionDbPath,
+  legacySessionDbIn,
+  hasBracketedLegacyStateIn,
   pendingStateMigrations,
   readStateStamp,
   runStateMigrations,
@@ -435,6 +437,7 @@ test('an empty database left at the old pathname is not mistaken for un-migrated
   const env = { homeDir: home };
   await seedSharedState(home);
   await runStateMigrations(env, { exclusive: true });
+  // The archive beside it is what makes the husk a husk.
 
   // SQLite creates a database on open and `DatabaseSync` has no
   // open-without-create, so a process that resolved the old pathname a
@@ -483,4 +486,69 @@ test('a legacy database that will not answer counts as holding something', async
   // this build cannot make sense of is the safe direction.
   await writeFile(legacySessionDbPath(env), 'this is not a database');
   assert.equal(await hasBracketedLegacyState(env), true);
+});
+
+test('an empty database with no archive beside it still needs the bracket', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // A home initialized a minute ago: no conversations yet, and a daemon of
+  // the older build holding that very file open, about to write the first.
+  // Row count alone cannot tell this from a spent husk, and migrating it
+  // without the claim would send that first turn into a file already
+  // renamed out of the way.
+  const fresh = new DatabaseSync(legacySessionDbPath(env));
+  fresh.exec('CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, status TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)');
+  fresh.close();
+
+  assert.deepEqual(await legacyStateHeld(env), { sessions: 0, schedules: 0 });
+  assert.equal(await hasBracketedLegacyState(env), true);
+  // So the ordinary path defers it, and the stamp stays back.
+  assert.deepEqual(
+    (await runStateMigrations(env)).map((result) => result.id),
+    ['0001-owner-only-state-files', '0002-provenance-labels'],
+  );
+  await stat(legacySessionDbPath(env));
+});
+
+test('the bracket is asked about the state directory in use, not the home', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // A host that pointed the stores somewhere other than ~/.stratus: the
+  // sessions it would strand are in the directory it chose, so that is the
+  // directory the question is about.
+  const elsewhere = path.join(home, 'elsewhere');
+  await mkdir(elsewhere, { recursive: true });
+  const at = '2026-01-01T00:00:00.000Z';
+  const db = new DatabaseSync(legacySessionDbIn(elsewhere));
+  db.exec('CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, status TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)');
+  db.prepare('INSERT INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('e-1', 'ava', 'completed', '{}', at, at);
+  db.close();
+
+  assert.equal(await hasBracketedLegacyStateIn(elsewhere), true);
+  // And the home itself is untouched and clean, which is exactly the answer
+  // that would have let those sessions be stranded silently.
+  assert.equal(await hasBracketedLegacyState(env), false);
+});
+
+test('an id whose directory is a file does not break the copy that runs before every command', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // `agents/ava.md` is a file, and `ava.md` is a valid legacy id, so the
+  // destination read under it fails with ENOTDIR. This copy runs before
+  // every CLI command, so rethrowing would refuse `serve` — and every other
+  // state-writing command — indefinitely, over one agent's unusable name.
+  await writeFile(path.join(agentsDirPath(env), 'blocked.md'), 'a soul file in the way');
+  await appendFile(
+    legacyMemoryFilePath(env),
+    `${JSON.stringify({ id: 'blocked:memory:1', agentId: 'blocked.md', content: 'nowhere to go', createdAt: '2026-01-01T00:00:00.000Z' })}\n`,
+  );
+
+  const drained = await drainSharedMemory(env);
+  assert.match(drained ?? '', /QUARANTINED/);
+  assert.match(drained ?? '', /blocked\.md/);
+  // The agents that can move still moved.
+  const memory = createHomeMemoryStore(env);
+  assert.deepEqual((await memory.list('ava')).entries.map((entry) => entry.content), ['likes jazz']);
 });
