@@ -5004,7 +5004,7 @@ test('recent records reach back through a rotated generation', async () => {
   assert.deepEqual(records.map((record) => record.msg), Array.from({ length: 10 }, (_, i) => `line ${i}`));
 });
 
-test('the structured log names the memory entry a write or forget touched — and never its content', () => {
+test('the structured log names the memory entry a write, forget, supersession, or pin touched — and never its content', () => {
   const completed = eventDetail({
     type: 'tool.completed',
     sessionId: 'sess-1',
@@ -5037,6 +5037,42 @@ test('the structured log names the memory entry a write or forget touched — an
     },
   });
   assert.deepEqual(recalled, { tool: 'memory.recall', ok: true });
+
+  // A supersession names both halves of the revision — the entry written
+  // and the one it retired — because "when did the agent stop believing
+  // this" is unanswerable later from anything else.
+  const superseded = eventDetail({
+    type: 'tool.completed',
+    sessionId: 'sess-1',
+    result: {
+      callId: 'call-4',
+      toolName: 'memory.remember',
+      ok: true,
+      output: { remembered: true, id: 'ava:memory:new', supersedes: 'ava:memory:old' },
+    },
+  });
+  assert.deepEqual(superseded, { tool: 'memory.remember', ok: true, entry: 'ava:memory:new', supersedes: 'ava:memory:old' });
+
+  const pinned = eventDetail({
+    type: 'tool.completed',
+    sessionId: 'sess-1',
+    result: { callId: 'call-5', toolName: 'memory.pin', ok: true, output: { pinned: true, id: 'ava:memory:abc', bytes: 42 } },
+  });
+  assert.deepEqual(pinned, { tool: 'memory.pin', ok: true, entry: 'ava:memory:abc', pinned: true });
+
+  // A refused pin is still a decision worth a line, and still names only
+  // the id: the refusal text quotes the cap, never the fact.
+  const refused = eventDetail({
+    type: 'tool.completed',
+    sessionId: 'sess-1',
+    result: {
+      callId: 'call-6',
+      toolName: 'memory.pin',
+      ok: true,
+      output: { pinned: false, id: 'ava:memory:abc', bytes: 2000, reason: 'The pinned core is capped at 2048 UTF-8 bytes...' },
+    },
+  });
+  assert.deepEqual(refused, { tool: 'memory.pin', ok: true, entry: 'ava:memory:abc', pinned: false });
 });
 
 test('the structured log does not grow a usage line when a session completes', () => {
@@ -10718,6 +10754,112 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
   const nothing = createStreams();
   assert.equal(await runCli({ argv: ['memory', 'reassert', 'ava', '--trust', 'user', '--all-unknown'], streams: nothing.streams, env }), 0);
   assert.match(nothing.output.stdout, /nothing to re-assert/);
+});
+
+test('stratus memory search, pin, forget, and audit work the record the way the agent’s own tools do', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-quality-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const line = (entry: Record<string, unknown>): string => JSON.stringify(entry);
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), [
+    line({ id: 'ava:memory:1', agentId: 'ava', content: 'Dylan prefers short answers.', createdAt: '2026-01-01T00:00:00.000Z', trust: 'user', kind: 'preference', about: ['Dylan'] }),
+    line({ id: 'ava:memory:2', agentId: 'ava', content: 'It now runs on Postgres.', createdAt: '2026-02-01T00:00:00.000Z', trust: 'agent', about: ['deploy pipeline'] }),
+    line({ id: 'ava:memory:3', agentId: 'ava', content: 'The freeze is over.', createdAt: '2026-02-02T00:00:00.000Z', trust: 'agent', validUntil: '2026-02-03T00:00:00.000Z' }),
+    line({ id: 'ava:memory:4', agentId: 'ava', content: 'Replaced that.', createdAt: '2026-02-04T00:00:00.000Z', trust: 'agent', supersedes: 'ava:memory:1' }),
+    '',
+  ].join('\n'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  // The alias case, from the terminal: the query matches only `about`.
+  const found = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'search', 'ava', 'deploy', 'pipeline', '--format', 'json'], streams: found.streams, env }), 0);
+  const hits = JSON.parse(found.output.stdout) as { strategy: string; entries: Array<{ id: string; validity: string }> };
+  assert.deepEqual(hits.entries.map((entry) => entry.id), ['ava:memory:2']);
+  assert.equal(hits.strategy, 'recency');
+
+  // An expired fact is listed, and listed *as* expired: the operator's read
+  // is the one place it has to stay visible.
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
+  assert.match(listed.output.stdout, /ava:memory:3 {2}\[agent\] {2}\[expired\]/);
+  // The superseded entry is gone from the live read, and the successor says
+  // what it replaced.
+  assert.doesNotMatch(listed.output.stdout, /Dylan prefers short answers/);
+  assert.match(listed.output.stdout, /ava:memory:4 .*\(replaces ava:memory:1\)/);
+
+  // Audit shows both halves of the revision, named in both directions.
+  const audited = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'audit', 'ava'], streams: audited.streams, env }), 0);
+  assert.match(audited.output.stdout, /Dylan prefers short answers/);
+  assert.match(audited.output.stdout, /replaced by: ava:memory:4/);
+
+  // Pinning is a record: the entry's own line is untouched, and the pin
+  // survives into a later read.
+  const before = await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8');
+  const pinned = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'pin', 'ava', 'ava:memory:2'], streams: pinned.streams, env }), 0);
+  assert.match(pinned.output.stdout, /Pinned 1 entry of ava/);
+  const after = await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8');
+  assert.ok(after.startsWith(before), 'pinning rewrote the record instead of appending to it');
+  const withPin = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: withPin.streams, env }), 0);
+  assert.match(withPin.output.stdout, /ava:memory:2 {2}\[agent\] {2}\[pinned\]/);
+  const unpinned = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'unpin', 'ava', 'ava:memory:2'], streams: unpinned.streams, env }), 0);
+  assert.equal(await runCli({ argv: ['memory', 'unpin', 'ava', 'ava:memory:2'], streams: createStreams().streams, env }), 1);
+
+  // Forget names what it could not drop, and exits non-zero for it.
+  const forgotten = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'forget', 'ava', 'ava:memory:3', 'ava:memory:missing'], streams: forgotten.streams, env }), 1);
+  assert.match(forgotten.output.stdout, /Retired 1 entry of ava/);
+  assert.match(forgotten.output.stderr, /No live memory entry with id ava:memory:missing/);
+});
+
+test('stratus memory export then import lands the same entries in order, external unless the operator vouches', async () => {
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-export-'));
+  await mkdir(path.join(source, '.stratus'), { recursive: true });
+  await writeFile(path.join(source, '.stratus', 'memory.jsonl'), [
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Dylan prefers short answers.', createdAt: '2026-01-01T00:00:00.000Z', trust: 'user', about: ['Dylan'] }),
+    JSON.stringify({ id: 'ava:memory:2', agentId: 'ava', content: 'The office moved to Southwark.', createdAt: '2026-02-01T00:00:00.000Z', trust: 'agent' }),
+    '',
+  ].join('\n'));
+  const sourceEnv = { cwd: source, homeDir: source, processEnv: {} };
+  const dump = path.join(source, 'ava.jsonl');
+  const exported = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'export', 'ava', '--file', dump], streams: exported.streams, env: sourceEnv }), 0);
+  assert.match(exported.output.stdout, /Wrote 2 entries of ava/);
+
+  const target = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-import-'));
+  const targetEnv = { cwd: target, homeDir: target, processEnv: {} };
+  const imported = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'import', 'ava', '--file', dump, '--format', 'json'], streams: imported.streams, env: targetEnv }), 0);
+  assert.deepEqual(JSON.parse(imported.output.stdout), { agentId: 'ava', imported: 2, skipped: [], preservedTrust: false });
+
+  const back = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--format', 'json'], streams: back.streams, env: targetEnv }), 0);
+  const entries = (JSON.parse(back.output.stdout) as { entries: Array<{ id: string; trust: string }> }).entries;
+  // The same entries in the same order — and deliberately not the same
+  // labels: expecting provenance to survive would assert that the import
+  // safety rule does not work.
+  assert.deepEqual(entries.map((entry) => entry.id), ['ava:memory:1', 'ava:memory:2']);
+  assert.deepEqual(entries.map((entry) => entry.trust), ['external', 'external']);
+
+  // The migration path, where a person vouches for the file.
+  const vouched = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-migrate-'));
+  const vouchedEnv = { cwd: vouched, homeDir: vouched, processEnv: {} };
+  assert.equal(await runCli({ argv: ['memory', 'import', 'ava', '--file', dump, '--preserve-trust'], streams: createStreams().streams, env: vouchedEnv }), 0);
+  const kept = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--format', 'json'], streams: kept.streams, env: vouchedEnv }), 0);
+  assert.deepEqual(
+    (JSON.parse(kept.output.stdout) as { entries: Array<{ trust: string }> }).entries.map((entry) => entry.trust),
+    ['user', 'agent'],
+  );
+
+  // A file that is not a memory record is refused before anything lands.
+  const junk = path.join(source, 'junk.jsonl');
+  await writeFile(junk, 'not json\n');
+  const refused = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'import', 'ava', '--file', junk], streams: refused.streams, env: targetEnv }), 1);
+  assert.match(refused.output.stderr, /line 1 is not JSON. Nothing was imported/);
 });
 
 test('a state migration that cannot stamp the home refuses commands that write state, and only those', async () => {

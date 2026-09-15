@@ -5,6 +5,7 @@ import {
   AgentRunner,
   InMemoryAgentMemoryStore,
   MEMORY_ENTRY_MAX_BYTES,
+  MEMORY_PINNED_MAX_BYTES,
   MEMORY_RECENCY_INJECTION_LIMIT,
   memoryInjectionEntries,
   ToolRegistry,
@@ -16,6 +17,7 @@ import {
 import {
   createAgentTeam,
   createForgetTool,
+  createPinTool,
   createRecallTool,
   createRememberTool,
   defineAgent,
@@ -109,4 +111,104 @@ test('the recency tail is bounded, and a forgotten entry never reaches the promp
   // prompt path is the half a search-only forget would have missed.
   assert.doesNotMatch(prompts[1] ?? '', /pineapples/);
   assert.equal(injected[1]?.length, MEMORY_RECENCY_INJECTION_LIMIT, 'the slice refills from live entries');
+});
+
+test('memory.remember carries the wider shape, and refuses a supersession that is not the agent’s to make', async () => {
+  const at = new Date('2026-06-01T00:00:00.000Z');
+  const store = new InMemoryAgentMemoryStore({ now: () => at });
+  const remember = createRememberTool(store);
+
+  const written = await remember.execute({
+    fact: 'The deploy pipeline runs on Postgres.',
+    kind: 'semantic',
+    about: ['deploy pipeline', 'Hermes'],
+    validFrom: '2026-06-01T00:00:00Z',
+  }, sessionFor('ava')) as { id: string };
+  const stored = (await store.list('ava')).entries[0]!;
+  assert.equal(stored.kind, 'semantic');
+  assert.deepEqual(stored.about, ['deploy pipeline', 'Hermes']);
+  assert.equal(stored.validFrom, '2026-06-01T00:00:00.000Z');
+
+  // A bound the model wrote as prose is refused rather than dropped: an
+  // unbounded fact that was meant to expire is the worse outcome.
+  await assert.rejects(
+    () => remember.execute({ fact: 'x', validUntil: 'next Tuesday' }, sessionFor('ava')),
+    /must be an ISO-8601 instant/,
+  );
+  await assert.rejects(() => remember.execute({ fact: 'x', kind: 'trivia' }, sessionFor('ava')), /"kind" must be one of/);
+  await assert.rejects(() => remember.execute({ fact: 'x', about: 'deploy' }, sessionFor('ava')), /array of entity names/);
+
+  // Superseding the agent's own entry works and is reported; another
+  // agent's is refused, and the victim's entry stays live.
+  const victim = await store.append('juno', 'Juno keeps the rota');
+  const revision = await remember.execute({
+    fact: 'The deploy pipeline runs on CockroachDB.',
+    supersedes: written.id,
+  }, sessionFor('ava')) as { supersedes?: string };
+  assert.equal(revision.supersedes, written.id);
+  assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.content), ['The deploy pipeline runs on CockroachDB.']);
+  await assert.rejects(
+    () => remember.execute({ fact: 'not mine', supersedes: victim.id }, sessionFor('ava')),
+    /belongs to this agent/,
+  );
+  assert.deepEqual((await store.list('juno')).entries.map((entry) => entry.id), [victim.id]);
+});
+
+test('a memory.recall hit that is out of window comes back marked as such', async () => {
+  const at = new Date('2026-06-01T00:00:00.000Z');
+  const store = new InMemoryAgentMemoryStore({ now: () => at });
+  await store.append('ava', 'Ada works at Northwind', { about: ['Ada'], validUntil: '2026-02-01T00:00:00.000Z' });
+  await store.append('ava', 'Ada works at Contoso', { about: ['Ada'], validFrom: '2026-09-01T00:00:00.000Z' });
+  await store.append('ava', 'Ada lives in Leeds', { about: ['Ada'] });
+
+  const recall = createRecallTool(store, { now: () => at });
+  const found = await recall.execute({ query: 'Ada' }, sessionFor('ava')) as {
+    results: { content: string; validity: string }[];
+    strategy: string;
+  };
+  // Keeping an out-of-window entry findable is right; returning it
+  // *unmarked* is not — an expired fact that reads exactly like a current
+  // one is the confusion the two fields exist to prevent.
+  assert.deepEqual(
+    Object.fromEntries(found.results.map((result) => [result.content, result.validity])),
+    {
+      'Ada works at Northwind': 'expired',
+      'Ada works at Contoso': 'not-yet-valid',
+      'Ada lives in Leeds': 'current',
+    },
+  );
+  assert.equal(found.strategy, 'recency');
+  // The alias case: the query matches only the `about` key.
+  const aliased = await recall.execute({ query: 'Ada' }, sessionFor('ava')) as { results: unknown[] };
+  assert.equal(aliased.results.length, 3);
+});
+
+test('memory.pin is safe, records rather than rewrites, and reports a refusal instead of throwing', async () => {
+  const at = new Date('2026-06-01T00:00:00.000Z');
+  const store = new InMemoryAgentMemoryStore({ now: () => at });
+  const pin = createPinTool(store);
+  assert.equal(pin.risk, 'safe');
+
+  const held = await store.append('ava', 'a'.repeat(MEMORY_PINNED_MAX_BYTES - 100));
+  const extra = await store.append('ava', 'b'.repeat(200));
+  assert.deepEqual(await pin.execute({ id: held.id }, sessionFor('ava')), {
+    pinned: true,
+    id: held.id,
+    bytes: MEMORY_PINNED_MAX_BYTES - 100,
+  });
+
+  // The cap is a full budget, not a failure: the agent's next move is to
+  // unpin something, and a thrown error would read as a broken tool.
+  const refused = await pin.execute({ id: extra.id }, sessionFor('ava')) as { pinned: boolean; reason: string };
+  assert.equal(refused.pinned, false);
+  assert.match(refused.reason, /capped at/);
+  assert.deepEqual((await store.pinned!('ava')).map((entry) => entry.id), [held.id]);
+
+  assert.deepEqual(await pin.execute({ id: held.id, unpin: true }, sessionFor('ava')), { pinned: false, id: held.id });
+  await assert.rejects(() => pin.execute({ id: held.id, unpin: true }, sessionFor('ava')), /nothing was unpinned/);
+
+  // And an agent cannot pin what is not its own.
+  const victim = await store.append('juno', 'Juno keeps the rota');
+  await assert.rejects(() => pin.execute({ id: victim.id }, sessionFor('ava')), /belongs to this agent/);
+  assert.deepEqual(await store.pinned!('juno'), []);
 });

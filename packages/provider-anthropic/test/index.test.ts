@@ -810,6 +810,42 @@ test('a memory write leaves the cached head byte-identical', async () => {
   assert.match(String(requests[1]!.body.messages.at(-1).content), /A fact learned since/);
 });
 
+test('all three memory blocks reach the tail as exactly one memory section', async () => {
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'One.' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const entry = (id: string, content: string): MemoryEntry => ({
+    id,
+    agentId: 'ava',
+    content,
+    createdAt: '2026-06-01T00:00:00.000Z',
+  });
+
+  await provider.generate({
+    session: createSession(),
+    memory: {
+      pinned: [entry('m1', 'Dylan prefers short answers.')],
+      topics: [{ name: 'deploy pipeline', count: 4, lastUpdatedAt: '2026-03-02T00:00:00.000Z', trust: 'agent' }],
+      recent: [entry('m2', 'The migration finished.')],
+    },
+    skills: [{ id: 'triage', name: 'Triage', description: 'Use when triaging.' }],
+  } as ProviderRequest);
+
+  // The criterion that fails if the blocks are ever split into sibling
+  // sections: the placement finds the volatile section by kind, so a second
+  // one would be dropped from the request outright.
+  const tail = String(requests[0]!.body.messages.at(-1).content);
+  assert.match(tail, /Dylan prefers short answers/);
+  assert.match(tail, /deploy pipeline \(4 facts/);
+  assert.match(tail, /The migration finished/);
+  // And none of them is left on the cached prefix, which is what the tail
+  // placement exists to avoid.
+  const head = cachedHeadOf(requests[0]!.body);
+  assert.doesNotMatch(head, /Dylan prefers short answers/);
+  assert.doesNotMatch(head, /deploy pipeline/);
+  assert.doesNotMatch(head, /The migration finished/);
+  assert.match(head, /Use when triaging/);
+});
+
 test('the tool list is byte-identical after a tool is re-registered', async () => {
   // The MCP reconnect case: a bridge unregisters and re-registers its tools,
   // which moves them to the end of the registry's insertion order. Unsorted,
