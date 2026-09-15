@@ -246,6 +246,7 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
   const insert = db.prepare(
     'INSERT INTO entries (seq, id, agent_id, content, created_at, metadata, trust, origin, fields) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
   );
+  const holdsId = db.prepare('SELECT 1 FROM entries WHERE agent_id = ? AND id = ?');
   const tombstone = db.prepare('UPDATE entries SET forgotten_at = ? WHERE agent_id = ? AND id = ? AND forgotten_at IS NULL');
   const relabel = db.prepare('UPDATE entries SET trust = ? WHERE agent_id = ? AND id = ? AND forgotten_at IS NULL');
   const selectPins = db.prepare('SELECT id FROM pins WHERE agent_id = ? ORDER BY seq');
@@ -292,8 +293,19 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
       // appends on one connection can never claim one id.
       db.exec('BEGIN IMMEDIATE');
       try {
-        const seq = (nextSeq.get() as { next: number }).next;
-        const id = `${agentId}:memory:${String(seq).padStart(12, '0')}`;
+        // The id encodes the sequence, and an import preserves ids from
+        // wherever the corpus came from — so a corpus with gaps in it (an
+        // export drops forgotten entries) can already hold the id this
+        // sequence is about to mint. Skipping forward is the whole fix;
+        // without it the insert fails the uniqueness constraint, the
+        // transaction rolls back without advancing the maximum, and every
+        // later write for that agent mints the same doomed id again.
+        let seq = (nextSeq.get() as { next: number }).next;
+        let id = `${agentId}:memory:${String(seq).padStart(12, '0')}`;
+        while (holdsId.get(agentId, id) !== undefined) {
+          seq += 1;
+          id = `${agentId}:memory:${String(seq).padStart(12, '0')}`;
+        }
         insert.run(
           seq,
           id,

@@ -17,8 +17,10 @@ import {
   mergeMemoryTopics,
   renderMemorySection,
   selectMemoryInjection,
+  MEMORY_INDEX_MAX_BYTES,
   supersededMemoryIdsAt,
   tokenizeMemoryText,
+  TRUST_LEVELS,
   type MemoryEntry,
   type MemoryTopic,
 } from '../src/index.ts';
@@ -269,26 +271,29 @@ test('the topic index the prompt carries is bounded, and the biggest topics surv
     lastUpdatedAt: '2026-01-01T00:00:00.000Z',
     trust: 'agent' as const,
   }));
-  const selected = selectMemoryInjection({ pinned: [], topics, recent: [] });
-  assert.ok(selected.topics.length < topics.length, 'the budget has to bite for this to mean anything');
-  assert.equal(selected.topics[0]?.count, 400);
-  const rendered = renderMemorySection(selected) ?? '';
-  assert.ok(memoryContentByteLength(rendered) < 8192, `the index block ran to ${memoryContentByteLength(rendered)} bytes`);
-
-  // The budget counts what is *rendered*, not what is stored: every control
-  // character expands to six on the way out, so measuring the raw name
-  // would admit a block several times the size it promised.
-  const escaped = selectMemoryInjection({
-    pinned: [],
-    topics: topics.map((topic) => ({ ...topic, name: topic.name.replaceAll('x', '\u0000') })),
-    recent: [],
-  });
-  const escapedBlock = renderMemorySection(escaped) ?? '';
-  assert.ok(escaped.topics.length < selected.topics.length, 'an escaped name has to cost more than a plain one');
-  assert.ok(
-    memoryContentByteLength(escapedBlock) < 8192,
-    `the index block ran to ${memoryContentByteLength(escapedBlock)} bytes once escaped`,
-  );
+  // The budget is over the block as it is *rendered*: the intro, the trust
+  // region headings, and every line's escaped name, count, and date. Each
+  // of these spends the whole budget a different way, and the block has to
+  // land inside it in all of them.
+  for (const [label, candidates] of [
+    ['plain', topics],
+    // Spread across all four labels, so the scaffolding is four headings.
+    ['every region', topics.map((topic, index) => ({ ...topic, trust: TRUST_LEVELS[index % TRUST_LEVELS.length]! }))],
+    // Control characters expand six-for-one on the way out.
+    ['escaped', topics.map((topic) => ({ ...topic, name: topic.name.replaceAll('x', '\u0000') }))],
+    // A hand-edited timestamp, which the line also escapes.
+    ['mangled dates', topics.map((topic) => ({ ...topic, lastUpdatedAt: '2026-\u000001-01' }))],
+  ] as const) {
+    const selected = selectMemoryInjection({ pinned: [], topics: candidates, recent: [] });
+    assert.ok(selected.topics.length < candidates.length, `${label}: the budget has to bite for this to mean anything`);
+    const rendered = renderMemorySection(selected) ?? '';
+    assert.ok(
+      memoryContentByteLength(rendered) <= MEMORY_INDEX_MAX_BYTES,
+      `${label}: the index block ran to ${memoryContentByteLength(rendered)} bytes, over ${MEMORY_INDEX_MAX_BYTES}`,
+    );
+  }
+  // The biggest topics are the ones that survive it.
+  assert.equal(selectMemoryInjection({ pinned: [], topics, recent: [] }).topics[0]?.count, 400);
 });
 
 test('an imported id is never minted again, and usage is counted per agent', async () => {

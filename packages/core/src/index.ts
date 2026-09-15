@@ -1800,10 +1800,8 @@ export interface MemoryInjection {
 /** Empty in all three blocks — what a host with no memory store injects. */
 export const emptyMemoryInjection = (): MemoryInjection => ({ pinned: [], topics: [], recent: [] });
 
-// A topic line is its name plus roughly `- name (4 facts, last 2026-03-01)`.
-// Budgeting the name plus a flat allowance keeps the bound a pure function
-// of the topic rather than of the renderer's current wording.
-const TOPIC_LINE_OVERHEAD_BYTES = 40;
+// The blank line between the intro and a region, and between regions.
+const TOPIC_BLOCK_SEPARATOR_BYTES = 2;
 
 /**
  * Bound the three blocks against their budgets and keep them disjoint: a
@@ -1826,12 +1824,18 @@ export const selectMemoryInjection = (input: {
     MEMORY_RECENCY_MAX_BYTES,
   ).entries;
   const topics: MemoryTopic[] = [];
-  let topicBytes = 0;
+  // Measured as the block is *rendered*, not as the topics are stored:
+  // every control character expands six-for-one on the way out, and the
+  // intro and the per-trust region headings are part of what the prompt
+  // pays for. The scaffolding is reserved up front from the labels present
+  // in the whole candidate list, which can only over-reserve — selecting
+  // fewer topics never adds a region.
+  let topicBytes = memoryContentByteLength(MEMORY_INDEX_INTRO) + TOPIC_BLOCK_SEPARATOR_BYTES;
+  for (const trust of new Set(input.topics.map((topic) => topic.trust))) {
+    topicBytes += memoryContentByteLength(memoryRegionHeading(trust)) + TOPIC_BLOCK_SEPARATOR_BYTES;
+  }
   for (const topic of input.topics) {
-    // Measured *escaped*, which is how the line is rendered: one NUL in an
-    // `about` key becomes the six characters `\u0000`, so budgeting the raw
-    // bytes would admit a block several times the size it promised.
-    const size = memoryContentByteLength(escapeControlCharacters(topic.name)) + TOPIC_LINE_OVERHEAD_BYTES;
+    const size = memoryContentByteLength(renderMemoryTopicLine(topic)) + 1;
     if (topicBytes + size > MEMORY_INDEX_MAX_BYTES) {
       break;
     }

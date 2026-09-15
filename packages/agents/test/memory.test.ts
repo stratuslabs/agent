@@ -136,6 +136,25 @@ test('memory.remember carries the wider shape, and refuses a supersession that i
     /must be an ISO-8601 instant/,
   );
   await assert.rejects(() => remember.execute({ fact: 'x', kind: 'trivia' }, sessionFor('ava')), /"kind" must be one of/);
+  // A window that closes before it opens describes nothing: the entry
+  // would be not-yet-valid, then expired, and never reach a prompt —
+  // stored, findable, and silently inert.
+  await assert.rejects(
+    () => remember.execute({
+      fact: 'x',
+      validFrom: '2026-09-01T00:00:00Z',
+      validUntil: '2026-08-01T00:00:00Z',
+    }, sessionFor('ava')),
+    /must be after validFrom/,
+  );
+  await assert.rejects(
+    () => remember.execute({
+      fact: 'x',
+      validFrom: '2026-09-01T00:00:00Z',
+      validUntil: '2026-09-01T00:00:00Z',
+    }, sessionFor('ava')),
+    /must be after validFrom/,
+  );
   await assert.rejects(() => remember.execute({ fact: 'x', about: 'deploy' }, sessionFor('ava')), /array of entity names/);
 
   // Superseding the agent's own entry works and is reported; another

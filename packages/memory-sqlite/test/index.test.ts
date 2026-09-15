@@ -293,3 +293,23 @@ test('usage counts per agent, and a superseded entry is not the agent’s to for
   ]);
   store.close();
 });
+
+test('a generated id never collides with one an import preserved', async () => {
+  const store = createSqliteMemoryStore(await newFile());
+  // An export drops forgotten entries, so a corpus can arrive with gaps —
+  // and the sequence this store mints from would walk straight into one.
+  // Before the skip, the insert failed the uniqueness constraint, the
+  // transaction rolled back without advancing the maximum, and every later
+  // write for that agent minted the same doomed id again.
+  await store.importEntries!('ava', [1, 2, 4].map((n) => ({
+    id: `ava:memory:${String(n).padStart(12, '0')}`,
+    agentId: 'somewhere',
+    content: `imported ${n}`,
+    createdAt: `2026-01-0${n}T00:00:00.000Z`,
+  })));
+  const first = await store.append('ava', 'a new fact');
+  const second = await store.append('ava', 'and another');
+  assert.equal(new Set([...(await store.audit('ava')).map((entry) => entry.id), first.id, second.id]).size, 5);
+  assert.equal((await store.list('ava')).entries.length, 5);
+  store.close();
+});

@@ -119,6 +119,16 @@ export const createRememberTool = (store: AgentMemoryStore): Tool => ({
     const about = aboutKeys(input.about);
     const validFrom = validityBound(input.validFrom, 'validFrom');
     const validUntil = validityBound(input.validUntil, 'validUntil');
+    // A window that closes before it opens describes nothing: the entry is
+    // not-yet-valid before `validFrom` and expired after it, so it could
+    // never be true and would never reach a prompt — stored, findable, and
+    // silently inert. The record tolerates whatever a hand edit or an
+    // import puts there; what a model writes is checked here.
+    if (validFrom !== undefined && validUntil !== undefined && Date.parse(validFrom) >= Date.parse(validUntil)) {
+      throw new Error(
+        `validUntil (${validUntil}) must be after validFrom (${validFrom}); a fact whose window closes before it opens is never true. Nothing was stored.`,
+      );
+    }
     const supersedes = optionalString(input.supersedes);
     const options: MemoryAppendOptions = {
       metadata: { sessionId: session.id },
