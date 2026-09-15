@@ -38,8 +38,12 @@ across daemon restarts.
 The log records that a tool ran and that a session completed, with the
 tool's name, the agent, and the session id. Prompts, replies, and tool
 inputs are not written — what was said lives in the session store instead.
-A memory write or forget also records the **entry id** it touched (never
-the fact itself), so "when did the agent learn this" has an answer. When a
+A memory write, forget, supersession, or pin also records the **entry id**
+it touched (never the fact itself), so "when did the agent learn this" has
+an answer. A supersession names both halves of the revision — the entry
+written and the one it retired — and a pin records whether it took, since
+the pinned core refuses rather than evicting and a refusal is a decision
+worth a line. When a
 session's trust label drops, `session.tainted` records the new label and
 the **name** of what lowered it — a tool, or `memory`, `sender`, `legacy` —
 and never the content that did: "since when has this conversation been

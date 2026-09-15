@@ -143,11 +143,27 @@ selects it fleet-wide:
 ```
 
 `file` (or the key absent) is the built-in store. The selected store backs
-`memory.remember`, `memory.recall`, `memory.forget`, and the memory each
-turn's prompt is built from, for every agent — still keyed per agent by the
-[memory contract](../concepts/memory.md), so two agents on one store never
-see each other's entries. `stratus run` reads the same key from the same
-trusted config, so a local test remembers into the store the daemon would.
+`memory.remember`, `memory.recall`, `memory.forget`, `memory.pin`, and the
+memory each turn's prompt is built from, for every agent — still keyed per
+agent by the [memory contract](../concepts/memory.md), so two agents on one
+store never see each other's entries. `stratus run` reads the same key from
+the same trusted config, so a local test remembers into the store the
+daemon would.
+
+Five of the contract's methods are **optional**, and a store that omits one
+gives up exactly the thing it names rather than failing: `reassertTrust`
+leaves its operator no way out of `unknown`; `pin`, `unpin`, and `pinned`
+leave the prompt with no pinned core; `topics` leaves it with no index of
+what the agent knows about; `importEntries` makes `stratus memory import`
+refuse. The required half — `append`, `list`, `search`, `forget`, `audit` —
+is what every store must answer identically, down to the ordering tie-break
+and which entries a bounded read keeps.
+
+A read may name the **ordering** it wants. `recency` is mandatory and is
+what the parity tests assert; a store asked for `relevance` or `hybrid` and
+lacking it serves `recency` and reports that in the result rather than
+erroring — so an embeddings-backed store is an additive capability here
+instead of a contract break.
 
 A `memoryStore` naming something no loaded plugin registers **refuses to
 start** rather than falling back to the file store: a daemon writing
