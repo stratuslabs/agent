@@ -18,24 +18,33 @@ import type { ParsedSchedulesCommand } from '../parse.ts';
  * every row sits safely in `fleet.db`, which is the worst answer this
  * surface can give — an operator reads it as "nothing will fire".
  *
+ * **The legacy database is read first**, and reading both is not by itself
+ * enough to make that safe. The migration copies the rows and *then*
+ * renames the source, so fleet-first leaves the same empty answer one step
+ * along: the fleet read finds nothing because the copy has not run, the
+ * copy and the rename happen, and the legacy read then finds no file — or
+ * the empty husk SQLite creates at the old name. Legacy-first cannot land
+ * there. Either the legacy read precedes the rename and sees the rows, or
+ * it follows the copy, in which case the fleet read after it has them.
+ *
  * Deduped by id because the migration copies with `INSERT OR REPLACE` on
  * that key, so a row caught mid-move is the same row in both places. The
- * fleet database is read first so the copy that survives is the one the
- * fleet will fire.
+ * fleet copy overwrites the legacy one, so what survives the merge is the
+ * row the fleet will actually fire.
  */
 const listEverywhere = async (env: CliEnvironment): Promise<ScheduleRecord[]> => {
   const { SqliteScheduleStore } = await import('@stratusagent/gateway');
   const byId = new Map<string, ScheduleRecord>();
-  for (const dbPath of [fleetDbPath(env), legacySessionDbPath(env)]) {
+  for (const dbPath of [legacySessionDbPath(env), fleetDbPath(env)]) {
     if (!(await pathExists(dbPath))) {
       continue;
     }
     const store = new SqliteScheduleStore(dbPath);
     try {
       for (const record of store.list()) {
-        if (!byId.has(record.id)) {
-          byId.set(record.id, record);
-        }
+        // Unconditional, so the fleet row read second replaces the legacy
+        // copy of the same id rather than losing to it.
+        byId.set(record.id, record);
       }
     } finally {
       store.close();

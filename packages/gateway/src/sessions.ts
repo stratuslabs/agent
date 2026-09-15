@@ -326,6 +326,16 @@ export class FleetSessionIndex {
    * re-opens its own session.
    */
   claim(row: SessionIndexRow): void {
+    // The insert is what decides, not a read before it. `DO NOTHING` makes
+    // the row's creation the atomic step: two callers racing for an id no
+    // one holds cannot both find it free, because one of their inserts is
+    // the conflict. The read after it is then a question with an answer —
+    // who holds this id now — rather than a guess that a write could have
+    // overtaken. Nothing is overwritten on the way, so a claim that loses
+    // has not touched the winner's row.
+    this.db
+      .prepare('INSERT INTO session_index (id, agent_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING')
+      .run(row.id, row.agentId, row.status, row.createdAt, row.updatedAt);
     const held = this.agentFor(row.id);
     if (held !== undefined && held !== row.agentId) {
       throw new SessionIdTakenError(row.id, held, row.agentId);
@@ -523,18 +533,28 @@ export class ShardedSessionStore implements SessionStore {
     const agentId = session.agent.id;
     assertPathSafeAgentId(agentId);
     // One id belongs to one agent, and this is the path that could change
-    // that quietly. `create` claims the id, so a sibling is refused at the
-    // seam; `save` takes whatever agent the session now names. A caller
-    // handing back a session whose `agent.id` has changed would write a
-    // second copy into the new agent's shard and then repoint the index at
-    // it — the original transcript still on disk but in a store nothing
-    // resolves to, and the next start refusing to serve at all, because the
-    // reconcile finds one id in two shards and says so. Refused here, where
-    // the error can still name the agent it belongs to.
-    const heldBy = this.index.agentFor(session.id);
-    if (heldBy !== undefined && heldBy !== agentId) {
-      throw new SessionIdTakenError(session.id, heldBy, agentId);
-    }
+    // that quietly. `save` takes whatever agent the session now names: a
+    // caller handing back a session whose `agent.id` has changed would
+    // write a second copy into the new agent's shard and then repoint the
+    // index at it — the original transcript still on disk but in a store
+    // nothing resolves to, and the next start refusing to serve at all,
+    // because the reconcile finds one id in two shards and says so.
+    //
+    // The same `claim` as `create`, not a read of the index. Asking who
+    // holds the id and *then* writing the shard leaves the whole file write
+    // between the question and the answer, so two callers saving an id
+    // nobody has indexed yet — different agents, the same id — both see it
+    // free and both write. Claiming takes the id in one statement before
+    // either shard write can start, so the loser is refused here, where the
+    // error can still name the agent it belongs to, instead of at the next
+    // start where it is a daemon that will not come up.
+    this.index.claim({
+      id: session.id,
+      agentId,
+      status: session.status,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+    });
     // The conversation is the truth and the index is derived from it, so
     // the shard write goes first: a crash in between leaves an index row
     // one status behind, which the next start reconciles, rather than an

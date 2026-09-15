@@ -419,29 +419,46 @@ export const createFileMemoryStore = (
   options: FileMemoryStoreOptions = {},
 ): AgentMemoryStore => {
   const indexPath = `${filePath}.index`;
+  /**
+   * The directory and the two files under it are this agent's own, never
+   * links to somewhere else.
+   *
+   * Its own function rather than the opening of `ensureDirectory`, because
+   * the reads never go through that one: `list` and `audit` call
+   * `readRecords` directly. A guard on the write path alone is a store that
+   * refuses to *place* a memory through a link while answering happily with
+   * whatever is on the far side of one — another agent's memories, or a
+   * file outside the home entirely. Which paths are this agent's is the
+   * same question in both directions, so it is asked in both.
+   *
+   * Refused rather than quarantined, like the session store and for the
+   * same reason: a memory this agent was told it had remembered must not
+   * live through a link somewhere else, and the chmod in `ensureDirectory`
+   * would tighten whatever it points at. A real directory says nothing
+   * about the files in it — a linked `memory.jsonl` puts the whole history
+   * outside the home, and a linked `.index` hands SQLite an external
+   * database to open, write and chmod.
+   */
+  const assertOwnedPaths = async (): Promise<void> => {
+    if (!options.ownedDirectory) {
+      return;
+    }
+    // See `isSymlinkedStateDirectory`, which owns the rule itself.
+    const dir = path.dirname(filePath);
+    if (await isSymlinkedStatePath(dir)) {
+      throw new Error(symlinkedStateDirectoryMessage(dir));
+    }
+    for (const candidate of [filePath, indexPath]) {
+      if (await isSymlinkedStatePath(candidate)) {
+        throw new Error(symlinkedStateFileMessage(candidate));
+      }
+    }
+  };
+
   /** The directory, made and held to the posture its owner asked for. */
   const ensureDirectory = async (): Promise<void> => {
     const dir = path.dirname(filePath);
-    if (options.ownedDirectory) {
-      // Never a symlink — see `isSymlinkedStateDirectory`, which owns that
-      // rule. Refused rather than quarantined, like the session store and
-      // for the same reason: a memory this agent was told it had remembered
-      // must not be written through a link to somewhere else, and the chmod
-      // below would tighten whatever it points at.
-      if (await isSymlinkedStatePath(dir)) {
-        throw new Error(symlinkedStateDirectoryMessage(dir));
-      }
-      // And the files themselves, which a real directory says nothing
-      // about. A linked `memory.jsonl` puts this agent's memories outside
-      // the home or into another agent's file — the drain would place them
-      // there during an upgrade — and a linked `.index` hands SQLite an
-      // external database to open, write and chmod.
-      for (const candidate of [filePath, indexPath]) {
-        if (await isSymlinkedStatePath(candidate)) {
-          throw new Error(symlinkedStateFileMessage(candidate));
-        }
-      }
-    }
+    await assertOwnedPaths();
     await mkdir(dir, { recursive: true, ...(options.ownedDirectory ? { mode: 0o700 } : {}) });
     if (options.ownedDirectory) {
       // `mkdir` only applies its mode when it creates, so an upgrade over a
@@ -463,6 +480,7 @@ export const createFileMemoryStore = (
   };
 
   const readRecords = async (): Promise<MemoryFileRecords> => {
+    await assertOwnedPaths();
     let raw: string;
     try {
       raw = await readFile(filePath, 'utf8');

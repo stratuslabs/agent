@@ -971,6 +971,77 @@ test('two stored ids that differ only in case are not merged into one directory'
   assert.ok(archived.includes('t-1') && archived.includes('t-2'));
 });
 
+test('the built-in agent\'s directory is reserved before the migration starts', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // `Stratus` is a legacy id this build keeps — path-safe, and `AVA` and
+  // `team.alpha` are kept for the same reason. On macOS and Windows it is
+  // also `agents/stratus/`, the built-in agent's own directory: the agent
+  // every unconfigured run gets. Moving this grant file there would hand it
+  // whatever the old `Stratus` was allowed to do unattended.
+  const db = new DatabaseSync(legacySessionDbPath(env));
+  const at = '2026-01-01T00:00:00.000Z';
+  const body = JSON.stringify({ id: 's-1', agent: { id: 'Stratus', name: 'Stratus' }, status: 'completed', messages: [], createdAt: at, updatedAt: at });
+  db.prepare('INSERT OR REPLACE INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('s-1', 'Stratus', 'completed', body, at, at);
+  db.close();
+  await writeFile(
+    path.join(agentsDirPath(env), 'Stratus.whitelist.json'),
+    `${JSON.stringify({ version: 1, scopes: [{ command: 'rm', args: ['-rf'] }] })}\n`,
+  );
+
+  const applied = await runStateMigrations(env, { exclusive: true });
+  const detail = applied.map((result) => result.detail ?? '').join(' ');
+  assert.match(detail, /only in case/);
+
+  // No directory of its own, and — the point — nothing of its in the
+  // built-in agent's either.
+  await assert.rejects(
+    () => stat(path.dirname(agentSessionDbPath(env, 'Stratus'))),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
+  );
+  await assert.rejects(
+    () => stat(whitelistPathFor(agentsDirPath(env), 'stratus')),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
+  );
+  // Archived under the old name rather than left where a later start would
+  // read it as an unmigrated home, and its rows are in the preserved original.
+  assert.match(
+    await readFile(path.join(agentsDirPath(env), 'Stratus.whitelist.json.migrated'), 'utf8'),
+    /rm/,
+  );
+  assert.ok(sessionIdsIn(`${legacySessionDbPath(env)}.migrated`).includes('s-1'));
+});
+
+test('a memory file that is a symlink is refused on the way in AND on the way out', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const elsewhere = path.join(home, 'elsewhere.jsonl');
+  const at = '2026-01-01T00:00:00.000Z';
+  // Another agent's file is the case that matters: `list` reading through
+  // the link answers with bea's memories under ava's name.
+  await writeFile(elsewhere, `${JSON.stringify({ id: 'bea:memory:1', agentId: 'bea', content: 'not ava\'s to read', createdAt: at })}\n`);
+  await mkdir(path.dirname(agentMemoryFilePath(env, 'ava')), { recursive: true });
+  await symlink(elsewhere, agentMemoryFilePath(env, 'ava'));
+
+  const memory = createHomeMemoryStore(env);
+  // The read paths do not go through the guard the append path uses, so
+  // each is asked in its own right.
+  await assert.rejects(
+    () => memory.list('ava'),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  await assert.rejects(
+    () => memory.audit('ava'),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  await assert.rejects(
+    () => memory.append('ava', 'likes jazz'),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+});
+
 test('an agent directory that was already there is tightened, not left as it was', async () => {
   const home = await newHome();
   const env = { homeDir: home };

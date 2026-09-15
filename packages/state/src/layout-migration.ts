@@ -6,6 +6,7 @@ import path from 'node:path';
 import { isValidAgentId } from '@stratusagent/agents';
 import { LEGACY_WHITELIST_SUFFIX, isSymlinkedStatePath, whitelistPathFor } from '@stratusagent/permissions';
 import { type StateEnvironment } from './environment.ts';
+import { DEFAULT_STRATUS_AGENT } from './souls.ts';
 import {
   agentMemoryFilePath,
   agentSessionDbPath,
@@ -212,6 +213,15 @@ export const makeAgentStateDirectory = async (
  *
  * The loser is quarantined, not dropped: its rows stay in the preserved
  * original, which is what a rename makes recoverable.
+ *
+ * Seeded with the built-in agent's id, because `agents/stratus/` is spoken
+ * for before any run starts and no roster refusal reaches this far: a
+ * legacy `Stratus` in a stored row or a `Stratus.whitelist.json` is a valid
+ * id this build must keep, and giving it that directory would hand the
+ * built-in agent — the one every unconfigured run gets — another agent's
+ * standing grants. Seeding in the factory rather than at the call sites so
+ * that a third caller cannot forget; the real `stratus` still migrates,
+ * since a name held by the same id it is asked for is not a collision.
  */
 export interface StateDirectoryNames {
   /**
@@ -225,7 +235,9 @@ export interface StateDirectoryNames {
 }
 
 export const createStateDirectoryNames = (): StateDirectoryNames => {
-  const byName = new Map<string, string>();
+  const byName = new Map<string, string>([
+    [foldedAgentId(DEFAULT_STRATUS_AGENT.id), DEFAULT_STRATUS_AGENT.id],
+  ]);
   return {
     heldBy: (agentId) => {
       const claimed = byName.get(foldedAgentId(agentId));

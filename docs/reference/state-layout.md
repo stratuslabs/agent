@@ -51,6 +51,18 @@ that are worth knowing:
 - **Renaming an agent's `id:` re-keys all of it.** The old directory stays
   where it is under the old id; nothing moves it, because nothing can tell
   a rename from a new agent.
+- **Nothing in `agents/<id>/` may be a symlink** — not the directory, not
+  `sessions.db`, `memory.jsonl`, `memory.jsonl.index` or `whitelist.json`.
+  Stratus chose these paths, so a link there is not a layout decision
+  somebody made, it is this agent's state pointing at another agent's file
+  or outside the home; and the `0700`/`0600` tightening would be applied to
+  whatever it points at. Reads are refused as well as writes, because a
+  store that will not *place* a memory through a link but answers happily
+  with what is on the far side of one has only moved the leak. A daemon
+  refuses; the upgrade move quarantines and says which file. This is about
+  Stratus's own paths only — `~/.stratus` itself may be a symlink, and a
+  soul file in `agents/` may be one too (see
+  [Templates](../guides/templates.md)).
 - **Two ids that differ only in case are one directory**, because macOS and
   Windows fold `agents/Ava/` and `agents/ava/` onto the same name — and one
   directory holding two agents is the sessions, the memories, and the

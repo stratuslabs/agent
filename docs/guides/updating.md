@@ -96,7 +96,8 @@ whose soul is absent keeps its rows — the migration walks the stored agent
 ids, not the roster — so restoring the soul later finds its history where
 the layout says it lives. An id with no directory to own — one that is not a
 single path segment, one whose name is already a file or a symlink, one the
-platform refuses, one that differs from another stored id only in case (see
+platform refuses, one that differs only in case from another stored id or
+from the reserved `stratus` (see
 [State layout](../reference/state-layout.md#one-directory-per-agent)) —
 keeps its rows in the preserved original, and the migration names it and
 the reason on the way past rather than dropping it silently or failing the

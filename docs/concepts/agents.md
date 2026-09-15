@@ -107,7 +107,10 @@ cleaned up — `id: ../../escape` is refused, not rewritten to `escape`.
 Anything else is yours. An id like `Ava_1` or `team.alpha` is unusual but
 harmless, and it is already keying that agent's sessions and sign-ins, so
 it is left exactly as written. Mixed case is fine on its own; what is not
-is *two* ids that differ only in case, which is a collision — see below. Omit `id:` and one is derived from the name
+is *two* ids that differ only in case — that is a collision, and so is one
+that differs only in case from the reserved `stratus`. See below.
+
+Omit `id:` and one is derived from the name
 as a plain slug (`ava`); a generated agent's id is also capped at 64
 characters, but a slug derived from a name you chose is used whole, because
 shortening an id moves the agent it belongs to.

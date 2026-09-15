@@ -291,6 +291,40 @@ test('a save that moves a session to another agent is refused, not written twice
   bea.close();
 });
 
+test('a save claims the id before it writes, so a concurrent save cannot take it too', async () => {
+  const stateDir = await newStateDir();
+  const store = new ShardedSessionStore({ stateDir });
+  const at = '2026-01-01T00:00:00.000Z';
+  const unindexed = (agentId: string): Session => ({
+    ...session('s-1', agentId),
+    agent: { id: agentId, name: agentId },
+    createdAt: at,
+    updatedAt: at,
+  });
+
+  // An id no `create` ever claimed — the case an embedder reaches by saving
+  // a session it built itself. Deliberately not awaited: `save` claims
+  // synchronously and then awaits the shard write, so this is exactly the
+  // window where a second caller runs. Reading the index and *then* writing
+  // the file leaves that whole write between the question and the answer,
+  // and both callers write a shard — which the next start refuses to serve
+  // over, because the reconcile finds one id under two agents.
+  const first = store.save(unindexed('ava'));
+  await assert.rejects(
+    () => store.save(unindexed('bea')),
+    (error: unknown) => error instanceof SessionIdTakenError && /never cross agent identities/.test(error.message),
+  );
+  await first;
+
+  assert.equal((await store.get('s-1'))?.agent.id, 'ava');
+  assert.deepEqual(await store.reconcile(), { released: [], reindexed: [] });
+  store.close();
+
+  const bea = new SqliteSessionStore(agentSessionDbIn(stateDir, 'bea'));
+  assert.deepEqual(bea.rows(), []);
+  bea.close();
+});
+
 test('a directory under agents/ that holds no shard is not an agent to reconcile', async () => {
   const stateDir = await newStateDir();
   const store = new ShardedSessionStore({ stateDir });
