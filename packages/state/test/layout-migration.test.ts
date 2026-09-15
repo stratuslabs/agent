@@ -14,6 +14,7 @@ import {
   agentsDirPath,
   createHomeMemoryStore,
   drainSharedMemory,
+  hasBracketedLegacyState,
   fleetDbPath,
   legacyMemoryFilePath,
   legacySessionDbPath,
@@ -289,7 +290,32 @@ test('a memory record written after one drain is taken by the next', async () =>
     (await memory.list('ava')).entries.map((entry) => entry.content),
     ['likes jazz', 'written after the drain'],
   );
+  // And a third pass over the same file adds nothing: the copy dedupes by
+  // line, which is what lets it run on every command.
+  assert.equal(await drainSharedMemory(env), undefined);
+});
+
+test('the drain copies, so a daemon of the older build keeps reading its own file', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+
+  // The old daemon reads `memory.jsonl` by pathname on every listing and
+  // takes ENOENT as an empty store, so a drain that moved the file would
+  // make its agents answer mid-conversation as though they had forgotten
+  // everything — the same failure the early copy exists to avoid, pointed
+  // at the old process instead of the new one.
+  const before = await readFile(legacyMemoryFilePath(env), 'utf8');
+  await drainSharedMemory(env);
+  assert.equal(await readFile(legacyMemoryFilePath(env), 'utf8'), before, 'the old reader still has its file, byte for byte');
+  // The new build has it too, from its own file.
+  assert.deepEqual((await createHomeMemoryStore(env).list('ava')).entries.map((entry) => entry.content), ['likes jazz']);
+
+  // Retiring it is the exclusive half's, where that reader is gone by
+  // definition — and the derived index goes with it.
+  await runStateMigrations(env, { exclusive: true });
   await assert.rejects(() => stat(legacyMemoryFilePath(env)));
+  await stat(`${legacyMemoryFilePath(env)}.migrated`);
 });
 
 test('a home with nothing shared to move is migrated by the ordinary path', async () => {
@@ -375,4 +401,30 @@ test('a grant written before the move lands in the file the move will carry', as
   const moved = createFileCommandWhitelist({ directory: agentsDirPath(env) });
   assert.deepEqual((await moved.toolGrantsFor('ava')).map((grant) => grant.tool), ['web.fetch']);
   assert.deepEqual((await moved.scopesFor('ava')).map((scope) => scope.command), ['git']);
+});
+
+test('a grant write never recreates the old file the move has already taken', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  await runStateMigrations(env);
+
+  // The gap the exclusive move can land in: a file-fallback grant write
+  // resolves the old path, and the rename happens before it writes. A plain
+  // `writeFile` would recreate the old name after the migration had already
+  // copied and stamped — the grants the daemon now reads would be missing
+  // this write, and the legacy file left behind would make every later
+  // `start()` refuse the home as un-migrated, with no migration left to run.
+  const store = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  await store.scopesFor('ava'); // resolve and cache, as a revoke does first
+  await runStateMigrations(env, { exclusive: true });
+  await store.rememberTool('ava', { tool: 'web.fetch', grantedAt: '2026-03-01T00:00:00.000Z' });
+
+  await assert.rejects(() => stat(path.join(agentsDirPath(env), 'ava.whitelist.json')));
+  const moved = JSON.parse(await readFile(whitelistPathFor(agentsDirPath(env), 'ava'), 'utf8')) as {
+    tools: Array<{ tool: string }>;
+  };
+  assert.deepEqual(moved.tools.map((grant) => grant.tool), ['web.fetch']);
+  // And the home does not read as un-migrated, which is the wedge.
+  assert.equal(await hasBracketedLegacyState(env), false);
 });

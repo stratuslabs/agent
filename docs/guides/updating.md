@@ -62,14 +62,16 @@ nothing has restarted it yet — can do to each file:
   one file at a time, whichever is currently the agent's, is what keeps the
   two builds writing the same list, so nothing goes quiet or comes back
   from the dead in between.
-- **Memories move on the first command of the new build**, and keep
-  moving. The JSONL is an append-only log opened by pathname on every
-  write, so an old daemon can recreate it after any single pass — which is
-  why folding it in is not a one-shot migration at all but a drain every
-  command and every daemon start runs until the file stops coming back.
-  Waiting for a restart here would mean every `run`, `agents`, and `memory`
-  in between reading an agent that remembers nothing, and an upgrade must
-  never look like the agent forgot.
+- **Memories are copied on the first command of the new build**, and keep
+  being copied. The JSONL is an append-only log opened by pathname on every
+  read and every write, so folding it in is not a one-shot migration at all
+  but a copy that every command and every daemon start runs until the
+  source stops changing. Copied rather than moved, and the source is
+  retired only under the bracket, because both ends have a reader to keep
+  whole: waiting would mean every `run`, `agents`, and `memory` on the new
+  build reading an agent that remembers nothing, while taking the file away
+  early would do the same to the old daemon still serving from it. An
+  upgrade must never look like the agent forgot — in either direction.
 
 Nothing is deleted: the shared database and the shared memory file stay on
 disk as `sessions.db.migrated` and `memory.jsonl.migrated`, and the old

@@ -79,5 +79,5 @@ you lose.
 An install upgrading from before this layout is migrated on first use — see
 [Updating](../guides/updating.md), which also says why the sessions,
 schedules, and grants wait for `stratus serve` or `stratus update` while
-the memories do not, and what the preserved originals are called
-afterwards.
+the memories are copied straight away, and what the preserved originals are
+called afterwards.

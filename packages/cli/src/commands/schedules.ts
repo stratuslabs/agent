@@ -1,6 +1,6 @@
 import { stat } from 'node:fs/promises';
 
-import { canonicalDestination, describeCadence, describeSchedule } from '@stratusagent/agents';
+import { canonicalDestination, describeCadence, describeSchedule, type ScheduleRecord } from '@stratusagent/agents';
 import { fleetDbPath, legacySessionDbPath } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -27,6 +27,46 @@ const scheduleDbPath = async (env: CliEnvironment): Promise<string> => {
   return legacy;
 };
 
+/**
+ * Cancel a schedule out of every database this home has one in.
+ *
+ * Two of them exist for as long as the per-agent move is pending, and a row
+ * that survives in either is a schedule that fires after the operator was
+ * told it was cancelled — carrying the standing destination grant the
+ * cancel was supposed to revoke with it, which is the failure this surface
+ * exists to prevent.
+ *
+ * **The legacy database goes first**, and the order is the point. The
+ * migration copies the rows out of it under an IMMEDIATE transaction, so a
+ * delete there either lands before the copy — leaving nothing to copy — or
+ * waits out the copy's brief lock and runs after it, in which case the row
+ * is now in `fleet.db` and the second delete below removes it. Deleting the
+ * fleet row first would invert that and let a copy still in flight put the
+ * row back behind us.
+ *
+ * Returns the record as the first database holding it described it, or
+ * undefined when nothing did.
+ */
+const cancelEverywhere = async (env: CliEnvironment, id: string): Promise<ScheduleRecord | undefined> => {
+  const { SqliteScheduleStore } = await import('@stratusagent/gateway');
+  let cancelled: ScheduleRecord | undefined;
+  for (const dbPath of [legacySessionDbPath(env), fleetDbPath(env)]) {
+    if (!(await pathExists(dbPath))) {
+      continue;
+    }
+    const store = new SqliteScheduleStore(dbPath);
+    try {
+      const record = store.get(id);
+      if (store.delete(id) && record) {
+        cancelled ??= record;
+      }
+    } finally {
+      store.close();
+    }
+  }
+  return cancelled;
+};
+
 const pathExists = async (filePath: string): Promise<boolean> => {
   try {
     await stat(filePath);
@@ -51,12 +91,13 @@ export const runSchedules = async (
   // Lazy like the serve path: node:sqlite loads only for the command that
   // needs it.
   const { SqliteScheduleStore } = await import('@stratusagent/gateway');
-  const store = new SqliteScheduleStore(await scheduleDbPath(env));
+  const resolved = await scheduleDbPath(env);
+  const store = new SqliteScheduleStore(resolved);
   try {
     if (command.action === 'cancel') {
       const id = command.scheduleId ?? '';
-      const record = store.get(id);
-      if (!record || !store.delete(id)) {
+      const record = await cancelEverywhere(env, id);
+      if (!record) {
         writeLine(streams.stderr, `No schedule with id ${id}. \`stratus schedules\` lists what exists.`);
         return 1;
       }

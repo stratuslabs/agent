@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { describeCommandScope, parseCommandScope, sameScope, type CommandScope } from './commands.ts';
@@ -326,18 +326,23 @@ export const createFileCommandWhitelist = (options: {
     // A write that always took the new path would fork the list while the
     // move is still pending.
     const target = await resolveWhitelistPath(options.directory, agentId);
-    // The agent's own directory, owner-only like every other per-agent
-    // resource: it holds what this agent may do unattended. (A no-op when
-    // the resolved path is still the old one beside the souls.)
-    await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
     const file: WhitelistFile = {
       version: WHITELIST_VERSION,
       scopes: grants.scopes,
       ...(grants.origins.length > 0 ? { origins: grants.origins } : {}),
       ...(grants.tools.length > 0 ? { tools: grants.tools } : {}),
     };
-    await writeFile(target, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-    await chmod(target, 0o600);
+    const body = `${JSON.stringify(file, null, 2)}\n`;
+    const current = whitelistPathFor(options.directory, agentId);
+    if (target === current) {
+      // The agent's own directory, owner-only like every other per-agent
+      // resource: it holds what this agent may do unattended.
+      await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+      await writeFile(target, body, { mode: 0o600 });
+      await chmod(target, 0o600);
+    } else {
+      await writeLegacy(target, current, body);
+    }
     // The cache is updated only once the file holds the same thing, and the
     // direction that matters is revocation. Updating it first meant a write
     // that failed — a read-only mount, a full disk — still dropped the grant
@@ -349,6 +354,46 @@ export const createFileCommandWhitelist = (options: {
     // leading it. Writes are serialized per agent, so a reader mid-write
     // sees the old grants, which is what the file still says.
     cache.set(agentId, Promise.resolve(grants));
+  };
+
+  /**
+   * Write the old file *without* being able to create it.
+   *
+   * There is a gap between resolving the path and writing it, and the
+   * exclusive migration can rename the file away inside it. A plain
+   * `writeFile` would then recreate the old name after the move had already
+   * copied and stamped — leaving the grants the daemon now reads missing
+   * this write, and a legacy file on disk that makes the next `start()`
+   * refuse the home as un-migrated, forever, because the migration is
+   * recorded as done.
+   *
+   * Opening without `O_CREAT` closes it, because a rename moves the inode
+   * rather than the bytes: either the open succeeds and the write lands in
+   * that file — following it to its new name if the move happens next — or
+   * it fails with ENOENT because the move already happened, and the write
+   * goes to where the grants now live. Neither outcome leaves a file behind
+   * that nothing will read again.
+   */
+  const writeLegacy = async (legacy: string, current: string, body: string): Promise<void> => {
+    let handle;
+    try {
+      handle = await open(legacy, 'r+');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+      await mkdir(path.dirname(current), { recursive: true, mode: 0o700 });
+      await writeFile(current, body, { mode: 0o600 });
+      await chmod(current, 0o600);
+      return;
+    }
+    try {
+      await handle.chmod(0o600);
+      await handle.truncate(0);
+      await handle.write(body, 0, 'utf8');
+    } finally {
+      await handle.close();
+    }
   };
 
   /**

@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { appendFile, chmod, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readdir, readFile, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
@@ -38,16 +37,18 @@ import {
 //   finds nothing to do. No stage mistakes a renamed source for a missing
 //   one.
 // - **Nothing races a daemon of the older build.** That daemon is still
-//   writing this state, and each resource answers it differently. The
-//   session database and the grant files move under an exclusive bracket,
-//   because their writers cannot be reconciled after the fact: a SQLite
-//   file is held open, and a grant file is a whole-state document where a
-//   revocation written to the old path after the move would leave the new
-//   one still granting. The memory file needs no bracket, because it is an
-//   append-only log and a *drain* can converge on it — which is why the
-//   memory half is not a stamped migration at all (see
-//   `drainSharedMemory`): stamping it would declare the job done while a
-//   process that has not restarted can still append one more line.
+//   reading and writing this state, and each resource answers it
+//   differently. The session database and the grant files *move* under an
+//   exclusive bracket, because their writers cannot be reconciled after the
+//   fact: a SQLite file is held open, and a grant file is a whole-state
+//   document where a revocation written to the old path after the move
+//   would leave the new one still granting. The memory file is *copied*
+//   early and retired late: copying needs no bracket, because the JSONL is
+//   an append-only log whose readers dedupe by entry id, and running the
+//   copy on every command is what converges on a writer that has not
+//   stopped — while taking the file away does need one, because that
+//   daemon reads the pathname on every listing and would answer, mid
+//   conversation, as though every agent had forgotten everything.
 // - **It walks the data, not the roster.** The gateway deliberately keeps a
 //   missing soul's sessions when it drops the soul, so owners come from the
 //   stored `agent_id` values as well as from the souls on disk: an agent
@@ -204,25 +205,48 @@ const moveSchedules = async (legacyDb: SqliteDatabase, env: StateEnvironment): P
     return 0;
   }
   const schema = tableSchemaOf(legacyDb, 'schedules');
-  const fleet = await openDatabase(fleetDbPath(env));
+  // The destination table first, on its own connection, so the copy below
+  // needs no rewriting of the source's `CREATE TABLE` to name an attached
+  // schema.
+  const fleetPath = fleetDbPath(env);
+  const fleet = await openDatabase(fleetPath);
   try {
     if (!hasTable(fleet, 'schedules') && schema !== undefined) {
       fleet.exec(schema);
     }
-    // Attached rather than read-then-write: one statement, inside SQLite,
-    // with no schedule body making a round trip through this process.
-    fleet.prepare('ATTACH ? AS legacy').run(legacySessionDbPath(env));
-    try {
-      const columns = columnsOf(fleet, 'legacy', 'schedules').join(', ');
-      fleet.exec(`INSERT OR REPLACE INTO schedules (${columns}) SELECT ${columns} FROM legacy.schedules`);
-      const counted = fleet.prepare('SELECT COUNT(*) AS total FROM legacy.schedules').get() as { total: number };
-      return Number(counted.total);
-    } finally {
-      fleet.exec('DETACH legacy');
-    }
   } finally {
     fleet.close();
-    await tighten(fleetDbPath(env));
+    await tighten(fleetPath);
+  }
+
+  // Copied from the *legacy* connection with the fleet database attached,
+  // inside an IMMEDIATE transaction, because the direction decides who
+  // waits. `stratus schedules cancel` is an ordinary CLI process — the home
+  // claim does not exclude it — and it deletes the row from the legacy
+  // database. Were that delete to land between this read and this write,
+  // the row would be copied back into `fleet.db` after the operator was
+  // told it was cancelled: a schedule that fires anyway, with the standing
+  // destination grant it carries still live. IMMEDIATE takes the write lock
+  // on the legacy database up front, so that delete waits its brief turn
+  // (every store here sets a busy timeout for exactly this) and then runs
+  // against a copy that has already happened — which the cancel finishes by
+  // deleting from the fleet database too.
+  legacyDb.prepare('ATTACH ? AS fleet').run(fleetPath);
+  try {
+    const columns = columnsOf(legacyDb, 'main', 'schedules').join(', ');
+    legacyDb.exec('BEGIN IMMEDIATE');
+    try {
+      legacyDb.exec(`INSERT OR REPLACE INTO fleet.schedules (${columns}) SELECT ${columns} FROM main.schedules`);
+      const counted = legacyDb.prepare('SELECT COUNT(*) AS total FROM main.schedules').get() as { total: number };
+      legacyDb.exec('COMMIT');
+      return Number(counted.total);
+    } catch (error) {
+      legacyDb.exec('ROLLBACK');
+      throw error;
+    }
+  } finally {
+    legacyDb.exec('DETACH fleet');
+    await tighten(fleetPath);
   }
 };
 
@@ -296,133 +320,118 @@ const agentIdOfLine = (line: string): string | undefined => {
 };
 
 /**
- * Split the shared memory file into one JSONL per agent.
+ * Copy the shared memory file into one JSONL per agent, leaving the source
+ * exactly where it is.
+ *
+ * Copy rather than move, because the source still has a reader: a daemon of
+ * the older build is serving until something restarts it, and it reads this
+ * pathname on every listing. Taking it away mid-upgrade would make its
+ * agents answer as though they had forgotten everything. Retiring the file
+ * is `retireSharedMemory`, under the exclusive bracket, where that reader
+ * is by definition gone.
  *
  * Every record type goes by its `agentId` — entries, the tombstones that
  * retire them, and the re-assertions that re-label them — because a
  * tombstone parted from its entry is a forgotten fact that comes back.
  *
  * Deduped by line rather than by id: the file is append-only and the same
- * line written twice is the same record, so a re-run after a kill converges
- * instead of doubling an agent's history. A line nobody can attribute (a
- * hand edit, a truncated write) stays in the preserved original, where it
+ * line written twice is the same record, so running this on every command
+ * converges instead of doubling an agent's history. A line nobody can
+ * attribute (a hand edit, a truncated write) stays in the source, where it
  * is recoverable, rather than being guessed into somebody's store.
  */
-const shardMemories = async (env: StateEnvironment, report: LayoutMigrationReport): Promise<void> => {
+const copySharedMemory = async (env: StateEnvironment, report: LayoutMigrationReport): Promise<void> => {
   const source = legacyMemoryFilePath(env);
-  const archive = `${source}.migrated`;
-
-  // Taken by rename before a byte is read, the way the per-directory import
-  // already claims its source: of any processes racing, exactly one wins the
-  // rename and the rest see ENOENT.
-  //
-  // The rename is not the end of it, and this is the part that decides the
-  // shape of the whole memory half. The file store opens the JSONL *by
-  // pathname* on every append, so a daemon of the older build writing one
-  // more fact after the rename does not land in the claimed inode — it
-  // recreates `memory.jsonl`, where nothing would ever look again if this
-  // ran once and recorded itself as done. So it does not: it is a drain
-  // that every command and every daemon start runs until the file stops
-  // coming back, and only a process still running the older build can make
-  // it come back.
-  const claimAndSplit = async (sourcePath: string): Promise<void> => {
-    const claimPath = path.join(path.dirname(source), `${path.basename(source)}.migrating-${randomUUID()}`);
-    try {
-      await rename(sourcePath, claimPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return; // another process owns it, or there is nothing to migrate
-      }
-      throw error;
-    }
-    const claimed = await readFile(claimPath, 'utf8');
-    const byAgent = new Map<string, string[]>();
-    const unsafe = new Map<string, number>();
-    let unattributed = 0;
-    for (const line of claimed.split('\n')) {
-      if (line.trim().length === 0) {
-        continue;
-      }
-      const agentId = agentIdOfLine(line);
-      if (agentId === undefined) {
-        unattributed += 1;
-        continue;
-      }
-      if (!isValidAgentId(agentId)) {
-        unsafe.set(agentId, (unsafe.get(agentId) ?? 0) + 1);
-        continue;
-      }
-      const lines = byAgent.get(agentId) ?? [];
-      lines.push(line);
-      byAgent.set(agentId, lines);
-    }
-    for (const [agentId, count] of unsafe) {
-      report.quarantined.push(
-        `${JSON.stringify(agentId)} (${count} memory record(s)) — not a single path segment, so it has no directory to own`,
-      );
-    }
-    for (const [agentId, lines] of byAgent) {
-      const destination = agentMemoryFilePath(env, agentId);
-      let existing = new Set<string>();
-      try {
-        existing = new Set((await readFile(destination, 'utf8')).split('\n'));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw error;
-        }
-      }
-      // Deduped by line rather than by id: the file is append-only and the
-      // same line written twice is the same record, so a re-run after a kill
-      // converges instead of doubling an agent's history.
-      const fresh = lines.filter((line) => !existing.has(line));
-      if (fresh.length === 0) {
-        continue;
-      }
-      if (!(await agentDirectoryOrQuarantine(env, agentId, `${fresh.length} memory record(s)`, report))) {
-        continue;
-      }
-      // Appended, never rewritten: the JSONL is append-only because that is
-      // its whole concurrency model, and a migration that rewrote the file
-      // would be the one writer that could lose a line somebody else added.
-      await appendFile(destination, `${fresh.join('\n')}\n`, { mode: 0o600 });
-      await chmod(destination, 0o600);
-      report.agentsWithMemories += 1;
-      report.memoriesMoved += fresh.length;
-    }
-    if (unattributed > 0) {
-      report.quarantined.push(
-        `${unattributed} memory line(s) with no agent id — left in the preserved ${path.basename(archive)}`,
-      );
-    }
-    // Archived by appending, never overwriting an earlier archive, and the
-    // claim dropped only once its content is preserved there.
-    if (claimed.length > 0) {
-      await appendFile(archive, claimed.endsWith('\n') ? claimed : `${claimed}\n`, { mode: 0o600 });
-      await chmod(archive, 0o600);
-    }
-    await rm(claimPath);
-  };
-
-  await claimAndSplit(source);
-
-  // Finish any claim a crashed run left behind.
-  let leftovers: string[];
+  let raw: string;
   try {
-    leftovers = await readdir(path.dirname(source));
+    raw = await readFile(source, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return;
     }
     throw error;
   }
-  for (const name of leftovers) {
-    if (name.startsWith(`${path.basename(source)}.migrating`)) {
-      await claimAndSplit(path.join(path.dirname(source), name));
-    }
-  }
 
-  // The derived FTS index of a record that is no longer there: renamed with
-  // it, so nothing rebuilds an index for a file this migration emptied.
+  const byAgent = new Map<string, string[]>();
+  const unsafe = new Map<string, number>();
+  let unattributed = 0;
+  for (const line of raw.split('\n')) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+    const agentId = agentIdOfLine(line);
+    if (agentId === undefined) {
+      unattributed += 1;
+      continue;
+    }
+    if (!isValidAgentId(agentId)) {
+      unsafe.set(agentId, (unsafe.get(agentId) ?? 0) + 1);
+      continue;
+    }
+    const lines = byAgent.get(agentId) ?? [];
+    lines.push(line);
+    byAgent.set(agentId, lines);
+  }
+  for (const [agentId, count] of unsafe) {
+    report.quarantined.push(
+      `${JSON.stringify(agentId)} (${count} memory record(s)) — not a single path segment, so it has no directory to own`,
+    );
+  }
+  for (const [agentId, lines] of byAgent) {
+    const destination = agentMemoryFilePath(env, agentId);
+    let existing = new Set<string>();
+    try {
+      existing = new Set((await readFile(destination, 'utf8')).split('\n'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
+    const fresh = lines.filter((line) => !existing.has(line));
+    if (fresh.length === 0) {
+      continue;
+    }
+    if (!(await agentDirectoryOrQuarantine(env, agentId, `${fresh.length} memory record(s)`, report))) {
+      continue;
+    }
+    // Appended, never rewritten: the JSONL is append-only because that is
+    // its whole concurrency model, and a migration that rewrote the file
+    // would be the one writer that could lose a line somebody else added.
+    // Two copiers racing can each append the same line — which is what the
+    // store's read-time dedupe by entry id is already for, and why this
+    // needs no claim of its own.
+    await appendFile(destination, `${fresh.join('\n')}\n`, { mode: 0o600 });
+    await chmod(destination, 0o600);
+    report.agentsWithMemories += 1;
+    report.memoriesMoved += fresh.length;
+  }
+  if (unattributed > 0) {
+    report.quarantined.push(
+      `${unattributed} memory line(s) with no agent id — left in ${path.basename(source)}`,
+    );
+  }
+};
+
+/**
+ * Retire the shared file, once nothing can be reading it any more.
+ *
+ * The one destructive step, and it belongs to the exclusive half for a
+ * reason the copy above does not share: a daemon of the older build reads
+ * `memory.jsonl` by pathname on every listing and takes `ENOENT` as an
+ * empty store, so taking the file away while it serves makes every one of
+ * its agents answer, mid-conversation, as though it had forgotten
+ * everything. That is the same failure the copy runs early to avoid,
+ * pointed at the old process instead of the new one.
+ *
+ * The derived FTS index goes with it: an index of a record that is no
+ * longer there would only be rebuilt from nothing.
+ */
+const retireSharedMemory = async (env: StateEnvironment): Promise<void> => {
+  const source = legacyMemoryFilePath(env);
+  if (!(await exists(source))) {
+    return;
+  }
+  await rename(source, `${source}.migrated`);
   if (await exists(`${source}.index`)) {
     await rename(`${source}.index`, `${source}.index.migrated`);
   }
@@ -561,7 +570,7 @@ const describe = (report: LayoutMigrationReport): string | undefined => {
  */
 export const drainSharedMemory = async (env: StateEnvironment): Promise<string | undefined> => {
   const report = emptyReport();
-  await shardMemories(env, report);
+  await copySharedMemory(env, report);
   return describe(report);
 };
 
@@ -596,6 +605,11 @@ export const applyPerAgentLayout = async (env: StateEnvironment): Promise<string
       }
     }
   }
+  // The memories too, one last time and then for good: the copy is what
+  // every command has been running, and this is the only caller that may
+  // also take the source away.
+  await copySharedMemory(env, report);
+  await retireSharedMemory(env);
   await moveWhitelists(env, report);
   return describe(report);
 };

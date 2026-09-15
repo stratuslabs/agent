@@ -10701,6 +10701,47 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
   assert.match(nothing.output.stdout, /nothing to re-assert/);
 });
 
+test('cancelling a schedule the move has since copied takes the row out of both databases', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-race-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const { SqliteScheduleStore } = await import('@stratusagent/gateway');
+  const { legacySessionDbPath, fleetDbPath: fleetPath } = await import('@stratusagent/state');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+
+  const row = {
+    id: 'sched-1',
+    agentId: 'ava',
+    cadence: { kind: 'every', intervalMs: 3_600_000 },
+    prompt: 'check the repo',
+    destination: { channel: 'slack', to: 'C-ENG' },
+    createdAt: '2026-08-29T00:00:00.000Z',
+    nextFireAt: '2026-08-30T07:00:00.000Z',
+  } as const;
+  // The state a migration that has already copied leaves for a moment: the
+  // row in both files, because the legacy database is archived only after.
+  const legacy = new SqliteScheduleStore(legacySessionDbPath(env));
+  legacy.insert(row);
+  legacy.close();
+  const fleet = new SqliteScheduleStore(fleetPath(env));
+  fleet.insert(row);
+  fleet.close();
+
+  const cancelled = createStreams();
+  assert.equal(await runCli({ argv: ['schedules', 'cancel', 'sched-1'], streams: cancelled.streams, env }), 0, cancelled.output.stderr);
+  assert.match(cancelled.output.stdout, /Cancelled sched-1/);
+  assert.match(cancelled.output.stdout, /destination slack:C-ENG is revoked/);
+
+  // A row left in either database is a schedule that fires after the
+  // operator was told it was cancelled, carrying the standing destination
+  // grant the cancel was supposed to revoke.
+  for (const dbPath of [fleetPath(env), legacySessionDbPath(env)]) {
+    const after = new SqliteScheduleStore(dbPath);
+    const survivors = after.list();
+    after.close();
+    assert.deepEqual(survivors.map((record) => record.id), [], dbPath);
+  }
+});
+
 test('a shared memory file a pre-15a daemon leaves behind is folded in by any command, not once', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-drain-cli-'));
   const env = { cwd: home, homeDir: home, processEnv: {} };
@@ -10724,7 +10765,9 @@ test('a shared memory file a pre-15a daemon leaves behind is folded in by any co
   assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: second.streams, env }), 0, second.output.stderr);
   assert.match(second.output.stdout, /written by the old daemon/);
   assert.match(second.output.stdout, /likes jazz/);
-  await assert.rejects(() => readFile(shared, 'utf8'));
+  // The file is still there, because that old daemon is still reading it —
+  // retiring it belongs to the exclusive half, once it has stopped.
+  assert.equal(await readFile(shared, 'utf8'), line('ava:memory:2', 'written by the old daemon'));
 });
 
 test('a state migration that cannot stamp the home refuses commands that write state, and only those', async () => {
