@@ -58,10 +58,10 @@ nothing has restarted it yet — can do to each file:
   move would land on the old path while the moved file still granted — a
   grant back from the dead. Nothing can reconcile those afterwards, so the
   move waits instead. Until it happens, `stratus schedules` keeps reading
-  the old database, and grants are both read *and written* on the old file —
-  one file at a time, whichever is currently the agent's, is what keeps the
-  two builds writing the same list, so nothing goes quiet or comes back
-  from the dead in between.
+  whichever database the rows are actually in, and grants are both read
+  *and written* on the old file — one file at a time, whichever is
+  currently the agent's, is what keeps the two builds writing the same
+  list, so nothing goes quiet or comes back from the dead in between.
 - **Memories are copied on the first command of the new build**, and keep
   being copied. The JSONL is an append-only log opened by pathname on every
   read and every write, so folding it in is not a one-shot migration at all
@@ -78,9 +78,11 @@ disk as `sessions.db.migrated` and `memory.jsonl.migrated`, and the old
 `agents/<id>.whitelist.json` files are moved rather than copied. An agent
 whose soul is absent keeps its rows — the migration walks the stored agent
 ids, not the roster — so restoring the soul later finds its history where
-the layout says it lives. An id that cannot be a single path segment has no
-directory to own: its rows stay in the preserved original and the migration
-names it on the way past, rather than dropping it silently.
+the layout says it lives. An id with no directory to own — one that is not a
+single path segment, one whose name is already a file, one the platform
+refuses — keeps its rows in the preserved original, and the migration names
+it and the reason on the way past rather than dropping it silently or
+failing the upgrade over it.
 
 One thing a rollback does lose, and it is not stamped: an agent's
 `origins` and `tools` grants. `whitelist.json` holds every kind of

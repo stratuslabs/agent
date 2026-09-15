@@ -15,6 +15,7 @@ import {
   createHomeMemoryStore,
   drainSharedMemory,
   hasBracketedLegacyState,
+  legacyStateHeld,
   fleetDbPath,
   legacyMemoryFilePath,
   legacySessionDbPath,
@@ -427,4 +428,59 @@ test('a grant write never recreates the old file the move has already taken', as
   assert.deepEqual(moved.tools.map((grant) => grant.tool), ['web.fetch']);
   // And the home does not read as un-migrated, which is the wedge.
   assert.equal(await hasBracketedLegacyState(env), false);
+});
+
+test('an empty database left at the old pathname is not mistaken for un-migrated state', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  await runStateMigrations(env, { exclusive: true });
+
+  // SQLite creates a database on open and `DatabaseSync` has no
+  // open-without-create, so a process that resolved the old pathname a
+  // moment before the rename leaves an empty husk behind it. Read as "this
+  // home is un-migrated", that husk is a permanent refusal over a file with
+  // nothing in it — and the migration that would clear it is already
+  // stamped as applied.
+  const husk = new DatabaseSync(legacySessionDbPath(env));
+  husk.exec('CREATE TABLE IF NOT EXISTS schedules (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, next_fire_at TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL)');
+  husk.close();
+
+  assert.equal(await hasBracketedLegacyState(env), false);
+  assert.deepEqual(await legacyStateHeld(env), { sessions: 0, schedules: 0 });
+});
+
+test('a directory name the platform refuses is quarantined like any other unusable name', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // The collision case stands in for the class: `isValidAgentId` answers
+  // path *safety*, which is not the same question as whether the platform
+  // will take the name — `CON` and a trailing dot are valid ids here and
+  // refused by Windows. Whatever the errno, one agent's unusable name must
+  // not abort the migration for the fleet.
+  await writeFile(path.join(agentsDirPath(env), 'taken.md'), 'a soul file in the way');
+  const at = '2026-01-01T00:00:00.000Z';
+  const db = new DatabaseSync(legacySessionDbPath(env));
+  db.prepare('INSERT OR REPLACE INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('t-1', 'taken.md', 'completed', JSON.stringify({ id: 't-1' }), at, at);
+  db.close();
+
+  const applied = await runStateMigrations(env, { exclusive: true });
+  const detail = applied.map((result) => result.detail ?? '').join(' ');
+  assert.match(detail, /QUARANTINED/);
+  assert.match(detail, /taken\.md/);
+  // Named with the reason the filesystem gave, so an operator can tell a
+  // name collision from a full disk.
+  assert.match(detail, /EEXIST|ENOTDIR/);
+  assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
+});
+
+test('a legacy database that will not answer counts as holding something', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // "Cannot tell" must not read as "nothing to lose": a refusal over a file
+  // this build cannot make sense of is the safe direction.
+  await writeFile(legacySessionDbPath(env), 'this is not a database');
+  assert.equal(await hasBracketedLegacyState(env), true);
 });

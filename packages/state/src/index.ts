@@ -121,7 +121,7 @@ export {
   runStateMigrations,
 } from './migrations.ts';
 
-export { drainSharedMemory, hasBracketedLegacyState } from './layout-migration.ts';
+export { drainSharedMemory, hasBracketedLegacyState, legacyStateHeld } from './layout-migration.ts';
 
 export {
   ConfigFileError,

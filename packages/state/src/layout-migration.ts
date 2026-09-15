@@ -133,6 +133,21 @@ const tighten = async (filePath: string): Promise<void> => {
 };
 
 /**
+ * The errors that mean *this name* cannot be a directory, as opposed to
+ * something being wrong with the whole operation.
+ *
+ * The split is the point. A name the filesystem refuses is one agent's
+ * problem and is quarantined; a full disk or an unwritable `agents/`
+ * directory is every agent's, and swallowing it would stamp the migration
+ * as applied with the whole fleet quarantined. `EEXIST`/`ENOTDIR` is the
+ * soul-filename collision; `EINVAL`, `EPERM` and `ENAMETOOLONG` are
+ * Windows, where `CON`, `PRN` and a trailing dot are valid agent ids by
+ * `isValidAgentId` — it answers path *safety*, which is not the same
+ * question as whether every platform will take the name.
+ */
+const UNUSABLE_DIRECTORY_NAME = new Set(['EEXIST', 'ENOTDIR', 'EINVAL', 'EPERM', 'ENAMETOOLONG']);
+
+/**
  * Make an agent's state directory, or say why it cannot exist.
  *
  * `isValidAgentId` answers whether an id is a safe path *segment*, which is
@@ -156,13 +171,13 @@ const agentDirectoryOrQuarantine = async (
     await mkdir(directory, { recursive: true, mode: 0o700 });
     return directory;
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== 'EEXIST' && code !== 'ENOTDIR') {
+    const code = (error as NodeJS.ErrnoException).code ?? '';
+    if (!UNUSABLE_DIRECTORY_NAME.has(code)) {
       throw error;
     }
     report.quarantined.push(
-      `${JSON.stringify(agentId)} (${what}) — ${path.relative(stratusHomePath(env), directory)} is already a file, `
-      + 'so this agent has no directory to own; rename its id to free the name',
+      `${JSON.stringify(agentId)} (${what}) — ${path.relative(stratusHomePath(env), directory)} cannot be a directory `
+      + `(${code}); this agent has no directory to own, so rename its id`,
     );
     return undefined;
   }
@@ -494,6 +509,53 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
 };
 
 /**
+ * What the pre-15a session database still holds, or undefined when there is
+ * no readable one.
+ *
+ * Rows rather than a filename, because a filename is not evidence. SQLite
+ * creates a database on open, so any process that resolves the old
+ * pathname a moment before the move renames it leaves an empty husk behind
+ * it — `stratus schedules` is the one that can, since `DatabaseSync` has no
+ * open-without-create. A husk answered as "this home is un-migrated" would
+ * be a permanent refusal over a file with nothing in it, and the migration
+ * that would clear it is already stamped as applied. Asking what is
+ * actually in there is both the safer answer and the truer one: a home with
+ * no sessions and no schedules has nothing the move could lose.
+ *
+ * A database that will not open or will not answer counts as holding
+ * something, because "cannot tell" must not read as "nothing to lose".
+ */
+export const legacyStateHeld = async (
+  env: StateEnvironment,
+): Promise<{ sessions: number; schedules: number } | undefined> => {
+  const filePath = legacySessionDbPath(env);
+  if (!(await exists(filePath))) {
+    return undefined;
+  }
+  const count = (db: SqliteDatabase, table: string): number => {
+    if (!hasTable(db, table)) {
+      return 0;
+    }
+    const row = db.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get() as { total: number };
+    return Number(row.total);
+  };
+  let db: SqliteDatabase;
+  try {
+    const { DatabaseSync } = await loadSqlite();
+    db = new DatabaseSync(filePath);
+  } catch {
+    return { sessions: 1, schedules: 1 };
+  }
+  try {
+    return { sessions: count(db, 'sessions'), schedules: count(db, 'schedules') };
+  } catch {
+    return { sessions: 1, schedules: 1 };
+  } finally {
+    db.close();
+  }
+};
+
+/**
  * Whether this home still holds state a daemon of the older build is
  * writing — and therefore whether the move needs the home to itself.
  *
@@ -503,7 +565,8 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
  * an old schema stamp waiting for a daemon start it may not get for days.
  */
 export const hasBracketedLegacyState = async (env: StateEnvironment): Promise<boolean> => {
-  if (await exists(legacySessionDbPath(env))) {
+  const held = await legacyStateHeld(env);
+  if (held !== undefined && (held.sessions > 0 || held.schedules > 0)) {
     return true;
   }
   try {

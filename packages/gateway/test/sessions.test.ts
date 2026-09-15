@@ -202,14 +202,27 @@ test('an agent id that cannot key a path never reaches a join', async () => {
 test('a gateway started on a home whose pre-15a state has not moved refuses rather than serving it', async () => {
   const { createGateway } = await import('../src/index.ts');
   const { legacySessionDbPath } = await import('@stratusagent/state');
+  const { DatabaseSync } = await import('node:sqlite');
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-unmigrated-'));
   const env = { homeDir: home, cwd: home, processEnv: {} };
   await mkdir(path.join(home, '.stratus'), { recursive: true });
-  // A shared session database, as a build before the per-agent layout left
-  // it. Serving over it is the quiet failure: the stores open on the new
-  // paths, find nothing, and the fleet starts a second population beside
-  // every session and schedule it already had.
-  await writeFile(legacySessionDbPath(env), '');
+  // A shared session database with a conversation in it, as a build before
+  // the per-agent layout left it. Serving over it is the quiet failure: the
+  // stores open on the new paths, find nothing, and the fleet starts a
+  // second population beside every session and schedule it already had.
+  // Rows, not just the filename — an empty database at that path is a husk
+  // some other process created and has nothing to strand.
+  const seeded = new DatabaseSync(legacySessionDbPath(env));
+  seeded.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, status TEXT NOT NULL,
+      body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )
+  `);
+  seeded
+    .prepare('INSERT INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('old-1', 'ava', 'completed', '{}', 'x', 'x');
+  seeded.close();
 
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await assert.rejects(() => gateway.start(), /pre-per-agent state/);

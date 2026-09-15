@@ -1,7 +1,7 @@
 import { stat } from 'node:fs/promises';
 
 import { canonicalDestination, describeCadence, describeSchedule, type ScheduleRecord } from '@stratusagent/agents';
-import { fleetDbPath, legacySessionDbPath } from '@stratusagent/state';
+import { fleetDbPath, legacySessionDbPath, legacyStateHeld } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
 import type { ParsedSchedulesCommand } from '../parse.ts';
@@ -14,17 +14,20 @@ import type { ParsedSchedulesCommand } from '../parse.ts';
  * deferred until a daemon start or `stratus update` (it needs the home to
  * itself), so between installing a newer build and that moment the rows are
  * still in the old file — and an audit list that read the new one would
- * report an empty fleet with every schedule still live in it. A fleet
- * database that exists is always the answer: nothing creates one before the
- * migration has run.
+ * report an empty fleet with every schedule still live in it.
+ *
+ * Decided by where the rows are, not by which files exist. `fleet.db`
+ * existing does not prove the move has happened: a gateway started by a
+ * host on an un-migrated home opens the fleet stores before `start()`
+ * refuses it, which leaves exactly that file with nothing in it. And an
+ * empty `sessions.db` does not prove the move has *not* happened, since
+ * SQLite creates one on open and any process that resolves the old
+ * pathname a moment before the rename leaves a husk. Counting the rows
+ * answers both.
  */
 const scheduleDbPath = async (env: CliEnvironment): Promise<string> => {
-  const fleet = fleetDbPath(env);
-  const legacy = legacySessionDbPath(env);
-  if (await pathExists(fleet) || !(await pathExists(legacy))) {
-    return fleet;
-  }
-  return legacy;
+  const held = await legacyStateHeld(env);
+  return held !== undefined && held.schedules > 0 ? legacySessionDbPath(env) : fleetDbPath(env);
 };
 
 /**

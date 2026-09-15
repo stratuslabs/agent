@@ -10701,6 +10701,35 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
   assert.match(nothing.output.stdout, /nothing to re-assert/);
 });
 
+test('stratus schedules reads where the rows are, not which database files exist', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-where-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const { SqliteScheduleStore } = await import('@stratusagent/gateway');
+  const { legacySessionDbPath, fleetDbPath: fleetPath } = await import('@stratusagent/state');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+
+  // An un-migrated home whose `fleet.db` exists anyway: a host that started
+  // the gateway itself opens the fleet stores before `start()` refuses the
+  // home, leaving that file with nothing in it. Reading "fleet.db exists"
+  // as "the move has happened" reports an empty fleet while every schedule
+  // is still live in the old database.
+  const legacy = new SqliteScheduleStore(legacySessionDbPath(env));
+  legacy.insert({
+    id: 'sched-1',
+    agentId: 'ava',
+    cadence: { kind: 'every', intervalMs: 3_600_000 },
+    prompt: 'check the repo',
+    createdAt: '2026-08-29T00:00:00.000Z',
+    nextFireAt: '2026-08-30T07:00:00.000Z',
+  });
+  legacy.close();
+  new SqliteScheduleStore(fleetPath(env)).close();
+
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['schedules'], streams: listed.streams, env }), 0, listed.output.stderr);
+  assert.match(listed.output.stdout, /sched-1 {2}\[ava\]/);
+});
+
 test('cancelling a schedule the move has since copied takes the row out of both databases', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-race-'));
   const env = { cwd: home, homeDir: home, processEnv: {} };
