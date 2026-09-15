@@ -292,6 +292,22 @@ export const createFileCommandWhitelist = (options: {
     return reading;
   };
 
+  /**
+   * The file's bytes, or undefined when there is no such file. Anything
+   * else — a permission, a directory in the way — is the caller's to
+   * report, because it means the grants exist and could not be read.
+   */
+  const readAt = async (file: string): Promise<string | undefined> => {
+    try {
+      return await readFile(file, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+      throw error;
+    }
+  };
+
   const readFresh = async (agentId: string): Promise<Grants> => {
     let scopes: CommandScope[] = [];
     let origins: OriginScope[] = [];
@@ -299,38 +315,59 @@ export const createFileCommandWhitelist = (options: {
     // The agent id is a validated invariant by the time it reaches any
     // path join (see 03) — it is a single path segment or it was refused
     // at the parse boundary, so this does not re-check it.
-    const file = await resolveWhitelistPath(options.directory, agentId);
+    let file = await resolveWhitelistPath(options.directory, agentId);
     try {
-      const raw = await readFile(file, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<WhitelistFile>;
-      scopes = Array.isArray(parsed.scopes)
-        ? parsed.scopes.map(parseCommandScope).filter((scope): scope is CommandScope => scope !== undefined)
-        : [];
-      origins = Array.isArray(parsed.origins)
-        ? parsed.origins.map(parseOriginScope).filter((scope): scope is OriginScope => scope !== undefined)
-        : [];
-      tools = Array.isArray(parsed.tools)
-        ? parsed.tools.map(parseToolGrant).filter((grant): grant is ToolGrant => grant !== undefined)
-        : [];
+      let raw = await readAt(file);
+      if (raw === undefined) {
+        // Resolved, then gone: the exclusive migration renames the legacy
+        // `<id>.whitelist.json` into the agent's own directory, and a read
+        // that resolved just before it finds nothing at the path it was
+        // handed. Taking that as "this agent has no grants" is the most
+        // expensive wrong answer this file can give — it is cached for the
+        // process, and the next "always" writes that emptiness plus one
+        // new scope to the current path, over every grant the migration
+        // had just moved there. So the question is asked again: the second
+        // resolve sees the world after the rename. A path that comes back
+        // unchanged really is absent, which is the ordinary case of an
+        // agent that has never been granted anything.
+        const moved = await resolveWhitelistPath(options.directory, agentId);
+        if (moved !== file) {
+          file = moved;
+          raw = await readAt(file);
+        }
+      }
+      if (raw !== undefined) {
+        const parsed = JSON.parse(raw) as Partial<WhitelistFile>;
+        scopes = Array.isArray(parsed.scopes)
+          ? parsed.scopes.map(parseCommandScope).filter((scope): scope is CommandScope => scope !== undefined)
+          : [];
+        origins = Array.isArray(parsed.origins)
+          ? parsed.origins.map(parseOriginScope).filter((scope): scope is OriginScope => scope !== undefined)
+          : [];
+        tools = Array.isArray(parsed.tools)
+          ? parsed.tools.map(parseToolGrant).filter((grant): grant is ToolGrant => grant !== undefined)
+          : [];
+      }
     } catch (error) {
       // No whitelist means no stored scopes, and is not worth failing a
       // turn over: the fallback is asking a human, which is where an agent
-      // with no whitelist starts anyway. A whitelist that exists and will
-      // not read is the same to this call and not the same to the file:
-      // one hand-edited comma made a grant list read as empty with no line
-      // about it, and the next "always" wrote a single new scope over
-      // every grant it held. So it is said once, and `remember` refuses.
+      // with no whitelist starts anyway — that case reaches here as an
+      // `undefined` above, not as a throw. A whitelist that exists and
+      // will not read is the same to this call and not the same to the
+      // file: one hand-edited comma made a grant list read as empty with
+      // no line about it, and the next "always" wrote a single new scope
+      // over every grant it held. So it is said once, and `remember`
+      // refuses. The path named is the one that actually failed, which is
+      // why `file` is read here rather than resolved again.
       scopes = [];
       origins = [];
       tools = [];
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        const reason = error instanceof Error ? error.message : String(error);
-        unreadable.set(agentId, { file, reason });
-        options.warn?.(
-          `${file} could not be read (${reason}); its scopes are ignored and "always" answers for ${agentId} `
-            + 'are not saved over it until it is fixed and the daemon restarted.',
-        );
-      }
+      const reason = error instanceof Error ? error.message : String(error);
+      unreadable.set(agentId, { file, reason });
+      options.warn?.(
+        `${file} could not be read (${reason}); its scopes are ignored and "always" answers for ${agentId} `
+          + 'are not saved over it until it is fixed and the daemon restarted.',
+      );
     }
     return { scopes, origins, tools };
   };

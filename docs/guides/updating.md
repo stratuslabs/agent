@@ -34,10 +34,11 @@ deferring run applied are idempotent and simply run again on the next
 command, which is the cheap half of that trade. So a home waiting for its
 bracket reads as schema 0 until its first `stratus serve` or `stratus
 update` — which is also the truthful answer to an older build asking
-whether it may write there. What a deferring run still checks is that
-`state.json` is something it *could* have written: a home where it is not
-is refused by the command that found it, rather than several
-state-changing commands later.)
+whether it may write there. What a deferring run still checks, before it
+runs anything at all, is that the stamp is something it *could* have
+written — `state.json` a regular file, or absent from a `~/.stratus` that
+is a writable directory. A home where it is not is refused by the command
+that found it, rather than several state-changing commands later.)
 
 Schema 2 is the first stamp that exists only to be refused: since
 [provenance](../concepts/memory.md#where-a-fact-came-from) landed, memory

@@ -63,10 +63,12 @@ that are worth knowing:
   Stratus's own paths only — `~/.stratus` itself may be a symlink, and a
   soul file in `agents/` may be one too (see
   [Templates](../guides/templates.md)).
-- **Two ids that differ only in case are one directory**, because macOS and
-  Windows fold `agents/Ava/` and `agents/ava/` onto the same name — and one
-  directory holding two agents is the sessions, the memories, and the
-  unattended grants of both. The roster refuses to load rather than serve
+- **Two ids a filesystem reads as one name are one directory**, because
+  macOS and Windows fold `agents/Ava/` and `agents/ava/` onto the same name
+  — and APFS folds Unicode normalization too, so an accent written as one
+  code point and as a combining pair land there as well. One directory
+  holding two agents is the sessions, the memories, and the unattended
+  grants of both. The roster refuses to load rather than serve
   them, on every platform including the ones that would keep the two apart:
   a souls directory gets copied between machines, and this must not be an
   answer that changes with the machine. The upgrade move applies the same

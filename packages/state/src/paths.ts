@@ -211,19 +211,30 @@ export const fleetDbIn = (stateDir: string): string =>
  * that are distinct by every other rule here would share all three, so one
  * could act unattended on grants the operator gave the other.
  *
+ * Case is not the only thing a filesystem folds. APFS is normalization-
+ * insensitive too, so `é` written as one code point and `é` written as `e`
+ * followed by a combining acute are one directory there and two distinct
+ * strings in JavaScript — a pair that would pass a case-only check and
+ * then share every file. Normalizing to NFC first collapses them; the
+ * second normalize catches the handful of case mappings whose output is
+ * not itself NFC, so that the key does not depend on which of an
+ * equivalent pair was written down.
+ *
  * Callers refuse a collision on every platform, not only where the
  * filesystem folds: a souls directory is copied between machines, and a
  * roster that loads on the Linux server and refuses on the operator's
- * laptop finds the problem at the worst moment. `toLowerCase` is not any
- * one filesystem's folding table — APFS and NTFS each have their own — but
- * it is deterministic and it over-approximates the pairs they merge, and
- * for a rule about shared grants the direction to err in is refusing.
+ * laptop finds the problem at the worst moment. This is still not any one
+ * filesystem's folding table — APFS and NTFS each have their own — but it
+ * is deterministic, and where it and a real filesystem disagree the answer
+ * to want is the one that refuses, because what the two agents would be
+ * sharing is a list of what may run unattended.
  *
  * Exported so `loadRosterSouls` and the layout migration ask the same
  * question: the roster is what stops two *souls* colliding, and the
  * migration walks stored ids no roster ever saw.
  */
-export const foldedAgentId = (agentId: string): string => agentId.toLowerCase();
+export const foldedAgentId = (agentId: string): string =>
+  agentId.normalize('NFC').toLowerCase().normalize('NFC');
 
 /**
  * Thrown rather than sanitized: an id that cannot key a path is a bug or an

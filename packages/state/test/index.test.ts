@@ -490,6 +490,31 @@ test('two ids that differ only in case are one directory, so the roster refuses 
   assert.match(failure.message, /differ only in case/);
 });
 
+test('two ids that differ only by Unicode normalization are one directory too', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-nfc-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  // The same name written two ways: one code point, and `e` followed by a
+  // combining acute. Distinct strings in JavaScript, one directory on
+  // APFS, which folds normalization as well as case — so a check that only
+  // lowercased let this pair straight through to sharing a whitelist.
+  const composed = 'caf\u00e9';
+  const decomposed = 'cafe\u0301';
+  assert.notEqual(composed, decomposed, 'the two spellings are different strings');
+  await writeFile(path.join(dir, 'a-first.md'), `---\nname: First\nid: ${composed}\n---\n\nYou are First.\n`);
+  await writeFile(path.join(dir, 'b-second.md'), `---\nname: Second\nid: ${decomposed}\n---\n\nYou are Second.\n`);
+
+  const failure = await loadRosterSouls({ homeDir: home }, () => {}).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof DuplicateAgentIdError, `expected a typed refusal, got ${String(failure)}`);
+  assert.equal(failure.agentId, composed);
+  assert.equal(failure.conflictingId, decomposed);
+  assert.match(failure.message, /a-first\.md/);
+  assert.match(failure.message, /b-second\.md/);
+});
+
 test('a soul claiming the built-in id in another case is ignored, not served', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-reserved-case-'));
   const dir = agentsDirPath({ homeDir: home });

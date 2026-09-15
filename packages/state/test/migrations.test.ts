@@ -15,6 +15,7 @@ import {
   readStateStamp,
   runStateMigrations,
   STATE_MIGRATIONS,
+  stratusHomePath,
   STATE_SCHEMA_VERSION,
   stateFilePath,
 } from '../src/index.ts';
@@ -171,6 +172,30 @@ test('a home whose stamp cannot be written is refused by a run that records noth
     () => runStateMigrations(env),
     (error: unknown) => error instanceof Error
       && error.message.includes(stateFilePath(env))
+      && /run the command again/.test(error.message),
+  );
+});
+
+test('a home that is a file, with no stamp to judge by, is refused by name', async () => {
+  const home = await freshHome();
+  const env = { homeDir: home };
+  // No `state.json` to look at, so the question is whether one could ever
+  // be created here. A `~/.stratus` that is a regular file answers that on
+  // its own — and it reaches the check as ENOTDIR on the stamp path rather
+  // than ENOENT, which is why both codes mean "no stamp, ask the
+  // directory". Without that, the command died on a raw ENOTDIR naming a
+  // path the operator never chose.
+  //
+  // Only the shape is asserted, not the permissions: this suite runs as
+  // root often enough that a `chmod 0500` check would pass there and fail
+  // nowhere, which is worse than not having it.
+  await writeFile(stratusHomePath(env), 'not a directory');
+
+  await assert.rejects(
+    () => runStateMigrations(env),
+    (error: unknown) => error instanceof Error
+      && error.message.includes(stratusHomePath(env))
+      && /is not a directory/.test(error.message)
       && /run the command again/.test(error.message),
   );
 });

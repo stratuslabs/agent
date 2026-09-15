@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { constants, readFileSync } from 'node:fs';
 import {
+  access,
   appendFile,
   chmod,
   lstat,
@@ -497,15 +498,68 @@ const assertStampWritable = async (env: StateEnvironment): Promise<void> => {
   try {
     found = await lstat(target);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return;
+    const code = (error as NodeJS.ErrnoException).code;
+    // ENOTDIR is the same answer as ENOENT for this purpose and reaches
+    // here when `~/.stratus` is a regular file: there is no stamp, and the
+    // reason is one the check below names properly.
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      throw error;
     }
-    throw error;
+    // No stamp yet, so the question moves to the directory that would have
+    // to hold one: `writeStateStamp` writes a temporary file and renames
+    // it, and both need the directory itself to be writable. Asked with
+    // `access` rather than by writing a probe file, because this runs
+    // before *every* command — a throwaway file created and unlinked in
+    // `~/.stratus` on each one is real work, visible to anything watching
+    // the directory, and racing every other Stratus process doing the
+    // same. A home that does not exist yet is not a problem: the first
+    // write creates it.
+    await assertStampDirectoryWritable(env);
+    return;
   }
   if (!found.isFile()) {
     throw new Error(
       `${target} is not a regular file, so this build cannot record what it has done to ${stratusHomePath(env)}. `
       + 'Move or remove it and run the command again.',
+    );
+  }
+};
+
+/**
+ * The directory a first stamp would be created in, when there is no stamp
+ * yet to judge by.
+ *
+ * Neither half of this is a guarantee, and it is not meant to be one: a
+ * directory writable now can be full a moment later, and the write itself
+ * is still the thing that finds that out. What it catches is the state
+ * that does not change under you — a `~/.stratus` that is a regular file
+ * or a link to one, or one whose permissions mean no command will ever
+ * record a schema version there — so the command that found it says so,
+ * instead of every later command quietly changing state nothing can stamp.
+ */
+const assertStampDirectoryWritable = async (env: StateEnvironment): Promise<void> => {
+  const home = stratusHomePath(env);
+  let found;
+  try {
+    found = await lstat(home);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  if (!found.isDirectory()) {
+    throw new Error(
+      `${home} is not a directory, so this build has nowhere to record what it has done to your state. `
+      + 'Move or remove it and run the command again.',
+    );
+  }
+  try {
+    await access(home, constants.W_OK);
+  } catch {
+    throw new Error(
+      `${home} cannot be written to, so this build cannot record what it has done to your state. `
+      + 'Fix its permissions and run the command again.',
     );
   }
 };
@@ -621,6 +675,13 @@ export const runStateMigrations = async (
   if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {
     throw new Error(newerStateMessage(stamp.schemaVersion));
   }
+  // Before any migration runs, not after them all. A home that can never
+  // record what was done to it is one to refuse *before* doing anything,
+  // and the order also decides who gets to describe the problem: 0001
+  // walks the state files, so on a `~/.stratus` that is a regular file it
+  // would otherwise die first, on a raw ENOTDIR naming a path the operator
+  // never chose.
+  await assertStampWritable(env);
   const results: AppliedStateMigration[] = [];
   const applied = new Set(stamp.applied);
   // Asked once, before anything runs, rather than per migration inside the
@@ -664,8 +725,8 @@ export const runStateMigrations = async (
   //
   // What that costs is the unwritable-stamp guard on ordinary commands,
   // which only fired because something tried to write. `assertStampWritable`
-  // keeps the part that matters without writing anything.
-  await assertStampWritable(env);
+  // keeps the part that matters without writing anything, and runs at the
+  // top of this function rather than here.
   if (!deferring && (results.length > 0 || stamp.schemaVersion !== STATE_SCHEMA_VERSION)) {
     await writeStateStamp(env, { schemaVersion: STATE_SCHEMA_VERSION, applied: stamp.applied });
   }
