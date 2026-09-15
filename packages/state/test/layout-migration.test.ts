@@ -691,18 +691,29 @@ test('a retirement a kill interrupted is finished, not left holding the only cop
     (await memory.list('ava')).entries.map((entry) => entry.content).sort(),
     ['likes jazz', 'remembered on the way out'],
   );
-  // The claim is emptied rather than unlinked, because a writer that
-  // predates the home claim may still have that inode open and an append
-  // would land in it. Removing it belongs to a later pass, by which time
-  // such a writer is gone.
-  const claims = (await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-'));
-  assert.equal(claims.length, 1);
-  assert.equal((await stat(path.join(stratusHomePath(env), claims[0]!))).size, 0);
+  // And the claim is gone, since nothing appended to it while it was placed.
+  assert.deepEqual((await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-')), []);
+});
 
-  // And that later pass is any command: the drain finishes what the
-  // retirement could not, which is the only way records in a leftover claim
-  // are ever reachable once 0003 is stamped.
+test('a leftover claim is finished by any command, not only by the migration', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  // The state `placeClaim` leaves when the file was still growing — and
+  // migration 0003 is stamped by then, so `applyPerAgentLayout` never runs
+  // again. If the every-command drain does not finish these, the records in
+  // them are reachable by nothing at all.
+  await writeFile(
+    `${legacyMemoryFilePath(env)}.retiring-7a1e4c60-0000-4000-8000-000000000000`,
+    `${JSON.stringify({ id: 'ava:memory:left', agentId: 'ava', content: 'left in a claim', createdAt: '2026-04-01T00:00:00.000Z' })}\n`,
+  );
+
   await drainSharedMemory(env);
+
+  assert.deepEqual(
+    (await createHomeMemoryStore(env).list('ava')).entries.map((entry) => entry.content),
+    ['left in a claim'],
+  );
   assert.deepEqual((await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-')), []);
 });
 
@@ -769,12 +780,9 @@ test('a claim holding bytes that are not valid UTF-8 is still placed and still r
 
   const memory = createHomeMemoryStore(env);
   assert.ok((await memory.list('ava')).entries.some((entry) => entry.content === 'placed from the claim'));
-  // Emptied, then removed by the next drain — comparing a *decoded* length
-  // against the file's size would leave it holding its bytes for ever.
-  const claims = (await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-'));
-  assert.equal(claims.length, 1);
-  assert.equal((await stat(path.join(stratusHomePath(env), claims[0]!))).size, 0);
-  await drainSharedMemory(env);
+  // Removed — comparing a *decoded* length against the file's size would
+  // never match, leaving the claim holding its bytes and re-placing them on
+  // every command for ever.
   assert.deepEqual((await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-')), []);
 });
 
@@ -812,4 +820,32 @@ test('an owned memory directory that is a symlink is refused, not written throug
     (error: unknown) => error instanceof Error && /symlink/.test(error.message),
   );
   assert.deepEqual(await readdir(elsewhere), []);
+});
+
+test('a retry does not rename a recreated grant file over the archive it already wrote', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // A grant file the move cannot take, so the first pass archives it.
+  await writeFile(path.join(agentsDirPath(env), 'blocked.md'), 'a soul file in the way');
+  await writeFile(
+    path.join(agentsDirPath(env), 'blocked.md.whitelist.json'),
+    `${JSON.stringify({ version: 1, scopes: [{ command: 'git', args: ['push'] }] })}\n`,
+  );
+
+  await runStateMigrations(env, { exclusive: true });
+  const archived = await readFile(path.join(agentsDirPath(env), 'blocked.md.whitelist.json.migrated'), 'utf8');
+  assert.match(archived, /git/);
+
+  // The kill-before-the-stamp retry again, with an older build having put a
+  // grant file back at the old name in between.
+  await rm(stateFilePath(env), { force: true });
+  await writeFile(
+    path.join(agentsDirPath(env), 'blocked.md.whitelist.json'),
+    `${JSON.stringify({ version: 1, scopes: [] })}\n`,
+  );
+  await runStateMigrations(env, { exclusive: true });
+
+  // The first pass's grants are still there, not replaced by the empty list.
+  assert.equal(await readFile(path.join(agentsDirPath(env), 'blocked.md.whitelist.json.migrated'), 'utf8'), archived);
 });

@@ -372,11 +372,23 @@ test('a grant is never written through a symlinked agent directory', async () =>
   await mkdir(bea, { recursive: true });
   await symlink(bea, path.join(agents, 'ava'));
 
+  // Bea has grants of her own, which are what Ava would inherit.
+  await createFileCommandWhitelist({ directory: agents }).rememberTool('bea', {
+    tool: 'web.fetch',
+    grantedAt: '2026-03-01T00:00:00.000Z',
+  });
+
   const store = createFileCommandWhitelist({ directory: agents });
   await assert.rejects(
-    () => store.rememberTool('ava', { tool: 'web.fetch', grantedAt: '2026-03-01T00:00:00.000Z' }),
+    () => store.rememberTool('ava', { tool: 'shell.run', grantedAt: '2026-03-01T00:00:00.000Z' }),
     (error: unknown) => error instanceof Error && /symlink/.test(error.message),
   );
-  assert.deepEqual(await readdir(bea), []);
+  // And the read refuses too, which is the half that matters: resolving
+  // through the link would report Bea's standing permissions as Ava's.
+  await assert.rejects(
+    () => store.grantsFor('ava'),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  assert.deepEqual((await createFileCommandWhitelist({ directory: agents }).grantsFor('bea')).tools.map((grant) => grant.tool), ['web.fetch']);
   await rm(home, { recursive: true, force: true });
 });

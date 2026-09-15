@@ -182,6 +182,16 @@ export const legacyWhitelistPathFor = (directory: string, agentId: string): stri
  */
 export const resolveWhitelistPath = async (directory: string, agentId: string): Promise<string> => {
   const current = whitelistPathFor(directory, agentId);
+  // Before either `stat` below, because both follow links: an `agents/<id>`
+  // pointing at another agent's directory resolves to *that* agent's
+  // `whitelist.json`, and every read through here — `grantsFor`, the policy,
+  // the audit listing — would report its standing permissions as this
+  // agent's. Refused on the read path as well as the write, since inheriting
+  // another identity's grants is the failure, not just recording them there.
+  const own = path.dirname(current);
+  if (await isSymlinkedStateDirectory(own)) {
+    throw new Error(symlinkedStateDirectoryMessage(own));
+  }
   try {
     await stat(current);
     return current;

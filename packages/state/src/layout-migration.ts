@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
-import { appendFile, chmod, mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
@@ -565,25 +565,22 @@ const placeClaim = async (env: StateEnvironment, claim: string, report: LayoutMi
     await appendFile(archive, raw.endsWith('\n') ? raw : `${raw}\n`, { mode: 0o600 });
     await chmod(archive, 0o600);
   }
-  // Emptied rather than unlinked, and never by the run that claimed it.
+  // Unlinked only when the file is still the size that was read.
   //
-  // A check and then an unlink cannot be made safe: a writer that predates
-  // the home claim still has this inode open, and it can append between the
-  // two however narrow the gap. Truncating instead means a late write cannot
-  // be lost — an append handle writes at the end of the file, which is now
-  // the start, so the bytes stay in the claim and the next pass places them.
-  // Only what was read is discarded, and only after it was placed.
+  // Truncating was worse and I should not have reached for it: `truncate(0)`
+  // discards the *whole* inode, so a tail a stale handle appended after the
+  // read — bytes nothing has placed — goes with it. Unlinking after a size
+  // check loses only what arrives between the check and the unlink, which is
+  // two adjacent syscalls.
   //
-  // The empty file is then removed by a *later* pass, not this one: by the
-  // time another command runs, a writer from before the rename is gone, and
-  // an empty claim costs a `readdir` entry and a zero-byte read until then.
-  if (bytes.length > 0) {
-    const handle = await open(claim, 'r+');
-    try {
-      await handle.truncate(0);
-    } finally {
-      await handle.close();
-    }
+  // That window cannot be closed. There is no "remove only if unchanged",
+  // and the only alternative is never reclaiming the file at all — which
+  // means every upgraded home re-reads and re-places the whole claim on
+  // every command, for ever, to cover a writer that in almost every case
+  // never existed. This is the smallest destruction available, and a claim
+  // that did grow is left for the next command's `drainRetiring` rather than
+  // removed.
+  if ((await stat(claim)).size !== bytes.length) {
     return;
   }
   await rm(claim, { force: true });
@@ -658,7 +655,13 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
    */
   const archive = async (entry: string): Promise<string> => {
     const from = path.join(directory, entry);
-    const to = `${from}.migrated`;
+    // Never over an archive that is already there, for the reason the
+    // session database gives: a run killed before the stamp leaves one, an
+    // older build recreates `<id>.whitelist.json` at the old name, and the
+    // retry would rename that over the grants the first pass preserved.
+    const to = await exists(`${from}.migrated`)
+      ? `${from}.migrated-${randomUUID()}`
+      : `${from}.migrated`;
     await rename(from, to);
     return path.basename(to);
   };
