@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -359,4 +359,24 @@ test('grant rows are read leniently and written back whole, beside the scopes th
   assert.equal(stored.tools?.length, 2);
 
   assert.equal(parseToolGrant({ tool: 'a.b', package: '', grantedAt: 'x' })?.package, undefined);
+});
+
+test('a grant is never written through a symlinked agent directory', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-link-'));
+  const agents = path.join(home, 'agents');
+  await mkdir(agents, { recursive: true });
+  // Pointed at another agent's directory, which is the worst version: both
+  // identities would resolve the same `whitelist.json`, so each inherits
+  // what the other was granted unattended and one revocation covers both.
+  const bea = path.join(agents, 'bea');
+  await mkdir(bea, { recursive: true });
+  await symlink(bea, path.join(agents, 'ava'));
+
+  const store = createFileCommandWhitelist({ directory: agents });
+  await assert.rejects(
+    () => store.rememberTool('ava', { tool: 'web.fetch', grantedAt: '2026-03-01T00:00:00.000Z' }),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  assert.deepEqual(await readdir(bea), []);
+  await rm(home, { recursive: true, force: true });
 });

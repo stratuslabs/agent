@@ -222,3 +222,15 @@ export {
   type AgentSummary,
   listAgentSummaries,
 } from './roster.ts';
+
+/**
+ * The rule that an agent's state directory is never a symlink, re-exported
+ * from `@stratusagent/permissions`, which owns it. `gateway` depends on this
+ * package and not on that one, and a second spelling of the check is exactly
+ * what the one home exists to prevent.
+ */
+export {
+  isSymlinkedStateDirectory,
+  isSymlinkedStateDirectorySync,
+  symlinkedStateDirectoryMessage,
+} from '@stratusagent/permissions';

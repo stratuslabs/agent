@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, chmod, mkdir, mkdtemp, readdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -24,6 +24,7 @@ import {
   pendingStateMigrations,
   readStateStamp,
   runStateMigrations,
+  stateFilePath,
   stratusHomePath,
 } from '../src/index.ts';
 
@@ -690,9 +691,19 @@ test('a retirement a kill interrupted is finished, not left holding the only cop
     (await memory.list('ava')).entries.map((entry) => entry.content).sort(),
     ['likes jazz', 'remembered on the way out'],
   );
-  // And the claim is gone, so a later run has nothing to redo.
-  const left = (await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-'));
-  assert.deepEqual(left, []);
+  // The claim is emptied rather than unlinked, because a writer that
+  // predates the home claim may still have that inode open and an append
+  // would land in it. Removing it belongs to a later pass, by which time
+  // such a writer is gone.
+  const claims = (await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-'));
+  assert.equal(claims.length, 1);
+  assert.equal((await stat(path.join(stratusHomePath(env), claims[0]!))).size, 0);
+
+  // And that later pass is any command: the drain finishes what the
+  // retirement could not, which is the only way records in a leftover claim
+  // are ever reachable once 0003 is stamped.
+  await drainSharedMemory(env);
+  assert.deepEqual((await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-')), []);
 });
 
 test('retiring the shared file appends to an earlier archive rather than renaming over it', async () => {
@@ -758,6 +769,47 @@ test('a claim holding bytes that are not valid UTF-8 is still placed and still r
 
   const memory = createHomeMemoryStore(env);
   assert.ok((await memory.list('ava')).entries.some((entry) => entry.content === 'placed from the claim'));
-  const left = (await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-'));
-  assert.deepEqual(left, []);
+  // Emptied, then removed by the next drain — comparing a *decoded* length
+  // against the file's size would leave it holding its bytes for ever.
+  const claims = (await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-'));
+  assert.equal(claims.length, 1);
+  assert.equal((await stat(path.join(stratusHomePath(env), claims[0]!))).size, 0);
+  await drainSharedMemory(env);
+  assert.deepEqual((await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-')), []);
+});
+
+test('a retry does not rename a husk over the archive it already wrote', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+
+  await runStateMigrations(env, { exclusive: true });
+  const archived = sessionIdsIn(`${legacySessionDbPath(env)}.migrated`);
+  assert.ok(archived.length > 0, 'the first pass archived the original');
+
+  // What a kill *before the stamp* leaves: the move done, nothing recorded,
+  // so the next run redoes it. (The stamp is written once, at the end — so
+  // removing it is exactly the state that kill leaves behind.) Plus the
+  // empty `sessions.db` a `stratus schedules` puts back at the old name in
+  // the meantime, because SQLite creates one on open. Renaming that over the
+  // archive would take every row this pass preserved with it.
+  await rm(stateFilePath(env), { force: true });
+  new DatabaseSync(legacySessionDbPath(env)).close();
+  await runStateMigrations(env, { exclusive: true });
+
+  assert.deepEqual(sessionIdsIn(`${legacySessionDbPath(env)}.migrated`), archived);
+});
+
+test('an owned memory directory that is a symlink is refused, not written through', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const elsewhere = path.join(home, 'elsewhere');
+  await mkdir(elsewhere, { recursive: true });
+  await symlink(elsewhere, path.join(agentsDirPath(env), 'ava'));
+
+  await assert.rejects(
+    () => createHomeMemoryStore(env).append('ava', 'likes jazz'),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  assert.deepEqual(await readdir(elsewhere), []);
 });

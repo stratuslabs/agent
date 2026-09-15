@@ -1117,3 +1117,9 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     },
   };
 };
+
+export {
+  isSymlinkedStateDirectory,
+  isSymlinkedStateDirectorySync,
+  symlinkedStateDirectoryMessage,
+} from './state-directory.ts';

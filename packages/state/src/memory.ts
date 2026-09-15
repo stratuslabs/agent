@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, chmod, mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { isSymlinkedStateDirectory, symlinkedStateDirectoryMessage } from '@stratusagent/permissions';
 
 import {
   assertMemoryContentWithinCap,
@@ -421,6 +422,16 @@ export const createFileMemoryStore = (
   /** The directory, made and held to the posture its owner asked for. */
   const ensureDirectory = async (): Promise<void> => {
     const dir = path.dirname(filePath);
+    if (options.ownedDirectory) {
+      // Never a symlink — see `isSymlinkedStateDirectory`, which owns that
+      // rule. Refused rather than quarantined, like the session store and
+      // for the same reason: a memory this agent was told it had remembered
+      // must not be written through a link to somewhere else, and the chmod
+      // below would tighten whatever it points at.
+      if (await isSymlinkedStateDirectory(dir)) {
+        throw new Error(symlinkedStateDirectoryMessage(dir));
+      }
+    }
     await mkdir(dir, { recursive: true, ...(options.ownedDirectory ? { mode: 0o700 } : {}) });
     if (options.ownedDirectory) {
       // `mkdir` only applies its mode when it creates, so an upgrade over a

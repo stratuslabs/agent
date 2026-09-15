@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
-import { appendFile, chmod, lstat, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
-import { LEGACY_WHITELIST_SUFFIX, whitelistPathFor } from '@stratusagent/permissions';
+import { LEGACY_WHITELIST_SUFFIX, isSymlinkedStateDirectory, whitelistPathFor } from '@stratusagent/permissions';
 import { type StateEnvironment } from './environment.ts';
 import {
   agentMemoryFilePath,
@@ -170,23 +170,13 @@ export const makeAgentStateDirectory = async (
   onUnusable?: (code: string) => void,
 ): Promise<string | undefined> => {
   const directory = agentStateDirPath(env, agentId);
-  // A symlink is not this agent's directory, however well it resolves.
-  // `mkdir` is satisfied by one pointing at a directory and the writes then
-  // land wherever it points — outside the home, or inside another agent's
-  // — which is the isolation this whole layout exists to give. It is also
-  // invisible to the startup sweep, which reads entry types and sees a
-  // symlink rather than a directory, so sessions migrated through one would
-  // never reach the fleet index and could not be resumed. Checked with
-  // `lstat`, which is the call that does not follow it.
-  try {
-    if ((await lstat(directory)).isSymbolicLink()) {
-      onUnusable?.('ELOOP');
-      return undefined;
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
-    }
+  // Never a symlink — see `isSymlinkedStateDirectory`, which owns that rule.
+  // Quarantined rather than thrown here: this runs inside a migration that
+  // has a report to name the agent in, and the rest of the fleet should
+  // still move.
+  if (await isSymlinkedStateDirectory(directory)) {
+    onUnusable?.('ELOOP');
+    return undefined;
   }
   try {
     await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -575,13 +565,25 @@ const placeClaim = async (env: StateEnvironment, claim: string, report: LayoutMi
     await appendFile(archive, raw.endsWith('\n') ? raw : `${raw}\n`, { mode: 0o600 });
     await chmod(archive, 0o600);
   }
-  // And unlinked only once it is provably whole. If it grew while this ran,
-  // a writer that predates the home claim still has it open, and removing it
-  // would take bytes nobody has read. Left where it is instead: the next
-  // command's `drainRetiring` reads it again from the top, places what it
-  // finds — the readers dedupe — and removes it when it has finally stopped
-  // moving. Nothing is ever unlinked unplaced, which is the whole point.
-  if ((await stat(claim)).size !== bytes.length) {
+  // Emptied rather than unlinked, and never by the run that claimed it.
+  //
+  // A check and then an unlink cannot be made safe: a writer that predates
+  // the home claim still has this inode open, and it can append between the
+  // two however narrow the gap. Truncating instead means a late write cannot
+  // be lost — an append handle writes at the end of the file, which is now
+  // the start, so the bytes stay in the claim and the next pass places them.
+  // Only what was read is discarded, and only after it was placed.
+  //
+  // The empty file is then removed by a *later* pass, not this one: by the
+  // time another command runs, a writer from before the rename is gone, and
+  // an empty claim costs a `readdir` entry and a zero-byte read until then.
+  if (bytes.length > 0) {
+    const handle = await open(claim, 'r+');
+    try {
+      await handle.truncate(0);
+    } finally {
+      await handle.close();
+    }
     return;
   }
   await rm(claim, { force: true });
@@ -863,6 +865,13 @@ const describe = (report: LayoutMigrationReport): string | undefined => {
 export const drainSharedMemory = async (env: StateEnvironment): Promise<string | undefined> => {
   const report = emptyReport();
   await copySharedMemory(env, report);
+  // And any claim a retirement could not finish. `placeClaim` leaves one
+  // behind when the file was still growing, and migration 0003 is stamped by
+  // then — so without this the records it is holding are reachable by
+  // nothing, which is the state the claim exists to avoid. Costs one
+  // `readdir` of the home per command, and finds nothing on every home that
+  // has finished upgrading.
+  await drainRetiring(env, report);
   return describe(report);
 };
 
@@ -890,10 +899,19 @@ export const applyPerAgentLayout = async (env: StateEnvironment): Promise<string
     // line re-runs them — which is safe, because both are keyed writes. The
     // sidecars move with it; SQLite derives their names from the main
     // file's, so one left behind belongs to a database that is not there.
-    await rename(legacyPath, `${legacyPath}.migrated`);
+    // Never over an archive that is already there. A run killed after this
+    // rename but before the stamp leaves one, and `stratus schedules` can
+    // recreate an empty `sessions.db` husk at the old name in the meantime —
+    // SQLite creates on open. The retry would then rename that husk over the
+    // real archive and take with it every row this pass had quarantined,
+    // which is the one copy of them left.
+    const archive = await exists(`${legacyPath}.migrated`)
+      ? `${legacyPath}.migrated-${randomUUID()}`
+      : `${legacyPath}.migrated`;
+    await rename(legacyPath, archive);
     for (const suffix of ['-wal', '-shm']) {
       if (await exists(`${legacyPath}${suffix}`)) {
-        await rename(`${legacyPath}${suffix}`, `${legacyPath}.migrated${suffix}`);
+        await rename(`${legacyPath}${suffix}`, `${archive}${suffix}`);
       }
     }
   }

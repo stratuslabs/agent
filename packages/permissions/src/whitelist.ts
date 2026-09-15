@@ -1,5 +1,6 @@
 import { chmod, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { isSymlinkedStateDirectory, symlinkedStateDirectoryMessage } from './state-directory.ts';
 
 import { describeCommandScope, parseCommandScope, sameScope, type CommandScope } from './commands.ts';
 import { parseToolGrant, sameToolGrant, type ToolGrant } from './grants.ts';
@@ -337,7 +338,17 @@ export const createFileCommandWhitelist = (options: {
     if (target === current) {
       // The agent's own directory, owner-only like every other per-agent
       // resource: it holds what this agent may do unattended.
-      await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+      //
+      // Never a symlink — see `isSymlinkedStateDirectory`. This is the call
+      // site where following one is worst: a link into another agent's
+      // directory makes two identities resolve the same `whitelist.json`,
+      // so each inherits what the other was granted unattended and a
+      // revocation for one silently revokes for both.
+      const directory = path.dirname(target);
+      if (await isSymlinkedStateDirectory(directory)) {
+        throw new Error(symlinkedStateDirectoryMessage(directory));
+      }
+      await mkdir(directory, { recursive: true, mode: 0o700 });
       await writeFile(target, body, { mode: 0o600 });
       await chmod(target, 0o600);
     } else {

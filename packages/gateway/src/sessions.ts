@@ -1,4 +1,4 @@
-import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,6 +10,8 @@ import {
   agentsDirIn,
   assertPathSafeAgentId,
   fleetDbIn,
+  isSymlinkedStateDirectorySync,
+  symlinkedStateDirectoryMessage,
 } from '@stratusagent/state';
 
 /**
@@ -129,32 +131,16 @@ const fileExists = async (filePath: string): Promise<boolean> => {
 const openStratusDatabase = (filePath: string, options: SqliteSessionStoreOptions = {}): DatabaseSync => {
   const dir = path.dirname(filePath);
   if (options.ownedDirectory) {
-    // A symlink is not this agent's directory, however well it resolves —
-    // the same rule `makeAgentStateDirectory` holds the migration to, and
-    // this is the other way in. `mkdirSync` is satisfied by one pointing at
-    // a directory, so without this a live session is written wherever it
-    // points and indexed as though it were here; the next start then reads
-    // entry types, does not see a directory, releases the index row, and
-    // the conversation is gone. Refused rather than quarantined, because at
-    // runtime there is no migration report to name it in and a turn that
-    // cannot be stored must not read as stored.
+    // Never a symlink — see `isSymlinkedStateDirectory`, which owns that
+    // rule. Refused rather than quarantined, unlike the migration: at
+    // runtime there is no report to name it in, and a turn that cannot be
+    // stored must not read as stored.
     //
-    // Only for a directory this store owns: `~/.stratus` itself is a
-    // symlink on plenty of real installs (a home on another disk), and the
-    // fleet index and the schedule store live directly in it.
-    let link;
-    try {
-      link = lstatSync(dir);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
-    }
-    if (link?.isSymbolicLink()) {
-      throw new Error(
-        `${dir} is a symlink, so it cannot be an agent's state directory — its sessions would be written outside the `
-        + 'home and lost at the next start. Replace the link with a real directory, moving its contents in.',
-      );
+    // Only for a directory this store owns: `~/.stratus` itself is a symlink
+    // on plenty of real installs (a home on another disk), and the fleet
+    // index and the schedule store live directly in it.
+    if (isSymlinkedStateDirectorySync(dir)) {
+      throw new Error(symlinkedStateDirectoryMessage(dir));
     }
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
