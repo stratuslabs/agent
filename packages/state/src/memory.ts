@@ -327,7 +327,10 @@ const pinBudgetFor = (
 // '3' added the `about`/`kind`/validity columns, tokenized `about` into the
 // searchable column, agent-scoped `forgotten`, the `revisions` table
 // supersession is computed from, and the `usage` counters.
-const INDEX_SCHEMA_VERSION = '3';
+// '4' keyed `revisions` by (successor, agent): import preserves entry ids
+// while re-keying them to the importing agent, so one corpus imported for
+// two agents legitimately produces the same successor id twice.
+const INDEX_SCHEMA_VERSION = '4';
 
 // Loaded on first `search`, never at module load: see the note at the top.
 type SqliteModule = typeof import('node:sqlite');
@@ -368,11 +371,12 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS forgotten (id TEXT NOT NULL, agent_id TEXT NOT NULL, PRIMARY KEY (id, agent_id));
 CREATE TABLE IF NOT EXISTS reasserted (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, trust TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS revisions (
-  successor_id TEXT PRIMARY KEY,
+  successor_id TEXT NOT NULL,
   target_id TEXT NOT NULL,
   agent_id TEXT NOT NULL,
   valid_from_ms INTEGER,
-  valid_until_ms INTEGER
+  valid_until_ms INTEGER,
+  PRIMARY KEY (successor_id, agent_id)
 );
 CREATE TABLE IF NOT EXISTS usage (id TEXT PRIMARY KEY, recall_count INTEGER NOT NULL, last_recalled_at TEXT NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -631,8 +635,16 @@ export const createFileMemoryStore = (
       // has the old shape and no stamp at all. Dropping everything makes
       // the next catch-up a full rebuild from the record, which is the
       // only cost a derived file can have.
-      const hasCurrentShape = (): boolean => (opened.prepare('PRAGMA table_info(memory_fts)').all() as Array<{ name: string }>)
-        .some((column) => column.name === 'fields');
+      // Both tables whose *shape* has changed, not only the widest one: a
+      // `revisions` keyed by successor alone silently collapses two agents'
+      // revisions into one row, and no column is added or removed by the
+      // fix, so only the key tells them apart.
+      const hasCurrentShape = (): boolean => {
+        const columns = (name: string): Array<{ name: string; pk: number }> =>
+          opened.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string; pk: number }>;
+        return columns('memory_fts').some((column) => column.name === 'fields')
+          && columns('revisions').some((column) => column.name === 'agent_id' && column.pk > 0);
+      };
       if (!hasCurrentShape()) {
         // Under the same write lock catch-up takes, and re-checked once it
         // is held: the daemon and a `stratus run` opening an upgraded

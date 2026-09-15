@@ -8,13 +8,14 @@ import {
   buildMemoryInjection,
   InMemoryAgentMemoryStore,
   MEMORY_PINNED_MAX_BYTES,
+  memoryContentByteLength,
   memoryValidityAt,
   renderMemorySection,
   type AgentMemoryStore,
   type MemoryEntry,
 } from '@stratusagent/core';
 
-import { createFileMemoryStore } from '../src/index.ts';
+import { createFileMemoryStore, DEFAULT_STRATUS_AGENT, withLegacyDefaultMemories } from '../src/index.ts';
 
 const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'stratus-memory-quality-'));
 const newFile = async (): Promise<string> => path.join(await tempDir(), 'memory.jsonl');
@@ -459,4 +460,56 @@ test('both stores answer a recency read identically, ties included, with every n
     const recalled = (await tied.search('ava', 'tied fact')).entries;
     assert.deepEqual(recalled.map((entry) => entry.id), [...recalled].map((entry) => entry.id).sort());
   }
+});
+
+test('one corpus imported for two agents keeps each agent’s revision, in list and in search alike', async () => {
+  // Import preserves entry ids while re-keying entries to the importing
+  // agent, so the same successor id legitimately exists twice. The FTS
+  // index computes supersession from its own table, and a row keyed by the
+  // successor alone would let the second import overwrite the first
+  // agent's revision — visible only in `search`, since `list` answers from
+  // the record.
+  const filePath = await newFile();
+  const store = createFileMemoryStore(filePath, frozen());
+  const corpus: MemoryEntry[] = [
+    { id: 'shared:1', agentId: 'somewhere', content: 'the deploy runs on MySQL', createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'shared:2', agentId: 'somewhere', content: 'the deploy runs on Postgres', createdAt: '2026-01-02T00:00:00.000Z', supersedes: 'shared:1' },
+  ];
+  await store.importEntries!('ava', corpus);
+  await store.importEntries!('juno', corpus);
+
+  for (const agentId of ['ava', 'juno']) {
+    assert.deepEqual((await store.list(agentId)).entries.map((entry) => entry.id), ['shared:2'], agentId);
+    assert.deepEqual((await store.search(agentId, 'deploy')).entries.map((entry) => entry.id), ['shared:2'], agentId);
+  }
+});
+
+test('the pinned core is one budget for an agent’s legacy aliases, not one each', async () => {
+  const filePath = await newFile();
+  const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
+  // The default agent inherits entries written under the ids older builds
+  // used. Each of those is a separate key in the record, so each would
+  // otherwise accept its own 2 KiB of pins — and the merged set would then
+  // be trimmed by recency in the injected slice, which is the silent
+  // eviction the cap promises never happens.
+  const current = await store.append(DEFAULT_STRATUS_AGENT.id, 'a'.repeat(1400));
+  await appendFile(filePath, `${JSON.stringify({
+    id: 'demo-agent:memory:legacy',
+    agentId: 'demo-agent',
+    content: 'b'.repeat(1400),
+    createdAt: '2026-01-01T00:00:00.000Z',
+  })}\n`);
+
+  assert.equal((await store.pin!(DEFAULT_STRATUS_AGENT.id, current.id)).pinned, true);
+  // Accepted under its own alias, because that store saw an empty budget.
+  assert.equal((await store.pin!(DEFAULT_STRATUS_AGENT.id, 'demo-agent:memory:legacy')).pinned, true);
+
+  const pinned = await store.pinned!(DEFAULT_STRATUS_AGENT.id);
+  const bytes = pinned.reduce((sum, entry) => sum + memoryContentByteLength(entry.content), 0);
+  assert.ok(bytes <= MEMORY_PINNED_MAX_BYTES, `the merged pinned core held ${bytes} bytes`);
+  assert.deepEqual(pinned.map((entry) => entry.id), [current.id]);
+  // And the slice takes it as given rather than trimming it, which is what
+  // "refuses rather than evicts" has to mean once the merge is in play.
+  const injection = await buildMemoryInjection(store, DEFAULT_STRATUS_AGENT.id);
+  assert.deepEqual(injection.pinned.map((entry) => entry.id), [current.id]);
 });

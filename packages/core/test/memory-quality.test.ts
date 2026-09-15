@@ -274,4 +274,19 @@ test('the topic index the prompt carries is bounded, and the biggest topics surv
   assert.equal(selected.topics[0]?.count, 400);
   const rendered = renderMemorySection(selected) ?? '';
   assert.ok(memoryContentByteLength(rendered) < 8192, `the index block ran to ${memoryContentByteLength(rendered)} bytes`);
+
+  // The budget counts what is *rendered*, not what is stored: every control
+  // character expands to six on the way out, so measuring the raw name
+  // would admit a block several times the size it promised.
+  const escaped = selectMemoryInjection({
+    pinned: [],
+    topics: topics.map((topic) => ({ ...topic, name: topic.name.replaceAll('x', '\u0000') })),
+    recent: [],
+  });
+  const escapedBlock = renderMemorySection(escaped) ?? '';
+  assert.ok(escaped.topics.length < selected.topics.length, 'an escaped name has to cost more than a plain one');
+  assert.ok(
+    memoryContentByteLength(escapedBlock) < 8192,
+    `the index block ran to ${memoryContentByteLength(escapedBlock)} bytes once escaped`,
+  );
 });

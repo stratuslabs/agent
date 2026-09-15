@@ -1,6 +1,7 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { chmod, readFile, writeFile } from 'node:fs/promises';
 
 import {
+  BUILTIN_MEMORY_STORE_NAME,
   escapeControlCharacters,
   memoryEntryTrust,
   memoryValidityAt,
@@ -15,7 +16,8 @@ import {
 } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
-import type { ParsedMemoryCommand } from '../parse.ts';
+import { memoryCommandWritesState, type ParsedMemoryCommand } from '../parse.ts';
+import { loadServeRuntimeSelection } from '../trusted-config.ts';
 
 /**
  * `stratus memory` — the operator's half of an agent's long-term memory.
@@ -51,12 +53,26 @@ export const runMemory = async (
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
+  // Every subcommand here reads and writes the built-in file store
+  // directly, with no plugin host and no daemon in the way — which is
+  // right, and only right while the fleet's memories actually live there.
+  // A config selecting a contributed store puts them somewhere else
+  // entirely, and answering from the JSONL anyway would report a store the
+  // agent does not use and write pins and tombstones nothing reads.
+  const configured = await loadServeRuntimeSelection('memoryStore', env, undefined, (line) =>
+    writeLine(streams.stderr, `Warning: ${line}`));
+  if (configured !== undefined && configured !== BUILTIN_MEMORY_STORE_NAME) {
+    writeLine(
+      streams.stderr,
+      `Error: this fleet's config selects memoryStore ${configured}, so its agents do not keep their memories in ${memoryFilePath(env)}. `
+      + `\`stratus memory\` reads and writes the built-in ${BUILTIN_MEMORY_STORE_NAME} store only — use that store's own tooling, or set memoryStore to ${BUILTIN_MEMORY_STORE_NAME}.`,
+    );
+    return 1;
+  }
   // Only the writers fold a legacy per-directory store in: the read-only
   // commands are what a downgraded build is allowed to run against newer
   // state, and a migration is a write.
-  const writes = command.action !== 'list' && command.action !== 'search'
-    && command.action !== 'audit' && command.action !== 'export';
-  if (writes) {
+  if (memoryCommandWritesState(command.action)) {
     await migrateLegacyMemory(env);
   }
   const store = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
@@ -237,7 +253,14 @@ export const runMemory = async (
       .map(({ forgottenAt: _forgotten, ...entry }) => entry);
     const jsonl = entries.map((entry) => JSON.stringify(entry)).join('\n');
     if (command.file !== undefined) {
-      // Owner-only, like everything else holding conversation content.
+      // Owner-only, like everything else holding conversation content —
+      // and tightened with an explicit `chmod`, because `writeFile`'s mode
+      // applies only when it *creates* the file. Exporting over a
+      // world-readable path left behind by something else would otherwise
+      // publish the corpus under the old permissions. The chmod runs
+      // first, so the content never exists at the looser mode.
+      await writeFile(command.file, '', { mode: 0o600 });
+      await chmod(command.file, 0o600);
       await writeFile(command.file, entries.length > 0 ? `${jsonl}\n` : '', { mode: 0o600 });
       writeLine(streams.stdout, `Wrote ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} of ${command.agentId} to ${command.file}.`);
       return 0;

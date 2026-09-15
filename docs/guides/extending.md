@@ -165,6 +165,11 @@ lacking it serves `recency` and reports that in the result rather than
 erroring — so an embeddings-backed store is an additive capability here
 instead of a contract break.
 
+`stratus memory` is the exception that proves the rule: it reads and writes
+the built-in store directly, with no plugin host, so against a fleet
+configured for a contributed store it **refuses** rather than answering
+from a file that store's agents never read.
+
 A `memoryStore` naming something no loaded plugin registers **refuses to
 start** rather than falling back to the file store: a daemon writing
 memories somewhere the operator did not select is a daemon whose agents

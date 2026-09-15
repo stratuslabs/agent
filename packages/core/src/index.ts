@@ -1828,7 +1828,10 @@ export const selectMemoryInjection = (input: {
   const topics: MemoryTopic[] = [];
   let topicBytes = 0;
   for (const topic of input.topics) {
-    const size = memoryContentByteLength(topic.name) + TOPIC_LINE_OVERHEAD_BYTES;
+    // Measured *escaped*, which is how the line is rendered: one NUL in an
+    // `about` key becomes the six characters `\u0000`, so budgeting the raw
+    // bytes would admit a block several times the size it promised.
+    const size = memoryContentByteLength(escapeControlCharacters(topic.name)) + TOPIC_LINE_OVERHEAD_BYTES;
     if (topicBytes + size > MEMORY_INDEX_MAX_BYTES) {
       break;
     }

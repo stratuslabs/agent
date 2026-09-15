@@ -82,7 +82,7 @@ stratus dashboard                      # local browser dashboard
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `grants`, `grants revoke` | [Approvals](../guides/approvals.md#standing-grants) |
-| `memory list`, `memory search`, `memory audit`, `memory forget` | [Memory](../concepts/memory.md#searching-it-yourself) |
+| `memory list`, `memory search`, `memory audit`, `memory forget` | [Memory](../concepts/memory.md#searching-it-yourself) — every `memory` subcommand works the built-in store, and refuses against a fleet whose config selects another |
 | `memory pin`, `memory unpin` | [Memory](../concepts/memory.md#pinned-facts) |
 | `memory export`, `memory import` | [Memory](../concepts/memory.md#moving-an-agents-memory) |
 | `memory reassert` | [Memory](../concepts/memory.md#where-a-fact-came-from) |

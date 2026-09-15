@@ -225,3 +225,43 @@ test('an import lands entries verbatim under the importing agent, and re-running
   assert.equal((await store.list('ava')).entries.length, 2);
   store.close();
 });
+
+test('one exported corpus imports for two agents, and an older file is rebuilt to allow it', async () => {
+  const file = await newFile();
+  const entries = [
+    { id: 'shared:1', agentId: 'somewhere', content: 'the survey is quarterly', createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'shared:2', agentId: 'somewhere', content: 'the hide needs repainting', createdAt: '2026-01-02T00:00:00.000Z' },
+  ];
+  const store = createSqliteMemoryStore(file);
+  // An id lives inside its agent's namespace, and import preserves ids
+  // while re-keying entries — so the same dump landing for two agents is
+  // the ordinary case, not a collision.
+  assert.deepEqual(await store.importEntries!('ava', entries), { imported: 2, skipped: [] });
+  assert.deepEqual(await store.importEntries!('juno', entries), { imported: 2, skipped: [] });
+  assert.equal((await store.list('ava')).entries.length, 2);
+  assert.equal((await store.list('juno')).entries.length, 2);
+  // And neither agent can reach the other's copy by id.
+  assert.equal(await store.forget('ava', 'shared:1'), true);
+  assert.equal((await store.list('juno')).entries.length, 2);
+  store.close();
+
+  // A file written before the constraint was scoped is rebuilt on open,
+  // rows intact — the one migration here that touches the record.
+  const legacyFile = await newFile();
+  const { DatabaseSync } = await import('node:sqlite');
+  const legacy = new DatabaseSync(legacyFile);
+  legacy.exec(`
+    CREATE TABLE entries (
+      seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, agent_id TEXT NOT NULL, content TEXT NOT NULL,
+      created_at TEXT NOT NULL, metadata TEXT, trust TEXT, origin TEXT, forgotten_at TEXT
+    )
+  `);
+  legacy.exec("INSERT INTO entries (seq, id, agent_id, content, created_at) VALUES (1, 'shared:1', 'ava', 'kept through the rebuild', '2026-01-01T00:00:00.000Z')");
+  legacy.close();
+
+  const upgraded = createSqliteMemoryStore(legacyFile);
+  assert.deepEqual((await upgraded.list('ava')).entries.map((entry) => entry.content), ['kept through the rebuild']);
+  assert.deepEqual(await upgraded.importEntries!('juno', entries), { imported: 2, skipped: [] });
+  assert.equal((await upgraded.list('juno')).entries.length, 2);
+  upgraded.close();
+});

@@ -10862,6 +10862,55 @@ test('stratus memory export then import lands the same entries in order, externa
   assert.match(refused.output.stderr, /line 1 is not JSON. Nothing was imported/);
 });
 
+test('stratus memory refuses when the fleet keeps its memories in a contributed store', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-store-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ memoryStore: 'sqlite' }));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  // Answering from the JSONL would report a store the agent does not use,
+  // and pinning into it would write records nothing reads.
+  for (const argv of [['memory', 'list', 'ava'], ['memory', 'pin', 'ava', 'ava:memory:1'], ['memory', 'export', 'ava']]) {
+    const streams = createStreams();
+    assert.equal(await runCli({ argv, streams: streams.streams, env }), 1, argv.join(' '));
+    assert.match(streams.output.stderr, /selects memoryStore sqlite/);
+    assert.doesNotMatch(streams.output.stdout, /Likes jazz/);
+  }
+
+  // A project-local config cannot make that decision — where an agent keeps
+  // its memories is not a call a cloned repository gets to make — so it is
+  // ignored and the built-in store answers as usual. A separate home,
+  // because the global file above would otherwise be the thing refusing.
+  const plain = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-plain-'));
+  await mkdir(path.join(plain, '.stratus'), { recursive: true });
+  await writeFile(path.join(plain, '.stratus', 'memory.jsonl'), `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ memoryStore: 'sqlite' }));
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env: { cwd: project, homeDir: plain, processEnv: {} } }), 0);
+  assert.match(listed.output.stdout, /Likes jazz/);
+  assert.match(listed.output.stderr, /ignoring memoryStore/);
+});
+
+test('stratus memory export tightens an existing file before the corpus lands in it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-perms-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  // A world-readable path left behind by something else: `writeFile`'s mode
+  // applies only when it creates the file, so without an explicit chmod the
+  // corpus would land under the old permissions.
+  const dump = path.join(home, 'ava.jsonl');
+  await writeFile(dump, 'stale\n');
+  await chmod(dump, 0o644);
+  const exported = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'export', 'ava', '--file', dump], streams: exported.streams, env }), 0);
+  assert.equal((await stat(dump)).mode & 0o777, 0o600);
+  assert.match(await readFile(dump, 'utf8'), /Likes jazz/);
+});
+
 test('a state migration that cannot stamp the home refuses commands that write state, and only those', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-stamp-'));
   // A stamp that cannot be written: `state.json` is a directory, so the
@@ -10883,10 +10932,29 @@ test('a state migration that cannot stamp the home refuses commands that write s
   assert.equal(await runCli({ argv: ['session', 'rollover', 's-1'], streams: rollover.streams, env }), 1);
   assert.match(rollover.output.stderr, /Refusing `stratus session`/);
 
-  const listed = createStreams();
-  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
-  assert.match(listed.output.stderr, /Warning: state migration failed/);
-  assert.match(listed.output.stdout, /ava:memory:1/);
+  // Every memory subcommand that appends a record is refused the same way,
+  // not only `reassert`: a pin, a tombstone, or an import landing in state
+  // a newer format owns is the corruption the stamp exists to prevent.
+  for (const argv of [
+    ['memory', 'forget', 'ava', 'ava:memory:1'],
+    ['memory', 'pin', 'ava', 'ava:memory:1'],
+    ['memory', 'unpin', 'ava', 'ava:memory:1'],
+    ['memory', 'import', 'ava', '--file', path.join(home, 'nothing.jsonl')],
+  ]) {
+    const writer = createStreams();
+    assert.equal(await runCli({ argv, streams: writer.streams, env }), 1, argv.join(' '));
+    assert.match(writer.output.stderr, /Refusing `stratus memory`/, argv.join(' '));
+  }
+  assert.equal((await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8')).trim().split('\n').length, 1);
+
+  // And the reads still work, because reading is how someone diagnoses
+  // their way out of this state.
+  for (const argv of [['memory', 'list', 'ava'], ['memory', 'search', 'ava', 'jazz'], ['memory', 'audit', 'ava']]) {
+    const reader = createStreams();
+    assert.equal(await runCli({ argv, streams: reader.streams, env }), 0, argv.join(' '));
+    assert.match(reader.output.stderr, /Warning: state migration failed/, argv.join(' '));
+    assert.match(reader.output.stdout, /ava:memory:1/, argv.join(' '));
+  }
 });
 
 test('stratus session rollover without a running daemon says so', async () => {

@@ -126,10 +126,15 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
   chmodSync(filePath, 0o600);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA busy_timeout = 5000');
+  // `UNIQUE (agent_id, id)`, never `UNIQUE (id)`: the contract defines an
+  // entry id inside its agent's namespace, and import preserves ids while
+  // re-keying entries to the importing agent — so one exported corpus
+  // imported for two agents legitimately holds the same id twice. A
+  // database-wide constraint turned that into a failed transaction.
   db.exec(`
     CREATE TABLE IF NOT EXISTS entries (
       seq INTEGER PRIMARY KEY,
-      id TEXT NOT NULL UNIQUE,
+      id TEXT NOT NULL,
       agent_id TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at TEXT NOT NULL,
@@ -137,7 +142,8 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
       trust TEXT,
       origin TEXT,
       fields TEXT,
-      forgotten_at TEXT
+      forgotten_at TEXT,
+      UNIQUE (agent_id, id)
     )
   `);
   db.exec('CREATE INDEX IF NOT EXISTS entries_by_agent ON entries (agent_id, forgotten_at)');
@@ -163,6 +169,48 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
   const columns = (db.prepare('PRAGMA table_info(entries)').all() as Array<{ name: string }>).map((column) => column.name);
   if (!columns.includes('fields')) {
     db.exec('ALTER TABLE entries ADD COLUMN fields TEXT');
+  }
+  // The constraint cannot be altered in place, so an older file is rebuilt
+  // into the current shape — rows and all, under one transaction, which is
+  // the only migration here that touches the record rather than adding to
+  // it. Detected by the index SQLite created for the old `UNIQUE (id)`,
+  // since the columns are identical either way.
+  const singleColumnIdUnique = (db.prepare('PRAGMA index_list(entries)').all() as Array<{ name: string; unique: number }>)
+    .filter((index) => index.unique === 1)
+    .some((index) => {
+      const on = (db.prepare(`PRAGMA index_info(${JSON.stringify(index.name)})`).all() as Array<{ name: string }>)
+        .map((column) => column.name);
+      return on.length === 1 && on[0] === 'id';
+    });
+  if (singleColumnIdUnique) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.exec('ALTER TABLE entries RENAME TO entries_legacy');
+      db.exec(`
+        CREATE TABLE entries (
+          seq INTEGER PRIMARY KEY,
+          id TEXT NOT NULL,
+          agent_id TEXT NOT NULL,
+          content TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          metadata TEXT,
+          trust TEXT,
+          origin TEXT,
+          fields TEXT,
+          forgotten_at TEXT,
+          UNIQUE (agent_id, id)
+        )
+      `);
+      db.exec(
+        'INSERT INTO entries (seq, id, agent_id, content, created_at, metadata, trust, origin, fields, forgotten_at)'
+        + ' SELECT seq, id, agent_id, content, created_at, metadata, trust, origin, fields, forgotten_at FROM entries_legacy',
+      );
+      db.exec('DROP TABLE entries_legacy');
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
   }
   for (const sidecar of [`${filePath}-wal`, `${filePath}-shm`]) {
     try {
@@ -339,6 +387,9 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
     },
 
     async importEntries(agentId, entries): Promise<MemoryImportResult> {
+      // This agent's ids, which is the whole namespace an id lives in —
+      // another agent holding the same id is not a collision here, and the
+      // table's `UNIQUE (agent_id, id)` agrees.
       const held = new Set((selectAgent.all(agentId) as unknown as Row[]).map((row) => row.id));
       const skipped: string[] = [];
       let imported = 0;

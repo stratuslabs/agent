@@ -203,6 +203,19 @@ export interface ParsedMemoryCommand {
   format: 'text' | 'json';
 }
 
+/**
+ * Which `stratus memory` subcommands write state — the append-only record
+ * or the derived index under `~/.stratus`.
+ *
+ * Exported because two places need the same answer and a second hand-rolled
+ * list drifts immediately: `main.ts` refuses a writer against a state stamp
+ * newer than this build understands, and `runMemory` folds a legacy
+ * per-directory store in only for a writer. They disagreed for exactly as
+ * long as this was spelled out twice.
+ */
+export const memoryCommandWritesState = (action: ParsedMemoryCommand['action']): boolean =>
+  action !== 'list' && action !== 'search' && action !== 'audit' && action !== 'export';
+
 export interface ParsedSessionCommand {
   command: 'session';
   action: 'rollover';

@@ -230,6 +230,9 @@ stratus memory export ava --file ava-memory.jsonl   # everything Ava still holds
 stratus memory import ava --file ava-memory.jsonl   # on the other machine
 ```
 
+The exported file is owner-only (`0600`), and an existing path is tightened
+before the corpus lands in it.
+
 Export writes the entries the agent still holds, oldest first — superseded
 ones included, because the successor carries its own retirement and the
 revision travels with it. Forgotten entries stay behind: a tombstone is a
@@ -252,6 +255,12 @@ stratus memory audit ava                     # everything ever written, and what
 stratus memory pin ava ava:memory:…          # and stratus memory unpin
 stratus memory forget ava ava:memory:…
 ```
+
+Every one of these works the **built-in file store** directly, with no
+daemon in the way. If a trusted config selects a contributed store with
+`memoryStore`, the fleet's memories live somewhere else and `stratus
+memory` refuses rather than answering from a JSONL nothing reads — see
+[Extending](../guides/extending.md#memory-stores).
 
 `search` matches the way `memory.recall` does — every word has to appear in
 a fact, or in what the fact is about — and marks anything outside its

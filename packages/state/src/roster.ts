@@ -5,10 +5,12 @@ import {
   type AgentDefinition,
   type AgentMemoryStore,
   type AvatarTheme,
+  applyMemoryPinBudget,
   boundMemoryList,
   boundMemoryRead,
   clampMemoryRecallLimit,
   compareMemoryChronology,
+  memoryContentByteLength,
   mergeMemoryTopics,
   type MemoryEntry,
 } from '@stratusagent/core';
@@ -133,8 +135,25 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
     ...(store.pinned
       ? {
           async pinned(agentId: string) {
-            const batches = await Promise.all(aliasIds(agentId).map((id) => store.pinned!(id)));
-            return batches.flat().sort(compareMemoryChronology);
+            const ids = aliasIds(agentId);
+            if (ids.length === 1) {
+              return store.pinned!(agentId);
+            }
+            // One budget for the merged identity, not one per alias. Each
+            // alias accepted its own pins against its own 2 KiB, so
+            // concatenating them can exceed the cap the injected slice then
+            // trims by recency — which is the silent eviction the cap
+            // exists to refuse. Re-allocating here in alias order (and
+            // within an alias, that store's append order) makes the
+            // overflow *inert*, which is what the cap's replay rule says
+            // happens to a pin two writers overspent the budget on.
+            const batches = await Promise.all(ids.map((id) => store.pinned!(id)));
+            const merged = new Map(batches.flat().map((entry) => [entry.id, entry]));
+            const budget = applyMemoryPinBudget(
+              [...merged.keys()],
+              (id) => memoryContentByteLength(merged.get(id)!.content),
+            );
+            return budget.effective.map((id) => merged.get(id)!).sort(compareMemoryChronology);
           },
         }
       : {}),
