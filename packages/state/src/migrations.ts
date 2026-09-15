@@ -15,7 +15,7 @@ import path from 'node:path';
 import type { MemoryEntry } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
 import { type StateEnvironment, readWorkingDirectory } from './environment.ts';
-import { applyPerAgentLayout, hasBracketedLegacyState } from './layout-migration.ts';
+import { applyPerAgentLayout, hasBracketedLegacyState, makeAgentStateDirectory } from './layout-migration.ts';
 import {
   MEMORY_FILENAME,
   stratusHomePath,
@@ -94,6 +94,17 @@ export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> 
     }
 
     for (const [agentId, lines] of byAgent) {
+      // The directory before anything reads a path *under* it, and never
+      // by throwing: an id whose directory name is already taken by its own
+      // soul file (`id: ava.md` beside `agents/ava.md`) makes `mkdir` fail
+      // with EEXIST, and this runs from `createAgentRuntime` and
+      // `gateway.start()` — after the source has been renamed to a claim,
+      // so the throw would come back on every later run and block the whole
+      // fleet over one agent's name. Skipped instead: the lines stay in the
+      // archive written below, which is where a quarantined record belongs.
+      if (await makeAgentStateDirectory(env, agentId) === undefined) {
+        continue;
+      }
       const destination = agentMemoryFilePath(env, agentId);
       let existingIds: Set<string>;
       try {
@@ -110,7 +121,6 @@ export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> 
       if (fresh.length === 0) {
         continue;
       }
-      await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
       await appendFile(destination, `${fresh.join('\n')}\n`, { mode: 0o600 });
       await chmod(destination, 0o600);
     }
@@ -391,15 +401,57 @@ const readStateStampSync = (env: StateEnvironment): StateStamp => {
   return parseStateStamp(raw);
 };
 
+/**
+ * The stamp to write, given what is on disk now and what this run means to
+ * record.
+ *
+ * Merged rather than replaced, because two processes reach here with
+ * snapshots taken at different moments and only one of them holds anything.
+ * An ordinary command and an exclusive `serve` or `update` both read the
+ * stamp at start; the ordinary one runs no claim and defers 0003, so a
+ * write of *its* snapshot after the exclusive process recorded 0003 would
+ * take the home back to a schema that omits it — and the downgrade guard
+ * would then wave an older build into an already-sharded home, where it
+ * recreates exactly the legacy state the move just retired.
+ *
+ * Both writers only ever *add* ids, so a union converges whichever order
+ * they land in. The version is derived from that union and floored at
+ * whatever is already recorded, so it can only move forward: a stamp is a
+ * claim about what has happened to this home, and nothing that has happened
+ * un-happens.
+ */
+export const mergeStateStamp = (latest: StateStamp, next: StateStamp): StateStamp => {
+  const applied = [...latest.applied];
+  for (const id of next.applied) {
+    if (!applied.includes(id)) {
+      applied.push(id);
+    }
+  }
+  const complete = STATE_MIGRATIONS.every((migration) => applied.includes(migration.id));
+  return {
+    schemaVersion: Math.max(latest.schemaVersion, complete ? STATE_SCHEMA_VERSION : next.schemaVersion),
+    applied,
+  };
+};
+
 const writeStateStamp = async (env: StateEnvironment, stamp: StateStamp): Promise<void> => {
   await mkdir(stratusHomePath(env), { recursive: true });
+  // Against the stamp as it is *now*, not as this run found it — see
+  // `mergeStateStamp`. An unreadable one is what this write repairs, so it
+  // merges with nothing rather than refusing.
+  let merged = stamp;
+  try {
+    merged = mergeStateStamp(await readStateStamp(env), stamp);
+  } catch {
+    merged = stamp;
+  }
   // Atomically, via rename: `writeFile` truncates before it writes, so a
   // crash in between would leave partial JSON — which reads as schema 0,
   // exactly the state that lets an older binary past the newer-schema
   // refusal. A rename either lands the whole stamp or leaves the old one.
   const target = stateFilePath(env);
   const temp = `${target}.tmp-${randomUUID()}`;
-  await writeFile(temp, `${JSON.stringify(stamp, null, 2)}\n`);
+  await writeFile(temp, `${JSON.stringify(merged, null, 2)}\n`);
   await rename(temp, target);
 };
 

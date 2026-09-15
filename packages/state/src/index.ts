@@ -115,6 +115,7 @@ export {
   type StateMigration,
   STATE_MIGRATIONS,
   readStateStamp,
+  mergeStateStamp,
   newerStateMessage,
   assertStateCompatible,
   pendingStateMigrations,

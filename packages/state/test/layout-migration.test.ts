@@ -343,12 +343,15 @@ test('a grant file already in the new place is never written over by the old one
   const applied = await runStateMigrations(env, { exclusive: true });
   const detail = applied.map((result) => result.detail ?? '').join(' ');
   // The agent's own directory is the one the daemon reads, so the older
-  // file stays put rather than overwriting grants somebody has since
-  // changed — and it is named rather than silently skipped.
+  // file does not overwrite grants somebody has since changed — and it is
+  // named rather than silently skipped.
   assert.match(detail, /ava\.whitelist\.json/);
   const kept = JSON.parse(await readFile(current, 'utf8')) as { tools: Array<{ tool: string }> };
   assert.deepEqual(kept.tools.map((grant) => grant.tool), ['web.fetch']);
-  await stat(path.join(agentsDirPath(env), 'ava.whitelist.json'));
+  // Kept under the archive name rather than at the old one, which would
+  // read as a home the move never reached — see the unservable-home test.
+  await stat(path.join(agentsDirPath(env), 'ava.whitelist.json.migrated'));
+  await assert.rejects(() => stat(path.join(agentsDirPath(env), 'ava.whitelist.json')));
 });
 
 test('an id whose directory name is already a file is quarantined, not a crash', async () => {
@@ -576,4 +579,32 @@ test('an id whose directory is a file does not break the copy that runs before e
   // The agents that can move still moved.
   const memory = createHomeMemoryStore(env);
   assert.deepEqual((await memory.list('ava')).entries.map((entry) => entry.content), ['likes jazz']);
+});
+
+test('a grant file the move could not take does not leave the home unservable', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // The collision again, but asking the question the stage after it asks:
+  // `agents/blocked.md` is a file, so `blocked.md` never gets a directory
+  // and its grant file cannot move.
+  await writeFile(path.join(agentsDirPath(env), 'blocked.md'), 'a soul file in the way');
+  await writeFile(
+    path.join(agentsDirPath(env), 'blocked.md.whitelist.json'),
+    `${JSON.stringify({ version: 1, scopes: [] })}\n`,
+  );
+
+  await runStateMigrations(env, { exclusive: true });
+
+  // A quarantined file left under the old name is not one agent's problem
+  // but the whole home's: the detector reads any `<id>.whitelist.json` as
+  // state the move has not reached, and this migration is stamped whether
+  // or not every file could move — so the refusal would stand for good,
+  // and the `stratus update` it names will not re-run a stamped migration.
+  assert.equal(await hasBracketedLegacyState(env), false);
+  assert.deepEqual(await pendingStateMigrations(env), []);
+  // Kept rather than deleted, like every other original: the grants are
+  // recoverable by hand, and the agent meanwhile has none.
+  await stat(path.join(agentsDirPath(env), 'blocked.md.whitelist.json.migrated'));
+  await assert.rejects(() => stat(path.join(agentsDirPath(env), 'blocked.md.whitelist.json')));
 });

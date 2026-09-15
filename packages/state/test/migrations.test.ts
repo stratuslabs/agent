@@ -5,8 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  agentMemoryFilePath,
+  agentsDirPath,
   assertStateCompatible,
   credentialsPath,
+  mergeStateStamp,
+  migrateLegacyMemory,
   pendingStateMigrations,
   readStateStamp,
   runStateMigrations,
@@ -115,4 +119,66 @@ test('provenance labels are a schema bump with nothing to rewrite, so a downgrad
   // A home with nothing shared to move is fully migrated by the ordinary
   // path, so the stamp reaches this build's version without a daemon start.
   assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
+});
+
+test('a cwd memory file for an id whose directory is a file does not block every later run', async () => {
+  const home = await freshHome();
+  const project = await freshHome();
+  const env = { homeDir: home, cwd: project };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await mkdir(path.join(project, '.stratus'), { recursive: true });
+  // `agents/blocked.md` is a file and `blocked.md` is a valid legacy id, so
+  // this agent's state directory cannot be made. This import runs from
+  // `createAgentRuntime` and `gateway.start()`, and it has already renamed
+  // its source to a claim by the time the directory is needed — so throwing
+  // here comes back on every later run and blocks the whole fleet.
+  await writeFile(path.join(agentsDirPath(env), 'blocked.md'), 'a soul file in the way');
+  const at = '2026-01-01T00:00:00.000Z';
+  await writeFile(path.join(project, '.stratus', 'memory.jsonl'), [
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'likes jazz', createdAt: at }),
+    JSON.stringify({ id: 'blocked:memory:1', agentId: 'blocked.md', content: 'nowhere to go', createdAt: at }),
+  ].join('\n') + '\n');
+
+  await migrateLegacyMemory(env);
+  // And again, the way the next command would: nothing is left half-claimed.
+  await migrateLegacyMemory(env);
+
+  // The agents that can move, moved.
+  assert.match(await readFile(agentMemoryFilePath(env, 'ava'), 'utf8'), /likes jazz/);
+  // The quarantined one is in the archive, which is where a record with
+  // nowhere to land belongs — not lost, and not blocking anyone.
+  assert.match(await readFile(path.join(project, '.stratus', 'memory.jsonl.migrated'), 'utf8'), /nowhere to go/);
+  const left = (await readdir(path.join(project, '.stratus'))).filter((name) => name.includes('migrating'));
+  assert.deepEqual(left, []);
+});
+
+test('a stamp write merges with what is on disk, so a stale snapshot cannot un-apply a migration', () => {
+  const everything = STATE_MIGRATIONS.map((migration) => migration.id);
+  // What the exclusive `serve` or `update` recorded while an ordinary
+  // command was mid-run, and what that ordinary command is about to write
+  // from the snapshot it took before any of it happened.
+  const recorded = { schemaVersion: STATE_SCHEMA_VERSION, applied: everything };
+  const stale = { schemaVersion: 0, applied: everything.slice(0, 1) };
+
+  const merged = mergeStateStamp(recorded, stale);
+  // Neither the ids nor the version may go backwards: an older build let
+  // past the downgrade guard recreates the legacy state the move retired.
+  assert.deepEqual(merged.applied, everything);
+  assert.equal(merged.schemaVersion, STATE_SCHEMA_VERSION);
+
+  // Forwards still moves, or nothing would ever be recorded at all.
+  assert.deepEqual(
+    mergeStateStamp({ schemaVersion: 0, applied: [] }, { schemaVersion: 0, applied: everything }),
+    { schemaVersion: STATE_SCHEMA_VERSION, applied: everything },
+  );
+
+  // And a stamp a NEWER build left is not lowered to this build's schema
+  // just because everything this build knows about has run: the
+  // newer-schema refusal is the guard over state this build cannot read,
+  // and it is the recorded version that arms it.
+  const fromNewer = { schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [...everything, '0004-from-a-later-build'] };
+  assert.equal(
+    mergeStateStamp(fromNewer, { schemaVersion: STATE_SCHEMA_VERSION, applied: everything }).schemaVersion,
+    STATE_SCHEMA_VERSION + 1,
+  );
 });

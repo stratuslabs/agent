@@ -162,11 +162,10 @@ const UNUSABLE_DIRECTORY_NAME = new Set(['EEXIST', 'ENOTDIR', 'EINVAL', 'EPERM',
  * quarantined like an unsafe id: named, with its rows left in the preserved
  * original, and the rest of the fleet migrated around it.
  */
-const agentDirectoryOrQuarantine = async (
+export const makeAgentStateDirectory = async (
   env: StateEnvironment,
   agentId: string,
-  what: string,
-  report: LayoutMigrationReport,
+  onUnusable?: (code: string) => void,
 ): Promise<string | undefined> => {
   const directory = agentStateDirPath(env, agentId);
   try {
@@ -177,13 +176,25 @@ const agentDirectoryOrQuarantine = async (
     if (!UNUSABLE_DIRECTORY_NAME.has(code)) {
       throw error;
     }
-    report.quarantined.push(
-      `${JSON.stringify(agentId)} (${what}) — ${path.relative(stratusHomePath(env), directory)} cannot be a directory `
-      + `(${code}); this agent has no directory to own, so rename its id`,
-    );
+    onUnusable?.(code);
     return undefined;
   }
 };
+
+/** {@link makeAgentStateDirectory}, naming what it could not make in `report`. */
+const agentDirectoryOrQuarantine = async (
+  env: StateEnvironment,
+  agentId: string,
+  what: string,
+  report: LayoutMigrationReport,
+): Promise<string | undefined> =>
+  makeAgentStateDirectory(env, agentId, (code) => {
+    report.quarantined.push(
+      `${JSON.stringify(agentId)} (${what}) — `
+      + `${path.relative(stratusHomePath(env), agentStateDirPath(env, agentId))} cannot be a directory `
+      + `(${code}); this agent has no directory to own, so rename its id`,
+    );
+  });
 
 const openDatabase = async (filePath: string): Promise<SqliteDatabase> => {
   const { DatabaseSync } = await loadSqlite();
@@ -489,13 +500,39 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
     }
     throw error;
   }
+  /**
+   * Take a grant file this migration cannot move out of the old *name*.
+   *
+   * Archived rather than left where it is, which is the difference between
+   * one agent losing its grants and the whole home becoming unservable:
+   * `hasBracketedLegacyState` reads any `<id>.whitelist.json` as a home the
+   * move has not reached, and this migration records itself as applied
+   * whether or not every file could be moved. A quarantined file left in
+   * place therefore refuses every later `start()`, points the operator at a
+   * `stratus update` that will not re-run a stamped migration, and does it
+   * over a file no later run was ever going to pick up.
+   *
+   * Under `.migrated`, like every other original this migration preserves:
+   * the grants are recoverable by hand, and the agent meanwhile has none,
+   * which is the direction to fail in.
+   */
+  const archive = async (entry: string): Promise<string> => {
+    const from = path.join(directory, entry);
+    const to = `${from}.migrated`;
+    await rename(from, to);
+    return path.basename(to);
+  };
+
   for (const entry of entries) {
     if (!entry.endsWith(LEGACY_WHITELIST_SUFFIX) || entry === LEGACY_WHITELIST_SUFFIX) {
       continue;
     }
     const agentId = entry.slice(0, -LEGACY_WHITELIST_SUFFIX.length);
     if (!isValidAgentId(agentId)) {
-      report.quarantined.push(`${JSON.stringify(agentId)} (grants) — not a single path segment, so it has no directory to own`);
+      report.quarantined.push(
+        `${JSON.stringify(agentId)} (grants) — not a single path segment, so it has no directory to own; `
+        + `kept as ${await archive(entry)}`,
+      );
       continue;
     }
     // The directory before anything under it, for the reason the memory
@@ -503,14 +540,18 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
     // and from here that would abort the whole migration and leave the
     // daemon unable to start.
     if (!(await agentDirectoryOrQuarantine(env, agentId, 'grants', report))) {
+      report.quarantined.push(`${entry} — kept as ${await archive(entry)}`);
       continue;
     }
     const target = whitelistPathFor(directory, agentId);
     if (await exists(target)) {
       // Both spellings present: the agent's own directory is the one the
-      // daemon reads, so the older file stays put rather than overwriting
-      // grants somebody has since changed. Named, not silently skipped.
-      report.quarantined.push(`${entry} — ${path.relative(directory, target)} already exists, so the old file was left alone`);
+      // daemon reads, so the older file does not overwrite grants somebody
+      // has since changed. Named, not silently skipped.
+      report.quarantined.push(
+        `${entry} — ${path.relative(directory, target)} already exists, so the old file was not moved over it; `
+        + `kept as ${await archive(entry)}`,
+      );
       continue;
     }
     await rename(path.join(directory, entry), target);

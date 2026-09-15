@@ -82,7 +82,12 @@ the layout says it lives. An id with no directory to own — one that is not a
 single path segment, one whose name is already a file, one the platform
 refuses — keeps its rows in the preserved original, and the migration names
 it and the reason on the way past rather than dropping it silently or
-failing the upgrade over it.
+failing the upgrade over it. Its grant file is archived too, as
+`agents/<id>.whitelist.json.migrated`: left under the old name it would
+read as a home the move never reached, and the daemon would refuse to start
+over a file no later run was going to pick up. That agent has no standing
+grants until you rename its id and put the file back — the safe direction,
+and the reason the original is kept.
 
 One thing a rollback does lose, and it is not stamped: an agent's
 `origins` and `tools` grants. `whitelist.json` holds every kind of
