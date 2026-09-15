@@ -722,6 +722,16 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
         return pair.close <= frame.to && closer?.kind === 'run';
       });
       if (here.length > 0) {
+        // Whatever the pairs rendered here do not account for is the run's
+        // own again, and it sits outside them, so it is written first. A
+        // pair closing beyond this range is left out above — `[***a**](url)
+        // b*` opens a bold that ends inside the label and an italic that
+        // ends after it — and the characters it had claimed went with it,
+        // which is one taken out of the reply rather than a style declined.
+        const kept = here.reduce((sum, pair) => sum + pair.use + pair.before, 0);
+        if (token.length > kept) {
+          write(frame, token.char.repeat(token.length - kept));
+        }
         for (const pair of here) {
           const closer = context.tokens[pair.close];
           if (closer?.kind !== 'run') {

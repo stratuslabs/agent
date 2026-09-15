@@ -104,6 +104,12 @@ test('a run with characters to spare answers more than one opener', () => {
     ['***a** b*', '_*a* b_'],
     // Strictly inside has always worked, and still does.
     ['**a *b* c**', '*a _b_ c*'],
+    // A run can also buy a pair that ends outside the range being rendered,
+    // and that pair is not written there. What it had claimed is the run's
+    // own again and has to be written as text, or the reply comes out a
+    // character short: here the bold ends inside the label and the italic
+    // after it, and the leading asterisk had been going to the italic.
+    ['[***a**](https://x) b*', '<https://x|**a*> b*'],
   ]);
   // Each opener answers a given closer once, so a run cannot buy the same
   // style twice over with characters the first pairing could not spend.
