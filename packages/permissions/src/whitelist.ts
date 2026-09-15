@@ -210,6 +210,16 @@ export const resolveWhitelistPath = async (directory: string, agentId: string): 
     }
   }
   const legacy = legacyWhitelistPathFor(directory, agentId);
+  // The same rule as `current` above, and the asymmetry is what made this
+  // reachable: the migration discovers legacy files with `Dirent.isFile()`,
+  // which reports a link as a link, so a symlinked `<id>.whitelist.json`
+  // is never moved — while this `stat` follows it and makes its target
+  // authoritative. The home is then stamped as migrated with the link
+  // still in place, this resolver keeps answering from outside the home,
+  // and `writeLegacy` opens and truncates whatever it points at.
+  if (await isSymlinkedStatePath(legacy)) {
+    throw new Error(symlinkedStateFileMessage(legacy));
+  }
   try {
     await stat(legacy);
     return legacy;

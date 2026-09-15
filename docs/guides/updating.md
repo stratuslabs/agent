@@ -99,14 +99,18 @@ the layout says it lives. An id with no directory to own — one that is not a
 single path segment, one whose name is already a file or a symlink, one the
 platform refuses, one that a filesystem would read as the same name as
 another stored id, as the reserved `stratus`, or as a state directory some
-earlier command already made (see
+earlier command already made — or one whose directory turns out, once
+created, to have already existed under a different spelling (see
 [State layout](../reference/state-layout.md#one-directory-per-agent)) —
 keeps its rows in the preserved original, and the migration names it and
 the reason on the way past rather than dropping it silently or failing the
 upgrade over it. Its grant file is archived too, as
 `agents/<id>.whitelist.json.migrated`: left under the old name it would
 read as a home the move never reached, and the daemon would refuse to start
-over a file no later run was going to pick up. That agent has no standing
+over a file no later run was going to pick up. A stray `.whitelist.json`
+naming no agent at all is archived for the same reason, and a symlinked
+one is refused rather than followed — the move discovers these files
+without following links, so a link is not a grant file it can carry. That agent has no standing
 grants until you rename its id and put the file back — the safe direction,
 and the reason the original is kept.
 

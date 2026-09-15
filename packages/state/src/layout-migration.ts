@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
-import { appendFile, chmod, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
@@ -166,6 +166,10 @@ const UNUSABLE_DIRECTORY_NAME = new Set(['EEXIST', 'ENOTDIR', 'EINVAL', 'EPERM',
  * and `stratus serve` unable to start over it. So a collision is
  * quarantined like an unsafe id: named, with its rows left in the preserved
  * original, and the rest of the fleet migrated around it.
+ *
+ * `ECASE` is this module's own code, not the filesystem's: it means the
+ * directory exists but under a different spelling of this id — see the
+ * `realpath` check below.
  */
 export const makeAgentStateDirectory = async (
   env: StateEnvironment,
@@ -189,6 +193,22 @@ export const makeAgentStateDirectory = async (
     // no other chmod, so it would stay loose indefinitely with this agent's
     // state inside it.
     await chmod(directory, 0o700);
+    // Last, and the only check here that does not depend on this process
+    // having seen the other one. `StateDirectoryNames` holds names within
+    // a run, and the exclusive migration is not the only process making
+    // these directories: the memory drain runs on every ordinary command
+    // *without* the home lock, deliberately, because the append-only copy
+    // is designed to need no bracket. So two processes can both find a
+    // name free and both `mkdir` it, and on a folding filesystem that is
+    // one directory with two agents in it. Asking what the filesystem
+    // actually named it settles that without a lock the memory half was
+    // built not to take: `realpath` answers with the spelling on disk, so
+    // a directory that was already there under another one says so.
+    const stored = path.basename(await realpath(directory));
+    if (stored !== agentId) {
+      onUnusable?.('ECASE');
+      return undefined;
+    }
     return directory;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code ?? '';
@@ -344,11 +364,13 @@ const agentDirectoryOrQuarantine = async (
     return undefined;
   }
   const directory = await makeAgentStateDirectory(env, agentId, (code) => {
-    report.quarantined.push(
-      `${JSON.stringify(agentId)} (${what}) — `
-      + `${path.relative(stratusHomePath(env), agentStateDirPath(env, agentId))} cannot be a directory `
-      + `(${code}); this agent has no directory to own, so rename its id`,
-    );
+    report.quarantined.push(code === 'ECASE'
+      ? `${JSON.stringify(agentId)} (${what}) — `
+        + `${path.relative(stratusHomePath(env), agentStateDirPath(env, agentId))} is already another spelling of `
+        + 'this id on this filesystem, so the two agents would share one directory; rename one of them'
+      : `${JSON.stringify(agentId)} (${what}) — `
+        + `${path.relative(stratusHomePath(env), agentStateDirPath(env, agentId))} cannot be a directory `
+        + `(${code}); this agent has no directory to own, so rename its id`);
   });
   if (directory !== undefined) {
     report.directoryNames.hold(agentId);
@@ -859,11 +881,24 @@ const moveWhitelists = async (env: StateEnvironment, report: LayoutMigrationRepo
     // state directory of an agent whose id ends in `.whitelist.json` has
     // this suffix, and renaming *that* would move one agent's whole
     // directory inside another's.
-    if (!found.isFile() || !found.name.endsWith(LEGACY_WHITELIST_SUFFIX) || found.name === LEGACY_WHITELIST_SUFFIX) {
+    if (!found.isFile() || !found.name.endsWith(LEGACY_WHITELIST_SUFFIX)) {
       continue;
     }
     const entry = found.name;
     const agentId = entry.slice(0, -LEGACY_WHITELIST_SUFFIX.length);
+    // A bare `.whitelist.json` names no agent at all. Skipping it left the
+    // home unservable for good: `hasBracketedLegacyStateIn` counts every
+    // regular file with this suffix, so the bracket predicate said "not
+    // migrated" while 0003 recorded itself as done — every later start
+    // refused the home, and `stratus update` had no pending migration to
+    // retry. Archived like any other id with nowhere to land, which is
+    // what clears the predicate.
+    if (agentId.length === 0) {
+      report.quarantined.push(
+        `${JSON.stringify(entry)} — a grant file naming no agent; kept as ${await archive(entry)}`,
+      );
+      continue;
+    }
     if (!isValidAgentId(agentId)) {
       report.quarantined.push(
         `${JSON.stringify(agentId)} (grants) — not a single path segment, so it has no directory to own; `

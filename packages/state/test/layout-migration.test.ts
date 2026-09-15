@@ -1117,6 +1117,58 @@ test('a migrated record never fuses onto a memory file with no trailing newline'
   assert.ok(contents.includes('likes jazz'), contents.join(' | '));
 });
 
+test('a grant file naming no agent is archived, not left refusing every start', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // `agents/.whitelist.json` names no agent, so nothing can move it into a
+  // directory. Skipping it looked harmless and was not: the bracket
+  // predicate counts every regular file with this suffix, so it read as an
+  // un-migrated home for ever while 0003 recorded itself as done — every
+  // later start refused, and `stratus update` had no pending migration to
+  // retry.
+  await writeFile(
+    path.join(agentsDirPath(env), '.whitelist.json'),
+    `${JSON.stringify({ version: 1, scopes: [{ command: 'rm', args: ['-rf'] }] })}\n`,
+  );
+
+  const applied = await runStateMigrations(env, { exclusive: true });
+  assert.match(applied.map((result) => result.detail ?? '').join(' '), /naming no agent/);
+
+  // Archived, so the file is recoverable — and the home is servable again,
+  // which is the property that was actually broken.
+  assert.match(
+    await readFile(path.join(agentsDirPath(env), '.whitelist.json.migrated'), 'utf8'),
+    /rm/,
+  );
+  assert.equal(await hasBracketedLegacyState(env), false);
+});
+
+test('a legacy grant file that is a symlink is refused, like the current one', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const elsewhere = path.join(home, 'elsewhere.json');
+  await writeFile(elsewhere, `${JSON.stringify({ version: 1, scopes: [{ command: 'rm', args: ['-rf'] }] })}\n`);
+  // The migration discovers legacy files with `Dirent.isFile()`, which
+  // reports a link as a link — so it never moves this one, and the home is
+  // stamped as migrated with it still in place. A resolver that followed
+  // it would go on answering from outside the home, and a write would
+  // truncate whatever it points at.
+  await symlink(elsewhere, path.join(agentsDirPath(env), 'ava.whitelist.json'));
+
+  const whitelist = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  await assert.rejects(
+    () => whitelist.grantsFor('ava'),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  await assert.rejects(
+    () => whitelist.remember('ava', { command: 'git', args: ['push'] }),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  // Nothing was written through the link.
+  assert.match(await readFile(elsewhere, 'utf8'), /rm/);
+});
+
 test('an agent directory that was already there is tightened, not left as it was', async () => {
   const home = await newHome();
   const env = { homeDir: home };
