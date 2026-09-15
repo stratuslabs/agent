@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   applyMemoryPinBudget,
+  assertMemoryAboutWithinCap,
   assertMemoryContentWithinCap,
   assertSupersedableMemoryEntry,
   boundMemoryList,
@@ -218,6 +219,7 @@ export const createSqliteMemoryStore = (filePath: string, options: SqliteMemoryS
         assertSupersedableMemoryEntry(liveEntries(agentId, at), appendOptions.supersedes);
       }
       const fields = memoryEntryFields(appendOptions);
+      assertMemoryAboutWithinCap(fields.about ?? []);
       const createdAt = at.toISOString();
       const { metadata, provenance } = appendOptions;
       // The sequence is read and written in one transaction, so two

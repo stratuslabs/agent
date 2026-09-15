@@ -220,6 +220,27 @@ test('an agent cannot supersede or pin an entry that is not its own', async () =
   assert.deepEqual((await store.audit('ava')).map((found) => found.id), []);
 });
 
+test('a fact may not be filed under an unbounded list of entities', async () => {
+  const store = new InMemoryAgentMemoryStore({ now: () => AT });
+  // `about` is model-written and is the one field the per-entry content cap
+  // does not cover, so without this a single write could put a megabyte of
+  // entity names into the record every store has to stay able to read.
+  await assert.rejects(
+    () => store.append('ava', 'a fact', { about: Array.from({ length: 20 }, (_, index) => `topic ${index}`) }),
+    /at most 12 entities/,
+  );
+  await assert.rejects(
+    () => store.append('ava', 'a fact', { about: ['x'.repeat(600)] }),
+    /capped at 512 UTF-8 bytes/,
+  );
+  // Refused, not truncated: nothing was stored.
+  assert.deepEqual((await store.audit('ava')).map((entry) => entry.id), []);
+  // Duplicates fold before the count is taken, so a model repeating itself
+  // is not a refusal.
+  await store.append('ava', 'a fact', { about: Array.from({ length: 20 }, () => 'Deploy Pipeline') });
+  assert.deepEqual((await store.list('ava', { limit: 5 })).entries[0]?.about, ['Deploy Pipeline']);
+});
+
 test('usage counters ride the read, never the record', async () => {
   const store = new InMemoryAgentMemoryStore({ now: () => AT });
   const written = await store.append('ava', 'the heron rookery is on the north bank');

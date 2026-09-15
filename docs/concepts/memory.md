@@ -32,6 +32,10 @@ Every one of them is optional and additive. A line carrying only the four
 required fields still loads, is still recallable, and still reaches the
 prompt — see [The file is yours](#the-file-is-yours).
 
+Two caps, and both refuse rather than truncate: a fact is at most 4 KiB,
+and it may name at most twelve entities in 512 bytes. A fact about a dozen
+things is usually a fact that has not been written down properly yet.
+
 ### Facts that stop being true
 
 An entry outside its validity window **leaves what is true now and stays

@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import {
   applyMemoryPinBudget,
+  assertMemoryAboutWithinCap,
   assertMemoryContentWithinCap,
   assertSupersedableMemoryEntry,
   boundMemoryList,
@@ -830,6 +831,7 @@ export const createFileMemoryStore = (
         assertSupersedableMemoryEntry(liveEntriesFor(await readRecords(), agentId, now()), appendOptions.supersedes);
       }
       const fields = memoryEntryFields(appendOptions);
+      assertMemoryAboutWithinCap(fields.about ?? []);
       const entry: MemoryEntry = {
         id: `${agentId}:memory:${randomUUID()}`,
         agentId,

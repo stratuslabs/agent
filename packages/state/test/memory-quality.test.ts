@@ -121,6 +121,34 @@ test('a superseded entry leaves list, search, and the prompt; audit shows both a
   assert.equal((await lines(filePath)).length, 2);
 });
 
+test('a crash during a supersession leaves either the whole revision or none of it', async () => {
+  const filePath = await newFile();
+  let tick = AT.getTime();
+  const store = createFileMemoryStore(filePath, { now: () => new Date((tick += 1000)) });
+  const old = await store.append('ava', 'the deploy runs on MySQL');
+  await store.append('ava', 'the deploy runs on Postgres', { supersedes: old.id });
+
+  // A two-append implementation has a state between its writes: the
+  // tombstone landed and the replacement did not, which loses a fact on a
+  // crash. One record has no such state, and this is what that means —
+  // truncate the file at every line boundary and the old fact is retired
+  // only in the prefixes that also carry the entry that retired it.
+  const written = await lines(filePath);
+  assert.equal(written.length, 2);
+  for (let kept = 0; kept <= written.length; kept += 1) {
+    const partial = path.join(await tempDir(), 'memory.jsonl');
+    await writeFile(partial, written.slice(0, kept).map((line) => `${line}\n`).join(''));
+    const crashed = createFileMemoryStore(partial, frozen());
+    const live = (await crashed.list('ava', { validity: 'all' })).entries.map((entry) => entry.content);
+    const retired = kept > 0 && !live.includes('the deploy runs on MySQL');
+    assert.equal(
+      retired,
+      live.includes('the deploy runs on Postgres'),
+      `after ${kept} of ${written.length} lines the record retired a fact without its replacement`,
+    );
+  }
+});
+
 test('a supersession the store refuses appends nothing at all', async () => {
   const filePath = await newFile();
   const store = createFileMemoryStore(filePath, frozen());

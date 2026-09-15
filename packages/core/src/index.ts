@@ -1283,6 +1283,38 @@ export const assertMemoryContentWithinCap = (content: string): void => {
 };
 
 /**
+ * How many entities one fact may be filed under, and how much room their
+ * names get. `about` is model-written and would otherwise be the one
+ * unbounded field on an entry: the per-entry cap covers `content` alone, so
+ * without this a single `memory.remember` could write a megabyte of entity
+ * names into the record and into every store's search index. The prompt's
+ * topic block has its own budget and would survive it; the record would
+ * not, and the record is the thing that has to stay hand-editable.
+ *
+ * Small on purpose. A fact about a dozen things is a fact that has not been
+ * written down properly yet.
+ */
+export const MEMORY_ABOUT_MAX_KEYS = 12;
+export const MEMORY_ABOUT_MAX_BYTES = 512;
+
+/** Refuses, like the content cap, and for the same reason: a half-filed fact is worse than a refused one. */
+export const assertMemoryAboutWithinCap = (about: readonly string[]): void => {
+  if (about.length > MEMORY_ABOUT_MAX_KEYS) {
+    throw new Error(
+      `A memory entry may name at most ${MEMORY_ABOUT_MAX_KEYS} entities in "about" and this one names ${about.length}. `
+      + 'Nothing was stored — file it under the few that matter, or remember it as more than one fact.',
+    );
+  }
+  const bytes = about.reduce((sum, key) => sum + memoryContentByteLength(key), 0);
+  if (bytes > MEMORY_ABOUT_MAX_BYTES) {
+    throw new Error(
+      `The "about" keys of a memory entry are capped at ${MEMORY_ABOUT_MAX_BYTES} UTF-8 bytes and these are ${bytes}. `
+      + 'Nothing was stored — an entity name is a name, not a description.',
+    );
+  }
+};
+
+/**
  * The tokenizer both store implementations share: NFC-normalized,
  * case-folded, split on anything that is not a Unicode letter or digit.
  * Search matching is defined on these tokens — `Postgres` finds `postgres`,
@@ -2051,6 +2083,7 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
       assertSupersedableMemoryEntry(this.live(agentId, this.now()), options.supersedes);
     }
     const about = memoryEntryAbout(options);
+    assertMemoryAboutWithinCap(about);
     this.counter += 1;
     const entry: MemoryAuditEntry = {
       id: `${agentId}:memory:${this.counter}`,
