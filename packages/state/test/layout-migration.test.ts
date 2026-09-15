@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, chmod, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, mkdtemp, readdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -668,19 +668,18 @@ test('an agent directory an older build left world-readable is tightened by the 
   assert.equal((await stat(directory)).mode & 0o777, 0o700);
 });
 
-test('a memory that lands in the shared file as it is retired is not left in the archive', async () => {
+test('a retirement a kill interrupted is finished, not left holding the only copy', async () => {
   const home = await newHome();
   const env = { homeDir: home };
   await seedSharedState(home);
   const at = '2026-04-01T00:00:00.000Z';
 
-  // The state that window leaves: a record that reached the shared file
-  // after the copy read it, carried into the archive by the rename. A
-  // writer that does not honour the home claim — a one-shot CLI of a build
-  // older than the claim — is what puts it there. Nothing reads the old
-  // pathname again, so a pass that stops at the rename loses it.
+  // What a kill between the claim and the archive leaves: the shared file
+  // renamed out of the way under a unique name, holding records no other
+  // pathname reaches. The rename is atomic precisely so this is the only
+  // state it can be left in — and it has to be finished, not stepped over.
   await writeFile(
-    `${legacyMemoryFilePath(env)}.migrated`,
+    `${legacyMemoryFilePath(env)}.retiring-2c9b1f70-0000-4000-8000-000000000000`,
     `${JSON.stringify({ id: 'ava:memory:late', agentId: 'ava', content: 'remembered on the way out', createdAt: at })}\n`,
   );
 
@@ -691,4 +690,51 @@ test('a memory that lands in the shared file as it is retired is not left in the
     (await memory.list('ava')).entries.map((entry) => entry.content).sort(),
     ['likes jazz', 'remembered on the way out'],
   );
+  // And the claim is gone, so a later run has nothing to redo.
+  const left = (await readdir(stratusHomePath(env))).filter((name) => name.includes('.retiring-'));
+  assert.deepEqual(left, []);
+});
+
+test('retiring the shared file appends to an earlier archive rather than renaming over it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+
+  // An archive an earlier retirement wrote. The shared file comes back
+  // afterwards — the store opens it by pathname on every append, so an
+  // older build recreates it — and a rename would take this with it,
+  // destroying the only copy of whatever that pass could not place.
+  await writeFile(
+    `${legacyMemoryFilePath(env)}.migrated`,
+    `${JSON.stringify({ id: 'ava:memory:older', agentId: 'ava', content: 'from an earlier pass', createdAt: '2026-01-01T00:00:00.000Z' })}\n`,
+  );
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const archived = await readFile(`${legacyMemoryFilePath(env)}.migrated`, 'utf8');
+  assert.match(archived, /from an earlier pass/);
+  assert.match(archived, /likes jazz/);
+});
+
+test('an agent directory that is a symlink is quarantined, not written through', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedSharedState(home);
+  // A name the old layout did not reserve, pointed somewhere else. `mkdir`
+  // is satisfied by it, and the writes would land wherever it points —
+  // and the startup sweep reads entry types, so it would not see a
+  // directory there at all and those sessions could never be resumed.
+  const elsewhere = path.join(home, 'elsewhere');
+  await mkdir(elsewhere, { recursive: true });
+  await symlink(elsewhere, path.join(agentsDirPath(env), 'ava'));
+
+  const applied = await runStateMigrations(env, { exclusive: true });
+  const detail = applied.map((result) => result.detail ?? '').join(' ');
+  assert.match(detail, /QUARANTINED/);
+  assert.match(detail, /ava/);
+
+  // Nothing of ava's was written through the link, and the rest of the
+  // fleet moved around it.
+  assert.deepEqual(await readdir(elsewhere), []);
+  assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ghost')), ['g-1']);
 });

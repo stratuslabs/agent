@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
-import { appendFile, chmod, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
@@ -169,6 +170,24 @@ export const makeAgentStateDirectory = async (
   onUnusable?: (code: string) => void,
 ): Promise<string | undefined> => {
   const directory = agentStateDirPath(env, agentId);
+  // A symlink is not this agent's directory, however well it resolves.
+  // `mkdir` is satisfied by one pointing at a directory and the writes then
+  // land wherever it points — outside the home, or inside another agent's
+  // — which is the isolation this whole layout exists to give. It is also
+  // invisible to the startup sweep, which reads entry types and sees a
+  // symlink rather than a directory, so sessions migrated through one would
+  // never reach the fleet index and could not be resumed. Checked with
+  // `lstat`, which is the call that does not follow it.
+  try {
+    if ((await lstat(directory)).isSymbolicLink()) {
+      onUnusable?.('ELOOP');
+      return undefined;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
   try {
     await mkdir(directory, { recursive: true, mode: 0o700 });
     return directory;
@@ -463,32 +482,89 @@ const copySharedMemory = async (
  * The derived FTS index goes with it: an index of a record that is no
  * longer there would only be rebuilt from nothing.
  */
-const retireSharedMemory = async (env: StateEnvironment): Promise<void> => {
+const RETIRING_SUFFIX = '.retiring-';
+
+/**
+ * Take the shared file out of use, atomically, and place everything that was
+ * in it.
+ *
+ * Through a uniquely named claim, which is the only way to get both of the
+ * things this needs. The destructive step has to be **atomic**, because a
+ * read-then-remove loses anything appended between the two — a writer that
+ * does not honour the home claim is exactly what this window is about, and
+ * "the record was never in the bytes we archived, and then we unlinked it"
+ * is a fact the operator was told had been remembered. And it must **not
+ * rename over the archive**, because the shared file comes back: the store
+ * opens it by pathname on every append, so an older build recreates it, and
+ * a second retirement would take the first one's archive with it.
+ *
+ * A rename to a claim gives both. After it, a late append either landed in
+ * the claimed inode — where the copy below places it — or recreates the
+ * source pathname, where the next command's drain takes it. Neither is lost,
+ * and the archive is only ever appended to.
+ *
+ * The same protocol `migrateLegacyMemory` uses for the cwd-local file, and
+ * for the same reason; a crash leaves a claim behind, which `drainRetiring`
+ * finishes.
+ */
+const retireSharedMemory = async (env: StateEnvironment, report: LayoutMigrationReport): Promise<void> => {
   const source = legacyMemoryFilePath(env);
-  const archive = `${source}.migrated`;
-  if (await exists(source)) {
-    // Appended and then removed, never renamed over the archive: a
-    // `memory.jsonl` can come back after a retirement — the file store
-    // opens it by pathname on every append, so a daemon or CLI of the older
-    // build recreates it — and a rename would take the earlier archive with
-    // it, which is the one copy of anything that pass could not place. The
-    // rule `migrateLegacyMemory` already follows for its own claim file.
-    //
-    // Not atomic, unlike the rename it replaces, and that is the right way
-    // round: a crash between the two leaves the records in both places,
-    // where the next pass dedupes them by line, rather than in neither.
-    const raw = await readFile(source, 'utf8');
-    if (raw.trim().length > 0) {
-      await appendFile(archive, raw.endsWith('\n') ? raw : `${raw}\n`, { mode: 0o600 });
-      await chmod(archive, 0o600);
+  const claim = `${source}${RETIRING_SUFFIX}${randomUUID()}`;
+  try {
+    await rename(source, claim);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
     }
-    await rm(source, { force: true });
+    // Nothing there, or another process claimed it first — either way this
+    // pass has nothing of its own to retire. Leftovers are finished below.
+    await drainRetiring(env, report);
+    return;
   }
-  // The derived index is rebuilt from whatever the record says, so this one
-  // may clobber: an index of records that are no longer at that pathname is
-  // not something to keep two of.
+  await placeClaim(env, claim, report);
+  await drainRetiring(env, report);
+
+  // The derived index goes last and may clobber: an index of records that
+  // are no longer at that pathname is not worth keeping two of.
   if (await exists(`${source}.index`)) {
     await rename(`${source}.index`, `${source}.index.migrated`);
+  }
+};
+
+/** Copy a claimed file into the agents' stores, fold it into the archive, and drop it. */
+const placeClaim = async (env: StateEnvironment, claim: string, report: LayoutMigrationReport): Promise<void> => {
+  await copySharedMemory(env, report, claim);
+  const archive = `${legacyMemoryFilePath(env)}.migrated`;
+  const raw = await readFile(claim, 'utf8');
+  if (raw.trim().length > 0) {
+    // Appended, never renamed over — see `retireSharedMemory`. A crash
+    // between this and the unlink leaves the claim behind, and `drainRetiring`
+    // appends it a second time; the readers dedupe by entry id, and the
+    // archive is a recovery artifact rather than anything that is read back.
+    await appendFile(archive, raw.endsWith('\n') ? raw : `${raw}\n`, { mode: 0o600 });
+    await chmod(archive, 0o600);
+  }
+  await rm(claim, { force: true });
+};
+
+/** Finish any claim a killed run left behind, including one from an older build. */
+const drainRetiring = async (env: StateEnvironment, report: LayoutMigrationReport): Promise<void> => {
+  const source = legacyMemoryFilePath(env);
+  const directory = path.dirname(source);
+  const prefix = `${path.basename(source)}${RETIRING_SUFFIX}`;
+  let entries: Dirent[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.startsWith(prefix)) {
+      await placeClaim(env, path.join(directory, entry.name), report);
+    }
   }
 };
 
@@ -785,16 +861,7 @@ export const applyPerAgentLayout = async (env: StateEnvironment): Promise<string
   // every command has been running, and this is the only caller that may
   // also take the source away.
   await copySharedMemory(env, report);
-  await retireSharedMemory(env);
-  // And once more from the archive, because the rename is not the boundary
-  // the copy above assumed. A writer that does not honour the home claim —
-  // a one-shot CLI of a build older than the claim itself — can append
-  // between that read and this rename, and the rename carries its record
-  // into the archive by the inode. Nothing reads the old pathname again, so
-  // without this the fact the operator just told an agent is on disk in a
-  // file no reader will ever open. Deduped by line like every other pass,
-  // so on the ordinary path it copies nothing and costs one read.
-  await copySharedMemory(env, report, `${legacyMemoryFilePath(env)}.migrated`);
+  await retireSharedMemory(env, report);
   await moveWhitelists(env, report);
   return describe(report);
 };
