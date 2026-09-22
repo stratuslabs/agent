@@ -700,3 +700,81 @@ test('a link to a workspace that did not move keeps naming where that workspace 
   assert.equal(await readFile(path.join(ava, 'shared.md'), 'utf8'), 'the files both agents see');
   assert.equal(await realpath(ava), await realpath(path.join(legacyWorkspacesDirPath(env), 'bea')));
 });
+
+test('a link planted where the move marker goes is refused, not written through', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'own.md': 'mine' });
+  // The workspace is the agent's own directory — `shell.run` starts there
+  // and is under no root confinement — so the agent can put anything at
+  // this name. Following a link here would truncate its target as the
+  // daemon user, and the `chmod` after it would set that file's mode.
+  const victim = path.join(home, 'victim.md');
+  await writeFile(victim, 'not the migration’s to touch');
+  await symlink(victim, path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl.moving'));
+
+  await assert.rejects(runStateMigrations(env, { exclusive: true }), /ELOOP/);
+
+  assert.equal(await readFile(victim, 'utf8'), 'not the migration’s to touch');
+});
+
+test('a marker that is a link is not read through either', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const workspace = agentWorkspacePath(env, 'ava');
+  await mkdir(workspace, { recursive: true });
+  await writeFile(path.join(workspace, 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/vendor.md'));
+  // A marker an agent planted at the *new* path, pointing at a file of its
+  // choosing. Reading through it would let the file's contents steer which
+  // records get re-recorded.
+  const elsewhere = path.join(home, 'planted.json');
+  await writeFile(elsewhere, `${JSON.stringify({ from: ['/'] })}\n`);
+  await symlink(elsewhere, path.join(workspace, 'fs-provenance.jsonl.moving'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  // Nothing re-recorded: the ledger is exactly as it was.
+  assert.deepEqual(
+    await recordedIn(path.join(workspace, 'fs-provenance.jsonl')),
+    ['/home/ada/notes/vendor.md'],
+  );
+});
+
+test('a chain of workspace links resolves whichever order they are listed in', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'cyd', { 'shared.md': 'the files all three see' });
+  // `ava -> bea -> cyd`, with the referencing links listed before what they
+  // point at. Ordering directories before links only settles a link whose
+  // target is a real directory; a link to a link needs the passes.
+  await symlink('bea', path.join(legacyWorkspacesDirPath(env), 'ava'));
+  await symlink('cyd', path.join(legacyWorkspacesDirPath(env), 'bea'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  for (const agentId of ['ava', 'bea', 'cyd']) {
+    assert.equal(
+      await readFile(path.join(agentWorkspacePath(env, agentId), 'shared.md'), 'utf8'),
+      'the files all three see',
+      agentId,
+    );
+  }
+  await assert.rejects(readdir(legacyWorkspacesDirPath(env)), /ENOENT/);
+});
+
+test('links that point at each other are left as they are rather than looping forever', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  // Neither can ever move to a resolved target, so the passes have to give
+  // up rather than defer each other indefinitely.
+  await symlink('bea', path.join(legacyWorkspacesDirPath(env), 'ava'));
+  await symlink('ava', path.join(legacyWorkspacesDirPath(env), 'bea'));
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  assert.ok(applied(results).includes(MIGRATION), applied(results).join(', '));
+  // Both moved, still pointing at each other, still resolving to nothing —
+  // which is what they did before, and not this migration's to repair.
+  assert.ok((await lstat(agentWorkspacePath(env, 'ava'))).isSymbolicLink());
+  assert.ok((await lstat(agentWorkspacePath(env, 'bea'))).isSymbolicLink());
+});

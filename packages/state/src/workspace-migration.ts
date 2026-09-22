@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import type { Dirent } from 'node:fs';
+import { constants, type Dirent } from 'node:fs';
 import {
   appendFile,
   chmod,
   lstat,
+  open,
   readdir,
   readFile,
   readlink,
@@ -136,20 +137,54 @@ const MOVE_MARKER_FILENAME = `${LEDGER_FILENAME}.moving`;
 
 const markerIn = (workspace: string): string => path.join(workspace, MOVE_MARKER_FILENAME);
 
+/**
+ * Both ends of the marker go through `O_NOFOLLOW`, because the directory it
+ * sits in is the agent's own: `shell.run` starts there and is under no root
+ * confinement, so an agent can put whatever it likes at this name. A plain
+ * `writeFile` would follow a symlink planted there and truncate whatever it
+ * pointed at, as the daemon user, and the `chmod` after it would set that
+ * file's mode — an arbitrary-write primitive handed over by a migration.
+ *
+ * A link at the name is refused rather than replaced. The migration has no
+ * business deciding what an operator meant by one, and the agent whose
+ * directory it is does not get to make this decision at all.
+ *
+ * The marker's *contents* are a different question and a much smaller one:
+ * they steer which records get re-recorded, and re-recording can only ever
+ * add a label to a path, never remove one. A planted marker buys an
+ * attacker over-labelling of their own files, which is the direction this
+ * whole ledger fails in by design.
+ */
+const MARKER_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW;
+
 const writeMoveMarker = async (workspace: string, from: readonly string[]): Promise<void> => {
-  await writeFile(markerIn(workspace), `${JSON.stringify({ from })}\n`, { mode: 0o600 });
-  await chmod(markerIn(workspace), 0o600);
+  const handle = await open(markerIn(workspace), MARKER_FLAGS, 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify({ from })}\n`);
+    await handle.chmod(0o600);
+  } finally {
+    await handle.close();
+  }
 };
 
 const readMoveMarker = async (workspace: string): Promise<string[] | undefined> => {
   let raw: string;
+  let handle;
   try {
-    raw = await readFile(markerIn(workspace), 'utf8');
+    handle = await open(markerIn(workspace), constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Nothing there, or something there that is not a marker this build
+    // wrote. Either way there is no move to finish from it.
+    if (code === 'ENOENT' || code === 'ELOOP') {
       return undefined;
     }
     throw error;
+  }
+  try {
+    raw = await handle.readFile('utf8');
+  } finally {
+    await handle.close();
   }
   try {
     const parsed = JSON.parse(raw) as { from?: unknown };
@@ -529,13 +564,9 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // would silently swap the shared files for a different workspace that an
   // ordinary command happened to create.
   const moved = new Set<string>();
-  const ordered = [
-    ...entries.filter((entry) => entry.isDirectory()),
-    ...entries.filter((entry) => !entry.isDirectory()),
-  ];
-  for (const entry of ordered) {
+  const move = async (entry: Dirent): Promise<void> => {
     if (!isWorkspaceEntry(entry)) {
-      continue;
+      return;
     }
     const agentId = entry.name;
     const from = path.join(legacy, agentId);
@@ -548,14 +579,14 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         `${JSON.stringify(agentId)} — not a single path segment, so it has no directory to own; `
         + `left at ${path.relative(stratusHomePath(env), from)}`,
       );
-      continue;
+      return;
     }
     // The agent's directory before anything under it, and through the rule
     // 0003 uses: a name that is another spelling of this id on a folding
     // filesystem would otherwise put two agents' output in one workspace.
     if (await agentDirectoryOrQuarantine(env, agentId, 'workspace', report) === undefined) {
       report.quarantined.push(`${agentId} — left at ${path.relative(stratusHomePath(env), from)}`);
-      continue;
+      return;
     }
     const target = agentWorkspacePath(env, agentId);
     // `lstat`, not `readdir` or `stat`: a *dangling* symlink at the
@@ -572,7 +603,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // not a collision.
       if (await sameEntry(from, target)) {
         report.quarantined.push(`${agentId} — ${there} already resolves to ${here}, so it was left as it is`);
-        continue;
+        return;
       }
       // Otherwise the deferral window, and the ordinary outcome of running
       // any command before restarting the daemon — see the note at the top
@@ -593,7 +624,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           : `${there} already existed, so what is left of ${here} stays there; its provenance records were `
             + 'folded into the ledger at the new path, and the files they name have not moved';
       report.quarantined.push(`${agentId} — ${why}`);
-      continue;
+      return;
     }
     // Captured while the source is still there: `realpath` cannot answer for
     // it once it has moved, and on a home reached through a link the
@@ -696,6 +727,41 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     }
     moved.add(agentId);
     report.moved += 1;
+  };
+
+  // Real workspaces first: a link can only be pointed at where its target
+  // ended up once that is known.
+  for (const entry of entries.filter((entry) => entry.isDirectory())) {
+    await move(entry);
+  }
+  // Then the links, in dependency order rather than `readdir` order, because
+  // one can point at another: `ava -> bea` where `bea` is itself a link.
+  // Each pass takes the links that wait on nothing still pending; when a
+  // pass moves nothing, whatever is left waits on something that is never
+  // going to move, so it is taken as it stands — which is right, since a
+  // target that stays put is a target a link should keep naming.
+  let pending = entries.filter((entry) => !entry.isDirectory() && isWorkspaceEntry(entry));
+  while (pending.length > 0) {
+    const names = new Set(pending.map((entry) => entry.name));
+    const waiting = await Promise.all(pending.map(async (entry) => {
+      const text = await readlink(path.join(legacy, entry.name)).catch(() => undefined);
+      if (text === undefined) {
+        return false;
+      }
+      const relative = path.relative(legacy, path.resolve(legacy, text));
+      const other = relative.split(path.sep)[0];
+      return other !== undefined && other !== entry.name && names.has(other);
+    }));
+    const ready = pending.filter((_, index) => !waiting[index]);
+    const deferred = pending.filter((_, index) => waiting[index]);
+    const before = moved.size;
+    for (const entry of ready.length > 0 ? ready : deferred) {
+      await move(entry);
+    }
+    if (ready.length === 0 || (deferred.length > 0 && moved.size === before && ready.length === pending.length)) {
+      break;
+    }
+    pending = deferred;
   }
   // Only when it empties, and never recursively: an operator's own file in
   // here is theirs, and a workspace left behind is that agent's output.
