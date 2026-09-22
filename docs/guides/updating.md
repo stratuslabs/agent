@@ -139,7 +139,9 @@ a symlink is moved *as the link*, so their files stay where they put them.
 The ledger's own records are rewritten to follow the move — they are
 absolute paths, and every binary an MCP server returned was written and
 recorded *inside* the workspace, so leaving them would strip the label off
-each one.
+each one. That rewrite happens after the move lands, and a workspace being
+moved carries a small `fs-provenance.jsonl.moving` note so that a run
+interrupted between the two is finished by the next one.
 
 If the new path already holds a workspace, the two ledgers are folded
 together rather than one being refused. That is the ordinary shape of an
