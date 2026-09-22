@@ -786,7 +786,14 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       return undefined;
     }
     const [other, ...rest] = relative.split(path.sep);
-    if (other === undefined) {
+    // A first segment that could be an agent id, and nothing else. The
+    // per-agent path helpers *throw* on a segment that could not key a
+    // directory — deliberately, since a bad id elsewhere is a soul to fix —
+    // so asking them about `workspaces/.cache/blob` would abort the whole
+    // exclusive migration, and with it `serve` and `update`. That entry is
+    // one this migration quarantines and leaves where it is; a link naming
+    // it is right as it stands, and keeps its target.
+    if (other === undefined || !isValidAgentId(other)) {
       return undefined;
     }
     // A workspace this run moved, or one a run before it did. The second

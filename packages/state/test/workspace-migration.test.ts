@@ -393,6 +393,28 @@ test('an absolute link naming the home’s canonical spelling is retargeted too'
   assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'own.md'), 'utf8'), 'mine');
 });
 
+test('a link into something that is nobody’s workspace keeps its target, and does not stop the fleet', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // `.cache` is a name the filesystem takes and `isValidAgentId` will not,
+  // which is why this migration leaves it where it is. The per-agent path
+  // helpers throw on such a segment rather than returning a path, so asking
+  // them where this link's target "went" would abort the exclusive
+  // migration — and with it every `stratus serve` and `stratus update`.
+  await mkdir(path.join(legacyWorkspacesDirPath(env), '.cache'), { recursive: true });
+  await writeFile(path.join(legacyWorkspacesDirPath(env), '.cache', 'blob'), 'not an agent’s');
+  await symlink(path.join('.cache', 'blob'), path.join(legacyWorkspacesDirPath(env), 'ava'));
+  await seedWorkspace(home, 'bea', { 'own.md': 'mine' });
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  assert.ok(applied(results).includes(MIGRATION), applied(results).join(', '));
+
+  // The link keeps naming what it named, which still exists, and the rest
+  // of the fleet moved around it.
+  assert.equal(await readFile(agentWorkspacePath(env, 'ava'), 'utf8'), 'not an agent’s');
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'bea'), 'own.md'), 'utf8'), 'mine');
+});
+
 test('a link to an unmounted volume is not a finished move, whatever is at the new path', async () => {
   const home = await newHome();
   const env = { homeDir: home };
