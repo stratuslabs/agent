@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { link, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -235,7 +235,6 @@ test('the seam answers for one agent by the layout, and for every agent by what 
   const home = await newHome();
   const env = { homeDir: home };
   const workspaces = createAgentWorkspaces(env);
-  assert.equal(workspaces.forAgent('ava'), agentWorkspacePath(env, 'ava'));
   // Nothing on disk yet: `all()` is asked before the first write, by the
   // ledger guard, so an empty home is an empty answer rather than a throw —
   // including a home with no `agents/` at all, which is every install
@@ -244,7 +243,8 @@ test('the seam answers for one agent by the layout, and for every agent by what 
   const fresh = await mkdtemp(path.join(os.tmpdir(), 'stratus-fresh-'));
   assert.deepEqual(await createAgentWorkspaces({ homeDir: fresh }).all(), []);
 
-  await mkdir(path.join(agentsDirPath(env), 'ava'), { recursive: true });
+  // Which is also what makes this agent's directory: `forAgent` creates.
+  assert.equal(workspaces.forAgent('ava'), agentWorkspacePath(env, 'ava'));
   // A soul is a file in here, not an agent's state directory.
   await writeFile(path.join(agentsDirPath(env), 'bea.md'), '# Bea\n');
   // And an agent whose soul is gone still has a workspace whose ledger a
@@ -258,6 +258,44 @@ test('the seam answers for one agent by the layout, and for every agent by what 
     [...await workspaces.all()].sort(),
     [agentWorkspacePath(env, 'ava'), agentWorkspacePath(env, 'ghost')].sort(),
   );
+});
+
+test('the seam hands back a workspace whose state directory is already 0700, whatever the umask', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const previous = process.umask(0o022);
+  try {
+    // The umask a login shell sets, which is what makes this worth a test:
+    // the plugins that call this reach for a recursive `mkdir` with no mode,
+    // and under 0022 that left `agents/<id>` — holding the agent's sessions,
+    // memories and `whitelist.json` — at 0755 when `shell.run` was an
+    // agent's first local action.
+    const workspace = createAgentWorkspaces(env).forAgent('ava');
+    assert.equal((await stat(workspace)).mode & 0o777, 0o700);
+    assert.equal((await stat(path.dirname(workspace))).mode & 0o777, 0o700);
+
+    // And an `agents/<id>` a pre-fix build already left loose is tightened,
+    // not left as it was: `mkdir`'s mode only applies to what it creates.
+    const loose = path.join(agentsDirPath(env), 'bea');
+    await mkdir(path.join(loose, 'workspace'), { recursive: true, mode: 0o755 });
+    createAgentWorkspaces(env).forAgent('bea');
+    assert.equal((await stat(loose)).mode & 0o777, 0o700);
+  } finally {
+    process.umask(previous);
+  }
+});
+
+test('a symlinked state directory is refused rather than chmodded through', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // `chmod` follows links, so without this check the 0700 above would be
+  // applied to whatever the link points at — and the agent's state written
+  // there. Named, so whoever planted it can also be the one who fixes it.
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await chmod(elsewhere, 0o755);
+  await symlink(elsewhere, path.join(agentsDirPath(env), 'ava'));
+  assert.throws(() => createAgentWorkspaces(env).forAgent('ava'), /is a symlink/);
+  assert.equal((await stat(elsewhere)).mode & 0o777, 0o755);
 });
 
 test('anything already at the destination, a dangling link included, stops the move rather than racing it', async () => {

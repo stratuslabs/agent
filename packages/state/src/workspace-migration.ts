@@ -183,13 +183,25 @@ const writeMoveMarker = async (workspace: string, from: readonly string[]): Prom
   }
 };
 
-/** Whether a move is unfinished here, asked without following anything. */
+/**
+ * Whether a move is unfinished here, asked without following anything.
+ *
+ * Only absence answers no. This is the sole evidence that a workspace's
+ * records still name the path it came from — the legacy directory is gone
+ * by the time anything asks — so a swallowed `EACCES` or `EIO` would skip
+ * the repair, stamp 0004, and leave those files reading back as the agent's
+ * own words. "Cannot tell" fails the migration instead.
+ */
 const hasMoveMarker = async (workspace: string): Promise<boolean> => {
   try {
     await lstat(markerIn(workspace));
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return false;
+    }
+    throw error;
   }
 };
 
@@ -457,10 +469,16 @@ const sameEntry = async (a: string, b: string): Promise<boolean> => {
   try {
     const [left, right] = await Promise.all([stat(a), stat(b)]);
     return left.dev === right.dev && left.ino === right.ino;
-  } catch {
-    // One of them cannot be resolved, so they are not the same thing that
-    // is there. The caller's next step decides what that means.
-    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Nothing there — a dangling link is the usual one — so they are not the
+    // same thing, and the caller's next step decides what that means.
+    // Anything else is "cannot tell", and answering no to that folds a
+    // ledger that may be the very file it is being folded into.
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return false;
+    }
+    throw error;
   }
 };
 

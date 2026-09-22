@@ -2558,9 +2558,15 @@ export interface ChannelRegistrationHandle {
  */
 export interface AgentWorkspaces {
   /**
-   * The directory this agent may put files in. Resolution only — the
-   * caller creates it, because only the caller knows whether it is about
-   * to write.
+   * The directory this agent may put files in, created and with its
+   * permissions already settled by the time it is returned.
+   *
+   * The host creates it rather than the plugin because the workspace sits
+   * inside the agent's state directory, beside its sessions, memories and
+   * grants — so the recursive `mkdir` a file-producing plugin would
+   * otherwise reach for makes a *state* directory under the process umask.
+   * A plugin has no way to know that; the host that chose the layout does.
+   * Callers may still create subdirectories under what they are handed.
    */
   forAgent(agentId: string): string;
   /**

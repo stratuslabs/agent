@@ -157,6 +157,15 @@ handed a `workspaceRoot` and each appended the agent id to it, so all five
 had to change when the workspace moved from `workspaces/<id>` to
 `agents/<id>/workspace` and the id stopped being the last segment.
 
+`forAgent` **creates** the directory, `0700`, before answering. That is the
+host's job and not the plugin's for the same reason the seam exists at all:
+the workspace now sits inside the agent's state directory, beside its
+sessions, memories and grants, and the recursive `mkdir` a file-producing
+plugin reaches for takes its mode from the process umask — which under the
+usual `0022` would leave `agents/<id>/` itself world-readable the first time
+an agent's opening move was `shell.run`. A plugin has no way to know that
+about a path it was handed; it may still make subdirectories under it.
+
 `workspaceRoot` survives as an operator's key and a hand-wired host's
 fallback, with the old meaning — one directory per agent directly under the
 root. A value there **wins** over the seam, because the loader no longer
