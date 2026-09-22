@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
-import { chmod, lstat, readdir, rename, rmdir } from 'node:fs/promises';
+import { appendFile, chmod, lstat, readdir, readFile, rename, rmdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
+import { LEDGER_FILENAME } from '@stratusagent/plugins';
 
 import { type StateEnvironment } from './environment.ts';
 import {
@@ -10,6 +12,7 @@ import {
   createStateDirectoryNames,
   type DirectoryReport,
 } from './layout-migration.ts';
+import { memoryAppendNeedsNewline } from './memory.ts';
 import {
   agentWorkspacePath,
   legacyWorkspacesDirPath,
@@ -28,25 +31,46 @@ import {
 // else is.
 //
 // The extra `workspace/` segment is the half of that which is load-bearing
-// rather than tidy: `tool-fs` takes this directory as its default root, so
-// the agent can read and write everything under it. With the workspace
-// *as* `agents/<id>/` the agent's own `whitelist.json` — the file saying
-// what it may do unattended — would be inside its own filesystem root.
-// One segment down, the grants, the sessions and the memories are siblings
-// of the root rather than descendants, and no canonicalized path inside it
-// reaches them.
+// rather than tidy. The workspace is a directory an operator can hand to
+// `fs` as a root — `tool-fs` carries a comment about exactly that case —
+// and is what a sandboxed executor mounts. Before this move, naming it
+// reached that agent's output and nothing else, because it lived outside
+// `agents/`. With the workspace *as* `agents/<id>/`, the same operator
+// choice would hand the agent its own `whitelist.json`, the file saying
+// what it may do unattended. One segment down, the grants, the sessions and
+// the memories are siblings of that root rather than descendants, and no
+// canonicalized path inside it reaches them.
 //
-// A rename, and therefore its own marker: the workspace is in one place or
-// the other, never both, so a second run finds nothing left to move. What
-// this migration will not do is *merge*. Two workspaces for one agent mean
-// two provenance ledgers, and folding them would mean picking a winner —
-// the losing ledger's records are the labels on real files, so dropping
-// them turns fetched text back into the agent's own words. Both are kept
-// where they are and the agent is named instead.
+// What this migration is careful about is the **provenance ledger**, which
+// lives at the top of the workspace and records which files came from
+// outside. A label that goes missing is not a visible failure — the file
+// reads back as the agent's own words — so two things that look like
+// bookkeeping are the point of this file:
+//
+// - **A rename changes the absolute path of everything it moves, and the
+//   ledger records absolute paths.** Every binary an MCP server returns is
+//   written at `<workspace>/mcp/<server>/…` and recorded there, with no
+//   operator configuration involved, so moving the workspace without
+//   rewriting the ledger would strip the label off every one of them. The
+//   records naming the old workspace are remapped onto the new one.
+// - **A destination that already exists is merged, not refused.** That is
+//   the ordinary shape of an upgrade rather than an exotic one: an ordinary
+//   command on the new build defers this migration — it needs the exclusive
+//   bracket — while its plugins already resolve the *new* path, so the
+//   first tool call that writes a file creates `agents/<id>/workspace` and
+//   starts a ledger there. Refusing that would refuse `stratus serve` to
+//   anyone who ran a command before restarting the daemon. The two ledgers
+//   fold together instead, which the format allows by construction:
+//   `parseLedger` keeps the lowest label recorded for a path whichever
+//   process wrote it first, exactly so concurrent appenders can interleave.
+//   Those records are *not* remapped — in this branch the files did not
+//   move — and what is left of the old workspace stays where it is.
 
 /** What one run changed, for the line it reports. */
 interface WorkspaceMigrationReport extends DirectoryReport {
   moved: number;
+  /** Agents whose old ledger was folded into one already at the new path. */
+  merged: string[];
 }
 
 /**
@@ -64,12 +88,140 @@ interface WorkspaceMigrationReport extends DirectoryReport {
  */
 const isWorkspaceEntry = (entry: Dirent): boolean => entry.isDirectory() || entry.isSymbolicLink();
 
+/** The ledger file at the top of a workspace. */
+const ledgerIn = (workspace: string): string => path.join(workspace, LEDGER_FILENAME);
+
+/** Whether nothing at all is at this path — a dangling link is something. */
+const pathIsFree = async (filePath: string): Promise<boolean> => {
+  try {
+    await lstat(filePath);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+};
+
+/** `absolutePath` with `from` swapped for `to`, when it is `from` or under it. */
+const reparented = (absolutePath: string, from: string, to: string): string | undefined => {
+  const relative = path.relative(from, absolutePath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return undefined;
+  }
+  return relative.length === 0 ? to : path.join(to, relative);
+};
+
+/**
+ * Rewrite the ledger's own records after the workspace under them moved.
+ *
+ * A ledger record is an absolute path, so a rename silently invalidates
+ * every record naming a file inside the workspace — and `plugin-mcp` puts
+ * every binary a server returns at `<workspace>/mcp/<server>/…` and records
+ * it there, so this is the common case rather than a corner of it. A record
+ * whose path is outside the workspace — the agent's ordinary `fs` roots,
+ * which is most of them — is left exactly as it was.
+ *
+ * Lines that will not parse are copied through byte for byte. The reader
+ * refuses such a ledger and says to delete it; rewriting one here would
+ * change which error an operator sees, and this migration has no opinion
+ * about a ledger that was already broken.
+ *
+ * Staged and renamed into place rather than written over, because a
+ * truncated ledger is a set of labels gone.
+ */
+const remapLedger = async (workspace: string, from: string, to: string): Promise<number> => {
+  const ledgerPath = ledgerIn(workspace);
+  let raw: string;
+  try {
+    raw = await readFile(ledgerPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return 0;
+    }
+    throw error;
+  }
+  let remapped = 0;
+  const lines = raw.split('\n').map((line) => {
+    if (line.trim().length === 0) {
+      return line;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return line;
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+      return line;
+    }
+    const record = parsed as { path?: unknown };
+    if (typeof record.path !== 'string') {
+      return line;
+    }
+    const moved = reparented(record.path, from, to);
+    if (moved === undefined) {
+      return line;
+    }
+    remapped += 1;
+    // Spread first, so every other field a record carries — the label, the
+    // timestamp, anything a newer build writes — survives the rewrite.
+    return JSON.stringify({ ...record, path: moved });
+  });
+  if (remapped === 0) {
+    return 0;
+  }
+  const staging = `${ledgerPath}.rewriting-${randomUUID()}`;
+  await writeFile(staging, lines.join('\n'), { mode: 0o600 });
+  await chmod(staging, 0o600);
+  await rename(staging, ledgerPath);
+  return remapped;
+};
+
+/**
+ * Fold the legacy workspace's ledger into the one already at the new path.
+ *
+ * Append-only and order-independent by construction — see the note at the
+ * top — so this is a concatenation and nothing more. No remapping: the
+ * files these records name have not moved, because this is the branch
+ * where the legacy workspace stays where it is.
+ *
+ * The source is retired afterwards so a second run does not append the same
+ * records again. Idempotent either way, since the labels would resolve the
+ * same, but a file that grows on every `stratus serve` is its own defect.
+ */
+const foldLedgerInto = async (from: string, target: string): Promise<boolean> => {
+  const source = ledgerIn(from);
+  let raw: string;
+  try {
+    raw = await readFile(source, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+  if (raw.trim().length > 0) {
+    const destination = ledgerIn(target);
+    // The rule the memory store already owns: an append onto a file whose
+    // last byte is not a newline fuses two records into one unparseable
+    // line — which, for a ledger, is a refusal to read any of it.
+    const lead = await memoryAppendNeedsNewline(destination) ? '\n' : '';
+    const body = raw.endsWith('\n') ? raw : `${raw}\n`;
+    await appendFile(destination, `${lead}${body}`, { mode: 0o600 });
+    await chmod(destination, 0o600);
+  }
+  // Never over an archive already there: a run killed between the append
+  // and this rename leaves one, and the retry must not bury it.
+  const archive = `${source}.migrated`;
+  await rename(source, await pathIsFree(archive) ? archive : `${archive}-${randomUUID()}`);
+  return true;
+};
+
 /**
  * Move each `workspaces/<id>` into `agents/<id>/workspace`.
  *
- * Idempotent and restartable at every agent: one rename each, nothing read,
- * nothing merged, and an agent that cannot be moved is named and skipped
- * rather than aborting the fleet.
+ * Idempotent and restartable at every agent: one rename each, a ledger
+ * rewrite after it, and an agent whose directory cannot be made is named
+ * and skipped rather than aborting the fleet.
  */
 export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<string | undefined> => {
   const legacy = legacyWorkspacesDirPath(env);
@@ -81,7 +233,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // Not there, or not a directory: either way it holds no workspaces.
     // `ENOTDIR` is a regular file somebody left at that name — aborting
     // over it would refuse every `stratus serve` for good, since the
-    // migration that would clear it is the one failing.
+    // migration that would clear the obstacle is the one failing.
     if (code === 'ENOENT' || code === 'ENOTDIR') {
       return undefined;
     }
@@ -89,6 +241,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   }
   const report: WorkspaceMigrationReport = {
     moved: 0,
+    merged: [],
     quarantined: [],
     directoryNames: createStateDirectoryNames(env),
   };
@@ -101,9 +254,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     if (!isValidAgentId(agentId)) {
       // It got here as a directory name, so the filesystem took it; what it
       // cannot be is a segment this build will join onto a path. Left where
-      // it is, which loses nothing: the old directory is not deleted, and
-      // an operator who renames the agent gets the move on the next
-      // `stratus update`.
+      // it is, which loses nothing: nothing is deleted, and an operator who
+      // renames the agent gets the move on the next `stratus update`.
       report.quarantined.push(
         `${JSON.stringify(agentId)} — not a single path segment, so it has no directory to own; `
         + `left at ${path.relative(stratusHomePath(env), from)}`,
@@ -118,43 +270,45 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       continue;
     }
     const target = agentWorkspacePath(env, agentId);
-    // `rename` onto an existing empty directory succeeds on some platforms
-    // and fails with ENOTEMPTY on the same call a moment later, so the
-    // destination is asked about rather than tried. Both are kept — see the
-    // note at the top on why two workspaces are never merged.
-    //
     // `lstat`, not `readdir` or `stat`: a *dangling* symlink at the
     // destination is something there, and both of those report it as
     // ENOENT. Renaming a directory over it would fail — after this
-    // migration had decided the name was free — and a link an operator
-    // pointed somewhere is theirs to fix either way.
-    let occupied = true;
-    try {
-      await lstat(target);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        occupied = false;
+    // migration had decided the name was free.
+    if (!(await pathIsFree(target))) {
+      // The deferral window, and the ordinary outcome of running any
+      // command before restarting the daemon — see the note at the top on
+      // why this merges rather than refuses.
+      if (await foldLedgerInto(from, target)) {
+        report.merged.push(agentId);
       }
-      // Anything else is a destination this migration will not write into.
-    }
-    if (occupied) {
       report.quarantined.push(
-        `${agentId} — ${path.relative(stratusHomePath(env), target)} already exists, and two workspaces hold `
-        + 'two provenance ledgers that cannot be folded into one; '
-        + `the older one is left at ${path.relative(stratusHomePath(env), from)}`,
+        `${agentId} — ${path.relative(stratusHomePath(env), target)} already existed, so what is left of `
+        + `${path.relative(stratusHomePath(env), from)} stays there; its provenance records were folded into `
+        + 'the ledger at the new path, and the files they name have not moved',
       );
       continue;
+    }
+    if (!entry.isSymbolicLink()) {
+      // Before the rename, not after. `agents/<id>/` is already owner-only,
+      // so this changes nothing an attacker could reach today — it is for
+      // the workspace read through a path that is not this one. Tightened
+      // on the *source* because a `chmod` failing after the rename would
+      // abort a migration whose source is already gone: the retry would
+      // find no legacy entry, and 0004 would eventually stamp with the
+      // directory still loose. Never on a link: `chmod` follows it, and the
+      // mode of whatever an operator pointed it at is not this migration's
+      // to change.
+      await chmod(from, 0o700);
     }
     try {
       await rename(from, target);
     } catch (error) {
       // Loud, and not quarantined, which is the opposite of how an id with
       // nowhere to land is treated — because the consequence is opposite
-      // too. This workspace holds the agent's provenance ledger: leaving it
-      // behind and letting the agent start a fresh one would make every
-      // file it fetched read back as its own words, silently. A daemon that
-      // will not start says so and can be fixed by hand; a label that went
-      // missing cannot be noticed.
+      // too. A workspace half-moved is a ledger whose records name files
+      // that are no longer where they say, which is a set of labels gone
+      // silently. A daemon that will not start says so and can be fixed by
+      // hand.
       //
       // `EXDEV` is the one that actually happens: a workspace an operator
       // mounted rather than linked cannot be renamed across the mount.
@@ -165,19 +319,13 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         + 'that path with a symlink, and run `stratus update` again.',
       );
     }
-    if (!entry.isSymbolicLink()) {
-      // `agents/<id>/` is already owner-only, so this changes nothing an
-      // attacker could reach today — it is for the workspace that gets
-      // moved out again, or read through a path that is not this one. Never
-      // on a link: `chmod` follows it, and the mode of whatever an operator
-      // pointed it at is not this migration's to change.
-      await chmod(target, 0o700);
-    }
+    // After the rename and before anything else reads it: every record
+    // naming a file that just moved now names where it is.
+    await remapLedger(target, from, target);
     report.moved += 1;
   }
   // Only when it empties, and never recursively: an operator's own file in
-  // here is theirs, and a quarantined workspace is the one copy of that
-  // agent's output.
+  // here is theirs, and a workspace left behind is that agent's output.
   try {
     await rmdir(legacy);
   } catch {
@@ -187,8 +335,15 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   if (report.moved === 0 && report.quarantined.length === 0) {
     return undefined;
   }
-  const summary = report.moved > 0 ? `moved ${report.moved} workspace(s)` : 'moved nothing';
+  const parts: string[] = [];
+  if (report.moved > 0) {
+    parts.push(`moved ${report.moved} workspace(s)`);
+  }
+  if (report.merged.length > 0) {
+    parts.push(`folded ${report.merged.length} provenance ledger(s) into a workspace already at the new path`);
+  }
+  const summary = parts.length > 0 ? parts.join('; ') : 'moved nothing';
   return report.quarantined.length > 0
-    ? `${summary}; QUARANTINED, left in ${path.basename(legacy)}/: ${report.quarantined.join('; ')}`
+    ? `${summary}; LEFT IN ${path.basename(legacy)}/: ${report.quarantined.join('; ')}`
     : summary;
 };

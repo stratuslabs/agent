@@ -122,7 +122,7 @@ test('a directory in here that names no agent is left where it is, and the rest 
 
   const results = await runStateMigrations(env, { exclusive: true });
   const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
-  assert.match(line, /moved 1 workspace\(s\); QUARANTINED/);
+  assert.match(line, /moved 1 workspace\(s\); LEFT IN workspaces\//);
   assert.match(line, /"\.cache" — not a single path segment/);
 
   // Left where it is — nothing is deleted, and an operator who renames it
@@ -133,35 +133,46 @@ test('a directory in here that names no agent is left where it is, and the rest 
   assert.deepEqual(await readdir(legacyWorkspacesDirPath(env)), ['.cache']);
 });
 
-test('a destination that already holds a workspace is never merged: both are kept and the agent is named', async () => {
+test('a destination the deferral window already created is merged, not refused', async () => {
   const home = await newHome();
   const env = { homeDir: home };
   await seedWorkspace(home, 'ava', {
     'fs-provenance.jsonl': ledgerLine('/home/ada/notes/old.md'),
     'old.md': 'the older copy',
   });
-  // A half-finished upgrade, or an operator who made the new path by hand:
-  // this workspace has its own ledger, and folding the two would mean
-  // dropping one set of labels.
+  // Exactly what an ordinary command on the new build leaves behind: it
+  // defers this migration but its plugins already resolve the new path, so
+  // the first tool call that wrote a file started a ledger there. Refusing
+  // this would refuse `stratus serve` to anyone who ran a command before
+  // restarting the daemon.
   await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
-  await writeFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/new.md'));
+  // No trailing newline, which is what a process killed mid-append leaves:
+  // concatenating onto it without one fuses two records into a line the
+  // reader refuses — and it refuses the whole ledger, not that line.
+  await writeFile(
+    path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'),
+    ledgerLine('/home/ada/notes/new.md').trimEnd(),
+  );
 
   const results = await runStateMigrations(env, { exclusive: true });
   const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
-  assert.match(line, /ava — agents[\\/]ava[\\/]workspace already exists/);
-  assert.match(line, /two provenance ledgers/);
+  assert.match(line, /folded 1 provenance ledger\(s\)/);
+  assert.match(line, /ava — agents[\\/]ava[\\/]workspace already existed/);
 
-  // Neither ledger lost a record.
-  assert.equal(
-    await readFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), 'utf8'),
-    ledgerLine('/home/ada/notes/new.md'),
-  );
-  assert.equal(
-    await readFile(path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl'), 'utf8'),
-    ledgerLine('/home/ada/notes/old.md'),
-  );
+  // Both sets of labels are in the live ledger. Order-independent by
+  // construction, so a concatenation is the whole merge.
+  const live = await readFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), 'utf8');
+  const recorded = live.split('\n').filter(Boolean).map((l) => (JSON.parse(l) as { path: string }).path);
+  assert.deepEqual([...recorded].sort(), ['/home/ada/notes/new.md', '/home/ada/notes/old.md']);
+  // Not remapped: in this branch the files those records name never moved.
+  assert.equal(await readFile(path.join(legacyWorkspacesDirPath(env), 'ava', 'old.md'), 'utf8'), 'the older copy');
+  // And the source ledger is retired, so a second run does not append it
+  // again — the labels would resolve the same, but the file would grow on
+  // every `stratus serve`.
+  await runStateMigrations(env, { exclusive: true });
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), 'utf8'), live);
+  assert.ok((await readdir(path.join(legacyWorkspacesDirPath(env), 'ava'))).includes('fs-provenance.jsonl.migrated'));
 });
-
 test('a file an operator left among the workspaces is not an agent’s, and keeps the directory', async () => {
   const home = await newHome();
   const env = { homeDir: home };
@@ -250,7 +261,7 @@ test('anything already at the destination, a dangling link included, stops the m
 
   const results = await runStateMigrations(env, { exclusive: true });
   const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
-  assert.match(line, /ava — agents[\\/]ava[\\/]workspace already exists/);
+  assert.match(line, /ava — agents[\\/]ava[\\/]workspace already existed/);
   assert.equal(await readFile(path.join(legacyWorkspacesDirPath(env), 'ava', 'own.md'), 'utf8'), 'mine');
 });
 
@@ -265,4 +276,45 @@ test('a regular file where the old workspaces directory would be holds no worksp
   assert.ok(applied(results).includes(MIGRATION), applied(results).join(', '));
   assert.equal(results.find((result) => result.id === MIGRATION)?.detail, undefined);
   assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
+});
+
+test('the records inside a moved ledger follow the files they name', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const legacyWorkspace = path.join(legacyWorkspacesDirPath(env), 'ava');
+  const outside = path.join(home, 'notes', 'vendor.md');
+  await seedWorkspace(home, 'ava', {
+    // An MCP server's image: written inside the workspace and recorded
+    // there, with no operator configuration involved. A rename moves the
+    // file and leaves the record naming a path nothing is at any more —
+    // which reads back as the agent's own words, silently.
+    'mcp/linear/chart-1-0.png': 'bytes',
+    'fs-provenance.jsonl': [
+      ledgerLine(path.join(legacyWorkspace, 'mcp', 'linear', 'chart-1-0.png')),
+      // A file in one of the agent's ordinary roots, which did not move.
+      ledgerLine(outside),
+      // A hand edit nothing can parse: copied through byte for byte, so the
+      // reader still refuses this ledger with the error it already gives.
+      '{"path":"/half-written",\n',
+    ].join(''),
+  });
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const workspace = agentWorkspacePath(env, 'ava');
+  const raw = await readFile(path.join(workspace, 'fs-provenance.jsonl'), 'utf8');
+  const paths = raw.split('\n').flatMap((line) => {
+    try {
+      const parsed = JSON.parse(line) as { path?: string };
+      return typeof parsed.path === 'string' ? [parsed.path] : [];
+    } catch {
+      return [];
+    }
+  });
+  assert.deepEqual(paths, [path.join(workspace, 'mcp', 'linear', 'chart-1-0.png'), outside]);
+  assert.match(raw, /\{"path":"\/half-written",/);
+  // The label rode along with the path, not just the path.
+  const moved = raw.split('\n').map((line) => { try { return JSON.parse(line) as { path?: string; trust?: string }; } catch { return {}; } })
+    .find((record) => record.path === path.join(workspace, 'mcp', 'linear', 'chart-1-0.png'));
+  assert.equal(moved?.trust, 'external');
 });

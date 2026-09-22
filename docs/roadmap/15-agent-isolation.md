@@ -84,16 +84,19 @@ instead, so there is one ledger by construction rather than by the loader
 holding a key down. The guard lost the depth entirely: `ledgerGuard` takes
 workspace directories and matches `fs-provenance.jsonl` directly inside one,
 which is what it should have taken all along. Migration `0004` renames each
-workspace under the exclusive bracket, carries a relocated one across as a
-link, and refuses to merge two — two workspaces are two ledgers, and folding
-them would drop a set of labels.
+workspace under the exclusive bracket, rewrites the ledger's own records to
+follow the files that moved, carries a relocated workspace across as a link,
+and folds two ledgers together where the deferral window already made one at
+the new path — the format is order-independent, so a concatenation is the
+whole merge.
 
 - Every per-agent durable resource moves under the agent's own directory,
   `~/.stratus/agents/<id>/`: `sessions.db`, `memory.jsonl` (and its FTS
   index), the workspace from `~/.stratus/workspaces/<id>` (as
   `agents/<id>/workspace`, one segment down so that the grants and the
-  stores are siblings of the agent's own `fs` root rather than inside it),
-  and the command
+  stores stay siblings of the directory an operator would name as an `fs`
+  root or mount into a sandbox, rather than files inside it), and the
+  command
   whitelist from `~/.stratus/agents/<id>.whitelist.json` beside the soul.
   Nothing is in per-agent-directory form today — the whitelist is the
   closest, a per-agent *file* in the shared directory — so all four move.

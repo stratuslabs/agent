@@ -381,8 +381,9 @@ const PER_AGENT_LAYOUT_MIGRATION: StateMigration = {
 /**
  * Step 15's layer A, finished: each agent's workspace moves from
  * `workspaces/<id>` into `agents/<id>/workspace`, so that `agents/<id>/` is
- * the one path everything an agent owns lives under. The move and what it
- * refuses to do are in `applyPerAgentWorkspaces`.
+ * the one path everything an agent owns lives under. The move, and the two
+ * things it does about the provenance ledger that are the whole reason it
+ * is not a bare rename, are in `applyPerAgentWorkspaces`.
  *
  * Exclusive for the reason 0003 is, and one of its own. A daemon of the
  * older build resolves `workspaces/<id>` by pathname on every tool call

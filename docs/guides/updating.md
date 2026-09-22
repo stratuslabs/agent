@@ -121,9 +121,10 @@ they produce, and where `fs-provenance.jsonl` — the ledger saying which of
 those files came from outside — lives. With it under `agents/<id>/`, that
 one directory is everything an agent owns, which is what makes backing one
 up or erasing one a single path to name. The extra `workspace/` segment is
-deliberate rather than tidy: it is `fs`'s default root, so the agent's own
-`whitelist.json`, `sessions.db` and `memory.jsonl` are siblings of that
-root rather than files inside it.
+deliberate rather than tidy: this is the directory you would name as an
+`fs` root to let an agent read back what its tools produced, and one level
+up its `whitelist.json`, `sessions.db` and `memory.jsonl` are siblings of
+it rather than files inside it.
 
 It waits for `stratus update` or the next `stratus serve`, for the same
 reason the sessions do and one of its own: the older daemon resolves
@@ -135,12 +136,22 @@ fetched file that reads back as the agent's own words.
 Nothing is deleted here either. Each workspace is renamed, so it is in one
 place or the other and never both; a workspace an operator relocated behind
 a symlink is moved *as the link*, so their files stay where they put them.
-Two things are left where they are and named on the way past: a directory
-whose name is not an agent id (a `.cache/` something dropped in there), and
-an agent that already has a workspace at the new path — two workspaces mean
-two provenance ledgers, and folding them would mean dropping one set of
-labels, which turns fetched text back into the agent's own. `workspaces/`
-itself is removed only if it empties, and never recursively.
+The ledger's own records are rewritten to follow the move — they are
+absolute paths, and every binary an MCP server returned was written and
+recorded *inside* the workspace, so leaving them would strip the label off
+each one.
+
+If the new path already holds a workspace, the two ledgers are folded
+together rather than one being refused. That is the ordinary shape of an
+upgrade: an ordinary command on the new build defers this move but already
+writes to the new path, so anyone who ran one before restarting the daemon
+has a ledger there. Folding is safe because the format is order-independent
+— a path keeps the lowest label recorded for it, whichever process wrote it
+first. What is left of the old workspace stays where it is and is named in
+the report; its records are *not* rewritten, because those files did not
+move. A directory whose name is not an agent id (a `.cache/` something
+dropped in there) is left alone the same way, and `workspaces/` itself is
+removed only if it empties, never recursively.
 
 One thing a rollback does lose, and it is not stamped: an agent's
 `origins` and `tools` grants. `whitelist.json` holds every kind of

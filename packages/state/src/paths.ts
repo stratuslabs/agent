@@ -185,11 +185,15 @@ export const agentMemoryFileIn = (stateDir: string, agentId: string): string =>
  * reading each other's work.
  *
  * A `workspace` subdirectory rather than the state directory itself, and
- * the extra segment is load-bearing: this path is what `tool-fs` uses as
- * its default root, so an agent can read and write everything under it. Its
- * own sessions, memories and — the one that matters — the `whitelist.json`
- * saying what it may do unattended are siblings of this directory, not
- * descendants, so no canonicalized path inside it reaches them.
+ * the extra segment is load-bearing. This is a directory an operator can
+ * hand to `tool-fs` as a root — it is not one by default, but `tool-fs`
+ * carries a comment about the case, and a sandboxed executor mounts it —
+ * and it is where `tool-shell` starts. Naming it must reach that agent's
+ * output and nothing else. Its own sessions, memories and, the one that
+ * matters, the `whitelist.json` saying what it may do unattended are
+ * siblings of this directory rather than descendants, so no canonicalized
+ * path inside it reaches them; with the workspace *as* the state directory
+ * they would all be inside it.
  *
  * The layout lives here because this package owns `~/.stratus`. Plugins do
  * not derive it: they ask the host through `AgentWorkspaces`, which

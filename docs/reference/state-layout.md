@@ -53,13 +53,15 @@ that are worth knowing:
 - **Renaming an agent's `id:` re-keys all of it.** The old directory stays
   where it is under the old id; nothing moves it, because nothing can tell
   a rename from a new agent.
-- **The `workspace/` segment is load-bearing, not tidiness.** That
-  directory is `fs`'s default root, so the agent can read and write
-  everything under it. One level up, its `whitelist.json` — the file saying
+- **The `workspace/` segment is load-bearing, not tidiness.** `fs` has no
+  default roots — no roots means no filesystem — but this is the directory
+  you would name as one to let an agent read back what its own tools
+  produced, it is where `shell.run` starts, and it is what a sandboxed
+  executor mounts. One level up, its `whitelist.json` — the file saying
   what it may do unattended — its `sessions.db` and its `memory.jsonl` are
-  *siblings* of that root rather than descendants, and no path inside it
-  reaches them. Naming the agent's own directory as an `fs` root, by hand,
-  hands it its own grant file.
+  *siblings* of that directory rather than descendants, and no path inside
+  it reaches them. Were the workspace `agents/<id>/` itself, that same
+  choice would hand the agent its own grant file.
 - **Nothing in `agents/<id>/` may be a symlink** — not the directory, not
   `sessions.db`, `memory.jsonl`, `memory.jsonl.index` or `whitelist.json`.
   `workspace/` is the exception: it may be a link, because where an agent's
