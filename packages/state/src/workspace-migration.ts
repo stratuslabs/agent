@@ -122,21 +122,27 @@ const ledgerIn = (workspace: string): string => path.join(workspace, LEDGER_FILE
  *
  * The ledger is keyed the way `fs.read` looks a path up, through `realpath`,
  * and `~/.stratus` may itself be a symlink — so a record names the canonical
- * path while this migration walks the configured one. `base` answers for a
- * path that does not exist yet: its parent does, and the canonical name is
- * the parent's plus this one's last segment.
+ * path while this migration walks the configured one.
+ *
+ * Absence is the one failure that answers: nothing there has no second
+ * spelling, and a caller asking about a workspace that is not there has
+ * nothing to re-record either way. Every other failure propagates, because
+ * losing the canonical spelling on a linked home is not a smaller answer —
+ * it is `remapLedger` matching none of that agent's records while the move
+ * goes ahead and 0004 stamps over it.
  */
-const spellingsOf = async (target: string, base: 'self' | 'parent'): Promise<string[]> => {
+const spellingsOf = async (target: string): Promise<string[]> => {
   const spellings = [target];
   try {
-    const canonical = base === 'self'
-      ? await realpath(target)
-      : path.join(await realpath(path.dirname(target)), path.basename(target));
+    const canonical = await realpath(target);
     if (canonical !== target) {
       spellings.push(canonical);
     }
-  } catch {
-    // Not there to canonicalize: the spelling given is the only one.
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      throw error;
+    }
   }
   return spellings;
 };
@@ -167,6 +173,27 @@ const legacyWorkspaceSpellings = async (env: StateEnvironment, agentId: string):
     }
   }
   return spellings;
+};
+
+/**
+ * Where a link points, or undefined when the path is not a link at all or
+ * is not there.
+ *
+ * Those two are answers; everything else is a failure, and a failure read
+ * as "not a link" is this migration deciding a question by not being able
+ * to ask it. Both callers turn undefined into "carry on as though this
+ * were an ordinary directory", which is the wrong direction for each.
+ */
+const linkText = async (filePath: string): Promise<string | undefined> => {
+  try {
+    return await readlink(filePath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EINVAL' || code === 'ENOENT' || code === 'ENOTDIR') {
+      return undefined;
+    }
+    throw error;
+  }
 };
 
 /** Whether nothing at all is at this path — a dangling link is something. */
@@ -619,7 +646,7 @@ const finishMove = async (
   from: readonly string[],
   target: string,
 ): Promise<void> => {
-  await remapLedger(workspace, from, (await spellingsOf(target, 'self')).at(-1)!);
+  await remapLedger(workspace, from, (await spellingsOf(target)).at(-1)!);
 };
 
 /**
@@ -685,7 +712,7 @@ const finishInterruptedMoves = async (env: StateEnvironment): Promise<number> =>
     // the home is configured with and the one `realpath` gives it.
     const workspace = agentWorkspacePath(env, entry.name);
     const from = await legacyWorkspaceSpellings(env, entry.name);
-    if (await remapLedger(workspace, from, (await spellingsOf(workspace, 'self')).at(-1)!) > 0) {
+    if (await remapLedger(workspace, from, (await spellingsOf(workspace)).at(-1)!) > 0) {
       finished += 1;
     }
   }
@@ -774,10 +801,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    * it names may be absent for the same reason the source is.
    */
   const destinationIsOurRecreate = async (from: string, target: string): Promise<boolean> => {
-    const [sourceText, targetText] = await Promise.all([
-      readlink(from).catch(() => undefined),
-      readlink(target).catch(() => undefined),
-    ]);
+    const [sourceText, targetText] = await Promise.all([linkText(from), linkText(target)]);
     if (sourceText === undefined || targetText === undefined) {
       return false;
     }
@@ -924,7 +948,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // the new path with no legacy entry beside it is the whole of the
       // evidence, and nothing an agent can unlink. See
       // `finishInterruptedMoves`.
-      fromSpellings = await spellingsOf(from, 'self');
+      fromSpellings = await spellingsOf(from);
       // Then the mode, on the source because a `chmod` failing after the
       // rename would abort a migration whose source is already gone.
       // `agents/<id>/` is already owner-only, so this changes nothing an
@@ -1040,7 +1064,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   while (pending.length > 0) {
     const names = new Set(pending.map((entry) => entry.name));
     const waiting = await Promise.all(pending.map(async (entry) => {
-      const text = await readlink(path.join(legacy, entry.name)).catch(() => undefined);
+      // A failure that is not "this is not a link" must not read as "this
+      // waits on nothing": it would move the link before its target, and
+      // `migratedTarget` would then keep the legacy destination for a
+      // workspace this loop relocates a moment later — a dangling link with
+      // 0004 stamped over it.
+      const text = await linkText(path.join(legacy, entry.name));
       if (text === undefined) {
         return false;
       }
