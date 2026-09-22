@@ -6,11 +6,12 @@ import path from 'node:path';
 
 import type { AgentWorkspaces } from '@stratusagent/core';
 
-import { allAgentWorkspaces, workspaceResolver } from '../src/index.ts';
+import { allAgentWorkspaces, workspacePreparer, workspaceResolver } from '../src/index.ts';
 
 /** A host that knows its own layout, as the loader hands it over. */
 const fakeWorkspaces = (home: string): AgentWorkspaces => ({
   forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+  prepare: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
   all: async () => [path.join(home, 'agents', 'ava', 'workspace'), path.join(home, 'agents', 'bea', 'workspace')],
 });
 
@@ -20,6 +21,32 @@ test('the host answers where an agent’s workspace is, and a plugin never joins
   // Which is the whole point of the seam: the id is not the last segment,
   // so a plugin that appended it would have written the wrong path.
   assert.notEqual(resolve?.('ava'), path.join('/home/ada/.stratus/agents', 'ava'));
+});
+
+test('a caller about to write asks the host to make the directory; one that only names it does not', () => {
+  // The whole reason there are two. Preparing can fail — the directory sits
+  // in the agent's state directory and may be unmakeable — and what fails
+  // with it should be only what needed it: a ledger *read* names a file
+  // that may not exist, and must not go down with a write's directory.
+  const asked: string[] = [];
+  const host: AgentWorkspaces = {
+    forAgent: (agentId) => `/home/ada/.stratus/agents/${agentId}/workspace`,
+    prepare: (agentId) => {
+      asked.push(agentId);
+      return `/home/ada/.stratus/agents/${agentId}/workspace`;
+    },
+    all: async () => [],
+  };
+  assert.equal(workspaceResolver(host, undefined)?.('ava'), '/home/ada/.stratus/agents/ava/workspace');
+  assert.deepEqual(asked, []);
+  assert.equal(workspacePreparer(host, undefined)?.('ava'), '/home/ada/.stratus/agents/ava/workspace');
+  assert.deepEqual(asked, ['ava']);
+
+  // Under a configured root the two are the same answer: it is not a state
+  // directory, so there is nothing for the host to secure and plugins make
+  // what they need beneath it.
+  assert.equal(workspacePreparer(host, '/data/shots')?.('ava'), path.join('/data/shots', 'ava'));
+  assert.deepEqual(asked, ['ava']);
 });
 
 test('a workspaceRoot an operator wrote down wins over the host’s layout', () => {

@@ -23,6 +23,7 @@ import {
   ledgerTrustOfContent,
   resolvePluginAgentConfig,
   workspaceResolver,
+  workspacePreparer,
   allAgentWorkspaces,
   type FileIdentity,
   type LedgerGuard,
@@ -1092,9 +1093,15 @@ export const createFsPlugin = (config: JsonObject = {}): Plugin => {
       // a file recorded in another reads back unlabelled. The config roots
       // are the fallback for a host that wires this plugin by hand.
       const ledgerRoot = context.workspaces === undefined ? handWiredLedgerRoot : undefined;
+      // Two resolvers: naming the ledger for a read costs nothing, while
+      // recording a write needs the directory made and owner-only. Every
+      // `fs.read` takes a snapshot, so asking the preparing one on a read
+      // would let a workspace that cannot be made stop reads under roots
+      // that are perfectly readable.
       const workspaceFor = workspaceResolver(context.workspaces, ledgerRoot);
-      const ledger = workspaceFor !== undefined
-        ? createFileLedger(workspaceFor)
+      const prepareFor = workspacePreparer(context.workspaces, ledgerRoot);
+      const ledger = workspaceFor !== undefined && prepareFor !== undefined
+        ? createFileLedger(workspaceFor, prepareFor)
         : createProcessLocalLedger();
       // Which paths are a ledger is decided per call, from the workspaces as
       // they stand — see `ledgerGuard` for the spellings a ledger can have

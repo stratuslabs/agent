@@ -15,7 +15,7 @@ import {
   type LocalCommandInvocation,
   type LocalCommandTool,
 } from '@stratusagent/executor-local';
-import { resolvePluginAgentConfig, workspaceResolver } from '@stratusagent/plugins';
+import { resolvePluginAgentConfig, workspacePreparer } from '@stratusagent/plugins';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 100_000;
@@ -74,7 +74,9 @@ const settingsFor = (
   // this plugin's own: where an agent's workspace is is the host's to say,
   // and appending the id here is what made this plugin one of five copies
   // of a layout that then moved. See `workspaceResolver`.
-  const workspaceFor = workspaceResolver(workspaces, workspaceRoot);
+  // Prepared, not just resolved: this is the directory the command is
+  // about to start in, and the host makes it owner-only before it does.
+  const workspaceFor = workspacePreparer(workspaces, workspaceRoot);
   const cwd = configuredCwd ?? workspaceFor?.(session.agent.id);
 
   const granted: NodeJS.ProcessEnv = {};

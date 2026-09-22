@@ -211,13 +211,26 @@ export const ledgerTrustOfContent = (raw: string): TrustLevel | undefined => {
  * one `O_APPEND` write, so processes that share an agent — the daemon and a
  * `stratus run` — interleave records rather than overwrite each other.
  *
- * Takes the resolver rather than a root, because where an agent's workspace
+ * Takes resolvers rather than a root, because where an agent's workspace
  * is is the host's to say: this package depends on `core` and `agents` only
  * and cannot see the `~/.stratus` layout, which is exactly why it must not
  * spell a depth. See `workspaceResolver`.
+ *
+ * Two of them, and the split is the point. Reading a ledger only needs the
+ * *name* of a file that may not exist — every `fs.read`, `fs.list` and
+ * `fs.search` takes a snapshot before it does anything — while recording a
+ * write needs the directory to be there and owner-only. Asking the
+ * preparing one on a read would let a workspace that cannot be made stop
+ * reads whose own roots are perfectly readable, and which could not have
+ * had a ledger at the blocked path anyway. `prepareFor` defaults to
+ * `workspaceFor` for a host that wires this by hand with one resolver.
  */
-export const createFileLedger = (workspaceFor: (agentId: string) => string): TaintedWriteLedger => {
+export const createFileLedger = (
+  workspaceFor: (agentId: string) => string,
+  prepareFor: (agentId: string) => string = workspaceFor,
+): TaintedWriteLedger => {
   const ledgerPath = (agentId: string): string => path.join(workspaceFor(agentId), LEDGER_FILENAME);
+  const ledgerPathForWrite = (agentId: string): string => path.join(prepareFor(agentId), LEDGER_FILENAME);
 
   const read = async (agentId: string): Promise<Record<string, TrustLevel>> => {
     const filePath = ledgerPath(agentId);
@@ -249,7 +262,7 @@ export const createFileLedger = (workspaceFor: (agentId: string) => string): Tai
           // A clean write records nothing — see `TaintedWriteLedger`.
           return;
         }
-        const filePath = ledgerPath(agentId);
+        const filePath = ledgerPathForWrite(agentId);
         await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
         // Read and appended through ONE descriptor. A ledger reached through
         // a link (a relocated workspace, a relocated file — both supported)

@@ -25,7 +25,9 @@ export const createAgentWorkspaces = (env: StateEnvironment): AgentWorkspaces =>
   return {
     /**
      * Created, and created *secured*, rather than resolved and left to the
-     * caller. The callers are file-producing plugins, and every one of them
+     * caller — and only for a caller that says it is about to write, since
+     * this is the half that can fail. The callers are file-producing
+     * plugins, and every one of them
      * reaches for a recursive `mkdir` with no mode — which under the usual
      * `0022` umask left `agents/<id>/` itself at `0755` when `tool-shell`
      * was the first to write. That directory is not an output directory:
@@ -34,7 +36,8 @@ export const createAgentWorkspaces = (env: StateEnvironment): AgentWorkspaces =>
      * `0700` precisely so they are not world-readable. A plugin cannot be
      * expected to know that, so the host that owns the layout does it.
      */
-    forAgent: (agentId) => {
+    forAgent: (agentId) => agentWorkspacePath(env, agentId),
+    prepare: (agentId) => {
       const workspace = agentWorkspacePath(env, agentId);
       if (secured.has(workspace)) {
         return workspace;

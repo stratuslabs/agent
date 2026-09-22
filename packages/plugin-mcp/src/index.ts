@@ -17,7 +17,7 @@ import {
   type Tool,
   type ToolRegistry,
 } from '@stratusagent/core';
-import { createFileLedger, workspaceResolver, type TaintedWriteLedger } from '@stratusagent/plugins';
+import { createFileLedger, workspacePreparer, workspaceResolver, type TaintedWriteLedger } from '@stratusagent/plugins';
 
 import {
   bridgedToolName,
@@ -1133,14 +1133,17 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       // one, else the host's layout — see `workspaceResolver`. Without
       // either, a binary block is dropped with a line saying so rather
       // than written somewhere this plugin chose.
-      workspaceFor = workspaceResolver(context.workspaces, workspaceRoot);
+      // Prepared rather than resolved: this one is only ever asked when a
+      // binary block is about to be written.
+      workspaceFor = workspacePreparer(context.workspaces, workspaceRoot);
       // Where the record of them lands: the host's seam wins here, so
       // relocating the output cannot fork the ledger.
-      const ledgerWorkspaceFor = workspaceResolver(
-        context.workspaces,
-        context.workspaces === undefined ? handWiredLedgerRoot : undefined,
-      );
-      ledger = ledgerWorkspaceFor !== undefined ? createFileLedger(ledgerWorkspaceFor) : undefined;
+      const ledgerRoot = context.workspaces === undefined ? handWiredLedgerRoot : undefined;
+      const ledgerWorkspaceFor = workspaceResolver(context.workspaces, ledgerRoot);
+      const ledgerPrepareFor = workspacePreparer(context.workspaces, ledgerRoot);
+      ledger = ledgerWorkspaceFor !== undefined && ledgerPrepareFor !== undefined
+        ? createFileLedger(ledgerWorkspaceFor, ledgerPrepareFor)
+        : undefined;
       if (options.log === undefined && context.log !== undefined) {
         log = boundedSink(context.log);
       }

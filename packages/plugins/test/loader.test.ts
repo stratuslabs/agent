@@ -81,6 +81,7 @@ const pluginModule = (
 /** A host's workspace layout, as the loader hands it to a plugin. */
 const fakeWorkspaces = (home: string): AgentWorkspaces => ({
   forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+  prepare: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
   all: async () => [path.join(home, 'agents', 'ava', 'workspace')],
 });
 

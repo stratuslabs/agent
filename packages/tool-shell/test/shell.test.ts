@@ -218,6 +218,7 @@ test('with no configured root the workspace comes from the host, which is not a 
   // plugin that joined it onto a root would run in the wrong directory.
   const workspaces: AgentWorkspaces = {
     forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
     all: async () => [],
   };
   const tools = await registryFor({}, undefined, workspaces);

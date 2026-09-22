@@ -621,6 +621,7 @@ test('the host answers for the workspace, and keeps the ledger even when an oper
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-seam-'));
   const workspaces: AgentWorkspaces = {
     forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
     all: async () => [path.join(home, 'agents', 'ava', 'workspace')],
   };
   const target = new ToolRegistry();

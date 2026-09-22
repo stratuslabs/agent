@@ -675,11 +675,42 @@ test('a file’s name is the tainted session’s text too: a listing or a skippe
   assert.deepEqual(clean.marks, []);
 });
 
+test('a workspace that cannot be made stops recording, not reading', async () => {
+  const { root } = await workspace();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-noprep-'));
+  // Preparing is the half that can fail. Every `fs.read`, `fs.list` and
+  // `fs.search` takes a ledger snapshot first, so asking for the prepared
+  // path on a read would stop reads under roots that are perfectly
+  // readable — and at a path that could not have held a ledger anyway.
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: () => {
+      throw new Error('agents/ava/workspace cannot be made');
+    },
+    all: async () => [path.join(home, 'agents', 'ava', 'workspace')],
+  };
+  const tools = await registryFor({ roots: [root] }, workspaces);
+  await writeFile(path.join(root, 'own.md'), 'the agent’s own words');
+
+  const read = marking();
+  const result = await run(tools, 'fs.read', { path: 'own.md' }, sessionAt('ava', 'user'), read.context) as JsonObject;
+  assert.match(String(result.content), /own words/);
+  assert.deepEqual(read.marks, []);
+
+  // A tainted write still refuses, because that is the direction that
+  // leaves no unlabelled file behind.
+  await assert.rejects(
+    () => run(tools, 'fs.write', { path: 'fetched.md', content: 'fetched' }, sessionAt('ava', 'external')),
+    /cannot be made/,
+  );
+});
+
 test('the ledger follows the host’s seam, not a workspaceRoot an operator wrote down', async () => {
   const { root, workspaceRoot } = await workspace();
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-seam-'));
   const workspaces: AgentWorkspaces = {
     forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
     all: async () => [path.join(home, 'agents', 'ava', 'workspace')],
   };
   // Both: the host's layout, and a root the operator set in this plugin's

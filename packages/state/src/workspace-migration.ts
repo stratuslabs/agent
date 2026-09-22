@@ -196,13 +196,25 @@ const linkText = async (filePath: string): Promise<string | undefined> => {
   }
 };
 
-/** Whether nothing at all is at this path — a dangling link is something. */
+/**
+ * Whether nothing at all is at this path — a dangling link is something.
+ *
+ * Absence answers, and so does a path whose parent is not a directory:
+ * nothing can be at either. Every other failure propagates, because both
+ * answers here decide something destructive. "Occupied" skips a repair or
+ * declines a retarget; "free" lets a rename replace what is there. Neither
+ * is a safe thing to say because `lstat` could not be asked.
+ */
 const pathIsFree = async (filePath: string): Promise<boolean> => {
   try {
     await lstat(filePath);
     return false;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return true;
+    }
+    throw error;
   }
 };
 
@@ -700,13 +712,21 @@ const finishInterruptedMoves = async (env: StateEnvironment): Promise<number> =>
     if (!entry.isDirectory() || !isValidAgentId(entry.name)) {
       continue;
     }
-    // The legacy entry still being there means the rename has not happened,
-    // and that agent is the ordinary walk's to move — not this pass's to
-    // repair. Repairing it here would put destination-named records in a
-    // ledger whose files are still at the old path.
-    if (!(await pathIsFree(legacyAgentWorkspaceIn(stratusHomePath(env), entry.name)))) {
-      continue;
-    }
+    // Asked of every agent, with no test for whether a move looks pending.
+    // The obvious one — "only if `workspaces/<id>` is gone" — is wrong in
+    // the case this pass exists for: an older, unstamped build recreates
+    // that directory the moment it writes a file, so the very interruption
+    // being repaired can put the legacy entry back and hide itself. The
+    // collision branch would then fold the recreated ledger and leave the
+    // moved one naming paths nothing is at.
+    //
+    // Nothing is lost by asking always, because the question is about
+    // records rather than directories: a ledger with nothing recorded
+    // under `workspaces/<id>` is a no-op, which is every agent that never
+    // moved. What it costs is the case already named above — an operator
+    // whose `fs` roots covered `~/.stratus/workspaces` — and one label too
+    // many is the direction this errs in everywhere.
+    //
     // Where it came from is derived: `workspaces/<id>`, with the id taken
     // from the directory this loop is standing in, in both the spelling
     // the home is configured with and the one `realpath` gives it.

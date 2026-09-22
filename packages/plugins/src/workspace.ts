@@ -39,6 +39,34 @@ export const workspaceResolver = (
 };
 
 /**
+ * The same, for a caller that is about to write: the host creates the
+ * directory and settles its permissions before answering.
+ *
+ * Asked only by the call that needs the directory, never by one that only
+ * needs the name. Resolving is free; preparing is not, and it can fail —
+ * `agents/<id>/workspace` may be unmakeable — so a `browser.goto`, a
+ * `fs.read`'s ledger lookup, or a tool result that turned out to be text
+ * must not go down with it.
+ *
+ * A configured `workspaceRoot` is not a state directory, so there is
+ * nothing for the host to secure under it and the two answers are the
+ * same: plugins already make what they need beneath it.
+ */
+export const workspacePreparer = (
+  workspaces: AgentWorkspaces | undefined,
+  workspaceRoot: string | undefined,
+): ((agentId: string) => string) | undefined => {
+  if (workspaceRoot !== undefined && workspaceRoot.length > 0) {
+    const root = workspaceRoot;
+    return (agentId) => path.join(root, agentId);
+  }
+  if (workspaces !== undefined) {
+    return (agentId) => workspaces.prepare(agentId);
+  }
+  return undefined;
+};
+
+/**
  * Every agent workspace on this host, for the guard that has to recognise
  * any agent's file rather than the caller's — see `ledgerGuard`.
  *

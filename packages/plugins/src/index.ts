@@ -80,4 +80,4 @@ export {
   type TaintedWriteLedger,
 } from './provenance.ts';
 
-export { workspaceResolver, allAgentWorkspaces } from './workspace.ts';
+export { workspaceResolver, workspacePreparer, allAgentWorkspaces } from './workspace.ts';

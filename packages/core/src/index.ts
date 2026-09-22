@@ -2558,17 +2558,30 @@ export interface ChannelRegistrationHandle {
  */
 export interface AgentWorkspaces {
   /**
-   * The directory this agent may put files in, created and with its
-   * permissions already settled by the time it is returned.
+   * Where this agent's files go. Resolution only: nothing is created and
+   * nothing can fail that would not fail for a bad id, so a caller that
+   * merely needs to *name* the path — the provenance ledger looking for a
+   * file that may not exist — can ask without consequence.
+   */
+  forAgent(agentId: string): string;
+  /**
+   * The same path, created and with its permissions settled, for a caller
+   * about to write.
    *
-   * The host creates it rather than the plugin because the workspace sits
+   * The host does this rather than the plugin because the workspace sits
    * inside the agent's state directory, beside its sessions, memories and
    * grants — so the recursive `mkdir` a file-producing plugin would
    * otherwise reach for makes a *state* directory under the process umask.
    * A plugin has no way to know that; the host that chose the layout does.
    * Callers may still create subdirectories under what they are handed.
+   *
+   * Separate from {@link forAgent} because it can fail, and what fails
+   * with it should be only what needed the directory. A read that wanted
+   * a path, a navigation that writes nothing, a tool result that turned
+   * out to be text — none of those should stop because a directory they
+   * were never going to use could not be made.
    */
-  forAgent(agentId: string): string;
+  prepare(agentId: string): string;
   /**
    * Every agent workspace the host can currently name, for the guards that
    * have to recognise *any* agent's file rather than the caller's — the

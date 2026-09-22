@@ -496,8 +496,11 @@ test('the seam answers for one agent by the layout, and for every agent by what 
   const fresh = await mkdtemp(path.join(os.tmpdir(), 'stratus-fresh-'));
   assert.deepEqual(await createAgentWorkspaces({ homeDir: fresh }).all(), []);
 
-  // Which is also what makes this agent's directory: `forAgent` creates.
+  // Resolving makes nothing; preparing does, which is what puts this
+  // agent's directory on disk for the listing below.
   assert.equal(workspaces.forAgent('ava'), agentWorkspacePath(env, 'ava'));
+  assert.deepEqual(await workspaces.all(), []);
+  assert.equal(workspaces.prepare('ava'), agentWorkspacePath(env, 'ava'));
   // A soul is a file in here, not an agent's state directory.
   await writeFile(path.join(agentsDirPath(env), 'bea.md'), '# Bea\n');
   // And an agent whose soul is gone still has a workspace whose ledger a
@@ -513,7 +516,7 @@ test('the seam answers for one agent by the layout, and for every agent by what 
   );
 });
 
-test('the seam hands back a workspace whose state directory is already 0700, whatever the umask', async () => {
+test('preparing a workspace leaves its state directory 0700, whatever the umask', async () => {
   const home = await newHome();
   const env = { homeDir: home };
   const previous = process.umask(0o022);
@@ -523,7 +526,7 @@ test('the seam hands back a workspace whose state directory is already 0700, wha
     // and under 0022 that left `agents/<id>` — holding the agent's sessions,
     // memories and `whitelist.json` — at 0755 when `shell.run` was an
     // agent's first local action.
-    const workspace = createAgentWorkspaces(env).forAgent('ava');
+    const workspace = createAgentWorkspaces(env).prepare('ava');
     assert.equal((await stat(workspace)).mode & 0o777, 0o700);
     assert.equal((await stat(path.dirname(workspace))).mode & 0o777, 0o700);
 
@@ -533,7 +536,7 @@ test('the seam hands back a workspace whose state directory is already 0700, wha
     // upgraded from. Both levels, because both hold the agent's files.
     const loose = path.join(agentsDirPath(env), 'bea');
     await mkdir(path.join(loose, 'workspace'), { recursive: true, mode: 0o755 });
-    createAgentWorkspaces(env).forAgent('bea');
+    createAgentWorkspaces(env).prepare('bea');
     assert.equal((await stat(loose)).mode & 0o777, 0o700);
     assert.equal((await stat(path.join(loose, 'workspace'))).mode & 0o777, 0o700);
 
@@ -543,7 +546,7 @@ test('the seam hands back a workspace whose state directory is already 0700, wha
     await chmod(volume, 0o755);
     await mkdir(path.join(agentsDirPath(env), 'cyd'), { recursive: true });
     await symlink(volume, agentWorkspacePath(env, 'cyd'));
-    createAgentWorkspaces(env).forAgent('cyd');
+    createAgentWorkspaces(env).prepare('cyd');
     assert.equal((await stat(volume)).mode & 0o777, 0o755);
   } finally {
     process.umask(previous);
@@ -559,7 +562,7 @@ test('a symlinked state directory is refused rather than chmodded through', asyn
   const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
   await chmod(elsewhere, 0o755);
   await symlink(elsewhere, path.join(agentsDirPath(env), 'ava'));
-  assert.throws(() => createAgentWorkspaces(env).forAgent('ava'), /is a symlink/);
+  assert.throws(() => createAgentWorkspaces(env).prepare('ava'), /is a symlink/);
   assert.equal((await stat(elsewhere)).mode & 0o777, 0o755);
 });
 
@@ -876,6 +879,31 @@ test('a move whose ledger rewrite never ran is finished by the next run, from th
     (await recordedIn(path.join(workspace, 'fs-provenance.jsonl')))
       .includes(path.join(await realpath(workspace), 'mcp', 'linear', 'chart-1-0.png')),
   );
+});
+
+test('a legacy path an older build recreated does not hide the repair it interrupted', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // The move landed and the rewrite did not — and then an older, unstamped
+  // build wrote a file, which recreates `workspaces/<id>` by pathname. The
+  // interruption has put its own evidence back, so a repair that ran only
+  // when the legacy entry was gone would skip exactly the case it exists
+  // for, and the collision branch would fold the recreated ledger while
+  // the moved one kept naming paths nothing is at.
+  const workspace = agentWorkspacePath(env, 'ava');
+  const legacyArtifact = path.join(legacyWorkspacesDirPath(env), 'ava', 'mcp', 'linear', 'chart-1-0.png');
+  await mkdir(path.join(workspace, 'mcp', 'linear'), { recursive: true });
+  await writeFile(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png'), 'bytes');
+  await writeFile(path.join(workspace, 'fs-provenance.jsonl'), ledgerLine(legacyArtifact));
+  await seedWorkspace(home, 'ava', { 'fs-provenance.jsonl': ledgerLine('/home/ada/notes/vendor.md') });
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const recorded = await recordedIn(path.join(workspace, 'fs-provenance.jsonl'));
+  // The moved file's record follows it.
+  assert.ok(recorded.includes(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png')), recorded.join(', '));
+  // And the recreated ledger is folded in as usual, so neither side loses.
+  assert.ok(recorded.includes('/home/ada/notes/vendor.md'), recorded.join(', '));
 });
 
 test('a completed move leaves nothing behind beside the workspace', async () => {

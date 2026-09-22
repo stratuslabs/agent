@@ -11,7 +11,7 @@ import {
   type Tool,
 } from '@stratusagent/core';
 import { assertRequestAllowed, egressPolicyFrom, type EgressPolicy } from '@stratusagent/egress';
-import { resolvePluginAgentConfig, workspaceResolver, type OptionalModuleHost } from '@stratusagent/plugins';
+import { resolvePluginAgentConfig, workspacePreparer, type OptionalModuleHost } from '@stratusagent/plugins';
 
 import { createPlaywrightDriver, type BrowserDriver, type PageLike, type RouteLike } from './driver.ts';
 import { BrowserSessionPool } from './sessions.ts';
@@ -71,8 +71,8 @@ const settingsFor = (config: JsonObject, session: Session, workspaces: AgentWork
     //
     // Resolved per call and through the shared rule: appending the agent id
     // here is what made this plugin one of five copies of a layout that
-    // then moved. See `workspaceResolver`.
-    workspace: (): string | undefined => workspaceResolver(workspaces, workspaceRoot)?.(session.agent.id),
+    // then moved. See `workspaceResolver`, whose preparing twin this is.
+    workspace: (): string | undefined => workspacePreparer(workspaces, workspaceRoot)?.(session.agent.id),
   };
 };
 

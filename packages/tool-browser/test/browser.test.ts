@@ -344,12 +344,13 @@ test('every request the page makes faces the scheme policy, not only the navigat
 });
 
 test('a workspace that cannot be made stops screenshots and nothing else', async (t) => {
-  // The host's seam *creates* the workspace, so asking it can fail. Every
-  // browser tool takes the same settings, and resolving eagerly would let
-  // an obstacle at `agents/<id>/workspace` take out navigation and reading
-  // — neither of which writes a file.
+  // Preparing the workspace is the half that can fail, and every browser
+  // tool takes the same settings — so asking for it eagerly would let an
+  // obstacle at `agents/<id>/workspace` take out navigation and reading,
+  // neither of which writes a file.
   const refusing: AgentWorkspaces = {
-    forAgent: () => {
+    forAgent: (agentId) => `/nowhere/agents/${agentId}/workspace`,
+    prepare: () => {
       throw new Error('agents/ava/workspace cannot be made');
     },
     all: async () => [],
@@ -399,6 +400,7 @@ test('a screenshot lands in the agent’s own workspace and comes back as a path
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shots-seam-'));
   const hosted = await pluginWith({ allowedHosts: ['example.com'] }, emptyRecorder(), {
     forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
     all: async () => [],
   });
   t.after(() => hosted.plugin.dispose());

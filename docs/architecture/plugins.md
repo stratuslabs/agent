@@ -157,8 +157,14 @@ handed a `workspaceRoot` and each appended the agent id to it, so all five
 had to change when the workspace moved from `workspaces/<id>` to
 `agents/<id>/workspace` and the id stopped being the last segment.
 
-`forAgent` **creates** the directory, `0700`, before answering. That is the
-host's job and not the plugin's for the same reason the seam exists at all:
+`prepare` **creates** the directory, `0700`, before answering; `forAgent`
+only resolves. A caller that is about to write asks the first, one that
+merely needs the name — the provenance ledger looking for a file that may
+not exist — asks the second, and the split matters because preparing can
+fail: a `browser.goto`, an `fs.read`'s ledger lookup, or a tool result that
+turned out to be text must not go down with a directory they were never
+going to use. Creating is the host's job and not the plugin's for the same
+reason the seam exists at all:
 the workspace now sits inside the agent's state directory, beside its
 sessions, memories and grants, and the recursive `mkdir` a file-producing
 plugin reaches for takes its mode from the process umask — which under the
