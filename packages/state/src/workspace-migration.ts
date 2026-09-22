@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
-import { appendFile, chmod, lstat, readdir, readFile, rename, rmdir, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, readdir, readFile, realpath, rename, rmdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
@@ -52,7 +52,9 @@ import {
 //   written at `<workspace>/mcp/<server>/…` and recorded there, with no
 //   operator configuration involved, so moving the workspace without
 //   rewriting the ledger would strip the label off every one of them. The
-//   records naming the old workspace are remapped onto the new one.
+//   records naming the old workspace are remapped onto the new one —
+//   *before* the rename, so that a rewrite which fails can be retried; once
+//   the source is gone, no later run has anything left to find.
 // - **A destination that already exists is merged, not refused.** That is
 //   the ordinary shape of an upgrade rather than an exotic one: an ordinary
 //   command on the new build defers this migration — it needs the exclusive
@@ -101,13 +103,27 @@ const pathIsFree = async (filePath: string): Promise<boolean> => {
   }
 };
 
-/** `absolutePath` with `from` swapped for `to`, when it is `from` or under it. */
-const reparented = (absolutePath: string, from: string, to: string): string | undefined => {
-  const relative = path.relative(from, absolutePath);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    return undefined;
+/**
+ * `absolutePath` with one of `from` swapped for `to`, when it is one of them
+ * or under it; undefined when it is under none.
+ *
+ * Containment is asked segment-wise, never by a `..` prefix on the relative
+ * path. `..cache/notes.md` is a legitimate child — a leading `..` is legal
+ * in a filename, and a *tainted session picks the filenames it writes*, so
+ * a prefix test is a provenance bypass an attacker can arrange by name: the
+ * file moves with the workspace, the record is judged "outside" and left
+ * naming the old path, and the fetched content reads back as the agent's
+ * own words.
+ */
+const reparented = (absolutePath: string, from: readonly string[], to: string): string | undefined => {
+  for (const candidate of from) {
+    const relative = path.relative(candidate, absolutePath);
+    if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
+      continue;
+    }
+    return relative.length === 0 ? to : path.join(to, relative);
   }
-  return relative.length === 0 ? to : path.join(to, relative);
+  return undefined;
 };
 
 /**
@@ -127,8 +143,14 @@ const reparented = (absolutePath: string, from: string, to: string): string | un
  *
  * Staged and renamed into place rather than written over, because a
  * truncated ledger is a set of labels gone.
+ *
+ * `from` is every spelling of the workspace worth matching, because the
+ * ledger is keyed the way `fs.read` looks a path up — through `realpath` —
+ * and `~/.stratus` may itself be a symlink. A record then names the
+ * canonical path while this migration walks the configured one, and a
+ * single-spelling comparison would quietly match nothing.
  */
-const remapLedger = async (workspace: string, from: string, to: string): Promise<number> => {
+const remapLedger = async (workspace: string, from: readonly string[], to: string): Promise<number> => {
   const ledgerPath = ledgerIn(workspace);
   let raw: string;
   try {
@@ -289,17 +311,39 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       continue;
     }
     if (!entry.isSymbolicLink()) {
-      // Before the rename, not after. `agents/<id>/` is already owner-only,
-      // so this changes nothing an attacker could reach today — it is for
-      // the workspace read through a path that is not this one. Tightened
-      // on the *source* because a `chmod` failing after the rename would
-      // abort a migration whose source is already gone: the retry would
-      // find no legacy entry, and 0004 would eventually stamp with the
-      // directory still loose. Never on a link: `chmod` follows it, and the
-      // mode of whatever an operator pointed it at is not this migration's
-      // to change.
+      // Everything fallible happens while the source is still there, and
+      // that is the ordering rule this whole block is written to: a step
+      // that fails *after* the rename cannot be retried, because the next
+      // run finds no legacy entry, stamps 0004, and leaves whatever that
+      // step was going to fix undone for good.
+      //
+      // So the ledger is rewritten here, naming where its files are about
+      // to be, and a second pass is a no-op — the records name the
+      // destination by then, which is under none of these spellings. Every
+      // spelling, because `~/.stratus` may itself be a link and the ledger
+      // is keyed canonically; and the destination as a read will spell it,
+      // which its parent can answer for since the directory itself does not
+      // exist yet.
+      const spellings = [from];
+      const canonical = await realpath(from);
+      if (canonical !== from) {
+        spellings.push(canonical);
+      }
+      await remapLedger(
+        from,
+        spellings,
+        path.join(await realpath(path.dirname(target)), path.basename(target)),
+      );
+      // Then the mode, on the source for the same reason.  `agents/<id>/` is
+      // already owner-only, so this changes nothing an attacker could reach
+      // today — it is for the workspace read through a path that is not this
+      // one.
       await chmod(from, 0o700);
     }
+    // A link is renamed and its target stays exactly where it is, so
+    // nothing above applies to one: every record still names where its file
+    // is, and `chmod` would follow the link and set the mode of whatever an
+    // operator pointed it at.
     try {
       await rename(from, target);
     } catch (error) {
@@ -319,9 +363,6 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         + 'that path with a symlink, and run `stratus update` again.',
       );
     }
-    // After the rename and before anything else reads it: every record
-    // naming a file that just moved now names where it is.
-    await remapLedger(target, from, target);
     report.moved += 1;
   }
   // Only when it empties, and never recursively: an operator's own file in
