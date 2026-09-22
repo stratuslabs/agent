@@ -540,6 +540,15 @@ test('preparing a workspace leaves its state directory 0700, whatever the umask'
     assert.equal((await stat(loose)).mode & 0o777, 0o700);
     assert.equal((await stat(path.join(loose, 'workspace'))).mode & 0o777, 0o700);
 
+    // Asked afresh every time: a daemon runs for weeks, and between one
+    // write and the next the directory can go — after which a plugin's own
+    // recursive `mkdir` rebuilds it under the umask.
+    await rm(path.join(agentsDirPath(env), 'bea'), { recursive: true });
+    await mkdir(path.join(loose, 'workspace'), { recursive: true, mode: 0o755 });
+    createAgentWorkspaces(env).prepare('bea');
+    assert.equal((await stat(loose)).mode & 0o777, 0o700);
+    assert.equal((await stat(path.join(loose, 'workspace'))).mode & 0o777, 0o700);
+
     // Unless it is the workspace an operator relocated: a link's target is
     // their directory, and `chmod` would follow the link into it.
     const volume = await mkdtemp(path.join(os.tmpdir(), 'stratus-vol-'));
@@ -564,6 +573,15 @@ test('a symlinked state directory is refused rather than chmodded through', asyn
   await symlink(elsewhere, path.join(agentsDirPath(env), 'ava'));
   assert.throws(() => createAgentWorkspaces(env).prepare('ava'), /is a symlink/);
   assert.equal((await stat(elsewhere)).mode & 0o777, 0o755);
+
+  // And the same seam that answered for a real directory a moment ago
+  // refuses once it has been replaced with one: remembering the first
+  // answer would write this agent's state through the link.
+  const workspaces = createAgentWorkspaces(env);
+  assert.equal(workspaces.prepare('bea'), agentWorkspacePath(env, 'bea'));
+  await rm(path.join(agentsDirPath(env), 'bea'), { recursive: true });
+  await symlink(elsewhere, path.join(agentsDirPath(env), 'bea'));
+  assert.throws(() => workspaces.prepare('bea'), /is a symlink/);
 });
 
 test('anything already at the destination, a dangling link included, stops the move rather than racing it', async () => {

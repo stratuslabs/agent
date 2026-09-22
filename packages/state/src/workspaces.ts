@@ -16,13 +16,7 @@ import { agentStateDirPath, agentWorkspacePath, agentsDirPath } from './paths.ts
  * the workspace moved out of `~/.stratus/workspaces/<id>` and into the
  * agent's own directory. A plugin now asks; only this file knows.
  */
-export const createAgentWorkspaces = (env: StateEnvironment): AgentWorkspaces => {
-  // Per instance, and only to keep the syscalls off the hot path: the
-  // ledger resolves a workspace on every `fs.write` check. Correctness does
-  // not rest on it — a directory somebody loosened under a running daemon
-  // is retightened by the next process, and nothing here caches the path.
-  const secured = new Set<string>();
-  return {
+export const createAgentWorkspaces = (env: StateEnvironment): AgentWorkspaces => ({
     /**
      * Created, and created *secured*, rather than resolved and left to the
      * caller — and only for a caller that says it is about to write, since
@@ -35,13 +29,19 @@ export const createAgentWorkspaces = (env: StateEnvironment): AgentWorkspaces =>
      * the workspace inside it, and the rest of the state code creates it at
      * `0700` precisely so they are not world-readable. A plugin cannot be
      * expected to know that, so the host that owns the layout does it.
+     *
+     * Asked afresh every time, with nothing remembered. A daemon runs for
+     * weeks: between one write and the next, the directory can be removed
+     * — after which a plugin's own recursive `mkdir` rebuilds it under the
+     * umask — or replaced with a link, which is the case the check below
+     * exists to refuse. A memo would answer both with the first call's
+     * answer. It was here for the syscalls, and that argument went when
+     * reading a ledger stopped asking: what is left asks once per write,
+     * beside a write.
      */
     forAgent: (agentId) => agentWorkspacePath(env, agentId),
     prepare: (agentId) => {
       const workspace = agentWorkspacePath(env, agentId);
-      if (secured.has(workspace)) {
-        return workspace;
-      }
       const stateDir = agentStateDirPath(env, agentId);
       // `chmod` follows links, so a planted `agents/<id>` would hand its
       // target's mode to whatever it points at — and the state written
@@ -64,7 +64,6 @@ export const createAgentWorkspaces = (env: StateEnvironment): AgentWorkspaces =>
       if (!isSymlinkedStatePathSync(workspace)) {
         chmodSync(workspace, 0o700);
       }
-      secured.add(workspace);
       return workspace;
     },
     /**
@@ -100,5 +99,4 @@ export const createAgentWorkspaces = (env: StateEnvironment): AgentWorkspaces =>
         .filter((entry) => entry.isDirectory() && isValidAgentId(entry.name))
         .map((entry) => agentWorkspacePath(env, entry.name));
     },
-  };
-};
+});
