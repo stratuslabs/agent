@@ -93,6 +93,19 @@ export const legacyWorkspacesDirIn = (stateDir: string): string =>
   path.join(stateDir, WORKSPACES_DIRNAME);
 
 /**
+ * One agent's workspace as it used to be addressed.
+ *
+ * The migration's source, and — more to the point — the answer it *derives*
+ * when finishing a move it did not start. That recovery reads a marker in a
+ * directory the agent owns, so where the workspace came from cannot come
+ * from the marker: it is this join, over an id read from the directory name.
+ */
+export const legacyAgentWorkspaceIn = (stateDir: string, agentId: string): string => {
+  assertPathSafeAgentId(agentId);
+  return path.join(legacyWorkspacesDirIn(stateDir), agentId);
+};
+
+/**
  * Where operator-installed skills live: one directory per skill, the
  * directory name is the id, `SKILL.md` inside it is the procedure. Plugins
  * contribute skills through their manifest instead; this directory is for

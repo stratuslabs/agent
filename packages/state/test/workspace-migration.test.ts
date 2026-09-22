@@ -701,21 +701,67 @@ test('a link to a workspace that did not move keeps naming where that workspace 
   assert.equal(await realpath(ava), await realpath(path.join(legacyWorkspacesDirPath(env), 'bea')));
 });
 
-test('a link planted where the move marker goes is refused, not written through', async () => {
+test('anything planted where the move marker goes loses its name, not its contents', async () => {
   const home = await newHome();
   const env = { homeDir: home };
   await seedWorkspace(home, 'ava', { 'own.md': 'mine' });
   // The workspace is the agent's own directory — `shell.run` starts there
   // and is under no root confinement — so the agent can put anything at
-  // this name. Following a link here would truncate its target as the
-  // daemon user, and the `chmod` after it would set that file's mode.
-  const victim = path.join(home, 'victim.md');
-  await writeFile(victim, 'not the migration’s to touch');
-  await symlink(victim, path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl.moving'));
+  // this name. A symlink is the obvious one; a **hard link** is the one
+  // `O_NOFOLLOW` does nothing about, because to `open` it is not a link at
+  // all, it is the file. Everything under `~/.stratus` is one filesystem
+  // and one uid, so that reaches another agent's grants or the credentials.
+  const symlinked = path.join(home, 'pointed-at.md');
+  const hardlinked = path.join(home, 'credentials.json');
+  await writeFile(symlinked, 'not the migration’s to touch');
+  await writeFile(hardlinked, '{"secret":"stays"}');
+  await symlink(symlinked, path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl.moving'));
+  await seedWorkspace(home, 'bea', { 'own.md': 'mine' });
+  await link(hardlinked, path.join(legacyWorkspacesDirPath(env), 'bea', 'fs-provenance.jsonl.moving'));
 
-  await assert.rejects(runStateMigrations(env, { exclusive: true }), /ELOOP/);
+  await runStateMigrations(env, { exclusive: true });
 
-  assert.equal(await readFile(victim, 'utf8'), 'not the migration’s to touch');
+  // Both targets intact: the name was unlinked, which never touches the
+  // inode behind it, and the marker created fresh.
+  assert.equal(await readFile(symlinked, 'utf8'), 'not the migration’s to touch');
+  assert.equal(await readFile(hardlinked, 'utf8'), '{"secret":"stays"}');
+  // And the migration got on with it rather than being blocked by a name an
+  // agent squatted.
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'own.md'), 'utf8'), 'mine');
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'bea'), 'own.md'), 'utf8'), 'mine');
+});
+
+test('a move marker an agent rewrote cannot make the re-recording a no-op', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const workspace = agentWorkspacePath(env, 'ava');
+  const legacyArtifact = path.join(legacyWorkspacesDirPath(env), 'ava', 'mcp', 'linear', 'chart-1-0.png');
+  await mkdir(path.join(workspace, 'mcp', 'linear'), { recursive: true });
+  await writeFile(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png'), 'bytes');
+  const outside = '/home/ada/notes/vendor.md';
+  await writeFile(
+    path.join(workspace, 'fs-provenance.jsonl'),
+    `${ledgerLine(legacyArtifact)}${ledgerLine(outside)}`,
+  );
+  // A crashed move left the marker here, and the agent has been running
+  // since — this directory is its own. Two ways to abuse it: point it
+  // somewhere with no records, so the re-recording does nothing and the
+  // marker is cleared and 0004 stamped straight after; or point it at `/`,
+  // so every record in the file gets dragged under the workspace.
+  await writeFile(
+    path.join(workspace, 'fs-provenance.jsonl.moving'),
+    `${JSON.stringify({ from: [path.join(home, 'nowhere', 'ava'), '/'] })}\n`,
+  );
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const recorded = await recordedIn(path.join(workspace, 'fs-provenance.jsonl'));
+  // Where it came from is derived from the directory name, not read.
+  assert.ok(recorded.includes(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png')), recorded.join(', '));
+  // And a claimed spelling that could not be this agent's workspace is not
+  // one: the record outside stays where it is, undragged.
+  assert.ok(!recorded.some((one) => one.startsWith(path.join(workspace, 'home'))), recorded.join(', '));
+  assert.ok(recorded.includes(outside), recorded.join(', '));
 });
 
 test('a marker that is a link is not read through either', async () => {

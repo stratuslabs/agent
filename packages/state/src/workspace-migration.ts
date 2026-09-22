@@ -31,6 +31,7 @@ import { memoryAppendNeedsNewline } from './memory.ts';
 import {
   agentWorkspacePath,
   agentsDirPath,
+  legacyAgentWorkspaceIn,
   legacyWorkspacesDirPath,
   stratusHomePath,
 } from './paths.ts';
@@ -138,32 +139,57 @@ const MOVE_MARKER_FILENAME = `${LEDGER_FILENAME}.moving`;
 const markerIn = (workspace: string): string => path.join(workspace, MOVE_MARKER_FILENAME);
 
 /**
- * Both ends of the marker go through `O_NOFOLLOW`, because the directory it
- * sits in is the agent's own: `shell.run` starts there and is under no root
- * confinement, so an agent can put whatever it likes at this name. A plain
- * `writeFile` would follow a symlink planted there and truncate whatever it
- * pointed at, as the daemon user, and the `chmod` after it would set that
- * file's mode — an arbitrary-write primitive handed over by a migration.
+ * The marker is created fresh, never opened in place, because the directory
+ * it sits in belongs to the agent: `shell.run` starts there under no root
+ * confinement, so an agent can put whatever it likes at this name.
  *
- * A link at the name is refused rather than replaced. The migration has no
- * business deciding what an operator meant by one, and the agent whose
- * directory it is does not get to make this decision at all.
+ * `O_NOFOLLOW` alone is not enough, and that is the whole reason this is
+ * three calls rather than one. It refuses a *symlink* at the name, but a
+ * **hard link** is not a link as far as `open` is concerned — it is the file
+ * — so `O_TRUNC` would empty whatever inode the agent linked there and the
+ * `chmod` would set its mode. Everything under `~/.stratus` is one
+ * filesystem and one uid, so that reaches another agent's `whitelist.json`,
+ * another agent's `sessions.db`, or `credentials.json`. An upgrade that
+ * empties the credentials file is not a provenance bug.
  *
- * The marker's *contents* are a different question and a much smaller one:
- * they steer which records get re-recorded, and re-recording can only ever
- * add a label to a path, never remove one. A planted marker buys an
- * attacker over-labelling of their own files, which is the direction this
- * whole ledger fails in by design.
+ * So the name is *unlinked* first and then created with `O_EXCL`. Unlinking
+ * removes the name and never the inode behind it, so a planted link loses
+ * its second name and its target is untouched; `O_EXCL` then guarantees the
+ * marker is a new file this build owns, and fails rather than reuses if
+ * something wins the race to recreate the name.
  */
-const MARKER_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW;
+/**
+ * Drop the marker's *name*. Never its inode: a hard link an agent planted
+ * there keeps whatever it points at, minus this one name.
+ */
+const clearMoveMarker = async (workspace: string): Promise<void> => {
+  try {
+    await unlink(markerIn(workspace));
+  } catch {
+    // Not there, which is the ordinary case: only a move writes one.
+  }
+};
+
+const MARKER_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
 
 const writeMoveMarker = async (workspace: string, from: readonly string[]): Promise<void> => {
+  await clearMoveMarker(workspace);
   const handle = await open(markerIn(workspace), MARKER_FLAGS, 0o600);
   try {
     await handle.writeFile(`${JSON.stringify({ from })}\n`);
     await handle.chmod(0o600);
   } finally {
     await handle.close();
+  }
+};
+
+/** Whether a move is unfinished here, asked without following anything. */
+const hasMoveMarker = async (workspace: string): Promise<boolean> => {
+  try {
+    await lstat(markerIn(workspace));
+    return true;
+  } catch {
+    return false;
   }
 };
 
@@ -198,13 +224,7 @@ const readMoveMarker = async (workspace: string): Promise<string[] | undefined> 
   }
 };
 
-const clearMoveMarker = async (workspace: string): Promise<void> => {
-  try {
-    await unlink(markerIn(workspace));
-  } catch {
-    // Not there, which is the ordinary case: only a move writes one.
-  }
-};
+
 
 /**
  * Every spelling of a path that a ledger record could be written as: the one
@@ -488,11 +508,27 @@ const finishInterruptedMoves = async (env: StateEnvironment): Promise<number> =>
       continue;
     }
     const workspace = agentWorkspacePath(env, entry.name);
-    const from = await readMoveMarker(workspace);
-    if (from === undefined) {
+    if (!(await hasMoveMarker(workspace))) {
       continue;
     }
-    await finishMove(workspace, from, workspace);
+    // Derived, not read. The marker sits in the agent's own directory, and
+    // between the crash that left it and the run that finds it the agent
+    // has been running: it can rewrite the file. A marker naming a path with
+    // no records makes the re-recording a no-op, and the marker is cleared
+    // and 0004 stamped straight afterwards — so trusting it would let an
+    // agent strip the labels off its own fetched files by editing a file it
+    // owns. Where the workspace came from is not the marker's to say: it is
+    // `workspaces/<id>`, and the id is the directory this loop is standing
+    // in.
+    //
+    // What the marker still carries is taken as *extra* candidates, and can
+    // only widen the match — re-recording adds a label to a path and never
+    // removes one — and only under a name that could be this agent's
+    // workspace, so a planted `/` cannot drag the whole filesystem in.
+    const derived = await spellingsOf(legacyAgentWorkspaceIn(stratusHomePath(env), entry.name), 'parent');
+    const claimed = (await readMoveMarker(workspace) ?? [])
+      .filter((one) => path.basename(one) === entry.name && !derived.includes(one));
+    await finishMove(workspace, [...derived, ...claimed], workspace);
     finished += 1;
   }
   return finished;

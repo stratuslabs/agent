@@ -39,6 +39,7 @@ export {
   legacySessionDbIn,
   legacyWorkspacesDirPath,
   legacyWorkspacesDirIn,
+  legacyAgentWorkspaceIn,
   skillsDirPath,
   agentWorkspacePath,
   agentWorkspaceIn,
