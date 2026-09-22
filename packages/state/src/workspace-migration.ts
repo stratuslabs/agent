@@ -732,6 +732,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // left to say so.
   const finished = await finishInterruptedMoves(env);
   const legacy = legacyWorkspacesDirPath(env);
+  const legacySpellings = await spellingsOf(legacy);
   let entries: Dirent[];
   try {
     entries = await readdir(legacy, { withFileTypes: true });
@@ -747,6 +748,28 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     throw error;
   }
   /**
+   * The path relative to the legacy workspaces directory, or undefined when
+   * it is not under it at all.
+   *
+   * Both spellings, because `~/.stratus` may itself be a symlink and an
+   * absolute link an operator wrote can name either: the configured one
+   * this migration walks, or the canonical one `realpath` gives. Comparing
+   * only the walked spelling reads a link into this very directory as
+   * pointing somewhere else entirely, and leaves it naming a workspace that
+   * is about to move.
+   */
+  const insideLegacy = (resolved: string): string | undefined => {
+    for (const candidate of legacySpellings) {
+      const relative = path.relative(candidate, resolved);
+      if (relative.length === 0 || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        continue;
+      }
+      return relative;
+    }
+    return undefined;
+  };
+
+  /**
    * Where a path inside the legacy workspaces directory is going, or
    * undefined when it is not one this migration relocates.
    *
@@ -757,16 +780,30 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    * other workspace moves, and a link left naming `workspaces/<id>` would
    * then dangle.
    */
-  const migratedTarget = (resolved: string): string | undefined => {
-    const relative = path.relative(legacy, resolved);
-    if (relative.length === 0 || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+  const migratedTarget = async (resolved: string): Promise<string | undefined> => {
+    const relative = insideLegacy(resolved);
+    if (relative === undefined) {
       return undefined;
     }
     const [other, ...rest] = relative.split(path.sep);
-    // Only a workspace this run actually moved. One that was quarantined or
-    // whose ledger was folded is still at its legacy path, and a link to it
-    // is right as it stands.
-    if (other === undefined || !moved.has(other)) {
+    if (other === undefined) {
+      return undefined;
+    }
+    // A workspace this run moved, or one a run before it did. The second
+    // matters because a run can die between moving `bea` and reaching the
+    // `ava -> bea` that depends on it: the retry starts with an empty set
+    // and can never add `bea`, since there is no legacy entry left to walk.
+    // Recreating `ava` at the path `bea` used to have would then leave it
+    // dangling with 0004 stamped over it.
+    //
+    // Gone *and* arrived, both: a legacy entry that is still there — even a
+    // dangling one, an operator's link to a volume that is not mounted —
+    // is a workspace this migration has not moved, and a link to it is
+    // right as it stands. One that was quarantined or whose ledger was
+    // folded is exactly that case.
+    if (!moved.has(other)
+      && !(await pathIsFree(legacyAgentWorkspaceIn(stratusHomePath(env), other))
+        && !(await pathIsFree(agentWorkspacePath(env, other))))) {
       return undefined;
     }
     return path.join(agentWorkspacePath(env, other), ...rest);
@@ -810,8 +847,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // the whole string against `isValidAgentId` rejected exactly the links
     // this is meant to recognise — `workspaces/ava -> bea/subdir` recreates
     // as `agents/bea/workspace/subdir`.
-    const names = path.relative(legacy, path.resolve(path.dirname(from), sourceText));
-    if (path.isAbsolute(names) || names === '..' || names.startsWith(`..${path.sep}`)) {
+    const names = insideLegacy(path.resolve(path.dirname(from), sourceText));
+    if (names === undefined) {
       return false;
     }
     const [other, ...rest] = names.split(path.sep);
@@ -972,7 +1009,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     const moveIntoPlace = async (): Promise<void> => {
       if (entry.isSymbolicLink()) {
         const text = await readlink(from);
-        const resolved = migratedTarget(path.resolve(path.dirname(from), text));
+        const resolved = await migratedTarget(path.resolve(path.dirname(from), text));
         if (!path.isAbsolute(text) || resolved !== undefined) {
           await symlink(
             path.relative(path.dirname(target), resolved ?? path.resolve(path.dirname(from), text)),
@@ -1073,8 +1110,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       if (text === undefined) {
         return false;
       }
-      const relative = path.relative(legacy, path.resolve(legacy, text));
-      const other = relative.split(path.sep)[0];
+      const other = insideLegacy(path.resolve(legacy, text))?.split(path.sep)[0];
       return other !== undefined && other !== entry.name && names.has(other);
     }));
     const ready = pending.filter((_, index) => !waiting[index]);

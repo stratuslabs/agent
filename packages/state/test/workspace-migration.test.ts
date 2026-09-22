@@ -355,6 +355,44 @@ test('a recreated link into a workspace’s subdirectory is recognised as finish
   assert.equal(await readFile(path.join(agentWorkspacePath(env, 'cyd'), 'own.md'), 'utf8'), 'mine');
 });
 
+test('a link finds a workspace an earlier run already moved, with no legacy entry left to say so', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // A run that died between moving `bea` and reaching the link that depends
+  // on it. The retry starts with an empty set of what it moved and there is
+  // no `workspaces/bea` left to walk, so "this run moved it" cannot answer
+  // — but gone from `workspaces/` and present at the new path can.
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'bea'), 'own.md'), 'mine');
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink('bea', path.join(legacyWorkspacesDirPath(env), 'ava'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'own.md'), 'utf8'), 'mine');
+});
+
+test('an absolute link naming the home’s canonical spelling is retargeted too', async () => {
+  // The home reached through a symlink, and a link written with the
+  // spelling `realpath` gives rather than the one this migration walks.
+  // Comparing only the walked spelling reads it as pointing outside the
+  // legacy directory entirely, and leaves it naming a workspace that is
+  // about to move.
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-volume-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-linked-'));
+  await mkdir(path.join(elsewhere, 'state'), { recursive: true });
+  await symlink(path.join(elsewhere, 'state'), path.join(home, '.stratus'));
+  const env = { homeDir: home };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await seedWorkspace(home, 'bea', { 'own.md': 'mine' });
+  const canonical = path.join(await realpath(legacyWorkspacesDirPath(env)), 'bea');
+  await symlink(canonical, path.join(legacyWorkspacesDirPath(env), 'ava'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'own.md'), 'utf8'), 'mine');
+});
+
 test('a link to an unmounted volume is not a finished move, whatever is at the new path', async () => {
   const home = await newHome();
   const env = { homeDir: home };
