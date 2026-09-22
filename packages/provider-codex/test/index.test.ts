@@ -177,6 +177,28 @@ test('failed turns and empty responses surface as errors', async () => {
   });
   await assert.rejects(() => cutOff.generate({ session: unasked }), /ended without completing the turn/);
 
+  // And the same when the run got some of an answer out first. Whatever
+  // Codex had finished saying when the pipe closed is a fragment: returned
+  // as a reply it reaches a person as the agent's answer, cut mid-thought,
+  // with the session recorded `completed`. Addressed or not — an overheard
+  // turn may decide to say nothing, but it does not get to have a cut-off
+  // run counted as that decision.
+  const cutOffMidReply = createCodexProvider({
+    runTurn: createFakeRunTurn([
+      { type: 'thread.started', thread_id: 't1' },
+      { type: 'turn.started' },
+      { type: 'item.completed', item: { id: 'msg-1', type: 'agent_message', text: 'The three options are: first,' } },
+    ]).runTurn,
+  });
+  await assert.rejects(
+    () => cutOffMidReply.generate({ session: createSession() }),
+    /ended without completing the turn/,
+  );
+  await assert.rejects(
+    () => cutOffMidReply.generate({ session: unasked }),
+    /ended without completing the turn/,
+  );
+
   // A failure after Codex sent anything says the prompt was delivered —
   // the thread has it — and one before it does not.
   await assert.rejects(

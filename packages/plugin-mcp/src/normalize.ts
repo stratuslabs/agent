@@ -85,6 +85,84 @@ export const bridgedDescription = (raw: string): string => {
 export const BRIDGED_SCHEMA_MAX_LENGTH = 16_384;
 
 /**
+ * The most of one `tools/call` result a server gets to put into the
+ * transcript, in characters, counting the joined text and the JSON of
+ * `structuredContent` separately.
+ *
+ * Every first-party tool caps what it returns — `fs.read` at 64 KB,
+ * `shell.run` and `browser.read` at 100 KB, `web.fetch` at 400 KB — and
+ * a bridged result was the one that did not. Binary blocks already land on
+ * disk rather than in the result, so this is about text, and text is the
+ * part that is *durable*: a tool result is saved into the session and
+ * replayed to the provider on every later turn of that conversation, so a
+ * server that answers `list_files` with twenty megabytes does not cost one
+ * turn, it costs every turn until the session ends — and survives restarts,
+ * because the transcript does. The stdio transport bounds a single message
+ * at its reader's buffer (10 MB by default) and the HTTP transports bound
+ * nothing, so "the transport will stop it" was never a cap.
+ *
+ * 100 KB matches `shell.run`, which is the closest comparison: somebody
+ * else's program, writing as much as it likes. Counted in characters
+ * rather than bytes, like the two bounds above and unlike the tool packs':
+ * what is scarce here is the model's context, which is measured in tokens,
+ * and a token follows a character more closely than it follows a byte.
+ */
+export const BRIDGED_RESULT_MAX_LENGTH = 100_000;
+
+/**
+ * `raw`, cut to `limit` characters with the cut announced, or `raw` when it
+ * fits.
+ *
+ * The marker matters as much as the cut: the model has to be able to tell a
+ * directory listing that ended from one that was stopped, or it reports
+ * the truncated answer as the whole answer — which is the failure mode of
+ * a silent cap, and worse than the size. It names the original length for
+ * the same reason `bridgedDescription`'s does: the number is what tells an
+ * operator whether to raise `maxResultChars` or fix the call.
+ *
+ * Counted in code points, and cut so the cut never lands inside a
+ * surrogate pair — half an astral character is a malformed string a
+ * provider may refuse.
+ *
+ * Deliberately without `Array.from`, which is how the two bounds above
+ * count: they measure a description against a fixed 1024, while this
+ * measures whatever a server sent. Materializing ten megabytes of result
+ * as an array of ten million one-character strings, to decide it is too
+ * long, would spend more memory on the check than the string it is
+ * guarding against. So the cheap test comes first — a string's UTF-16
+ * length is never below its code-point count, so anything whose `length`
+ * fits is under the cap and returns untouched, which is every ordinary
+ * result — and the exact count is only paid for on the oversized path.
+ *
+ * A `limit` smaller than the marker yields just the marker, which is
+ * longer than the limit. Reachable only from a `maxResultChars` of a few
+ * dozen characters, where no result could be useful anyway, and the
+ * alternative is a cut with nothing saying it happened.
+ */
+const cutToLimit = (raw: string, limit: number, what: string): string => {
+  if (raw.length <= limit) {
+    return raw;
+  }
+  let codePoints = 0;
+  for (const _character of raw) {
+    codePoints += 1;
+  }
+  if (codePoints <= limit) {
+    return raw;
+  }
+  const marker = `\n… [${what} truncated by stratus at ${limit} characters; the server sent ${codePoints}]`;
+  // `marker` is ASCII apart from the ellipsis, so its own code-point count
+  // is its length.
+  const cut = Math.max(0, limit - marker.length);
+  const sliced = raw.slice(0, cut);
+  const last = sliced.charCodeAt(sliced.length - 1);
+  // A trailing high surrogate is the first half of a pair whose second
+  // half was just cut away.
+  const whole = last >= 0xd800 && last <= 0xdbff ? sliced.slice(0, -1) : sliced;
+  return `${whole}${marker}`;
+};
+
+/**
  * How deep a schema may nest before the bridge stops walking it. Sixty-four
  * levels is far past any parameter list a person wrote; a schema nested
  * deeper is a stack-overflow attempt dressed as a tool, and a recursive
@@ -252,6 +330,12 @@ export interface NormalizeOptions {
    * the loader-less host case gets.
    */
   ledger?: TaintedWriteLedger;
+  /**
+   * The operator's cap on this result, in characters. Defaults to
+   * {@link BRIDGED_RESULT_MAX_LENGTH}; a server cannot raise it, because
+   * the cap exists to bound what the server sends.
+   */
+  maxResultChars?: number;
   /** Clock seam for deterministic file names in tests. */
   now?: () => number;
 }
@@ -397,15 +481,31 @@ export const normalizeCallResult = async (
     }
   }
 
-  const structured = isObject(shaped.structuredContent) ? (shaped.structuredContent as JsonObject) : undefined;
-  const text = texts.length > 0 ? texts.join('\n\n') : undefined;
+  const limit = options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH;
+  const structuredRaw = isObject(shaped.structuredContent) ? (shaped.structuredContent as JsonObject) : undefined;
+  const text = texts.length > 0 ? cutToLimit(texts.join('\n\n'), limit, 'result') : undefined;
 
-  if (structured === undefined && files.length === 0 && resources.length === 0) {
+  // Bounded as its own serialized string rather than by walking the
+  // object: the cost this is guarding is what the provider is sent, and
+  // what the provider is sent is the JSON. A structured payload over the
+  // cap therefore arrives as *text* — it stops being a parseable object,
+  // which is the honest outcome, since a truncated object is not one. The
+  // key says which it is, so a caller reading `structured` never finds a
+  // half-object there.
+  const structuredJson = structuredRaw === undefined ? undefined : JSON.stringify(structuredRaw);
+  const structuredFits = structuredJson !== undefined && Array.from(structuredJson).length <= limit;
+  const structured = structuredFits ? structuredRaw : undefined;
+  const structuredNote = structuredJson !== undefined && !structuredFits
+    ? cutToLimit(structuredJson, limit, 'structured result')
+    : undefined;
+
+  if (structured === undefined && structuredNote === undefined && files.length === 0 && resources.length === 0) {
     return text ?? '';
   }
   return {
     ...(text !== undefined ? { text } : {}),
     ...(structured !== undefined ? { structured } : {}),
+    ...(structuredNote !== undefined ? { structuredText: structuredNote } : {}),
     ...(files.length > 0 ? { files } : {}),
     ...(resources.length > 0 ? { resources } : {}),
   };

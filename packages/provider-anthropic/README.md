@@ -20,6 +20,14 @@ const provider = createAnthropicProvider({
 
 Pass the provider to `AgentRunner` from `@stratusagent/core` and it handles the loop: tools are executed locally and results are fed back to Claude until the model answers in plain text.
 
-Options: `model`, `maxTokens` (default 4096), `systemPrompt`, `baseUrl`, `thinking: 'disabled'`, and an injectable `fetch` for tests.
+Options: `model`, `maxTokens` (default 16000), `systemPrompt`, `baseUrl`, `thinking: 'disabled'`, and an injectable `fetch` for tests.
+
+A turn that hits `maxTokens` before the model finished is **refused, not
+returned**: the reply would be a fragment, and a fragment delivered as an
+answer reads exactly like a complete one. The error names the cap that was
+in force. Raising `maxTokens` past roughly 20k only works on the streaming
+path — the Anthropic SDK refuses a non-streaming request whose cap puts its
+estimated duration past ten minutes. `stratus serve` streams; a host
+calling `generate` with no `onDelta` does not.
 
 Most users won't wire this directly — `@stratusagent/cli` sets it up from a menu: `npm i -g @stratusagent/cli && stratus setup`.

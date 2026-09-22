@@ -204,6 +204,24 @@ export interface StratusConfigFile {
    * plugin registered. Trusted configs only, for the same reason.
    */
   memoryStore?: string;
+  /**
+   * How many provider turns one dispatched turn may take before it is
+   * failed as a runaway. Default 8 (`DEFAULT_MAX_TURNS` in core).
+   *
+   * The daemon had no way to say this: `--max-turns` reaches `stratus
+   * run` only, so every Slack message, scheduled firing, and control-API
+   * turn was held to the built-in 8 with no override anywhere. A task
+   * needing nine tool calls failed on the ninth — after doing the work of
+   * the first eight, and with no partial answer, because the ceiling is
+   * checked before the provider call rather than after it.
+   *
+   * **Trusted configs only.** This is a runaway *and cost* guard, so both
+   * directions are a decision a cloned repository must not get to make:
+   * raising it spends the operator's tokens, and lowering it to 1 fails
+   * every turn the daemon serves. An untrusted config naming it falls
+   * through to the global file, as `executor` and `principals` do.
+   */
+  maxTurns?: number;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */

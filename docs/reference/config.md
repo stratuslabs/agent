@@ -57,6 +57,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `plugins` | Plugins to load, keyed by package name — trusted configs only, see below |
 | `executor` | Which executor runs tool calls: `local` (the default) or the name a [plugin executor](../guides/extending.md#executors) registers — trusted configs only, see below |
 | `memoryStore` | Which store backs agent memory: `file` (the default) or the name a [plugin memory store](../guides/extending.md#memory-stores) registers — trusted configs only, see below |
+| `maxTurns` | How many provider turns one message may spend before the turn is failed as a runaway. Default `8` — trusted configs only, see below |
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
@@ -77,6 +78,41 @@ agent's `credentials:` soul list and resolved per call — the agent's own
 entry first, then the fleet's shared one, then the environment. Add one with
 [`stratus credential set`](./cli.md); never write a key into a config file,
 which is a file people commit.
+
+## How many turns one message may spend
+
+A dispatched turn calls the provider, runs whatever tools it asked for,
+calls the provider again with the results, and repeats. `maxTurns` is the
+ceiling on that loop — the point at which the turn is failed rather than
+allowed to keep going.
+
+```json
+{
+  "maxTurns": 24
+}
+```
+
+The default is 8, which is the whole budget for one Slack message: a task
+that needs nine rounds of tool calls fails on the ninth. It fails *before*
+the ninth provider call rather than after it, so there is no partial
+answer — the error is `Session exceeded the maximum of 8 provider turns`,
+and the work of the first eight turns is in the transcript but was never
+summed up. Sending the message again resumes the session with the ceiling
+reset, which is the recovery; raising `maxTurns` is the fix.
+
+Raise it for agents that do multi-step work — reading several files,
+walking a set of issues, anything with a fan-out. Leave it low for a fleet
+that answers questions.
+
+It is a **spending** limit as much as a safety one, which is why it is
+trusted-config only: a turn that loops 500 times costs 500 provider calls.
+That cuts both ways, so a project-local config cannot lower it either —
+`"maxTurns": 1` would fail every turn the daemon serves.
+
+A delegated sub-session gets its own allowance rather than a share of its
+parent's: `agent.delegate` starts a separate dispatch, and each dispatch is
+held to this ceiling. The bound on delegation *depth* is a different
+setting — see [Tools](../guides/tools.md).
 
 ## Prompt caching
 
@@ -131,6 +167,7 @@ set.
 | `approvals` | Who may authorize an agent's tool calls, and how | [Approvals](../guides/approvals.md) |
 | `principals` | Whose messages an agent takes as its operator's; everyone else's arrive as `unknown` | [Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator), [Memory](../concepts/memory.md#where-a-fact-came-from) |
 | `api` | Which interface and port a daemon binds | [Remote access](../guides/remote-access.md) |
+| `maxTurns` | How long a loop one message can buy, which is both a runaway guard and a spending limit | [Always on](../guides/always-on.md#how-many-turns-one-message-may-spend) |
 | `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
 | `soul`, `systemPrompt` | What the agent is told it is and what it may do — a persona in a cloned repo is a system prompt written by whoever pushed it. `--soul` and `STRATUS_SOUL` still name one; the run says once, on stderr, what the file asked for and did not get, and `stratus serve` says it once at startup, whether or not its runtime resolves | [Security](../concepts/security.md) |
 

@@ -45,6 +45,19 @@ soul's allowlist — `tools: [mcp.linear.*]` grants one server:
   than 64 levels deep, is a page, not a parameter list, and so is a tool
   whose name is longer than 64 characters: that one tool is not bridged,
   the daemon log names it, and the server's other tools load.
+- **A server's results are bounded too**, at 100,000 characters per call
+  by default — the same cap `shell.run` puts on a command's output, and
+  for the same reason: it is somebody else's program, writing as much as it
+  likes. What makes it matter more here is that a tool result is
+  *durable*: it is saved into the session and replayed to the provider on
+  every later turn of that conversation, so one twenty-megabyte directory
+  listing is not one expensive turn, it is every turn until the
+  conversation ends, and it survives restarts because the transcript does.
+  A cut is announced in the text the model reads, with the original size,
+  so a listing that was stopped never reads as a listing that ended.
+  Per server, as `maxResultChars`, for a server that legitimately returns
+  large documents. Binary content is unaffected — it lands in the
+  per-agent workspace as a file rather than in the transcript.
 - **A stdio server's environment is replaced** the way
   [`tool-shell`'s](./tools.md) is: it gets what you granted and nothing
   else, not the daemon's own environment.

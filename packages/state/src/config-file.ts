@@ -125,6 +125,25 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   if (typeof config.vision === 'boolean') {
     resolved.vision = config.vision;
   }
+  if (config.maxTurns !== undefined) {
+    // Refused rather than clamped, like `approvals.timeoutMs`: every value
+    // this rejects breaks the daemon in a way nothing downstream reports.
+    // The ceiling is tested as `turn > maxTurns` before the provider call,
+    // so 0 or a negative fails turn 1 of every dispatch — an install where
+    // no agent can answer anything, with "exceeded the maximum of 0
+    // provider turns" as the only clue.
+    if (
+      typeof config.maxTurns !== 'number'
+      || !Number.isInteger(config.maxTurns)
+      || config.maxTurns < 1
+    ) {
+      throw new Error(
+        `Invalid maxTurns in config ${configPath}: ${JSON.stringify(config.maxTurns)}. `
+        + 'Use a whole number of provider turns, 1 or more.',
+      );
+    }
+    resolved.maxTurns = config.maxTurns;
+  }
   const approvals = parseApprovalsConfig(config.approvals, configPath);
   if (approvals) {
     resolved.approvals = approvals;

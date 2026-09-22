@@ -32,6 +32,7 @@ import { ManifestBoundToolRegistry, parsePluginManifest } from '@stratusagent/pl
 import {
   createMcpPlugin,
   normalizeCallResult,
+  BRIDGED_RESULT_MAX_LENGTH,
   PLUGIN_MCP_VERSION,
   sanitizeToolSegment,
   sealedStdioEnv,
@@ -1455,6 +1456,74 @@ test('a connection that closes during discovery is not published as connected', 
     clearInterval(keepAlive);
     await plugin.dispose?.();
   }
+});
+
+test('a result too large for the transcript is cut, with the cut announced', async () => {
+  // The durability is the point. A tool result is saved into the session
+  // and replayed to the provider on every later turn, so an unbounded one
+  // does not cost a turn — it costs every turn until the conversation
+  // ends, and survives restarts with the transcript. Every first-party
+  // tool caps its output; a bridged result was the one that did not.
+  const huge = 'x'.repeat(BRIDGED_RESULT_MAX_LENGTH + 5_000);
+  const cut = await normalizeCallResult(
+    { content: [{ type: 'text', text: huge }] },
+    { server: 'linear', tool: 'list_files', agentId: 'ava' },
+  ) as string;
+  assert.ok(Array.from(cut).length <= BRIDGED_RESULT_MAX_LENGTH, `stayed inside the cap: ${cut.length}`);
+  // Announced, not silent: the model has to be able to tell a listing that
+  // ended from one that was stopped, or it reports the fragment as the
+  // whole answer. The original size rides along, because that is the number
+  // that says whether to raise the cap or fix the call.
+  assert.match(cut, /truncated by stratus at 100000 characters; the server sent 105000/);
+
+  // A result that fits is untouched — no marker, no reshaping.
+  const small = await normalizeCallResult(
+    { content: [{ type: 'text', text: 'issue ENG-1' }] },
+    { server: 'linear', tool: 'get_issue', agentId: 'ava' },
+  );
+  assert.equal(small, 'issue ENG-1');
+
+  // The operator's cap is the one that applies, and a server cannot raise
+  // it: the cap exists to bound what the server sends.
+  const narrowed = await normalizeCallResult(
+    { content: [{ type: 'text', text: 'abcdefghij'.repeat(20) }] },
+    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 80 },
+  ) as string;
+  assert.ok(Array.from(narrowed).length <= 80, `honoured the narrowed cap: ${narrowed.length}`);
+  assert.match(narrowed, /truncated by stratus at 80 characters; the server sent 200/);
+
+  // An oversized `structuredContent` stops being a parseable object,
+  // because a truncated object is not one — it arrives as text under a
+  // key that says so, and `structured` is absent rather than half there.
+  const structured = await normalizeCallResult(
+    { content: [{ type: 'text', text: 'ok' }], structuredContent: { blob: 'y'.repeat(300) } },
+    { server: 'linear', tool: 'chart', agentId: 'ava', maxResultChars: 120 },
+  ) as JsonObject;
+  assert.equal(structured.structured, undefined);
+  assert.match(String(structured.structuredText), /structured result truncated by stratus at 120 characters/);
+  assert.equal(structured.text, 'ok');
+
+  // One that fits still comes back as an object.
+  const intact = await normalizeCallResult(
+    { content: [{ type: 'text', text: 'ok' }], structuredContent: { points: 4 } },
+    { server: 'linear', tool: 'chart', agentId: 'ava' },
+  ) as JsonObject;
+  assert.deepEqual(intact.structured, { points: 4 });
+  assert.equal(intact.structuredText, undefined);
+
+  // A cut never lands inside a surrogate pair: half an astral character is
+  // a malformed string a provider may refuse. The cap is chosen so the cut
+  // index really is odd — at 100 emoji and this marker, 71 puts it at one
+  // UTF-16 unit, which is the first half of the first pair.
+  const emoji = await normalizeCallResult(
+    { content: [{ type: 'text', text: '\u{1f600}'.repeat(100) }] },
+    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 71 },
+  ) as string;
+  assert.match(emoji, /truncated by stratus at 71 characters; the server sent 100/);
+  assert.doesNotMatch(emoji, /[\u{d800}-\u{dfff}]/u);
+  // The lone surrogate was dropped rather than kept, so nothing of the
+  // split character survives.
+  assert.ok(emoji.startsWith('\n… ['), `dropped the half character: ${JSON.stringify(emoji.slice(0, 8))}`);
 });
 
 test('a binary block cannot steer the written path: the server-side tool name is folded before it names a file', async () => {

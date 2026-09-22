@@ -699,6 +699,16 @@ export interface GatewayOptions {
    * which is only ever right in a test. Default 15 minutes.
    */
   approvalTimeoutMs?: number;
+  /**
+   * How many provider turns one dispatched turn may take before the runner
+   * fails it as a runaway. Default 8 (`DEFAULT_MAX_TURNS` in core).
+   *
+   * Applies to every runner this gateway builds, so a delegated
+   * sub-session is held to the same ceiling as the turn that delegated it
+   * — they are separate dispatches and each gets its own allowance, not a
+   * share of one. `stratus serve` fills it from the trusted config's
+   * `maxTurns`.
+   */
   maxTurns?: number;
   /**
    * The activity watchdog: abort a turn when no event for its session has

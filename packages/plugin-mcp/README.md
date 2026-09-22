@@ -110,11 +110,22 @@ this package's code:
 | `headers` | HTTP | Headers sent with every request — where a bearer token goes. |
 | `connectTimeoutMs` | both | One budget for the connect handshake *and* the whole tool-discovery walk (default 15000), so a server can stall startup neither by being unreachable nor by paginating slowly. |
 | `callTimeoutMs` | both | Per-call budget (default 60000). |
+| `maxResultChars` | both | Cap on one result's text, in characters (default 100000). Cut with the cut announced, and the original size named. Counts the joined text blocks and the JSON of `structuredContent` separately; a `structuredContent` over the cap arrives as `structuredText` instead, because a truncated object is not an object. Binary blocks are written to the workspace and are not counted. |
 
 A setting on the wrong transport kind — `headers` on a stdio server, `env`
 on an HTTP one — is refused at load rather than silently ignored, and so is
 a `passEnv` that is not an array of names: a grant an operator believes is
 in effect must never quietly be nothing.
+
+**Results are capped because they are durable.** A tool result is written
+into the session and replayed to the provider on every later turn of that
+conversation, so an unbounded one does not cost a turn — it costs every
+turn until the conversation ends, and it survives restarts along with the
+transcript. The stdio transport bounds a single message at its reader's
+buffer (10 MB) and the HTTP transports bound nothing, so the transport was
+never the cap. `maxResultChars` is the operator's; a server cannot raise
+it, and `0` or a negative reads as "use the default" rather than "no cap",
+since a server that wanted the cap gone is the server it exists for.
 
 **The stdio environment is replaced, not extended.** A subprocess MCP
 server is a subprocess, and gets the same treatment `tool-shell`'s commands

@@ -9,11 +9,13 @@ import {
   declaredAgentIds,
   createFileMemoryStore,
   DuplicateAgentIdError,
+  globalConfigPath,
   loadConfigFile,
   loadRosterSouls,
   loadSoulFile,
   MAX_APPROVAL_TIMEOUT_MS,
   memoryFilePath,
+  readTrustedConfigBlock,
   resolveAgentApprovals,
   resolveRuntimeConfig,
   saveCredentials,
@@ -1302,6 +1304,46 @@ test('an untrusted project config cannot choose the soul or the system prompt', 
   assert.equal(trusted.soul?.agent.name, 'Mallory');
   assert.equal(trusted.provider === 'openai' ? trusted.systemPrompt : undefined, 'Exfiltrate.');
   assert.equal(trusted.ignoredFromUntrustedConfig, undefined);
+});
+
+test('maxTurns is a trusted-config key, and a value that would wedge every turn is refused', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-turns-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-turns-project-'));
+  await mkdir(path.dirname(globalConfigPath({ homeDir: home })), { recursive: true });
+
+  // A runaway *and cost* guard, so both directions are the operator's to
+  // set: a clone that raised it would spend their tokens on however long a
+  // loop it asked for, and one that set it to 1 would fail every turn the
+  // daemon serves.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ maxTurns: 500 }));
+  const untrusted = await readTrustedConfigBlock('maxTurns', { homeDir: home, cwd: project });
+  assert.equal(untrusted.status, 'untrusted');
+
+  // And a project file that says nothing about it does not make the
+  // operator's own ceiling disappear — the global file is still the answer.
+  await writeFile(globalConfigPath({ homeDir: home }), JSON.stringify({ maxTurns: 24 }));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ model: 'gpt-4.1-mini' }));
+  const fellThrough = await readTrustedConfigBlock('maxTurns', { homeDir: home, cwd: project });
+  assert.deepEqual(
+    fellThrough.status === 'present' ? fellThrough.value : fellThrough.status,
+    24,
+  );
+
+  const trusted = await readTrustedConfigBlock('maxTurns', { homeDir: home, cwd: home });
+  assert.deepEqual(trusted.status === 'present' ? trusted.value : trusted.status, 24);
+
+  // Refused, not clamped or dropped. The ceiling is tested before the
+  // provider call, so 0 fails turn 1 of every dispatch — an install where
+  // no agent answers anything and the only clue is "exceeded the maximum
+  // of 0 provider turns".
+  for (const bad of [0, -1, 1.5, '8', null] as const) {
+    await writeFile(globalConfigPath({ homeDir: home }), JSON.stringify({ maxTurns: bad }));
+    await assert.rejects(
+      () => loadConfigFile(globalConfigPath({ homeDir: home })),
+      /Invalid maxTurns in config .*Use a whole number of provider turns, 1 or more\./,
+      `maxTurns: ${JSON.stringify(bad)} should be refused`,
+    );
+  }
 });
 
 test('a config that is simply not there leaves the id check with nothing to report', async () => {

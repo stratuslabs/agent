@@ -26,6 +26,7 @@ import {
   SERVER_NAME_PATTERN,
   bridgedDescription,
   bridgedSchema,
+  BRIDGED_RESULT_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_DEPTH,
   BRIDGED_SEGMENT_MAX_LENGTH,
@@ -45,6 +46,7 @@ export const PLUGIN_MCP_VERSION = '0.11.4';
 
 export {
   BRIDGED_DESCRIPTION_MAX_LENGTH,
+  BRIDGED_RESULT_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_DEPTH,
   BRIDGED_SEGMENT_MAX_LENGTH,
@@ -109,6 +111,14 @@ export interface McpServerSpec {
   headers: Record<string, string>;
   connectTimeoutMs: number;
   callTimeoutMs: number;
+  /**
+   * The cap on one result's text, in characters — see
+   * `BRIDGED_RESULT_MAX_LENGTH` in `./normalize.ts` for the number and the
+   * reason. Per server because that is where the operator already tunes a
+   * server's behavior, and because one verbose server should not force the
+   * cap up for the rest.
+   */
+  maxResultChars: number;
 }
 
 export interface McpPluginOptions {
@@ -168,7 +178,14 @@ const asStringRecord = (value: unknown, where: string): Record<string, string> =
   return record;
 };
 
-const asTimeout = (value: unknown, fallback: number): number =>
+/**
+ * A positive number from a config block, or the default. Shared by the two
+ * timeouts and by `maxResultChars`: all three mean "a bound the operator
+ * may move", and for all three a `0`, a negative, or a non-number is a
+ * value that would remove the bound rather than set it — which is never
+ * what a config key on somebody else's server should be able to say.
+ */
+const asPositiveNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 
 const asStringArray = (value: unknown, where: string): string[] | undefined => {
@@ -311,8 +328,12 @@ const resolveServerSpec = (
     env,
     ...(url !== undefined ? { url } : {}),
     headers: asStringRecord(block.headers, `${where}.headers`),
-    connectTimeoutMs: asTimeout(block.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS),
-    callTimeoutMs: asTimeout(block.callTimeoutMs, DEFAULT_CALL_TIMEOUT_MS),
+    connectTimeoutMs: asPositiveNumber(block.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS),
+    callTimeoutMs: asPositiveNumber(block.callTimeoutMs, DEFAULT_CALL_TIMEOUT_MS),
+    // A `0` or a negative is not "no cap" — see `asPositiveNumber`. The one
+    // thing this must not be is switchable off from a config key, since a
+    // server that wanted the cap gone is the server it exists for.
+    maxResultChars: asPositiveNumber(block.maxResultChars, BRIDGED_RESULT_MAX_LENGTH),
   };
 };
 
@@ -819,6 +840,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         server: state.spec.name,
         tool: info.mcpName,
         agentId: session.agent.id,
+        maxResultChars: state.spec.maxResultChars,
         ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
         ...(ledger !== undefined ? { ledger } : {}),
       });
