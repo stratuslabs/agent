@@ -48,9 +48,19 @@ export const createAgentWorkspaces = (env: StateEnvironment): AgentWorkspaces =>
         throw new Error(symlinkedStateDirectoryMessage(stateDir));
       }
       mkdirSync(workspace, { recursive: true, mode: 0o700 });
-      // `mkdir`'s mode applies only to what it creates, so an `agents/<id>/`
-      // an older build or a pre-fix plugin already left is whatever it was.
+      // `mkdir`'s mode applies only to what it creates, so a directory an
+      // older build or a pre-fix plugin already left is whatever it was —
+      // and that is the common case here, since the builds that created
+      // these under the umask are exactly the ones being upgraded from.
       chmodSync(stateDir, 0o700);
+      // The workspace itself only when it is a real directory. It is the
+      // one thing under `agents/<id>/` that may be a symlink — an operator
+      // relocating an agent's output to another volume is supported — and
+      // `chmod` follows links, so the mode of a directory they chose is
+      // not this build's to change.
+      if (!isSymlinkedStatePathSync(workspace)) {
+        chmodSync(workspace, 0o700);
+      }
       secured.add(workspace);
       return workspace;
     },

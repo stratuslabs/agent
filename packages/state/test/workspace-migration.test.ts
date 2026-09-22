@@ -283,6 +283,32 @@ test('and the agent sharing it does not have to be one still waiting in workspac
   assert.deepEqual(Object.keys(forBea), ['/home/ada/notes/shared.md']);
 });
 
+test('a chain of links finishes where an interrupted run left it, not at the path that has gone', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // Exactly what a run killed between recreating a link and unlinking its
+  // source leaves behind, for the chain `ava -> bea -> cyd`: cyd moved,
+  // bea's destination link was written, and bea's source now names a
+  // directory that has gone.
+  await mkdir(agentWorkspacePath(env, 'cyd'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'cyd'), 'own.md'), 'mine');
+  await mkdir(path.join(agentsDirPath(env), 'bea'), { recursive: true });
+  await symlink(path.join('..', '..', 'agents', 'cyd', 'workspace'), agentWorkspacePath(env, 'bea'));
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink('cyd', path.join(legacyWorkspacesDirPath(env), 'bea'));
+  await symlink('bea', path.join(legacyWorkspacesDirPath(env), 'ava'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  // ava has to be pointed at where bea's workspace *is*. Following the
+  // source link instead would name `workspaces/bea`, which leads nowhere —
+  // and that is a dangling link an operator can see, unlike a lost label.
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'own.md'), 'utf8'), 'mine');
+  // The stale source is left for them rather than removed: a target that
+  // is merely unmounted comes back.
+  assert.ok((await readdir(legacyWorkspacesDirPath(env))).includes('bea'));
+});
+
 test('a file an operator left among the workspaces is not an agent’s, and keeps the directory', async () => {
   const home = await newHome();
   const env = { homeDir: home };
@@ -373,12 +399,24 @@ test('the seam hands back a workspace whose state directory is already 0700, wha
     assert.equal((await stat(workspace)).mode & 0o777, 0o700);
     assert.equal((await stat(path.dirname(workspace))).mode & 0o777, 0o700);
 
-    // And an `agents/<id>` a pre-fix build already left loose is tightened,
-    // not left as it was: `mkdir`'s mode only applies to what it creates.
+    // And a directory a pre-fix build already left loose is tightened, not
+    // left as it was: `mkdir`'s mode only applies to what it creates, and
+    // the builds that made these under the umask are the ones being
+    // upgraded from. Both levels, because both hold the agent's files.
     const loose = path.join(agentsDirPath(env), 'bea');
     await mkdir(path.join(loose, 'workspace'), { recursive: true, mode: 0o755 });
     createAgentWorkspaces(env).forAgent('bea');
     assert.equal((await stat(loose)).mode & 0o777, 0o700);
+    assert.equal((await stat(path.join(loose, 'workspace'))).mode & 0o777, 0o700);
+
+    // Unless it is the workspace an operator relocated: a link's target is
+    // their directory, and `chmod` would follow the link into it.
+    const volume = await mkdtemp(path.join(os.tmpdir(), 'stratus-vol-'));
+    await chmod(volume, 0o755);
+    await mkdir(path.join(agentsDirPath(env), 'cyd'), { recursive: true });
+    await symlink(volume, agentWorkspacePath(env, 'cyd'));
+    createAgentWorkspaces(env).forAgent('cyd');
+    assert.equal((await stat(volume)).mode & 0o777, 0o755);
   } finally {
     process.umask(previous);
   }

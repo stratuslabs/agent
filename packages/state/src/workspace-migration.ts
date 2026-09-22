@@ -274,6 +274,34 @@ const pathIsFree = async (filePath: string): Promise<boolean> => {
 };
 
 /**
+ * The destination appeared between the last check and the rename. Its own
+ * type because the catch that wraps every other failure would tell the
+ * operator to move a directory by hand, and the fix here is to run the
+ * upgrade again — nothing of this agent's has moved. Internal: the only
+ * caller that catches it is the one that throws it.
+ */
+class WorkspaceDestinationTakenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkspaceDestinationTakenError';
+  }
+}
+
+/** Whether a path leads to something, following links. A dangling one does not. */
+const resolves = async (filePath: string): Promise<boolean> => {
+  try {
+    await stat(filePath);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return false;
+    }
+    throw error;
+  }
+};
+
+/**
  * `absolutePath` with one of `from` swapped for `to`, when it is one of them
  * or under it; undefined when it is under none.
  *
@@ -829,6 +857,28 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         report.quarantined.push(`${agentId} — ${there} already resolves to ${here}, so it was left as it is`);
         return;
       }
+      // A source link that leads nowhere, with something already at the new
+      // path: this agent's workspace *is* at the new path, and the link
+      // left in `workspaces/` names a directory that has gone. The shape a
+      // run killed between recreating a link and unlinking its source
+      // leaves — `ava -> bea -> cyd`, cyd moved, bea's destination written,
+      // bea's source now dangling.
+      //
+      // Counted as moved even though this run did not move it, because
+      // that set is what `migratedTarget` reads, and a dependent asking
+      // where this agent's workspace went has to be told the new path.
+      // Reading the dangling source instead would point it at a directory
+      // nothing is at — and unlike a label, that is a link an operator can
+      // see. The stale source is left alone rather than unlinked: it is
+      // still theirs, and a target that is merely unmounted comes back.
+      if (entry.isSymbolicLink() && !(await resolves(from))) {
+        moved.add(agentId);
+        report.quarantined.push(
+          `${agentId} — ${here} leads nowhere and ${there} is already there, so the new path is taken as `
+          + 'this workspace and the stale link left for you to remove',
+        );
+        return;
+      }
       // Otherwise the deferral window, and the ordinary outcome of running
       // any command before restarting the daemon — see the note at the top
       // on why this merges rather than refuses. Nothing has to be undone
@@ -924,6 +974,22 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           return;
         }
       }
+      // Checked again, as late as it can be. `rename` onto an *empty*
+      // directory succeeds and unlinks it — so an ordinary command that
+      // created the destination since the check above, and is sitting in
+      // it as `shell.run`'s cwd, would go on writing into a directory with
+      // no name, and every file it produced would be gone with 0004
+      // stamped over it. There is no `RENAME_NOREPLACE` in Node, so this
+      // narrows the window to a single syscall rather than closing it;
+      // what closes it is the exclusive bracket.
+      if (!(await pathIsFree(target))) {
+        throw new WorkspaceDestinationTakenError(
+          `${target} appeared while ${JSON.stringify(agentId)}'s workspace was being moved into it, so the `
+          + 'move was stopped rather than replacing it — a command of yours is most likely writing there '
+          + 'right now. Nothing was changed. Run `stratus update` again once it has finished, and the two '
+          + 'will be merged.',
+        );
+      }
       await rename(from, target);
     };
     try {
@@ -942,6 +1008,11 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // rewritten once the move has landed. The marker is dropped so a
       // later run does not read it as a move that got further than it did.
       await clearMoveMarker(from);
+      // Already a full sentence naming its own fix, and a different fix
+      // from the one below: nothing of this agent's has moved.
+      if (error instanceof WorkspaceDestinationTakenError) {
+        throw error;
+      }
       // Loud, and not quarantined, which is the opposite of how an id with
       // nowhere to land is treated — because the consequence is opposite
       // too. A workspace half-moved is a ledger whose records name files
