@@ -136,12 +136,16 @@ fetched file that reads back as the agent's own words.
 Nothing is deleted here either. Each workspace is renamed, so it is in one
 place or the other and never both; a workspace an operator relocated behind
 a symlink is moved *as the link*, so their files stay where they put them.
-The ledger's own records are rewritten to follow the move — they are
-absolute paths, and every binary an MCP server returned was written and
-recorded *inside* the workspace, so leaving them would strip the label off
-each one. That rewrite happens after the move lands, and a workspace being
-moved carries a small `fs-provenance.jsonl.moving` note so that a run
-interrupted between the two is finished by the next one.
+The ledger's own records follow the move — they are absolute paths, and
+every binary an MCP server returned was written and recorded *inside* the
+workspace, so leaving them would strip the label off each one. They are
+re-recorded at the new path rather than edited in place, because ordinary
+commands keep appending to that file and a read-modify-write would drop
+whatever landed in between; the old records stay, naming paths nothing is
+at, which costs a line each and can only ever add a label. The re-recording
+happens after the move lands, and a workspace being moved carries a small
+`fs-provenance.jsonl.moving` note so a run interrupted between the two is
+finished by the next one.
 
 If the new path already holds a workspace, the two ledgers are folded
 together rather than one being refused. That is the ordinary shape of an

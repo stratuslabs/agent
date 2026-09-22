@@ -230,22 +230,36 @@ const reparented = (absolutePath: string, from: readonly string[], to: string): 
 };
 
 /**
- * Rewrite the ledger's own records after the workspace under them moved.
+ * Re-record, at the workspace's new path, everything the ledger had recorded
+ * at its old one.
  *
  * A ledger record is an absolute path, so a rename silently invalidates
  * every record naming a file inside the workspace — and `plugin-mcp` puts
  * every binary a server returns at `<workspace>/mcp/<server>/…` and records
  * it there, so this is the common case rather than a corner of it. A record
  * whose path is outside the workspace — the agent's ordinary `fs` roots,
- * which is most of them — is left exactly as it was.
+ * which is most of them — is nothing to do with this.
  *
- * Lines that will not parse are copied through byte for byte. The reader
- * refuses such a ledger and says to delete it; rewriting one here would
- * change which error an operator sees, and this migration has no opinion
- * about a ledger that was already broken.
+ * **Appended, not rewritten**, and that is the whole design. The obvious
+ * shape is read the file, edit the paths, write it back; but this migration
+ * does not have the ledger to itself. Ordinary commands take no home lock,
+ * deliberately, and the moment the rename exposes the new path one of them
+ * can append a record there. A read-modify-write would drop whatever landed
+ * between its read and its rename, and a dropped record is an externally
+ * sourced file reading back as the agent's own words — permanently, since
+ * the migration stamps afterwards.
  *
- * Staged and renamed into place rather than written over, because a
- * truncated ledger is a set of labels gone.
+ * An append cannot lose one. It also needs no exclusivity to be correct,
+ * because the format was built for concurrent appenders: `parseLedger` keeps
+ * the lowest label recorded for a path whichever process wrote it first.
+ *
+ * What it leaves behind is the old record, naming a path nothing is at any
+ * more. That costs a line each and is the safe direction: a stale record can
+ * only ever *add* a label to a path, never remove one.
+ *
+ * Lines that will not parse are left alone. The reader refuses such a ledger
+ * and says to delete it; this migration has no opinion about one that was
+ * already broken.
  *
  * `from` is every spelling of the workspace worth matching, because the
  * ledger is keyed the way `fs.read` looks a path up — through `realpath` —
@@ -264,41 +278,42 @@ const remapLedger = async (workspace: string, from: readonly string[], to: strin
     }
     throw error;
   }
-  let remapped = 0;
-  const lines = raw.split('\n').map((line) => {
+  const moved: string[] = [];
+  for (const line of raw.split('\n')) {
     if (line.trim().length === 0) {
-      return line;
+      continue;
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
     } catch {
-      return line;
+      continue;
     }
     if (typeof parsed !== 'object' || parsed === null) {
-      return line;
+      continue;
     }
     const record = parsed as { path?: unknown };
     if (typeof record.path !== 'string') {
-      return line;
+      continue;
     }
-    const moved = reparented(record.path, from, to);
-    if (moved === undefined) {
-      return line;
+    const at = reparented(record.path, from, to);
+    if (at === undefined) {
+      continue;
     }
-    remapped += 1;
     // Spread first, so every other field a record carries — the label, the
-    // timestamp, anything a newer build writes — survives the rewrite.
-    return JSON.stringify({ ...record, path: moved });
-  });
-  if (remapped === 0) {
+    // timestamp, anything a newer build writes — comes along with the path.
+    moved.push(JSON.stringify({ ...record, path: at }));
+  }
+  if (moved.length === 0) {
     return 0;
   }
-  const staging = `${ledgerPath}.rewriting-${randomUUID()}`;
-  await writeFile(staging, lines.join('\n'), { mode: 0o600 });
-  await chmod(staging, 0o600);
-  await rename(staging, ledgerPath);
-  return remapped;
+  // The rule the memory store owns: an append onto a file whose last byte is
+  // not a newline fuses two records into one unparseable line, and for a
+  // ledger that is a refusal to read any of it.
+  const lead = await memoryAppendNeedsNewline(ledgerPath) ? '\n' : '';
+  await appendFile(ledgerPath, `${lead}${moved.join('\n')}\n`, { mode: 0o600 });
+  await chmod(ledgerPath, 0o600);
+  return moved.length;
 };
 
 /**
@@ -492,7 +507,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       return undefined;
     }
     const [other, ...rest] = relative.split(path.sep);
-    if (other === undefined || !isValidAgentId(other)) {
+    // Only a workspace this run actually moved. One that was quarantined or
+    // whose ledger was folded is still at its legacy path, and a link to it
+    // is right as it stands.
+    if (other === undefined || !moved.has(other)) {
       return undefined;
     }
     return path.join(agentWorkspacePath(env, other), ...rest);
@@ -503,7 +521,19 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     quarantined: [],
     directoryNames: createStateDirectoryNames(env),
   };
-  for (const entry of entries) {
+  // Real workspaces first, links second, and the order is load-bearing: a
+  // link into this directory can only be pointed at where its workspace
+  // ended up once that is known. A workspace whose destination was already
+  // occupied stays where it is and its ledger is folded, so a link to it
+  // must keep naming the old path — sending it to `agents/<other>/workspace`
+  // would silently swap the shared files for a different workspace that an
+  // ordinary command happened to create.
+  const moved = new Set<string>();
+  const ordered = [
+    ...entries.filter((entry) => entry.isDirectory()),
+    ...entries.filter((entry) => !entry.isDirectory()),
+  ];
+  for (const entry of ordered) {
     if (!isWorkspaceEntry(entry)) {
       continue;
     }
@@ -664,6 +694,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         + 'that path with a symlink, and run `stratus update` again.',
       );
     }
+    moved.add(agentId);
     report.moved += 1;
   }
   // Only when it empties, and never recursively: an operator's own file in

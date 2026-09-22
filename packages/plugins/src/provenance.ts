@@ -349,8 +349,38 @@ export type LedgerGuard = (absolutePath: string, identity?: FileIdentity) => Pro
 
 const identityKey = (identity: FileIdentity): string => `${identity.dev}:${identity.ino}`;
 
-export const ledgerGuard = async (workspaces: readonly string[]): Promise<LedgerGuard> => {
-  if (workspaces.length === 0) {
+/**
+ * Roots whose immediate children are workspaces, judged lexically.
+ *
+ * This is the `workspaceRoot` contract and nothing else: one directory per
+ * agent directly under the root. It is kept because a workspace that does
+ * not exist *yet* still has a reserved ledger path, and enumerating what is
+ * on disk cannot name it — so an agent's very first `fs.write` could create
+ * or clobber `<root>/<id>/fs-provenance.jsonl` before any tainted write had
+ * made the directory.
+ *
+ * The host's own layout gets no such rule, deliberately. There the
+ * workspace sits inside `agents/<id>/`, so a root wide enough to reach an
+ * agent that has no directory yet already reaches every other agent's
+ * `whitelist.json` and `sessions.db` — there is nothing left for this to
+ * save. Under a configured root, which holds workspaces and nothing else,
+ * the reason the rule existed still holds.
+ */
+const isLedgerUnderRoot = (roots: readonly string[], absolutePath: string): boolean =>
+  roots.some((root) => {
+    const relative = path.relative(root, absolutePath);
+    if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
+      return false;
+    }
+    const segments = relative.split(path.sep);
+    return segments.length === 2 && segments[1] === LEDGER_FILENAME;
+  });
+
+export const ledgerGuard = async (
+  workspaces: readonly string[],
+  roots: readonly string[] = [],
+): Promise<LedgerGuard> => {
+  if (workspaces.length === 0 && roots.length === 0) {
     return async () => false;
   }
   // Every spelling of every agent's workspace: the path the host gave and
@@ -358,6 +388,20 @@ export const ledgerGuard = async (workspaces: readonly string[]): Promise<Ledger
   // from the root resolver and a workspace behind a link would otherwise
   // compare as outside.
   const spellings: string[] = [];
+  // Both spellings of each root too, for the same reason the workspaces
+  // have both: the path being judged arrives canonical from the resolver.
+  const rootSpellings: string[] = [];
+  for (const root of roots) {
+    rootSpellings.push(root);
+    try {
+      const canonical = await realpath(root);
+      if (canonical !== root) {
+        rootSpellings.push(canonical);
+      }
+    } catch {
+      // Not there yet: only the spelling the operator gave.
+    }
+  }
   const ledgers = new Set<string>();
   // And the files themselves, by identity: a hard link to a ledger from
   // inside a root has a path no spelling reaches and `realpath` leaves
@@ -390,7 +434,7 @@ export const ledgerGuard = async (workspaces: readonly string[]): Promise<Ledger
     }
   }
   return async (absolutePath, identity) => {
-    if (isLedgerPath(spellings, absolutePath) || ledgers.has(absolutePath)) {
+    if (isLedgerPath(spellings, absolutePath) || isLedgerUnderRoot(rootSpellings, absolutePath) || ledgers.has(absolutePath)) {
       return true;
     }
     if (identities.size === 0) {

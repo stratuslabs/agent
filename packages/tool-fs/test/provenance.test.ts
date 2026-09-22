@@ -222,18 +222,19 @@ test('fs.write refuses to edit the ledger itself, even inside a root that covers
   await run(tools, 'fs.read', { path: 'ava/notes.md' }, sessionAt('ava', 'user'), read.context);
   assert.deepEqual(read.marks, ['external']);
 
-  // Another agent's ledger is refused too — every agent the host knows of,
-  // which under a configured root is every directory in it.
-  //
-  // An id with no directory anywhere is not one of them. That check was
-  // lexical once — `<root>/<anything>/fs-provenance.jsonl` — and could be
-  // while the root held workspaces and nothing else. A workspace now lives
-  // inside the agent's own state directory, so a root wide enough to reach
-  // an unknown agent's ledger already reaches its `whitelist.json` and its
-  // `sessions.db`, and there is nothing left here for this guard to save.
-  await mkdir(path.join(workspaceRoot, 'bea'), { recursive: true });
+  // Another agent's ledger is refused too, and an agent that has no
+  // directory yet is *still* one of them: under a configured root the rule
+  // is structural — one directory per agent directly under it — so the
+  // ledger path is reserved before the first tainted write creates it.
+  // Enumerating what is on disk could not name that one, and an agent's
+  // very first `fs.write` would have been free to take it.
   await assert.rejects(
     () => run(tools, 'fs.write', { path: `bea/${LEDGER_FILENAME}`, content: '{}' }, sessionAt('ava', 'agent')),
+    /provenance ledger/,
+  );
+  await mkdir(path.join(workspaceRoot, 'cyd'), { recursive: true });
+  await assert.rejects(
+    () => run(tools, 'fs.write', { path: `cyd/${LEDGER_FILENAME}`, content: '{}' }, sessionAt('ava', 'agent')),
     /provenance ledger/,
   );
   // And only the ledger: a project file that happens to share the name, one

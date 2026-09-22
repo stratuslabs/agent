@@ -1099,8 +1099,13 @@ export const createFsPlugin = (config: JsonObject = {}): Plugin => {
       // Which paths are a ledger is decided per call, from the workspaces as
       // they stand — see `ledgerGuard` for the spellings a ledger can have
       // and why none is cached.
-      const isLedger = async (): Promise<LedgerGuard> =>
-        ledgerGuard(await allAgentWorkspaces(context.workspaces, ledgerRoot));
+      const isLedger = async (): Promise<LedgerGuard> => ledgerGuard(
+        await allAgentWorkspaces(context.workspaces, ledgerRoot),
+        // The configured root's own contract — one directory per agent
+        // directly under it — so an agent whose workspace does not exist
+        // yet still has its ledger path reserved. See `ledgerGuard`.
+        ledgerRoot !== undefined ? [ledgerRoot] : [],
+      );
       context.tools.register(createReadTool(config, ledger, isLedger, serialized));
       context.tools.register(createListTool(config, ledger));
       context.tools.register(createSearchTool(config, ledger, isLedger));
