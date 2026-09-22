@@ -1156,7 +1156,20 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // naming the legacy path.
     if (ready.length === 0) {
       for (const entry of deferred) {
-        if (isValidAgentId(entry.name) && await pathIsFree(agentWorkspacePath(env, entry.name))) {
+        if (!isValidAgentId(entry.name) || !(await pathIsFree(agentWorkspacePath(env, entry.name)))) {
+          continue;
+        }
+        // And only if its directory can actually be made, asked through the
+        // rule that decides it rather than a second copy of the rule. A
+        // member announced as moving and then quarantined — `agents/<id>`
+        // is a regular file, say — leaves its peers pointed at a path that
+        // never appears, with their own legacy entries already unlinked.
+        //
+        // The name tracker is shared, because the directory really is
+        // created here and the name really is taken; the quarantine lines
+        // are not, because `move` is about to produce the real ones.
+        const probe: DirectoryReport = { quarantined: [], directoryNames: report.directoryNames };
+        if (await agentDirectoryOrQuarantine(env, entry.name, 'workspace', probe) !== undefined) {
           moved.add(entry.name);
         }
       }

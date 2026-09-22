@@ -61,6 +61,17 @@ const truncate = (value: string, maxBytes: number, dropped: boolean): { text: st
   return { text: `${value.slice(0, maxBytes)}\n… output truncated at ${maxBytes} bytes`, truncated: true };
 };
 
+/**
+ * The output cap, without asking where the workspace is.
+ *
+ * `parseResult` runs after the subprocess has finished, and asking the
+ * preparing seam again there would let a workspace that went away between
+ * the two turn a command that already ran — and may already have changed
+ * something — into a failed tool result somebody retries.
+ */
+const maxOutputBytesFor = (config: JsonObject, session: Session): number =>
+  asNumber(resolvePluginAgentConfig(config, session.agent.id).maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
+
 const settingsFor = (
   config: JsonObject,
   session: Session,
@@ -189,9 +200,9 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       };
     },
     parseResult(result: LocalCommandExecution, context): JsonValue {
-      const settings = settingsFor(config, context.session, options.processEnv ?? process.env, options.workspaces);
-      const stdout = truncate(result.stdout, settings.maxOutputBytes, result.stdoutTruncated);
-      const stderr = truncate(result.stderr, settings.maxOutputBytes, result.stderrTruncated);
+      const maxOutputBytes = maxOutputBytesFor(config, context.session);
+      const stdout = truncate(result.stdout, maxOutputBytes, result.stdoutTruncated);
+      const stderr = truncate(result.stderr, maxOutputBytes, result.stderrTruncated);
       return {
         stdout: stdout.text,
         stderr: stderr.text,

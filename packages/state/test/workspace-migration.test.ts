@@ -1115,6 +1115,29 @@ test('a chain of workspace links resolves whichever order they are listed in', a
   await assert.rejects(readdir(legacyWorkspacesDirPath(env)), /ENOENT/);
 });
 
+test('a cycle member that cannot be given a directory is not announced as moving', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink('bea', path.join(legacyWorkspacesDirPath(env), 'ava'));
+  await symlink('ava', path.join(legacyWorkspacesDirPath(env), 'bea'));
+  // `ava` has nowhere to land: a regular file sits where its state
+  // directory would go. Announcing it as moving anyway would point `bea`
+  // at `agents/ava/workspace`, which never appears — and `bea`'s own
+  // legacy entry is unlinked as it goes, so nothing would be left naming
+  // anything.
+  await writeFile(path.join(agentsDirPath(env), 'ava'), 'not a directory');
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
+  assert.match(line, /ava/);
+
+  assert.equal(
+    path.resolve(path.dirname(agentWorkspacePath(env, 'bea')), await readlink(agentWorkspacePath(env, 'bea'))),
+    path.join(legacyWorkspacesDirPath(env), 'ava'),
+  );
+});
+
 test('links that point at each other are left as they are rather than looping forever', async () => {
   const home = await newHome();
   const env = { homeDir: home };
