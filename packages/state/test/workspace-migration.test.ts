@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, stat, symlink, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -477,4 +477,50 @@ test('a dangling link at the destination leaves the source ledger alone rather t
   // did not abort over it either.
   assert.equal(await readFile(path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl'), 'utf8'), recorded);
   assert.ok(applied(results).includes(MIGRATION));
+});
+
+test('two real workspaces sharing one ledger file is not a ledger to fold into itself', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const recorded = ledgerLine('/home/ada/notes/vendor.md');
+  await seedWorkspace(home, 'ava', { 'fs-provenance.jsonl': recorded, 'own.md': 'mine' });
+  const source = path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl');
+  // Distinct directories, one ledger: a link at the *file* rather than at
+  // the directory, which `ledgerGuard` deliberately recognises — so it is a
+  // layout this migration has to expect. Folding would append the ledger to
+  // itself and then retire the file both names point at, leaving the
+  // destination dangling with every record in a file nothing consults.
+  const workspace = agentWorkspacePath(env, 'ava');
+  await mkdir(workspace, { recursive: true });
+  await writeFile(path.join(workspace, 'later.md'), 'written since the upgrade');
+  await symlink(source, path.join(workspace, 'fs-provenance.jsonl'));
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
+  assert.match(line, /already reads the very ledger in workspaces[\\/]ava/);
+  assert.ok(!line.includes('folded'), line);
+
+  // The one ledger is still live under both names, with its records intact.
+  assert.equal(await readFile(source, 'utf8'), recorded);
+  assert.equal(await readFile(path.join(workspace, 'fs-provenance.jsonl'), 'utf8'), recorded);
+  assert.ok(!(await readdir(path.join(legacyWorkspacesDirPath(env), 'ava'))).includes('fs-provenance.jsonl.migrated'));
+});
+
+test('a hard link to the ledger is the same file too, and is not folded either', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const recorded = ledgerLine('/home/ada/notes/vendor.md');
+  await seedWorkspace(home, 'ava', { 'fs-provenance.jsonl': recorded });
+  const workspace = agentWorkspacePath(env, 'ava');
+  await mkdir(workspace, { recursive: true });
+  // No amount of `realpath` reveals this one — only the inode does.
+  await link(
+    path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl'),
+    path.join(workspace, 'fs-provenance.jsonl'),
+  );
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  assert.match(results.find((result) => result.id === MIGRATION)?.detail ?? '', /already reads the very ledger/);
+  // Not doubled: an append through either name would have written both.
+  assert.equal(await readFile(path.join(workspace, 'fs-provenance.jsonl'), 'utf8'), recorded);
 });

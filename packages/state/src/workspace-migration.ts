@@ -224,8 +224,17 @@ const remapLedger = async (workspace: string, from: readonly string[], to: strin
  * records again. Idempotent either way, since the labels would resolve the
  * same, but a file that grows on every `stratus serve` is its own defect.
  */
-const foldLedgerInto = async (from: string, target: string): Promise<'none' | 'folded' | 'unreachable'> => {
+const foldLedgerInto = async (
+  from: string,
+  target: string,
+): Promise<'none' | 'folded' | 'aliased' | 'unreachable'> => {
   const source = ledgerIn(from);
+  // The destination's ledger can be this very file under another name, with
+  // two real workspace directories on either side of it — see `sameEntry`.
+  // Nothing to fold: the records are already live where a read will look.
+  if (await sameEntry(source, ledgerIn(target))) {
+    return 'aliased';
+  }
   let raw: string;
   try {
     raw = await readFile(source, 'utf8');
@@ -265,18 +274,27 @@ const foldLedgerInto = async (from: string, target: string): Promise<'none' | 'f
 };
 
 /**
- * Whether two paths are the same directory, following links.
+ * Whether two paths are the same thing on disk, following links.
  *
- * Asked before folding one workspace's ledger into another's, because the
- * destination can be a link back to the source — an operator's hand-made
+ * Asked twice before folding one workspace's ledger into another's, because
+ * the destination can be an alias of the source at either level, and
+ * folding an alias is the same disaster both times: the append doubles a
+ * ledger into itself, and retiring the source then leaves the destination
+ * naming a file that is not there. The workspace is reachable at the new
+ * path with no ledger at all, so `fs.write` stops refusing it, `fs.read`
+ * labels nothing, and every record sits in a file nothing consults.
+ *
+ * The *directory* can be an alias — an operator's hand-made
  * `agents/<id>/workspace -> workspaces/<id>`, or this migration's own
- * recreate-then-unlink for a relative link, interrupted. Folding then reads
- * a ledger and appends it to *itself*, doubling it, and retires the live
- * file to `.migrated`: the workspace is left reachable at the new path with
- * no ledger at all, so `fs.write` stops refusing it and every label is
- * gone.
+ * recreate-then-unlink for a relative link, interrupted. So can the
+ * *ledger file alone*, with two real workspace directories: a link at the
+ * file rather than at the directory is a layout `ledgerGuard` deliberately
+ * recognises, so it is one this migration has to expect.
+ *
+ * Identity rather than spelling, which also answers a hard link — the other
+ * shape `ledgerGuard` tracks, and one no amount of `realpath` would reveal.
  */
-const sameDirectory = async (a: string, b: string): Promise<boolean> => {
+const sameEntry = async (a: string, b: string): Promise<boolean> => {
   try {
     const [left, right] = await Promise.all([stat(a), stat(b)]);
     return left.dev === right.dev && left.ino === right.ino;
@@ -350,10 +368,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       const there = path.relative(stratusHomePath(env), target);
       // The destination may be a link back to this very workspace, in which
       // case there is one directory and one ledger and nothing to fold —
-      // see `sameDirectory` for what folding a ledger into itself costs.
+      // see `sameEntry` for what folding a ledger into itself costs.
       // Already reachable at the new path, so this is a finished state and
       // not a collision.
-      if (await sameDirectory(from, target)) {
+      if (await sameEntry(from, target)) {
         report.quarantined.push(`${agentId} — ${there} already resolves to ${here}, so it was left as it is`);
         continue;
       }
@@ -364,11 +382,15 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       if (folded === 'folded') {
         report.merged.push(agentId);
       }
-      report.quarantined.push(folded === 'unreachable'
-        ? `${agentId} — something is at ${there} that its provenance records cannot be written into, so `
-          + `${here} was left untouched; its ledger is the only copy of those labels`
-        : `${agentId} — ${there} already existed, so what is left of ${here} stays there; its provenance `
-          + 'records were folded into the ledger at the new path, and the files they name have not moved');
+      const why = folded === 'unreachable'
+        ? `something is at ${there} that its provenance records cannot be written into, so ${here} was left `
+          + 'untouched; its ledger is the only copy of those labels'
+        : folded === 'aliased'
+          ? `${there} already reads the very ledger in ${here}, so there was nothing to fold; both are left `
+            + 'as they are'
+          : `${there} already existed, so what is left of ${here} stays there; its provenance records were `
+            + 'folded into the ledger at the new path, and the files they name have not moved';
+      report.quarantined.push(`${agentId} — ${why}`);
       continue;
     }
     if (!entry.isSymbolicLink()) {
@@ -422,7 +444,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           );
           // Both exist for an instant. A run killed here finds the source
           // again next time and the destination resolving to the same
-          // directory, which `sameDirectory` above reads as finished.
+          // directory, which `sameEntry` above reads as finished.
           await unlink(from);
           return;
         }
