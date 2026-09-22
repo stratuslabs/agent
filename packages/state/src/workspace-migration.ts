@@ -457,20 +457,22 @@ const appendRecords = async (destination: string, body: string): Promise<void> =
  * records again. Idempotent either way, since the labels would resolve the
  * same, but a file that grows on every `stratus serve` is its own defect.
  *
- * **Read twice, either side of that rename**, because retiring the source
- * is the only thing that stops records still arriving in it. An older
- * build resolves `workspaces/<id>` by pathname and appends there on every
- * tainted write, ordinary commands take no home lock, and one of them can
- * append between the read below and the rename — into a file the new
- * runtime will never consult again, which is a label gone for good. The
- * rename closes the path, and the second read collects whatever made it in
- * first. `appendFile` opens, writes and closes per record, so after the
- * rename there is no descriptor left that still reaches the archive.
+ * **Read twice**, because the first read is not a snapshot of anything
+ * that has stopped. An older build resolves `workspaces/<id>` by pathname
+ * and appends there on every tainted write, ordinary commands take no home
+ * lock, and a record that lands after the read is only in the source — a
+ * file the collided agent no longer consults, so the label is gone for
+ * good once 0004 stamps.
  *
- * The offset the second read resumes from is the end of the last
- * *complete* line, not the end of what was read: a record caught
- * mid-append would otherwise be split across the two reads and dropped by
- * both halves, when waiting one read recovers it whole.
+ * The second read narrows that window; it does not close it, and nothing
+ * here can. Retiring the source shuts the *name*, but `recordWrite` holds
+ * one descriptor across its read and its append — deliberately, so a
+ * relocated ledger resolves once — and a writer already inside that window
+ * appends to the archive after the rename. Where the source stays live
+ * because another agent shares it, there is not even a name to shut. The
+ * barrier is the exclusive bracket this migration runs under; an older
+ * build still writing to a home being migrated is what that bracket is
+ * for, and no ordering inside this function substitutes for it.
  */
 const foldLedgerInto = async (
   from: string,
@@ -514,11 +516,37 @@ const foldLedgerInto = async (
       throw error;
     }
   }
+  /**
+   * Whatever landed in the source after the read above — a legacy command
+   * appending while this ran. Reading the ledger of a fleet that has been
+   * up for months is not instant, and a record that lands inside that read
+   * is only in the source, which the collided agent no longer consults.
+   *
+   * Resumed from `complete` rather than from the end of what was read, so
+   * a record caught mid-append is recovered whole rather than split across
+   * the two reads and dropped by both halves.
+   *
+   * Not guarded the way the first append is: the destination took records
+   * a moment ago, and a failure here is a fold left half done, which this
+   * migration throws on rather than stamping over.
+   */
+  const foldRest = async (at: string): Promise<void> => {
+    const late = await readFile(at);
+    if (late.length <= complete) {
+      return;
+    }
+    const rest = foldableLines(late.subarray(complete).toString('utf8'));
+    dropped += rest.dropped;
+    if (rest.body.length > 0) {
+      await appendRecords(destination, rest.body);
+    }
+  };
   if (!retire) {
     // Somebody else is still reading this file — see `workspaceIsShared`.
     // Copied rather than moved, then: the duplicate records resolve to the
     // same labels wherever they are read, and the alternative is taking an
     // agent's whole ledger away to migrate a different agent.
+    await foldRest(source);
     return { outcome: 'folded', dropped };
   }
   // Never over an archive already there: a run killed between the append
@@ -526,18 +554,7 @@ const foldLedgerInto = async (
   const candidate = `${source}.migrated`;
   const archive = await pathIsFree(candidate) ? candidate : `${candidate}-${randomUUID()}`;
   await rename(source, archive);
-  // Whatever arrived while the name was still open. Not guarded the way the
-  // append above is: the destination took records a moment ago, and a
-  // failure here is a fold left half done, which this migration throws on
-  // rather than stamping over — the same rule the rest of it follows.
-  const late = await readFile(archive);
-  if (late.length > complete) {
-    const rest = foldableLines(late.subarray(complete).toString('utf8'));
-    dropped += rest.dropped;
-    if (rest.body.length > 0) {
-      await appendRecords(destination, rest.body);
-    }
-  }
+  await foldRest(archive);
   return { outcome: 'folded', dropped };
 };
 
@@ -600,21 +617,29 @@ const sameEntry = async (a: string, b: string): Promise<boolean> => {
  */
 const workspaceIsShared = async (env: StateEnvironment, from: string): Promise<boolean> => {
   const candidates: string[] = [];
-  try {
-    for (const name of await readdir(legacyWorkspacesDirPath(env))) {
-      candidates.push(path.join(legacyWorkspacesDirPath(env), name));
-    }
-  } catch {
-    // Gone or not a directory: there is nothing left to share it with.
-  }
-  try {
-    for (const entry of await readdir(agentsDirPath(env), { withFileTypes: true })) {
-      if (entry.isDirectory() && isValidAgentId(entry.name)) {
-        candidates.push(agentWorkspacePath(env, entry.name));
+  // Absence is an answer — nothing there is nothing to share it with — and
+  // every other failure is "cannot tell", which must not read as "nobody
+  // else has it". A directory that is searchable but not listable, or a
+  // transient `EMFILE`, would otherwise retire a ledger an agent this walk
+  // never saw is still reading, and 0004 stamps over that.
+  const listed = async <T>(work: Promise<T[]>): Promise<T[]> => {
+    try {
+      return await work;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        return [];
       }
+      throw error;
     }
-  } catch {
-    // Same.
+  };
+  for (const name of await listed(readdir(legacyWorkspacesDirPath(env)))) {
+    candidates.push(path.join(legacyWorkspacesDirPath(env), name));
+  }
+  for (const entry of await listed(readdir(agentsDirPath(env), { withFileTypes: true }))) {
+    if (entry.isDirectory() && isValidAgentId(entry.name)) {
+      candidates.push(agentWorkspacePath(env, entry.name));
+    }
   }
   for (const candidate of candidates) {
     if (candidate === from) {

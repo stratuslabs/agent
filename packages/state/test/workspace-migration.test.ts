@@ -225,7 +225,16 @@ test('a ledger two agents share is not taken away to migrate one of them', async
   // directory, sharing its ledger. The format tolerates it — records are
   // keyed by absolute path and labels only ever go down.
   const shared = await mkdtemp(path.join(os.tmpdir(), 'stratus-shared-'));
-  await writeFile(path.join(shared, 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/shared.md'));
+  // The second record has no trailing newline, which is what a writer
+  // interrupted between its record and its newline leaves. The fold's
+  // first read stops at the last complete line, so this one reaches the
+  // destination only through the read that follows — the same read that
+  // catches a record appended while the fold was running, which is the
+  // case there is no way to schedule from a test.
+  await writeFile(
+    path.join(shared, 'fs-provenance.jsonl'),
+    `${ledgerLine('/home/ada/notes/shared.md')}${ledgerLine('/home/ada/notes/late.md').trimEnd()}`,
+  );
   await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
   await symlink(shared, path.join(legacyWorkspacesDirPath(env), 'ava'));
   await symlink(shared, path.join(legacyWorkspacesDirPath(env), 'bea'));
@@ -240,12 +249,15 @@ test('a ledger two agents share is not taken away to migrate one of them', async
 
   // ava got the records, as a fold always does.
   const forAva = await createFileLedger(() => agentWorkspacePath(env, 'ava')).snapshot('ava');
-  assert.deepEqual(Object.keys(forAva).sort(), ['/home/ada/notes/own.md', '/home/ada/notes/shared.md']);
+  assert.deepEqual(
+    Object.keys(forAva).sort(),
+    ['/home/ada/notes/late.md', '/home/ada/notes/own.md', '/home/ada/notes/shared.md'],
+  );
   // And bea, which never collided and whose workspace is that same shared
   // directory, still has one. Retiring it for ava's sake would have left
   // every externally sourced file in there reading back as bea's own words.
   const forBea = await createFileLedger(() => agentWorkspacePath(env, 'bea')).snapshot('bea');
-  assert.deepEqual(Object.keys(forBea), ['/home/ada/notes/shared.md']);
+  assert.deepEqual(Object.keys(forBea).sort(), ['/home/ada/notes/late.md', '/home/ada/notes/shared.md']);
   assert.equal(await realpath(agentWorkspacePath(env, 'bea')), await realpath(shared));
   assert.ok(!(await readdir(shared)).includes('fs-provenance.jsonl.migrated'));
 });
