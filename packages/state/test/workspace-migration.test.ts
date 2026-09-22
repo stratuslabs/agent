@@ -1138,6 +1138,25 @@ test('a cycle member that cannot be given a directory is not announced as moving
   );
 });
 
+test('a link at the legacy directory itself keeps it, rather than having it swept away', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // An operator saying this agent's workspace is the whole of `workspaces/`.
+  // There is no agent id in that target to follow, so the link keeps naming
+  // the directory — and the sweep that removes `workspaces/` once it empties
+  // would then leave it naming nothing.
+  await seedWorkspace(home, 'bea', { 'own.md': 'mine' });
+  await symlink('.', path.join(legacyWorkspacesDirPath(env), 'ava'));
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  assert.ok(applied(results).includes(MIGRATION), applied(results).join(', '));
+
+  // bea moved out, `workspaces/` emptied — and stayed, because ava names it.
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'bea'), 'own.md'), 'utf8'), 'mine');
+  assert.equal(await realpath(agentWorkspacePath(env, 'ava')), await realpath(legacyWorkspacesDirPath(env)));
+  assert.deepEqual(await readdir(legacyWorkspacesDirPath(env)), []);
+});
+
 test('links that point at each other are left as they are rather than looping forever', async () => {
   const home = await newHome();
   const env = { homeDir: home };

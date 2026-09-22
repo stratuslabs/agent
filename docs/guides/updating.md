@@ -162,7 +162,8 @@ first. What is left of the old workspace stays where it is and is named in
 the report; its records are *not* rewritten, because those files did not
 move. A directory whose name is not an agent id (a `.cache/` something
 dropped in there) is left alone the same way, and `workspaces/` itself is
-removed only if it empties, never recursively.
+removed only if it empties, never recursively — and not at all if a
+workspace link still names it, which `workspaces/<id> -> .` does.
 
 The old ledger is retired to `fs-provenance.jsonl.migrated` afterwards, so
 a re-run does not append the same records again — unless another workspace

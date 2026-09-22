@@ -849,6 +849,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // would silently swap the shared files for a different workspace that an
   // ordinary command happened to create.
   const moved = new Set<string>();
+  // Set when a link this run relocates still names the legacy directory —
+  // see `moveIntoPlace`. It is the one thing that keeps the sweep below
+  // from removing a directory that has emptied.
+  let legacyStillNamed = false;
   /**
    * Whether `target` holds the link this migration would have written for
    * `from` — which only the recreate step writes.
@@ -1037,11 +1041,18 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       if (entry.isSymbolicLink()) {
         const text = await readlink(from);
         const resolved = await migratedTarget(path.resolve(path.dirname(from), text));
+        const names = resolved ?? path.resolve(path.dirname(from), text);
+        // A link at the legacy directory *itself* — `workspaces/ava -> .`,
+        // which is an operator saying this agent's workspace is the whole of
+        // it. There is no agent id to follow, so it keeps naming that
+        // directory, and the sweep at the end must therefore not remove it:
+        // it empties as the rest of the fleet moves out, and removing it
+        // would leave this link naming nothing.
+        if (legacySpellings.includes(names)) {
+          legacyStillNamed = true;
+        }
         if (!path.isAbsolute(text) || resolved !== undefined) {
-          await symlink(
-            path.relative(path.dirname(target), resolved ?? path.resolve(path.dirname(from), text)),
-            target,
-          );
+          await symlink(path.relative(path.dirname(target), names), target);
           // Both exist for an instant. A run killed here finds the source
           // again next time and the destination resolving to the same
           // directory, which `sameEntry` above reads as finished.
@@ -1183,9 +1194,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     pending = deferred;
   }
   // Only when it empties, and never recursively: an operator's own file in
-  // here is theirs, and a workspace left behind is that agent's output.
+  // here is theirs, and a workspace left behind is that agent's output. And
+  // never while a workspace this run moved still names this directory.
   try {
-    await rmdir(legacy);
+    if (!legacyStillNamed) {
+      await rmdir(legacy);
+    }
   } catch {
     // Still holding something. Nothing to report: what is left is either
     // named above or was never this migration's.
