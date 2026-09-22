@@ -159,6 +159,15 @@ move. A directory whose name is not an agent id (a `.cache/` something
 dropped in there) is left alone the same way, and `workspaces/` itself is
 removed only if it empties, never recursively.
 
+Only lines a reader could parse are folded. A ledger has one record per
+line and is refused in full if any line is unreadable, so a record cut off
+mid-append by a kill — the likeliest thing to be wrong with a file left
+behind in an old workspace — would otherwise take the working ledger at the
+new path down with it, and every `fs` call for that agent with it. Such
+lines stay in the retired `fs-provenance.jsonl.migrated` beside the old
+workspace, which keeps the file's original bytes, and the report says how
+many there were.
+
 One thing a rollback does lose, and it is not stamped: an agent's
 `origins` and `tools` grants. `whitelist.json` holds every kind of
 grant under the same version, so a daemon predating

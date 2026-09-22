@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { whitelistPathFor } from '@stratusagent/permissions';
+import { createFileLedger } from '@stratusagent/plugins';
 
 import {
   STATE_SCHEMA_VERSION,
@@ -184,6 +185,39 @@ test('a destination the deferral window already created is merged, not refused',
   assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), 'utf8'), live);
   assert.ok((await readdir(path.join(legacyWorkspacesDirPath(env), 'ava'))).includes('fs-provenance.jsonl.migrated'));
 });
+test('a line no reader can parse is left in the archive rather than folded into a ledger that works', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // What an abandoned ledger actually looks like: a record, a line that is
+  // not JSON at all, and a last record cut off mid-append by a kill.
+  const torn = `${ledgerLine('/home/ada/notes/old.md')}not json at all\n${ledgerLine('/home/ada/notes/cut.md').slice(0, 30)}`;
+  await seedWorkspace(home, 'ava', { 'fs-provenance.jsonl': torn });
+  // And a destination ledger that is perfectly fine, which is what makes
+  // this worth refusing: `parseLedger` throws on the first line it cannot
+  // read and refuses the *whole* file, so folding the bytes across would
+  // have taken every `fs.read` and `fs.write` for this agent down with it.
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/new.md'));
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
+  // Two: the line that is not JSON, and the fragment after the last
+  // newline — which is only reached on the re-read the rename opens, since
+  // the first pass stops at the end of the last *complete* line.
+  assert.match(line, /2 line\(s\) no reader could parse were left behind in the archived ledger/);
+
+  // The live ledger still reads, and it has both sides' labels.
+  const snapshot = await createFileLedger(() => agentWorkspacePath(env, 'ava')).snapshot('ava');
+  assert.deepEqual(Object.keys(snapshot).sort(), ['/home/ada/notes/new.md', '/home/ada/notes/old.md']);
+
+  // Nothing is destroyed to achieve that: the archive beside the legacy
+  // workspace holds the original bytes, torn line and all.
+  assert.equal(
+    await readFile(path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl.migrated'), 'utf8'),
+    torn,
+  );
+});
+
 test('a file an operator left among the workspaces is not an agent’s, and keeps the directory', async () => {
   const home = await newHome();
   const env = { homeDir: home };

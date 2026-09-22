@@ -384,6 +384,68 @@ const remapLedger = async (workspace: string, from: readonly string[], to: strin
 };
 
 /**
+ * What a fold did, for the line the report gives the operator.
+ *
+ * `dropped` is only ever non-zero alongside `folded`, and it is worth
+ * saying out loud rather than returning silently: a ledger nobody could
+ * read is exactly the state an operator is entitled to hear about, and the
+ * bytes it held are still in the archive beside it.
+ */
+interface FoldResult {
+  outcome: 'none' | 'folded' | 'aliased' | 'unreachable';
+  dropped: number;
+}
+
+/**
+ * The lines of a source ledger that are safe to append to another one.
+ *
+ * `parseLedger` throws on the *first* line it cannot parse and refuses the
+ * whole file — so copying a torn line out of a broken ledger and into a
+ * working one does not merely carry the damage across, it spreads it: every
+ * `fs.read` and every `fs.write` for that agent would start failing on a
+ * ledger that read fine a moment ago. One interrupted append in the legacy
+ * workspace is all it takes, and that is the likeliest thing to be wrong
+ * with a file this migration finds abandoned.
+ *
+ * Dropping the line loses whatever label it carried, which is the honest
+ * trade: it carried none that anything could read, since the ledger holding
+ * it was already refused in full. `remapLedger` takes the same position on
+ * the same lines — this migration has no opinion about a ledger that was
+ * already broken — and the archive keeps the original bytes either way.
+ *
+ * Records that parse but carry nothing this build recognises are copied
+ * across untouched. `parseLedger` skips those without complaint, and a
+ * field a newer build writes is not ours to discard.
+ */
+const foldableLines = (raw: string): { body: string; dropped: number } => {
+  let dropped = 0;
+  const kept: string[] = [];
+  for (const line of raw.split('\n')) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+    try {
+      JSON.parse(line);
+    } catch {
+      dropped += 1;
+      continue;
+    }
+    kept.push(line);
+  }
+  return { body: kept.length > 0 ? `${kept.join('\n')}\n` : '', dropped };
+};
+
+/** Append records onto a ledger, leaving it owner-only and parseable. */
+const appendRecords = async (destination: string, body: string): Promise<void> => {
+  // The rule the memory store already owns: an append onto a file whose
+  // last byte is not a newline fuses two records into one unparseable
+  // line — which, for a ledger, is a refusal to read any of it.
+  const lead = await memoryAppendNeedsNewline(destination) ? '\n' : '';
+  await appendFile(destination, `${lead}${body}`, { mode: 0o600 });
+  await chmod(destination, 0o600);
+};
+
+/**
  * Fold the legacy workspace's ledger into the one already at the new path.
  *
  * Append-only and order-independent by construction — see the note at the
@@ -394,37 +456,51 @@ const remapLedger = async (workspace: string, from: readonly string[], to: strin
  * The source is retired afterwards so a second run does not append the same
  * records again. Idempotent either way, since the labels would resolve the
  * same, but a file that grows on every `stratus serve` is its own defect.
+ *
+ * **Read twice, either side of that rename**, because retiring the source
+ * is the only thing that stops records still arriving in it. An older
+ * build resolves `workspaces/<id>` by pathname and appends there on every
+ * tainted write, ordinary commands take no home lock, and one of them can
+ * append between the read below and the rename — into a file the new
+ * runtime will never consult again, which is a label gone for good. The
+ * rename closes the path, and the second read collects whatever made it in
+ * first. `appendFile` opens, writes and closes per record, so after the
+ * rename there is no descriptor left that still reaches the archive.
+ *
+ * The offset the second read resumes from is the end of the last
+ * *complete* line, not the end of what was read: a record caught
+ * mid-append would otherwise be split across the two reads and dropped by
+ * both halves, when waiting one read recovers it whole.
  */
 const foldLedgerInto = async (
   from: string,
   target: string,
-): Promise<'none' | 'folded' | 'aliased' | 'unreachable'> => {
+): Promise<FoldResult> => {
   const source = ledgerIn(from);
   // The destination's ledger can be this very file under another name, with
   // two real workspace directories on either side of it — see `sameEntry`.
   // Nothing to fold: the records are already live where a read will look.
   if (await sameEntry(source, ledgerIn(target))) {
-    return 'aliased';
+    return { outcome: 'aliased', dropped: 0 };
   }
-  let raw: string;
+  let raw: Buffer;
   try {
-    raw = await readFile(source, 'utf8');
+    raw = await readFile(source);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return 'none';
+      return { outcome: 'none', dropped: 0 };
     }
     throw error;
   }
-  if (raw.trim().length > 0) {
-    const destination = ledgerIn(target);
+  const destination = ledgerIn(target);
+  // Bytes, not characters: this offset indexes back into a file on disk.
+  const complete = raw.lastIndexOf(0x0a) + 1;
+  let dropped = 0;
+  const first = foldableLines(raw.subarray(0, complete).toString('utf8'));
+  dropped += first.dropped;
+  if (first.body.length > 0) {
     try {
-      // The rule the memory store already owns: an append onto a file whose
-      // last byte is not a newline fuses two records into one unparseable
-      // line — which, for a ledger, is a refusal to read any of it.
-      const lead = await memoryAppendNeedsNewline(destination) ? '\n' : '';
-      const body = raw.endsWith('\n') ? raw : `${raw}\n`;
-      await appendFile(destination, `${lead}${body}`, { mode: 0o600 });
-      await chmod(destination, 0o600);
+      await appendRecords(destination, first.body);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       // Something is at the destination — `pathIsFree` said so — but it is
@@ -432,16 +508,29 @@ const foldLedgerInto = async (
       // is the shape that reaches here. The source keeps its ledger, which
       // is the only copy of those labels, and the agent is named.
       if (code === 'ENOENT' || code === 'ENOTDIR') {
-        return 'unreachable';
+        return { outcome: 'unreachable', dropped: 0 };
       }
       throw error;
     }
   }
   // Never over an archive already there: a run killed between the append
   // and this rename leaves one, and the retry must not bury it.
-  const archive = `${source}.migrated`;
-  await rename(source, await pathIsFree(archive) ? archive : `${archive}-${randomUUID()}`);
-  return 'folded';
+  const candidate = `${source}.migrated`;
+  const archive = await pathIsFree(candidate) ? candidate : `${candidate}-${randomUUID()}`;
+  await rename(source, archive);
+  // Whatever arrived while the name was still open. Not guarded the way the
+  // append above is: the destination took records a moment ago, and a
+  // failure here is a fold left half done, which this migration throws on
+  // rather than stamping over — the same rule the rest of it follows.
+  const late = await readFile(archive);
+  if (late.length > complete) {
+    const rest = foldableLines(late.subarray(complete).toString('utf8'));
+    dropped += rest.dropped;
+    if (rest.body.length > 0) {
+      await appendRecords(destination, rest.body);
+    }
+  }
+  return { outcome: 'folded', dropped };
 };
 
 /**
@@ -666,17 +755,23 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // succeeded, so the records here still name where their files are.
       await clearMoveMarker(from);
       const folded = await foldLedgerInto(from, target);
-      if (folded === 'folded') {
+      if (folded.outcome === 'folded') {
         report.merged.push(agentId);
       }
-      const why = folded === 'unreachable'
+      // Said out loud, because a torn line means that ledger was refusing
+      // every read for this agent before the migration touched it, and the
+      // operator's copy of those bytes is now the archive beside it.
+      const torn = folded.dropped > 0
+        ? ` (${folded.dropped} line(s) no reader could parse were left behind in the archived ledger)`
+        : '';
+      const why = folded.outcome === 'unreachable'
         ? `something is at ${there} that its provenance records cannot be written into, so ${here} was left `
           + 'untouched; its ledger is the only copy of those labels'
-        : folded === 'aliased'
+        : folded.outcome === 'aliased'
           ? `${there} already reads the very ledger in ${here}, so there was nothing to fold; both are left `
             + 'as they are'
           : `${there} already existed, so what is left of ${here} stays there; its provenance records were `
-            + 'folded into the ledger at the new path, and the files they name have not moved';
+            + `folded into the ledger at the new path${torn}, and the files they name have not moved`;
       report.quarantined.push(`${agentId} — ${why}`);
       return;
     }
