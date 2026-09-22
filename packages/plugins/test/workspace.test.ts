@@ -65,3 +65,16 @@ test('a root that is not there yet holds no agents, because the guard runs befor
   assert.deepEqual(await allAgentWorkspaces(undefined, missing), []);
   assert.deepEqual(await allAgentWorkspaces(undefined, undefined), []);
 });
+
+test('a root that cannot be listed is not an empty one: the guard must not fail open', async () => {
+  // This list is what `ledgerGuard` is built from, and an empty one is a
+  // guard that answers "not a ledger" to every path — so a swallowed
+  // failure lets `fs.write` truncate the one file it must never touch. The
+  // cases that reach this in production are a root that is executable but
+  // not listable (its children still writable by name) and a transient
+  // `EMFILE`; a loop stands in for them here, because a suite running as
+  // root cannot be denied by mode bits.
+  const root = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-ws-')), 'loop');
+  await symlink(root, root);
+  await assert.rejects(() => allAgentWorkspaces(undefined, root), /ELOOP/);
+});

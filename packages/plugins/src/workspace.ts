@@ -46,7 +46,8 @@ export const workspaceResolver = (
  * are the agents, which is what reading `workspaceRoot` as a root means,
  * and the seam answers otherwise. A root that is not there yet holds no
  * agents rather than failing, because a guard runs before the first write
- * as well as after it.
+ * as well as after it — but only a root that is genuinely absent. See the
+ * catch below for why every other failure has to reach the caller.
  */
 export const allAgentWorkspaces = async (
   workspaces: AgentWorkspaces | undefined,
@@ -60,7 +61,21 @@ export const allAgentWorkspaces = async (
     return entries
       .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
       .map((entry) => path.join(workspaceRoot, entry.name));
-  } catch {
-    return [];
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // A root that is not there yet, or is not a directory, holds no
+    // workspaces and so no ledgers — nothing for a guard to miss.
+    //
+    // Anything else propagates, and the caller fails its tool call. This
+    // list is what `ledgerGuard` is built from, and an empty one is a guard
+    // that answers "not a ledger" to every path — so swallowing `EACCES`
+    // (a root that is executable but not listable, whose children are still
+    // writable by name) or a transient `EMFILE` would let `fs.write`
+    // truncate an agent's provenance ledger. "Cannot tell" is not "nothing
+    // to protect".
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return [];
+    }
+    throw error;
   }
 };

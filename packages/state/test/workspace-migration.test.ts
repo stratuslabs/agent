@@ -412,3 +412,69 @@ test('a relocated workspace’s records are left alone: the link moved, its targ
   // holds nothing.
   assert.equal(await readFile(path.join(volume, 'fs-provenance.jsonl'), 'utf8'), recorded);
 });
+
+test('a workspace behind a relative link still points where it did after the move', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // The link text is resolved against the directory holding the link, and
+  // this move takes it two levels deeper — so a rename alone leaves
+  // `../../data/ava` meaning `.stratus/data/ava` instead of `~/data/ava`.
+  const volume = path.join(home, 'data', 'ava');
+  await mkdir(volume, { recursive: true });
+  await writeFile(path.join(volume, 'big.bin'), 'bytes');
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink(path.join('..', '..', 'data', 'ava'), path.join(legacyWorkspacesDirPath(env), 'ava'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const workspace = agentWorkspacePath(env, 'ava');
+  assert.ok((await lstat(workspace)).isSymbolicLink());
+  // Still relative, and still the operator's directory.
+  assert.ok(!path.isAbsolute(await readlink(workspace)));
+  assert.equal(await realpath(workspace), await realpath(volume));
+  assert.equal(await readFile(path.join(workspace, 'big.bin'), 'utf8'), 'bytes');
+});
+
+test('a destination that is a link back to the workspace is finished, not a ledger to fold into itself', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const recorded = ledgerLine('/home/ada/notes/vendor.md');
+  await seedWorkspace(home, 'ava', { 'fs-provenance.jsonl': recorded, 'own.md': 'mine' });
+  // What this migration's own interrupted relative-link move leaves, and
+  // what an operator wiring the new path by hand would make. Folding here
+  // would append the ledger to itself and then retire the live file,
+  // leaving the workspace reachable with no ledger at all — so `fs.write`
+  // would stop refusing it and every label would be gone.
+  await mkdir(path.dirname(agentWorkspacePath(env, 'ava')), { recursive: true });
+  await symlink(path.join(legacyWorkspacesDirPath(env), 'ava'), agentWorkspacePath(env, 'ava'));
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
+  assert.match(line, /already resolves to workspaces[\\/]ava/);
+  assert.ok(!line.includes('folded'), line);
+
+  // One ledger, unchanged, still live at the path a read will ask for.
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), 'utf8'), recorded);
+  assert.deepEqual(
+    (await readdir(path.join(legacyWorkspacesDirPath(env), 'ava'))).sort(),
+    ['fs-provenance.jsonl', 'own.md'],
+  );
+});
+
+test('a dangling link at the destination leaves the source ledger alone rather than losing it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const recorded = ledgerLine('/home/ada/notes/vendor.md');
+  await seedWorkspace(home, 'ava', { 'fs-provenance.jsonl': recorded, 'own.md': 'mine' });
+  await mkdir(path.dirname(agentWorkspacePath(env, 'ava')), { recursive: true });
+  await symlink(path.join(home, 'not-mounted'), agentWorkspacePath(env, 'ava'));
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
+  assert.match(line, /cannot be written into/);
+
+  // The one copy of those labels is still where it was, and the migration
+  // did not abort over it either.
+  assert.equal(await readFile(path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl'), 'utf8'), recorded);
+  assert.ok(applied(results).includes(MIGRATION));
+});

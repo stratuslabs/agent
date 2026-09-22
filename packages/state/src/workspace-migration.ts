@@ -1,6 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
-import { appendFile, chmod, lstat, readdir, readFile, realpath, rename, rmdir, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  chmod,
+  lstat,
+  readdir,
+  readFile,
+  readlink,
+  realpath,
+  rename,
+  rmdir,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
@@ -210,32 +224,67 @@ const remapLedger = async (workspace: string, from: readonly string[], to: strin
  * records again. Idempotent either way, since the labels would resolve the
  * same, but a file that grows on every `stratus serve` is its own defect.
  */
-const foldLedgerInto = async (from: string, target: string): Promise<boolean> => {
+const foldLedgerInto = async (from: string, target: string): Promise<'none' | 'folded' | 'unreachable'> => {
   const source = ledgerIn(from);
   let raw: string;
   try {
     raw = await readFile(source, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return false;
+      return 'none';
     }
     throw error;
   }
   if (raw.trim().length > 0) {
     const destination = ledgerIn(target);
-    // The rule the memory store already owns: an append onto a file whose
-    // last byte is not a newline fuses two records into one unparseable
-    // line — which, for a ledger, is a refusal to read any of it.
-    const lead = await memoryAppendNeedsNewline(destination) ? '\n' : '';
-    const body = raw.endsWith('\n') ? raw : `${raw}\n`;
-    await appendFile(destination, `${lead}${body}`, { mode: 0o600 });
-    await chmod(destination, 0o600);
+    try {
+      // The rule the memory store already owns: an append onto a file whose
+      // last byte is not a newline fuses two records into one unparseable
+      // line — which, for a ledger, is a refusal to read any of it.
+      const lead = await memoryAppendNeedsNewline(destination) ? '\n' : '';
+      const body = raw.endsWith('\n') ? raw : `${raw}\n`;
+      await appendFile(destination, `${lead}${body}`, { mode: 0o600 });
+      await chmod(destination, 0o600);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // Something is at the destination — `pathIsFree` said so — but it is
+      // not a directory these records can be written into: a dangling link
+      // is the shape that reaches here. The source keeps its ledger, which
+      // is the only copy of those labels, and the agent is named.
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        return 'unreachable';
+      }
+      throw error;
+    }
   }
   // Never over an archive already there: a run killed between the append
   // and this rename leaves one, and the retry must not bury it.
   const archive = `${source}.migrated`;
   await rename(source, await pathIsFree(archive) ? archive : `${archive}-${randomUUID()}`);
-  return true;
+  return 'folded';
+};
+
+/**
+ * Whether two paths are the same directory, following links.
+ *
+ * Asked before folding one workspace's ledger into another's, because the
+ * destination can be a link back to the source — an operator's hand-made
+ * `agents/<id>/workspace -> workspaces/<id>`, or this migration's own
+ * recreate-then-unlink for a relative link, interrupted. Folding then reads
+ * a ledger and appends it to *itself*, doubling it, and retires the live
+ * file to `.migrated`: the workspace is left reachable at the new path with
+ * no ledger at all, so `fs.write` stops refusing it and every label is
+ * gone.
+ */
+const sameDirectory = async (a: string, b: string): Promise<boolean> => {
+  try {
+    const [left, right] = await Promise.all([stat(a), stat(b)]);
+    return left.dev === right.dev && left.ino === right.ino;
+  } catch {
+    // One of them cannot be resolved, so they are not the same thing that
+    // is there. The caller's next step decides what that means.
+    return false;
+  }
 };
 
 /**
@@ -297,17 +346,29 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // ENOENT. Renaming a directory over it would fail — after this
     // migration had decided the name was free.
     if (!(await pathIsFree(target))) {
-      // The deferral window, and the ordinary outcome of running any
-      // command before restarting the daemon — see the note at the top on
-      // why this merges rather than refuses.
-      if (await foldLedgerInto(from, target)) {
+      const here = path.relative(stratusHomePath(env), from);
+      const there = path.relative(stratusHomePath(env), target);
+      // The destination may be a link back to this very workspace, in which
+      // case there is one directory and one ledger and nothing to fold —
+      // see `sameDirectory` for what folding a ledger into itself costs.
+      // Already reachable at the new path, so this is a finished state and
+      // not a collision.
+      if (await sameDirectory(from, target)) {
+        report.quarantined.push(`${agentId} — ${there} already resolves to ${here}, so it was left as it is`);
+        continue;
+      }
+      // Otherwise the deferral window, and the ordinary outcome of running
+      // any command before restarting the daemon — see the note at the top
+      // on why this merges rather than refuses.
+      const folded = await foldLedgerInto(from, target);
+      if (folded === 'folded') {
         report.merged.push(agentId);
       }
-      report.quarantined.push(
-        `${agentId} — ${path.relative(stratusHomePath(env), target)} already existed, so what is left of `
-        + `${path.relative(stratusHomePath(env), from)} stays there; its provenance records were folded into `
-        + 'the ledger at the new path, and the files they name have not moved',
-      );
+      report.quarantined.push(folded === 'unreachable'
+        ? `${agentId} — something is at ${there} that its provenance records cannot be written into, so `
+          + `${here} was left untouched; its ledger is the only copy of those labels`
+        : `${agentId} — ${there} already existed, so what is left of ${here} stays there; its provenance `
+          + 'records were folded into the ledger at the new path, and the files they name have not moved');
       continue;
     }
     if (!entry.isSymbolicLink()) {
@@ -340,12 +401,36 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // one.
       await chmod(from, 0o700);
     }
-    // A link is renamed and its target stays exactly where it is, so
-    // nothing above applies to one: every record still names where its file
-    // is, and `chmod` would follow the link and set the mode of whatever an
-    // operator pointed it at.
-    try {
+    // A link's target does not move, so nothing above applies to one: every
+    // record still names where its file is, and `chmod` would follow the
+    // link and set the mode of whatever an operator pointed it at.
+    //
+    // What *does* apply is that a relative link is not moved by a rename at
+    // all. Its target is resolved against the directory holding it, and this
+    // move changes that directory: `workspaces/ava -> ../../data/ava` means
+    // `~/data/ava` where it is and `~/.stratus/data/ava` once it sits at
+    // `agents/ava/workspace` — a different directory, or none. So a relative
+    // link is recreated with a target that resolves where the old one did,
+    // and only an absolute one is renamed as it stands.
+    const moveIntoPlace = async (): Promise<void> => {
+      if (entry.isSymbolicLink()) {
+        const text = await readlink(from);
+        if (!path.isAbsolute(text)) {
+          await symlink(
+            path.relative(path.dirname(target), path.resolve(path.dirname(from), text)),
+            target,
+          );
+          // Both exist for an instant. A run killed here finds the source
+          // again next time and the destination resolving to the same
+          // directory, which `sameDirectory` above reads as finished.
+          await unlink(from);
+          return;
+        }
+      }
       await rename(from, target);
+    };
+    try {
+      await moveIntoPlace();
     } catch (error) {
       // Loud, and not quarantined, which is the opposite of how an id with
       // nowhere to land is treated — because the consequence is opposite
