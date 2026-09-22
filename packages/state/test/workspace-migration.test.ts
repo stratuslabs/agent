@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -37,14 +37,6 @@ const seedWorkspace = async (home: string, agentId: string, files: Record<string
   }
   return directory;
 };
-
-/**
- * Where the move marker goes: beside the workspace, in the state
- * directory, out of reach of an agent whose `shell.run` starts inside the
- * workspace and could otherwise unlink it.
- */
-const markerPath = (env: { homeDir: string }, agentId: string): string =>
-  path.join(agentsDirPath(env), agentId, 'fs-provenance.jsonl.moving');
 
 const ledgerLine = (filePath: string): string =>
   `${JSON.stringify({ path: filePath, trust: 'external', at: '2026-01-01T00:00:00.000Z' })}\n`;
@@ -339,6 +331,28 @@ test('a chain of links finishes where an interrupted run left it, not at the pat
   // The stale source is left for them rather than removed: a target that
   // is merely unmounted comes back.
   assert.ok((await readdir(legacyWorkspacesDirPath(env))).includes('bea'));
+});
+
+test('a recreated link into a workspace’s subdirectory is recognised as finished too', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // The same interrupted recreate, but the link names a path *inside*
+  // another workspace — `workspaces/ava -> bea/subdir`, which the recreate
+  // maps to `agents/bea/workspace/subdir`, carrying the suffix across.
+  await mkdir(path.join(agentWorkspacePath(env, 'bea'), 'subdir'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'bea'), 'subdir', 'own.md'), 'mine');
+  await mkdir(path.join(agentsDirPath(env), 'ava'), { recursive: true });
+  await symlink(path.join('..', '..', 'agents', 'bea', 'workspace', 'subdir'), agentWorkspacePath(env, 'ava'));
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink(path.join('bea', 'subdir'), path.join(legacyWorkspacesDirPath(env), 'ava'));
+  await symlink('ava', path.join(legacyWorkspacesDirPath(env), 'cyd'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  // cyd has to reach ava's workspace. Rejecting the recreate because
+  // `bea/subdir` is not an agent id would send it to `workspaces/ava`,
+  // which is going away.
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'cyd'), 'own.md'), 'utf8'), 'mine');
 });
 
 test('a link to an unmounted volume is not a finished move, whatever is at the new path', async () => {
@@ -765,11 +779,12 @@ test('a hard link to the ledger is the same file too, and is not folded either',
   assert.equal(await readFile(path.join(workspace, 'fs-provenance.jsonl'), 'utf8'), recorded);
 });
 
-test('a move whose ledger rewrite never ran is finished by the next run, from the marker it left', async () => {
+test('a move whose ledger rewrite never ran is finished by the next run, from the state it left', async () => {
   // On a home reached through a link, because the rewrite has to name the
   // path a read will ask for — `fs.read` canonicalizes before it looks a
-  // record up, so the marker has to carry the spellings the records were
-  // written as, not just the configured one.
+  // record up, so the repair has to derive the spellings the records were
+  // written as, not just the configured one. `workspaces/` is gone by then,
+  // so they come from the home, which is not.
   const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-volume-'));
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-linked-'));
   await mkdir(path.join(elsewhere, 'state'), { recursive: true });
@@ -777,10 +792,11 @@ test('a move whose ledger rewrite never ran is finished by the next run, from th
   const env = { homeDir: home };
   await mkdir(agentsDirPath(env), { recursive: true });
 
-  // What a run killed between the rename and the rewrite leaves: the
-  // workspace already at its new path, its records still naming the old
-  // one, and nothing in `workspaces/` to say so. Without the marker the
-  // migration would stamp over a ledger pointing at paths nothing is at.
+  // What a run killed between the rename and the rewrite leaves, and the
+  // whole of the evidence: the workspace already at its new path, its
+  // records still naming the old one, and nothing in `workspaces/` beside
+  // it. No note is involved — a note is a file an agent can unlink, and
+  // `shell.run`'s cwd is a starting directory rather than a jail.
   const workspace = agentWorkspacePath(env, 'ava');
   await mkdir(path.join(workspace, 'mcp', 'linear'), { recursive: true });
   await writeFile(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png'), 'bytes');
@@ -791,24 +807,18 @@ test('a move whose ledger rewrite never ran is finished by the next run, from th
     path.join(workspace, 'fs-provenance.jsonl'),
     ledgerLine(path.join(legacyWorkspace, 'mcp', 'linear', 'chart-1-0.png')),
   );
-  await writeFile(
-    markerPath(env, 'ava'),
-    `${JSON.stringify({ from: [path.join(legacyWorkspacesDirPath(env), 'ava'), legacyWorkspace] })}\n`,
-  );
-
   const results = await runStateMigrations(env, { exclusive: true });
   assert.match(results.find((result) => result.id === MIGRATION)?.detail ?? '', /interrupted/);
 
   // The record names the file that is really there, spelled the way a read
-  // will spell it, and the marker is gone.
+  // will spell it.
   assert.ok(
     (await recordedIn(path.join(workspace, 'fs-provenance.jsonl')))
       .includes(path.join(await realpath(workspace), 'mcp', 'linear', 'chart-1-0.png')),
   );
-  await assert.rejects(readFile(markerPath(env, 'ava')), /ENOENT/);
 });
 
-test('a marker is left behind by nothing that finished, so a completed move clears it', async () => {
+test('a completed move leaves nothing behind beside the workspace', async () => {
   const home = await newHome();
   const env = { homeDir: home };
   await seedWorkspace(home, 'ava', {
@@ -822,6 +832,12 @@ test('a marker is left behind by nothing that finished, so a completed move clea
   assert.deepEqual(
     (await readdir(workspace)).sort(),
     ['fs-provenance.jsonl', 'mcp'],
+  );
+  // And nothing in the state directory either: the repair reads the state
+  // rather than a note, so there is no note to clean up.
+  assert.deepEqual(
+    (await readdir(path.join(agentsDirPath(env), 'ava'))).filter((name) => name !== 'workspace'),
+    [],
   );
   assert.ok(
     (await recordedIn(path.join(workspace, 'fs-provenance.jsonl')))
@@ -861,29 +877,56 @@ test('an absolute link out of the home is renamed as it stands', async () => {
   assert.equal(await readlink(agentWorkspacePath(env, 'ava')), volume);
 });
 
-test('a move whose ledger rewrite fails leaves the marker, so the move is still finishable', async () => {
+test('a move whose ledger rewrite fails is still finishable, with nothing left behind to say so', async () => {
   const home = await newHome();
   const env = { homeDir: home };
+  const legacyArtifact = path.join(legacyWorkspacesDirPath(env), 'ava', 'mcp', 'linear', 'chart-1-0.png');
   await seedWorkspace(home, 'ava', { 'mcp/linear/chart-1-0.png': 'bytes' });
   // A ledger that cannot be read stands in for any failure of the rewrite:
   // what matters is that the rewrite runs *after* the move, so a failure
-  // there is on the far side of an irreversible rename. The marker is what
-  // makes that finishable instead of permanent.
+  // there is on the far side of an irreversible rename.
   await mkdir(path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl'), { recursive: true });
 
   await assert.rejects(runStateMigrations(env, { exclusive: true }), /EISDIR/);
 
-  // The files moved, and the note saying their records still name the old
-  // path moved with them.
+  // The files moved, and 0004 is not stamped.
   const workspace = agentWorkspacePath(env, 'ava');
   assert.equal(await readFile(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png'), 'utf8'), 'bytes');
-  const marker = JSON.parse(await readFile(markerPath(env, 'ava'), 'utf8')) as { from: string[] };
-  assert.ok(marker.from.includes(path.join(legacyWorkspacesDirPath(env), 'ava')), marker.from.join(', '));
-  // Beside the workspace, never inside it: `shell.run` starts in there
-  // under no root confinement, so a marker within reach is one an agent can
-  // unlink — and an unlinked marker is a skipped repair, a stamped 0004,
-  // and every file that agent fetched reading back as its own words.
-  assert.ok(!(await readdir(workspace)).includes('fs-provenance.jsonl.moving'));
+  assert.notEqual((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
+  // Nothing was left behind to remember the move by — no note beside the
+  // workspace and none inside it. What says the rewrite still has to happen
+  // is the state: workspace at the new path, no legacy entry, records
+  // naming the old one.
+  assert.deepEqual(
+    (await readdir(path.join(agentsDirPath(env), 'ava'))).filter((name) => name !== 'workspace'),
+    [],
+  );
+
+  // Whoever fixes the ledger gets the repair on the next run — and this run
+  // fails too, on a *second* agent, so 0004 is still not stamped and the
+  // repair will be re-entered once more.
+  await rm(path.join(workspace, 'fs-provenance.jsonl'), { recursive: true });
+  await writeFile(path.join(workspace, 'fs-provenance.jsonl'), ledgerLine(legacyArtifact));
+  await seedWorkspace(home, 'bea', { 'own.md': 'mine' });
+  await mkdir(path.join(legacyWorkspacesDirPath(env), 'bea', 'fs-provenance.jsonl'), { recursive: true });
+  await assert.rejects(runStateMigrations(env, { exclusive: true }), /EISDIR/);
+  const canonical = await realpath(workspace);
+  assert.ok(
+    (await recordedIn(path.join(workspace, 'fs-provenance.jsonl')))
+      .includes(path.join(canonical, 'mcp', 'linear', 'chart-1-0.png')),
+  );
+
+  // Third time through, with bea fixed. A repair derived from the state
+  // rather than remembered is one every retry re-enters, so re-recording
+  // has to recognise what it already wrote — otherwise this agent's ledger
+  // grows by a line for every failed `stratus serve`.
+  await rm(path.join(agentWorkspacePath(env, 'bea'), 'fs-provenance.jsonl'), { recursive: true });
+  const results = await runStateMigrations(env, { exclusive: true });
+  assert.ok(applied(results).includes(MIGRATION), applied(results).join(', '));
+  // And it reports no repair this time, because there was none left to do.
+  assert.ok(!(results.find((result) => result.id === MIGRATION)?.detail ?? '').includes('interrupted'));
+  const recorded = await recordedIn(path.join(workspace, 'fs-provenance.jsonl'));
+  assert.equal(recorded.filter((one) => one.startsWith(canonical)).length, 1, recorded.join(', '));
 });
 
 test('a record appended while the move is finishing is not lost', async () => {
@@ -894,10 +937,6 @@ test('a record appended while the move is finishing is not lost', async () => {
   await mkdir(path.join(workspace, 'mcp', 'linear'), { recursive: true });
   await writeFile(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png'), 'bytes');
   await writeFile(path.join(workspace, 'fs-provenance.jsonl'), ledgerLine(legacyArtifact));
-  await writeFile(
-    markerPath(env, 'ava'),
-    `${JSON.stringify({ from: [path.join(legacyWorkspacesDirPath(env), 'ava')] })}\n`,
-  );
   // An ordinary command appends here the moment the new path exists — it
   // takes no home lock, and the rename has already exposed the workspace.
   // A read-modify-write of this file would drop whichever of these two
@@ -935,39 +974,8 @@ test('a link to a workspace that did not move keeps naming where that workspace 
   assert.equal(await realpath(ava), await realpath(path.join(legacyWorkspacesDirPath(env), 'bea')));
 });
 
-test('anything planted where the move marker goes loses its name, not its contents', async () => {
-  const home = await newHome();
-  const env = { homeDir: home };
-  await seedWorkspace(home, 'ava', { 'own.md': 'mine' });
-  // The marker's directory is not the agent's any more, but the defence
-  // stays: an older build's leftover, or an operator's own file, can be at
-  // this name. A symlink is the obvious one; a **hard link** is the one
-  // `O_NOFOLLOW` does nothing about, because to `open` it is not a link at
-  // all, it is the file. Everything under `~/.stratus` is one filesystem
-  // and one uid, so that reaches another agent's grants or the credentials.
-  const symlinked = path.join(home, 'pointed-at.md');
-  const hardlinked = path.join(home, 'credentials.json');
-  await writeFile(symlinked, 'not the migration’s to touch');
-  await writeFile(hardlinked, '{"secret":"stays"}');
-  await mkdir(path.join(agentsDirPath(env), 'ava'), { recursive: true });
-  await symlink(symlinked, markerPath(env, 'ava'));
-  await seedWorkspace(home, 'bea', { 'own.md': 'mine' });
-  await mkdir(path.join(agentsDirPath(env), 'bea'), { recursive: true });
-  await link(hardlinked, markerPath(env, 'bea'));
 
-  await runStateMigrations(env, { exclusive: true });
-
-  // Both targets intact: the name was unlinked, which never touches the
-  // inode behind it, and the marker created fresh.
-  assert.equal(await readFile(symlinked, 'utf8'), 'not the migration’s to touch');
-  assert.equal(await readFile(hardlinked, 'utf8'), '{"secret":"stays"}');
-  // And the migration got on with it rather than being blocked by a name an
-  // agent squatted.
-  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'own.md'), 'utf8'), 'mine');
-  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'bea'), 'own.md'), 'utf8'), 'mine');
-});
-
-test('a move marker an agent rewrote cannot make the re-recording a no-op', async () => {
+test('the path a repair re-records from is derived, so nothing drags the ledger under the workspace', async () => {
   const home = await newHome();
   const env = { homeDir: home };
   const workspace = agentWorkspacePath(env, 'ava');
@@ -979,50 +987,23 @@ test('a move marker an agent rewrote cannot make the re-recording a no-op', asyn
     path.join(workspace, 'fs-provenance.jsonl'),
     `${ledgerLine(legacyArtifact)}${ledgerLine(outside)}`,
   );
-  // A crashed move left the marker, and its contents are still not
-  // trusted even though they now sit where an agent cannot reach them:
-  // deriving costs nothing and the file outlives this build. Two ways a
-  // writable one could be abused: point it
-  // somewhere with no records, so the re-recording does nothing and the
-  // marker is cleared and 0004 stamped straight after; or point it at `/`,
-  // so every record in the file gets dragged under the workspace.
-  await writeFile(
-    markerPath(env, 'ava'),
-    `${JSON.stringify({ from: [path.join(home, 'nowhere', 'ava'), '/'] })}\n`,
-  );
+  // A crashed move, repaired from the state: `workspaces/<id>` with the id
+  // taken from the directory this agent's state is in, and nothing read
+  // from anywhere. Were that source ever widened — to `/`, say — every
+  // record in the file would be dragged under the workspace and every
+  // unrelated file the agent had fetched would start reading as though it
+  // lived there.
 
   await runStateMigrations(env, { exclusive: true });
 
   const recorded = await recordedIn(path.join(workspace, 'fs-provenance.jsonl'));
-  // Where it came from is derived from the directory name, not read.
+  // The record inside the workspace follows it.
   assert.ok(recorded.includes(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png')), recorded.join(', '));
-  // And a claimed spelling that could not be this agent's workspace is not
-  // one: the record outside stays where it is, undragged.
+  // And the record outside stays where it is, undragged.
   assert.ok(!recorded.some((one) => one.startsWith(path.join(workspace, 'home'))), recorded.join(', '));
   assert.ok(recorded.includes(outside), recorded.join(', '));
 });
 
-test('a marker that is a link is not read through either', async () => {
-  const home = await newHome();
-  const env = { homeDir: home };
-  const workspace = agentWorkspacePath(env, 'ava');
-  await mkdir(workspace, { recursive: true });
-  await writeFile(path.join(workspace, 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/vendor.md'));
-  // A marker that is a link, pointing at a file of somebody's choosing.
-  // Reading through it would let that file's contents steer which records
-  // get re-recorded.
-  const elsewhere = path.join(home, 'planted.json');
-  await writeFile(elsewhere, `${JSON.stringify({ from: ['/'] })}\n`);
-  await symlink(elsewhere, markerPath(env, 'ava'));
-
-  await runStateMigrations(env, { exclusive: true });
-
-  // Nothing re-recorded: the ledger is exactly as it was.
-  assert.deepEqual(
-    await recordedIn(path.join(workspace, 'fs-provenance.jsonl')),
-    ['/home/ada/notes/vendor.md'],
-  );
-});
 
 test('a chain of workspace links resolves whichever order they are listed in', async () => {
   const home = await newHome();

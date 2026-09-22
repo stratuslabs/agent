@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { constants, type Dirent } from 'node:fs';
+import { type Dirent } from 'node:fs';
 import {
   appendFile,
   chmod,
   lstat,
-  open,
   readdir,
   readFile,
   readlink,
@@ -74,8 +73,8 @@ import {
 //   the rename — a ledger rewritten for a move that then failed is a set of
 //   labels pointing at nothing, and nothing can tell those records from
 //   ones that legitimately named the destination. What makes a rewrite on
-//   the far side of an irreversible rename finishable is the marker the
-//   move leaves behind; see `MOVE_MARKER_FILENAME`.
+//   the far side of an irreversible rename finishable is that it is
+//   derived rather than remembered: see `finishInterruptedMoves`.
 // - **A destination that already exists is merged, not refused.** That is
 //   the ordinary shape of an upgrade rather than an exotic one: an ordinary
 //   command on the new build defers this migration — it needs the exclusive
@@ -114,146 +113,6 @@ const isWorkspaceEntry = (entry: Dirent): boolean => entry.isDirectory() || entr
 /** The ledger file at the top of a workspace. */
 const ledgerIn = (workspace: string): string => path.join(workspace, LEDGER_FILENAME);
 
-/**
- * The note a workspace carries while it is being moved: the paths its ledger
- * records were written against.
- *
- * It exists so the ledger can be rewritten *after* the rename rather than
- * before it, without that rewrite becoming unfinishable. Before was the
- * obvious answer — a failure there is retryable while a failure afterwards
- * is not, since the next run finds no legacy entry — but it is wrong for a
- * subtler reason: it leaves the ledger naming a move that may never happen,
- * and no later pass can tell those records from ones that legitimately name
- * the destination. A pre-layout build records every `fs.write` under the
- * agent's *configured roots*, and a root can cover `agents/<id>/workspace`
- * once something creates it.
- *
- * The marker settles it without guessing. It is written before the move and
- * cleared once the rewrite is done, so a run that dies anywhere in between
- * leaves a note saying exactly what remains to be done.
- * {@link finishInterruptedMoves} is what reads them, and it runs before
- * anything else, because by then there may be no legacy entry left to
- * notice.
- *
- * It lives in `agents/<id>/`, **not** in the workspace it describes. That
- * is the difference between evidence and a suggestion: the workspace is the
- * agent's own directory — `shell.run` starts there under no root
- * confinement — so an agent could simply delete a marker sitting in it, and
- * a deleted marker is a skipped repair, a stamped 0004, and a ledger left
- * naming paths nothing is at. Which is to say: every file that agent
- * fetched from outside reading back as its own words, by unlinking one
- * file. The state directory is where the rest of what an agent must not
- * reach already lives, and the workspace is deliberately a sibling of it
- * rather than a parent.
- */
-const MOVE_MARKER_FILENAME = `${LEDGER_FILENAME}.moving`;
-
-/**
- * Where an agent's marker goes, given its workspace: beside it, in the
- * state directory, for the reason above. A legacy `workspaces/<id>` is
- * never passed here — the marker's home does not move, because it was
- * never inside the thing being moved.
- */
-const markerFor = (env: StateEnvironment, agentId: string): string =>
-  path.join(agentStateDirPath(env, agentId), MOVE_MARKER_FILENAME);
-
-/**
- * The marker is created fresh, never opened in place, because the directory
- * it sits in belongs to the agent: `shell.run` starts there under no root
- * confinement, so an agent can put whatever it likes at this name.
- *
- * `O_NOFOLLOW` alone is not enough, and that is the whole reason this is
- * three calls rather than one. It refuses a *symlink* at the name, but a
- * **hard link** is not a link as far as `open` is concerned — it is the file
- * — so `O_TRUNC` would empty whatever inode the agent linked there and the
- * `chmod` would set its mode. Everything under `~/.stratus` is one
- * filesystem and one uid, so that reaches another agent's `whitelist.json`,
- * another agent's `sessions.db`, or `credentials.json`. An upgrade that
- * empties the credentials file is not a provenance bug.
- *
- * So the name is *unlinked* first and then created with `O_EXCL`. Unlinking
- * removes the name and never the inode behind it, so a planted link loses
- * its second name and its target is untouched; `O_EXCL` then guarantees the
- * marker is a new file this build owns, and fails rather than reuses if
- * something wins the race to recreate the name.
- */
-/**
- * Drop the marker's *name*. Never its inode: a hard link an agent planted
- * there keeps whatever it points at, minus this one name.
- */
-const clearMoveMarker = async (env: StateEnvironment, agentId: string): Promise<void> => {
-  try {
-    await unlink(markerFor(env, agentId));
-  } catch {
-    // Not there, which is the ordinary case: only a move writes one.
-  }
-};
-
-const MARKER_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
-
-const writeMoveMarker = async (env: StateEnvironment, agentId: string, from: readonly string[]): Promise<void> => {
-  await clearMoveMarker(env, agentId);
-  const handle = await open(markerFor(env, agentId), MARKER_FLAGS, 0o600);
-  try {
-    await handle.writeFile(`${JSON.stringify({ from })}\n`);
-    await handle.chmod(0o600);
-  } finally {
-    await handle.close();
-  }
-};
-
-/**
- * Whether a move is unfinished here, asked without following anything.
- *
- * Only absence answers no. This is the sole evidence that a workspace's
- * records still name the path it came from — the legacy directory is gone
- * by the time anything asks — so a swallowed `EACCES` or `EIO` would skip
- * the repair, stamp 0004, and leave those files reading back as the agent's
- * own words. "Cannot tell" fails the migration instead.
- */
-const hasMoveMarker = async (env: StateEnvironment, agentId: string): Promise<boolean> => {
-  try {
-    await lstat(markerFor(env, agentId));
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') {
-      return false;
-    }
-    throw error;
-  }
-};
-
-const readMoveMarker = async (env: StateEnvironment, agentId: string): Promise<string[] | undefined> => {
-  let raw: string;
-  let handle;
-  try {
-    handle = await open(markerFor(env, agentId), constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    // Nothing there, or something there that is not a marker this build
-    // wrote. Either way there is no move to finish from it.
-    if (code === 'ENOENT' || code === 'ELOOP') {
-      return undefined;
-    }
-    throw error;
-  }
-  try {
-    raw = await handle.readFile('utf8');
-  } finally {
-    await handle.close();
-  }
-  try {
-    const parsed = JSON.parse(raw) as { from?: unknown };
-    const from = Array.isArray(parsed.from) ? parsed.from.filter((one): one is string => typeof one === 'string') : [];
-    // A marker naming nothing is one this build cannot act on. Answering
-    // with no spellings would silently skip the rewrite it exists to
-    // finish, so it is the same as a marker that will not parse.
-    return from.length > 0 ? from : undefined;
-  } catch {
-    return undefined;
-  }
-};
 
 
 
@@ -278,6 +137,34 @@ const spellingsOf = async (target: string, base: 'self' | 'parent'): Promise<str
     }
   } catch {
     // Not there to canonicalize: the spelling given is the only one.
+  }
+  return spellings;
+};
+
+/**
+ * Every spelling of where an agent's workspace used to be.
+ *
+ * Built from the home rather than from `workspaces/` itself, because by the
+ * time the repair asks, `workspaces/` is usually gone — and `realpath` of a
+ * path that is not there answers nothing, which would drop exactly the
+ * canonical spelling the records were written as on a home reached through
+ * a link. The home is still there; the rest is a join.
+ */
+const legacyWorkspaceSpellings = async (env: StateEnvironment, agentId: string): Promise<string[]> => {
+  const home = stratusHomePath(env);
+  const spellings = [legacyAgentWorkspaceIn(home, agentId)];
+  try {
+    const canonical = legacyAgentWorkspaceIn(await realpath(home), agentId);
+    if (!spellings.includes(canonical)) {
+      spellings.push(canonical);
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // No home to canonicalize means no install; anything else is a reason
+    // to stop rather than repair half the records.
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      throw error;
+    }
   }
   return spellings;
 };
@@ -393,6 +280,14 @@ const remapLedger = async (workspace: string, from: readonly string[], to: strin
     throw error;
   }
   const moved: string[] = [];
+  // What the ledger already says, as `path` and label together. A repair
+  // that is derived rather than remembered can run more than once — the
+  // migration is retried whenever a run fails before stamping — and without
+  // this each pass would append the same re-recordings again. Appending a
+  // record whose label is *new* is still right, so the pair is the key
+  // rather than the path.
+  const already = new Set<string>();
+  const records: Array<{ path: string; [key: string]: unknown }> = [];
   for (const line of raw.split('\n')) {
     if (line.trim().length === 0) {
       continue;
@@ -406,12 +301,16 @@ const remapLedger = async (workspace: string, from: readonly string[], to: strin
     if (typeof parsed !== 'object' || parsed === null) {
       continue;
     }
-    const record = parsed as { path?: unknown };
+    const record = parsed as { path?: unknown; trust?: unknown };
     if (typeof record.path !== 'string') {
       continue;
     }
+    already.add(`${record.path}\u0000${String(record.trust)}`);
+    records.push(record as { path: string });
+  }
+  for (const record of records) {
     const at = reparented(record.path, from, to);
-    if (at === undefined) {
+    if (at === undefined || already.has(`${at}\u0000${String(record.trust)}`)) {
       continue;
     }
     // Spread first, so every other field a record carries — the label, the
@@ -706,34 +605,50 @@ const ledgerIsShared = async (env: StateEnvironment, from: string): Promise<bool
 };
 
 /**
- * Rewrite a moved workspace's ledger to name where its files now are, and
- * drop the marker that said it still had to be done.
+ * Rewrite a moved workspace's ledger to name where its files now are.
  *
  * The spellings are the *source's* — the paths the records were written
  * against — and the destination is spelled the way a read will spell it.
- * Idempotent: a second pass finds those records already reparented, so
- * `reparented` declines them and the rewrite is a no-op.
  */
 const finishMove = async (
-  env: StateEnvironment,
-  agentId: string,
   workspace: string,
   from: readonly string[],
   target: string,
 ): Promise<void> => {
   await remapLedger(workspace, from, (await spellingsOf(target, 'self')).at(-1)!);
-  await clearMoveMarker(env, agentId);
 };
 
 /**
  * Finish any move whose rename landed but whose ledger rewrite did not.
  *
  * Runs before the legacy directory is walked, because by then there may be
- * nothing left there to notice: the workspace is already at its new path,
- * and only the marker inside it says its records still name the old one.
- * Without this the migration would stamp over a ledger pointing at paths
- * nothing is at, which is every one of those files reading back as the
- * agent's own words.
+ * nothing left there to notice: the workspace is already at its new path
+ * and its records still name the old one.
+ *
+ * **Derived from the state on disk, never from a note left behind.** A note
+ * was the obvious design and it was wrong twice over: whatever file said
+ * "this one still needs repairing" would be one an agent could edit — and
+ * then, once it was moved out of the workspace, one an agent could still
+ * delete, because `shell.run`'s cwd is a starting directory and not a jail
+ * (`tool-shell`'s README says so in as many words). A note that can be
+ * removed is a repair that can be skipped, and a skipped repair is every
+ * file that agent fetched from outside reading back as its own words.
+ *
+ * The state says it instead, and cannot be unsaid: the workspace is at the
+ * new path, its legacy entry is gone, and the ledger still holds records
+ * naming that legacy path. Re-recording them is what the repair *is*, so
+ * running it whenever those conditions hold needs no memory of having
+ * started. It costs one ledger read per agent on the one run this migration
+ * gets.
+ *
+ * Unconditionally safe to repeat, and safe when it is not a move at all: a
+ * fresh agent's ledger holds no record under `workspaces/<id>` and the pass
+ * does nothing. The one case it cannot tell apart is an operator whose `fs`
+ * roots covered `~/.stratus/workspaces` and whose agent wrote there
+ * directly; that agent gains a label on a path under its new workspace
+ * which may hold something else. Labels only ever go down, so the cost is
+ * one file read back more cautiously than it needs to be — the direction
+ * this migration errs in everywhere else too.
  */
 const finishInterruptedMoves = async (env: StateEnvironment): Promise<number> => {
   let entries: Dirent[];
@@ -754,38 +669,21 @@ const finishInterruptedMoves = async (env: StateEnvironment): Promise<number> =>
     if (!entry.isDirectory() || !isValidAgentId(entry.name)) {
       continue;
     }
-    const workspace = agentWorkspacePath(env, entry.name);
-    if (!(await hasMoveMarker(env, entry.name))) {
-      continue;
-    }
-    // A marker says a move was *started*; the legacy entry being gone is
-    // what says the rename landed. The marker used to travel inside the
-    // workspace, where its mere presence at the new path answered both —
-    // and where an agent could delete it. Out here it answers only the
-    // first, so the second is asked directly: a run that died before its
-    // rename leaves the workspace where it was, and that one is the
-    // ordinary walk's to finish, not this pass's.
+    // The legacy entry still being there means the rename has not happened,
+    // and that agent is the ordinary walk's to move — not this pass's to
+    // repair. Repairing it here would put destination-named records in a
+    // ledger whose files are still at the old path.
     if (!(await pathIsFree(legacyAgentWorkspaceIn(stratusHomePath(env), entry.name)))) {
       continue;
     }
-    // Derived, not read, and still derived now that the marker is out of
-    // the agent's reach. A marker naming a path with no records makes the
-    // re-recording a no-op, and the marker is cleared and 0004 stamped
-    // straight afterwards, so a marker that could be edited would be a way
-    // to strip the labels off one's own fetched files. Where the workspace
-    // came from is not the marker's to say in any case: it is
-    // `workspaces/<id>`, and the id is the directory this loop is standing
-    // in.
-    //
-    // What the marker still carries is taken as *extra* candidates, and can
-    // only widen the match — re-recording adds a label to a path and never
-    // removes one — and only under a name that could be this agent's
-    // workspace, so a planted `/` cannot drag the whole filesystem in.
-    const derived = await spellingsOf(legacyAgentWorkspaceIn(stratusHomePath(env), entry.name), 'parent');
-    const claimed = (await readMoveMarker(env, entry.name) ?? [])
-      .filter((one) => path.basename(one) === entry.name && !derived.includes(one));
-    await finishMove(env, entry.name, workspace, [...derived, ...claimed], workspace);
-    finished += 1;
+    // Where it came from is derived: `workspaces/<id>`, with the id taken
+    // from the directory this loop is standing in, in both the spelling
+    // the home is configured with and the one `realpath` gives it.
+    const workspace = agentWorkspacePath(env, entry.name);
+    const from = await legacyWorkspaceSpellings(env, entry.name);
+    if (await remapLedger(workspace, from, (await spellingsOf(workspace, 'self')).at(-1)!) > 0) {
+      finished += 1;
+    }
   }
   return finished;
 };
@@ -879,11 +777,21 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     if (sourceText === undefined || targetText === undefined) {
       return false;
     }
+    // The first segment is the workspace; anything after it is a path
+    // inside it, which `migratedTarget` carries across unchanged. Checking
+    // the whole string against `isValidAgentId` rejected exactly the links
+    // this is meant to recognise — `workspaces/ava -> bea/subdir` recreates
+    // as `agents/bea/workspace/subdir`.
     const names = path.relative(legacy, path.resolve(path.dirname(from), sourceText));
-    if (!isValidAgentId(names)) {
+    if (path.isAbsolute(names) || names === '..' || names.startsWith(`..${path.sep}`)) {
       return false;
     }
-    return path.resolve(path.dirname(target), targetText) === agentWorkspacePath(env, names);
+    const [other, ...rest] = names.split(path.sep);
+    if (other === undefined || !isValidAgentId(other)) {
+      return false;
+    }
+    return path.resolve(path.dirname(target), targetText)
+      === path.join(agentWorkspacePath(env, other), ...rest);
   };
 
   const move = async (entry: Dirent): Promise<void> => {
@@ -960,7 +868,6 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // on why this merges rather than refuses. Nothing has to be undone
       // first: a ledger is rewritten only *after* its rename has already
       // succeeded, so the records here still name where their files are.
-      await clearMoveMarker(env, agentId);
       // Retired only if this workspace is nobody else's — see
       // `ledgerIsShared`. Asked before the fold, because the fold is
       // what would take it away.
@@ -1008,12 +915,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // something creates it, so "a destination path in this ledger means
       // an interrupted move" is a guess, not an invariant.
       //
-      // What goes here instead is the marker: the note saying which path
-      // this workspace is moving from, so the rewrite can happen *after*
-      // the rename, when it is unambiguously right, and still be finished
-      // by a later run if this one dies in between.
+      // It happens after instead, and a run that dies in between is
+      // finished by the next one from the state it left: the workspace at
+      // the new path with no legacy entry beside it is the whole of the
+      // evidence, and nothing an agent can unlink. See
+      // `finishInterruptedMoves`.
       fromSpellings = await spellingsOf(from, 'self');
-      await writeMoveMarker(env, agentId, fromSpellings);
       // Then the mode, on the source because a `chmod` failing after the
       // rename would abort a migration whose source is already gone.
       // `agents/<id>/` is already owner-only, so this changes nothing an
@@ -1068,10 +975,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       }
       await rename(from, target);
     };
-    let landed = false;
     try {
       await moveIntoPlace();
-      landed = true;
       // Now, and only now, is the rewrite unambiguous: the files are at the
       // destination, so the records naming the source are exactly the ones
       // that have to follow. A failure here leaves the marker, and
@@ -1079,23 +984,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       //
       // Nothing to do for a link, which moved no files and wrote no marker.
       if (fromSpellings.length > 0) {
-        await finishMove(env, agentId, target, fromSpellings, target);
+        await finishMove(target, fromSpellings, target);
       }
     } catch (error) {
-      // Nothing to undo: the ledger was never touched, because it is only
-      // rewritten once the move has landed. The marker is dropped so a
-      // later run does not read it as a move that got further than it did.
-      //
-      // Only when the move did *not* land, and that condition is the whole
-      // point of the marker: once the rename has happened, this is the only
-      // record that the ledger still names the old path, and clearing it
-      // would make the one failure it exists for — a rewrite that dies on
-      // the far side of an irreversible rename — permanent instead of
-      // finishable. It used to survive by accident, because the path this
-      // cleared was the source's and the source was already gone.
-      if (!landed) {
-        await clearMoveMarker(env, agentId);
-      }
+      // Nothing to undo: the ledger is only rewritten once the move has
+      // landed, and a rewrite that failed on the far side of the rename is
+      // finished by the next run from what it can see.
       // Already a full sentence naming its own fix, and a different fix
       // from the one below: nothing of this agent's has moved.
       if (error instanceof WorkspaceDestinationTakenError) {
