@@ -1212,6 +1212,42 @@ test('a legacy directory a previous run left a link at is not swept by the next 
   assert.equal(await realpath(agentWorkspacePath(env, 'ava')), await realpath(legacyWorkspacesDirPath(env)));
 });
 
+test('a cycle somewhere else in the fleet does not stop another agent’s ledger fold', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'fs-provenance.jsonl': ledgerLine('/home/ada/notes/old.md') });
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/new.md'));
+  // Nothing to do with ava. Deciding whether ava's ledger is shared walks
+  // every other workspace, and `stat` through a cycle is `ELOOP` — which
+  // would abort the upgrade over a layout this migration handles.
+  await symlink('cyd', path.join(legacyWorkspacesDirPath(env), 'bea'));
+  await symlink('bea', path.join(legacyWorkspacesDirPath(env), 'cyd'));
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  assert.ok(applied(results).includes(MIGRATION), applied(results).join(', '));
+
+  const recorded = await recordedIn(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'));
+  assert.deepEqual([...recorded].sort(), ['/home/ada/notes/new.md', '/home/ada/notes/old.md']);
+});
+
+test('a workspace that reaches the legacy directory through another link keeps it too', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'bea', { 'own.md': 'mine' });
+  // The operator's own indirection: ava's workspace names a path of theirs
+  // which points back here. Comparing link text sees two unrelated paths
+  // and sweeps the directory both of them resolve to.
+  const indirect = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-indirect-')), 'ws');
+  await symlink(legacyWorkspacesDirPath(env), indirect);
+  await symlink(indirect, path.join(legacyWorkspacesDirPath(env), 'ava'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'bea'), 'own.md'), 'utf8'), 'mine');
+  assert.equal(await realpath(agentWorkspacePath(env, 'ava')), await realpath(legacyWorkspacesDirPath(env)));
+});
+
 test('links that point at each other are left as they are rather than looping forever', async () => {
   const home = await newHome();
   const env = { homeDir: home };

@@ -579,11 +579,15 @@ const sameEntry = async (a: string, b: string): Promise<boolean> => {
     return left.dev === right.dev && left.ino === right.ino;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    // Nothing there — a dangling link is the usual one — so they are not the
-    // same thing, and the caller's next step decides what that means.
-    // Anything else is "cannot tell", and answering no to that folds a
-    // ledger that may be the very file it is being folded into.
-    if (code === 'ENOENT' || code === 'ENOTDIR') {
+    // Nothing there — a dangling link is the usual one, a cycle of links the
+    // other — so they are not the same thing, and the caller's next step
+    // decides what that means. A cycle belongs here rather than below
+    // because it is an answer: a path that resolves to nothing cannot be
+    // the same file as anything, and this scan walks *other* agents'
+    // workspaces, any one of which may be a cycle this migration otherwise
+    // supports. Anything else is "cannot tell", and answering no to that
+    // folds a ledger that may be the very file it is being folded into.
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') {
       return false;
     }
     throw error;
@@ -751,10 +755,7 @@ const finishInterruptedMoves = async (env: StateEnvironment): Promise<number> =>
  * See the sweep in {@link applyPerAgentWorkspaces} for why such a link
  * exists and why it is right.
  */
-const anyWorkspaceNamesLegacy = async (
-  env: StateEnvironment,
-  legacySpellings: readonly string[],
-): Promise<boolean> => {
+const anyWorkspaceNamesLegacy = async (env: StateEnvironment, legacy: string): Promise<boolean> => {
   let entries: Dirent[];
   try {
     entries = await readdir(agentsDirPath(env), { withFileTypes: true });
@@ -769,9 +770,12 @@ const anyWorkspaceNamesLegacy = async (
     if (!entry.isDirectory() || !isValidAgentId(entry.name)) {
       continue;
     }
-    const workspace = agentWorkspacePath(env, entry.name);
-    const text = await linkText(workspace);
-    if (text !== undefined && legacySpellings.includes(path.resolve(path.dirname(workspace), text))) {
+    // Identity, not spelling: a workspace can name this directory through
+    // an intermediate link of the operator's — `workspaces/ava -> /tmp/ws`
+    // with `/tmp/ws` pointing back here — and comparing the text of the
+    // link would see two unrelated paths and sweep the directory both of
+    // them resolve to.
+    if (await sameEntry(agentWorkspacePath(env, entry.name), legacy)) {
       return true;
     }
   }
@@ -1244,7 +1248,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // visits that agent again: the retry would find nothing to remember and
   // sweep the directory its workspace points at.
   try {
-    if (!(await anyWorkspaceNamesLegacy(env, legacySpellings))) {
+    if (!(await anyWorkspaceNamesLegacy(env, legacy))) {
       await rmdir(legacy);
     }
   } catch {
