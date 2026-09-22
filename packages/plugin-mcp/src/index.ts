@@ -824,11 +824,16 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         }
         throw error;
       }
+      // The resolver, not its answer: resolving creates the workspace and
+      // settles its permissions, and a text-only result must not be
+      // reported as a failure over a directory it never needed — the remote
+      // call has already happened, and a retry does the side effect twice.
+      const resolve = workspaceFor;
       return normalizeCallResult(result, {
         server: state.spec.name,
         tool: info.mcpName,
         agentId: session.agent.id,
-        ...(workspaceFor !== undefined ? { workspace: workspaceFor(session.agent.id) } : {}),
+        ...(resolve !== undefined ? { workspace: () => resolve(session.agent.id) } : {}),
         ...(ledger !== undefined ? { ledger } : {}),
       });
     },

@@ -63,10 +63,16 @@ const settingsFor = (config: JsonObject, session: Session, workspaces: AgentWork
     policy,
     maxTextBytes: asNumber(resolved.maxTextBytes, DEFAULT_MAX_TEXT_BYTES),
     navigationTimeoutMs: asNumber(resolved.navigationTimeoutMs, DEFAULT_NAVIGATION_TIMEOUT_MS),
+    // The resolver, not its answer, and every tool here takes these
+    // settings: asking creates the workspace and settles its permissions,
+    // so resolving eagerly would let a workspace that cannot be made stop
+    // `browser.goto`, `browser.read`, a click or a keystroke — none of
+    // which writes a file. Only `browser.screenshot` asks.
+    //
     // Resolved per call and through the shared rule: appending the agent id
     // here is what made this plugin one of five copies of a layout that
     // then moved. See `workspaceResolver`.
-    workspace: workspaceResolver(workspaces, workspaceRoot)?.(session.agent.id),
+    workspace: (): string | undefined => workspaceResolver(workspaces, workspaceRoot)?.(session.agent.id),
   };
 };
 
@@ -374,7 +380,7 @@ const createTools = (
       if (typeof input.url === 'string' && input.url.length > 0) {
         await navigate(page, input.url, settings.policy, settings.navigationTimeoutMs);
       }
-      const target = await screenshotPathFor(settings.workspace, Date.now());
+      const target = await screenshotPathFor(settings.workspace(), Date.now());
       await page.screenshot({ path: target, fullPage: input.fullPage === true });
       // `file`, because that is the key a channel already acts on: an ok
       // result carrying `file` (or `files`) is delivered as an attachment,

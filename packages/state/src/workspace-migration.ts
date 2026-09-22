@@ -1123,6 +1123,24 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     const ready = pending.filter((_, index) => !waiting[index]);
     const deferred = pending.filter((_, index) => waiting[index]);
     const before = moved.size;
+    // Nothing ready means every link left waits on another link left: a
+    // cycle, and no order through it lets `moved` answer one at a time.
+    // Taken one by one, the first keeps naming its peer's legacy path and
+    // the peer's legacy path is then unlinked — so both ends dangle, where
+    // before they at least named each other. The batch is announced as
+    // moving before any of it moves, so each member is pointed at where its
+    // peer is going.
+    //
+    // Only the ones that will actually go: a destination already occupied
+    // means that agent stays where it is, and a link to it has to keep
+    // naming the legacy path.
+    if (ready.length === 0) {
+      for (const entry of deferred) {
+        if (isValidAgentId(entry.name) && await pathIsFree(agentWorkspacePath(env, entry.name))) {
+          moved.add(entry.name);
+        }
+      }
+    }
     for (const entry of ready.length > 0 ? ready : deferred) {
       await move(entry);
     }

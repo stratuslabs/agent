@@ -237,11 +237,18 @@ export interface NormalizeOptions {
   /** The server-side tool name — part of the written file's name. */
   tool: string;
   /**
-   * This agent's workspace, as the host resolved it — not a root to join an
-   * id onto. Binary content lands under `<workspace>/mcp/<server>/`, so two
-   * agents never read each other's files, the same shape screenshots take.
+   * Where this agent's workspace is, asked for rather than passed in — not
+   * a root to join an id onto. Binary content lands under
+   * `<workspace>/mcp/<server>/`, so two agents never read each other's
+   * files, the same shape screenshots take.
+   *
+   * A function because asking is no longer free: the host's seam *creates*
+   * the directory and settles its permissions, and it can fail. A
+   * text-only result must not be reported as an error because a workspace
+   * it never wanted could not be made — the remote call has already
+   * happened, and whoever retries it does the side effect twice.
    */
-  workspace?: string;
+  workspace?: () => string;
   agentId: string;
   /**
    * The filesystem provenance ledger for `workspace`. A binary block
@@ -299,7 +306,8 @@ export const normalizeCallResult = async (
     if (typeof data !== 'string') {
       return;
     }
-    if (!options.workspace) {
+    const workspace = options.workspace?.();
+    if (workspace === undefined || workspace.length === 0) {
       texts.push(`[binary ${typeof mimeType === 'string' ? mimeType : 'content'} dropped: @stratusagent/plugin-mcp has no workspace for ${options.agentId} — the host supplied neither a workspaces seam nor a workspaceRoot]`);
       return;
     }
@@ -307,7 +315,7 @@ export const normalizeCallResult = async (
     // path up — through `realpath` — and a workspace an operator moved
     // behind a link would otherwise leave the record under a spelling no
     // read ever asks for.
-    const lexical = path.join(options.workspace, 'mcp', options.server);
+    const lexical = path.join(workspace, 'mcp', options.server);
     await mkdir(lexical, { recursive: true });
     const directory = await realpath(lexical);
     const stamp = (options.now ?? Date.now)();

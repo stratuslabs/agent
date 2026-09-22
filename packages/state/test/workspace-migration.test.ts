@@ -1098,8 +1098,15 @@ test('links that point at each other are left as they are rather than looping fo
 
   const results = await runStateMigrations(env, { exclusive: true });
   assert.ok(applied(results).includes(MIGRATION), applied(results).join(', '));
-  // Both moved, still pointing at each other, still resolving to nothing —
-  // which is what they did before, and not this migration's to repair.
+  // Both moved, still pointing at *each other* — which is what they did
+  // before, and not this migration's to repair. Naming the legacy paths
+  // instead would be worse than it found them: those are unlinked as the
+  // cycle moves, so each end would point at nothing at all.
   assert.ok((await lstat(agentWorkspacePath(env, 'ava'))).isSymbolicLink());
   assert.ok((await lstat(agentWorkspacePath(env, 'bea'))).isSymbolicLink());
+  const reached = async (agentId: string): Promise<string> =>
+    path.resolve(path.dirname(agentWorkspacePath(env, agentId)), await readlink(agentWorkspacePath(env, agentId)));
+  assert.equal(await reached('ava'), agentWorkspacePath(env, 'bea'));
+  assert.equal(await reached('bea'), agentWorkspacePath(env, 'ava'));
+  await assert.rejects(readdir(legacyWorkspacesDirPath(env)), /ENOENT/);
 });

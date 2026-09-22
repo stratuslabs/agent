@@ -343,6 +343,30 @@ test('every request the page makes faces the scheme policy, not only the navigat
   assert.match(String(result.text), /kettle is in the cupboard/);
 });
 
+test('a workspace that cannot be made stops screenshots and nothing else', async (t) => {
+  // The host's seam *creates* the workspace, so asking it can fail. Every
+  // browser tool takes the same settings, and resolving eagerly would let
+  // an obstacle at `agents/<id>/workspace` take out navigation and reading
+  // — neither of which writes a file.
+  const refusing: AgentWorkspaces = {
+    forAgent: () => {
+      throw new Error('agents/ava/workspace cannot be made');
+    },
+    all: async () => [],
+  };
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, emptyRecorder(), refusing);
+  t.after(() => plugin.dispose());
+
+  const read = await tool('browser.read').execute({ url: 'https://example.com/' }, sessionFor('s', 'ava')) as JsonObject;
+  assert.match(String(read.text), /kettle/);
+
+  // Only the one that needs a file says so.
+  await assert.rejects(
+    () => tool('browser.screenshot').execute({ url: 'https://example.com/' }, sessionFor('s', 'ava')),
+    /cannot be made/,
+  );
+});
+
 test('a screenshot lands in the agent’s own workspace and comes back as a path', async (t) => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-shots-'));
   const recorder = emptyRecorder();

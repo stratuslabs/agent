@@ -1508,7 +1508,7 @@ test('a binary block cannot steer the written path: the server-side tool name is
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-traversal-'));
   const output = await normalizeCallResult(
     { content: [{ type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' }] },
-    { server: 'linear', tool: '../../../escape', agentId: 'ava', workspace: path.join(workspaceRoot, 'ava') },
+    { server: 'linear', tool: '../../../escape', agentId: 'ava', workspace: () => path.join(workspaceRoot, 'ava') },
   ) as JsonObject;
   const [file] = output.files as string[];
   const directory = path.join(workspaceRoot, 'ava', 'mcp', 'linear');
@@ -1519,7 +1519,7 @@ test('a binary block cannot steer the written path: the server-side tool name is
 test('a link planted at a binary block’s recorded path is never written through', async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-link-'));
   const block = { content: [{ type: 'image', data: Buffer.from('server bytes').toString('base64'), mimeType: 'image/png' }] };
-  const context = { server: 'linear', tool: 'chart', agentId: 'ava', workspace: path.join(workspaceRoot, 'ava'), now: () => 7, ledger: createFileLedger(under(workspaceRoot)) };
+  const context = { server: 'linear', tool: 'chart', agentId: 'ava', workspace: () => path.join(workspaceRoot, 'ava'), now: () => 7, ledger: createFileLedger(under(workspaceRoot)) };
   // The file names are `<tool>-<stamp>-<serial>`, and the serial counts up
   // by one per block, so the next name is known once one has been seen —
   // which is what a peer watching the ledger's records would see too.
@@ -1547,7 +1547,7 @@ test('an artifact directory swapped for a link between its resolution and the op
     server: 'linear',
     tool: 'chart',
     agentId: 'ava',
-    workspace: path.join(workspaceRoot, 'ava'),
+    workspace: () => path.join(workspaceRoot, 'ava'),
     ledger: createFileLedger(under(workspaceRoot)),
     now: () => {
       renameSync(directory, `${directory}.moved`);
@@ -1562,10 +1562,38 @@ test('an artifact directory swapped for a link between its resolution and the op
   }
 });
 
+test('a text-only result never asks where the workspace is', async () => {
+  // Asking is not free: the host's seam creates the workspace and settles
+  // its permissions, and it can fail. The remote call has already happened
+  // by the time this runs, so failing a text result over a directory it
+  // never wanted turns a completed side effect into one somebody retries.
+  let asked = 0;
+  const context = {
+    server: 'linear',
+    tool: 'chart',
+    agentId: 'ava',
+    workspace: () => {
+      asked += 1;
+      throw new Error('agents/ava/workspace cannot be made');
+    },
+  };
+  assert.equal(await normalizeCallResult({ content: [{ type: 'text', text: 'done' }] }, context), 'done');
+  assert.equal(asked, 0);
+
+  // A binary block is the one that needs it, and it says what failed.
+  await assert.rejects(
+    () => normalizeCallResult(
+      { content: [{ type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' }] },
+      context,
+    ),
+    /cannot be made/,
+  );
+});
+
 test('two writes in the same millisecond get distinct files', async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-serial-'));
   const block = { content: [{ type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' }] };
-  const context = { server: 'linear', tool: 'chart', agentId: 'ava', workspace: path.join(workspaceRoot, 'ava'), now: () => 42 };
+  const context = { server: 'linear', tool: 'chart', agentId: 'ava', workspace: () => path.join(workspaceRoot, 'ava'), now: () => 42 };
   const first = await normalizeCallResult(block, context) as JsonObject;
   const second = await normalizeCallResult(block, context) as JsonObject;
   assert.notEqual((first.files as string[])[0], (second.files as string[])[0]);
@@ -1582,7 +1610,7 @@ test('a failing result writes nothing: isError is settled before any block touch
           { type: 'text', text: 'it broke' },
         ],
       },
-      { server: 'linear', tool: 'chart', agentId: 'ava', workspace: path.join(workspaceRoot, 'ava') },
+      { server: 'linear', tool: 'chart', agentId: 'ava', workspace: () => path.join(workspaceRoot, 'ava') },
     ),
     /it broke/,
   );
