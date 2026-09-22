@@ -415,10 +415,14 @@ const appendRecords = async (destination: string, body: string): Promise<void> =
  * one descriptor across its read and its append — deliberately, so a
  * relocated ledger resolves once — and a writer already inside that window
  * appends to the archive after the rename. Where the source stays live
- * because another agent shares it, there is not even a name to shut. The
- * barrier is the exclusive bracket this migration runs under; an older
- * build still writing to a home being migrated is what that bracket is
- * for, and no ordering inside this function substitutes for it.
+ * because another agent shares it, there is not even a name to shut.
+ *
+ * Nor does the exclusive bracket close it. That bracket keeps *other
+ * migrations* off the home; ordinary commands take no home lock at all,
+ * deliberately — see `layout-migration.ts` — so an older build's command
+ * is exactly what can be writing here, and nothing this function orders
+ * will stop it. What the second read buys is that the window is the gap
+ * between two reads rather than the whole fold.
  */
 const foldLedgerInto = async (
   from: string,
@@ -963,8 +967,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // it as `shell.run`'s cwd, would go on writing into a directory with
       // no name, and every file it produced would be gone with 0004
       // stamped over it. There is no `RENAME_NOREPLACE` in Node, so this
-      // narrows the window to a single syscall rather than closing it;
-      // what closes it is the exclusive bracket.
+      // narrows the window to a single syscall rather than closing it, and
+      // nothing available closes it: the exclusive bracket holds off other
+      // migrations, not the lock-free ordinary commands that create this
+      // path, and a `mkdir` reservation is atomic for *detecting* the
+      // collision but renames onto its own directory with the same replace
+      // semantics.
       if (!(await pathIsFree(target))) {
         throw new WorkspaceDestinationTakenError(
           `${target} appeared while ${JSON.stringify(agentId)}'s workspace was being moved into it, so the `
