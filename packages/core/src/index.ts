@@ -2542,6 +2542,39 @@ export interface ChannelRegistrationHandle {
   transportSecrets(kind: string): Promise<ChannelTransportSecrets>;
 }
 
+/**
+ * Where each agent's files go, answered by the host.
+ *
+ * A seam rather than a path in a config block because the layout is this
+ * repository's to own: the workspace is `~/.stratus/agents/<id>/workspace`
+ * today and was `~/.stratus/workspaces/<id>` before it, and every plugin
+ * that joined the agent id onto a root held a copy of that shape. Five of
+ * them did, and all five had to change when it moved — which is the cost
+ * the `workspaceRoot` key was introduced to avoid and did not.
+ *
+ * Asked per call, from `session.agent.id`, for the same reason credentials
+ * are: the answer is the *calling* agent's, and one captured at setup is
+ * the first agent's forever.
+ */
+export interface AgentWorkspaces {
+  /**
+   * The directory this agent may put files in. Resolution only — the
+   * caller creates it, because only the caller knows whether it is about
+   * to write.
+   */
+  forAgent(agentId: string): string;
+  /**
+   * Every agent workspace the host can currently name, for the guards that
+   * have to recognise *any* agent's file rather than the caller's — the
+   * filesystem provenance ledger is the one that does.
+   *
+   * Paths, not a promise that each exists: a caller canonicalizes and
+   * tolerates what is missing. Re-read rather than cached, so an agent
+   * added under a running daemon is visible to the next call.
+   */
+  all(): Promise<readonly string[]>;
+}
+
 export interface MemoryRegistrationHandle {
   register(contribution: MemoryStoreContribution): void;
 }
@@ -2581,6 +2614,19 @@ export interface PluginContext {
   channels?: ChannelRegistrationHandle;
   memory?: MemoryRegistrationHandle;
   executors?: ExecutorRegistrationHandle;
+  /**
+   * Where this plugin may write files, per agent. See {@link AgentWorkspaces}.
+   *
+   * A host that omits it leaves every plugin that produces a file with
+   * nowhere the host has chosen to put it. Such a plugin falls back to the
+   * `workspaceRoot` config key — the documented root it joins the agent id
+   * onto — and, given neither, must fail the call naming what is missing,
+   * the way `browser.screenshot` does. Never a directory of its own
+   * choosing: a file an agent was told it produced has to be somewhere the
+   * operator can find, and a turn that cannot store its output must not
+   * read as though it did.
+   */
+  workspaces?: AgentWorkspaces;
   /**
    * The host's log, for what a plugin has to say after `setup` returns —
    * a server that dropped, a reconnect that failed. The daemon's is the

@@ -1,14 +1,21 @@
 import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import { DEFAULT_SUBPROCESS_PASS_ENV, type JsonObject, type JsonValue, type Plugin, type Session } from '@stratusagent/core';
+import {
+  DEFAULT_SUBPROCESS_PASS_ENV,
+  type AgentWorkspaces,
+  type JsonObject,
+  type JsonValue,
+  type Plugin,
+  type Session,
+} from '@stratusagent/core';
 import {
   defineLocalCommandTool,
   type LocalCommandExecution,
   type LocalCommandInvocation,
   type LocalCommandTool,
 } from '@stratusagent/executor-local';
-import { resolvePluginAgentConfig } from '@stratusagent/plugins';
+import { resolvePluginAgentConfig, workspaceResolver } from '@stratusagent/plugins';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 100_000;
@@ -29,7 +36,11 @@ export interface ShellPluginConfig extends JsonObject {
   maxOutputBytes?: number;
   /** The shell binary. `/bin/sh` unless you mean something else. */
   shell?: string;
-  /** Supplied by the host: `~/.stratus/workspaces`, one directory per agent. */
+  /**
+   * A root this plugin appends the agent id to. Only an operator sets it
+   * now — the host answers per agent through the `workspaces` seam — and
+   * setting it still relocates the agent's shell cwd, which is the point.
+   */
   workspaceRoot?: string;
 }
 
@@ -50,11 +61,21 @@ const truncate = (value: string, maxBytes: number, dropped: boolean): { text: st
   return { text: `${value.slice(0, maxBytes)}\n… output truncated at ${maxBytes} bytes`, truncated: true };
 };
 
-const settingsFor = (config: JsonObject, session: Session, env: NodeJS.ProcessEnv) => {
+const settingsFor = (
+  config: JsonObject,
+  session: Session,
+  env: NodeJS.ProcessEnv,
+  workspaces: AgentWorkspaces | undefined,
+) => {
   const resolved = resolvePluginAgentConfig(config, session.agent.id);
   const workspaceRoot = typeof resolved.workspaceRoot === 'string' ? resolved.workspaceRoot : undefined;
   const configuredCwd = typeof resolved.cwd === 'string' && resolved.cwd.length > 0 ? resolved.cwd : undefined;
-  const cwd = configuredCwd ?? (workspaceRoot ? path.join(workspaceRoot, session.agent.id) : undefined);
+  // Resolved per call, and through the shared rule rather than a join of
+  // this plugin's own: where an agent's workspace is is the host's to say,
+  // and appending the id here is what made this plugin one of five copies
+  // of a layout that then moved. See `workspaceResolver`.
+  const workspaceFor = workspaceResolver(workspaces, workspaceRoot);
+  const cwd = configuredCwd ?? workspaceFor?.(session.agent.id);
 
   const granted: NodeJS.ProcessEnv = {};
   for (const name of asStrings(resolved.passEnv, DEFAULT_PASS_ENV)) {
@@ -88,6 +109,12 @@ const settingsFor = (config: JsonObject, session: Session, env: NodeJS.ProcessEn
 export interface ShellToolOptions {
   /** The environment to grant *from*. Defaults to the daemon's. */
   processEnv?: NodeJS.ProcessEnv;
+  /**
+   * Where each agent's files go, from the host. The plugin passes its
+   * `setup` context's seam through; a caller building the tool directly
+   * supplies one or leaves the cwd to `workspaceRoot`.
+   */
+  workspaces?: AgentWorkspaces;
 }
 
 export const createShellTool = (config: JsonObject = {}, options: ShellToolOptions = {}): LocalCommandTool => {
@@ -123,7 +150,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       if (!command) {
         throw new Error('command is required.');
       }
-      const settings = settingsFor(config, session, options.processEnv ?? process.env);
+      const settings = settingsFor(config, session, options.processEnv ?? process.env, options.workspaces);
       if (settings.cwd) {
         // `spawn` fails with a bare `ENOENT` naming the *shell* when its
         // working directory does not exist — which on a fresh install is
@@ -160,7 +187,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       };
     },
     parseResult(result: LocalCommandExecution, context): JsonValue {
-      const settings = settingsFor(config, context.session, options.processEnv ?? process.env);
+      const settings = settingsFor(config, context.session, options.processEnv ?? process.env, options.workspaces);
       const stdout = truncate(result.stdout, settings.maxOutputBytes, result.stdoutTruncated);
       const stderr = truncate(result.stderr, settings.maxOutputBytes, result.stderrTruncated);
       return {
@@ -200,7 +227,15 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
 export const createShellPlugin = (config: JsonObject = {}, options: ShellToolOptions = {}): Plugin => ({
   name: '@stratusagent/tool-shell',
   setup(context) {
-    context.tools.register(createShellTool(config, options));
+    context.tools.register(createShellTool(config, {
+      ...options,
+      // The host's seam, unless the caller that constructed this plugin
+      // already supplied one: an option passed by hand is the more specific
+      // answer, the way `plugin-mcp` treats `log`.
+      ...(options.workspaces === undefined && context.workspaces !== undefined
+        ? { workspaces: context.workspaces }
+        : {}),
+    }));
   },
 });
 

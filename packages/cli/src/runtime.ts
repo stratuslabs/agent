@@ -44,7 +44,7 @@ import {
   readNonEmptyString,
   readProcessEnv,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
-  workspacesDirPath,
+  createAgentWorkspaces,
   type RuntimeSelection,
   type RuntimeConfig,
   type IgnoredUntrustedConfig,
@@ -279,7 +279,7 @@ export const createAgentRuntime = async (
       // nowhere, and its request for its secrets is refused with a message
       // that says so rather than answered with an empty roster.
       credentials: createFileCredentialResolver(runEnv),
-      workspaceRoot: workspacesDirPath(runEnv),
+      workspaces: createAgentWorkspaces(runEnv),
     });
     loadedPlugins.push(...result.loaded);
     for (const failure of result.failures) {

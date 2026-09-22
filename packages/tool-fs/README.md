@@ -60,8 +60,8 @@ tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 | `maxBytes` | `64000` | Cap on one `fs.read`, before the `truncated` marker. A call's own `maxBytes` may ask for less, never more. |
 | `maxMatches` | `100` | Cap on `fs.search` matches. A call's own `maxMatches` may ask for fewer, never more. |
 | `maxEntries` | `500` | Cap on `fs.list` entries. |
-| `workspaceRoot` | `~/.stratus/workspaces` | Supplied by the daemon when unset. Where an agent's files under the workspace live. |
-| `ledgerRoot` | `~/.stratus/workspaces` | Set by the daemon, and not yours to move: where each agent's provenance ledger lives — see below. Every plugin that writes the ledger is handed the same value, so there is one ledger however the workspaces are arranged. |
+| `workspaceRoot` | the host's answer | Only for a host wiring this plugin by hand with no workspace layout of its own. Under the daemon the host answers per agent (`~/.stratus/agents/<id>/workspace`) and this key is not consulted at all — the ledger follows the host, so relocating one writer cannot fork it. Set on a hand-wired host, it means the old shape: one directory per agent directly under the root. |
+| `ledgerRoot` | — | Not a key you set: the loader strips it from every block it hands a plugin, the way it strips `toolRisks`. It survives only as a hand-wired host's way to name the ledger's home. |
 
 Every key can be set per agent in the `agents` sub-block, over the defaults
 above it, and `roots` is why the sub-block exists: a flat list would give
@@ -75,7 +75,8 @@ a hostile page, writes what it said into its workspace, and reads it back
 next week gets a file with no provenance, arriving as its own notes. So
 `fs.write` from a session whose trust label is `external` or `unknown`
 records the path — and any directory it creates — in a per-agent ledger,
-`<workspaceRoot>/<agent>/fs-provenance.jsonl` (owner-only, append-only, one
+`fs-provenance.jsonl` at the top of that agent's workspace
+(`~/.stratus/agents/<id>/workspace/` under the daemon; owner-only, append-only, one
 record per line like the memory file, so the daemon and a `stratus run`
 writing at once lose nothing) — before the bytes land, so a crash or a ledger
 that cannot be written leaves a labelled path with no file rather than a file
@@ -105,9 +106,15 @@ bound to the name, one descriptor for the ledger) close the windows the
 agent's own concurrent calls and an operator's relocated directories open,
 not a hostile process with the daemon's own permissions. The ledger lives in `@stratusagent/plugins` (re-exported here), so a
 plugin that puts a server's bytes on disk without `fs.write` — `plugin-mcp`
-writing a bridged tool's image — records into the same file. Loaded without a `workspaceRoot` — a host wiring the plugin by hand
-rather than through the loader — the ledger is process-local, and the
-read-back-next-week case survives only as long as the process does. The
+writing a bridged tool's image — records into the same file. Both ask the
+host where an agent's workspace is rather than joining an id onto a root of
+their own, which is what makes it *the same* file: an operator who points
+one plugin's output somewhere else does not thereby give it a second
+ledger, because `fs.read` consults exactly one and a file recorded in the
+other reads back unlabelled. Loaded with neither the host's answer nor a
+`workspaceRoot` — a host wiring the plugin by hand rather than through the
+loader — the ledger is process-local, and the read-back-next-week case
+survives only as long as the process does. The
 labels themselves are documented in
 [Memory](../../docs/concepts/memory.md#where-a-fact-came-from).
 

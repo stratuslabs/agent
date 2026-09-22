@@ -10,8 +10,10 @@ import {
   EventBus,
   matchesToolAllowlist,
   ToolRegistry,
+  type AgentWorkspaces,
   type JsonObject,
   type Plugin,
+  type PluginContext,
   type Tool,
 } from '@stratusagent/core';
 
@@ -64,13 +66,22 @@ const fakeHost = async (
   };
 };
 
-const pluginModule = (name: string, register: (tools: ToolRegistry, config: JsonObject) => void) => ({
+const pluginModule = (
+  name: string,
+  register: (tools: ToolRegistry, config: JsonObject, context: PluginContext) => void,
+) => ({
   createPlugin: (config: JsonObject): Plugin => ({
     name,
     setup(context) {
-      register(context.tools, config);
+      register(context.tools, config, context);
     },
   }),
+});
+
+/** A host's workspace layout, as the loader hands it to a plugin. */
+const fakeWorkspaces = (home: string): AgentWorkspaces => ({
+  forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+  all: async () => [path.join(home, 'agents', 'ava', 'workspace')],
 });
 
 test('a listed, enabled plugin registers its declared tools; a disabled one is never imported', async () => {
@@ -273,7 +284,7 @@ test('a plugin without the createPlugin ABI is refused by name', async () => {
   assert.match(result.failures[0]?.reason ?? '', /does not export createPlugin\(config\)/);
 });
 
-test('a plugin that declares ledgerRoot is handed the host’s workspace root whatever the operator set', async () => {
+test('ledgerRoot is stripped, so an operator cannot give one writer its own ledger', async () => {
   const seen: JsonObject[] = [];
   const host = await fakeHost({
     '@stratusagent/plugin-mcp': {
@@ -297,15 +308,21 @@ test('a plugin that declares ledgerRoot is handed the host’s workspace root wh
     host,
     tools: new ToolRegistry(),
     bus: new EventBus(),
-    workspaceRoot: '/home/ada/.stratus/workspaces',
+    workspaces: fakeWorkspaces('/home/ada/.stratus'),
   });
 
-  // The artifacts move; the ledger does not — it is the one `fs.read` asks.
-  assert.deepEqual(seen[0], { workspaceRoot: '/data/mcp', ledgerRoot: '/home/ada/.stratus/workspaces' });
+  // The artifacts move. The ledger is not the operator's to move: two
+  // plugins write it, and `fs.read` consults one, so a file recorded in
+  // another reads back unlabelled. It used to be forced to the host's
+  // single workspace root; there is no single root now, so the key is taken
+  // away entirely and both writers bind the ledger to the `workspaces`
+  // seam, which no config block can reach.
+  assert.deepEqual(seen[0], { workspaceRoot: '/data/mcp' });
 });
 
-test('a plugin that declares workspaceRoot is given the host’s answer unless the operator set one', async () => {
+test('the host answers for the workspace through the seam, not by injecting a path', async () => {
   const seen: JsonObject[] = [];
+  const seats: Array<string | undefined> = [];
   const host = await fakeHost({
     '@stratusagent/tool-browser': {
       manifest: {
@@ -315,15 +332,17 @@ test('a plugin that declares workspaceRoot is given the host’s answer unless t
           config: { type: 'object', properties: { workspaceRoot: { type: 'string' } } },
         },
       },
-      module: pluginModule('tool-browser', (tools, config) => {
+      module: pluginModule('tool-browser', (tools, config, context) => {
         seen.push(config);
+        seats.push(context.workspaces?.forAgent('ava'));
         tools.register(tool('browser.goto', 'gated'));
       }),
     },
     '@stratusagent/tool-web': {
       manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'web.fetch', risk: 'gated' }] } } },
-      module: pluginModule('tool-web', (tools, config) => {
+      module: pluginModule('tool-web', (tools, config, context) => {
         seen.push(config);
+        seats.push(context.workspaces?.forAgent('ava'));
         tools.register(tool('web.fetch', 'gated'));
       }),
     },
@@ -334,12 +353,21 @@ test('a plugin that declares workspaceRoot is given the host’s answer unless t
     host,
     tools: new ToolRegistry(),
     bus: new EventBus(),
-    workspaceRoot: '/home/ada/.stratus/workspaces',
+    workspaces: fakeWorkspaces('/home/ada/.stratus'),
   });
 
-  assert.deepEqual(seen[0], { workspaceRoot: '/home/ada/.stratus/workspaces' });
-  // A plugin that never declared it is not handed a path it has no schema for.
+  // Neither plugin's config gains a path. The host used to fill
+  // `workspaceRoot` for any manifest declaring it, which worked while the
+  // workspace was a root plus the agent id and broke the moment it moved
+  // inside the agent's own directory — five plugins had written that shape
+  // down. The whole question is the host's now, so the answer arrives as a
+  // seam and is the same for every plugin, declared schema or not.
+  assert.deepEqual(seen[0], {});
   assert.deepEqual(seen[1], {});
+  assert.deepEqual(seats, [
+    '/home/ada/.stratus/agents/ava/workspace',
+    '/home/ada/.stratus/agents/ava/workspace',
+  ]);
 });
 
 test('loadOptionalModule tells "not installed" from "installed and broken"', async () => {
@@ -422,7 +450,7 @@ test('a plugin that fails after it was constructed is still told to let go', asy
   assert.match(result.failures[1]?.reason ?? '', /already registered by the kernel/);
 });
 
-test('a plugin can require the setting the host supplies', async () => {
+test('a manifest that requires workspaceRoot now needs the operator to set it', async () => {
   let received: JsonObject | undefined;
   const host = await fakeHost({
     '@stratusagent/tool-browser': {
@@ -430,8 +458,10 @@ test('a plugin can require the setting the host supplies', async () => {
         stratus: {
           pluginVersion: 1,
           contributes: { tools: [{ name: 'browser.goto', risk: 'gated' }] },
-          // Required, because this plugin cannot work without somewhere to
-          // write — and the host is what knows where that is.
+          // A manifest may still require it. The host no longer fills it,
+          // so requiring it is now a demand on the *operator* — which is
+          // the cost of moving the answer to the `workspaces` seam, and is
+          // why no first-party manifest marks it required.
           config: {
             type: 'object',
             properties: { workspaceRoot: { type: 'string' } },
@@ -446,20 +476,32 @@ test('a plugin can require the setting the host supplies', async () => {
     },
   });
 
-  const result = await loadPlugins({
+  const unset = await loadPlugins({
     config: { '@stratusagent/tool-browser': { enabled: true } },
     host,
     tools: new ToolRegistry(),
     bus: new EventBus(),
-    workspaceRoot: '/home/ada/.stratus/workspaces',
+    workspaces: fakeWorkspaces('/home/ada/.stratus'),
   });
 
-  // Validated against what the plugin is actually handed, not against the
-  // operator's block before the defaults were folded in — otherwise a
-  // manifest that requires this setting is refused for missing the very
-  // thing the loader was about to supply.
-  assert.deepEqual(result.failures, []);
-  assert.deepEqual(received, { workspaceRoot: '/home/ada/.stratus/workspaces' });
+  // Refused, and the seam does not satisfy it: `workspaceRoot` is a config
+  // key, the seam is not, and a schema that requires the key is asking the
+  // operator for a path. Named rather than silently loaded without it.
+  assert.equal(unset.failures.length, 1);
+  assert.match(unset.failures[0]?.reason ?? '', /workspaceRoot/);
+  assert.equal(received, undefined);
+
+  // Set, and it comes through untouched — the operator's own root, which
+  // `workspaceResolver` lets win over the seam for exactly this reason.
+  const set = await loadPlugins({
+    config: { '@stratusagent/tool-browser': { enabled: true, workspaceRoot: '/data/shots' } },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    workspaces: fakeWorkspaces('/home/ada/.stratus'),
+  });
+  assert.deepEqual(set.failures, []);
+  assert.deepEqual(received, { workspaceRoot: '/data/shots' });
 });
 
 test('a third-party search plugin registers web.search gated even though its manifest says safe', async () => {
@@ -647,10 +689,10 @@ test('the preflight refuses settings the manifest schema rejects', async () => {
   });
 
   await assert.rejects(
-    () => preflightPlugin(manifest, directory, {}, undefined),
+    () => preflightPlugin(manifest, directory, {}),
     /required setting "org"/,
   );
-  await preflightPlugin(manifest, directory, { org: 'stratuslabs' }, undefined);
+  await preflightPlugin(manifest, directory, { org: 'stratuslabs' });
 });
 
 test('the preflight refuses a toolRisks override the loader would refuse', async () => {
@@ -665,10 +707,10 @@ test('the preflight refuses a toolRisks override the loader would refuse', async
   // both. `validatePluginConfig` cannot catch it: `toolRisks` is a
   // host-owned key, stripped before the schema is applied.
   await assert.rejects(
-    () => preflightPlugin(manifest, directory, { toolRisks: { 'example.write': 'safe' } }, undefined),
+    () => preflightPlugin(manifest, directory, { toolRisks: { 'example.write': 'safe' } }),
     /toolRisks/,
   );
-  await preflightPlugin(manifest, directory, { toolRisks: { 'example.read': 'gated' } }, undefined);
+  await preflightPlugin(manifest, directory, { toolRisks: { 'example.read': 'gated' } });
 });
 
 test('the preflight refuses a declared skill file that is not there', async () => {
@@ -690,7 +732,7 @@ test('the preflight refuses a declared skill file that is not there', async () =
   // is how `stratus setup` briefly offered to enable a plugin whose skill
   // files were not there.
   await assert.rejects(
-    () => preflightPlugin(manifest, directory, {}, undefined),
+    () => preflightPlugin(manifest, directory, {}),
     PluginManifestError,
   );
 
@@ -699,5 +741,5 @@ test('the preflight refuses a declared skill file that is not there', async () =
     path.join(directory, 'skills', 'pr-review', 'SKILL.md'),
     ['---', 'name: pr-review', 'description: Review a pull request the way this team does.', '---', '', 'Read the diff.'].join('\n'),
   );
-  await preflightPlugin(manifest, directory, {}, undefined);
+  await preflightPlugin(manifest, directory, {});
 });

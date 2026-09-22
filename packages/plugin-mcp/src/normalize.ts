@@ -237,14 +237,14 @@ export interface NormalizeOptions {
   /** The server-side tool name — part of the written file's name. */
   tool: string;
   /**
-   * The workspace root the host supplied. Binary content lands under
-   * `<workspaceRoot>/<agentId>/mcp/<server>/` — per agent, same as
-   * screenshots, so two agents never read each other's files.
+   * This agent's workspace, as the host resolved it — not a root to join an
+   * id onto. Binary content lands under `<workspace>/mcp/<server>/`, so two
+   * agents never read each other's files, the same shape screenshots take.
    */
-  workspaceRoot?: string;
+  workspace?: string;
   agentId: string;
   /**
-   * The filesystem provenance ledger for `workspaceRoot`. A binary block
+   * The filesystem provenance ledger for `workspace`. A binary block
    * is a server's bytes written to disk without going through `fs.write`,
    * so the write records itself here at `external` before the bytes land —
    * a later `fs.read` of the file then carries the label the tool result
@@ -299,15 +299,15 @@ export const normalizeCallResult = async (
     if (typeof data !== 'string') {
       return;
     }
-    if (!options.workspaceRoot) {
-      texts.push(`[binary ${typeof mimeType === 'string' ? mimeType : 'content'} dropped: no workspaceRoot is configured for @stratusagent/plugin-mcp]`);
+    if (!options.workspace) {
+      texts.push(`[binary ${typeof mimeType === 'string' ? mimeType : 'content'} dropped: @stratusagent/plugin-mcp has no workspace for ${options.agentId} — the host supplied neither a workspaces seam nor a workspaceRoot]`);
       return;
     }
     // Canonical, because the ledger is keyed the way `fs.read` looks a
-    // path up — through `realpath` — and a workspace root or agent
-    // directory an operator moved behind a link would otherwise leave the
-    // record under a spelling no read ever asks for.
-    const lexical = path.join(options.workspaceRoot, options.agentId, 'mcp', options.server);
+    // path up — through `realpath` — and a workspace an operator moved
+    // behind a link would otherwise leave the record under a spelling no
+    // read ever asks for.
+    const lexical = path.join(options.workspace, 'mcp', options.server);
     await mkdir(lexical, { recursive: true });
     const directory = await realpath(lexical);
     const stamp = (options.now ?? Date.now)();

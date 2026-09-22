@@ -20,6 +20,7 @@ import {
   EventBus,
   ToolRegistry,
   resolveToolRisk,
+  type AgentWorkspaces,
   type JsonObject,
   type ModelProvider,
   type Plugin,
@@ -44,6 +45,11 @@ import {
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+// What a configured `workspaceRoot` still means to a plugin: one directory
+// per agent directly under the root. The host's own layout answers through
+// the `workspaces` seam instead, which is why the ledger takes a resolver.
+const under = (workspaceRoot: string) => (agentId: string) => path.join(workspaceRoot, agentId);
+
 const sessionFor = (agentId: string): Session => ({
   id: `${agentId}-session`,
   agent: { id: agentId, name: agentId },
@@ -65,9 +71,17 @@ const viewFor = async (target: ToolRegistry): Promise<ManifestBoundToolRegistry>
 };
 
 /** Load the plugin the way the loader does: setup through the view, then commit. */
-const loadThroughView = async (plugin: Plugin, target: ToolRegistry): Promise<ManifestBoundToolRegistry> => {
+const loadThroughView = async (
+  plugin: Plugin,
+  target: ToolRegistry,
+  workspaces?: AgentWorkspaces,
+): Promise<ManifestBoundToolRegistry> => {
   const view = await viewFor(target);
-  await plugin.setup({ bus: new EventBus(), tools: view });
+  await plugin.setup({
+    bus: new EventBus(),
+    tools: view,
+    ...(workspaces !== undefined ? { workspaces } : {}),
+  });
   view.commit(new Map());
   return view;
 };
@@ -531,7 +545,7 @@ test('structured content passes through, and an image lands in the per-agent wor
     // A server's bytes on disk, written without `fs.write`: recorded in the
     // same ledger `tool-fs` reads, so a later `fs.read` of the file carries
     // the label this result did rather than arriving as the agent's own.
-    const ledger = createFileLedger(workspaceRoot);
+    const ledger = createFileLedger(under(workspaceRoot));
     assert.equal(await ledger.lookup('ava', files[0]!), 'external');
   } finally {
     await plugin.dispose?.();
@@ -564,7 +578,7 @@ test('an image written through a linked workspace is recorded under the path a r
     assert.ok(file);
     assert.equal(file, await realpath(file));
     assert.ok(file.startsWith(path.join(await realpath(real), 'ava', 'mcp', 'linear') + path.sep));
-    assert.equal(await createFileLedger(linked).lookup('ava', file), 'external');
+    assert.equal(await createFileLedger(under(linked)).lookup('ava', file), 'external');
   } finally {
     await plugin.dispose?.();
   }
@@ -588,8 +602,41 @@ test('an image written under a plugin-specific workspace is recorded in the host
     const output = await target.get('mcp.linear.chart')!.execute({}, sessionFor('ava')) as JsonObject;
     const [file] = output.files as string[];
     assert.ok(file!.startsWith(path.join(await realpath(artifacts), 'ava') + path.sep));
-    assert.equal(await createFileLedger(ledgerRoot).lookup('ava', file!), 'external');
-    assert.equal(await createFileLedger(artifacts).lookup('ava', file!), undefined);
+    assert.equal(await createFileLedger(under(ledgerRoot)).lookup('ava', file!), 'external');
+    assert.equal(await createFileLedger(under(artifacts)).lookup('ava', file!), undefined);
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('the host answers for the workspace, and keeps the ledger even when an operator relocates the output', async () => {
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  const handle = fakeServer({
+    current: (server) => {
+      server.registerTool('chart', { description: 'Render a chart.' }, async () => ({
+        content: [{ type: 'image', data: png.toString('base64'), mimeType: 'image/png' }],
+      }));
+    },
+  });
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-seam-'));
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    all: async () => [path.join(home, 'agents', 'ava', 'workspace')],
+  };
+  const target = new ToolRegistry();
+  // Seam *and* a relocated output directory. The bytes follow the operator;
+  // the ledger does not, because `tool-fs` reads the one at the seam's
+  // workspace and `fs.read` consults exactly one — a record in a second
+  // ledger is a fetched file that reads back as the agent's own words.
+  const artifacts = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-relocated-'));
+  const plugin = pluginFor(handle, { workspaceRoot: artifacts });
+  await loadThroughView(plugin, target, workspaces);
+  try {
+    const output = await target.get('mcp.linear.chart')!.execute({}, sessionFor('ava')) as JsonObject;
+    const [file] = output.files as string[];
+    assert.ok(file!.startsWith(path.join(await realpath(artifacts), 'ava', 'mcp', 'linear') + path.sep), file);
+    assert.equal(await createFileLedger(workspaces.forAgent).lookup('ava', file!), 'external');
+    assert.equal(await createFileLedger(under(artifacts)).lookup('ava', file!), undefined);
   } finally {
     await plugin.dispose?.();
   }
@@ -1461,7 +1508,7 @@ test('a binary block cannot steer the written path: the server-side tool name is
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-traversal-'));
   const output = await normalizeCallResult(
     { content: [{ type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' }] },
-    { server: 'linear', tool: '../../../escape', agentId: 'ava', workspaceRoot },
+    { server: 'linear', tool: '../../../escape', agentId: 'ava', workspace: path.join(workspaceRoot, 'ava') },
   ) as JsonObject;
   const [file] = output.files as string[];
   const directory = path.join(workspaceRoot, 'ava', 'mcp', 'linear');
@@ -1472,7 +1519,7 @@ test('a binary block cannot steer the written path: the server-side tool name is
 test('a link planted at a binary block’s recorded path is never written through', async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-link-'));
   const block = { content: [{ type: 'image', data: Buffer.from('server bytes').toString('base64'), mimeType: 'image/png' }] };
-  const context = { server: 'linear', tool: 'chart', agentId: 'ava', workspaceRoot, now: () => 7, ledger: createFileLedger(workspaceRoot) };
+  const context = { server: 'linear', tool: 'chart', agentId: 'ava', workspace: path.join(workspaceRoot, 'ava'), now: () => 7, ledger: createFileLedger(under(workspaceRoot)) };
   // The file names are `<tool>-<stamp>-<serial>`, and the serial counts up
   // by one per block, so the next name is known once one has been seen —
   // which is what a peer watching the ledger's records would see too.
@@ -1500,8 +1547,8 @@ test('an artifact directory swapped for a link between its resolution and the op
     server: 'linear',
     tool: 'chart',
     agentId: 'ava',
-    workspaceRoot,
-    ledger: createFileLedger(workspaceRoot),
+    workspace: path.join(workspaceRoot, 'ava'),
+    ledger: createFileLedger(under(workspaceRoot)),
     now: () => {
       renameSync(directory, `${directory}.moved`);
       symlinkSync(elsewhere, directory);
@@ -1518,7 +1565,7 @@ test('an artifact directory swapped for a link between its resolution and the op
 test('two writes in the same millisecond get distinct files', async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-serial-'));
   const block = { content: [{ type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' }] };
-  const context = { server: 'linear', tool: 'chart', agentId: 'ava', workspaceRoot, now: () => 42 };
+  const context = { server: 'linear', tool: 'chart', agentId: 'ava', workspace: path.join(workspaceRoot, 'ava'), now: () => 42 };
   const first = await normalizeCallResult(block, context) as JsonObject;
   const second = await normalizeCallResult(block, context) as JsonObject;
   assert.notEqual((first.files as string[])[0], (second.files as string[])[0]);
@@ -1535,7 +1582,7 @@ test('a failing result writes nothing: isError is settled before any block touch
           { type: 'text', text: 'it broke' },
         ],
       },
-      { server: 'linear', tool: 'chart', agentId: 'ava', workspaceRoot },
+      { server: 'linear', tool: 'chart', agentId: 'ava', workspace: path.join(workspaceRoot, 'ava') },
     ),
     /it broke/,
   );

@@ -47,6 +47,7 @@ test('a configured plugin is loaded before dispatch, and reported with its prove
   const warn: string[] = [];
   let disposed = 0;
   let workspaceRoot: unknown;
+  let seenWorkspace: unknown;
 
   const host = await hostFor({
     'stratus-plugin-notes': {
@@ -62,7 +63,11 @@ test('a configured plugin is loaded before dispatch, and reported with its prove
           workspaceRoot = config.workspaceRoot;
           return {
             name: 'notes',
-            setup(context: { tools: { register(tool: unknown): void } }) {
+            setup(context: {
+              tools: { register(tool: unknown): void };
+              workspaces?: { forAgent(agentId: string): string };
+            }) {
+              seenWorkspace = context.workspaces?.forAgent('ava');
               context.tools.register({
                 name: 'notes.read',
                 description: 'Read a note.',
@@ -107,9 +112,11 @@ test('a configured plugin is loaded before dispatch, and reported with its prove
     // them rather than an omission.
     assert.equal(tools.find((tool) => tool.name === 'demo.echo')?.package, undefined);
 
-    // The host supplies the workspace root; the plugin does not re-derive
-    // ~/.stratus/workspaces for itself.
-    assert.equal(workspaceRoot, path.join(home, '.stratus', 'workspaces'));
+    // The host answers for the workspace through the seam, per agent — the
+    // plugin does not re-derive the layout, and nothing fills its own
+    // `workspaceRoot` key on its behalf any more.
+    assert.equal(workspaceRoot, undefined);
+    assert.equal(seenWorkspace, path.join(home, '.stratus', 'agents', 'ava', 'workspace'));
 
     const plugins = gateway.plugins();
     assert.equal(plugins.find((plugin) => plugin.package === 'stratus-plugin-notes')?.tools?.length, 1);

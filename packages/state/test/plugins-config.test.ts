@@ -9,7 +9,7 @@ import {
   globalConfigPath,
   readTrustedConfigBlock,
   validateConfigFile,
-  workspacesDirPath,
+  legacyWorkspacesDirPath,
 } from '../src/index.ts';
 
 const validate = (plugins: unknown) => validateConfigFile({ plugins }, 'config.json');
@@ -80,8 +80,12 @@ test('reading a block that is absent, or a config that will not parse, says whic
   assert.equal(broken.status, 'unreadable');
 });
 
-test('tool output has one directory per agent under the Stratus home', () => {
+test('an agent’s tool output lives beside the rest of its state, not in a root of its own', () => {
   const env = { homeDir: '/home/ada' };
-  assert.equal(workspacesDirPath(env), '/home/ada/.stratus/workspaces');
-  assert.equal(agentWorkspacePath(env, 'ava'), '/home/ada/.stratus/workspaces/ava');
+  // Inside the agent's directory, as a sibling of `sessions.db`,
+  // `memory.jsonl` and `whitelist.json` — never an ancestor of them, which
+  // is what makes it safe as a default `fs` root.
+  assert.equal(agentWorkspacePath(env, 'ava'), '/home/ada/.stratus/agents/ava/workspace');
+  // The pre-schema-4 home, kept only so the migration can find it.
+  assert.equal(legacyWorkspacesDirPath(env), '/home/ada/.stratus/workspaces');
 });

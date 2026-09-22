@@ -114,6 +114,34 @@ without following links, so a link is not a grant file it can carry. That agent 
 grants until you rename its id and put the file back — the safe direction,
 and the reason the original is kept.
 
+Schema 4 finishes the same move with the fourth resource an agent owns: its
+**workspace**, from `~/.stratus/workspaces/<id>` to
+`~/.stratus/agents/<id>/workspace`. That is where its tools put the files
+they produce, and where `fs-provenance.jsonl` — the ledger saying which of
+those files came from outside — lives. With it under `agents/<id>/`, that
+one directory is everything an agent owns, which is what makes backing one
+up or erasing one a single path to name. The extra `workspace/` segment is
+deliberate rather than tidy: it is `fs`'s default root, so the agent's own
+`whitelist.json`, `sessions.db` and `memory.jsonl` are siblings of that
+root rather than files inside it.
+
+It waits for `stratus update` or the next `stratus serve`, for the same
+reason the sessions do and one of its own: the older daemon resolves
+`workspaces/<id>` by pathname on every tool call that writes a file, so it
+does not notice a move — it rebuilds the old tree and goes on appending
+provenance records there, and a record the new ledger never sees is a
+fetched file that reads back as the agent's own words.
+
+Nothing is deleted here either. Each workspace is renamed, so it is in one
+place or the other and never both; a workspace an operator relocated behind
+a symlink is moved *as the link*, so their files stay where they put them.
+Two things are left where they are and named on the way past: a directory
+whose name is not an agent id (a `.cache/` something dropped in there), and
+an agent that already has a workspace at the new path — two workspaces mean
+two provenance ledgers, and folding them would mean dropping one set of
+labels, which turns fetched text back into the agent's own. `workspaces/`
+itself is removed only if it empties, and never recursively.
+
 One thing a rollback does lose, and it is not stamped: an agent's
 `origins` and `tools` grants. `whitelist.json` holds every kind of
 grant under the same version, so a daemon predating

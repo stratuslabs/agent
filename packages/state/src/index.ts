@@ -37,9 +37,11 @@ export {
   legacyMemoryFileIn,
   legacySessionDbPath,
   legacySessionDbIn,
-  workspacesDirPath,
+  legacyWorkspacesDirPath,
+  legacyWorkspacesDirIn,
   skillsDirPath,
   agentWorkspacePath,
+  agentWorkspaceIn,
   agentStateDirPath,
   agentStateDirIn,
   agentsDirIn,
@@ -236,3 +238,5 @@ export {
   symlinkedStateDirectoryMessage,
   symlinkedStateFileMessage,
 } from '@stratusagent/permissions';
+
+export { createAgentWorkspaces } from './workspaces.ts';

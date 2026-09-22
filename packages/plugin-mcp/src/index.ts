@@ -17,7 +17,7 @@ import {
   type Tool,
   type ToolRegistry,
 } from '@stratusagent/core';
-import { createFileLedger } from '@stratusagent/plugins';
+import { createFileLedger, workspaceResolver, type TaintedWriteLedger } from '@stratusagent/plugins';
 
 import {
   bridgedToolName,
@@ -731,11 +731,20 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     ?? ((attempt: number) => Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS));
   const workspaceRoot = typeof config.workspaceRoot === 'string' ? config.workspaceRoot : undefined;
   // The same ledger `tool-fs` reads, so a server's image or audio block
-  // written here reads back labelled there: its home is the host's
-  // `ledgerRoot`, which the loader sets for both and lets neither config
-  // block move, with `workspaceRoot` the fallback for a hand-wired host.
-  const ledgerRoot = typeof config.ledgerRoot === 'string' ? config.ledgerRoot : workspaceRoot;
-  const ledger = ledgerRoot !== undefined ? createFileLedger(ledgerRoot) : undefined;
+  // written here reads back labelled there — and a *different* location
+  // from the artifacts it records. An operator may point this plugin's
+  // output at a volume of their own (`workspaceRoot`); the ledger follows
+  // the host's `workspaces` seam regardless, because `tool-fs` writes the
+  // same one and `fs.read` consults exactly one — a file recorded in a
+  // second ledger reads back unlabelled. `ledgerRoot` and `workspaceRoot`
+  // are the fallback for a host that wires this plugin by hand and has no
+  // layout to offer.
+  //
+  // Both resolvers are built in `setup`, because the seam arrives with the
+  // context; this holds only what config said.
+  const handWiredLedgerRoot = typeof config.ledgerRoot === 'string' ? config.ledgerRoot : workspaceRoot;
+  let workspaceFor: ((agentId: string) => string) | undefined;
+  let ledger: TaintedWriteLedger | undefined;
 
   if (!isObject(config.servers)) {
     throw new McpConfigError(
@@ -819,7 +828,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         server: state.spec.name,
         tool: info.mcpName,
         agentId: session.agent.id,
-        ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+        ...(workspaceFor !== undefined ? { workspace: workspaceFor(session.agent.id) } : {}),
         ...(ledger !== undefined ? { ledger } : {}),
       });
     },
@@ -1115,6 +1124,18 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
 
     async setup(context) {
       view = context.tools;
+      // Where the bytes land: the operator's `workspaceRoot` if they wrote
+      // one, else the host's layout — see `workspaceResolver`. Without
+      // either, a binary block is dropped with a line saying so rather
+      // than written somewhere this plugin chose.
+      workspaceFor = workspaceResolver(context.workspaces, workspaceRoot);
+      // Where the record of them lands: the host's seam wins here, so
+      // relocating the output cannot fork the ledger.
+      const ledgerWorkspaceFor = workspaceResolver(
+        context.workspaces,
+        context.workspaces === undefined ? handWiredLedgerRoot : undefined,
+      );
+      ledger = ledgerWorkspaceFor !== undefined ? createFileLedger(ledgerWorkspaceFor) : undefined;
       if (options.log === undefined && context.log !== undefined) {
         log = boundedSink(context.log);
       }

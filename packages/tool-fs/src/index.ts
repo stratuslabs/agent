@@ -22,6 +22,8 @@ import {
   ledgerGuard,
   ledgerTrustOfContent,
   resolvePluginAgentConfig,
+  workspaceResolver,
+  allAgentWorkspaces,
   type FileIdentity,
   type LedgerGuard,
   type TaintedWriteLedger,
@@ -1063,29 +1065,42 @@ const createWriteTool = (
  * `session.agent.id` on every call.
  */
 export const createFsPlugin = (config: JsonObject = {}): Plugin => {
-  // `workspaceRoot` is supplied by the loader (the host knows the platform's
-  // answer); it is where the tainted-write ledger lives, per agent. Loaded
-  // without one — a host wiring the plugin by hand — the ledger is
-  // process-local, which the README says outright.
-  const workspaceRoot = typeof config.workspaceRoot === 'string' && config.workspaceRoot.length > 0
-    ? config.workspaceRoot
-    : undefined;
-  // The ledger's home is the host's `ledgerRoot`, which the loader sets to
-  // its workspace root for every plugin that writes the ledger and never
-  // lets a config block override — see the loader. `workspaceRoot` is the
-  // fallback for a host that wired the plugin by hand.
-  const ledgerRoot = typeof config.ledgerRoot === 'string' && config.ledgerRoot.length > 0
+  // The ledger's home used to be a root this plugin appended the agent id
+  // to. It is now whatever the host says the agent's workspace is, because
+  // the layout is the host's: see `workspaceResolver`. `ledgerRoot` and
+  // `workspaceRoot` remain the fallback for a host that wires this plugin
+  // by hand and supplies no `workspaces` seam — the loader sets `ledgerRoot`
+  // and never lets a config block override it, so two writers cannot keep
+  // two ledgers.
+  const handWiredLedgerRoot = typeof config.ledgerRoot === 'string' && config.ledgerRoot.length > 0
     ? config.ledgerRoot
-    : workspaceRoot;
-  const ledger = ledgerRoot !== undefined ? createFileLedger(ledgerRoot) : createProcessLocalLedger();
-  // Which paths are a ledger is decided per call, from the workspace as it
-  // stands — see `ledgerGuard` for the two spellings a ledger can have and
-  // why neither is cached.
-  const isLedger = (): Promise<LedgerGuard> => ledgerGuard(ledgerRoot);
+    : typeof config.workspaceRoot === 'string' && config.workspaceRoot.length > 0
+      ? config.workspaceRoot
+      : undefined;
   const serialized = createKeyedSerializer();
   return {
     name: '@stratusagent/tool-fs',
     setup(context) {
+      // Built here rather than at construction, because the seam arrives
+      // with the context. A host that supplies neither leaves the ledger
+      // process-local, which the README says outright.
+      // The ledger follows the host's seam and never this plugin's own
+      // `workspaceRoot`, which is how one ledger is kept now that the
+      // loader no longer holds `ledgerRoot` down: `plugin-mcp` writes the
+      // same ledger, and an operator who relocates one plugin's workspace
+      // must not thereby give it a second one — `fs.read` consults one, so
+      // a file recorded in another reads back unlabelled. The config roots
+      // are the fallback for a host that wires this plugin by hand.
+      const ledgerRoot = context.workspaces === undefined ? handWiredLedgerRoot : undefined;
+      const workspaceFor = workspaceResolver(context.workspaces, ledgerRoot);
+      const ledger = workspaceFor !== undefined
+        ? createFileLedger(workspaceFor)
+        : createProcessLocalLedger();
+      // Which paths are a ledger is decided per call, from the workspaces as
+      // they stand — see `ledgerGuard` for the spellings a ledger can have
+      // and why none is cached.
+      const isLedger = async (): Promise<LedgerGuard> =>
+        ledgerGuard(await allAgentWorkspaces(context.workspaces, ledgerRoot));
       context.tools.register(createReadTool(config, ledger, isLedger, serialized));
       context.tools.register(createListTool(config, ledger));
       context.tools.register(createSearchTool(config, ledger, isLedger));

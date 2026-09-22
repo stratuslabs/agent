@@ -12,6 +12,7 @@ import {
   type JsonObject,
   type Session,
   type Tool,
+  type AgentWorkspaces,
   type TrustLevel,
 } from '@stratusagent/core';
 
@@ -19,9 +20,13 @@ import { ledgerContentTrust, ledgerTrustOfContent } from '@stratusagent/plugins'
 
 import { createFileLedger, createFsPlugin, LEDGER_FILENAME, ledgerGuard, nameIdentifiesHandle, openContained } from '../src/index.ts';
 
-const registryFor = async (config: JsonObject): Promise<ToolRegistry> => {
+const registryFor = async (config: JsonObject, workspaces?: AgentWorkspaces): Promise<ToolRegistry> => {
   const tools = new ToolRegistry();
-  await createFsPlugin(config).setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  await createFsPlugin(config).setup({
+    bus: { emit: async () => undefined, subscribe: () => () => undefined } as never,
+    tools,
+    ...(workspaces !== undefined ? { workspaces } : {}),
+  });
   return tools;
 };
 
@@ -44,6 +49,12 @@ const run = async (tools: ToolRegistry, name: string, input: JsonObject, session
   const tool = tools.get(name) as Tool;
   return tool.execute(input, session, context);
 };
+
+// What a configured `workspaceRoot` still means to a plugin: one directory
+// per agent directly under the root. The host's own layout puts the
+// workspace inside the agent's state directory instead, which is why the
+// ledger takes a resolver now and not a root.
+const under = (workspaceRoot: string) => (agentId: string) => path.join(workspaceRoot, agentId);
 
 const workspace = async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-provenance-'));
@@ -211,13 +222,22 @@ test('fs.write refuses to edit the ledger itself, even inside a root that covers
   await run(tools, 'fs.read', { path: 'ava/notes.md' }, sessionAt('ava', 'user'), read.context);
   assert.deepEqual(read.marks, ['external']);
 
-  // Another agent's ledger is refused too — and only the ledger: a project
-  // file that happens to share the name, one level deeper, is an ordinary
-  // write.
+  // Another agent's ledger is refused too — every agent the host knows of,
+  // which under a configured root is every directory in it.
+  //
+  // An id with no directory anywhere is not one of them. That check was
+  // lexical once — `<root>/<anything>/fs-provenance.jsonl` — and could be
+  // while the root held workspaces and nothing else. A workspace now lives
+  // inside the agent's own state directory, so a root wide enough to reach
+  // an unknown agent's ledger already reaches its `whitelist.json` and its
+  // `sessions.db`, and there is nothing left here for this guard to save.
+  await mkdir(path.join(workspaceRoot, 'bea'), { recursive: true });
   await assert.rejects(
     () => run(tools, 'fs.write', { path: `bea/${LEDGER_FILENAME}`, content: '{}' }, sessionAt('ava', 'agent')),
     /provenance ledger/,
   );
+  // And only the ledger: a project file that happens to share the name, one
+  // level deeper, is an ordinary write.
   await run(tools, 'fs.write', { path: `ava/project/${LEDGER_FILENAME}`, content: '{"theirs":true}' }, sessionAt('ava', 'agent'));
   assert.equal(await readFile(path.join(workspaceRoot, 'ava', 'project', LEDGER_FILENAME), 'utf8'), '{"theirs":true}');
 });
@@ -499,7 +519,7 @@ test('the ledger guard judges the inode a caller holds, not whatever the name po
   const held = { dev: info.dev, ino: info.ino };
   await rm(alias);
   await writeFile(alias, '');
-  const guard = await ledgerGuard(workspaceRoot);
+  const guard = await ledgerGuard([path.join(workspaceRoot, 'ava')]);
   assert.equal(await guard(alias, held), true);
   // Without the inode the guard can only ask the name, which now lies.
   assert.equal(await guard(alias), false);
@@ -527,8 +547,8 @@ test('the ledger lives at the host’s ledgerRoot, not at whatever workspaceRoot
   await mkdir(ledgerRoot, { recursive: true });
   const tools = await registryFor({ roots: [root], workspaceRoot, ledgerRoot });
   await run(tools, 'fs.write', { path: 'fetched.md', content: 'fetched' }, sessionAt('ava', 'external'));
-  assert.equal(await createFileLedger(ledgerRoot).lookup('ava', path.join(root, 'fetched.md')), 'external');
-  assert.equal(await createFileLedger(workspaceRoot).lookup('ava', path.join(root, 'fetched.md')), undefined);
+  assert.equal(await createFileLedger(under(ledgerRoot)).lookup('ava', path.join(root, 'fetched.md')), 'external');
+  assert.equal(await createFileLedger(under(workspaceRoot)).lookup('ava', path.join(root, 'fetched.md')), undefined);
   // And it is the ledger the reads consult.
   const read = marking();
   await run(tools, 'fs.read', { path: 'fetched.md' }, sessionAt('ava', 'user'), read.context);
@@ -569,7 +589,7 @@ test('a ledger record with a label nobody can read still marks its path, at unkn
     JSON.stringify({ path: path.join(root, 'fetched.md'), trust: 'external', at: 'now' }),
     '',
   ].join('\n'));
-  const ledger = createFileLedger(workspaceRoot);
+  const ledger = createFileLedger(under(workspaceRoot));
   assert.equal(await ledger.lookup('ava', path.join(root, 'edited.md')), 'unknown');
   assert.equal(await ledger.lookup('ava', path.join(root, 'future.md')), 'unknown');
   assert.equal(await ledger.lookup('ava', path.join(root, 'fetched.md')), 'external');
@@ -652,4 +672,27 @@ test('a file’s name is the tainted session’s text too: a listing or a skippe
   const clean = marking();
   await run(tools, 'fs.list', { path: 'clean' }, sessionAt('ava', 'user'), clean.context);
   assert.deepEqual(clean.marks, []);
+});
+
+test('the ledger follows the host’s seam, not a workspaceRoot an operator wrote down', async () => {
+  const { root, workspaceRoot } = await workspace();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-seam-'));
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    all: async () => [path.join(home, 'agents', 'ava', 'workspace')],
+  };
+  // Both: the host's layout, and a root the operator set in this plugin's
+  // own config block. `plugin-mcp` writes this same ledger, so an operator
+  // who relocates one writer must not thereby give it a second one —
+  // `fs.read` consults exactly one, and a file recorded in the other reads
+  // back as the agent's own text.
+  const tools = await registryFor({ roots: [root], workspaceRoot }, workspaces);
+  await run(tools, 'fs.write', { path: 'fetched.md', content: 'fetched' }, sessionAt('ava', 'external'));
+
+  assert.equal(await createFileLedger(workspaces.forAgent).lookup('ava', path.join(root, 'fetched.md')), 'external');
+  assert.equal(await createFileLedger(under(workspaceRoot)).lookup('ava', path.join(root, 'fetched.md')), undefined);
+  // And it is the ledger the reads consult.
+  const read = marking();
+  await run(tools, 'fs.read', { path: 'fetched.md' }, sessionAt('ava', 'user'), read.context);
+  assert.deepEqual(read.marks, ['external']);
 });

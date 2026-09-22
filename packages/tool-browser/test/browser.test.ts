@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-import { ToolRegistry, type JsonObject, type Session, type Tool } from '@stratusagent/core';
+import { ToolRegistry, type AgentWorkspaces, type JsonObject, type Session, type Tool } from '@stratusagent/core';
 
 import {
   createBrowserPlugin,
@@ -108,10 +108,14 @@ const sessionFor = (id: string, agentId = 'ava'): Session => ({
   updatedAt: new Date().toISOString(),
 });
 
-const pluginWith = async (config: JsonObject, recorder: Recorder) => {
+const pluginWith = async (config: JsonObject, recorder: Recorder, workspaces?: AgentWorkspaces) => {
   const tools = new ToolRegistry();
   const plugin = createBrowserPlugin(config, { driver: fakeDriver(recorder) });
-  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  await plugin.setup({
+    bus: { emit: async () => undefined, subscribe: () => () => undefined } as never,
+    tools,
+    ...(workspaces !== undefined ? { workspaces } : {}),
+  });
   return { plugin, tools, tool: (name: string) => tools.get(name) as Tool };
 };
 
@@ -365,6 +369,20 @@ test('a screenshot lands in the agent’s own workspace and comes back as a path
     () => homeless.tool('browser.screenshot').execute({ url: 'https://example.com/' }, sessionFor('s')),
     /nowhere to write/,
   );
+
+  // And with no configured root, the host answers — through a layout that
+  // puts the id in the middle, which no join of a root and an id reaches.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shots-seam-'));
+  const hosted = await pluginWith({ allowedHosts: ['example.com'] }, emptyRecorder(), {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    all: async () => [],
+  });
+  t.after(() => hosted.plugin.dispose());
+  const seated = await hosted.tool('browser.screenshot').execute(
+    { url: 'https://example.com/' },
+    sessionFor('s', 'ava'),
+  ) as JsonObject;
+  assert.ok(String(seated.file).startsWith(path.join(home, 'agents', 'ava', 'workspace', 'screenshots') + path.sep), String(seated.file));
 });
 
 test('every tool carries the risk the manifest declares, acting included', async () => {
