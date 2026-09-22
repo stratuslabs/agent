@@ -475,6 +475,7 @@ const appendRecords = async (destination: string, body: string): Promise<void> =
 const foldLedgerInto = async (
   from: string,
   target: string,
+  retire: boolean,
 ): Promise<FoldResult> => {
   const source = ledgerIn(from);
   // The destination's ledger can be this very file under another name, with
@@ -512,6 +513,13 @@ const foldLedgerInto = async (
       }
       throw error;
     }
+  }
+  if (!retire) {
+    // Somebody else is still reading this file — see `workspaceIsShared`.
+    // Copied rather than moved, then: the duplicate records resolve to the
+    // same labels wherever they are read, and the alternative is taking an
+    // agent's whole ledger away to migrate a different agent.
+    return { outcome: 'folded', dropped };
   }
   // Never over an archive already there: a run killed between the append
   // and this rename leaves one, and the retry must not bury it.
@@ -569,6 +577,54 @@ const sameEntry = async (a: string, b: string): Promise<boolean> => {
     }
     throw error;
   }
+};
+
+/**
+ * Whether any other workspace on this host is this same directory.
+ *
+ * Asked before a fold retires the source's ledger, because retiring it is
+ * only safe if nothing else is still reading it. Two agents can share one
+ * workspace — `workspaces/ava` and `workspaces/bea` both linked at
+ * `/data/shared` is a layout an operator can build today, and the ledger
+ * format tolerates it, since records are keyed by absolute path and labels
+ * only ever go down. Folding one of those agents into a destination that
+ * already exists would then archive the *shared* ledger, and the other
+ * agent — migrated as a link to the same directory, with no collision of
+ * its own — would come out the far side with no ledger at all and every
+ * externally sourced file in it reading back as its own words.
+ *
+ * Both sides are looked at, because either order reaches the same place:
+ * an agent still waiting in `workspaces/` has its legacy entry, and one
+ * already moved has `agents/<id>/workspace`. Identity, not spelling — the
+ * sharing is a link by construction, so comparing paths would find nothing.
+ */
+const workspaceIsShared = async (env: StateEnvironment, from: string): Promise<boolean> => {
+  const candidates: string[] = [];
+  try {
+    for (const name of await readdir(legacyWorkspacesDirPath(env))) {
+      candidates.push(path.join(legacyWorkspacesDirPath(env), name));
+    }
+  } catch {
+    // Gone or not a directory: there is nothing left to share it with.
+  }
+  try {
+    for (const entry of await readdir(agentsDirPath(env), { withFileTypes: true })) {
+      if (entry.isDirectory() && isValidAgentId(entry.name)) {
+        candidates.push(agentWorkspacePath(env, entry.name));
+      }
+    }
+  } catch {
+    // Same.
+  }
+  for (const candidate of candidates) {
+    if (candidate === from) {
+      continue;
+    }
+    if (await sameEntry(candidate, from)) {
+      return true;
+    }
+  }
+  return false;
 };
 
 /**
@@ -754,7 +810,11 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // first: a ledger is rewritten only *after* its rename has already
       // succeeded, so the records here still name where their files are.
       await clearMoveMarker(from);
-      const folded = await foldLedgerInto(from, target);
+      // Retired only if this workspace is nobody else's — see
+      // `workspaceIsShared`. Asked before the fold, because the fold is
+      // what would take it away.
+      const shared = await workspaceIsShared(env, from);
+      const folded = await foldLedgerInto(from, target, !shared);
       if (folded.outcome === 'folded') {
         report.merged.push(agentId);
       }
@@ -771,7 +831,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           ? `${there} already reads the very ledger in ${here}, so there was nothing to fold; both are left `
             + 'as they are'
           : `${there} already existed, so what is left of ${here} stays there; its provenance records were `
-            + `folded into the ledger at the new path${torn}, and the files they name have not moved`;
+            + `folded into the ledger at the new path${torn}, and the files they name have not moved`
+            + (shared ? '; its own ledger was left live, because another workspace is the same directory' : '');
       report.quarantined.push(`${agentId} — ${why}`);
       return;
     }

@@ -218,6 +218,59 @@ test('a line no reader can parse is left in the archive rather than folded into 
   );
 });
 
+test('a ledger two agents share is not taken away to migrate one of them', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // A layout an operator can build today: two agents pointed at one
+  // directory, sharing its ledger. The format tolerates it — records are
+  // keyed by absolute path and labels only ever go down.
+  const shared = await mkdtemp(path.join(os.tmpdir(), 'stratus-shared-'));
+  await writeFile(path.join(shared, 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/shared.md'));
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink(shared, path.join(legacyWorkspacesDirPath(env), 'ava'));
+  await symlink(shared, path.join(legacyWorkspacesDirPath(env), 'bea'));
+  // Only one of them collides, which is what makes this asymmetric: ava is
+  // folded, bea is a plain link move.
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/own.md'));
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
+  assert.match(line, /its own ledger was left live, because another workspace is the same directory/);
+
+  // ava got the records, as a fold always does.
+  const forAva = await createFileLedger(() => agentWorkspacePath(env, 'ava')).snapshot('ava');
+  assert.deepEqual(Object.keys(forAva).sort(), ['/home/ada/notes/own.md', '/home/ada/notes/shared.md']);
+  // And bea, which never collided and whose workspace is that same shared
+  // directory, still has one. Retiring it for ava's sake would have left
+  // every externally sourced file in there reading back as bea's own words.
+  const forBea = await createFileLedger(() => agentWorkspacePath(env, 'bea')).snapshot('bea');
+  assert.deepEqual(Object.keys(forBea), ['/home/ada/notes/shared.md']);
+  assert.equal(await realpath(agentWorkspacePath(env, 'bea')), await realpath(shared));
+  assert.ok(!(await readdir(shared)).includes('fs-provenance.jsonl.migrated'));
+});
+
+test('and the agent sharing it does not have to be one still waiting in workspaces/', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // The other order, and the one a listing cannot be relied on to give:
+  // bea has already been moved — by an interrupted earlier run, or by an
+  // operator's own hand — so `workspaces/` knows nothing about the sharing.
+  const shared = await mkdtemp(path.join(os.tmpdir(), 'stratus-shared-'));
+  await writeFile(path.join(shared, 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/shared.md'));
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink(shared, path.join(legacyWorkspacesDirPath(env), 'ava'));
+  await mkdir(path.join(agentsDirPath(env), 'bea'), { recursive: true });
+  await symlink(shared, agentWorkspacePath(env, 'bea'));
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/own.md'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const forBea = await createFileLedger(() => agentWorkspacePath(env, 'bea')).snapshot('bea');
+  assert.deepEqual(Object.keys(forBea), ['/home/ada/notes/shared.md']);
+});
+
 test('a file an operator left among the workspaces is not an agent’s, and keeps the directory', async () => {
   const home = await newHome();
   const env = { homeDir: home };

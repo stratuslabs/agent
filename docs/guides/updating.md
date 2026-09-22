@@ -159,6 +159,14 @@ move. A directory whose name is not an agent id (a `.cache/` something
 dropped in there) is left alone the same way, and `workspaces/` itself is
 removed only if it empties, never recursively.
 
+The old ledger is retired to `fs-provenance.jsonl.migrated` afterwards, so
+a re-run does not append the same records again — unless another workspace
+is that same directory. Two agents pointed at one directory share its
+ledger, which the format allows, and retiring it to migrate one of them
+would leave the other with no ledger at all and every externally sourced
+file in it reading back as the agent's own words. In that case the records
+are copied and the original left live.
+
 Only lines a reader could parse are folded. A ledger has one record per
 line and is refused in full if any line is unreadable, so a record cut off
 mid-append by a kill — the likeliest thing to be wrong with a file left
