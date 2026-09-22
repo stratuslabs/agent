@@ -11,7 +11,7 @@ import type { OptionalModuleHost } from '@stratusagent/plugins';
 import {
   RESTARTING_TURN_ERROR,
   RestartUnsupportedError,
-  SqliteSessionStore,
+  ShardedSessionStore,
   createGateway,
   type GatewayChannelAdapter,
   type RestartOutcome,
@@ -488,8 +488,9 @@ test('a scheduled firing that ignores its abort does not hold the restart foreve
   });
   await gateway.start();
 
-  const { SqliteScheduleStore, defaultSessionDbPath } = await import('../src/index.ts');
-  const scheduleStore = new SqliteScheduleStore(defaultSessionDbPath({ homeDir: home }));
+  const { SqliteScheduleStore } = await import('../src/index.ts');
+  const { fleetDbPath } = await import('@stratusagent/state');
+  const scheduleStore = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
   scheduleStore.insert({
     id: 'sched-stuck',
     agentId: 'ava',
@@ -741,13 +742,13 @@ test('a restart asked for while the daemon is still starting is refused, and wor
 
 test('a turn recovered from a parked approval is aborted at the window like any other', async () => {
   const home = await newHome();
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
 
   // A session left as a kill mid-approval leaves one. Recovery runs the
   // parked call and then asks the provider again — and that call is the
   // one that blocks until its signal aborts.
-  const seed = new SqliteSessionStore(dbPath);
+  const seed = new ShardedSessionStore({ stateDir });
   const now = new Date().toISOString();
   await seed.create({
     id: 'parked-session',
@@ -781,7 +782,7 @@ test('a turn recovered from a parked approval is aborted at the window like any 
   const gateway = createGateway({
     env,
     idleTimeoutMs: 0,
-    sessionDbPath: dbPath,
+    stateDir,
     log: () => {},
     warn: () => {},
     onRestart: (outcome) => handOff(outcome),
@@ -802,7 +803,7 @@ test('a turn recovered from a parked approval is aborted at the window like any 
   assert.equal((await failed).error, RESTARTING_TURN_ERROR);
   await gateway.stop();
 
-  const after = new SqliteSessionStore(dbPath);
+  const after = new ShardedSessionStore({ stateDir });
   const session = await after.get('parked-session');
   after.close();
   assert.equal(session?.status, 'failed');

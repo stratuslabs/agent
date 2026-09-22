@@ -19,7 +19,7 @@ pack for a daemon and this page is the whole story; run it yourself and
 ## Which commands run unattended
 
 1. **Scopes approved this session**, then
-2. **the agent's whitelist** — `~/.stratus/agents/<id>.whitelist.json`,
+2. **the agent's whitelist** — `~/.stratus/agents/<id>/whitelist.json`,
    written by **Always allow**; its `scopes` array is this list, the
    `origins` array beside it is the same file's answer for
    [browser actions](./browser.md), and `tools` holds the

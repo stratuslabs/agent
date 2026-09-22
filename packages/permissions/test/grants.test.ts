@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -51,6 +51,16 @@ const contextFor = (tool: Tool, agentId = 'ava', input: JsonObject = {}): Approv
 });
 
 const newDirectory = (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-grants-'));
+
+/**
+ * A grant file written by hand, the way an operator edits one. The agent's
+ * own directory is where it lives now, and an operator creating it is
+ * creating that directory too.
+ */
+const writeByHand = async (file: string, contents: string): Promise<void> => {
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, contents);
+};
 
 test('always allow on a gated tool is a standing grant: per agent, past a restart, and never for allow once', async () => {
   const directory = await newDirectory();
@@ -156,7 +166,7 @@ test('a tool that names a command scope can never receive a tool grant, even by 
 
   // And a grant written into the file by hand does not apply either — the
   // exclusion is structural, resolved before the grant tier is consulted.
-  await writeFile(
+  await writeByHand(
     whitelistPathFor(directory, 'ava'),
     JSON.stringify({ version: 1, scopes: [], tools: [{ tool: 'shell.run', grantedAt: '2026-09-07T00:00:00.000Z' }] }),
   );
@@ -190,7 +200,7 @@ test('a dangerous tool cannot receive a standing grant', async () => {
   assert.deepEqual(await store.toolGrantsFor('ava'), []);
 
   // Nor by hand: a `tools` row for a dangerous tool is not consulted.
-  await writeFile(
+  await writeByHand(
     whitelistPathFor(directory, 'ava'),
     JSON.stringify({ version: 1, scopes: [], tools: [{ tool: 'fs.delete', grantedAt: '2026-09-07T00:00:00.000Z' }] }),
   );
@@ -324,7 +334,7 @@ test('a revoke whose write fails leaves the grant standing, rather than dropping
 
 test('grant rows are read leniently and written back whole, beside the scopes they sit with', async () => {
   const directory = await newDirectory();
-  await writeFile(
+  await writeByHand(
     whitelistPathFor(directory, 'ava'),
     JSON.stringify({
       version: 1,
@@ -349,4 +359,67 @@ test('grant rows are read leniently and written back whole, beside the scopes th
   assert.equal(stored.tools?.length, 2);
 
   assert.equal(parseToolGrant({ tool: 'a.b', package: '', grantedAt: 'x' })?.package, undefined);
+});
+
+test('a grant is never written through a symlinked agent directory', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-link-'));
+  const agents = path.join(home, 'agents');
+  await mkdir(agents, { recursive: true });
+  // Pointed at another agent's directory, which is the worst version: both
+  // identities would resolve the same `whitelist.json`, so each inherits
+  // what the other was granted unattended and one revocation covers both.
+  const bea = path.join(agents, 'bea');
+  await mkdir(bea, { recursive: true });
+  await symlink(bea, path.join(agents, 'ava'));
+
+  // Bea has grants of her own, which are what Ava would inherit.
+  await createFileCommandWhitelist({ directory: agents }).rememberTool('bea', {
+    tool: 'web.fetch',
+    grantedAt: '2026-03-01T00:00:00.000Z',
+  });
+
+  const store = createFileCommandWhitelist({ directory: agents });
+  await assert.rejects(
+    () => store.rememberTool('ava', { tool: 'shell.run', grantedAt: '2026-03-01T00:00:00.000Z' }),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  // And the read refuses too, which is the half that matters: resolving
+  // through the link would report Bea's standing permissions as Ava's.
+  await assert.rejects(
+    () => store.grantsFor('ava'),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  assert.deepEqual((await createFileCommandWhitelist({ directory: agents }).grantsFor('bea')).tools.map((grant) => grant.tool), ['web.fetch']);
+  await rm(home, { recursive: true, force: true });
+});
+
+test('a whitelist.json that is a symlink is refused, even inside a real directory', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-file-link-'));
+  const agents = path.join(home, 'agents');
+  await mkdir(path.join(agents, 'ava'), { recursive: true });
+  await mkdir(path.join(agents, 'bea'), { recursive: true });
+  const beas = whitelistPathFor(agents, 'bea');
+  await createFileCommandWhitelist({ directory: agents }).rememberTool('bea', {
+    tool: 'web.fetch',
+    grantedAt: '2026-03-01T00:00:00.000Z',
+  });
+  // The directory is real; only the file is a link. Followed, it makes Bea's
+  // list authoritative for Ava — and the migration would read the
+  // destination as populated and archive Ava's real legacy grants.
+  await symlink(beas, whitelistPathFor(agents, 'ava'));
+
+  const store = createFileCommandWhitelist({ directory: agents });
+  await assert.rejects(
+    () => store.grantsFor('ava'),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  await assert.rejects(
+    () => store.rememberTool('ava', { tool: 'shell.run', grantedAt: '2026-03-01T00:00:00.000Z' }),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  assert.deepEqual(
+    (await createFileCommandWhitelist({ directory: agents }).grantsFor('bea')).tools.map((grant) => grant.tool),
+    ['web.fetch'],
+  );
+  await rm(home, { recursive: true, force: true });
 });

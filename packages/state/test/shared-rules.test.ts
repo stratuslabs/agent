@@ -9,11 +9,12 @@ import {
   agentsDirPath,
   applySoulPins,
   claimSoulFile,
+  loadRosterSouls,
   collectAvailableModels,
   globalConfigPath,
   KNOWN_CLAUDE_MODELS,
   listAgentSummaries,
-  memoryFilePath,
+  agentMemoryFilePath,
   saveConfigFile,
   servedRuntimes,
   verifyProviderKey,
@@ -99,6 +100,30 @@ test('claimSoulFile refuses an id the roster already declares and takes a suffix
 
   assert.notEqual(claimed.agent.id, 'ava');
   assert.match(claimed.agent.id, /^ava-/);
+});
+
+test('claimSoulFile refuses an id that only a filesystem would call the same', async () => {
+  const home = await newHome();
+  // `AVA` is a legacy id this build keeps, and `agent new Ava` mints the
+  // slug `ava`. Exact-string checking called that available, wrote
+  // `ava.md`, and reported a new agent — after which the roster refuses
+  // every soul on every platform and the daemon will not start. The
+  // command meant to help is the one that broke it.
+  await writeSoul(home, 'renamed.md', '---\nname: Ava\nid: AVA\n---\n\nThe first Ava.\n');
+
+  const claimed = await claimSoulFile(
+    { homeDir: home, cwd: home, processEnv: {} },
+    { name: 'Ava', instructions: 'The second Ava.' },
+    (agent) => formatSoul({ agent }),
+    () => {},
+  );
+
+  assert.notEqual(claimed.agent.id, 'ava');
+  assert.match(claimed.agent.id, /^ava-/);
+  // And the roster it just wrote into still loads, which is the property
+  // the refusal exists to keep.
+  const roster = await loadRosterSouls({ homeDir: home, cwd: home, processEnv: {} }, () => {});
+  assert.equal(roster.length, 2);
 });
 
 test('verifyProviderKey condemns a key only on an explicit auth failure', async () => {
@@ -307,5 +332,5 @@ test('saveConfigFile creates the directory and round-trips through loadAgentSumm
   assert.deepEqual(summaries[0]?.runsOn, { provider: 'anthropic', model: 'claude-opus-5' });
   // Nothing has remembered anything yet.
   assert.equal(summaries[0]?.memories, 0);
-  assert.equal(memoryFilePath({ homeDir: home }).endsWith('memory.jsonl'), true);
+  assert.equal(agentMemoryFilePath({ homeDir: home }, 'ava').endsWith(path.join('agents', 'ava', 'memory.jsonl')), true);
 });

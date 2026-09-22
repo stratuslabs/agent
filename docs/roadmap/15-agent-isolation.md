@@ -54,6 +54,25 @@ before it.
 
 ### A. Per-agent state layout
 
+**Shipped**, except the workspace. `agents/<id>/` holds `sessions.db`,
+`memory.jsonl`, and `whitelist.json`; the schedules moved to `fleet.db`
+beside the session index; the sharded stores sit behind one aggregate
+facade with a startup reconcile; and the migration is two registry entries
+— memories and grants on the first command of the new build, sessions and
+schedules once a caller holds the home, which is the `requiresExclusive`
+marker the registry was told to grow before a migration like this could be
+registered. [`docs/reference/state-layout.md`](../reference/state-layout.md)
+is the layout as users read it.
+
+**The workspace move is the one piece deferred**, to a follow-up PR: the
+other three were a store constructor's path, while
+`~/.stratus/workspaces/<id>` is a plugin-facing contract — `workspaceRoot`
+is a documented config key whose per-agent subdirectory two plugins join
+themselves, and the tainted-write ledger's guard is written against that
+exact depth. Moving it is a change to the plugin ABI and to
+security-sensitive path logic, with its own tests, and it belongs in a PR
+where that is the change rather than a rider on the store sharding.
+
 - Every per-agent durable resource moves under the agent's own directory,
   `~/.stratus/agents/<id>/`: `sessions.db`, `memory.jsonl` (and its FTS
   index), the workspace from `~/.stratus/workspaces/<id>`, and the command
@@ -271,7 +290,7 @@ step needs, which is the evidence the seams were right.
   the hardened modes (OS users, a containerized runtime) and lands as
   their acceptance test when they do — a same-user process cannot pass it,
   and this criterion does not pretend otherwise.
-- Caller-chosen session ids stay globally unique across the sharded
+- ~~Caller-chosen session ids stay globally unique across the sharded
   stores: creating a session under one agent with an id another agent's
   store already holds is refused at the create seam, and
   `GET /sessions/:id` — no agent in hand — resolves through the index to
@@ -284,11 +303,15 @@ step needs, which is the evidence the seams were right.
   between the index write and the store write on create leaves, after
   restart, either a released id or a re-indexed session — never a
   stranded claim or an unreachable conversation — tested by killing the
-  process on each side of the create.
-- With state sharded, the fleet-wide schedule surface is unchanged: every
+  process on each side of the create.~~ Shipped, with the crash halves
+  driven as the states a kill leaves rather than by killing a process.
+- ~~With state sharded, the fleet-wide schedule surface is unchanged: every
   agent's schedules still fire, all appear in `stratus schedules`, and a
   bare-id cancel still lands — destination-grant revocation included —
-  exactly as against the shared database.
+  exactly as against the shared database.~~ Shipped: the schedule suites run
+  against `fleet.db` unchanged, and `stratus schedules` reads the old file
+  while the move is still deferred, so nothing goes quiet between the
+  upgrade and the next daemon start.
 - `kill -9` on one agent's runtime mid-turn: the turn fails honestly (the
   abandoned-turn sweep already reports this), the agent restarts, its
   parked approvals recover, and a concurrent turn on another agent
@@ -299,7 +322,7 @@ step needs, which is the evidence the seams were right.
   `isolation: shared` and `isolation: process`. The parity suite from
   [04](./04-agent-sdk-bridge.md) is the model: one behavior, two
   transports.
-- Migration drill: a `~/.stratus` with shared `sessions.db` and
+- ~~Migration drill: a `~/.stratus` with shared `sessions.db` and
   `memory.jsonl`, populated `workspaces/<id>` directories, and
   `agents/<id>.whitelist.json` files starts under the new layout; every
   agent finds its history, memories, workspace contents, and persistent
@@ -307,7 +330,8 @@ step needs, which is the evidence the seams were right.
   re-migrate. An agent whose soul is absent at migration time keeps its
   rows: restoring the soul afterwards finds the history in its per-agent
   store, and a stored id that fails validation is quarantined with a log
-  line, never dropped.
+  line, never dropped.~~ Shipped, minus the `workspaces/<id>` half of the
+  drill, which lands with the workspace move.
 - A command run under `executor-container` cannot read a host path outside
   the agent's roots and workspace (tested with a real runtime on macOS via
   Apple `container` and on Linux via Docker); the same soul with

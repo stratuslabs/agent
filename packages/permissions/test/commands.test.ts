@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -229,6 +229,7 @@ test('a whitelist that exists but will not read is said once, ignored, and never
   // next "always" wrote a single new scope over every grant it held.
   const file = whitelistPathFor(directory, 'ava');
   const broken = '{\n  "version": 1,\n  "scopes": [],\n}\n';
+  await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, broken);
 
   const decisions: PermissionDecision[] = [];
@@ -242,7 +243,7 @@ test('a whitelist that exists but will not read is said once, ignored, and never
 
   assert.equal(await policy.approve(contextFor('git push origin main')), true);
   assert.equal(warnings.length, 1, warnings.join('\n'));
-  assert.match(warnings[0] ?? '', /ava\.whitelist\.json could not be read \(.*\); its scopes are ignored and "always" answers for ava are not saved/);
+  assert.match(warnings[0] ?? '', /ava[/\\]whitelist\.json could not be read \(.*\); its scopes are ignored and "always" answers for ava are not saved/);
   assert.equal(await readFile(file, 'utf8'), broken, 'the file is not written over');
   assert.match(decisions.at(-1)?.reason ?? '', /runs without asking for ava until the daemon restarts — not saved: .*could not be read/);
 

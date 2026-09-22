@@ -1,9 +1,8 @@
 import { escapeControlCharacters, memoryEntryTrust, type MemoryEntry } from '@stratusagent/core';
 import {
-  createFileMemoryStore,
-  memoryFilePath,
+  createHomeMemoryStore,
+  agentMemoryFilePath,
   migrateLegacyMemory,
-  withLegacyDefaultMemories,
 } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -36,7 +35,7 @@ export const runMemory = async (
   if (command.action === 'reassert') {
     await migrateLegacyMemory(env);
   }
-  const store = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+  const store = createHomeMemoryStore(env);
   // Two ways an entry reads `unknown`, and only one is the upgrade case:
   // no label at all (written before labels existed, or added by hand), or a
   // recorded `unknown` — a session that heard from a sender nobody vouched
@@ -62,7 +61,7 @@ export const runMemory = async (
       writeLine(
         streams.stdout,
         command.trust === undefined
-          ? `${command.agentId} has no live memory entries in ${memoryFilePath(env)}.`
+          ? `${command.agentId} has no live memory entries in ${agentMemoryFilePath(env, command.agentId)}.`
           : `${command.agentId} has no live memory entries at ${command.trust}.`,
       );
       return 0;

@@ -176,7 +176,7 @@ warning naming the file.
   a schedule (`message.send`): a grant there would be a yes to every
   destination, and no per-destination grant exists yet, so it lasts for
   the session and the prompt says so. Everything else lives in
-  `~/.stratus/agents/<id>.whitelist.json` and survives a restart. When that
+  `~/.stratus/agents/<id>/whitelist.json` and survives a restart. When that
   file exists and no longer parses it is never written over, so the answer
   holds only until the daemon stops; the log line says which happened, and
   the Slack message cannot, because it is sent before the write is
@@ -208,7 +208,7 @@ was granted, and who answered — a Slack user id when a channel asked, or
 decision came through the control API:
 
 ```jsonc
-// ~/.stratus/agents/ava.whitelist.json
+// ~/.stratus/agents/ava/whitelist.json
 {
   "version": 1,
   "scopes": [{ "command": "git", "args": ["push"], "denyRefspecForms": true }],
@@ -266,7 +266,7 @@ until that daemon restarts; the command falls back to the file, and says
 so, only when the daemon `~/.stratus/gateway.json` names does not answer.
 With no daemon at all, the file is edited directly.
 
-A grant can outlive its agent: delete a soul and its `.whitelist.json`
+A grant can outlive its agent: delete a soul and its `whitelist.json`
 stays, and an agent created later under the same id inherits it.
 `stratus grants <id>` shows it whether or not a soul exists, so revoke the
 rows or remove the file when you retire an id. Grants do not expire on

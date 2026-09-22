@@ -2,6 +2,7 @@ import { redactAnthropicRawTurns } from '@stratusagent/provider-anthropic';
 import {
   newerStateMessage,
   readStateStamp,
+  drainSharedMemory,
   runStateMigrations,
   STATE_SCHEMA_VERSION,
 } from '@stratusagent/state';
@@ -109,6 +110,17 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
             if (migration.detail !== undefined) {
               writeLine(streams.stderr, `state migration ${migration.id}: ${migration.detail}`);
             }
+          }
+          // Here rather than in the registry, and on every command rather
+          // than once: the shared memory file is append-only and a daemon
+          // of the older build can recreate it after any single pass, so
+          // folding it into the agents' own files is a drain that keeps
+          // converging, not a migration that records itself as done. See
+          // `drainSharedMemory`. Silent when there is nothing there, which
+          // is every run on a home that has finished upgrading.
+          const drained = await drainSharedMemory(resolvedEnv);
+          if (drained !== undefined) {
+            writeLine(streams.stderr, `shared memory drained: ${drained}`);
           }
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);

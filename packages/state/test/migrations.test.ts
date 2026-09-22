@@ -1,16 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import {
+  agentMemoryFilePath,
+  agentsDirPath,
   assertStateCompatible,
   credentialsPath,
+  mergeStateStamp,
+  migrateLegacyMemory,
   pendingStateMigrations,
   readStateStamp,
   runStateMigrations,
   STATE_MIGRATIONS,
+  stratusHomePath,
   STATE_SCHEMA_VERSION,
   stateFilePath,
 } from '../src/index.ts';
@@ -28,7 +33,9 @@ test('a home directory that predates versioning reads as schema 0 with everythin
 
 test('running migrations stamps the home directory and a second run has nothing to do', async () => {
   const env = { homeDir: await freshHome() };
-  const first = await runStateMigrations(env);
+  // Exclusive, because that is what a run that finishes everything is now:
+  // 0003 belongs to a caller holding the home, whatever the home holds.
+  const first = await runStateMigrations(env, { exclusive: true });
   assert.deepEqual(first.map((migration) => migration.id), STATE_MIGRATIONS.map((migration) => migration.id));
 
   const stamp = await readStateStamp(env);
@@ -79,7 +86,7 @@ test('a corrupt stamp reads as unversioned and is rewritten, not an error', asyn
   await writeFile(stateFilePath(env), 'not json at all');
 
   assert.deepEqual(await readStateStamp(env), { schemaVersion: 0, applied: [] });
-  await runStateMigrations(env);
+  await runStateMigrations(env, { exclusive: true });
   assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
 });
 
@@ -107,11 +114,200 @@ test('provenance labels are a schema bump with nothing to rewrite, so a downgrad
   // needs rewriting; what needs to happen is that a build without the
   // labels stops at the stamp instead of writing unlabelled state beside
   // the labelled kind.
-  assert.equal(STATE_SCHEMA_VERSION, 2);
   const migration = STATE_MIGRATIONS.find((candidate) => candidate.id === '0002-provenance-labels');
   assert.ok(migration);
   const env = { homeDir: await freshHome() };
-  const applied = await runStateMigrations(env);
+  const applied = await runStateMigrations(env, { exclusive: true });
   assert.equal(applied.find((result) => result.id === '0002-provenance-labels')?.detail, undefined);
-  assert.equal((await readStateStamp(env)).schemaVersion, 2);
+  // The stamp reaches this build's version once a run finishes every
+  // migration, which is a run holding the home — `stratus serve` or
+  // `stratus update`, both of which a daemonised install reaches at once.
+  assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
+});
+
+test('a cwd memory file for an id whose directory is a file does not block every later run', async () => {
+  const home = await freshHome();
+  const project = await freshHome();
+  const env = { homeDir: home, cwd: project };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await mkdir(path.join(project, '.stratus'), { recursive: true });
+  // `agents/blocked.md` is a file and `blocked.md` is a valid legacy id, so
+  // this agent's state directory cannot be made. This import runs from
+  // `createAgentRuntime` and `gateway.start()`, and it has already renamed
+  // its source to a claim by the time the directory is needed — so throwing
+  // here comes back on every later run and blocks the whole fleet.
+  await writeFile(path.join(agentsDirPath(env), 'blocked.md'), 'a soul file in the way');
+  const at = '2026-01-01T00:00:00.000Z';
+  await writeFile(path.join(project, '.stratus', 'memory.jsonl'), [
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'likes jazz', createdAt: at }),
+    JSON.stringify({ id: 'blocked:memory:1', agentId: 'blocked.md', content: 'nowhere to go', createdAt: at }),
+  ].join('\n') + '\n');
+
+  await migrateLegacyMemory(env);
+  // And again, the way the next command would: nothing is left half-claimed.
+  await migrateLegacyMemory(env);
+
+  // The agents that can move, moved.
+  assert.match(await readFile(agentMemoryFilePath(env, 'ava'), 'utf8'), /likes jazz/);
+  // The quarantined one is in the archive, which is where a record with
+  // nowhere to land belongs — not lost, and not blocking anyone.
+  assert.match(await readFile(path.join(project, '.stratus', 'memory.jsonl.migrated'), 'utf8'), /nowhere to go/);
+  const left = (await readdir(path.join(project, '.stratus'))).filter((name) => name.includes('migrating'));
+  assert.deepEqual(left, []);
+});
+
+test('a home whose stamp cannot be written is refused by a run that records nothing', async () => {
+  const home = await freshHome();
+  const env = { homeDir: home };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  // Whatever put it there, `state.json` is not a file this build can write,
+  // so nothing it does to this home can ever be recorded. A run deferring
+  // the exclusive half writes no stamp at all now — which is the whole
+  // reason this check is separate from the write: without it the home
+  // would look fine until the next `stratus serve`, by which point several
+  // commands have changed state that nothing recorded.
+  await mkdir(stateFilePath(env), { recursive: true });
+
+  await assert.rejects(
+    () => runStateMigrations(env),
+    (error: unknown) => error instanceof Error
+      && error.message.includes(stateFilePath(env))
+      && /run the command again/.test(error.message),
+  );
+});
+
+test('a ~/.stratus that is a symlink to a directory still gets its first stamp', async () => {
+  const home = await freshHome();
+  const elsewhere = await freshHome();
+  const env = { homeDir: home };
+  // A supported layout — the home is a path the *operator* chose, and a
+  // link to a directory somewhere else (another volume, a synced folder)
+  // is theirs to make. It is `agents/<id>/` and the files under it, which
+  // Stratus derives, that may never be links. Checking this one without
+  // following refused every linked home on its first command, before it
+  // could write a stamp at all.
+  await symlink(path.join(elsewhere, 'real-home'), stratusHomePath(env));
+  await mkdir(path.join(elsewhere, 'real-home', 'agents'), { recursive: true });
+
+  const applied = await runStateMigrations(env, { exclusive: true });
+
+  assert.ok(applied.length > 0, 'the migrations ran');
+  assert.equal((await readStateStamp(env)).schemaVersion, STATE_SCHEMA_VERSION);
+});
+
+test('a home that is a file, with no stamp to judge by, is refused by name', async () => {
+  const home = await freshHome();
+  const env = { homeDir: home };
+  // No `state.json` to look at, so the question is whether one could ever
+  // be created here. A `~/.stratus` that is a regular file answers that on
+  // its own — and it reaches the check as ENOTDIR on the stamp path rather
+  // than ENOENT, which is why both codes mean "no stamp, ask the
+  // directory". Without that, the command died on a raw ENOTDIR naming a
+  // path the operator never chose.
+  //
+  // Only the shape is asserted, not the permissions: this suite runs as
+  // root often enough that a `chmod 0500` check would pass there and fail
+  // nowhere, which is worse than not having it.
+  await writeFile(stratusHomePath(env), 'not a directory');
+
+  await assert.rejects(
+    () => runStateMigrations(env),
+    (error: unknown) => error instanceof Error
+      && error.message.includes(stratusHomePath(env))
+      && /is not a directory/.test(error.message)
+      && /run the command again/.test(error.message),
+  );
+});
+
+test('a cwd memory file with two ids that differ only in case keeps them apart', async () => {
+  const home = await freshHome();
+  const project = await freshHome();
+  const env = { homeDir: home, cwd: project };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await mkdir(path.join(project, '.stratus'), { recursive: true });
+  const at = '2026-01-01T00:00:00.000Z';
+  // One directory on macOS and Windows, so the second agent's memories
+  // would be appended to the first agent's file.
+  await writeFile(path.join(project, '.stratus', 'memory.jsonl'), [
+    JSON.stringify({ id: 'Twin:memory:1', agentId: 'Twin', content: 'the first twin', createdAt: at }),
+    JSON.stringify({ id: 'twin:memory:1', agentId: 'twin', content: 'the second twin', createdAt: at }),
+  ].join('\n') + '\n');
+
+  await migrateLegacyMemory(env);
+
+  assert.match(await readFile(agentMemoryFilePath(env, 'Twin'), 'utf8'), /the first twin/);
+  // The second spelling was given no directory at all. That is what this
+  // can assert here: a case-sensitive runner keeps the two apart by itself,
+  // so the file contents look right either way and only the refusal to
+  // create the second directory distinguishes the rule from its absence.
+  await assert.rejects(
+    () => stat(path.dirname(agentMemoryFilePath(env, 'twin'))),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
+  );
+  // And its records are in the archive, not lost.
+  assert.match(
+    await readFile(path.join(project, '.stratus', 'memory.jsonl.migrated'), 'utf8'),
+    /the second twin/,
+  );
+});
+
+test('a cwd memory file is never imported through a symlinked destination', async () => {
+  const home = await freshHome();
+  const project = await freshHome();
+  const env = { homeDir: home, cwd: project };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await mkdir(path.join(project, '.stratus'), { recursive: true });
+  const elsewhere = path.join(home, 'elsewhere.jsonl');
+  await writeFile(elsewhere, '');
+  // A real `agents/ava/` says nothing about the file in it, and this
+  // importer appends directly rather than through the store's guarded open.
+  await mkdir(path.dirname(agentMemoryFilePath(env, 'ava')), { recursive: true });
+  await symlink(elsewhere, agentMemoryFilePath(env, 'ava'));
+  const at = '2026-01-01T00:00:00.000Z';
+  await writeFile(path.join(project, '.stratus', 'memory.jsonl'), [
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'likes jazz', createdAt: at }),
+    JSON.stringify({ id: 'bea:memory:1', agentId: 'bea', content: 'likes tea', createdAt: at }),
+  ].join('\n') + '\n');
+
+  await migrateLegacyMemory(env);
+
+  assert.equal((await stat(elsewhere)).size, 0);
+  // The agent whose file is its own still moved, and the skipped lines are
+  // in the archive rather than lost.
+  assert.match(await readFile(agentMemoryFilePath(env, 'bea'), 'utf8'), /likes tea/);
+  assert.match(
+    await readFile(path.join(project, '.stratus', 'memory.jsonl.migrated'), 'utf8'),
+    /likes jazz/,
+  );
+});
+
+test('a stamp write merges with what is on disk, so a stale snapshot cannot un-apply a migration', () => {
+  const everything = STATE_MIGRATIONS.map((migration) => migration.id);
+  // What the exclusive `serve` or `update` recorded while an ordinary
+  // command was mid-run, and what that ordinary command is about to write
+  // from the snapshot it took before any of it happened.
+  const recorded = { schemaVersion: STATE_SCHEMA_VERSION, applied: everything };
+  const stale = { schemaVersion: 0, applied: everything.slice(0, 1) };
+
+  const merged = mergeStateStamp(recorded, stale);
+  // Neither the ids nor the version may go backwards: an older build let
+  // past the downgrade guard recreates the legacy state the move retired.
+  assert.deepEqual(merged.applied, everything);
+  assert.equal(merged.schemaVersion, STATE_SCHEMA_VERSION);
+
+  // Forwards still moves, or nothing would ever be recorded at all.
+  assert.deepEqual(
+    mergeStateStamp({ schemaVersion: 0, applied: [] }, { schemaVersion: 0, applied: everything }),
+    { schemaVersion: STATE_SCHEMA_VERSION, applied: everything },
+  );
+
+  // And a stamp a NEWER build left is not lowered to this build's schema
+  // just because everything this build knows about has run: the
+  // newer-schema refusal is the guard over state this build cannot read,
+  // and it is the recorded version that arms it.
+  const fromNewer = { schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [...everything, '0004-from-a-later-build'] };
+  assert.equal(
+    mergeStateStamp(fromNewer, { schemaVersion: STATE_SCHEMA_VERSION, applied: everything }).schemaVersion,
+    STATE_SCHEMA_VERSION + 1,
+  );
 });
