@@ -38,6 +38,14 @@ const seedWorkspace = async (home: string, agentId: string, files: Record<string
   return directory;
 };
 
+/**
+ * Where the move marker goes: beside the workspace, in the state
+ * directory, out of reach of an agent whose `shell.run` starts inside the
+ * workspace and could otherwise unlink it.
+ */
+const markerPath = (env: { homeDir: string }, agentId: string): string =>
+  path.join(agentsDirPath(env), agentId, 'fs-provenance.jsonl.moving');
+
 const ledgerLine = (filePath: string): string =>
   `${JSON.stringify({ path: filePath, trust: 'external', at: '2026-01-01T00:00:00.000Z' })}\n`;
 
@@ -245,7 +253,7 @@ test('a ledger two agents share is not taken away to migrate one of them', async
 
   const results = await runStateMigrations(env, { exclusive: true });
   const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
-  assert.match(line, /its own ledger was left live, because another workspace is the same directory/);
+  assert.match(line, /its own ledger was left live, because another workspace is still reading it/);
 
   // ava got the records, as a fold always does.
   const forAva = await createFileLedger(() => agentWorkspacePath(env, 'ava')).snapshot('ava');
@@ -260,6 +268,30 @@ test('a ledger two agents share is not taken away to migrate one of them', async
   assert.deepEqual(Object.keys(forBea).sort(), ['/home/ada/notes/late.md', '/home/ada/notes/shared.md']);
   assert.equal(await realpath(agentWorkspacePath(env, 'bea')), await realpath(shared));
   assert.ok(!(await readdir(shared)).includes('fs-provenance.jsonl.migrated'));
+});
+
+test('a ledger shared through a link at the file alone is left live too', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // Two real workspaces, one ledger: `ledgerGuard` recognises a link at the
+  // file rather than at the directory, so this migration has to expect it.
+  await seedWorkspace(home, 'ava', { 'fs-provenance.jsonl': ledgerLine('/home/ada/notes/shared.md') });
+  await seedWorkspace(home, 'bea', { 'own.md': 'mine' });
+  await symlink(
+    path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl'),
+    path.join(legacyWorkspacesDirPath(env), 'bea', 'fs-provenance.jsonl'),
+  );
+  // ava collides, so ava is the one folded — and the file it would retire
+  // is the one bea reads.
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/own.md'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  // bea moved, and its ledger link still leads somewhere.
+  const forBea = await createFileLedger(() => agentWorkspacePath(env, 'bea')).snapshot('bea');
+  assert.deepEqual(Object.keys(forBea), ['/home/ada/notes/shared.md']);
+  assert.ok(!(await readdir(path.join(legacyWorkspacesDirPath(env), 'ava'))).includes('fs-provenance.jsonl.migrated'));
 });
 
 test('and the agent sharing it does not have to be one still waiting in workspaces/', async () => {
@@ -307,6 +339,28 @@ test('a chain of links finishes where an interrupted run left it, not at the pat
   // The stale source is left for them rather than removed: a target that
   // is merely unmounted comes back.
   assert.ok((await readdir(legacyWorkspacesDirPath(env))).includes('bea'));
+});
+
+test('a link to an unmounted volume is not a finished move, whatever is at the new path', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // Dangling for the ordinary reason — the volume is not mounted right now
+  // — and something at the new path for a reason of its own: a command in
+  // the deferral window resolved it and made the directory.
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink(path.join(home, 'not-mounted'), path.join(legacyWorkspacesDirPath(env), 'bea'));
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await symlink('bea', path.join(legacyWorkspacesDirPath(env), 'ava'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  // ava keeps naming bea's legacy link, so it works again when the volume
+  // comes back. Taking the new path as bea's workspace would re-aim ava at
+  // an unrelated directory and leave it there for good.
+  assert.equal(
+    path.resolve(path.dirname(agentWorkspacePath(env, 'ava')), await readlink(agentWorkspacePath(env, 'ava'))),
+    path.join(legacyWorkspacesDirPath(env), 'bea'),
+  );
 });
 
 test('a file an operator left among the workspaces is not an agent’s, and keeps the directory', async () => {
@@ -738,7 +792,7 @@ test('a move whose ledger rewrite never ran is finished by the next run, from th
     ledgerLine(path.join(legacyWorkspace, 'mcp', 'linear', 'chart-1-0.png')),
   );
   await writeFile(
-    path.join(workspace, 'fs-provenance.jsonl.moving'),
+    markerPath(env, 'ava'),
     `${JSON.stringify({ from: [path.join(legacyWorkspacesDirPath(env), 'ava'), legacyWorkspace] })}\n`,
   );
 
@@ -751,7 +805,7 @@ test('a move whose ledger rewrite never ran is finished by the next run, from th
     (await recordedIn(path.join(workspace, 'fs-provenance.jsonl')))
       .includes(path.join(await realpath(workspace), 'mcp', 'linear', 'chart-1-0.png')),
   );
-  await assert.rejects(readFile(path.join(workspace, 'fs-provenance.jsonl.moving')), /ENOENT/);
+  await assert.rejects(readFile(markerPath(env, 'ava')), /ENOENT/);
 });
 
 test('a marker is left behind by nothing that finished, so a completed move clears it', async () => {
@@ -823,8 +877,13 @@ test('a move whose ledger rewrite fails leaves the marker, so the move is still 
   // path moved with them.
   const workspace = agentWorkspacePath(env, 'ava');
   assert.equal(await readFile(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png'), 'utf8'), 'bytes');
-  const marker = JSON.parse(await readFile(path.join(workspace, 'fs-provenance.jsonl.moving'), 'utf8')) as { from: string[] };
+  const marker = JSON.parse(await readFile(markerPath(env, 'ava'), 'utf8')) as { from: string[] };
   assert.ok(marker.from.includes(path.join(legacyWorkspacesDirPath(env), 'ava')), marker.from.join(', '));
+  // Beside the workspace, never inside it: `shell.run` starts in there
+  // under no root confinement, so a marker within reach is one an agent can
+  // unlink — and an unlinked marker is a skipped repair, a stamped 0004,
+  // and every file that agent fetched reading back as its own words.
+  assert.ok(!(await readdir(workspace)).includes('fs-provenance.jsonl.moving'));
 });
 
 test('a record appended while the move is finishing is not lost', async () => {
@@ -836,7 +895,7 @@ test('a record appended while the move is finishing is not lost', async () => {
   await writeFile(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png'), 'bytes');
   await writeFile(path.join(workspace, 'fs-provenance.jsonl'), ledgerLine(legacyArtifact));
   await writeFile(
-    path.join(workspace, 'fs-provenance.jsonl.moving'),
+    markerPath(env, 'ava'),
     `${JSON.stringify({ from: [path.join(legacyWorkspacesDirPath(env), 'ava')] })}\n`,
   );
   // An ordinary command appends here the moment the new path exists — it
@@ -880,8 +939,8 @@ test('anything planted where the move marker goes loses its name, not its conten
   const home = await newHome();
   const env = { homeDir: home };
   await seedWorkspace(home, 'ava', { 'own.md': 'mine' });
-  // The workspace is the agent's own directory — `shell.run` starts there
-  // and is under no root confinement — so the agent can put anything at
+  // The marker's directory is not the agent's any more, but the defence
+  // stays: an older build's leftover, or an operator's own file, can be at
   // this name. A symlink is the obvious one; a **hard link** is the one
   // `O_NOFOLLOW` does nothing about, because to `open` it is not a link at
   // all, it is the file. Everything under `~/.stratus` is one filesystem
@@ -890,9 +949,11 @@ test('anything planted where the move marker goes loses its name, not its conten
   const hardlinked = path.join(home, 'credentials.json');
   await writeFile(symlinked, 'not the migration’s to touch');
   await writeFile(hardlinked, '{"secret":"stays"}');
-  await symlink(symlinked, path.join(legacyWorkspacesDirPath(env), 'ava', 'fs-provenance.jsonl.moving'));
+  await mkdir(path.join(agentsDirPath(env), 'ava'), { recursive: true });
+  await symlink(symlinked, markerPath(env, 'ava'));
   await seedWorkspace(home, 'bea', { 'own.md': 'mine' });
-  await link(hardlinked, path.join(legacyWorkspacesDirPath(env), 'bea', 'fs-provenance.jsonl.moving'));
+  await mkdir(path.join(agentsDirPath(env), 'bea'), { recursive: true });
+  await link(hardlinked, markerPath(env, 'bea'));
 
   await runStateMigrations(env, { exclusive: true });
 
@@ -918,13 +979,15 @@ test('a move marker an agent rewrote cannot make the re-recording a no-op', asyn
     path.join(workspace, 'fs-provenance.jsonl'),
     `${ledgerLine(legacyArtifact)}${ledgerLine(outside)}`,
   );
-  // A crashed move left the marker here, and the agent has been running
-  // since — this directory is its own. Two ways to abuse it: point it
+  // A crashed move left the marker, and its contents are still not
+  // trusted even though they now sit where an agent cannot reach them:
+  // deriving costs nothing and the file outlives this build. Two ways a
+  // writable one could be abused: point it
   // somewhere with no records, so the re-recording does nothing and the
   // marker is cleared and 0004 stamped straight after; or point it at `/`,
   // so every record in the file gets dragged under the workspace.
   await writeFile(
-    path.join(workspace, 'fs-provenance.jsonl.moving'),
+    markerPath(env, 'ava'),
     `${JSON.stringify({ from: [path.join(home, 'nowhere', 'ava'), '/'] })}\n`,
   );
 
@@ -945,12 +1008,12 @@ test('a marker that is a link is not read through either', async () => {
   const workspace = agentWorkspacePath(env, 'ava');
   await mkdir(workspace, { recursive: true });
   await writeFile(path.join(workspace, 'fs-provenance.jsonl'), ledgerLine('/home/ada/notes/vendor.md'));
-  // A marker an agent planted at the *new* path, pointing at a file of its
-  // choosing. Reading through it would let the file's contents steer which
-  // records get re-recorded.
+  // A marker that is a link, pointing at a file of somebody's choosing.
+  // Reading through it would let that file's contents steer which records
+  // get re-recorded.
   const elsewhere = path.join(home, 'planted.json');
   await writeFile(elsewhere, `${JSON.stringify({ from: ['/'] })}\n`);
-  await symlink(elsewhere, path.join(workspace, 'fs-provenance.jsonl.moving'));
+  await symlink(elsewhere, markerPath(env, 'ava'));
 
   await runStateMigrations(env, { exclusive: true });
 

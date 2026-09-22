@@ -143,9 +143,12 @@ re-recorded at the new path rather than edited in place, because ordinary
 commands keep appending to that file and a read-modify-write would drop
 whatever landed in between; the old records stay, naming paths nothing is
 at, which costs a line each and can only ever add a label. The re-recording
-happens after the move lands, and a workspace being moved carries a small
-`fs-provenance.jsonl.moving` note so a run interrupted between the two is
-finished by the next one.
+happens after the move lands, and a small `fs-provenance.jsonl.moving` note
+is written at `agents/<id>/` — beside the workspace, not inside it — so a
+run interrupted between the two is finished by the next one. Beside rather
+than inside because `shell.run` starts *in* the workspace: a note an agent
+could delete is a repair that can be skipped, and a ledger left naming the
+old paths is every file that agent fetched reading back as its own words.
 
 If the new path already holds a workspace, the two ledgers are folded
 together rather than one being refused. That is the ordinary shape of an
