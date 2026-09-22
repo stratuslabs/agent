@@ -239,7 +239,12 @@ const resolves = async (filePath: string): Promise<boolean> => {
     return true;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') {
+    // `ELOOP` alongside the other two, and it belongs with them rather than
+    // with the failures: a cycle of links leads nowhere for everybody, now
+    // and permanently, which is the same answer as nothing being there.
+    // `workspaces/ava -> bea -> ava` is a shape this migration supports
+    // when the destinations are free, so it must not abort when they are not.
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') {
       return false;
     }
     throw error;
@@ -740,6 +745,40 @@ const finishInterruptedMoves = async (env: StateEnvironment): Promise<number> =>
 };
 
 /**
+ * Whether any agent's workspace is a link at the legacy directory itself.
+ *
+ * The one thing that keeps that directory from being swept once it empties.
+ * See the sweep in {@link applyPerAgentWorkspaces} for why such a link
+ * exists and why it is right.
+ */
+const anyWorkspaceNamesLegacy = async (
+  env: StateEnvironment,
+  legacySpellings: readonly string[],
+): Promise<boolean> => {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(agentsDirPath(env), { withFileTypes: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return false;
+    }
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !isValidAgentId(entry.name)) {
+      continue;
+    }
+    const workspace = agentWorkspacePath(env, entry.name);
+    const text = await linkText(workspace);
+    if (text !== undefined && legacySpellings.includes(path.resolve(path.dirname(workspace), text))) {
+      return true;
+    }
+  }
+  return false;
+};
+
+/**
  * Move each `workspaces/<id>` into `agents/<id>/workspace`.
  *
  * Idempotent and restartable at every agent: one rename each, a ledger
@@ -849,10 +888,6 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // would silently swap the shared files for a different workspace that an
   // ordinary command happened to create.
   const moved = new Set<string>();
-  // Set when a link this run relocates still names the legacy directory —
-  // see `moveIntoPlace`. It is the one thing that keeps the sweep below
-  // from removing a directory that has emptied.
-  let legacyStillNamed = false;
   /**
    * Whether `target` holds the link this migration would have written for
    * `from` — which only the recreate step writes.
@@ -922,12 +957,25 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     if (!(await pathIsFree(target))) {
       const here = path.relative(stratusHomePath(env), from);
       const there = path.relative(stratusHomePath(env), target);
+      // A source that leads nowhere — dangling, or a cycle of links — is
+      // asked about first, because the two questions below both reach for
+      // it: `sameEntry` would `stat` through the cycle and `foldLedgerInto`
+      // would read a ledger behind it. Neither can answer, and a source
+      // nothing can resolve holds no records for anyone, so there is
+      // nothing to fold and nothing at risk in not folding it.
+      const leadsNowhere = entry.isSymbolicLink() && !(await resolves(from));
+      if (leadsNowhere && !(await destinationIsOurRecreate(from, target))) {
+        report.quarantined.push(
+          `${agentId} — ${here} leads nowhere and ${there} is already there, so both were left as they are`,
+        );
+        return;
+      }
       // The destination may be a link back to this very workspace, in which
       // case there is one directory and one ledger and nothing to fold —
       // see `sameEntry` for what folding a ledger into itself costs.
       // Already reachable at the new path, so this is a finished state and
       // not a collision.
-      if (await sameEntry(from, target)) {
+      if (!leadsNowhere && await sameEntry(from, target)) {
         report.quarantined.push(`${agentId} — ${there} already resolves to ${here}, so it was left as it is`);
         return;
       }
@@ -951,7 +999,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // reasons of its own. Taking *that* pair as a finished move would
       // silently re-aim a dependent at an unrelated directory and leave it
       // there when the volume came back.
-      if (entry.isSymbolicLink() && !(await resolves(from)) && await destinationIsOurRecreate(from, target)) {
+      if (leadsNowhere) {
         moved.add(agentId);
         report.quarantined.push(
           `${agentId} — ${here} leads nowhere and ${there} is already there, so the new path is taken as `
@@ -1042,15 +1090,6 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         const text = await readlink(from);
         const resolved = await migratedTarget(path.resolve(path.dirname(from), text));
         const names = resolved ?? path.resolve(path.dirname(from), text);
-        // A link at the legacy directory *itself* — `workspaces/ava -> .`,
-        // which is an operator saying this agent's workspace is the whole of
-        // it. There is no agent id to follow, so it keeps naming that
-        // directory, and the sweep at the end must therefore not remove it:
-        // it empties as the rest of the fleet moves out, and removing it
-        // would leave this link naming nothing.
-        if (legacySpellings.includes(names)) {
-          legacyStillNamed = true;
-        }
         if (!path.isAbsolute(text) || resolved !== undefined) {
           await symlink(path.relative(path.dirname(target), names), target);
           // Both exist for an instant. A run killed here finds the source
@@ -1195,9 +1234,17 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   }
   // Only when it empties, and never recursively: an operator's own file in
   // here is theirs, and a workspace left behind is that agent's output. And
-  // never while a workspace this run moved still names this directory.
+  // never while a workspace still names this directory — `workspaces/ava ->
+  // .` is an operator saying that agent's workspace is the whole of it, and
+  // there is no agent id in that target to follow, so the link rightly keeps
+  // naming a directory that empties as the rest of the fleet moves out.
+  //
+  // Asked of what is on disk rather than of what this run did, because a run
+  // killed after recreating such a link and unlinking its source never
+  // visits that agent again: the retry would find nothing to remember and
+  // sweep the directory its workspace points at.
   try {
-    if (!legacyStillNamed) {
+    if (!(await anyWorkspaceNamesLegacy(env, legacySpellings))) {
       await rmdir(legacy);
     }
   } catch {
