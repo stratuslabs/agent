@@ -524,3 +524,41 @@ test('a hard link to the ledger is the same file too, and is not folded either',
   // Not doubled: an append through either name would have written both.
   assert.equal(await readFile(path.join(workspace, 'fs-provenance.jsonl'), 'utf8'), recorded);
 });
+
+test('a ledger rewritten for a move that then failed is put back on the next run', async () => {
+  // On a home reached through a link, because the put-back has to name the
+  // path a read will ask for — `fs.read` canonicalizes before it looks a
+  // record up, so records restored to the configured spelling would match
+  // nothing and the labels would be lost just the same.
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-volume-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-linked-'));
+  await mkdir(path.join(elsewhere, 'state'), { recursive: true });
+  await symlink(path.join(elsewhere, 'state'), path.join(home, '.stratus'));
+  const env = { homeDir: home };
+  await mkdir(agentsDirPath(env), { recursive: true });
+
+  const workspace = agentWorkspacePath(env, 'ava');
+  await seedWorkspace(home, 'ava', { 'mcp/linear/chart-1-0.png': 'bytes' });
+  const artifact = await realpath(path.join(legacyWorkspacesDirPath(env), 'ava', 'mcp', 'linear', 'chart-1-0.png'));
+  // Exactly what a killed pass leaves when the rename never happened: the
+  // files at the old path, the records already naming the new one. Folding
+  // those into the destination would claim a label for a file that never
+  // arrived, while the real one reads back bare.
+  await seedWorkspace(home, 'ava', {
+    'fs-provenance.jsonl': ledgerLine(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png')),
+  });
+  // And the destination the move lost the race to.
+  await mkdir(workspace, { recursive: true });
+  await writeFile(path.join(workspace, 'written-since.md'), 'by an ordinary command');
+
+  await runStateMigrations(env, { exclusive: true });
+
+  // Put back, then folded: the record names the file that is really there,
+  // spelled the way a read will spell it.
+  assert.deepEqual(
+    (await readFile(path.join(workspace, 'fs-provenance.jsonl'), 'utf8')).split('\n').filter(Boolean)
+      .map((l) => (JSON.parse(l) as { path: string }).path),
+    [artifact],
+  );
+  assert.equal(await readFile(artifact, 'utf8'), 'bytes');
+});

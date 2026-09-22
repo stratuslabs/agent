@@ -107,6 +107,31 @@ const isWorkspaceEntry = (entry: Dirent): boolean => entry.isDirectory() || entr
 /** The ledger file at the top of a workspace. */
 const ledgerIn = (workspace: string): string => path.join(workspace, LEDGER_FILENAME);
 
+/**
+ * Every spelling of a path that a ledger record could be written as: the one
+ * given, and its canonical form.
+ *
+ * The ledger is keyed the way `fs.read` looks a path up, through `realpath`,
+ * and `~/.stratus` may itself be a symlink — so a record names the canonical
+ * path while this migration walks the configured one. `base` answers for a
+ * path that does not exist yet: its parent does, and the canonical name is
+ * the parent's plus this one's last segment.
+ */
+const spellingsOf = async (target: string, base: 'self' | 'parent'): Promise<string[]> => {
+  const spellings = [target];
+  try {
+    const canonical = base === 'self'
+      ? await realpath(target)
+      : path.join(await realpath(path.dirname(target)), path.basename(target));
+    if (canonical !== target) {
+      spellings.push(canonical);
+    }
+  } catch {
+    // Not there to canonicalize: the spelling given is the only one.
+  }
+  return spellings;
+};
+
 /** Whether nothing at all is at this path — a dangling link is something. */
 const pathIsFree = async (filePath: string): Promise<boolean> => {
   try {
@@ -378,6 +403,17 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // Otherwise the deferral window, and the ordinary outcome of running
       // any command before restarting the daemon — see the note at the top
       // on why this merges rather than refuses.
+      //
+      // First, put back anything an interrupted move rewrote. A pass that
+      // rewrote this ledger for the rename and then lost the destination —
+      // an ordinary command creating it in between, or a kill — leaves
+      // records naming a path these files are not at, and folding those
+      // into the destination would claim labels for files that never
+      // arrived while the real ones read back bare. Nothing else can put a
+      // destination path in *this* ledger: it is written only by a build
+      // that predates the new layout, whose every path is under the old
+      // one.
+      await remapLedger(from, await spellingsOf(target, 'parent'), (await spellingsOf(from, 'self')).at(-1)!);
       const folded = await foldLedgerInto(from, target);
       if (folded === 'folded') {
         report.merged.push(agentId);
@@ -407,15 +443,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // is keyed canonically; and the destination as a read will spell it,
       // which its parent can answer for since the directory itself does not
       // exist yet.
-      const spellings = [from];
-      const canonical = await realpath(from);
-      if (canonical !== from) {
-        spellings.push(canonical);
-      }
       await remapLedger(
         from,
-        spellings,
-        path.join(await realpath(path.dirname(target)), path.basename(target)),
+        await spellingsOf(from, 'self'),
+        (await spellingsOf(target, 'parent')).at(-1)!,
       );
       // Then the mode, on the source for the same reason.  `agents/<id>/` is
       // already owner-only, so this changes nothing an attacker could reach
@@ -454,6 +485,20 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     try {
       await moveIntoPlace();
     } catch (error) {
+      // The ledger was rewritten for a move that did not happen, so put it
+      // back before anything reads it. Ordinary commands keep running while
+      // this migration is refused — they take no home lock, deliberately —
+      // and every one of them consults these records.
+      //
+      // The retry repairs this too (see the fold branch), but only on the
+      // next `stratus serve` or `stratus update`, and only if it gets that
+      // far. Doing it here closes the window rather than describing it.
+      let restored = true;
+      try {
+        await remapLedger(from, await spellingsOf(target, 'parent'), (await spellingsOf(from, 'self')).at(-1)!);
+      } catch {
+        restored = false;
+      }
       // Loud, and not quarantined, which is the opposite of how an id with
       // nowhere to land is treated — because the consequence is opposite
       // too. A workspace half-moved is a ledger whose records name files
@@ -461,13 +506,17 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // silently. A daemon that will not start says so and can be fixed by
       // hand.
       //
-      // `EXDEV` is the one that actually happens: a workspace an operator
-      // mounted rather than linked cannot be renamed across the mount.
+      // `EXDEV` is one that happens: a workspace an operator mounted rather
+      // than linked cannot be renamed across the mount. So is `ENOTEMPTY`,
+      // when an ordinary command created the destination between the check
+      // and here.
       throw new Error(
         `Could not move ${JSON.stringify(agentId)}'s workspace from ${from} to ${target} `
         + `(${(error as NodeJS.ErrnoException).code ?? 'unknown error'}). It holds that agent's provenance `
         + 'ledger, so it is not safe to leave behind: move the directory by hand, or replace a mount at '
-        + 'that path with a symlink, and run `stratus update` again.',
+        + 'that path with a symlink, and run `stratus update` again.'
+        + (restored ? '' : ` Its ledger at ${ledgerIn(from)} now names paths under ${target}, which the next `
+          + 'run will put back.'),
       );
     }
     report.moved += 1;
