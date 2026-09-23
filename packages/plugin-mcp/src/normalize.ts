@@ -630,11 +630,20 @@ export const normalizeCallResult = async (
   // saying there were ninety is.
   const kept: JsonObject[] = [];
   for (const link of resources) {
+    // Charged as the list costs, not as the link costs. A link measured on
+    // its own leaves the comma joining it to the last one unpaid, and the
+    // key and brackets the collection arrives in unpaid entirely — so
+    // thousands of minimal links each pass the check while the array they
+    // serialize into runs thousands of characters past the cap. The first
+    // link pays for the envelope, each one after it pays for its
+    // separator, and the total is exactly what `"resources":[…]` weighs
+    // in the result.
     const serialized = JSON.stringify(link);
-    if (!budget.fits(serialized)) {
+    const cost = kept.length === 0 ? `"resources":[${serialized}]` : `,${serialized}`;
+    if (!budget.fits(cost)) {
       break;
     }
-    budget.charge(serialized);
+    budget.charge(cost);
     kept.push(link);
   }
   const droppedLinks = resources.length - kept.length;

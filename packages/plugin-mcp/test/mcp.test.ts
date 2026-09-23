@@ -1632,6 +1632,25 @@ test('resource links are bounded, not waved through', async () => {
   assert.ok(kept.length < 200, `stopped short of every link: ${kept.length}`);
   assert.ok(JSON.stringify(kept).length <= 2_500, `stayed near the allowance: ${JSON.stringify(kept).length}`);
   assert.match(String(result.resourcesTruncated), /more resource links were not included/);
+
+  // A list costs its separators too. Measured link by link in isolation,
+  // the comma joining each to the last goes unpaid and the key and
+  // brackets go unpaid entirely — so many small links each pass the check
+  // while the array they serialize into runs past the cap.
+  const many = Array.from({ length: 4_000 }, (_entry, index) => ({
+    type: 'resource_link',
+    uri: `https://e.test/${index}`,
+  }));
+  const listed = await normalizeCallResult(
+    { content: many },
+    { server: 'linear', tool: 'list_docs', agentId: 'ava', maxResultChars: 1_000 },
+  ) as JsonObject;
+  // What the result actually carries for this key, envelope included.
+  const weighed = `"resources":${JSON.stringify(listed.resources)}`;
+  assert.ok(
+    weighed.length <= 1_000,
+    `the serialized collection stayed inside the allowance: ${weighed.length}`,
+  );
 });
 
 test('a server that fails gets no larger channel into the transcript than one that succeeds', async () => {

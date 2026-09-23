@@ -845,6 +845,14 @@ export const createCodexProvider = ({
         }
         completedMessages.length = 0;
         emittedByItemId.clear();
+        // Including whether a turn finished. The abandoned attempt can have
+        // emitted `turn.completed` and then thrown — the stream closing
+        // after the event, say — and the flag left standing would answer
+        // for the replay: a fresh attempt that ended without completing
+        // would read the old attempt's `true` and hand back its partial
+        // text as a finished answer, which is the exact failure the guard
+        // at the end of this function exists to refuse.
+        turnCompleted = false;
         await attempt(undefined);
       }
     } catch (error) {

@@ -216,6 +216,42 @@ test('failed turns and empty responses surface as errors', async () => {
   );
 });
 
+test('a replayed turn does not inherit the abandoned attempt\'s completion', async () => {
+  // A resume that emits `turn.completed` and THEN throws — the stream
+  // closing after the event — leaves the run completed as far as the flag
+  // is concerned. The replay clears the messages and the emitted ids; if
+  // it does not clear this too, a fresh attempt that ends without
+  // completing reads the old attempt's `true` and hands back its partial
+  // text as a finished answer. Which is the failure the guard exists to
+  // refuse, reached from inside the recovery.
+  let attempts = 0;
+  const runTurn: CodexRunTurn = () => {
+    attempts += 1;
+    const first = attempts === 1;
+    return (async function* () {
+      yield { type: 'thread.started', thread_id: 't1' } as CodexThreadEvent;
+      yield { type: 'turn.started' } as CodexThreadEvent;
+      if (first) {
+        yield { type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: 'from the abandoned attempt' } } as CodexThreadEvent;
+        yield { type: 'turn.completed' } as CodexThreadEvent;
+        throw new Error('stream closed after the turn completed');
+      }
+      // The replay says something and is then cut off — no turn.completed.
+      yield { type: 'item.completed', item: { id: 'm2', type: 'agent_message', text: 'half of a second answer' } } as CodexThreadEvent;
+    })();
+  };
+
+  const session = createSession();
+  session.metadata = { [CODEX_THREAD_METADATA_KEY]: 'stale-thread' };
+  const provider = createCodexProvider({ runTurn });
+
+  await assert.rejects(
+    () => provider.generate({ session }),
+    /ended without completing the turn/,
+  );
+  assert.equal(attempts, 2, 'the resume failed and was replayed');
+});
+
 test('a signed-out codex maps to sign-in guidance', async () => {
   const provider = createCodexProvider({
     runTurn: () => {
