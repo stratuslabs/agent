@@ -833,6 +833,45 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   };
 
   /**
+   * The first path *inside* the legacy workspaces directory that a chain of
+   * links reaches, or undefined when the chain leads somewhere else.
+   *
+   * A link's own text is only one hop, and an operator's indirection is
+   * routinely more than one: `workspaces/ava -> /srv/stratus/shared` where
+   * that in turn points at `workspaces/bea` is the same arrangement as
+   * `workspaces/ava -> bea`, wearing a stable name the operator can
+   * repoint. Judging `ava` by its text alone reads it as naming something
+   * outside the home, so it is carried across as it stands — and `bea`
+   * moves out from under the alias, leaving `ava` dangling with 0004
+   * stamped over it.
+   *
+   * One hop at a time rather than `realpath`, because which *entry* it
+   * lands on is the answer: a full canonicalization of `ava -> alias ->
+   * workspaces/bea -> /mnt/bulk` gives `/mnt/bulk`, and `bea` — the link
+   * this one has to be ordered behind — is nowhere in it.
+   *
+   * A chain that loops, or that ends outside, is undefined: every caller
+   * turns that into "keep the target it has", which is the answer that
+   * changes nothing.
+   */
+  const throughLinks = async (start: string): Promise<string | undefined> => {
+    const seen = new Set<string>();
+    let at = start;
+    while (!seen.has(at)) {
+      if (insideLegacy(at) !== undefined) {
+        return at;
+      }
+      seen.add(at);
+      const text = await linkText(at);
+      if (text === undefined) {
+        return undefined;
+      }
+      at = path.resolve(path.dirname(at), text);
+    }
+    return undefined;
+  };
+
+  /**
    * Where a path inside the legacy workspaces directory is going, or
    * undefined when it is not one this migration relocates.
    *
@@ -884,6 +923,32 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     quarantined: [],
     directoryNames: createStateDirectoryNames(env),
   };
+  /**
+   * For each link in here whose target only reaches this directory through
+   * a path outside it, the entry it reaches — recorded now, while the chain
+   * is still whole.
+   *
+   * It has to be now: the hop that leads back in here is a link an operator
+   * owns and this migration does not touch, so the moment the workspace it
+   * names is renamed, that hop dangles and nothing can be followed through
+   * it any more. By the time the links pass runs, the answer exists only if
+   * it was taken before the first directory moved.
+   */
+  const aliased = new Map<string, string>();
+  for (const entry of entries.filter((entry) => !entry.isDirectory() && isWorkspaceEntry(entry))) {
+    const text = await linkText(path.join(legacy, entry.name));
+    if (text === undefined) {
+      continue;
+    }
+    const direct = path.resolve(legacy, text);
+    if (insideLegacy(direct) !== undefined) {
+      continue;
+    }
+    const reached = await throughLinks(direct);
+    if (reached !== undefined) {
+      aliased.set(entry.name, reached);
+    }
+  }
   // Real workspaces first, links second, and the order is load-bearing: a
   // link into this directory can only be pointed at where its workspace
   // ended up once that is known. A workspace whose destination was already
@@ -1092,8 +1157,18 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     const moveIntoPlace = async (): Promise<void> => {
       if (entry.isSymbolicLink()) {
         const text = await readlink(from);
-        const resolved = await migratedTarget(path.resolve(path.dirname(from), text));
-        const names = resolved ?? path.resolve(path.dirname(from), text);
+        const direct = path.resolve(path.dirname(from), text);
+        // The text first, then the entry an alias outside the home reaches —
+        // and only that far. Following the chain *replaces* the operator's
+        // indirection with the workspace it arrives at, which is a real cost:
+        // repointing that alias afterwards no longer moves this agent. It is
+        // paid only where keeping the alias would leave this workspace
+        // naming nothing, since `migratedTarget` answers for a workspace
+        // that has actually gone and nowhere else.
+        const alias = aliased.get(entry.name);
+        const resolved = await migratedTarget(direct)
+          ?? (alias !== undefined ? await migratedTarget(alias) : undefined);
+        const names = resolved ?? direct;
         if (!path.isAbsolute(text) || resolved !== undefined) {
           await symlink(path.relative(path.dirname(target), names), target);
           // Both exist for an instant. A run killed here finds the source
@@ -1191,7 +1266,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       if (text === undefined) {
         return false;
       }
-      const other = insideLegacy(path.resolve(legacy, text))?.split(path.sep)[0];
+      const other = insideLegacy(aliased.get(entry.name) ?? path.resolve(legacy, text))?.split(path.sep)[0];
       return other !== undefined && other !== entry.name && names.has(other);
     }));
     const ready = pending.filter((_, index) => !waiting[index]);

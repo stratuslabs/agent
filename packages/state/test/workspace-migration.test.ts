@@ -969,6 +969,49 @@ test('a link to another agent’s workspace follows it to where that one is goin
   assert.equal(await readFile(path.join(ava, 'shared.md'), 'utf8'), 'both agents see this');
 });
 
+test('a workspace aliased through a path outside the home follows the workspace, not the alias', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const bea = await seedWorkspace(home, 'bea', { 'shared.md': 'both agents see this' });
+  // The same arrangement as `ava -> bea`, wearing the stable name an
+  // operator can repoint. One hop more is all it takes for `ava` to read as
+  // naming something outside the home — and `bea` moves out from under it.
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'stratus-alias-'));
+  const alias = path.join(outside, 'shared');
+  await symlink(bea, alias);
+  await symlink(alias, path.join(legacyWorkspacesDirPath(env), 'ava'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const ava = agentWorkspacePath(env, 'ava');
+  assert.ok((await lstat(ava)).isSymbolicLink());
+  assert.equal(await realpath(ava), await realpath(agentWorkspacePath(env, 'bea')));
+  assert.equal(await readFile(path.join(ava, 'shared.md'), 'utf8'), 'both agents see this');
+});
+
+test('an alias reaching a workspace that is itself a link is ordered behind it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  const volume = await mkdtemp(path.join(os.tmpdir(), 'stratus-volume-'));
+  await writeFile(path.join(volume, 'big.bin'), 'bytes');
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  // `bea` is a link to a volume, and `ava` reaches `bea` only through an
+  // alias outside the home: the chain has to stop at the entry it lands on,
+  // since a canonicalization would name the volume and leave nothing saying
+  // `ava` waits on `bea`.
+  await symlink(volume, path.join(legacyWorkspacesDirPath(env), 'bea'));
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'stratus-alias-'));
+  const alias = path.join(outside, 'shared');
+  await symlink(path.join(legacyWorkspacesDirPath(env), 'bea'), alias);
+  await symlink(alias, path.join(legacyWorkspacesDirPath(env), 'ava'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const ava = agentWorkspacePath(env, 'ava');
+  assert.equal(await realpath(ava), await realpath(volume));
+  assert.equal(await readFile(path.join(ava, 'big.bin'), 'utf8'), 'bytes');
+});
+
 test('an absolute link out of the home is renamed as it stands', async () => {
   const home = await newHome();
   const env = { homeDir: home };

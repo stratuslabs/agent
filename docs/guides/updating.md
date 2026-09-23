@@ -136,6 +136,12 @@ fetched file that reads back as the agent's own words.
 Nothing is deleted here either. Each workspace is renamed, so it is in one
 place or the other and never both; a workspace an operator relocated behind
 a symlink is moved *as the link*, so their files stay where they put them.
+A link pointing at another agent's workspace is followed to where that
+workspace is going — including through an alias outside `~/.stratus`, such
+as `workspaces/ava -> /srv/stratus/shared -> workspaces/bea`, since the
+alias is not this migration's to rewrite and keeping it would leave `ava`
+naming nothing. That agent's link is retargeted at the workspace itself, so
+repointing the alias afterwards no longer moves it.
 The ledger's own records follow the move — they are absolute paths, and
 every binary an MCP server returned was written and recorded *inside* the
 workspace, so leaving them would strip the label off each one. They are
