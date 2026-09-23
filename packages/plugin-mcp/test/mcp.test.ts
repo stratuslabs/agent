@@ -1504,7 +1504,10 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // after `text` spent two characters and the note reservation took its
   // share. Those are real and are why the payload did not fit, but they
   // are not a number anyone can raise — `maxResultChars` is.
-  assert.match(String(structured.structuredText), /structured result truncated by stratus at 120 characters; the server sent 311/);
+  // 315 rather than the 311 characters the JSON is long: it arrives as a
+  // string *value*, so its four quotes are escaped, and the size named is
+  // what the transcript pays rather than what the object measures.
+  assert.match(String(structured.structuredText), /structured result truncated by stratus at 120 characters; the server sent 315/);
   assert.equal(structured.text, 'ok');
 
   // One that fits still comes back as an object.
@@ -1529,10 +1532,11 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // cut cannot land inside a surrogate pair.
   assert.doesNotMatch(emoji, /[\u{d800}-\u{dfff}]/u);
   // And the emoji that fit were kept. Half the 180 is reserved for the
-  // notes, leaving a server 90; the marker takes 71 of those, leaving 19 —
-  // nineteen whole emoji, not the nine a code-unit slice would have left.
+  // notes, leaving a server 90; the marker costs 72 of those — its own
+  // leading newline escapes to two — leaving 18 whole emoji, not the nine
+  // a code-unit slice would have left.
   const kept = Array.from(emoji).filter((character) => character === '\u{1f600}').length;
-  assert.equal(kept, 19, `spent the allowance in code points: kept ${kept}`);
+  assert.equal(kept, 18, `spent the allowance in code points: kept ${kept}`);
   assert.ok(Array.from(emoji).length <= 180, 'and stayed inside it');
 
   // A fractional allowance is not a number of characters, and the walk
@@ -1733,6 +1737,75 @@ test('attachment paths are charged to the allowance, so tiny blocks cannot flood
     JSON.stringify(listed).length <= 20_000,
     `the serialized result stayed inside the cap: ${JSON.stringify(listed).length}`,
   );
+});
+
+test('an attachment path is measured, not assumed', async () => {
+  // The entry a block returns was checked against a fixed 256-character
+  // reservation and then charged at its real size. A `workspaceRoot` an
+  // operator nested deeply makes that entry longer than the reservation,
+  // so a block could clear the check with 256 left and then be charged a
+  // thousand — the reservation guessed, and guessed low. The name is built
+  // before the write, so there is nothing to guess about.
+  const base = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-deep-'));
+  const workspaceRoot = path.join(base, 'd'.repeat(200), 'e'.repeat(200), 'f'.repeat(200), 'g'.repeat(200));
+  const pixel = Buffer.from('x').toString('base64');
+  const result = await normalizeCallResult(
+    {
+      content: Array.from({ length: 8 }, () => ({ type: 'image', data: pixel, mimeType: 'image/png' })),
+    },
+    // 1700 puts the second block's check in the gap the reservation opened:
+    // more than 256 characters left, far less than the ~875 the entry
+    // actually costs. Reserved, that block is written and charged anyway.
+    { server: 'linear', tool: 'shots', agentId: 'ava', workspaceRoot, maxResultChars: 1_700 },
+  ) as JsonObject;
+
+  const written = (result.files ?? []) as string[];
+  assert.ok(written.length > 0, 'blocks that fit were still written');
+  assert.ok(written.length < 8, `stopped short of every block: ${written.length}`);
+  assert.ok(
+    JSON.stringify(result).length <= 1_700,
+    `a long path is charged at its length: ${JSON.stringify(result).length}`,
+  );
+  // And the block it refused left nothing behind, the same as any other
+  // refusal: the check still happens before a byte is written.
+  const onDisk = await readdir(path.join(workspaceRoot, 'ava', 'mcp', 'linear'));
+  assert.equal(onDisk.length, written.length, 'no orphaned files were written');
+});
+
+test('a server is charged for what its text costs the transcript, escapes included', async () => {
+  // The transcript is JSON, so the characters a server writes are not the
+  // characters it pays for: a NUL escapes to `\u0000`, six of them. Counted
+  // raw, 100,000 NULs passed a 100,000-character cap and weighed 596,546 in
+  // the session and in every request that replayed it — a sixfold bypass of
+  // a bound whose whole purpose is that a durable result cannot be huge.
+  const nuls = await normalizeCallResult(
+    { content: [{ type: 'text', text: '\u0000'.repeat(100_000) }] },
+    { server: 'linear', tool: 'dump', agentId: 'ava', maxResultChars: 10_000 },
+  ) as string;
+  assert.ok(
+    JSON.stringify(nuls).length <= 10_000,
+    `weighed as the transcript carries it: ${JSON.stringify(nuls).length}`,
+  );
+  assert.match(nuls, /truncated by stratus at 10000 characters/);
+
+  // Quotes and backslashes are the ordinary version of the same thing, at
+  // two characters each rather than six.
+  const quotes = await normalizeCallResult(
+    { content: [{ type: 'text', text: '"'.repeat(100_000) }] },
+    { server: 'linear', tool: 'dump', agentId: 'ava', maxResultChars: 10_000 },
+  ) as string;
+  assert.ok(
+    JSON.stringify(quotes).length <= 10_000,
+    `escaped text is charged for its escapes: ${JSON.stringify(quotes).length}`,
+  );
+
+  // And prose that needs no escaping is charged exactly as before, so the
+  // setting means the same thing it always did for an ordinary result.
+  const plain = await normalizeCallResult(
+    { content: [{ type: 'text', text: 'x'.repeat(200) }] },
+    { server: 'linear', tool: 'dump', agentId: 'ava', maxResultChars: 10_000 },
+  );
+  assert.equal(plain, 'x'.repeat(200));
 });
 
 test('announcing a cut does not push the result past the cap it announces', async () => {

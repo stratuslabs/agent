@@ -110,17 +110,6 @@ export const BRIDGED_SCHEMA_MAX_LENGTH = 16_384;
 export const BRIDGED_RESULT_MAX_LENGTH = 100_000;
 
 /**
- * What a binary block reserves from the budget before it is written, in
- * characters — a generous stand-in for the entry it will return, which is
- * not known until the file is created. Generous on purpose: the check has
- * to happen before the write, because refusing to return a path for bytes
- * already on disk leaves an orphan in the workspace. It stands in for the
- * path *as the list serializes it*, quotes, escapes and separator
- * included, which is what the block actually goes on to be charged.
- */
-const BINARY_PATH_RESERVE = 256;
-
-/**
  * Room set aside, before a server is charged for anything, for stratus's
  * own account of what it cut.
  *
@@ -139,8 +128,7 @@ const BINARY_PATH_RESERVE = 256;
  * does. Four at most — a marker for the text, one for the structured
  * payload, and the two notes — plus the keys they arrive under; each is
  * under 100 characters of fixed prose and three numbers, so 512 is
- * generous for the lot, in the same spirit as
- * {@link BINARY_PATH_RESERVE}.
+ * generous for the lot.
  *
  * Never more than half the allowance, because a reservation that leaves a
  * server nothing is not a reservation: at a `maxResultChars` of a few
@@ -154,37 +142,12 @@ const noteReserveFor = (limit: number): number =>
   Math.min(RESULT_NOTE_RESERVE, Math.floor(limit / 2));
 
 /**
- * `raw`, cut to `limit` characters with the cut announced, or `raw` when it
- * fits.
- *
- * The marker matters as much as the cut: the model has to be able to tell a
- * directory listing that ended from one that was stopped, or it reports
- * the truncated answer as the whole answer — which is the failure mode of
- * a silent cap, and worse than the size. It names the original length for
- * the same reason `bridgedDescription`'s does: the number is what tells an
- * operator whether to raise `maxResultChars` or fix the call.
- *
- * Counted in code points, and cut so the cut never lands inside a
- * surrogate pair — half an astral character is a malformed string a
- * provider may refuse.
- *
- * Deliberately without `Array.from`, which is how the two bounds above
- * count: they measure a description against a fixed 1024, while this
- * measures whatever a server sent. Materializing ten megabytes of result
- * as an array of ten million one-character strings, to decide it is too
- * long, would spend more memory on the check than the string it is
- * guarding against. So the cheap test comes first — a string's UTF-16
- * length is never below its code-point count, so anything whose `length`
- * fits is under the cap and returns untouched, which is every ordinary
- * result — and the exact count is only paid for on the oversized path.
- *
- * A `limit` smaller than the marker yields just the marker, which is
- * longer than the limit. Inside a result budget the marker is paid for out
- * of {@link RESULT_NOTE_RESERVE} instead of out of what the server is
- * spending, so this only bites where that reservation is itself too small
- * to hold one — a `maxResultChars` of a hundred or so, where no result
- * could be useful anyway, and where the alternative is a cut with nothing
- * saying it happened.
+ * `raw`'s length in code points, walked rather than materialized:
+ * `Array.from` is how the two bounds above count, because they measure a
+ * description against a fixed 1024, while these measure whatever a server
+ * sent. Turning ten megabytes of result into ten million one-character
+ * strings, to decide it is too long, would spend more memory on the check
+ * than the string it guards against.
  */
 const codePointLength = (raw: string): number => {
   let count = 0;
@@ -203,54 +166,146 @@ const codePointLength = (raw: string): number => {
 const withinLimit = (raw: string, limit: number): boolean =>
   raw.length <= limit || codePointLength(raw) <= limit;
 
+/**
+ * What one character costs the transcript, which is JSON.
+ *
+ * A tool result is stored and replayed as a JSON string, so the characters
+ * a server writes are not the characters the transcript pays for: `"` and
+ * `\` escape to two, the five shorthand controls to two, and every other
+ * control character to six — `\u0000` for a NUL. Counting raw code points
+ * therefore under-charged a hostile payload by up to sixfold: 100,000 NULs
+ * passed a 100,000-character cap and weighed 596,546 in the session and in
+ * every request that replayed it.
+ *
+ * Lone surrogates cost six for the same reason, and can be present in a
+ * server's text even though nothing here ever produces one.
+ *
+ * Ordinary prose is unaffected — a log file pays for its newlines, a JSON
+ * document for its quotes, both a couple of percent. The cap is still
+ * counted in characters rather than bytes, as
+ * {@link BRIDGED_RESULT_MAX_LENGTH} describes; these are simply the
+ * characters that actually land.
+ */
+const serializedCostOf = (character: string): number => {
+  const code = character.codePointAt(0)!;
+  if (code === 0x22 || code === 0x5c) {
+    return 2;
+  }
+  if (code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) {
+    return 2;
+  }
+  if (code < 0x20 || (code >= 0xd800 && code <= 0xdfff)) {
+    return 6;
+  }
+  return 1;
+};
+
+/** `raw` measured as the transcript will carry it. */
+const serializedLength = (raw: string): number => {
+  let count = 0;
+  for (const character of raw) {
+    count += serializedCostOf(character);
+  }
+  return count;
+};
+
+/**
+ * Whether `raw` serializes within `limit`, without counting further than it
+ * has to. A character costs at most six, so anything six times whose UTF-16
+ * length fits is under the limit — one multiply for every ordinary result —
+ * and the walk that settles the rest stops as soon as it has overspent,
+ * rather than measuring ten megabytes to decide they are too many.
+ */
+const withinSerialized = (raw: string, limit: number): boolean => {
+  if (raw.length * 6 <= limit) {
+    return true;
+  }
+  let count = 0;
+  for (const character of raw) {
+    count += serializedCostOf(character);
+    if (count > limit) {
+      return false;
+    }
+  }
+  return true;
+};
+
+/**
+ * `raw`, cut so that what it costs the transcript is within `limit`, with
+ * the cut announced — or `raw` when it already fits.
+ *
+ * The marker matters as much as the cut: the model has to be able to tell
+ * a directory listing that ended from one that was stopped, or it reports
+ * the truncated answer as the whole answer — which is the failure mode of
+ * a silent cap, and worse than the size. It names the original size for
+ * the same reason `bridgedDescription`'s does: the number is what tells an
+ * operator whether to raise `maxResultChars` or fix the call, and it is
+ * given in what the transcript pays so that both numbers in the sentence
+ * are in the same units.
+ *
+ * The cut never lands inside a surrogate pair — half an astral character
+ * is a malformed string a provider may refuse — and the exact size is only
+ * paid for on the oversized path, `withinSerialized` having already
+ * settled the ordinary one without walking the whole string.
+ *
+ * A `limit` smaller than the marker yields just the marker, which is
+ * longer than the limit. Inside a result budget the marker is paid for out
+ * of {@link RESULT_NOTE_RESERVE} instead of out of what the server is
+ * spending, so this only bites where that reservation is itself too small
+ * to hold one — a `maxResultChars` of a hundred or so, where no result
+ * could be useful anyway, and where the alternative is a cut with nothing
+ * saying it happened.
+ */
 const cutToLimit = (raw: string, limit: number, what: string, cap: number = limit): string => {
-  if (withinLimit(raw, limit)) {
+  if (withinSerialized(raw, limit)) {
     return raw;
   }
-  const codePoints = codePointLength(raw);
+  const characters = serializedLength(raw);
   // `cap`, not `limit`: the number an operator can act on is the one they
   // set, and `limit` is what was left of it after the reservation and
   // whatever the result already spent. Naming the remainder would tell
   // someone reading the transcript to raise a setting that does not exist.
-  const marker = `\n… [${what} truncated by stratus at ${cap} characters; the server sent ${codePoints}]`;
-  // `marker` is ASCII apart from the ellipsis, so its own code-point count
-  // is its length.
-  return `${firstCodePoints(raw, Math.max(0, limit - marker.length))}${marker}`;
+  const marker = `\n… [${what} truncated by stratus at ${cap} characters; the server sent ${characters}]`;
+  return `${firstWithinCost(raw, Math.max(0, limit - serializedLength(marker)))}${marker}`;
 };
 
 /**
  * The first `count` CODE POINTS of `raw`.
  *
- * Not `raw.slice(0, count)`, which is the obvious thing and is wrong here:
- * the allowance is counted in code points and `slice` indexes UTF-16 code
- * units, so an emoji-heavy result would keep about half of what it was
- * allowed — every astral character costing two of a budget that meant to
- * charge one. Walking the string instead charges each character once and,
- * because it only ever advances by whole code points, can never cut inside
- * a surrogate pair.
+ * Not `raw.slice(0, allowance)`, which is the obvious thing and is wrong
+ * twice over: `slice` indexes UTF-16 code units, so an emoji-heavy result
+ * would keep about half of what it was allowed, and the allowance is spent
+ * in what the transcript charges rather than in characters, so an escaped
+ * one has to pay its escape. Walking the string settles both, and because
+ * it only ever advances by whole code points it can never cut inside a
+ * surrogate pair — nor leave a lone one behind for `JSON.stringify` to
+ * spend six characters on.
  *
- * Bounded by `count`, not by the length of `raw`: the input is a result
- * that has already been found too long, and the point of stopping early is
- * not walking ten megabytes to keep a hundred thousand characters.
+ * Bounded by `allowance`, not by the length of `raw`: the input is a
+ * result that has already been found too long, and the point of stopping
+ * early is not walking ten megabytes to keep a hundred thousand
+ * characters.
  */
-const firstCodePoints = (raw: string, count: number): string => {
-  if (count <= 0) {
+const firstWithinCost = (raw: string, allowance: number): string => {
+  if (allowance <= 0) {
     return '';
   }
   let units = 0;
-  let taken = 0;
+  let spent = 0;
   for (const character of raw) {
-    // `>=`, not `===`. `taken` counts whole characters, so an equality
-    // test against a fractional `count` is never true and the loop runs to
-    // the end of the string — returning the entire payload with a
-    // truncation marker on it, which is larger than what came in. The
-    // callers are guarded (see `asPositiveInteger`), and this is the layer
-    // that must not depend on them being right.
-    if (taken >= count) {
+    // Compared before committing, never after: a character that would take
+    // the total past the allowance is not taken. An equality test would
+    // never be true against a fractional allowance and the loop would run
+    // to the end of the string, returning the entire payload with a
+    // truncation marker on it — larger than what came in. The callers are
+    // guarded (see `asPositiveInteger`); this is the layer that must not
+    // depend on them being right.
+    const next = spent + serializedCostOf(character);
+    if (next > allowance) {
       break;
     }
+    spent = next;
     units += character.length;
-    taken += 1;
   }
   return raw.slice(0, units);
 };
@@ -419,18 +474,27 @@ const createResultBudget = (limit: number) => {
   // result past the cut. See {@link RESULT_NOTE_RESERVE}.
   const forServer = Math.max(0, limit - noteReserveFor(limit));
   const remaining = (): number => Math.max(0, forServer - spent);
+  // Two ways in, because a result carries two kinds of string. `fits` and
+  // `charge` take a value that is ALREADY in the form the transcript holds
+  // — a `JSON.stringify`d link or path, whose escapes are characters in it
+  // already — so they count it as it stands. `spend` takes a server's raw
+  // text, which becomes a JSON string *value* and is escaped on the way,
+  // so it is charged for what that escaping costs. Measuring either one the
+  // other way is wrong in a direction that matters: plainly, and a NUL
+  // costs a sixth of what it weighs; serialized, and every quote in a link
+  // is paid for twice.
   return {
     limit,
-    /** Whether `value` fits in what is left, counted without allocating. */
+    /** Whether `value`, already serialized, fits in what is left. */
     fits: (value: string): boolean => withinLimit(value, remaining()),
-    /** Charge `value` against the budget; the caller has checked it fits. */
+    /** Charge `value`, already serialized; the caller has checked it fits. */
     charge: (value: string): void => {
       spent += Math.min(value.length, codePointLength(value));
     },
-    /** `value` cut to what is left, with the cut announced, and charged. */
+    /** Raw text cut to what is left, with the cut announced, and charged. */
     spend: (value: string, what: string): string => {
       const bounded = cutToLimit(value, remaining(), what, limit);
-      spent += Math.min(bounded.length, codePointLength(bounded));
+      spent += serializedLength(bounded);
       return bounded;
     },
   };
@@ -538,30 +602,35 @@ export const normalizeCallResult = async (
     );
   }
 
+  // Resolved once for the whole result rather than per block. The inputs
+  // are fixed for the call, and a server answering with ten thousand tiny
+  // images would otherwise pay two syscalls apiece to be told there is no
+  // room left — which is the case the cap exists for. Scoped to this one
+  // result, so it cannot hand a later call another agent's directory the
+  // way a setup-time cache would.
+  let resolvedDirectory: string | undefined;
+  const binaryDirectory = async (root: string): Promise<string> => {
+    if (resolvedDirectory === undefined) {
+      // Canonical, because the ledger is keyed the way `fs.read` looks a
+      // path up — through `realpath` — and a workspace root or agent
+      // directory an operator moved behind a link would otherwise leave
+      // the record under a spelling no read ever asks for.
+      const lexical = path.join(root, options.agentId, 'mcp', options.server);
+      await mkdir(lexical, { recursive: true });
+      resolvedDirectory = await realpath(lexical);
+    }
+    return resolvedDirectory;
+  };
+
   const writeBlock = async (data: unknown, mimeType: unknown): Promise<void> => {
     if (typeof data !== 'string') {
-      return;
-    }
-    // Checked before the write, not after: refusing to *return* a path for
-    // bytes already on disk would leave a file in the workspace that
-    // nothing references, delivers, or cleans up — the same orphan the
-    // `isError` guard above exists to avoid. A generous reservation, since
-    // the path is not known until it is built.
-    if (!budget.fits('x'.repeat(BINARY_PATH_RESERVE))) {
-      skippedBinary += 1;
       return;
     }
     if (!options.workspaceRoot) {
       texts.push(`[binary ${typeof mimeType === 'string' ? mimeType : 'content'} dropped: no workspaceRoot is configured for @stratusagent/plugin-mcp]`);
       return;
     }
-    // Canonical, because the ledger is keyed the way `fs.read` looks a
-    // path up — through `realpath` — and a workspace root or agent
-    // directory an operator moved behind a link would otherwise leave the
-    // record under a spelling no read ever asks for.
-    const lexical = path.join(options.workspaceRoot, options.agentId, 'mcp', options.server);
-    await mkdir(lexical, { recursive: true });
-    const directory = await realpath(lexical);
+    const directory = await binaryDirectory(options.workspaceRoot);
     const stamp = (options.now ?? Date.now)();
     fileSerial += 1;
     // The tool name is the server's own string, so it is folded to the
@@ -572,6 +641,22 @@ export const normalizeCallResult = async (
       directory,
       `${sanitizeToolSegment(options.tool) ?? 'tool'}-${stamp}-${fileSerial}.${extensionFor(typeof mimeType === 'string' ? mimeType : undefined)}`,
     );
+    // Charged on the exact entry, and checked before anything touches the
+    // disk: refusing to *return* a path for bytes already written would
+    // leave a file in the workspace that nothing references, delivers, or
+    // cleans up — the same orphan the `isError` guard above exists to
+    // avoid. A fixed reservation stood in for this while the path was not
+    // yet known, and it was a guess in the wrong direction: a deeply
+    // nested `workspaceRoot` makes an entry longer than the 256 reserved,
+    // so a block could clear the reservation and then be charged more than
+    // was left. Nothing needs reserving now that the name is built before
+    // the write rather than after it.
+    const entry = JSON.stringify(file);
+    const cost = files.length === 0 ? `"files":[${entry}]` : `,${entry}`;
+    if (!budget.fits(cost)) {
+      skippedBinary += 1;
+      return;
+    }
     // Recorded before the bytes land, like a tainted `fs.write`: a crash
     // between the two leaves a labelled path with no file, never a file
     // with no label.
@@ -607,19 +692,7 @@ export const normalizeCallResult = async (
     } finally {
       await handle.close();
     }
-    // Charged as the list costs, not as the path costs — the same
-    // correction the resource links needed below. A path measured on its
-    // own leaves the quotes around it, the comma joining it to the last
-    // one, and the `"files":[…]` the collection arrives in unpaid, which
-    // is three characters an entry plus the envelope: small per block and
-    // unbounded in the number of them, which is the wrong way round for a
-    // cap whose purpose is surviving a server that returns many of
-    // something. `JSON.stringify` rather than quoting by hand, because a
-    // path is the one string here an operator's workspace root can put a
-    // backslash or a quote into, and an escape is a character the
-    // transcript pays for.
-    const entry = JSON.stringify(file);
-    budget.charge(files.length === 0 ? `"files":[${entry}]` : `,${entry}`);
+    budget.charge(cost);
     files.push(file);
   };
 
