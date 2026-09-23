@@ -266,6 +266,16 @@ const withinLimit = (raw: string, limit: number): boolean =>
   raw.length <= limit || codePointLength(raw) <= limit;
 
 /**
+ * What an already-serialized string costs the result, in the code points
+ * the cap is counted in. The cheap `length` first, which is never below
+ * the code-point count, so only a string carrying astral characters is
+ * walked. One rule, because everything that adds to the total has to agree
+ * with everything that tests it — measuring one in UTF-16 units and the
+ * other in code points is how a result that fitted was cut anyway.
+ */
+const charged = (value: string): number => Math.min(value.length, codePointLength(value));
+
+/**
  * What one character costs the transcript, which is JSON.
  *
  * A tool result is stored and replayed as a JSON string, so the characters
@@ -606,7 +616,7 @@ const createResultBudget = (limit: number, initialReserve: number) => {
     fits: (value: string): boolean => withinLimit(value, remaining()),
     /** Charge `value`, already serialized; the caller has checked it fits. */
     charge: (value: string): void => {
-      spent += Math.min(value.length, codePointLength(value));
+      spent += charged(value);
     },
     /**
      * `value`, already serialized, taken whole if it fits once the room
@@ -624,7 +634,7 @@ const createResultBudget = (limit: number, initialReserve: number) => {
       if (!withinLimit(value, withoutOwn(ownReserve))) {
         return false;
       }
-      spent += Math.min(value.length, codePointLength(value));
+      spent += charged(value);
       reserve -= ownReserve;
       return true;
     },
@@ -773,6 +783,12 @@ export const normalizeCallResult = async (
     // every later turn exactly as output is. A server that cannot answer
     // must not get an unbounded channel into the transcript by failing
     // instead of succeeding.
+    // This branch discards the structured payload, the links and the
+    // blocks — only the message survives, so only the marker that would
+    // announce cutting *it* can ever be written. Room held for the others
+    // comes out of the message instead, and a 280-character error came
+    // back as 156 for a payload that weighs 292 of a 512-character cap.
+    budget.release(reserve.total - reserve.text);
     throw new Error(
       // A failing call throws rather than returning a result, so what is
       // replayed is the message inside `ToolResult.error` — the same
@@ -958,12 +974,16 @@ export const normalizeCallResult = async (
   // measured, not materialized.
   const joinedText = texts.length > 0 ? texts.join('\n\n') : undefined;
   const plannedFiles = planned.map((block, index) => fileEntryCost(block.file, index === 0)).join('');
-  const untouched = plannedFiles.length
+  // Counted the way `charge` counts, in code points — `.length` is UTF-16
+  // units, so a structured payload or a link description carrying emoji
+  // weighed twice what it is charged, and a result that fitted was judged
+  // not to and had its *text* cut for the difference.
+  const untouched = charged(plannedFiles)
     + (joinedText === undefined
       ? 0
       : serializedLength(joinedText) + (collapsesToText ? 2 - 1 : keyOverhead('text')))
-    + (structuredJson === undefined ? 0 : `"structured":${structuredJson},`.length)
-    + (resources.length === 0 ? 0 : `"resources":${JSON.stringify(resources)},`.length);
+    + (structuredJson === undefined ? 0 : charged(`"structured":${structuredJson},`))
+    + (resources.length === 0 ? 0 : charged(`"resources":${JSON.stringify(resources)},`));
   const nothingCut = budget.fitsUntouched(untouched);
   if (nothingCut) {
     budget.releaseAll();

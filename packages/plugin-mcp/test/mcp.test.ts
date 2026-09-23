@@ -1911,11 +1911,17 @@ test('no shape of result outweighs its cap', async () => {
   // arriving as text.
   let checked = 0;
   for (let cap = BRIDGED_RESULT_MIN_LENGTH; cap <= 760; cap += 1) {
-    for (const shape of [0, 1, 2, 3]) {
+    for (const shape of [0, 1, 2, 3, 4]) {
       const content: JsonObject[] = [];
       if (shape !== 1) {
         // A quote and newlines, so the escaping is exercised too.
         content.push({ type: 'text', text: `"${'a\n'.repeat(shape === 3 ? 3 : 2_000)}` });
+      }
+      if (shape === 4) {
+        // Astral characters, because the cap counts code points and
+        // `.length` does not: a shape measured in UTF-16 units is judged
+        // to be twice the size it is charged.
+        content.push({ type: 'text', text: '\u{1f600}'.repeat(300) });
       }
       if (shape >= 1) {
         content.push({ type: 'image', data: pixel, mimeType: 'image/png' });
@@ -1926,15 +1932,23 @@ test('no shape of result outweighs its cap', async () => {
         }
       }
       const result = await normalizeCallResult(
-        { content, structuredContent: { blob: 's'.repeat(shape === 3 ? 120 : 3_000) } },
+        {
+          content,
+          structuredContent: shape === 4
+            ? { blob: '\u{1f600}'.repeat(60) }
+            : { blob: 's'.repeat(shape === 3 ? 120 : 3_000) },
+        },
         { server: 'linear', tool: 'sweep', agentId: 'ava', workspaceRoot, maxResultChars: cap },
       );
-      const weighed = JSON.stringify(result).length;
+      // In code points, which is the unit the cap is documented in and the
+      // one the budget charges — `.length` would be UTF-16 units, a
+      // different and stricter question that only agrees for ASCII.
+      const weighed = Array.from(JSON.stringify(result)).length;
       assert.ok(weighed <= cap, `cap ${cap}, shape ${shape}: the result weighed ${weighed}`);
       checked += 1;
     }
   }
-  assert.ok(checked > 900, `the sweep actually ran: ${checked} caps and shapes`);
+  assert.ok(checked > 1_200, `the sweep actually ran: ${checked} caps and shapes`);
 });
 
 test('an attachment is judged against the whole list, not against half of one', async () => {
@@ -1978,6 +1992,56 @@ test('an attachment is judged against the whole list, not against half of one', 
   assert.match(String(many.filesTruncated), /more attachments were not saved/);
   const onDisk = await readdir(path.join(manyRoot, 'ava', 'mcp', 'linear'));
   assert.equal(onDisk.length, written.length, 'the blocks that were refused were never written');
+});
+
+test('a failing result holds room only for the one cut it can announce', async () => {
+  // The `isError` branch discards the structured payload, the links and
+  // the blocks — only the message survives, so only the marker announcing
+  // a cut to *it* can ever be written. Room held for the others came out
+  // of the message: 280 characters came back as 156, for a payload that
+  // weighs 292 of a 512-character cap.
+  await assert.rejects(
+    () => normalizeCallResult(
+      {
+        isError: true,
+        content: [
+          { type: 'text', text: 'E'.repeat(280) },
+          ...Array.from({ length: 5 }, (_entry, index) => ({
+            type: 'resource_link',
+            uri: `https://e.test/${index}`,
+          })),
+        ],
+        structuredContent: { detail: 'd'.repeat(50) },
+      },
+      { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: BRIDGED_RESULT_MIN_LENGTH },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'E'.repeat(280), 'the message that fits came back whole');
+      assert.ok(
+        JSON.stringify({ error: error.message }).length <= BRIDGED_RESULT_MIN_LENGTH,
+        `and still inside the cap: ${JSON.stringify({ error: error.message }).length}`,
+      );
+      return true;
+    },
+  );
+});
+
+test('a result is weighed in the characters it is charged, not in UTF-16 units', async () => {
+  // The cap counts code points; `.length` counts UTF-16 units, and an
+  // astral character is two of those. Weighing the untouched result the
+  // second way judged a result that fitted to be nearly twice its size —
+  // and cut the *text* to pay for a structured payload that was never
+  // over the cap at all.
+  const text = 'a'.repeat(390);
+  const result = await normalizeCallResult(
+    { content: [{ type: 'text', text }], structuredContent: { e: '\u{1f600}'.repeat(50) } },
+    { server: 'linear', tool: 'report', agentId: 'ava', maxResultChars: BRIDGED_RESULT_MIN_LENGTH },
+  ) as JsonObject;
+  assert.equal(result.text, text, 'the text was not cut for a payload that fits');
+  assert.deepEqual(result.structured, { e: '\u{1f600}'.repeat(50) });
+  const weighed = Array.from(JSON.stringify(result)).length;
+  assert.ok(weighed <= BRIDGED_RESULT_MIN_LENGTH, `and the whole result fits: ${weighed}`);
 });
 
 test('a thrown message is bounded for the envelope it is replayed in', async () => {
