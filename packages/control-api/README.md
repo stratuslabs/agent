@@ -541,7 +541,15 @@ the session's new trust label and the name of what lowered it, never the
 content. `session.observed` joined it with overhearing: a message entered
 the session with no turn run on it — its own event rather than a
 `session.updated`, because a client that takes `running` as "a reply is
-coming" would wait on a turn that never speaks. Session and agent ids only.) The **turn id lives on the envelope** because `StratusEvent`
+coming" would wait on a turn that never speaks. Session and agent ids only.
+`session.context-trimmed` joined it with context management: the
+conversation outgrew the model's window, so its oldest messages are no
+longer sent — `droppedMessages` is what this trim gave up and `floor` is
+the total now held back. Counts only, and worth surfacing rather than
+swallowing: nothing else tells a client that the agent it is showing has
+stopped being able to see the start of the thread. It can arrive more than
+once in a turn, since the window is narrowed by halving until the request
+fits.) The **turn id lives on the envelope** because `StratusEvent`
 carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own
 deltas from the next caller's. The id is assigned at dispatch and returned by

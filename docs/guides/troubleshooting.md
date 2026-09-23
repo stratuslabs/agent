@@ -84,3 +84,39 @@ subscription sign-in to per-token billing.
 - **A gated tool call was refused overnight** — that is the daemon's
   honest default. [Approvals](./approvals.md) covers asking a human in
   Slack instead.
+- **An agent has forgotten the start of a long conversation** — see below.
+
+## A conversation that outgrows the model
+
+A session is durable and a Slack DM is one session for the life of the
+install, so a busy thread's transcript grows without limit. Every turn
+replays the whole thing to the model, and eventually it no longer fits.
+
+When that happens the conversation **narrows rather than stopping**. The
+request is refused for length, the daemon halves how much history it sends
+and tries again until it fits, and it remembers the window it landed on so
+the next turn does not pay for the discovery again. The agent is told, in
+the request, that earlier messages are not being shown.
+
+What this costs is real and worth knowing:
+
+- **The agent cannot see the messages that fell out of the window.** It
+  knows how many there were and nothing about them, so it will answer
+  questions about the start of the conversation as though it had just
+  joined. Summarizing what leaves is
+  [planned, not shipped](../roadmap/32-context-management.md).
+- **Nothing is deleted.** The window bounds what is *sent*; the transcript
+  on disk is whole, and `stratus logs` shows every trim as
+  `session.context-trimmed`.
+- **The window only ever narrows.** A conversation that trimmed once will
+  trim again as it grows.
+
+`stratus session rollover <id>` starts the same id over with an empty
+transcript when you would rather begin again than keep narrowing — the old
+conversation is archived, not lost.
+
+One case this cannot rescue: a **single turn** too large for the model, for
+example a tool result of several megabytes. There is no earlier history to
+give up, so the turn fails saying exactly that. Cut what the call returns — `maxBytes` on
+`fs.read`, `maxOutputBytes` on `shell.run`, see [Tools](./tools.md) — or
+move that agent to a model with a bigger context window.

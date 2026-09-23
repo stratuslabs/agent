@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { UNADDRESSED_TURN_NOTE, type ProviderCallUsage, type ProviderRequest } from '@stratusagent/core';
+import { ContextOverflowError, UNADDRESSED_TURN_NOTE, type ProviderCallUsage, type ProviderRequest } from '@stratusagent/core';
 import {
   createOpenAICompatibleProvider,
   createProviderRegistry,
@@ -636,6 +636,50 @@ test('createOpenAICompatibleProvider rejects malformed tool call arguments', asy
   await assert.rejects(
     () => provider.generate(createRequest()),
     /invalid arguments for tool demo\.echo/,
+  );
+});
+
+test('a transcript past the context window is reported as recoverable, not as a dead turn', async () => {
+  const rejectWith = (body: Record<string, unknown>) => async () => ({
+    ok: false,
+    status: 400,
+    text: async () => JSON.stringify(body),
+  }) as Response;
+
+  // The first-party API sets a code, and a code needs no pattern.
+  const coded = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: rejectWith({ error: { message: 'This model\'s maximum context length is 128000 tokens.', code: 'context_length_exceeded' } }),
+  });
+  await assert.rejects(
+    () => coded.generate(createRequest()),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+
+  // Everything else implementing this wire format says it in prose, and
+  // differently — a local runtime has no code to read.
+  const prose = createOpenAICompatibleProvider({
+    model: 'local-llama',
+    apiKey: 'test-key',
+    fetch: rejectWith({ error: { message: 'the request exceeds the available context size. Try to lower the number of tokens.' } }),
+  });
+  await assert.rejects(
+    () => prose.generate(createRequest()),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+
+  // Narrow on purpose: an unrelated 400 read as an overflow would have the
+  // kernel throw conversation history away over a request that was
+  // malformed in some other way.
+  const unrelated = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: rejectWith({ error: { message: 'Unrecognized request argument supplied: tool_choce' } }),
+  });
+  await assert.rejects(
+    () => unrelated.generate(createRequest()),
+    (error: unknown) => error instanceof Error && !(error instanceof ContextOverflowError),
   );
 });
 

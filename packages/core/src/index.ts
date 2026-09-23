@@ -2205,7 +2205,19 @@ export type StratusEvent =
    * was tracked). Never the content: this is what the daemon log records,
    * and the log is a trace, not a transcript.
    */
-  | { type: 'session.tainted'; sessionId: string; trust: TrustLevel; source: string };
+  | { type: 'session.tainted'; sessionId: string; trust: TrustLevel; source: string }
+  /**
+   * The conversation outgrew the model's context window, so its oldest
+   * messages are no longer sent. `droppedMessages` is what this trim gave
+   * up; `floor` is the total now held back.
+   *
+   * Counts only — no content, for the same reason `session.tainted` names
+   * only its source: this is what the daemon log records, and the log is a
+   * trace, not a second transcript. Worth an event at all because it is
+   * otherwise invisible: the answers stay plausible while the agent
+   * quietly stops being able to remember the start of the conversation.
+   */
+  | { type: 'session.context-trimmed'; sessionId: string; droppedMessages: number; floor: number };
 
 export type EventHandler = (event: StratusEvent) => void | Promise<void>;
 
@@ -3382,6 +3394,148 @@ export interface ObserveInput {
 }
 
 /**
+ * Thrown by a provider when the request did not fit the model's context
+ * window — the transcript, not the answer, is what was too long.
+ *
+ * A distinct type because it is the one provider failure the kernel can do
+ * something about. Everything else a provider throws is final; this one
+ * says "the same request will never work, a shorter one might", and the
+ * runner answers by sending less history (see `raiseContextFloor`).
+ *
+ * Providers opt in. Recognising it means matching a vendor's own wording
+ * for a 400, which only the adapter can do — and a harness provider that
+ * manages its own context (`provider-claude-code`, `provider-codex`) has
+ * nothing to report, because the transcript it sends is not ours to
+ * shorten. A provider that never throws this behaves exactly as it did.
+ */
+export class ContextOverflowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ContextOverflowError';
+  }
+}
+
+/**
+ * How many of a session's oldest messages are no longer sent to the
+ * provider.
+ *
+ * Durable, and **monotonic** like the trust label: a transcript only grows,
+ * so a floor that has had to rise once would have to rise again on the next
+ * turn, and re-discovering that costs a rejected request every time. Raised
+ * only by `raiseContextFloor`, never lowered — a conversation does not get
+ * shorter.
+ *
+ * It bounds what is *sent*, never what is stored. The transcript is the
+ * record of what happened and stays whole on disk; this is a window onto
+ * its tail. `stratus session rollover` is still the way to actually leave a
+ * conversation behind.
+ */
+export const CONTEXT_FLOOR_METADATA_KEY = 'contextFloor';
+
+/** The stored floor, or 0 for a session that has never overflowed. */
+export const contextFloorOf = (session: Pick<Session, 'metadata'>): number => {
+  const stored = session.metadata?.[CONTEXT_FLOOR_METADATA_KEY];
+  return typeof stored === 'number' && Number.isInteger(stored) && stored > 0 ? stored : 0;
+};
+
+/**
+ * The note that stands in for the messages a floor cut away, prefixed to
+ * the oldest message the model still sees.
+ *
+ * Said rather than done silently, for the reason every other cut in this
+ * codebase is announced: a model that cannot tell a conversation that
+ * started here from one that was trimmed will answer as though the earlier
+ * turns never happened, and confidently.
+ */
+export const droppedTurnsNote = (count: number): string =>
+  `[${count} earlier message${count === 1 ? '' : 's'} in this conversation ${count === 1 ? 'is' : 'are'} not shown: `
+  + 'it grew past what fits in one request. Say so if you are asked about something from before this point, '
+  + 'rather than answering as though the conversation started here.]';
+
+/**
+ * The index of the first message at or after `from` that a request may
+ * begin with, or undefined when there is none.
+ *
+ * A window has to start on a `user` message: the wire format requires it,
+ * and more importantly a `tool` result whose `tool_use` was cut away is a
+ * request every provider rejects — which would turn one overflow into a
+ * permanent failure of a different kind. The runner only ever writes a
+ * user message at a turn boundary (`observe` refuses to splice one into a
+ * turn in flight, exactly so this holds), so a user message is always a
+ * safe cut and no pair is ever split.
+ */
+const nextTurnBoundary = (messages: readonly Message[], from: number): number | undefined => {
+  for (let index = Math.max(0, from); index < messages.length; index += 1) {
+    if (messages[index]?.role === 'user') {
+      return index;
+    }
+  }
+  return undefined;
+};
+
+/**
+ * A view of `session` carrying only the messages above its floor, with the
+ * note in place of what was cut. The session itself is untouched — the
+ * copy is shallow and deliberately shares `metadata`, because providers
+ * keep replay state there (the Anthropic raw-turn cache) and a turn that
+ * wrote into a copy would lose it.
+ *
+ * Returns the session unchanged when the floor is 0, so a conversation that
+ * has never overflowed is not copied on every turn.
+ */
+export const sessionWithinContextFloor = (session: Session): Session => {
+  const floor = contextFloorOf(session);
+  if (floor <= 0 || floor >= session.messages.length) {
+    return session;
+  }
+  const start = nextTurnBoundary(session.messages, floor);
+  if (start === undefined || start === 0) {
+    return session;
+  }
+  const kept = session.messages.slice(start);
+  const first = kept[0]!;
+  // Prefixed onto the oldest surviving message rather than added as one of
+  // its own: an extra message would be a turn the transcript never had, and
+  // every count derived from the messages — ids, `latestTurnReply` — reads
+  // the stored list anyway. This view is only ever handed to a provider.
+  return {
+    ...session,
+    messages: [{ ...first, content: `${droppedTurnsNote(start)}\n\n${first.content}` }, ...kept.slice(1)],
+  };
+};
+
+/**
+ * Raise the floor so the next attempt sends less, and report whether there
+ * was anything left to give up.
+ *
+ * Halves the remaining window each time rather than trimming a fixed
+ * amount: nothing here knows how many tokens a message is, and an overflow
+ * says only "too big", not "too big by this much" — so the cheap thing is
+ * to converge in a handful of attempts rather than to creep towards the
+ * answer one turn at a time, paying a rejected request for each step.
+ *
+ * Returns false when the window is already down to the newest turn. That is
+ * the floor's floor: a single turn that does not fit is a message larger
+ * than the model can read, and no amount of dropping history fixes it.
+ */
+export const raiseContextFloor = (session: Session): boolean => {
+  const floor = contextFloorOf(session);
+  const remaining = session.messages.length - floor;
+  if (remaining <= 1) {
+    return false;
+  }
+  const target = floor + Math.max(1, Math.floor(remaining / 2));
+  const start = nextTurnBoundary(session.messages, target);
+  // No boundary above the target, or the only one is where we already are:
+  // the tail is one turn and there is nothing further to drop.
+  if (start === undefined || start <= floor) {
+    return false;
+  }
+  session.metadata = { ...(session.metadata ?? {}), [CONTEXT_FLOOR_METADATA_KEY]: start };
+  return true;
+};
+
+/**
  * Thrown when a run is stopped by its abort signal. The session ends up
  * `failed` with this error's message as `lastError`, so an aborted turn is
  * distinguishable from a genuine failure.
@@ -3930,15 +4084,70 @@ export class AgentRunner {
           this.recordUsage(session, turnId, usage);
         };
 
-        const response = await this.options.provider.generate({
-          session,
-          ...(tools.length > 0 ? { tools } : {}),
-          ...(memory.length > 0 ? { memory } : {}),
-          ...(enabledSkills.length > 0 ? { skills: enabledSkills } : {}),
-          ...(this.streaming ? { onDelta } : {}),
-          onUsage,
-          ...(signal ? { signal } : {}),
-        });
+        // Sending less history until it fits, rather than failing for good.
+        //
+        // A transcript that has outgrown the context window is the one
+        // provider rejection that repeats: the session is durable, so the
+        // next message replays the same too-long request and is refused
+        // the same way, and the conversation is dead under an id its
+        // channel still routes to. A Slack DM is one session for the life
+        // of the install, so "start a new one" is not available to the
+        // person typing into it.
+        //
+        // The floor is raised on the session and saved, so the next turn
+        // begins where this one ended up instead of paying a rejected
+        // request to rediscover it. `sessionWithinContextFloor` is what
+        // actually shortens the request; the provider only says that it
+        // did not fit.
+        let response: ProviderResponse | undefined;
+        for (;;) {
+          try {
+            response = await this.options.provider.generate({
+              session: sessionWithinContextFloor(session),
+              ...(tools.length > 0 ? { tools } : {}),
+              ...(memory.length > 0 ? { memory } : {}),
+              ...(enabledSkills.length > 0 ? { skills: enabledSkills } : {}),
+              ...(this.streaming ? { onDelta } : {}),
+              onUsage,
+              ...(signal ? { signal } : {}),
+            });
+            break;
+          } catch (error) {
+            // Not an overflow, or nothing left to drop: the turn fails, and
+            // the message says which — a single turn too big for the model
+            // is a different problem from a conversation that got long, and
+            // the remedies do not overlap.
+            if (!(error instanceof ContextOverflowError)) {
+              throw error;
+            }
+            throwIfAborted(signal);
+            const before = contextFloorOf(session);
+            if (!raiseContextFloor(session)) {
+              throw new Error(
+                `${error.message} The newest turn on its own is already larger than this model can read, `
+                + 'so dropping earlier messages cannot help: shorten the message, cut the tool output it '
+                + 'carries, or move to a model with a bigger context window.',
+              );
+            }
+            // Durable before the retry, not after it. A daemon that dies
+            // mid-recovery must not come back and replay the request that
+            // was just refused; the floor is the one thing learned here and
+            // it costs a rejected call to learn again.
+            await this.store.save(session);
+            // Whatever the abandoned attempt streamed has to be discarded,
+            // or a renderer fuses the two answers — the same contract the
+            // fallback wrapper's reset delta honours.
+            if (this.streaming) {
+              await onDelta({ type: 'reset', reason: 'retry' });
+            }
+            await this.bus.emit({
+              type: 'session.context-trimmed',
+              sessionId: session.id,
+              droppedMessages: contextFloorOf(session) - before,
+              floor: contextFloorOf(session),
+            });
+          }
+        }
         // Recorded before the abort check, deliberately: a turn cancelled
         // between the response arriving and this loop noticing still spent
         // those tokens, and the catch below saves the session.

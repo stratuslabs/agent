@@ -1,4 +1,5 @@
 import {
+  ContextOverflowError,
   isUnaddressedTurn,
   droppedImageNote,
   imagesWithinReplayBudget,
@@ -171,9 +172,37 @@ interface OpenAICompatibleResponse {
   model?: string;
   error?: {
     message?: string;
+    /**
+     * The first-party API's machine-readable reason, the one part of this
+     * error shape that is not prose. Most OpenAI-compatible runtimes omit
+     * it, which is why the overflow check reads the message too.
+     */
+    code?: string;
   };
   rawText?: string;
 }
+
+/**
+ * Whether a rejected request was rejected for being longer than the model's
+ * context window.
+ *
+ * The code first, because the first-party API sets
+ * `context_length_exceeded` and a code needs no pattern. Everything else
+ * implementing this wire format phrases it in prose and differently —
+ * llama.cpp, vLLM, Ollama and the hosted gateways each have their own — so
+ * the fallback is a narrow match on the shapes those actually use. Narrow
+ * on purpose: reading an unrelated 400 as an overflow would have the kernel
+ * throw away conversation history to "fix" a request that was wrong in some
+ * other way.
+ */
+const overflowedContext = (payload: { error?: { code?: string } }, message: string): boolean =>
+  payload.error?.code === 'context_length_exceeded'
+  // The families that actually occur: "maximum context length is N tokens"
+  // (OpenAI, vLLM), "exceeds the available context size" (llama.cpp),
+  // "context window", "prompt is too long". Anchored on the word `context`
+  // rather than on any one sentence, except for the two phrasings that
+  // omit it.
+  || /context (?:length|size|window)|maximum context|too many tokens|prompt is too long|reduce the length of the messages/i.test(message);
 
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
@@ -454,6 +483,18 @@ export const createOpenAICompatibleProvider = ({
           }
           imagesRetried = true;
           continue;
+        }
+        // The transcript did not fit. Reported as the one provider failure
+        // the kernel can act on — it answers by sending less history —
+        // rather than as the final error every other 400 here is. Matched
+        // on wording because the OpenAI-compatible shape has no dedicated
+        // status: the first-party API says `context_length_exceeded` in
+        // `error.code`, and the local runtimes that implement this surface
+        // each phrase it their own way.
+        if (overflowedContext(payload, message)) {
+          throw new ContextOverflowError(
+            `The conversation no longer fits ${model}'s context window (${message}).`,
+          );
         }
         throw new Error(message);
       }

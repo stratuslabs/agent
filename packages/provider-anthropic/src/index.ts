@@ -8,6 +8,7 @@ import type {
   Tool as AnthropicTool,
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
+  ContextOverflowError,
   isUnaddressedTurn,
   droppedImageNote,
   imagesWithinReplayBudget,
@@ -236,6 +237,21 @@ const buildPrompt = (
  */
 const rejectsSystemMessages = (error: unknown): boolean =>
   error instanceof Anthropic.BadRequestError && /role .?system.? is not supported/i.test(error.message);
+
+/**
+ * The 400 the API answers with when the request did not fit the model's
+ * context window — `prompt is too long: 1053721 tokens > 1000000 maximum`.
+ *
+ * Matched on the API's own wording, like `rejectsSystemMessages` above and
+ * for the same reason: the SDK gives no code for it, and
+ * `invalid_request_error` covers every other malformed request too. Kept
+ * narrow on purpose — reading an unrelated 400 as an overflow would have
+ * the kernel throw away conversation history to "fix" a request that was
+ * wrong in some other way.
+ */
+const overflowedContext = (error: unknown): boolean =>
+  error instanceof Anthropic.BadRequestError
+  && /prompt is too long|exceeds? the maximum.*context|context.*too (?:long|large)/i.test(error.message);
 
 /**
  * The image block a 400 names, when it names one. The API spells the
@@ -731,6 +747,19 @@ export const createAnthropicProvider = ({
           response = await send(params);
           break;
         } catch (error) {
+          // The transcript did not fit. Not recoverable here — this adapter
+          // is handed the messages and does not get to decide which of
+          // them to send — so it is reported as the one provider failure
+          // the kernel can act on, and the kernel retries with a shorter
+          // window. Ahead of the two recoveries below because it is about
+          // the request's size rather than its shape: an overflowing
+          // request would fail the same way with its system message moved
+          // or an image dropped.
+          if (overflowedContext(error)) {
+            throw new ContextOverflowError(
+              `The conversation no longer fits ${model}'s context window (${error instanceof Error ? error.message : String(error)}).`,
+            );
+          }
           // No reset delta on either recovery: the API rejects the request
           // before generating, so nothing has streamed for a consumer to
           // discard.

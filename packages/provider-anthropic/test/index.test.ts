@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { UNADDRESSED_TURN_NOTE, type ImageAttachment, type MemoryEntry, type ProviderCallUsage, type ProviderRequest, type Session } from '@stratusagent/core';
+import { ContextOverflowError, UNADDRESSED_TURN_NOTE, type ImageAttachment, type MemoryEntry, type ProviderCallUsage, type ProviderRequest, type Session } from '@stratusagent/core';
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
@@ -302,6 +302,39 @@ test('a turn nobody asked for reaches the API with the note after its newest mes
     fetch: createMockFetch([apiMessage([], 'max_tokens')]).fetchImpl,
   });
   await assert.rejects(() => exhausted.generate({ session }), /stop_reason max_tokens/);
+});
+
+test('a transcript past the context window is reported as recoverable, not as a dead turn', async () => {
+  // The kernel can act on exactly one provider failure: this one. It
+  // answers by sending less history, so the adapter's whole job is to name
+  // the rejection rather than treat it as final — which is what left a
+  // long conversation permanently unanswerable, since the transcript is
+  // durable and every later message replayed the same refused request.
+  const rejectWith = (message: string): typeof fetch => (async () => new Response(
+    JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message } }),
+    { status: 400, headers: { 'content-type': 'application/json' } },
+  )) as typeof fetch;
+
+  const overflowing = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: rejectWith('prompt is too long: 1053721 tokens > 1000000 maximum'),
+  });
+  await assert.rejects(
+    () => overflowing.generate({ session: createSession() }),
+    (error: unknown) => error instanceof ContextOverflowError && /no longer fits/.test(error.message),
+  );
+
+  // Narrow on purpose: an unrelated 400 read as an overflow would have the
+  // kernel throw conversation history away to "fix" a request that was
+  // malformed in some other way.
+  const otherRejection = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: rejectWith('tools.0.custom.name: invalid value'),
+  });
+  await assert.rejects(
+    () => otherRejection.generate({ session: createSession() }),
+    (error: unknown) => !(error instanceof ContextOverflowError),
+  );
 });
 
 test('failed tool results replay as is_error tool_result blocks', async () => {

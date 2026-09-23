@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  CONTEXT_FLOOR_METADATA_KEY,
+  ContextOverflowError,
+  contextFloorOf,
   RunAbortedError,
   EventBus,
   InMemorySessionStore,
@@ -1879,4 +1882,176 @@ test('the first stored turn is held to the replay window too', async () => {
   ]);
   const stored = await store.get('session-first-window');
   assert.equal(stored?.messages[0]?.images?.[0]?.omitted, true);
+});
+
+
+/**
+ * A provider that refuses any request carrying more than `fits` messages,
+ * the way an API refuses a transcript past the context window, and
+ * otherwise answers. Records what it was actually sent each time.
+ */
+const createOverflowingProvider = (fits: number) => {
+  const sent: number[] = [];
+  const firstMessages: string[] = [];
+  const provider: ModelProvider = {
+    name: 'overflowing-provider',
+    async generate(request) {
+      sent.push(request.session.messages.length);
+      if (request.session.messages.length > fits) {
+        throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
+      }
+      firstMessages.push(request.session.messages[0]?.content ?? '');
+      return { parts: [{ type: 'text' as const, text: 'answered' }] };
+    },
+  };
+  return { provider, sent, firstMessages };
+};
+
+/** A session whose transcript is `turns` complete user/assistant pairs. */
+const seedTranscript = async (runner: AgentRunner, sessionId: string, turns: number): Promise<Session> => {
+  const now = new Date().toISOString();
+  const messages = [];
+  for (let turn = 1; turn <= turns; turn += 1) {
+    messages.push({ id: `${sessionId}:user:${turn}`, role: 'user' as const, content: `question ${turn}`, createdAt: now });
+    messages.push({ id: `${sessionId}:assistant:${turn}`, role: 'assistant' as const, content: `answer ${turn}`, createdAt: now });
+  }
+  return runner.store.create({
+    id: sessionId,
+    agent: { id: 'agent-ctx', name: 'Context Agent' },
+    status: 'idle',
+    messages,
+  });
+};
+
+test('a conversation that outgrew the context window keeps going on a shorter window', async () => {
+  // The bug this closes: the transcript is durable, so a request the model
+  // refuses for length is refused identically on every later message. The
+  // session is dead under an id its channel still routes to, and a Slack
+  // DM is one session for the life of the install — "start a new one" is
+  // not something the person typing has.
+  const { provider, sent, firstMessages } = createOverflowingProvider(6);
+  const events: StratusEvent[] = [];
+  const bus = new EventBus();
+  bus.subscribe((event) => {
+    events.push(event);
+  });
+  const runner = new AgentRunner({ provider, bus });
+  await seedTranscript(runner, 'session-ctx', 10);
+
+  const session = await runner.resume({ sessionId: 'session-ctx', userMessage: 'and now?' });
+
+  assert.equal(session.status, 'completed');
+  // Halved until it fit rather than crept down one turn at a time: an
+  // overflow says "too big", never "too big by this much", so each
+  // rejected request has to buy a real reduction.
+  assert.ok(sent.length >= 2 && sent.length <= 5, `converged in a few attempts: ${JSON.stringify(sent)}`);
+  assert.ok(sent[sent.length - 1]! <= 6, `the attempt that succeeded fit: ${JSON.stringify(sent)}`);
+  assert.ok(sent[0]! > sent[sent.length - 1]!, 'each attempt sent less than the last');
+
+  // The model is told, rather than left to answer as though the earlier
+  // turns never happened.
+  assert.match(firstMessages[0]!, /earlier messages in this conversation are not shown/);
+
+  // And it is on the bus, counts only — the log is a trace, not a second
+  // transcript.
+  const trimmed = events.filter((event) => event.type === 'session.context-trimmed');
+  assert.ok(trimmed.length >= 1, 'announced the trim');
+  assert.ok(trimmed.every((event) => 'floor' in event && event.floor > 0));
+});
+
+test('the shorter window is remembered, so the next turn does not buy it again', async () => {
+  const { provider, sent } = createOverflowingProvider(6);
+  const runner = new AgentRunner({ provider });
+  await seedTranscript(runner, 'session-ctx-2', 10);
+
+  await runner.resume({ sessionId: 'session-ctx-2', userMessage: 'first' });
+  const attemptsToLearn = sent.length;
+  assert.ok(attemptsToLearn > 1, 'the first turn paid rejected requests to find the window');
+
+  // Durable on the session, and monotonic: a transcript only grows, so a
+  // floor that had to rise once would have to rise again, and rediscovering
+  // it costs a rejected request every turn.
+  const stored = await runner.store.get('session-ctx-2');
+  assert.ok(contextFloorOf(stored!) > 0);
+  assert.equal(stored!.metadata?.[CONTEXT_FLOOR_METADATA_KEY], contextFloorOf(stored!));
+
+  const floor = contextFloorOf(stored!);
+  sent.length = 0;
+  await runner.resume({ sessionId: 'session-ctx-2', userMessage: 'second' });
+
+  // The next turn starts from the remembered floor rather than from the
+  // whole transcript: its first attempt is the tail above that floor, not
+  // the twenty-odd messages the first turn opened with.
+  assert.ok(
+    sent[0]! <= stored!.messages.length - floor + 2,
+    `opened at the remembered window, not the whole transcript: ${JSON.stringify(sent)}`,
+  );
+  assert.ok(sent.length < attemptsToLearn, `fewer rejected requests than the first turn: ${JSON.stringify(sent)}`);
+
+  // The floor is absolute, so it has to keep rising as the conversation
+  // grows — holding back the same old messages while new ones pile on top
+  // would drift back over the line. It only ever rises.
+  const after = await runner.store.get('session-ctx-2');
+  assert.ok(contextFloorOf(after!) >= floor, 'the floor never goes back down');
+});
+
+test('the transcript is only windowed on the way out, never shortened on disk', async () => {
+  const { provider } = createOverflowingProvider(6);
+  const runner = new AgentRunner({ provider });
+  await seedTranscript(runner, 'session-ctx-3', 10);
+
+  await runner.resume({ sessionId: 'session-ctx-3', userMessage: 'and now?' });
+
+  // The record of what happened stays whole: this is a window onto the
+  // tail, not a deletion. `stratus session rollover` is still the only
+  // thing that leaves a conversation behind.
+  const stored = await runner.store.get('session-ctx-3');
+  assert.equal(stored!.messages[0]?.content, 'question 1');
+  assert.ok(stored!.messages.length > 20, 'every message is still stored');
+  // And the note lives only in the view — it is not written into history.
+  assert.ok(
+    stored!.messages.every((message) => !message.content.includes('are not shown')),
+    'the note never lands in the transcript',
+  );
+});
+
+test('a single turn too large for the model fails saying so, rather than retrying forever', async () => {
+  // Nothing is left to drop once the window is the newest turn, and the
+  // remedy is a different one — so the error says which problem this is.
+  const provider: ModelProvider = {
+    name: 'always-overflowing',
+    async generate() {
+      throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
+    },
+  };
+  const runner = new AgentRunner({ provider });
+  await seedTranscript(runner, 'session-ctx-4', 3);
+
+  await assert.rejects(
+    () => runner.resume({ sessionId: 'session-ctx-4', userMessage: 'one enormous message' }),
+    /newest turn on its own is already larger than this model can read/,
+  );
+  const stored = await runner.store.get('session-ctx-4');
+  assert.equal(stored?.status, 'failed');
+});
+
+test('a provider failure that is not an overflow is never answered by dropping history', async () => {
+  let calls = 0;
+  const provider: ModelProvider = {
+    name: 'failing-provider',
+    async generate() {
+      calls += 1;
+      throw new Error('invalid_request_error: tools.0.name is not valid');
+    },
+  };
+  const runner = new AgentRunner({ provider });
+  await seedTranscript(runner, 'session-ctx-5', 10);
+
+  await assert.rejects(
+    () => runner.resume({ sessionId: 'session-ctx-5', userMessage: 'hello' }),
+    /tools\.0\.name is not valid/,
+  );
+  assert.equal(calls, 1, 'tried once and stopped');
+  const stored = await runner.store.get('session-ctx-5');
+  assert.equal(contextFloorOf(stored!), 0, 'gave up no history over an unrelated rejection');
 });
