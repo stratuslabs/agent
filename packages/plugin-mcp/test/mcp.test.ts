@@ -33,6 +33,7 @@ import {
   createMcpPlugin,
   normalizeCallResult,
   BRIDGED_RESULT_MAX_LENGTH,
+  BRIDGED_RESULT_MIN_LENGTH,
   PLUGIN_MCP_VERSION,
   sanitizeToolSegment,
   sealedStdioEnv,
@@ -1486,31 +1487,45 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // The operator's cap is the one that applies, and a server cannot raise
   // it: the cap exists to bound what the server sends.
   const narrowed = await normalizeCallResult(
-    { content: [{ type: 'text', text: 'abcdefghij'.repeat(20) }] },
-    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 80 },
+    { content: [{ type: 'text', text: 'abcdefghij'.repeat(600) }] },
+    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 600 },
   ) as string;
-  assert.ok(Array.from(narrowed).length <= 80, `honoured the narrowed cap: ${narrowed.length}`);
-  assert.match(narrowed, /truncated by stratus at 80 characters; the server sent 200/);
+  assert.ok(Array.from(narrowed).length <= 600, `honoured the narrowed cap: ${narrowed.length}`);
+  assert.match(narrowed, /truncated by stratus at 600 characters; the server sent 6000/);
+
+  // A cap too small to hold an account of what it cut is raised to the
+  // floor, and the marker names the cap that was applied rather than the
+  // one that was asked for. Approximating an impossible cap silently is
+  // the thing this whole bound exists to avoid.
+  const tiny = await normalizeCallResult(
+    { content: [{ type: 'text', text: 'abcdefghij'.repeat(600) }] },
+    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 1 },
+  ) as string;
+  assert.ok(
+    Array.from(tiny).length <= BRIDGED_RESULT_MIN_LENGTH,
+    `a cap below the floor is raised to it: ${tiny.length}`,
+  );
+  assert.match(tiny, new RegExp(`truncated by stratus at ${BRIDGED_RESULT_MIN_LENGTH} characters`));
 
   // An oversized `structuredContent` stops being a parseable object,
   // because a truncated object is not one — it arrives as text under a
   // key that says so, and `structured` is absent rather than half there.
   const structured = await normalizeCallResult(
-    { content: [{ type: 'text', text: 'ok' }], structuredContent: { blob: 'y'.repeat(300) } },
-    // 400, because a result that can truncate both its text and its
-    // structured payload sets aside room to say so about each, and below
-    // roughly three hundred characters there is nothing left for a result.
-    { server: 'linear', tool: 'chart', agentId: 'ava', maxResultChars: 400 },
+    { content: [{ type: 'text', text: 'ok' }], structuredContent: { blob: 'y'.repeat(600) } },
+    // 600, because a result that can truncate both its text and its
+    // structured payload sets aside room to say so about each, on top of
+    // the floor every cap is held to.
+    { server: 'linear', tool: 'chart', agentId: 'ava', maxResultChars: 600 },
   ) as JsonObject;
   assert.equal(structured.structured, undefined);
   // Two numbers, neither of them obvious. The cap named is the one the
   // operator set, not what was left of it after `text` spent two
   // characters and the reservation took its share — those are why the
   // payload did not fit, but neither is a number anyone can raise. And the
-  // size is 315 rather than the 311 the JSON is long, because it arrives
+  // size is 615 rather than the 611 the JSON is long, because it arrives
   // as a string *value*, so its four quotes are escaped: what the
   // transcript pays rather than what the object measures.
-  assert.match(String(structured.structuredText), /structured result truncated by stratus at 400 characters; the server sent 315/);
+  assert.match(String(structured.structuredText), /structured result truncated by stratus at 600 characters; the server sent 615/);
   assert.equal(structured.text, 'ok');
 
   // One that fits still comes back as an object.
@@ -1527,20 +1542,20 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // nothing malformed comes out, but quietly lossy in a way no marker
   // reports.
   const emoji = await normalizeCallResult(
-    { content: [{ type: 'text', text: '\u{1f600}'.repeat(100) }] },
-    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 200 },
+    { content: [{ type: 'text', text: '\u{1f600}'.repeat(600) }] },
+    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 600 },
   ) as string;
-  assert.match(emoji, /truncated by stratus at 200 characters; the server sent 100/);
+  assert.match(emoji, /truncated by stratus at 600 characters; the server sent 600/);
   // Never half a character: the walk advances by whole code points, so a
   // cut cannot land inside a surrogate pair.
   assert.doesNotMatch(emoji, /[\u{d800}-\u{dfff}]/u);
-  // And the emoji that fit were kept. Room to announce one cut is set
-  // aside out of the 200, and the marker then costs 72 of what is left —
-  // its own leading newline escapes to two — leaving 22 whole emoji, not
-  // the eleven a code-unit slice would have left.
+  // And the emoji that fit were kept: 422 of them, where a code-unit slice
+  // would have left 211 — every astral character costing two of a budget
+  // that meant to charge one. The rest of the 600 went on the room set
+  // aside to announce a cut and on the marker itself.
   const kept = Array.from(emoji).filter((character) => character === '\u{1f600}').length;
-  assert.equal(kept, 22, `spent the allowance in code points: kept ${kept}`);
-  assert.ok(Array.from(emoji).length <= 200, 'and stayed inside it');
+  assert.equal(kept, 422, `spent the allowance in code points: kept ${kept}`);
+  assert.ok(Array.from(emoji).length <= 600, 'and stayed inside it');
 
   // A fractional allowance is not a number of characters, and the walk
   // counts whole ones — so an equality test against it would never be true
@@ -1549,9 +1564,11 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // the walk, because the walk must not depend on its callers being right.
   const fractional = await normalizeCallResult(
     { content: [{ type: 'text', text: 'y'.repeat(5_000) }] },
-    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 400.5 },
+    // Above the floor, so the fraction is what the walk sees rather than
+    // being raised away before it gets there.
+    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 600.5 },
   ) as string;
-  assert.ok(fractional.length < 600, `a fractional cap still bounds the result: ${fractional.length}`);
+  assert.ok(fractional.length < 800, `a fractional cap still bounds the result: ${fractional.length}`);
   assert.match(fractional, /truncated by stratus/);
 });
 
@@ -1677,12 +1694,12 @@ test('a server that fails gets no larger channel into the transcript than one th
   await assert.rejects(
     () => normalizeCallResult(
       { isError: true, content: [{ type: 'text', text: 'e'.repeat(5_000) }] },
-      { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 200 },
+      { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 600 },
     ),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.ok(error.message.length <= 300, `the error message was bounded: ${error.message.length}`);
-      assert.match(error.message, /error message truncated by stratus at 200 characters; the server sent 5000/);
+      assert.ok(error.message.length <= 600, `the error message was bounded: ${error.message.length}`);
+      assert.match(error.message, /error message truncated by stratus at 600 characters; the server sent 5000/);
       return true;
     },
   );

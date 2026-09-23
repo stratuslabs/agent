@@ -110,6 +110,28 @@ export const BRIDGED_SCHEMA_MAX_LENGTH = 16_384;
 export const BRIDGED_RESULT_MAX_LENGTH = 100_000;
 
 /**
+ * The smallest `maxResultChars` that means anything, and the floor every
+ * smaller one is raised to.
+ *
+ * A cap has to be able to hold an account of what it cut. The four
+ * annotations a result can carry — a marker for the text, one for the
+ * structured payload, and the two truncation notes — come to a little over
+ * four hundred characters with the keys they arrive under, and shortening
+ * them is not on the table: an announcement is the whole reason a cap is
+ * safe to have, and a cut with nothing saying it happened is the failure
+ * this bound exists to prevent.
+ *
+ * So below this a cap cannot be honoured, only approximated — `1` yielded
+ * 73 characters for a truncated text and 104 for a dropped resource link —
+ * and approximating it silently is worse than raising it. Raised rather
+ * than refused, and raised to the floor rather than back to the default,
+ * because an operator who asked for the smallest possible result should
+ * get the smallest possible result. The markers name the cap that was
+ * actually applied.
+ */
+export const BRIDGED_RESULT_MIN_LENGTH = 512;
+
+/**
  * Stratus's own account of a cut, in the three shapes it takes. One home
  * each, because the reservation below has to know what they cost and a
  * second copy of the wording would drift from the one that ships.
@@ -617,7 +639,14 @@ export const normalizeCallResult = async (
   // block's *bytes* go to disk, but the path it returns is a string in the
   // durable result like any other, and a thousand tiny images is a
   // thousand paths replayed on every later turn.
-  const resultLimit = options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH;
+  // Clamped here rather than at the config boundary so that a host
+  // embedding the normalizer directly gets the same floor an operator
+  // does — `NormalizeOptions.maxResultChars` is reachable without going
+  // through `mcpPlugin`'s validation at all.
+  const resultLimit = Math.max(
+    BRIDGED_RESULT_MIN_LENGTH,
+    options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH,
+  );
   const budget = createResultBudget(
     resultLimit,
     noteReserveFor(content, isObject(shaped.structuredContent), resultLimit),

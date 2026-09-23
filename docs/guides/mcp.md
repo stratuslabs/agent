@@ -56,7 +56,9 @@ soul's allowlist — `tools: [mcp.linear.*]` grants one server:
   A cut is announced in the text the model reads, with the original size,
   so a listing that was stopped never reads as a listing that ended.
   Per server, as `maxResultChars`, for a server that legitimately returns
-  large documents. It is **one allowance for the whole result**, not one
+  large documents. Its floor is 512: below that a cap cannot hold an
+  account of what it cut, and one smaller is raised to it rather than
+  approximated, with the markers naming the cap that was applied. It is **one allowance for the whole result**, not one
   per field: text, a structured payload and a list of resource links are
   three places a server can put bytes in one reply, and the transcript pays
   their sum. A failing call is bounded the same way, whether it
