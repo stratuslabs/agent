@@ -635,12 +635,17 @@ const createResultBudget = (limit: number, initialReserve: number) => {
         return false;
       }
       spent += charged(value);
-      reserve -= ownReserve;
+      reserve = Math.max(0, reserve - ownReserve);
       return true;
     },
-    /** Give back room held for an annotation this result will not carry. */
+    /**
+     * Give back room held for an annotation this result will not carry.
+     * Clamped at zero, because a share given back twice is room the cap
+     * never had — the budget would then let the fields below it overspend
+     * by exactly the size of the note nobody is writing.
+     */
     release: (ownReserve: number): void => {
-      reserve -= ownReserve;
+      reserve = Math.max(0, reserve - ownReserve);
     },
     /**
      * Whether everything still to come fits with no room held back at all
@@ -658,7 +663,7 @@ const createResultBudget = (limit: number, initialReserve: number) => {
       // costs, so part of what it has to fit inside.
       if (withinSerialized(value, withoutOwn(ownReserve) - envelope)) {
         spent += serializedLength(value) + envelope;
-        reserve -= ownReserve;
+        reserve = Math.max(0, reserve - ownReserve);
         return value;
       }
       const bounded = cutToLimit(value, Math.max(0, remaining() - envelope), what, limit);
@@ -994,19 +999,34 @@ export const normalizeCallResult = async (
   // judged against a half-known list was refused while the whole result
   // would have fitted. Charged in order and written only once admitted, so
   // a refusal still leaves nothing on disk.
+  // When something else forces a cut, the list still gets the try the
+  // resource links get: weighed whole, at the allowance it has once the
+  // room for `filesTruncated` is not held. A list that fits entirely never
+  // produces that note, so holding room for it dropped attachments that
+  // belonged in the result — an image beside a text that did have to be
+  // cut was refused, for a result weighing 389 of its 512.
+  const wholeListFits = !nothingCut
+    && planned.length > 0
+    && budget.takeWhole(plannedFiles, reserve.files);
+
   for (const block of planned) {
     const cost = fileEntryCost(block.file, files.length === 0);
-    if (!nothingCut && !budget.fits(cost)) {
+    if (!nothingCut && !wholeListFits && !budget.fits(cost)) {
       skippedBinary += 1;
       continue;
     }
     await commitBlock(block.file, block.data);
-    budget.charge(cost);
+    // Already charged as a list, so not charged again as entries.
+    if (!wholeListFits) {
+      budget.charge(cost);
+    }
     files.push(block.file);
   }
-  if (skippedBinary === 0) {
+  if (skippedBinary === 0 && !nothingCut && !wholeListFits) {
     // No `filesTruncated` to pay for, and everything below spends after
-    // this point, so holding its room would come out of the text.
+    // this point, so holding its room would come out of the text. Only
+    // when it is still held: the other two paths have already given it
+    // back, and giving it back twice is room the cap never had.
     budget.release(reserve.files);
   }
 

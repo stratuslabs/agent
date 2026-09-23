@@ -1994,6 +1994,33 @@ test('an attachment is judged against the whole list, not against half of one', 
   assert.equal(onDisk.length, written.length, 'the blocks that were refused were never written');
 });
 
+test('an attachment is not dropped because a different field had to be cut', async () => {
+  // The links get their list weighed whole at the allowance it has once
+  // the room for the note reporting *dropped* links is not held. The
+  // attachments only got that when nothing anywhere needed cutting — so
+  // an image beside a text that did have to be cut was refused, for a
+  // result weighing 389 of its 512.
+  const base = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-mixed-'));
+  const workspaceRoot = path.join(base, 'd'.repeat(200), 'e'.repeat(73));
+  const result = await normalizeCallResult(
+    {
+      content: [
+        { type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' },
+        { type: 'text', text: 'a'.repeat(5_000) },
+      ],
+    },
+    { server: 'linear', tool: 'shot', agentId: 'ava', workspaceRoot, maxResultChars: BRIDGED_RESULT_MIN_LENGTH },
+  ) as JsonObject;
+
+  assert.equal(((result.files ?? []) as unknown[]).length, 1, 'the attachment that fits was kept');
+  assert.equal(result.filesTruncated, undefined, 'and nothing claims it was not');
+  // The text is the thing that genuinely did not fit, so it is cut, and
+  // says so.
+  assert.match(String(result.text), /truncated by stratus/);
+  const weighed = Array.from(JSON.stringify(result)).length;
+  assert.ok(weighed <= BRIDGED_RESULT_MIN_LENGTH, `and the whole result fits: ${weighed}`);
+});
+
 test('a failing result holds room only for the one cut it can announce', async () => {
   // The `isError` branch discards the structured payload, the links and
   // the blocks — only the message survives, so only the marker announcing
