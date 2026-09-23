@@ -472,6 +472,36 @@ export const createOpenAICompatibleProvider = ({
           break;
         }
         const message = payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`;
+        // The transcript did not fit. Reported as the one provider failure
+        // the kernel can act on — it answers by sending less history —
+        // rather than as the final error every other 400 here is. Matched
+        // on wording because the OpenAI-compatible shape has no dedicated
+        // status: the first-party API says `context_length_exceeded` in
+        // `error.code`, and the local runtimes that implement this surface
+        // each phrase it their own way.
+        //
+        // **Only on a 400**, which is the status that means the request
+        // itself was unacceptable — the same narrowing the Anthropic
+        // adapter gets for free from `BadRequestError`. Without it, every
+        // non-2xx is read for the prose: a proxy answering 503 "failed to
+        // determine model context length" would be taken for an overflow,
+        // and the kernel would permanently raise the floor over a
+        // transient failure instead of surfacing it or switching to the
+        // fallback.
+        //
+        // **Ahead of the image recovery below**, which is the destructive
+        // one: `omitImage` empties attachments on the live session, and
+        // that is irreversible. An overflow message can name an image
+        // ("maximum context length is 8192 tokens; your messages including
+        // 1 image resulted in …"), and taken by the branch below it would
+        // throw away the pictures a turn was about and retry — when what
+        // the request needed was less history, which the kernel would have
+        // supplied.
+        if (response.status === 400 && overflowedContext(payload, message)) {
+          throw new ContextOverflowError(
+            `The conversation no longer fits ${model}'s context window (${message}).`,
+          );
+        }
         // A 400 that blames an image, from a request that carried some. This
         // wire format has no one error shape across its vendors, so the
         // whole batch is let go of rather than one block: the images are
@@ -484,18 +514,6 @@ export const createOpenAICompatibleProvider = ({
           }
           imagesRetried = true;
           continue;
-        }
-        // The transcript did not fit. Reported as the one provider failure
-        // the kernel can act on — it answers by sending less history —
-        // rather than as the final error every other 400 here is. Matched
-        // on wording because the OpenAI-compatible shape has no dedicated
-        // status: the first-party API says `context_length_exceeded` in
-        // `error.code`, and the local runtimes that implement this surface
-        // each phrase it their own way.
-        if (overflowedContext(payload, message)) {
-          throw new ContextOverflowError(
-            `The conversation no longer fits ${model}'s context window (${message}).`,
-          );
         }
         throw new Error(message);
       }
