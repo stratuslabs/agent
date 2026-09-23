@@ -2150,3 +2150,50 @@ test('narrowing falls back to the newest boundary when the midpoint has none aft
   const stored = await runner.store.get('session-ctx-7');
   assert.equal(contextFloorOf(stored!), 2);
 });
+
+test('a retry after an overflow records the call that answered, not only the one that failed', async () => {
+  // The usage sink's exclusivity is scoped to one `generate`, and a retry
+  // is another one. Shared across attempts, a failed attempt that reported
+  // its billed tokens through the sink would suppress the response field
+  // of the shorter attempt that then succeeded — so the session would
+  // record the call that failed and not the one that answered.
+  const seen: string[] = [];
+  let attempt = 0;
+  const provider: ModelProvider = {
+    name: 'billing-provider',
+    async generate(request) {
+      attempt += 1;
+      if (attempt === 1) {
+        // A billed attempt that reports on its way out, the way the
+        // Anthropic adapter does when a stream dies after message_start.
+        request.onUsage?.({ inputTokens: 900, outputTokens: 0 });
+        throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
+      }
+      seen.push(`attempt ${attempt}`);
+      // And a one-call provider that answers with usage on the response
+      // only — a documented, valid mode.
+      return {
+        parts: [{ type: 'text' as const, text: 'answered' }],
+        usage: { inputTokens: 400, outputTokens: 25 },
+      };
+    },
+  };
+
+  const runner = new AgentRunner({ provider });
+  await seedTranscript(runner, 'session-ctx-8', 10);
+  await runner.resume({ sessionId: 'session-ctx-8', userMessage: 'and now?' });
+
+  const stored = await runner.store.get('session-ctx-8');
+  const usage = stored?.usage ?? [];
+  assert.deepEqual(seen, ['attempt 2']);
+  // Both are real spend and both are recorded: the refused request was
+  // billed, and so was the one that answered.
+  assert.equal(usage.length, 2, `both calls recorded: ${JSON.stringify(usage)}`);
+  assert.deepEqual(
+    usage.map((record) => record.inputTokens),
+    [900, 400],
+  );
+  // Under one turn id — one Stratus turn, however many provider calls it
+  // took to fit.
+  assert.equal(new Set(usage.map((record) => record.turnId)).size, 1);
+});

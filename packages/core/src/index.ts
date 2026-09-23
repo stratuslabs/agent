@@ -4134,16 +4134,6 @@ export class AgentRunner {
         // makes underneath it. Allocated before the call because the sink
         // fires during it.
         const turnId = this.nextTurnId(session);
-        // Sink-reported usage is exclusive for the call. An adapter that
-        // reports its internal attempts through the sink has already counted
-        // the last one, and reading the response's field as well would bill
-        // that attempt twice.
-        let sinkReported = false;
-        const onUsage = (usage: ProviderCallUsage): void => {
-          sinkReported = true;
-          this.recordUsage(session, turnId, usage);
-        };
-
         // Sending less history until it fits, rather than failing for good.
         //
         // A transcript that has outgrown the context window is the one
@@ -4162,6 +4152,24 @@ export class AgentRunner {
         let response: ProviderResponse | undefined;
         for (;;) {
           const floored = messagesWithinContextFloor(session);
+          // Sink-reported usage is exclusive for the call: an adapter that
+          // reports its internal attempts through the sink has already
+          // counted the last one, and reading the response's field as well
+          // would bill that attempt twice.
+          //
+          // Per ATTEMPT, not per turn, because the sink's exclusivity is
+          // scoped to one `generate` (see `ProviderRequest.onUsage`) and a
+          // retry below is another one. Shared across them, an overflowing
+          // attempt that reported its billed tokens through the sink would
+          // suppress the response field of the shorter attempt that then
+          // succeeded — recording the call that failed and not the one that
+          // answered. The turn id is deliberately not per attempt: one
+          // Stratus turn, however many provider calls it took to fit.
+          let sinkReported = false;
+          const onUsage = (usage: ProviderCallUsage): void => {
+            sinkReported = true;
+            this.recordUsage(session, turnId, usage);
+          };
           try {
             response = await this.options.provider.generate({
               // The real session, always: providers persist it. The window
@@ -4175,6 +4183,13 @@ export class AgentRunner {
               onUsage,
               ...(signal ? { signal } : {}),
             });
+            // Recorded before the abort check below, deliberately: a turn
+            // cancelled between the response arriving and this loop
+            // noticing still spent those tokens, and the catch that ends
+            // the turn saves the session.
+            if (!sinkReported && response.usage) {
+              this.recordUsage(session, turnId, response.usage);
+            }
             break;
           } catch (error) {
             // Not an overflow, or nothing left to drop: the turn fails, and
@@ -4211,12 +4226,6 @@ export class AgentRunner {
               floor: contextFloorOf(session),
             });
           }
-        }
-        // Recorded before the abort check, deliberately: a turn cancelled
-        // between the response arriving and this loop noticing still spent
-        // those tokens, and the catch below saves the session.
-        if (!sinkReported && response.usage) {
-          this.recordUsage(session, turnId, response.usage);
         }
         throwIfAborted(signal);
         await deltaChain;
