@@ -810,6 +810,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     }
     throw error;
   }
+  /** Every name this run was handed, so a later one can be told apart. */
+  const snapshot = new Set(entries.map((entry) => entry.name));
   /**
    * The path relative to the legacy workspaces directory, or undefined when
    * it is not under it at all.
@@ -957,6 +959,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // would silently swap the shared files for a different workspace that an
   // ordinary command happened to create.
   const moved = new Set<string>();
+  /** The names this run left free, as opposed to deliberately left alone. */
+  const emptied = new Set<string>();
   /**
    * Whether `target` holds the link this migration would have written for
    * `from` — which only the recreate step writes.
@@ -1239,6 +1243,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       );
     }
     moved.add(agentId);
+    // The one place a source stops existing. Anything wearing this name
+    // afterwards was put there by somebody else, which is what the sweep
+    // below has to be able to tell.
+    emptied.add(agentId);
     report.moved += 1;
   };
 
@@ -1322,13 +1330,49 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // killed after recreating such a link and unlinking its source never
   // visits that agent again: the retry would find nothing to remember and
   // sweep the directory its workspace points at.
+  // Before any of that, the claim the swallow below rests on — that what is
+  // left is either named in the report or was never this migration's — is
+  // checked rather than assumed. An ordinary command of an *older* build
+  // holds no home lock and resolves `workspaces/<id>` by pathname, so it can
+  // create one after the snapshot this run walked, or recreate one this run
+  // has already moved. Stamping over that is not a lost race: 0004 never
+  // runs again, nothing else ever reads `workspaces/`, and those files and
+  // every provenance label in them are stranded where no build will look —
+  // silently, which is the one outcome this migration exists to rule out.
+  //
+  // Derived from what is on disk against what this run did, in the two
+  // shapes that can only be somebody else's: a name this run emptied that is
+  // occupied again, and a name that was not in the snapshot at all. An entry
+  // this run deliberately left — quarantined, or a fold's retired source —
+  // is neither, and is already named in the summary.
+  const appeared: string[] = [];
+  for (const entry of await readdir(legacy, { withFileTypes: true }).catch(() => [])) {
+    if (isWorkspaceEntry(entry) && (emptied.has(entry.name) || !snapshot.has(entry.name))) {
+      appeared.push(entry.name);
+    }
+  }
+  if (appeared.length > 0) {
+    // Nothing is stamped, so the next run does 0004 again from what it
+    // finds — re-enterable by construction, and a workspace at both paths
+    // is the fold this migration already knows how to do. Refusing here
+    // costs a start that says why; the alternative costs the files.
+    throw new Error(
+      `${appeared.map((name) => JSON.stringify(name)).join(', ')} appeared in `
+      + `${path.relative(stratusHomePath(env), legacy)}/ while it was being migrated, so the upgrade was `
+      + 'stopped rather than leaving them where nothing will read them — a command of an older build is '
+      + 'most likely still running. Nothing was lost. Stop it and run `stratus update` again, and they '
+      + 'will be merged.',
+    );
+  }
   try {
     if (!(await anyWorkspaceNamesLegacy(env, legacy))) {
       await rmdir(legacy);
     }
   } catch {
-    // Still holding something. Nothing to report: what is left is either
-    // named above or was never this migration's.
+    // Still holding something this run is right to leave: an operator's own
+    // file, a quarantined workspace, or a workspace still naming this
+    // directory. All three are named above or were never this migration's —
+    // which the check above is what makes true.
   }
   if (report.moved === 0 && report.quarantined.length === 0 && finished === 0) {
     return undefined;

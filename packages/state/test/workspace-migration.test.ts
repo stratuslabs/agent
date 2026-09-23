@@ -451,6 +451,31 @@ test('a file an operator left among the workspaces is not an agent’s, and keep
   assert.deepEqual(await readdir(legacyWorkspacesDirPath(env)), ['README.txt']);
 });
 
+test('what this run left behind on purpose is not read as a workspace that appeared under it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // One that moves, one this run cannot give a directory to and so leaves
+  // named in the summary, and one of the operator's own files. All three
+  // are still in `workspaces/` or reported at the end, and none of them is
+  // a workspace somebody else put there while this ran — the sweep has to
+  // tell those apart, or an upgrade refuses to start over its own work.
+  await seedWorkspace(home, 'ava', { 'note.md': 'moves' });
+  await seedWorkspace(home, 'bea', { 'note.md': 'stays' });
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await writeFile(path.join(agentsDirPath(env), 'bea'), 'a regular file where bea’s directory would go');
+  await writeFile(path.join(legacyWorkspacesDirPath(env), 'README'), 'operator’s own note');
+
+  const results = await runStateMigrations(env, { exclusive: true });
+
+  const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
+  assert.match(line, /moved 1 workspace/);
+  assert.match(line, /LEFT IN workspaces\/: "bea"/);
+  assert.match(line, /bea — left at workspaces\/bea/);
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'note.md'), 'utf8'), 'moves');
+  assert.equal(await readFile(path.join(legacyWorkspacesDirPath(env), 'bea', 'note.md'), 'utf8'), 'stays');
+  assert.deepEqual((await readdir(legacyWorkspacesDirPath(env))).sort(), ['README', 'bea']);
+});
+
 test('the workspace move is idempotent, and a second run has nothing to say', async () => {
   const home = await newHome();
   const env = { homeDir: home };

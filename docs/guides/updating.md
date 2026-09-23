@@ -158,6 +158,15 @@ no memory of having started. Nothing to delete means nothing an agent can
 delete to skip it, and `shell.run`'s working directory is a starting point
 rather than a boundary.
 
+One thing stops the upgrade rather than completing it: a workspace that
+*appears* in `workspaces/` while the move is running — a command of an
+older build, which holds no lock and resolves that path by name, creating
+one after the sweep began or recreating one already moved. Schema 4 is
+stamped once and nothing reads `workspaces/` afterwards, so carrying on
+would leave those files and every provenance label in them where no build
+will look. Nothing is lost and nothing is stamped: stop the older command
+and run `stratus update` again, and the two are merged.
+
 If the new path already holds a workspace, the two ledgers are folded
 together rather than one being refused. That is the ordinary shape of an
 upgrade: an ordinary command on the new build defers this move but already
