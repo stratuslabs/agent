@@ -986,7 +986,16 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // the whole string against `isValidAgentId` rejected exactly the links
     // this is meant to recognise — `workspaces/ava -> bea/subdir` recreates
     // as `agents/bea/workspace/subdir`.
-    const names = insideLegacy(path.resolve(path.dirname(from), sourceText));
+    // The source's own text, then the entry an alias outside the home
+    // reaches — the same two the recreate step consulted when it wrote this
+    // destination. Asking only the text quarantines exactly the moves the
+    // alias case produces: `ava -> /srv/shared -> workspaces/bea` recreates
+    // as `agents/bea/workspace`, and a run that died before unlinking the
+    // source would find that pair unrecognisable and leave a dependent
+    // pointed at a legacy path that is about to go.
+    const alias = aliased.get(path.basename(from));
+    const names = insideLegacy(path.resolve(path.dirname(from), sourceText))
+      ?? (alias !== undefined ? insideLegacy(alias) : undefined);
     if (names === undefined) {
       return false;
     }

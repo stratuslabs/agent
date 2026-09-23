@@ -532,6 +532,29 @@ test('the ledger guard judges the inode a caller holds, not whatever the name po
   assert.equal(await ledgerContentTrust(ledgerPath, { dev: (await stat(ledgerPath)).dev, ino: (await stat(ledgerPath)).ino }), 'external');
 });
 
+test('a workspace the guard cannot canonicalize fails the call rather than reading as holding no ledger', async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-guard-'));
+  await mkdir(path.join(workspaceRoot, 'ava'), { recursive: true });
+  await writeFile(path.join(workspaceRoot, 'ava', LEDGER_FILENAME), '');
+
+  // Absence and a link that leads nowhere are answers: a workspace can be
+  // asked about before anything has created it, and a dangling one holds
+  // no ledger for anybody.
+  const absent = await ledgerGuard([path.join(workspaceRoot, 'ava'), path.join(workspaceRoot, 'gone')]);
+  assert.equal(await absent(path.join(workspaceRoot, 'ava', LEDGER_FILENAME)), true);
+  await symlink(path.join(workspaceRoot, 'loop'), path.join(workspaceRoot, 'loop'));
+  const looped = await ledgerGuard([path.join(workspaceRoot, 'ava'), path.join(workspaceRoot, 'loop')]);
+  assert.equal(await looped(path.join(workspaceRoot, 'ava', LEDGER_FILENAME)), true);
+
+  // Anything else is the guard being unable to ask. Answering "not a
+  // ledger" is what lets `fs.write` truncate the file it exists to refuse,
+  // so the failure is the caller's to see.
+  await assert.rejects(
+    ledgerGuard([path.join(workspaceRoot, 'ava'), path.join(workspaceRoot, 'x'.repeat(5000))]),
+    (error: NodeJS.ErrnoException) => error.code === 'ENAMETOOLONG',
+  );
+});
+
 test('a ledger’s label is judged on the bytes the model was shown', async () => {
   const record = (file: string, trust: string) => JSON.stringify({ path: file, trust, at: 'now' });
   assert.equal(ledgerTrustOfContent(''), undefined);

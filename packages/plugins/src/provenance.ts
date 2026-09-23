@@ -389,6 +389,23 @@ const isLedgerUnderRoot = (roots: readonly string[], absolutePath: string): bool
     return segments.length === 2 && segments[1] === LEDGER_FILENAME;
   });
 
+/**
+ * Whether a canonicalization failure is one that *answers*: nothing is at
+ * that path, or it leads nowhere at all.
+ *
+ * Every other failure is this guard deciding a question by not being able
+ * to ask it, and in the direction that destroys something. `EIO`, `EACCES`
+ * or `EMFILE` on one workspace drops that agent's ledger out of the set
+ * below, and the set is the whole of what the guard refuses — so a write
+ * aimed at `fs-provenance.jsonl` would pass and truncate the file this
+ * exists to protect. The caller is a single tool call: propagating costs
+ * that call, which is the cheaper of the two answers by a long way.
+ */
+const holdsNoLedger = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP';
+};
+
 export const ledgerGuard = async (
   workspaces: readonly string[],
   roots: readonly string[] = [],
@@ -411,7 +428,10 @@ export const ledgerGuard = async (
       if (canonical !== root) {
         rootSpellings.push(canonical);
       }
-    } catch {
+    } catch (error) {
+      if (!holdsNoLedger(error)) {
+        throw error;
+      }
       // Not there yet: only the spelling the operator gave.
     }
   }
@@ -435,14 +455,20 @@ export const ledgerGuard = async (
         spellings.push(canonical);
       }
       ledgers.add(path.join(canonical, LEDGER_FILENAME));
-    } catch {
+    } catch (error) {
+      if (!holdsNoLedger(error)) {
+        throw error;
+      }
       // Not there yet, or a dangling link: holds no ledger.
     }
     const lexical = path.join(workspace, LEDGER_FILENAME);
     try {
       ledgers.add(await realpath(lexical));
       identities.add(identityKey(await stat(lexical)));
-    } catch {
+    } catch (error) {
+      if (!holdsNoLedger(error)) {
+        throw error;
+      }
       // No ledger there yet, or a dangling link: nothing to protect.
     }
   }

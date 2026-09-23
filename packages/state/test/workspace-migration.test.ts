@@ -1014,6 +1014,39 @@ test('a workspace aliased through a path outside the home follows the workspace,
   assert.equal(await readFile(path.join(ava, 'shared.md'), 'utf8'), 'both agents see this');
 });
 
+test('an alias’s recreated link is recognised as finished, not quarantined into a dangling dependent', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // The state a run leaves when it dies between recreating `ava` at the new
+  // path and unlinking its source: `bea` has moved, the alias through which
+  // `ava` reached it now dangles, and `ava` exists at both paths. The proof
+  // that the destination is this migration's own recreate has to see the
+  // alias, or `ava` is quarantined — and `cyd`, which waits on it, is then
+  // recreated naming a legacy path that goes away a moment later.
+  await seedWorkspace(home, 'bea', { 'shared.md': 'both agents see this' });
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'stratus-alias-'));
+  const alias = path.join(outside, 'shared');
+  await symlink(path.join(legacyWorkspacesDirPath(env), 'bea'), alias);
+  await symlink(alias, path.join(legacyWorkspacesDirPath(env), 'ava'));
+  await symlink('ava', path.join(legacyWorkspacesDirPath(env), 'cyd'));
+  // What the interrupted run got to before it died.
+  await mkdir(path.dirname(agentWorkspacePath(env, 'ava')), { recursive: true });
+  await symlink(
+    path.relative(path.dirname(agentWorkspacePath(env, 'ava')), agentWorkspacePath(env, 'bea')),
+    agentWorkspacePath(env, 'ava'),
+  );
+
+  const results = await runStateMigrations(env, { exclusive: true });
+
+  // `ava` is the move this run finished, so `cyd` follows it to the new
+  // path rather than to the legacy link that is about to go.
+  const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
+  assert.match(line, /ava — workspaces\/ava leads nowhere .* the stale link left for you to remove/);
+  assert.equal(await realpath(agentWorkspacePath(env, 'ava')), await realpath(agentWorkspacePath(env, 'bea')));
+  assert.equal(await readlink(agentWorkspacePath(env, 'cyd')), path.join('..', 'ava', 'workspace'));
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'cyd'), 'shared.md'), 'utf8'), 'both agents see this');
+});
+
 test('an alias reaching a workspace that is itself a link is ordered behind it', async () => {
   const home = await newHome();
   const env = { homeDir: home };
