@@ -170,11 +170,12 @@ export const loadServePlugins = async (
  *
  * Under the same trust rule as the blocks above, and it needs both
  * directions of it. Raising the ceiling spends the operator's tokens on
- * however long a loop a cloned repository asks for; lowering it to 1 fails
- * every turn the daemon serves, which is a denial of service written in
- * one line of JSON. So an untrusted config naming it falls through to the
- * global file rather than to the built-in — the fall-through `principals`
- * and `executor` use, for the same reason they use it.
+ * however long a loop a cloned repository asks for; lowering it to 1
+ * leaves every agent that uses a tool unable to finish, since the ceiling
+ * is tested before each provider call and the second one is what reads
+ * the tool's result. So an untrusted config naming it falls through to
+ * the global file rather than to the built-in — the fall-through
+ * `principals` and `executor` use, for the same reason they use it.
  *
  * Absent, or ignored, means the kernel's own default; the caller leaves
  * the option off and the runner supplies it.

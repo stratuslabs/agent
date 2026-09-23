@@ -233,9 +233,11 @@ export interface StratusConfigFile {
    *
    * **Trusted configs only.** This is a runaway *and cost* guard, so both
    * directions are a decision a cloned repository must not get to make:
-   * raising it spends the operator's tokens, and lowering it to 1 fails
-   * every turn the daemon serves. An untrusted config naming it falls
-   * through to the global file, as `executor` and `principals` do.
+   * raising it spends the operator's tokens, and lowering it to 1 leaves
+   * every agent that uses a tool unable to finish — the first provider
+   * call is allowed, the one that would read the tool's result is not. An
+   * untrusted config naming it falls through to the global file, as
+   * `executor` and `principals` do.
    */
   maxTurns?: number;
 }

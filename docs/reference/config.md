@@ -146,8 +146,12 @@ that answers questions.
 
 It is a **spending** limit as much as a safety one, which is why it is
 trusted-config only: a turn that loops 500 times costs 500 provider calls.
-That cuts both ways, so a project-local config cannot lower it either —
-`"maxTurns": 1` would fail every turn the daemon serves.
+That cuts both ways, so a project-local config cannot lower it either. The
+floor is 1, and 1 does not stop the daemon answering: the ceiling is
+tested before each provider call, so the first one is always allowed and a
+question the agent can answer outright still gets answered. What it stops
+is the *second* turn — every agent that reads a file, searches, or calls
+any tool at all fails the moment it tries to use the result.
 
 A delegated sub-session gets its own allowance rather than a share of its
 parent's: `agent.delegate` starts a separate dispatch, and each dispatch is
