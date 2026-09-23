@@ -341,7 +341,9 @@ test('kernel tools are served over a loopback MCP endpoint the codex process can
 test('maxTurns bounds the inner loop: calls past the budget are refused, not executed', async () => {
   // Codex has no native turn cap, so the kernel's limit is enforced at the
   // tool endpoint — a call past the budget comes back as a tool error with
-  // nothing executed, and the loop finishes with what it has.
+  // nothing executed, and the loop finishes with what it has. This is the
+  // asymmetry docs/reference/config.md documents: the same ceiling that
+  // fails a kernel-driven provider's turn only shortens a codex one.
   const executed: string[] = [];
   const runTurn: CodexRunTurn = (params) => (async function* (): AsyncGenerator<CodexThreadEvent> {
     const config = params.clientOptions.config as CapturedConfig;

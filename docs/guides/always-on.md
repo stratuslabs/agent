@@ -193,7 +193,15 @@ The ceiling is checked *before* the provider call rather than after it, so
 the agent never gets a last turn to sum up what it found — the work of the
 first eight is in the transcript, unanswered. Sending the message again
 resumes the session with a fresh allowance, which is how to recover;
-raising `maxTurns` is how to stop it happening. There is no flag for it on
+raising `maxTurns` is how to stop it happening.
+
+That is how the ceiling reads under a provider the kernel drives one call
+at a time. The `codex` and `claude-code` runtimes hold their own loop
+inside one call and take the number as an inner budget instead, where
+running out ends the turn with a short answer rather than a failure — see
+[Configuration](../reference/config.md#how-many-turns-one-message-may-spend).
+
+There is no flag for it on
 `stratus serve`: it is a trusted-config key, because a turn that loops 500
 times costs 500 provider calls. See
 [Configuration](../reference/config.md#how-many-turns-one-message-may-spend).

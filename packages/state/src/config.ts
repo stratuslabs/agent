@@ -234,8 +234,11 @@ export interface StratusConfigFile {
    * **Trusted configs only.** This is a runaway *and cost* guard, so both
    * directions are a decision a cloned repository must not get to make:
    * raising it spends the operator's tokens, and lowering it to 1 leaves
-   * every agent that uses a tool unable to finish — the first provider
-   * call is allowed, the one that would read the tool's result is not. An
+   * an agent on a kernel-driven provider unable to use a tool at all —
+   * the first provider call is allowed, the one that would read the
+   * tool's result is not. The harness runtimes (`codex`, `claude-code`)
+   * take the same number as their own inner budget, so there a low
+   * ceiling truncates the work rather than failing the turn. An
    * untrusted config naming it falls through to the global file, as
    * `executor` and `principals` do.
    */

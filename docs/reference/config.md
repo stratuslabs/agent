@@ -150,8 +150,21 @@ That cuts both ways, so a project-local config cannot lower it either. The
 floor is 1, and 1 does not stop the daemon answering: the ceiling is
 tested before each provider call, so the first one is always allowed and a
 question the agent can answer outright still gets answered. What it stops
-is the *second* turn — every agent that reads a file, searches, or calls
-any tool at all fails the moment it tries to use the result.
+is the *second* call — under a provider the kernel drives one call at a
+time (`anthropic`, `openai`, and plugin providers of that shape), an agent
+that reads a file, searches, or calls any tool at all fails the moment it
+tries to use the result.
+
+**The harness runtimes spend the ceiling differently.** `codex` and
+`claude-code` hold their own loop inside a single provider call, so the
+same number reaches them as an *inner* budget rather than a count of round
+trips. For `codex` it bounds hosted tool calls per run: at `maxTurns: 1`
+the first tool call executes and the agent answers with its result, and it
+is the *second* that comes back refused as a tool error (`Turn budget
+exhausted: ...`) — which ends the run with whatever it has rather than
+failing the turn. For `claude-code` it is the Agent SDK's own turn cap. So
+a ceiling too low truncates the work there; it does not fail in the same
+place, and a turn that stops early can look like a complete answer.
 
 A delegated sub-session gets its own allowance rather than a share of its
 parent's: `agent.delegate` starts a separate dispatch, and each dispatch is
