@@ -1542,10 +1542,10 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // nothing malformed comes out, but quietly lossy in a way no marker
   // reports.
   const emoji = await normalizeCallResult(
-    { content: [{ type: 'text', text: '\u{1f600}'.repeat(600) }] },
+    { content: [{ type: 'text', text: '\u{1f600}'.repeat(800) }] },
     { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 600 },
   ) as string;
-  assert.match(emoji, /truncated by stratus at 600 characters; the server sent 600/);
+  assert.match(emoji, /truncated by stratus at 600 characters; the server sent 800/);
   // Never half a character: the walk advances by whole code points, so a
   // cut cannot land inside a surrogate pair.
   assert.doesNotMatch(emoji, /[\u{d800}-\u{dfff}]/u);
@@ -1613,7 +1613,9 @@ test('every server-written string in a result shares one allowance', async () =>
         { type: 'resource_link', uri: `https://example.test/${filler}`, name: filler, description: filler },
         { type: 'resource_link', uri: 'https://example.test/second', name: 'second' },
       ],
-      structuredContent: { blob: filler },
+      // Its own, larger payload: the point is that what is left after
+      // `text` does not hold it, and `filler` now fits the remainder.
+      structuredContent: { blob: 'w'.repeat(700) },
     },
     // 1024 rather than 500, because half of a cap that small is reserved
     // for the notes and 400 characters of text would no longer fit. Here a
@@ -1792,6 +1794,44 @@ test('an attachment path is measured, not assumed', async () => {
   assert.equal(onDisk.length, written.length, 'no orphaned files were written');
 });
 
+test('a result that fits is not cut to make room for saying it was cut', async () => {
+  // The room set aside to announce a cut is room a result that needs no
+  // announcing should not be charged for. Withheld unconditionally, it
+  // truncated results that fitted — 99,950 plain characters came back cut
+  // at the 100,000 default, marked with a marker claiming a cut that never
+  // happened. Which is the same lie as a silent cut, told the other way
+  // round: it is still a result whose text does not match what the server
+  // sent, and now the model is told so in the one place it would look.
+  const whole = 'x'.repeat(99_950);
+  const untouched = await normalizeCallResult(
+    { content: [{ type: 'text', text: whole }] },
+    { server: 'linear', tool: 'dump', agentId: 'ava' },
+  );
+  assert.equal(untouched, whole);
+
+  // Right up to the edge: a result that exactly fills the cap is whole,
+  // and one character more is not.
+  const exact = 'x'.repeat(BRIDGED_RESULT_MAX_LENGTH);
+  assert.equal(
+    await normalizeCallResult(
+      { content: [{ type: 'text', text: exact }] },
+      { server: 'linear', tool: 'dump', agentId: 'ava' },
+    ),
+    exact,
+  );
+  const over = await normalizeCallResult(
+    { content: [{ type: 'text', text: 'x'.repeat(BRIDGED_RESULT_MAX_LENGTH + 1) }] },
+    { server: 'linear', tool: 'dump', agentId: 'ava' },
+  ) as string;
+  assert.match(over, /truncated by stratus/);
+  // And the room is only released for the announcement that is not needed:
+  // the result still weighs no more than the cap.
+  assert.ok(
+    JSON.stringify(over).length <= BRIDGED_RESULT_MAX_LENGTH + 2,
+    `still inside the cap: ${JSON.stringify(over).length}`,
+  );
+});
+
 test('a result that has to explain four cuts still fits inside its cap', async () => {
   // Every annotation at once: text truncated, structured payload truncated,
   // resource links dropped, attachments skipped. Reserved as a flat share
@@ -1924,7 +1964,11 @@ test('a call that fails at the protocol level is bounded like one that answers',
           error.message.length <= 600,
           `the thrown message was bounded: ${error.message.length}`,
         );
-        assert.match(error.message, /error message truncated by stratus at 400 characters/);
+        // 512, not the 400 configured: this path bounds the message itself
+        // and never reaches `normalizeCallResult`, so it used to be the one
+        // place the floor did not apply and a cap of 1 could name itself in
+        // a marker. Both now go through `boundedResultLimit`.
+        assert.match(error.message, new RegExp(`error message truncated by stratus at ${BRIDGED_RESULT_MIN_LENGTH} characters`));
         return true;
       },
     );

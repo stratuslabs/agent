@@ -32,6 +32,7 @@ import {
   BRIDGED_SCHEMA_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_DEPTH,
   BRIDGED_SEGMENT_MAX_LENGTH,
+  boundedResultLimit,
 } from './normalize.ts';
 
 /**
@@ -53,6 +54,7 @@ export {
   BRIDGED_SCHEMA_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_DEPTH,
   BRIDGED_SEGMENT_MAX_LENGTH,
+  boundedResultLimit,
   bridgedDescription,
   bridgedSchema,
   bridgedToolName,
@@ -347,7 +349,10 @@ const resolveServerSpec = (
     // `asPositiveInteger`. The one thing this must not be is switchable off
     // from a config key, since a server that wanted the cap gone is the
     // server it exists for.
-    maxResultChars: asPositiveInteger(block.maxResultChars, BRIDGED_RESULT_MAX_LENGTH),
+    // Through `boundedResultLimit` so the floor reaches everything this
+    // spec feeds, the protocol-error path included — that one bounds its
+    // message directly and never passes through `normalizeCallResult`.
+    maxResultChars: boundedResultLimit(asPositiveInteger(block.maxResultChars, BRIDGED_RESULT_MAX_LENGTH)),
   };
 };
 

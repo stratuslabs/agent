@@ -132,6 +132,17 @@ export const BRIDGED_RESULT_MAX_LENGTH = 100_000;
 export const BRIDGED_RESULT_MIN_LENGTH = 512;
 
 /**
+ * A configured `maxResultChars` as it actually applies: the default when
+ * unset, never below the floor. One implementation because it has two
+ * consumers — `normalizeCallResult` for a result, and the call path for a
+ * `tools/call` that fails before there is a result to normalize. A second
+ * copy would leave the floor applying to one and not the other, which is
+ * how a cap of 1 came to name itself in a protocol error's marker.
+ */
+export const boundedResultLimit = (configured: number | undefined): number =>
+  Math.max(BRIDGED_RESULT_MIN_LENGTH, configured ?? BRIDGED_RESULT_MAX_LENGTH);
+
+/**
  * Stratus's own account of a cut, in the three shapes it takes. One home
  * each, because the reservation below has to know what they cost and a
  * second copy of the wording would drift from the one that ships.
@@ -186,22 +197,32 @@ const keyOverhead = (key: string): number => key.length + 6;
  * allowance the server is spending would let a server suppress its own
  * truncation notice by filling the budget.
  */
-const noteReserveFor = (content: readonly unknown[], hasStructured: boolean, limit: number): number => {
+interface NoteReserve {
+  /** The marker a truncated `text` would carry. */
+  text: number;
+  /** The marker a `structuredContent` too large to keep would carry. */
+  structured: number;
+  /** The note dropped resource links would carry. */
+  resources: number;
+  /** The note skipped attachments would carry. */
+  files: number;
+  total: number;
+}
+
+const markerReserve = (key: string, limit: number): number =>
+  serializedLength(truncationMarker(WIDEST_MARKER_SUBJECT, limit, WIDEST_COUNT)) + keyOverhead(key);
+
+const noteReserveFor = (content: readonly unknown[], hasStructured: boolean, limit: number): NoteReserve => {
   const kinds = content.filter(isObject).map((block) => block.type);
-  let reserve = 0;
-  if (content.length > 0) {
-    reserve += serializedLength(truncationMarker(WIDEST_MARKER_SUBJECT, limit, WIDEST_COUNT)) + keyOverhead('text');
-  }
-  if (hasStructured) {
-    reserve += serializedLength(truncationMarker(WIDEST_MARKER_SUBJECT, limit, WIDEST_COUNT)) + keyOverhead('structuredText');
-  }
-  if (kinds.includes('resource_link')) {
-    reserve += serializedLength(resourcesTruncatedNote(WIDEST_COUNT, limit)) + keyOverhead('resourcesTruncated');
-  }
-  if (kinds.some((kind) => kind === 'image' || kind === 'audio' || kind === 'resource')) {
-    reserve += serializedLength(filesTruncatedNote(WIDEST_COUNT, limit)) + keyOverhead('filesTruncated');
-  }
-  return reserve;
+  const text = content.length > 0 ? markerReserve('text', limit) : 0;
+  const structured = hasStructured ? markerReserve('structuredText', limit) : 0;
+  const resources = kinds.includes('resource_link')
+    ? serializedLength(resourcesTruncatedNote(WIDEST_COUNT, limit)) + keyOverhead('resourcesTruncated')
+    : 0;
+  const files = kinds.some((kind) => kind === 'image' || kind === 'audio' || kind === 'resource')
+    ? serializedLength(filesTruncatedNote(WIDEST_COUNT, limit)) + keyOverhead('filesTruncated')
+    : 0;
+  return { text, structured, resources, files, total: text + structured + resources + files };
 };
 
 /**
@@ -527,14 +548,14 @@ let fileSerial = 0;
  * places a server can put bytes in one result, and three separate caps
  * would let it spend the allowance three times.
  */
-const createResultBudget = (limit: number, reserve: number) => {
+const createResultBudget = (limit: number, initialReserve: number) => {
   let spent = 0;
+  let reserve = initialReserve;
   // `limit` is what the whole result may weigh; this is what a *server*
   // may spend of it. Stratus's own truncation markers and notes come out
   // of the difference, so that announcing a cut cannot itself push the
   // result past the cut. See {@link noteReserveFor}.
-  const forServer = Math.max(0, limit - reserve);
-  const remaining = (): number => Math.max(0, forServer - spent);
+  const remaining = (): number => Math.max(0, limit - reserve - spent);
   // Two ways in, because a result carries two kinds of string. `fits` and
   // `charge` take a value that is ALREADY in the form the transcript holds
   // — a `JSON.stringify`d link or path, whose escapes are characters in it
@@ -552,8 +573,23 @@ const createResultBudget = (limit: number, reserve: number) => {
     charge: (value: string): void => {
       spent += Math.min(value.length, codePointLength(value));
     },
-    /** Raw text cut to what is left, with the cut announced, and charged. */
-    spend: (value: string, what: string): string => {
+    /**
+     * Raw text cut to what is left, with the cut announced, and charged.
+     *
+     * `ownReserve` is the room held back for the marker *this* call might
+     * emit. A value that fits without one is returned whole and that room
+     * released, because withholding it otherwise cuts a result that would
+     * have fitted and marks it truncated — a claim about a cut that never
+     * happened, which is the same lie as a silent cut told the other way
+     * round. 99,950 plain characters came back cut at a 100,000 cap.
+     */
+    spend: (value: string, what: string, ownReserve: number): string => {
+      const withoutOwn = Math.max(0, limit - spent - (reserve - ownReserve));
+      if (withinSerialized(value, withoutOwn)) {
+        spent += serializedLength(value);
+        reserve -= ownReserve;
+        return value;
+      }
       const bounded = cutToLimit(value, remaining(), what, limit);
       spent += serializedLength(bounded);
       return bounded;
@@ -639,18 +675,13 @@ export const normalizeCallResult = async (
   // block's *bytes* go to disk, but the path it returns is a string in the
   // durable result like any other, and a thousand tiny images is a
   // thousand paths replayed on every later turn.
-  // Clamped here rather than at the config boundary so that a host
+  // Bounded here as well as at the config boundary, so that a host
   // embedding the normalizer directly gets the same floor an operator
   // does — `NormalizeOptions.maxResultChars` is reachable without going
   // through `mcpPlugin`'s validation at all.
-  const resultLimit = Math.max(
-    BRIDGED_RESULT_MIN_LENGTH,
-    options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH,
-  );
-  const budget = createResultBudget(
-    resultLimit,
-    noteReserveFor(content, isObject(shaped.structuredContent), resultLimit),
-  );
+  const resultLimit = boundedResultLimit(options.maxResultChars);
+  const reserve = noteReserveFor(content, isObject(shaped.structuredContent), resultLimit);
+  const budget = createResultBudget(resultLimit, reserve.total);
   let skippedBinary = 0;
 
   // Settled before anything touches the disk: a failing result's binary
@@ -669,7 +700,7 @@ export const normalizeCallResult = async (
     // must not get an unbounded channel into the transcript by failing
     // instead of succeeding.
     throw new Error(
-      budget.spend(message, 'error message')
+      budget.spend(message, 'error message', reserve.text)
       || `MCP server ${options.server} reported an error for ${options.tool} with no message.`,
     );
   }
@@ -807,7 +838,7 @@ export const normalizeCallResult = async (
     }
   }
 
-  const text = texts.length > 0 ? budget.spend(texts.join('\n\n'), 'result') : undefined;
+  const text = texts.length > 0 ? budget.spend(texts.join('\n\n'), 'result', reserve.text) : undefined;
 
   // Measured as its own serialized string rather than by walking the
   // object: what the provider is sent is the JSON, so the JSON is the cost.
@@ -823,7 +854,7 @@ export const normalizeCallResult = async (
     budget.charge(structuredJson!);
   }
   const structuredNote = structuredJson !== undefined && !structuredFits
-    ? budget.spend(structuredJson, 'structured result')
+    ? budget.spend(structuredJson, 'structured result', reserve.structured)
     : undefined;
 
   // Resource links are server-controlled strings too, and a list of them is
