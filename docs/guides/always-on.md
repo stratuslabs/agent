@@ -197,8 +197,9 @@ raising `maxTurns` is how to stop it happening.
 
 That is how the ceiling reads under a provider the kernel drives one call
 at a time. The `codex` and `claude-code` runtimes hold their own loop
-inside one call and take the number as an inner budget instead, where
-running out ends the turn with a short answer rather than a failure — see
+inside one call and take the number as an inner budget instead: codex
+refuses the call past the budget as a tool error and answers with what it
+has, while Claude Code's own limit fails the run (`error_max_turns`). See
 [Configuration](../reference/config.md#how-many-turns-one-message-may-spend).
 
 There is no flag for it on

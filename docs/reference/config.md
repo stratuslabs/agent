@@ -158,13 +158,20 @@ tries to use the result.
 **The harness runtimes spend the ceiling differently.** `codex` and
 `claude-code` hold their own loop inside a single provider call, so the
 same number reaches them as an *inner* budget rather than a count of round
-trips. For `codex` it bounds hosted tool calls per run: at `maxTurns: 1`
-the first tool call executes and the agent answers with its result, and it
-is the *second* that comes back refused as a tool error (`Turn budget
-exhausted: ...`) — which ends the run with whatever it has rather than
-failing the turn. For `claude-code` it is the Agent SDK's own turn cap. So
-a ceiling too low truncates the work there; it does not fail in the same
-place, and a turn that stops early can look like a complete answer.
+trips, and the two spend it differently from each other.
+
+For `codex` it bounds hosted tool calls per run. At `maxTurns: 1` the first
+tool call executes and the agent answers with its result; it is the
+*second* that comes back refused as a tool error (`Turn budget
+exhausted: ...`), which ends the run with whatever it has rather than
+failing it. That is the case to watch: a ceiling too low shortens the work
+into an answer that reads like a complete one.
+
+For `claude-code` it is the Agent SDK's own turn cap, and running out is a
+failure rather than a short answer — the SDK ends the run with
+`error_max_turns`, and the provider refuses any non-success result. So the
+turn fails as it would under a kernel-driven provider, just from inside a
+single provider call and with the SDK's wording.
 
 A delegated sub-session gets its own allowance rather than a share of its
 parent's: `agent.delegate` starts a separate dispatch, and each dispatch is
