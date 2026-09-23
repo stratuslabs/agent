@@ -111,12 +111,47 @@ export const BRIDGED_RESULT_MAX_LENGTH = 100_000;
 
 /**
  * What a binary block reserves from the budget before it is written, in
- * characters — a generous stand-in for the path it will return, which is
+ * characters — a generous stand-in for the entry it will return, which is
  * not known until the file is created. Generous on purpose: the check has
  * to happen before the write, because refusing to return a path for bytes
- * already on disk leaves an orphan in the workspace.
+ * already on disk leaves an orphan in the workspace. It stands in for the
+ * path *as the list serializes it*, quotes, escapes and separator
+ * included, which is what the block actually goes on to be charged.
  */
 const BINARY_PATH_RESERVE = 256;
+
+/**
+ * Room set aside, before a server is charged for anything, for stratus's
+ * own account of what it cut.
+ *
+ * The truncation markers and the `resourcesTruncated` / `filesTruncated`
+ * notes are the reason a cap is safe to have at all: they are what tells
+ * the model that a listing was stopped rather than ended. That makes them
+ * the one thing in the result a server must not be able to squeeze out by
+ * filling the allowance — and leaving them uncharged instead, which is
+ * what they were, puts the result past the cap by however many of them
+ * there are. A 100,000-character cap returned 107,306 for a result of
+ * small binary blocks, and 100,083 for one whose text filled the
+ * allowance and whose structured payload then arrived as a bare marker.
+ *
+ * So they are paid for first, out of a reservation the server never sees,
+ * and `maxResultChars` bounds the whole result the way the docs say it
+ * does. Four at most — a marker for the text, one for the structured
+ * payload, and the two notes — plus the keys they arrive under; each is
+ * under 100 characters of fixed prose and three numbers, so 512 is
+ * generous for the lot, in the same spirit as
+ * {@link BINARY_PATH_RESERVE}.
+ *
+ * Never more than half the allowance, because a reservation that leaves a
+ * server nothing is not a reservation: at a `maxResultChars` of a few
+ * dozen there is no room for both a result and an account of what was cut
+ * from it, and the degenerate case `cutToLimit` describes applies instead.
+ * That regime is the only one where a result can still outweigh its cap.
+ */
+const RESULT_NOTE_RESERVE = 512;
+
+const noteReserveFor = (limit: number): number =>
+  Math.min(RESULT_NOTE_RESERVE, Math.floor(limit / 2));
 
 /**
  * `raw`, cut to `limit` characters with the cut announced, or `raw` when it
@@ -144,9 +179,12 @@ const BINARY_PATH_RESERVE = 256;
  * result — and the exact count is only paid for on the oversized path.
  *
  * A `limit` smaller than the marker yields just the marker, which is
- * longer than the limit. Reachable only from a `maxResultChars` of a few
- * dozen characters, where no result could be useful anyway, and the
- * alternative is a cut with nothing saying it happened.
+ * longer than the limit. Inside a result budget the marker is paid for out
+ * of {@link RESULT_NOTE_RESERVE} instead of out of what the server is
+ * spending, so this only bites where that reservation is itself too small
+ * to hold one — a `maxResultChars` of a hundred or so, where no result
+ * could be useful anyway, and where the alternative is a cut with nothing
+ * saying it happened.
  */
 const codePointLength = (raw: string): number => {
   let count = 0;
@@ -165,12 +203,16 @@ const codePointLength = (raw: string): number => {
 const withinLimit = (raw: string, limit: number): boolean =>
   raw.length <= limit || codePointLength(raw) <= limit;
 
-const cutToLimit = (raw: string, limit: number, what: string): string => {
+const cutToLimit = (raw: string, limit: number, what: string, cap: number = limit): string => {
   if (withinLimit(raw, limit)) {
     return raw;
   }
   const codePoints = codePointLength(raw);
-  const marker = `\n… [${what} truncated by stratus at ${limit} characters; the server sent ${codePoints}]`;
+  // `cap`, not `limit`: the number an operator can act on is the one they
+  // set, and `limit` is what was left of it after the reservation and
+  // whatever the result already spent. Naming the remainder would tell
+  // someone reading the transcript to raise a setting that does not exist.
+  const marker = `\n… [${what} truncated by stratus at ${cap} characters; the server sent ${codePoints}]`;
   // `marker` is ASCII apart from the ellipsis, so its own code-point count
   // is its length.
   return `${firstCodePoints(raw, Math.max(0, limit - marker.length))}${marker}`;
@@ -371,7 +413,12 @@ let fileSerial = 0;
  */
 const createResultBudget = (limit: number) => {
   let spent = 0;
-  const remaining = (): number => Math.max(0, limit - spent);
+  // `limit` is what the whole result may weigh; this is what a *server*
+  // may spend of it. Stratus's own truncation markers and notes come out
+  // of the difference, so that announcing a cut cannot itself push the
+  // result past the cut. See {@link RESULT_NOTE_RESERVE}.
+  const forServer = Math.max(0, limit - noteReserveFor(limit));
+  const remaining = (): number => Math.max(0, forServer - spent);
   return {
     limit,
     /** Whether `value` fits in what is left, counted without allocating. */
@@ -382,7 +429,7 @@ const createResultBudget = (limit: number) => {
     },
     /** `value` cut to what is left, with the cut announced, and charged. */
     spend: (value: string, what: string): string => {
-      const bounded = cutToLimit(value, remaining(), what);
+      const bounded = cutToLimit(value, remaining(), what, limit);
       spent += Math.min(bounded.length, codePointLength(bounded));
       return bounded;
     },
@@ -560,7 +607,19 @@ export const normalizeCallResult = async (
     } finally {
       await handle.close();
     }
-    budget.charge(file);
+    // Charged as the list costs, not as the path costs — the same
+    // correction the resource links needed below. A path measured on its
+    // own leaves the quotes around it, the comma joining it to the last
+    // one, and the `"files":[…]` the collection arrives in unpaid, which
+    // is three characters an entry plus the envelope: small per block and
+    // unbounded in the number of them, which is the wrong way round for a
+    // cap whose purpose is surviving a server that returns many of
+    // something. `JSON.stringify` rather than quoting by hand, because a
+    // path is the one string here an operator's workspace root can put a
+    // backslash or a quote into, and an escape is a character the
+    // transcript pays for.
+    const entry = JSON.stringify(file);
+    budget.charge(files.length === 0 ? `"files":[${entry}]` : `,${entry}`);
     files.push(file);
   };
 

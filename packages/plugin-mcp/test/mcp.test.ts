@@ -1500,11 +1500,11 @@ test('a result too large for the transcript is cut, with the cut announced', asy
     { server: 'linear', tool: 'chart', agentId: 'ava', maxResultChars: 120 },
   ) as JsonObject;
   assert.equal(structured.structured, undefined);
-  // 118, not 120: `text` already spent two characters of the same budget.
-  // One allowance for the whole result, not one per field — the transcript
-  // pays the sum, and three separate caps would let a server spend the
-  // allowance three times over.
-  assert.match(String(structured.structuredText), /structured result truncated by stratus at 118 characters; the server sent 311/);
+  // The marker names the cap the operator set, not what was left of it
+  // after `text` spent two characters and the note reservation took its
+  // share. Those are real and are why the payload did not fit, but they
+  // are not a number anyone can raise — `maxResultChars` is.
+  assert.match(String(structured.structuredText), /structured result truncated by stratus at 120 characters; the server sent 311/);
   assert.equal(structured.text, 'ok');
 
   // One that fits still comes back as an object.
@@ -1522,17 +1522,18 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // reports.
   const emoji = await normalizeCallResult(
     { content: [{ type: 'text', text: '\u{1f600}'.repeat(100) }] },
-    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 90 },
+    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 180 },
   ) as string;
-  assert.match(emoji, /truncated by stratus at 90 characters; the server sent 100/);
+  assert.match(emoji, /truncated by stratus at 180 characters; the server sent 100/);
   // Never half a character: the walk advances by whole code points, so a
   // cut cannot land inside a surrogate pair.
   assert.doesNotMatch(emoji, /[\u{d800}-\u{dfff}]/u);
-  // And the emoji that fit were kept. The marker is 70 characters, leaving
-  // 20 — twenty whole emoji, not the ten a code-unit slice would have left.
+  // And the emoji that fit were kept. Half the 180 is reserved for the
+  // notes, leaving a server 90; the marker takes 71 of those, leaving 19 —
+  // nineteen whole emoji, not the nine a code-unit slice would have left.
   const kept = Array.from(emoji).filter((character) => character === '\u{1f600}').length;
-  assert.equal(kept, 20, `spent the allowance in code points: kept ${kept}`);
-  assert.ok(Array.from(emoji).length <= 90, 'and stayed inside it');
+  assert.equal(kept, 19, `spent the allowance in code points: kept ${kept}`);
+  assert.ok(Array.from(emoji).length <= 180, 'and stayed inside it');
 
   // A fractional allowance is not a number of characters, and the walk
   // counts whole ones — so an equality test against it would never be true
@@ -1590,11 +1591,17 @@ test('every server-written string in a result shares one allowance', async () =>
       ],
       structuredContent: { blob: filler },
     },
-    { server: 'linear', tool: 'search', agentId: 'ava', maxResultChars: 500 },
+    // 1024 rather than 500, because half of a cap that small is reserved
+    // for the notes and 400 characters of text would no longer fit. Here a
+    // server may spend 512, which is what this test is about — given a
+    // fresh 512 each, the structured payload below would fit whole, and
+    // that is the arrangement being ruled out.
+    { server: 'linear', tool: 'search', agentId: 'ava', maxResultChars: 1_024 },
   ) as JsonObject;
 
-  // Text fits (400 of 500) and is left alone; what follows is squeezed by
-  // what it spent, rather than each field getting a fresh 500.
+  // Text fits (400 of the 512 a server may spend) and is left alone; what
+  // follows is squeezed by what it spent, rather than each field getting a
+  // fresh allowance.
   assert.equal(result.text, filler);
 
   // The structured payload no longer fits in what is left, so it arrives as
@@ -1608,9 +1615,12 @@ test('every server-written string in a result shares one allowance', async () =>
   assert.equal(result.resources, undefined);
   assert.match(String(result.resourcesTruncated), /2 more resource links were not included/);
 
-  const serverWritten = String(result.text).length
-    + String(result.structuredText ?? '').length;
-  assert.ok(serverWritten <= 500, `the whole result stayed inside one allowance: ${serverWritten}`);
+  // Weighed as the transcript carries it — every key, quote and separator
+  // included, notes and all — which is what the cap is supposed to bound.
+  assert.ok(
+    JSON.stringify(result).length <= 1_024,
+    `the whole result stayed inside one allowance: ${JSON.stringify(result).length}`,
+  );
 });
 
 test('resource links are bounded, not waved through', async () => {
@@ -1702,6 +1712,52 @@ test('attachment paths are charged to the allowance, so tiny blocks cannot flood
   // orphan the isError guard exists to avoid.
   const onDisk = await readdir(path.join(workspaceRoot, 'ava', 'mcp', 'linear'));
   assert.equal(onDisk.length, written.length, 'no orphaned files were written');
+
+  // A list costs its separators here too. Charged path by path, the quotes
+  // around each one, the comma joining it to the last and the `"files":[…]`
+  // the collection arrives in all went unpaid — three characters an entry,
+  // which is nothing per block and thousands across a result made of them.
+  const manyRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-list-'));
+  const listed = await normalizeCallResult(
+    {
+      content: Array.from({ length: 400 }, () => ({ type: 'image', data: pixel, mimeType: 'image/png' })),
+    },
+    { server: 'linear', tool: 'shots', agentId: 'ava', workspaceRoot: manyRoot, maxResultChars: 20_000 },
+  ) as JsonObject;
+  assert.ok(
+    (listed.files as string[]).length < 400,
+    `stopped short of every block: ${(listed.files as string[]).length}`,
+  );
+  // Weighed as the transcript carries it, not as the bare paths weigh.
+  assert.ok(
+    JSON.stringify(listed).length <= 20_000,
+    `the serialized result stayed inside the cap: ${JSON.stringify(listed).length}`,
+  );
+});
+
+test('announcing a cut does not push the result past the cap it announces', async () => {
+  // The markers and the truncation notes are stratus's words, not the
+  // server's, and nothing charged for them: they were appended to a result
+  // that had already spent the whole allowance. So the cap was the cap plus
+  // however many cuts had to be explained — and a server could suppress the
+  // explanation by filling the budget, which is backwards, since the
+  // announcement is what makes a cap safe to have at all.
+  const result = await normalizeCallResult(
+    {
+      content: [{ type: 'text', text: 'T'.repeat(50_000) }],
+      structuredContent: { detail: 'S'.repeat(50_000) },
+    },
+    { server: 'linear', tool: 'report', agentId: 'ava', maxResultChars: 10_000 },
+  ) as JsonObject;
+
+  // Still announced — the point is that the announcement fits, not that it
+  // is dropped.
+  assert.match(String(result.text), /result truncated by stratus at 10000 characters/);
+  assert.match(String(result.structuredText), /structured result truncated by stratus at 10000 characters/);
+  assert.ok(
+    JSON.stringify(result).length <= 10_000,
+    `the whole result stayed inside the cap: ${JSON.stringify(result).length}`,
+  );
 });
 
 test('a call that fails at the protocol level is bounded like one that answers', async () => {

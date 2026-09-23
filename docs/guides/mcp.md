@@ -66,6 +66,11 @@ soul's allowlist — `tools: [mcp.linear.*]` grants one server:
   workspace rather than the transcript, but the path each one returns is a
   string in the result like any other, so those are counted too; blocks
   past the allowance are not written at all, and the result says how many.
+  A list is charged as it serializes — the commas and brackets a hundred
+  links or paths arrive in are characters the transcript pays for like any
+  other — and the room for stratus's own account of a cut is set aside
+  before a server spends anything, so explaining a truncation cannot
+  itself push the result past the number you set.
 - **A stdio server's environment is replaced** the way
   [`tool-shell`'s](./tools.md) is: it gets what you granted and nothing
   else, not the daemon's own environment.
