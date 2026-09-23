@@ -1345,12 +1345,25 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // occupied again, and a name that was not in the snapshot at all. An entry
   // this run deliberately left — quarantined, or a fold's retired source —
   // is neither, and is already named in the summary.
-  const appeared: string[] = [];
-  for (const entry of await readdir(legacy, { withFileTypes: true }).catch(() => [])) {
-    if (isWorkspaceEntry(entry) && (emptied.has(entry.name) || !snapshot.has(entry.name))) {
-      appeared.push(entry.name);
+  // Absence answers — an older command can remove the directory as readily
+  // as fill it, and nothing is in a directory that is not there. Every other
+  // failure propagates, the same rule as the walk that opened this: a rescan
+  // that fails open says "nothing appeared" for `EIO`, `EMFILE` or `EACCES`,
+  // which is this check deciding the question by not being able to ask it —
+  // and the stamp that follows is the one that cannot be taken back.
+  let remaining: Dirent[];
+  try {
+    remaining = await readdir(legacy, { withFileTypes: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      throw error;
     }
+    remaining = [];
   }
+  const appeared = remaining
+    .filter((entry) => isWorkspaceEntry(entry) && (emptied.has(entry.name) || !snapshot.has(entry.name)))
+    .map((entry) => entry.name);
   if (appeared.length > 0) {
     // Nothing is stamped, so the next run does 0004 again from what it
     // finds — re-enterable by construction, and a workspace at both paths
