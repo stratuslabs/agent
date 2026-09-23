@@ -104,9 +104,3 @@ subscription sign-in to per-token billing.
   has a lower ceiling than the default — set `maxTokens` under it. On an
   OpenAI-compatible endpoint the cap is the endpoint's own default, so the
   fix is on that side.
-- **A bridged MCP tool's output ends in `truncated by stratus`** — the
-  server returned more than one result may put into the transcript, which
-  every later turn of that conversation would then replay. The marker
-  names the size the server sent; raise that server's `maxResultChars` if
-  it is legitimately that large, or narrow the call. See
-  [MCP](./mcp.md#the-posture).
