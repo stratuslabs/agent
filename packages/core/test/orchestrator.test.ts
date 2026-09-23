@@ -6,6 +6,7 @@ import {
   CONTEXT_FLOOR_METADATA_KEY,
   ContextOverflowError,
   contextFloorOf,
+  transcriptOf,
   RunAbortedError,
   EventBus,
   InMemorySessionStore,
@@ -1893,18 +1894,25 @@ test('the first stored turn is held to the replay window too', async () => {
 const createOverflowingProvider = (fits: number) => {
   const sent: number[] = [];
   const firstMessages: string[] = [];
+  // Reads the transcript the way an adapter must: `transcriptOf`, never
+  // `session.messages`. The session is the live, persistable one and is
+  // always whole — an adapter that read it directly would ignore the floor
+  // and re-send the request that was just refused.
+  const sessionSizes: number[] = [];
   const provider: ModelProvider = {
     name: 'overflowing-provider',
     async generate(request) {
-      sent.push(request.session.messages.length);
-      if (request.session.messages.length > fits) {
+      const transcript = transcriptOf(request);
+      sent.push(transcript.length);
+      sessionSizes.push(request.session.messages.length);
+      if (transcript.length > fits) {
         throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
       }
-      firstMessages.push(request.session.messages[0]?.content ?? '');
+      firstMessages.push(transcript[0]?.content ?? '');
       return { parts: [{ type: 'text' as const, text: 'answered' }] };
     },
   };
-  return { provider, sent, firstMessages };
+  return { provider, sent, firstMessages, sessionSizes };
 };
 
 /** A session whose transcript is `turns` complete user/assistant pairs. */
@@ -2054,4 +2062,91 @@ test('a provider failure that is not an overflow is never answered by dropping h
   assert.equal(calls, 1, 'tried once and stopped');
   const stored = await runner.store.get('session-ctx-5');
   assert.equal(contextFloorOf(stored!), 0, 'gave up no history over an unrelated rejection');
+});
+
+test('the session a provider is handed is always the whole one, because providers persist it', async () => {
+  // The window rides beside the session, never replaces it. The harness
+  // providers pass `request.session` to `executeHostedToolCall`, which
+  // appends tool records and saves it, and the fallback wrapper saves it
+  // to make its switch durable — so a session-shaped view would be written
+  // back over the real transcript and lose everything below the floor.
+  const { provider, sent, sessionSizes } = createOverflowingProvider(6);
+  const runner = new AgentRunner({ provider });
+  const seeded = await seedTranscript(runner, 'session-ctx-6', 10);
+  const storedCount = seeded.messages.length + 1;
+
+  await runner.resume({ sessionId: 'session-ctx-6', userMessage: 'and now?' });
+
+  // Every attempt saw the whole session, including the ones that were
+  // handed a shortened transcript.
+  assert.ok(
+    sessionSizes.every((size) => size === storedCount),
+    `the session stayed whole on every attempt: ${JSON.stringify(sessionSizes)}`,
+  );
+  assert.ok(sent.some((size) => size < storedCount), 'and at least one attempt was windowed');
+
+  // A provider that saved what it was handed would have saved the whole
+  // transcript, which is what the store still holds.
+  const stored = await runner.store.get('session-ctx-6');
+  assert.equal(stored!.messages[0]?.content, 'question 1');
+});
+
+test('narrowing falls back to the newest boundary when the midpoint has none after it', async () => {
+  // Reachable only on a provider turn AFTER tool calls have run: `resume`
+  // appends a user message, so until tool results pile up behind it the
+  // midpoint always has a boundary after it. Once they have, half of what
+  // is left lands inside the turn in flight, and searching forward finds
+  // nothing — so giving up there reports "the newest turn is too large"
+  // without ever having tried dropping the turn before it.
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'look',
+    async execute() {
+      return { seen: true };
+    },
+  });
+
+  const sent: number[] = [];
+  let turn = 0;
+  const provider: ModelProvider = {
+    name: 'overflow-after-tools',
+    async generate(request) {
+      turn += 1;
+      const transcript = transcriptOf(request);
+      sent.push(transcript.length);
+      if (turn === 1) {
+        return {
+          parts: [
+            { type: 'tool-call' as const, call: { id: 'c1', toolName: 'look', input: {} } },
+            { type: 'tool-call' as const, call: { id: 'c2', toolName: 'look', input: {} } },
+          ],
+        };
+      }
+      if (transcript.length > 6) {
+        throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
+      }
+      return { parts: [{ type: 'text' as const, text: 'answered' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools });
+  const now = new Date().toISOString();
+  await runner.store.create({
+    id: 'session-ctx-7',
+    agent: { id: 'agent-ctx', name: 'Context Agent' },
+    status: 'idle',
+    messages: [
+      { id: 'm1', role: 'user', content: 'an older question', createdAt: now },
+      { id: 'm2', role: 'assistant', content: 'an older answer', createdAt: now },
+    ],
+  });
+
+  const session = await runner.resume({ sessionId: 'session-ctx-7', userMessage: 'and now?' });
+
+  assert.equal(session.status, 'completed', `narrowed instead of giving up: ${JSON.stringify(sent)}`);
+  assert.ok(sent[sent.length - 1]! <= 6, `the attempt that succeeded fit: ${JSON.stringify(sent)}`);
+  // It dropped the older turn, which is the history the forward search
+  // could not see.
+  const stored = await runner.store.get('session-ctx-7');
+  assert.equal(contextFloorOf(stored!), 2);
 });

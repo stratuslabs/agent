@@ -1,6 +1,7 @@
 import {
   ContextOverflowError,
   isUnaddressedTurn,
+  transcriptOf,
   droppedImageNote,
   imagesWithinReplayBudget,
   omitImage,
@@ -704,10 +705,10 @@ const createOpenAICompatibleMessages = (
   imageReplayBudget: ImageReplayBudget | undefined,
 ): { messages: OpenAICompatibleMessage[]; sent: ImageAttachment[] } => {
   const messages: OpenAICompatibleMessage[] = [];
-  const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudget);
+  const replayed = imagesWithinReplayBudget(transcriptOf(request), imageReplayBudget);
   // The images this request actually carries, for a rejection to answer.
   const sent: ImageAttachment[] = vision
-    ? request.session.messages.flatMap((message) => (message.images ?? []).filter((image) => replayed.has(image)))
+    ? transcriptOf(request).flatMap((message) => (message.images ?? []).filter((image) => replayed.has(image)))
     : [];
 
   // One shared reading of what an agent is told about itself — persona,
@@ -719,8 +720,9 @@ const createOpenAICompatibleMessages = (
     messages.push({ role: 'system', content: section });
   }
 
-  const latest = latestUserMessageOf(request.session.messages);
-  for (const message of request.session.messages) {
+  const transcript = transcriptOf(request);
+  const latest = latestUserMessageOf(transcript);
+  for (const message of transcript) {
     if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
       const wireCalls = message.toolCalls.map((call) => ({
         id: call.id,
@@ -942,7 +944,7 @@ const latestUserMessageOf = (messages: readonly Message[]): Message | undefined 
   messages.findLast((message) => message.role === 'user');
 
 export const renderTranscriptPrompt = (request: ProviderRequest): string => {
-  const conversational = request.session.messages.filter(
+  const conversational = transcriptOf(request).filter(
     (message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool',
   );
 
@@ -1005,7 +1007,7 @@ export const renderTranscriptPrompt = (request: ProviderRequest): string => {
  * isolate, so a caller can never end up sending nothing.
  */
 export const latestUserMessagePrompt = (request: ProviderRequest): string => {
-  const messages = request.session.messages;
+  const messages = transcriptOf(request);
   let start = messages.length;
   while (start > 0 && messages[start - 1]?.role !== 'assistant') {
     start -= 1;

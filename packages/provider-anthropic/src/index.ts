@@ -9,6 +9,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
   ContextOverflowError,
+  transcriptOf,
   isUnaddressedTurn,
   droppedImageNote,
   imagesWithinReplayBudget,
@@ -363,7 +364,7 @@ const createAnthropicMessages = (
   /** Every image block sent, oldest first, with where it sits so it can give way. */
   imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }>;
 } => {
-  const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudget);
+  const replayed = imagesWithinReplayBudget(transcriptOf(request), imageReplayBudget);
   // Which session image each image block came from, so a rejection that
   // names a block can be answered on the session.
   const imageOf = new WeakMap<ContentBlockParam, ImageAttachment>();
@@ -395,7 +396,8 @@ const createAnthropicMessages = (
   const alreadyEmitted = (calls: ToolCall[] | undefined): boolean =>
     (calls ?? []).some((call) => emittedCallIds.has(call.id));
 
-  const messages = request.session.messages;
+  // The window when the session has one, the whole transcript otherwise.
+  const messages = transcriptOf(request);
   // The newest user message is the one the turn ends on; an unaddressed
   // turn's note follows it and no other — see `PromptTextOptions`.
   const latest = messages.findLast((message) => message.role === 'user');

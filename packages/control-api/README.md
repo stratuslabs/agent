@@ -549,7 +549,9 @@ the total now held back. Counts only, and worth surfacing rather than
 swallowing: nothing else tells a client that the agent it is showing has
 stopped being able to see the start of the thread. It can arrive more than
 once in a turn, since the window is narrowed by halving until the request
-fits.) The **turn id lives on the envelope** because `StratusEvent`
+fits, and it is not replaced by a model switch — a configured fallback
+rethrows an overflow so the conversation is trimmed rather than moved to
+another model for good.) The **turn id lives on the envelope** because `StratusEvent`
 carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own
 deltas from the next caller's. The id is assigned at dispatch and returned by

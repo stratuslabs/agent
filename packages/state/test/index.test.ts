@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { ContextOverflowError, type Session } from '@stratusagent/core';
 import { mkdir, mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +15,7 @@ import {
   loadSoulFile,
   MAX_APPROVAL_TIMEOUT_MS,
   agentMemoryFilePath,
+  FALLBACK_ACTIVE_METADATA_KEY,
   resolveAgentApprovals,
   resolveRuntimeConfig,
   saveCredentials,
@@ -112,6 +114,70 @@ test('fallback stickiness is per session, never per pooled provider', async () =
   // The flaky session itself stays switched for good.
   const flakyAgain = await wrapped.generate({ session: makeSession('flaky') } as never);
   assert.equal((flakyAgain.parts[0] as { text: string }).text, 'fallback');
+});
+
+test('an overflowing transcript reaches the runner instead of spending the fallback switch', async () => {
+  // The wrapper catches every provider failure and switches the session to
+  // the fallback model for good. A context overflow is the one rejection
+  // that must not go that way: the runner answers it by trimming and
+  // retrying the SAME provider, so swallowing it here would spend a
+  // permanent model switch on a request that never needed another model,
+  // only a shorter one — and hand the fallback the same too-long
+  // transcript, which fails again wherever its window is smaller.
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session: Session = {
+    id: 'long',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  let fallbackCalls = 0;
+  const primary = {
+    name: 'primary',
+    async generate() {
+      throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
+    },
+  };
+  const fallback = {
+    name: 'fallback',
+    async generate() {
+      fallbackCalls += 1;
+      return { parts: [{ type: 'text' as const, text: 'fallback' }] };
+    },
+  };
+
+  const switches: unknown[] = [];
+  const wrapped = createFallbackWrappedProvider(
+    primary as never,
+    fallback as never,
+    (error) => switches.push(error),
+  );
+
+  await assert.rejects(
+    () => wrapped.generate({ session } as never),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+  assert.equal(fallbackCalls, 0, 'the fallback was never reached');
+  assert.deepEqual(switches, [], 'no switch was announced');
+  assert.equal(
+    session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY],
+    undefined,
+    'and the session was not marked switched',
+  );
+
+  // An ordinary provider failure still switches, as it always did.
+  const flaky = {
+    name: 'primary',
+    async generate() {
+      throw new Error('primary down');
+    },
+  };
+  const ordinary = createFallbackWrappedProvider(flaky as never, fallback as never, () => {});
+  const served = await ordinary.generate({ session: { ...session, id: 'flaky' } } as never);
+  assert.equal((served.parts[0] as { text: string }).text, 'fallback');
 });
 
 test('fallback stickiness survives a wrapper rebuild via session metadata', async () => {

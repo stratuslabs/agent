@@ -96,14 +96,18 @@ Three things make now the moment rather than later:
 
 ## Design sketch
 
-The seam is already there. `sessionWithinContextFloor` builds the view a
-provider is sent; summarization changes what that view contains rather than
-where it is decided.
+The seam is already there. `messagesWithinContextFloor` builds the
+transcript a provider is sent, and it travels as `ProviderRequest.messages`
+beside the session rather than as a shortened session — `request.session`
+is persistable, and the harness providers hand it to
+`executeHostedToolCall` while the fallback wrapper saves it. Adapters read
+`transcriptOf(request)`. Summarization changes what that transcript
+contains rather than where it is decided.
 
 ```
 overflow → raiseContextFloor → summarize what just left → store on session
                                       ↓
-        sessionWithinContextFloor prepends the summary to the kept tail
+        messagesWithinContextFloor prepends the summary to the kept tail
 ```
 
 Three properties the current code already establishes and this must keep:
@@ -114,9 +118,13 @@ Three properties the current code already establishes and this must keep:
 - **The floor is monotonic and durable.** It is saved before the retry, so a
   daemon that dies mid-recovery does not come back and replay the request
   that was just refused.
-- **The transcript on disk is never shortened.** The window is a view. The
-  record of what happened stays whole, and `rolloverSession` remains the one
-  thing that deliberately leaves a conversation behind.
+- **The transcript on disk is never shortened.** The window is a view, and
+  it is deliberately not session-shaped: `request.session` is what providers
+  persist, so a shortened one would be written back over the real
+  transcript. The record of what happened stays whole, and `rolloverSession`
+  remains the one thing that deliberately leaves a conversation behind — it
+  drops the floor with the transcript the floor indexed, since an absolute
+  index means nothing beside a different conversation.
 
 For the native path, the API's compaction block must be replayed verbatim on
 the next request — the same contract the raw-turn cache already honours for

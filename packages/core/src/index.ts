@@ -1612,7 +1612,31 @@ export const totalTokenUsage = (records: readonly TokenUsage[]): TokenUsage | un
 };
 
 export interface ProviderRequest {
+  /**
+   * The live session. **Persistable**: a provider that saves it, or hands
+   * it to `executeHostedToolCall`, is writing the real conversation — so
+   * this is always the whole session, never a view. Read the transcript
+   * through `transcriptOf(request)` instead of from here.
+   */
   session: Session;
+  /**
+   * The transcript to send, when it is not the whole of `session.messages`
+   * — the tail left by the session's context floor, with a note in place
+   * of what was cut.
+   *
+   * Separate from `session` because the two are used for different things
+   * and only one of them may be written back. The harness providers pass
+   * `request.session` to `executeHostedToolCall`, which appends tool
+   * records and saves; the fallback wrapper persists `request.session` to
+   * make its switch durable. Handing either a shortened *session* would
+   * write the window over the stored transcript and lose everything below
+   * the floor, permanently.
+   *
+   * Absent means "all of them", so an adapter that ignores this field
+   * behaves exactly as it did — which is right for a harness provider,
+   * since it manages its own context and the window is not its to apply.
+   */
+  messages?: readonly Message[];
   tools?: ToolDescriptor[];
   /** Agent-scoped long-term memory, newest last. */
   memory?: MemoryEntry[];
@@ -1670,6 +1694,18 @@ export interface ProviderRequest {
    */
   signal?: AbortSignal;
 }
+
+/**
+ * The transcript a provider should send: the request's window when it has
+ * one, the whole session otherwise.
+ *
+ * One implementation because there is one rule, and because the wrong
+ * answer is silent — an adapter reading `session.messages` directly still
+ * works, it just ignores the floor and sends the request that was already
+ * refused.
+ */
+export const transcriptOf = (request: Pick<ProviderRequest, 'session' | 'messages'>): readonly Message[] =>
+  request.messages ?? request.session.messages;
 
 export interface ProviderResponse {
   parts: ProviderPart[];
@@ -3474,7 +3510,22 @@ const nextTurnBoundary = (messages: readonly Message[], from: number): number | 
 };
 
 /**
- * A view of `session` carrying only the messages above its floor, with the
+ * The index of the LAST message at or after `from` that a request may begin
+ * with, or undefined when there is none — `nextTurnBoundary`'s counterpart,
+ * for narrowing as far as the transcript allows rather than to a midpoint
+ * that may have no boundary after it.
+ */
+const lastTurnBoundary = (messages: readonly Message[], from: number): number | undefined => {
+  for (let index = messages.length - 1; index >= Math.max(0, from); index -= 1) {
+    if (messages[index]?.role === 'user') {
+      return index;
+    }
+  }
+  return undefined;
+};
+
+/**
+ * The messages above `session`'s floor, with the
  * note in place of what was cut. The session itself is untouched — the
  * copy is shallow and deliberately shares `metadata`, because providers
  * keep replay state there (the Anthropic raw-turn cache) and a turn that
@@ -3483,25 +3534,28 @@ const nextTurnBoundary = (messages: readonly Message[], from: number): number | 
  * Returns the session unchanged when the floor is 0, so a conversation that
  * has never overflowed is not copied on every turn.
  */
-export const sessionWithinContextFloor = (session: Session): Session => {
+export const messagesWithinContextFloor = (session: Session): readonly Message[] => {
   const floor = contextFloorOf(session);
   if (floor <= 0 || floor >= session.messages.length) {
-    return session;
+    return session.messages;
   }
   const start = nextTurnBoundary(session.messages, floor);
   if (start === undefined || start === 0) {
-    return session;
+    return session.messages;
   }
   const kept = session.messages.slice(start);
   const first = kept[0]!;
   // Prefixed onto the oldest surviving message rather than added as one of
   // its own: an extra message would be a turn the transcript never had, and
   // every count derived from the messages — ids, `latestTurnReply` — reads
-  // the stored list anyway. This view is only ever handed to a provider.
-  return {
-    ...session,
-    messages: [{ ...first, content: `${droppedTurnsNote(start)}\n\n${first.content}` }, ...kept.slice(1)],
-  };
+  // the stored list anyway.
+  //
+  // Messages rather than a shortened Session, and that is the whole point:
+  // `request.session` is persistable — the harness providers hand it to
+  // `executeHostedToolCall` and the fallback wrapper saves it — so a
+  // session-shaped view would be written back over the real transcript and
+  // lose everything below the floor for good.
+  return [{ ...first, content: `${droppedTurnsNote(start)}\n\n${first.content}` }, ...kept.slice(1)];
 };
 
 /**
@@ -3525,9 +3579,15 @@ export const raiseContextFloor = (session: Session): boolean => {
     return false;
   }
   const target = floor + Math.max(1, Math.floor(remaining / 2));
-  const start = nextTurnBoundary(session.messages, target);
-  // No boundary above the target, or the only one is where we already are:
-  // the tail is one turn and there is nothing further to drop.
+  // The midpoint first, then the newest boundary there is. They differ when
+  // the turn in flight is more than half of what is left — many tool calls
+  // and results under one user message — and then nothing sits at or after
+  // the midpoint, while an earlier boundary above the floor still drops
+  // real history. Reporting "the newest turn is too large" without having
+  // tried the newest turn alone is the case this second look exists for.
+  const start = nextTurnBoundary(session.messages, target) ?? lastTurnBoundary(session.messages, floor + 1);
+  // Nothing above the floor: the tail is one turn and there is nothing
+  // further to drop.
   if (start === undefined || start <= floor) {
     return false;
   }
@@ -4101,9 +4161,13 @@ export class AgentRunner {
         // did not fit.
         let response: ProviderResponse | undefined;
         for (;;) {
+          const floored = messagesWithinContextFloor(session);
           try {
             response = await this.options.provider.generate({
-              session: sessionWithinContextFloor(session),
+              // The real session, always: providers persist it. The window
+              // rides beside it.
+              session,
+              ...(floored.length === session.messages.length ? {} : { messages: floored }),
               ...(tools.length > 0 ? { tools } : {}),
               ...(memory.length > 0 ? { memory } : {}),
               ...(enabledSkills.length > 0 ? { skills: enabledSkills } : {}),
