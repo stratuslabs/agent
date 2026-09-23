@@ -108,6 +108,12 @@ Two reasons to set it:
   minutes. `stratus serve` streams, so a daemon can go higher; `stratus
   run` cannot always.
 
+A configured Anthropic `fallbackModel` runs under the same cap, like
+`promptCache` and `promptCacheTtl` — one setting for the daemon, applying
+to whichever Anthropic model ends up serving the turn. That matters most
+here: a fallback left on the default would fail every request from the
+moment it took over.
+
 It is not a budget — nothing is spent for being allowed, only for what the
 model actually writes. The other providers ignore it: the harnesses choose
 their own cap, and the OpenAI-compatible adapter sends none, so there the

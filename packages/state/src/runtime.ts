@@ -300,6 +300,13 @@ export const resolveRuntimeConfig = async (
       // providers, which do not build their own requests.
       ...(fileConfig.promptCache !== undefined ? { promptCache: fileConfig.promptCache } : {}),
       ...(fileConfig.promptCacheTtl ? { promptCacheTtl: fileConfig.promptCacheTtl } : {}),
+      // And the output cap, by the same rule as the line above it: one
+      // operator setting for the daemon, applying to whichever Anthropic
+      // model ends up serving the turn. It matters most here — the setting
+      // exists for a model whose ceiling is under the default, and a
+      // fallback left on the default fails every request from the moment
+      // it takes over.
+      ...(fileConfig.maxTokens !== undefined ? { maxTokens: fileConfig.maxTokens } : {}),
       // The one daemon-wide `vision` setting reaches an OpenAI-compatible
       // fallback too; the other providers never ask.
       ...(fallbackProvider === 'openai' && fileConfig.vision !== undefined ? { vision: fileConfig.vision } : {}),

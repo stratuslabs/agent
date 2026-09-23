@@ -1390,6 +1390,32 @@ test('maxTokens is configurable, so a model with a lower output ceiling is not s
   assert.equal(resolved.provider, 'anthropic');
   assert.equal(resolved.provider === 'anthropic' ? resolved.maxTokens : undefined, 4096);
 
+  // And it reaches the fallback, which is where it matters most: the
+  // setting exists for a model whose ceiling is under the default, and a
+  // fallback left on the default fails every request from the moment it
+  // takes over — the same compatibility problem, deferred to the worst
+  // moment to meet it.
+  await writeFile(
+    globalConfigPath({ homeDir: home }),
+    JSON.stringify({
+      provider: 'anthropic',
+      model: 'claude-opus-5',
+      maxTokens: 4096,
+      fallbackProvider: 'anthropic',
+      fallbackModel: 'some-proxied-model',
+    }),
+  );
+  const withFallback = await resolveRuntimeConfig(
+    {},
+    { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-real' } },
+  );
+  assert.equal(withFallback.provider === 'anthropic' ? withFallback.maxTokens : undefined, 4096);
+  assert.equal(
+    withFallback.provider === 'anthropic' ? withFallback.fallback?.maxTokens : undefined,
+    4096,
+    'the fallback runs under the same cap as the primary',
+  );
+
   // Absent means the adapter's own default — the key exists to override
   // it, not to have every install state it.
   await writeFile(

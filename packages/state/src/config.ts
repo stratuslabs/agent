@@ -278,6 +278,16 @@ export interface FallbackRuntime {
   promptCache?: boolean;
   promptCacheTtl?: '5m' | '1h';
   /**
+   * The daemon's `maxTokens`, carried for the same reason as the caching
+   * settings and more sharply: the setting exists because a model or proxy
+   * may have a ceiling below the default, and a fallback is just another
+   * model that might. Left behind, an Anthropic fallback is built on the
+   * default and fails every request the moment it takes over — the exact
+   * compatibility problem the option was added to solve, deferred to the
+   * worst moment to meet it.
+   */
+  maxTokens?: number;
+  /**
    * The daemon's `vision` setting, carried to an OpenAI-compatible fallback
    * for the same reason as the caching settings above: a session that has
    * gone fallback-sticky replays its images to the fallback, and a
