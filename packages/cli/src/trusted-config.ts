@@ -165,6 +165,46 @@ export const loadServePlugins = async (
 };
 
 /**
+ * The daemon's `maxTurns` ceiling — how many provider turns one dispatched
+ * turn may take before it is failed as a runaway.
+ *
+ * Under the same trust rule as the blocks above, and it needs both
+ * directions of it. Raising the ceiling spends the operator's tokens on
+ * however long a loop a cloned repository asks for; lowering it to 1
+ * leaves an agent on a kernel-driven provider unable to use a tool at
+ * all, since the ceiling is tested before each provider call and the
+ * second one is what reads the tool's result. The harness runtimes take
+ * the same number as an inner budget — codex spends it on hosted tool
+ * calls — so there a low ceiling truncates the work instead of failing
+ * the turn, which is quieter and no less a decision. So an untrusted
+ * config naming it falls through to
+ * the global file rather than to the built-in — the fall-through
+ * `principals` and `executor` use, for the same reason they use it.
+ *
+ * Absent, or ignored, means the kernel's own default; the caller leaves
+ * the option off and the runner supplies it.
+ */
+export const loadServeMaxTurns = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<number | undefined> => {
+  let block = await readTrustedConfigBlock('maxTurns', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring maxTurns in ${block.path}: a project-local config cannot decide how many provider turns `
+      + 'this daemon spends on one message. Using ~/.stratus/config.json instead.',
+    );
+    block = await readGlobalConfigBlock('maxTurns', env);
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring maxTurns (${block.error instanceof Error ? block.error.message : String(block.error)}); using the default`);
+    return undefined;
+  }
+  return block.status === 'present' ? block.value : undefined;
+};
+
+/**
  * The daemon's `executor` or `memoryStore` selection — a name a plugin
  * registered — under the trust rule `plugins` has, and for the same
  * reason one step on: the plugins block decides which code runs, and

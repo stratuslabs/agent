@@ -639,6 +639,81 @@ test('createOpenAICompatibleProvider rejects malformed tool call arguments', asy
   );
 });
 
+test('a reply cut off at the endpoint\'s output cap is refused, not delivered as the answer', async () => {
+  // `finish_reason: length` with content is the case nothing used to
+  // check: the empty-response branch reads the finish reason, but only
+  // ever ran when no part surfaced, so a paragraph that stopped mid-word
+  // came back as a finished turn — posted as the agent's reply, session
+  // recorded `completed`.
+  const truncatedText = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: 'The three options are: first,' }, finish_reason: 'length' }],
+      }),
+    }) as Response,
+  });
+  await assert.rejects(
+    () => truncatedText.generate(createRequest()),
+    /stopped at its output cap before finishing \(finish_reason: length\)/,
+  );
+
+  // And the sharper half: `arguments` cut off mid-JSON that happens to
+  // land somewhere parseable rebuilds into an object missing keys, which
+  // reads as a perfectly good call.
+  const truncatedCall = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                { id: 'call-1', type: 'function', function: { name: 'demo.echo', arguments: '{"path":"/etc"}' } },
+              ],
+            },
+            finish_reason: 'length',
+          },
+        ],
+      }),
+    }) as Response,
+  });
+  await assert.rejects(
+    () => truncatedCall.generate(createRequest()),
+    /stopped at its output cap before finishing/,
+  );
+
+  // The tokens are still reported: the call completed and was billed, and
+  // a throw returns no response for the count to ride on.
+  const reported: ProviderCallUsage[] = [];
+  const billed = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: 'half an answ' }, finish_reason: 'length' }],
+        usage: { prompt_tokens: 40, completion_tokens: 900 },
+      }),
+    }) as Response,
+  });
+  await assert.rejects(
+    () => billed.generate({ ...createRequest(), onUsage: (usage) => reported.push(usage) }),
+    /output cap/,
+  );
+  assert.deepEqual(reported, [
+    { provider: 'openai', model: 'gpt-4.1-mini', inputTokens: 40, outputTokens: 900 },
+  ]);
+});
+
 test('createOpenAICompatibleProvider preserves non-json HTTP error bodies', async () => {
   const provider = createOpenAICompatibleProvider({
     model: 'gpt-4.1-mini',

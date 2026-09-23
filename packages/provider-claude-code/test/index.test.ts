@@ -123,6 +123,10 @@ test('multi-turn sessions are rendered as a transcript', async () => {
   assert.match(prompt, /replying to the latest user message/);
 });
 
+// `error_max_turns` is the SDK hitting the `maxTurns` this provider passes
+// it, and it fails the turn here rather than returning what the run had —
+// the half of the asymmetry docs/reference/config.md documents that codex
+// does not share, where the same ceiling only shortens the answer.
 test('error results and empty responses surface as errors', async () => {
   const failed = createClaudeCodeProvider({
     queryFn: createFakeQuery([
