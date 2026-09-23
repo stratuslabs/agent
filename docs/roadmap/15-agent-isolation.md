@@ -74,10 +74,16 @@ so the move was a plugin ABI change and a change to security-sensitive path
 logic, not a rider on the store sharding.
 
 What replaced it: `AgentWorkspaces` on `PluginContext` (`forAgent(agentId)`,
-`all()`), so the layout stays in `@stratusagent/state` and a plugin asks
-instead of joining. `workspaceRoot` survives as an operator's key and a
-hand-wired host's fallback, and `workspaceResolver` in
-`@stratusagent/plugins` is the one place the precedence between the two
+`prepare(agentId)`, `all()`), so the layout stays in `@stratusagent/state`
+and a plugin asks instead of joining. `forAgent` resolves and creates
+nothing; `prepare` creates the directory at `0700` and is asked only by a
+caller about to write, because the workspace now sits *inside* the agent's
+state directory and a plugin's own recursive `mkdir` would build that
+directory under the process umask. The split is there because preparing can
+fail, and a read that turned out not to need the directory must not fail
+with it. `workspaceRoot` survives as an operator's key and a hand-wired
+host's fallback, and `workspaceResolver` and `workspacePreparer` in
+`@stratusagent/plugins` are the one place the precedence between the two
 lives. `ledgerRoot` is no longer forced to the host's root — it is
 *stripped*, the way `toolRisks` is, and both ledger writers bind to the seam
 instead, so there is one ledger by construction rather than by the loader
@@ -87,8 +93,8 @@ which is what it should have taken all along. Migration `0004` renames each
 workspace under the exclusive bracket, rewrites the ledger's own records to
 follow the files that moved, carries a relocated workspace across as a link,
 and folds two ledgers together where the deferral window already made one at
-the new path — the format is order-independent, so a concatenation is the
-whole merge.
+the new path — the format is order-independent, so appending the lines a
+reader can parse is the whole merge.
 
 - Every per-agent durable resource moves under the agent's own directory,
   `~/.stratus/agents/<id>/`: `sessions.db`, `memory.jsonl` (and its FTS
