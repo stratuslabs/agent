@@ -10,7 +10,7 @@ import { DEFAULT_INHERITED_ENV_VARS } from '@modelcontextprotocol/sdk/client/std
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { ListToolsRequestSchema, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { z } from 'zod';
@@ -1613,6 +1613,79 @@ test('a server that fails gets no larger channel into the transcript than one th
     ),
     /^Error: no such issue$/,
   );
+});
+
+test('attachment paths are charged to the allowance, so tiny blocks cannot flood it', async () => {
+  // The bytes go to disk, but the path each block returns is a string in
+  // the durable result like any other — a thousand tiny images is a
+  // thousand paths replayed on every later turn of the conversation.
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-many-'));
+  const pixel = Buffer.from('x').toString('base64');
+  const result = await normalizeCallResult(
+    {
+      content: Array.from({ length: 40 }, () => ({ type: 'image', data: pixel, mimeType: 'image/png' })),
+    },
+    { server: 'linear', tool: 'shots', agentId: 'ava', workspaceRoot, maxResultChars: 1_200 },
+  ) as JsonObject;
+
+  const written = result.files as string[];
+  assert.ok(written.length < 40, `stopped short of every block: ${written.length}`);
+  assert.match(String(result.filesTruncated), /more attachments were not saved/);
+
+  // Checked before the write, so the blocks that did not fit left nothing
+  // on disk — a file nothing references, delivers, or cleans up is the
+  // orphan the isError guard exists to avoid.
+  const onDisk = await readdir(path.join(workspaceRoot, 'ava', 'mcp', 'linear'));
+  assert.equal(onDisk.length, written.length, 'no orphaned files were written');
+});
+
+test('a call that fails at the protocol level is bounded like one that answers', async () => {
+  // Distinct from the `isError` result, and this is the whole point of the
+  // finding: a tool handler that throws under `McpServer.registerTool` is
+  // converted into an `isError` RESULT, which the cap already covers. A
+  // JSON-RPC *error* produces no result object at all — it arrives as an
+  // `McpError` whose message the server wrote — and it reaches the agent as
+  // a thrown message that `DefaultExecutor` copies into `ToolResult.error`,
+  // persisted and replayed exactly like output. So the low-level `Server`
+  // here, rather than the `McpServer` wrapper the other tests use.
+  const huge = 'E'.repeat(9_000);
+  const transportFor = async (): Promise<Transport> => {
+    const server = new Server({ name: 'exploding', version: '1.0.0' }, { capabilities: { tools: {} } });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: [{ name: 'explode', inputSchema: { type: 'object' as const } }],
+    }));
+    server.setRequestHandler(CallToolRequestSchema, async () => {
+      throw new McpError(ErrorCode.InternalError, huge);
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    return clientTransport;
+  };
+
+  const target = new ToolRegistry();
+  const plugin = createMcpPlugin(
+    { servers: { linear: { url: 'http://127.0.0.1:9/unused', maxResultChars: 400 } } },
+    { transportFor, warn: () => {}, log: () => {} },
+  );
+  await loadThroughView(plugin, target);
+  try {
+    const tool = target.get('mcp.linear.explode');
+    assert.ok(tool);
+    await assert.rejects(
+      () => tool!.execute({}, sessionFor('ava')),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.ok(
+          error.message.length <= 600,
+          `the thrown message was bounded: ${error.message.length}`,
+        );
+        assert.match(error.message, /error message truncated by stratus at 400 characters/);
+        return true;
+      },
+    );
+  } finally {
+    await plugin.dispose?.();
+  }
 });
 
 test('a binary block cannot steer the written path: the server-side tool name is folded before it names a file', async () => {

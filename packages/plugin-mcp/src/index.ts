@@ -20,6 +20,7 @@ import {
 import { createFileLedger } from '@stratusagent/plugins';
 
 import {
+  boundServerText,
   bridgedToolName,
   normalizeCallResult,
   sanitizeToolSegment,
@@ -829,12 +830,22 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         // "Connection closed" is all the SDK says about a request the
         // transport died under. When the transport said why, say so here,
         // where the agent reads it.
+        //
+        // Bounded on the way out, both of them. A `tools/call` that fails
+        // at the protocol level never produces a result for
+        // `normalizeCallResult` to cap: a JSON-RPC error arrives as an
+        // `McpError` whose message the server wrote, and a transport
+        // failure can carry an HTTP body. Both reach the agent as a thrown
+        // message, which `DefaultExecutor` copies into `ToolResult.error`
+        // — persisted on the session and replayed to the provider on every
+        // later turn, exactly like output. Failing must not be a wider
+        // channel into the transcript than answering.
+        const described = error instanceof Error ? error.message : String(error);
+        const limit = state.spec.maxResultChars;
         if (isConnectionFailure(error) && state.closeCause !== undefined) {
-          throw new Error(
-            `${error instanceof Error ? error.message : String(error)} — ${state.closeCause}`,
-          );
+          throw new Error(boundServerText(`${described} — ${state.closeCause}`, limit, 'error message'));
         }
-        throw error;
+        throw new Error(boundServerText(described, limit, 'error message'));
       }
       return normalizeCallResult(result, {
         server: state.spec.name,

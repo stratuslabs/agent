@@ -818,6 +818,21 @@ export const createAnthropicProvider = ({
           + 'maxTokens for this provider.',
         );
       }
+      // The other way a limit rather than the model ends a turn: the
+      // context window filled *during* generation, so what arrived is a
+      // fragment for the same reason and needs the same refusal. A
+      // documented `StopReason` in the SDK this package installs, and
+      // easily missed because the two read as one case and are not — this
+      // one is not fixed by lowering the reply's length, so the remedy
+      // sentence differs.
+      if (response.stop_reason === 'model_context_window_exceeded') {
+        throw new Error(
+          'Claude ran out of context part-way through its answer '
+          + '(stop_reason model_context_window_exceeded), so the reply is a fragment and was not '
+          + 'delivered. The conversation, not the answer, is what is too long: start a new one with '
+          + '`stratus session rollover`, or move this agent to a model with a bigger context window.',
+        );
+      }
 
       const { text, calls } = extractParts(response.content, mapping);
 

@@ -110,6 +110,15 @@ export const BRIDGED_SCHEMA_MAX_LENGTH = 16_384;
 export const BRIDGED_RESULT_MAX_LENGTH = 100_000;
 
 /**
+ * What a binary block reserves from the budget before it is written, in
+ * characters — a generous stand-in for the path it will return, which is
+ * not known until the file is created. Generous on purpose: the check has
+ * to happen before the write, because refusing to return a path for bytes
+ * already on disk leaves an orphan in the workspace.
+ */
+const BINARY_PATH_RESERVE = 256;
+
+/**
  * `raw`, cut to `limit` characters with the cut announced, or `raw` when it
  * fits.
  *
@@ -349,6 +358,17 @@ const createResultBudget = (limit: number) => {
   };
 };
 
+/**
+ * Server-written text, bounded for the transcript — the same treatment a
+ * result's text gets, exported because a `tools/call` can fail in ways that
+ * never produce a result at all: a JSON-RPC error, or a transport failure
+ * carrying an HTTP body. Those reach the agent as a thrown message, which
+ * `DefaultExecutor` copies into `ToolResult.error` and the session persists
+ * and replays exactly like output.
+ */
+export const boundServerText = (raw: string, limit: number, what: string): string =>
+  cutToLimit(raw, limit, what);
+
 export interface NormalizeOptions {
   /** The bridged server's config key — part of where a binary block lands. */
   server: string;
@@ -406,6 +426,18 @@ export const normalizeCallResult = async (
   const texts: string[] = [];
   const files: string[] = [];
   const resources: JsonObject[] = [];
+  // ONE budget for the whole result, spent in order — not a separate cap
+  // per carrier. A result can hold text, a structured payload, a list of
+  // resource links, and a path per binary block; capped separately, a
+  // server spends the allowance once per kind, while what reaches the
+  // transcript is their sum.
+  //
+  // Created before the content loop because the loop spends it: a binary
+  // block's *bytes* go to disk, but the path it returns is a string in the
+  // durable result like any other, and a thousand tiny images is a
+  // thousand paths replayed on every later turn.
+  const budget = createResultBudget(options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH);
+  let skippedBinary = 0;
 
   // Settled before anything touches the disk: a failing result's binary
   // blocks would otherwise land as server-controlled files in the
@@ -423,13 +455,22 @@ export const normalizeCallResult = async (
     // must not get an unbounded channel into the transcript by failing
     // instead of succeeding.
     throw new Error(
-      cutToLimit(message, options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH, 'error message')
+      budget.spend(message, 'error message')
       || `MCP server ${options.server} reported an error for ${options.tool} with no message.`,
     );
   }
 
   const writeBlock = async (data: unknown, mimeType: unknown): Promise<void> => {
     if (typeof data !== 'string') {
+      return;
+    }
+    // Checked before the write, not after: refusing to *return* a path for
+    // bytes already on disk would leave a file in the workspace that
+    // nothing references, delivers, or cleans up — the same orphan the
+    // `isError` guard above exists to avoid. A generous reservation, since
+    // the path is not known until it is built.
+    if (!budget.fits('x'.repeat(BINARY_PATH_RESERVE))) {
+      skippedBinary += 1;
       return;
     }
     if (!options.workspaceRoot) {
@@ -488,6 +529,7 @@ export const normalizeCallResult = async (
     } finally {
       await handle.close();
     }
+    budget.charge(file);
     files.push(file);
   };
 
@@ -530,13 +572,6 @@ export const normalizeCallResult = async (
     }
   }
 
-  // ONE budget for the whole result, spent in order — not a separate cap
-  // per carrier. A result can hold text and a structured payload and a list
-  // of resource links, and three independent caps let a server spend the
-  // cap three times over; what reaches the transcript is their sum, so that
-  // is what has to be bounded.
-  const budget = createResultBudget(options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH);
-
   const text = texts.length > 0 ? budget.spend(texts.join('\n\n'), 'result') : undefined;
 
   // Measured as its own serialized string rather than by walking the
@@ -578,6 +613,7 @@ export const normalizeCallResult = async (
     && structuredNote === undefined
     && files.length === 0
     && resources.length === 0
+    && skippedBinary === 0
   ) {
     return text ?? '';
   }
@@ -589,6 +625,9 @@ export const normalizeCallResult = async (
     ...(kept.length > 0 ? { resources: kept } : {}),
     ...(droppedLinks > 0
       ? { resourcesTruncated: `${droppedLinks} more resource link${droppedLinks === 1 ? '' : 's'} were not included: the result reached its ${budget.limit}-character cap.` }
+      : {}),
+    ...(skippedBinary > 0
+      ? { filesTruncated: `${skippedBinary} more attachment${skippedBinary === 1 ? '' : 's'} were not saved: the result reached its ${budget.limit}-character cap.` }
       : {}),
   };
 };

@@ -89,6 +89,11 @@ subscription sign-in to per-token billing.
   resume with a fresh allowance; raise `maxTurns` so it stops happening.
   See [how many turns one message may
   spend](./always-on.md#how-many-turns-one-message-may-spend).
+- **"ran out of context part-way through its answer"** — different from
+  the cap below, and not fixed by asking for less: the *conversation* is
+  what no longer fits, so the model reached the end of its context window
+  mid-reply. `stratus session rollover <id>` starts the same id over, or
+  move that agent to a model with a bigger window.
 - **"stopped at the … output cap before finishing"** — the model ran out
   of room mid-answer, so the reply was a fragment and was not delivered.
   The turn is failed rather than answered on purpose: a cut-off reply

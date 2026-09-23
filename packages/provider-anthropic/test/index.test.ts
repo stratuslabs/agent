@@ -352,6 +352,25 @@ test('a reply cut off at the output cap is refused, not delivered as the answer'
   });
   await assert.rejects(() => truncatedUnasked.generate({ session: unasked }), /output cap before finishing/);
 
+  // The other way a limit rather than the model ends a turn: the context
+  // window filled during generation. A documented `StopReason` in the SDK
+  // this package installs, and a fragment for the same reason — easy to
+  // miss because the two read as one case, and they need different advice:
+  // this one is not fixed by asking for a shorter reply.
+  const outOfContext = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: createMockFetch([
+      apiMessage([{ type: 'text', text: 'Looking at the first file,' }], 'model_context_window_exceeded'),
+    ]).fetchImpl,
+  });
+  await assert.rejects(
+    () => outOfContext.generate({ session }),
+    /ran out of context part-way through its answer .*model_context_window_exceeded/,
+  );
+  // And on a turn nobody asked for, where silence would otherwise be a
+  // valid answer.
+  await assert.rejects(() => outOfContext.generate({ session: unasked }), /ran out of context/);
+
   // And the cap the message names is the one that was actually sent, so
   // the remedy it suggests is measured against the real ceiling.
   const lowered = createAnthropicProvider({

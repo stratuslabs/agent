@@ -59,10 +59,13 @@ soul's allowlist — `tools: [mcp.linear.*]` grants one server:
   large documents. It is **one allowance for the whole result**, not one
   per field: text, a structured payload and a list of resource links are
   three places a server can put bytes in one reply, and the transcript pays
-  their sum. A failing call is bounded the same way — an error message is
-  persisted and replayed exactly as output is, so failing is not a way
-  around the cap. Binary content is unaffected: it lands in the per-agent
-  workspace as a file rather than in the transcript.
+  their sum. A failing call is bounded the same way, whether it
+  answers with an error or fails at the protocol level — either way the
+  message is persisted and replayed exactly as output is, so failing is
+  not a way around the cap. Binary content's *bytes* land in the per-agent
+  workspace rather than the transcript, but the path each one returns is a
+  string in the result like any other, so those are counted too; blocks
+  past the allowance are not written at all, and the result says how many.
 - **A stdio server's environment is replaced** the way
   [`tool-shell`'s](./tools.md) is: it gets what you granted and nothing
   else, not the daemon's own environment.
