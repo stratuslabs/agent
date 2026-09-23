@@ -505,6 +505,10 @@ export const resolveRuntimeConfig = async (
         // with one switch.
         ...(fileConfig.promptCache !== undefined ? { promptCache: fileConfig.promptCache } : {}),
         ...(fileConfig.promptCacheTtl ? { promptCacheTtl: fileConfig.promptCacheTtl } : {}),
+        // Only this variant asks, for the same reason `vision` is only on
+        // the OpenAI one: the harnesses choose their own output cap, and
+        // the OpenAI-compatible adapter sends none at all.
+        ...(fileConfig.maxTokens !== undefined ? { maxTokens: fileConfig.maxTokens } : {}),
         ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
       }
     : provider === 'codex'

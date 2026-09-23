@@ -139,17 +139,28 @@ export const BRIDGED_RESULT_MAX_LENGTH = 100_000;
  * dozen characters, where no result could be useful anyway, and the
  * alternative is a cut with nothing saying it happened.
  */
-const cutToLimit = (raw: string, limit: number, what: string): string => {
-  if (raw.length <= limit) {
-    return raw;
-  }
-  let codePoints = 0;
+const codePointLength = (raw: string): number => {
+  let count = 0;
   for (const _character of raw) {
-    codePoints += 1;
+    count += 1;
   }
-  if (codePoints <= limit) {
+  return count;
+};
+
+/**
+ * Whether `raw` is within `limit` code points, without counting further
+ * than it has to. The cheap test first — a string's UTF-16 length is never
+ * below its code-point count, so anything whose `length` fits is under the
+ * limit — which is every ordinary string and costs one property read.
+ */
+const withinLimit = (raw: string, limit: number): boolean =>
+  raw.length <= limit || codePointLength(raw) <= limit;
+
+const cutToLimit = (raw: string, limit: number, what: string): string => {
+  if (withinLimit(raw, limit)) {
     return raw;
   }
+  const codePoints = codePointLength(raw);
   const marker = `\n… [${what} truncated by stratus at ${limit} characters; the server sent ${codePoints}]`;
   // `marker` is ASCII apart from the ellipsis, so its own code-point count
   // is its length.
@@ -309,6 +320,35 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 // entry would silently point at the second call's bytes.
 let fileSerial = 0;
 
+/**
+ * One result's character allowance, spent across everything server-written
+ * that reaches the transcript.
+ *
+ * A budget rather than a cap per field because the transcript pays the
+ * sum: text, a structured payload and a list of resource links are three
+ * places a server can put bytes in one result, and three separate caps
+ * would let it spend the allowance three times.
+ */
+const createResultBudget = (limit: number) => {
+  let spent = 0;
+  const remaining = (): number => Math.max(0, limit - spent);
+  return {
+    limit,
+    /** Whether `value` fits in what is left, counted without allocating. */
+    fits: (value: string): boolean => withinLimit(value, remaining()),
+    /** Charge `value` against the budget; the caller has checked it fits. */
+    charge: (value: string): void => {
+      spent += Math.min(value.length, codePointLength(value));
+    },
+    /** `value` cut to what is left, with the cut announced, and charged. */
+    spend: (value: string, what: string): string => {
+      const bounded = cutToLimit(value, remaining(), what);
+      spent += Math.min(bounded.length, codePointLength(bounded));
+      return bounded;
+    },
+  };
+};
+
 export interface NormalizeOptions {
   /** The bridged server's config key — part of where a binary block lands. */
   server: string;
@@ -376,7 +416,16 @@ export const normalizeCallResult = async (
       .filter((block) => block.type === 'text' && typeof block.text === 'string')
       .map((block) => block.text as string)
       .join('\n\n');
-    throw new Error(message || `MCP server ${options.server} reported an error for ${options.tool} with no message.`);
+    // Bounded like a successful result, because it ends up in the same
+    // place: the executor copies a thrown message into `ToolResult.error`,
+    // which is persisted on the session and replayed to the provider on
+    // every later turn exactly as output is. A server that cannot answer
+    // must not get an unbounded channel into the transcript by failing
+    // instead of succeeding.
+    throw new Error(
+      cutToLimit(message, options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH, 'error message')
+      || `MCP server ${options.server} reported an error for ${options.tool} with no message.`,
+    );
   }
 
   const writeBlock = async (data: unknown, mimeType: unknown): Promise<void> => {
@@ -481,25 +530,55 @@ export const normalizeCallResult = async (
     }
   }
 
-  const limit = options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH;
-  const structuredRaw = isObject(shaped.structuredContent) ? (shaped.structuredContent as JsonObject) : undefined;
-  const text = texts.length > 0 ? cutToLimit(texts.join('\n\n'), limit, 'result') : undefined;
+  // ONE budget for the whole result, spent in order — not a separate cap
+  // per carrier. A result can hold text and a structured payload and a list
+  // of resource links, and three independent caps let a server spend the
+  // cap three times over; what reaches the transcript is their sum, so that
+  // is what has to be bounded.
+  const budget = createResultBudget(options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH);
 
-  // Bounded as its own serialized string rather than by walking the
-  // object: the cost this is guarding is what the provider is sent, and
-  // what the provider is sent is the JSON. A structured payload over the
-  // cap therefore arrives as *text* — it stops being a parseable object,
-  // which is the honest outcome, since a truncated object is not one. The
-  // key says which it is, so a caller reading `structured` never finds a
-  // half-object there.
+  const text = texts.length > 0 ? budget.spend(texts.join('\n\n'), 'result') : undefined;
+
+  // Measured as its own serialized string rather than by walking the
+  // object: what the provider is sent is the JSON, so the JSON is the cost.
+  // A structured payload that does not fit arrives as *text* — it stops
+  // being a parseable object, which is the honest outcome, since a
+  // truncated object is not one. The key says which it is, so a caller
+  // reading `structured` never finds a half-object there.
+  const structuredRaw = isObject(shaped.structuredContent) ? (shaped.structuredContent as JsonObject) : undefined;
   const structuredJson = structuredRaw === undefined ? undefined : JSON.stringify(structuredRaw);
-  const structuredFits = structuredJson !== undefined && Array.from(structuredJson).length <= limit;
+  const structuredFits = structuredJson !== undefined && budget.fits(structuredJson);
   const structured = structuredFits ? structuredRaw : undefined;
+  if (structuredFits) {
+    budget.charge(structuredJson!);
+  }
   const structuredNote = structuredJson !== undefined && !structuredFits
-    ? cutToLimit(structuredJson, limit, 'structured result')
+    ? budget.spend(structuredJson, 'structured result')
     : undefined;
 
-  if (structured === undefined && structuredNote === undefined && files.length === 0 && resources.length === 0) {
+  // Resource links are server-controlled strings too, and a list of them is
+  // as unbounded as a paragraph is: `uri`, `name`, `title` and
+  // `description` all land in the durable result and are replayed with it.
+  // Kept whole while the budget lasts and then stopped, rather than each
+  // one cut — half a URI is no use to anybody, while nine links and a note
+  // saying there were ninety is.
+  const kept: JsonObject[] = [];
+  for (const link of resources) {
+    const serialized = JSON.stringify(link);
+    if (!budget.fits(serialized)) {
+      break;
+    }
+    budget.charge(serialized);
+    kept.push(link);
+  }
+  const droppedLinks = resources.length - kept.length;
+
+  if (
+    structured === undefined
+    && structuredNote === undefined
+    && files.length === 0
+    && resources.length === 0
+  ) {
     return text ?? '';
   }
   return {
@@ -507,6 +586,9 @@ export const normalizeCallResult = async (
     ...(structured !== undefined ? { structured } : {}),
     ...(structuredNote !== undefined ? { structuredText: structuredNote } : {}),
     ...(files.length > 0 ? { files } : {}),
-    ...(resources.length > 0 ? { resources } : {}),
+    ...(kept.length > 0 ? { resources: kept } : {}),
+    ...(droppedLinks > 0
+      ? { resourcesTruncated: `${droppedLinks} more resource link${droppedLinks === 1 ? '' : 's'} were not included: the result reached its ${budget.limit}-character cap.` }
+      : {}),
   };
 };

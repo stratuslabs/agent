@@ -56,8 +56,13 @@ soul's allowlist — `tools: [mcp.linear.*]` grants one server:
   A cut is announced in the text the model reads, with the original size,
   so a listing that was stopped never reads as a listing that ended.
   Per server, as `maxResultChars`, for a server that legitimately returns
-  large documents. Binary content is unaffected — it lands in the
-  per-agent workspace as a file rather than in the transcript.
+  large documents. It is **one allowance for the whole result**, not one
+  per field: text, a structured payload and a list of resource links are
+  three places a server can put bytes in one reply, and the transcript pays
+  their sum. A failing call is bounded the same way — an error message is
+  persisted and replayed exactly as output is, so failing is not a way
+  around the cap. Binary content is unaffected: it lands in the per-agent
+  workspace as a file rather than in the transcript.
 - **A stdio server's environment is replaced** the way
   [`tool-shell`'s](./tools.md) is: it gets what you granted and nothing
   else, not the daemon's own environment.

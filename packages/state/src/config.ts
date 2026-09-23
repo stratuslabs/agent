@@ -179,6 +179,22 @@ export interface StratusConfigFile {
   /** Cache entry lifetime: '5m' (default) or '1h'. */
   promptCacheTtl?: '5m' | '1h';
   /**
+   * The per-turn output cap sent to Anthropic. Default 16000.
+   *
+   * The API requires one, and it is not a budget — nothing is spent for
+   * being allowed. It exists here because the provider takes arbitrary
+   * model names and a `baseUrl` that may point at a proxy, so the
+   * daemon-wide default cannot be right for every model an operator might
+   * name: one whose ceiling is below the default would have every request
+   * refused before generating, with no way to say otherwise.
+   *
+   * Raising it past roughly 20000 only works where the request streams —
+   * the SDK refuses a non-streaming call whose cap puts its estimated
+   * duration past ten minutes. `stratus serve` streams; `stratus run` does
+   * not always.
+   */
+  maxTokens?: number;
+  /**
    * Whether an OpenAI-compatible model takes images. Default true; set
    * false for a text-only model (a local runtime, usually), which would
    * otherwise reject every turn of a session an image was sent to.
@@ -310,6 +326,8 @@ type RuntimeConfigVariant =
       apiKey?: string;
       /** Claude subscription auth (Claude Code setup token). */
       authToken?: string;
+      /** See StratusConfigFile.maxTokens. Absent means the adapter's default. */
+      maxTokens?: number;
       systemPrompt?: string;
       fetch?: typeof fetch;
       /**

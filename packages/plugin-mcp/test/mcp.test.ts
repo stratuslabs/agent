@@ -1500,7 +1500,11 @@ test('a result too large for the transcript is cut, with the cut announced', asy
     { server: 'linear', tool: 'chart', agentId: 'ava', maxResultChars: 120 },
   ) as JsonObject;
   assert.equal(structured.structured, undefined);
-  assert.match(String(structured.structuredText), /structured result truncated by stratus at 120 characters/);
+  // 118, not 120: `text` already spent two characters of the same budget.
+  // One allowance for the whole result, not one per field — the transcript
+  // pays the sum, and three separate caps would let a server spend the
+  // allowance three times over.
+  assert.match(String(structured.structuredText), /structured result truncated by stratus at 118 characters; the server sent 311/);
   assert.equal(structured.text, 'ok');
 
   // One that fits still comes back as an object.
@@ -1524,6 +1528,91 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // The lone surrogate was dropped rather than kept, so nothing of the
   // split character survives.
   assert.ok(emoji.startsWith('\n… ['), `dropped the half character: ${JSON.stringify(emoji.slice(0, 8))}`);
+});
+
+test('every server-written string in a result shares one allowance', async () => {
+  // Text, a structured payload and a list of resource links are three
+  // places one result can carry bytes. Capped separately, a server spends
+  // the allowance once per field; what the transcript pays is their sum.
+  const filler = 'z'.repeat(400);
+  const result = await normalizeCallResult(
+    {
+      content: [
+        { type: 'text', text: filler },
+        { type: 'resource_link', uri: `https://example.test/${filler}`, name: filler, description: filler },
+        { type: 'resource_link', uri: 'https://example.test/second', name: 'second' },
+      ],
+      structuredContent: { blob: filler },
+    },
+    { server: 'linear', tool: 'search', agentId: 'ava', maxResultChars: 500 },
+  ) as JsonObject;
+
+  // Text fits (400 of 500) and is left alone; what follows is squeezed by
+  // what it spent, rather than each field getting a fresh 500.
+  assert.equal(result.text, filler);
+
+  // The structured payload no longer fits in what is left, so it arrives as
+  // text saying so rather than as a half-object.
+  assert.equal(result.structured, undefined);
+  assert.match(String(result.structuredText), /structured result truncated by stratus/);
+
+  // And the links, last in line, find nothing left to spend: dropped whole
+  // and counted rather than each cut, because half a URI is no use to
+  // anybody while a note saying how many were left out is.
+  assert.equal(result.resources, undefined);
+  assert.match(String(result.resourcesTruncated), /2 more resource links were not included/);
+
+  const serverWritten = String(result.text).length
+    + String(result.structuredText ?? '').length;
+  assert.ok(serverWritten <= 500, `the whole result stayed inside one allowance: ${serverWritten}`);
+});
+
+test('resource links are bounded, not waved through', async () => {
+  // `uri`, `name`, `title` and `description` are server-controlled strings
+  // that land in the durable result and replay with it, exactly as text
+  // does — so a list of them is as unbounded as a paragraph is.
+  const links = Array.from({ length: 200 }, (_entry, index) => ({
+    type: 'resource_link',
+    uri: `https://example.test/${index}`,
+    name: `document ${index}`,
+    description: 'd'.repeat(500),
+  }));
+  const result = await normalizeCallResult(
+    { content: links },
+    { server: 'linear', tool: 'list_docs', agentId: 'ava', maxResultChars: 2_000 },
+  ) as JsonObject;
+
+  const kept = result.resources as unknown[];
+  assert.ok(kept.length < 200, `stopped short of every link: ${kept.length}`);
+  assert.ok(JSON.stringify(kept).length <= 2_500, `stayed near the allowance: ${JSON.stringify(kept).length}`);
+  assert.match(String(result.resourcesTruncated), /more resource links were not included/);
+});
+
+test('a server that fails gets no larger channel into the transcript than one that succeeds', async () => {
+  // `isError` throws, the executor copies the message into
+  // `ToolResult.error`, and that is persisted and replayed exactly as
+  // output is — so failing must not be a way around the cap.
+  await assert.rejects(
+    () => normalizeCallResult(
+      { isError: true, content: [{ type: 'text', text: 'e'.repeat(5_000) }] },
+      { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 200 },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.length <= 300, `the error message was bounded: ${error.message.length}`);
+      assert.match(error.message, /error message truncated by stratus at 200 characters; the server sent 5000/);
+      return true;
+    },
+  );
+
+  // An error that fits is untouched, and an empty one still names the tool.
+  await assert.rejects(
+    () => normalizeCallResult(
+      { isError: true, content: [{ type: 'text', text: 'no such issue' }] },
+      { server: 'linear', tool: 'get_issue', agentId: 'ava' },
+    ),
+    /^Error: no such issue$/,
+  );
 });
 
 test('a binary block cannot steer the written path: the server-side tool name is folded before it names a file', async () => {

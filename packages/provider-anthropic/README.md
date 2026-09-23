@@ -30,4 +30,10 @@ path — the Anthropic SDK refuses a non-streaming request whose cap puts its
 estimated duration past ten minutes. `stratus serve` streams; a host
 calling `generate` with no `onDelta` does not.
 
+Because this adapter accepts any model name and any `baseUrl`, no default
+is right for every endpoint: one whose own ceiling is below 16000 would
+have every request refused before generating. Operators set
+[`maxTokens`](../../docs/reference/config.md#how-long-an-answer-may-be) in
+the config file for that case.
+
 Most users won't wire this directly — `@stratusagent/cli` sets it up from a menu: `npm i -g @stratusagent/cli && stratus setup`.

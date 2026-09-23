@@ -50,6 +50,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `fallbackBaseUrl` | Base URL for an OpenAI-compatible fallback (e.g. a local model) |
 | `promptCache` | Cache the stable head of each Anthropic request. Default `true` — see below |
 | `promptCacheTtl` | How long a cache entry lives: `5m` (default) or `1h` |
+| `maxTokens` | Per-turn output cap sent to Anthropic. Default `16000`; lower it for a model or proxy whose ceiling is below that, raise it for longer answers — see below |
 | `vision` | Whether an OpenAI-compatible model takes images — the main one or the fallback, it is one setting. Default `true`; set `false` for a text-only model, which would otherwise reject every turn of a session an image was sent to — see [Slack](../guides/slack.md#sending-an-image) |
 | `approvals` | Unattended-approval policy for `stratus serve` — trusted configs only, see below |
 | `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), and whether anyone else gets a turn at all: `admit` (`anyone`, the default, or `principals`), each with a per-agent `agents` sub-block — trusted configs only, see below |
@@ -78,6 +79,39 @@ agent's `credentials:` soul list and resolved per call — the agent's own
 entry first, then the fleet's shared one, then the environment. Add one with
 [`stratus credential set`](./cli.md); never write a key into a config file,
 which is a file people commit.
+
+## How long an answer may be
+
+Anthropic requires a per-turn output cap, and `maxTokens` sets it. The
+default is 16000.
+
+```json
+{
+  "maxTokens": 4096
+}
+```
+
+A reply that hits the cap is **refused, not returned**: the model was still
+going, so what arrived is a fragment, and a fragment delivered as an answer
+reads exactly like a complete one. The error names the cap that was in
+force.
+
+Two reasons to set it:
+
+- **Lower**, for a model or a `baseUrl` proxy whose own ceiling is under
+  the default. The adapter takes whatever model name you give it, so it
+  cannot know — and a cap above what the endpoint accepts is refused
+  before anything is generated, on every turn.
+- **Higher**, for agents that write long answers. Past roughly 20000 this
+  only works where the request streams: the Anthropic SDK refuses a
+  non-streaming call whose cap puts its estimated duration past ten
+  minutes. `stratus serve` streams, so a daemon can go higher; `stratus
+  run` cannot always.
+
+It is not a budget — nothing is spent for being allowed, only for what the
+model actually writes. The other providers ignore it: the harnesses choose
+their own cap, and the OpenAI-compatible adapter sends none, so there the
+ceiling is the endpoint's own default.
 
 ## How many turns one message may spend
 

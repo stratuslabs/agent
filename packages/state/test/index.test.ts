@@ -1371,6 +1371,49 @@ test('an untrusted project config cannot choose the soul or the system prompt', 
   assert.equal(trusted.ignoredFromUntrustedConfig, undefined);
 });
 
+test('maxTokens is configurable, so a model with a lower output ceiling is not stranded', async () => {
+  // The adapter takes arbitrary model names and a `baseUrl` that may point
+  // at a proxy, so no single default is right for every model an operator
+  // might name — and one whose ceiling is under the default would have
+  // every request refused before generating, with nothing to say otherwise.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-maxtokens-'));
+  await mkdir(path.dirname(globalConfigPath({ homeDir: home })), { recursive: true });
+  await writeFile(
+    globalConfigPath({ homeDir: home }),
+    JSON.stringify({ provider: 'anthropic', model: 'some-proxied-model', maxTokens: 4096 }),
+  );
+
+  const resolved = await resolveRuntimeConfig(
+    {},
+    { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-real' } },
+  );
+  assert.equal(resolved.provider, 'anthropic');
+  assert.equal(resolved.provider === 'anthropic' ? resolved.maxTokens : undefined, 4096);
+
+  // Absent means the adapter's own default — the key exists to override
+  // it, not to have every install state it.
+  await writeFile(
+    globalConfigPath({ homeDir: home }),
+    JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5' }),
+  );
+  const defaulted = await resolveRuntimeConfig(
+    {},
+    { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-real' } },
+  );
+  assert.equal(defaulted.provider === 'anthropic' ? defaulted.maxTokens : 'wrong provider', undefined);
+
+  // Refused rather than clamped: the API rejects a cap that is not a
+  // positive integer, so a bad value fails every turn before generating.
+  for (const bad of [0, -1, 2.5, '4096', null] as const) {
+    await writeFile(globalConfigPath({ homeDir: home }), JSON.stringify({ maxTokens: bad }));
+    await assert.rejects(
+      () => loadConfigFile(globalConfigPath({ homeDir: home })),
+      /Invalid maxTokens in config .*Use a whole number of output tokens, 1 or more\./,
+      `maxTokens: ${JSON.stringify(bad)} should be refused`,
+    );
+  }
+});
+
 test('maxTurns is a trusted-config key, and a value that would wedge every turn is refused', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-turns-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-turns-project-'));

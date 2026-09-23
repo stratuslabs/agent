@@ -121,6 +121,22 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   if (config.promptCacheTtl === '5m' || config.promptCacheTtl === '1h') {
     resolved.promptCacheTtl = config.promptCacheTtl;
   }
+  if (config.maxTokens !== undefined) {
+    // Refused rather than clamped, like every other bound here: the API
+    // rejects a request whose cap is not a positive integer, so a bad value
+    // does not degrade, it fails every turn before generating.
+    if (
+      typeof config.maxTokens !== 'number'
+      || !Number.isInteger(config.maxTokens)
+      || config.maxTokens < 1
+    ) {
+      throw new Error(
+        `Invalid maxTokens in config ${configPath}: ${JSON.stringify(config.maxTokens)}. `
+        + 'Use a whole number of output tokens, 1 or more.',
+      );
+    }
+    resolved.maxTokens = config.maxTokens;
+  }
   // `false` is the whole point of this key too.
   if (typeof config.vision === 'boolean') {
     resolved.vision = config.vision;

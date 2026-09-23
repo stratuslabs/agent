@@ -93,10 +93,12 @@ subscription sign-in to per-token billing.
   of room mid-answer, so the reply was a fragment and was not delivered.
   The turn is failed rather than answered on purpose: a cut-off reply
   reads exactly like a complete one, which is worse than an error. Ask for
-  a shorter answer, or raise the provider's `maxTokens`
-  ([provider-anthropic](../../packages/provider-anthropic/README.md)); on
-  an OpenAI-compatible endpoint the cap is the endpoint's own default, so
-  the fix is on that side.
+  a shorter answer, or change
+  [`maxTokens`](../reference/config.md#how-long-an-answer-may-be). If the
+  message says the cap itself was rejected, the model or proxy you named
+  has a lower ceiling than the default — set `maxTokens` under it. On an
+  OpenAI-compatible endpoint the cap is the endpoint's own default, so the
+  fix is on that side.
 - **A bridged MCP tool's output ends in `truncated by stratus`** — the
   server returned more than one result may put into the transcript, which
   every later turn of that conversation would then replay. The marker
