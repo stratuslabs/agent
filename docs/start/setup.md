@@ -244,8 +244,7 @@ sets (the other keys a clone cannot set are listed under
 
 Re-running setup **edits** that file rather than rewriting it. The keys it
 has no menu for are read in and written back untouched — the `api` and
-`principals` blocks, the `executor` and `memoryStore` selections, and the
-`vision`, `promptCache`, `promptCacheTtl`, `maxTokens`, and `maxTurns`
+`principals` blocks, plus the `vision`, `promptCache`, and `promptCacheTtl`
 preferences — so a capability you granted an agent by hand survives the next
 time you change a model. It did not always: setup rebuilt the file from its
 own menus, and everything it had no menu for was deleted by a run that never
