@@ -1936,6 +1936,39 @@ test('no shape of result outweighs its cap', async () => {
   assert.ok(checked > 900, `the sweep actually ran: ${checked} caps and shapes`);
 });
 
+test('a result that fits whole is not cut for a sentence about a different field', async () => {
+  // The room is held per annotation and released per annotation, which is
+  // right once something has to be cut. But each field was still charged
+  // for the *other* fields' unspent room, so a field that would have
+  // fitted got cut to make space for a sentence about a field that was
+  // never going to be cut either.
+  const text = 'a'.repeat(400);
+  const mixed = await normalizeCallResult(
+    { content: [{ type: 'text', text }], structuredContent: { x: 's' } },
+    { server: 'linear', tool: 'report', agentId: 'ava', maxResultChars: BRIDGED_RESULT_MIN_LENGTH },
+  ) as JsonObject;
+  // Whole, both of them: the untouched result weighs 434 of the 512.
+  assert.equal(mixed.text, text);
+  assert.deepEqual(mixed.structured, { x: 's' });
+  assert.equal(mixed.structuredText, undefined, 'nothing claims a cut that did not happen');
+  assert.ok(
+    JSON.stringify(mixed).length <= BRIDGED_RESULT_MIN_LENGTH,
+    `and it still fits: ${JSON.stringify(mixed).length}`,
+  );
+
+  // The release is not a way past the cap: one character more than fits
+  // still gets cut, and the cut is still announced.
+  const over = await normalizeCallResult(
+    { content: [{ type: 'text', text: 'a'.repeat(5_000) }], structuredContent: { x: 's' } },
+    { server: 'linear', tool: 'report', agentId: 'ava', maxResultChars: BRIDGED_RESULT_MIN_LENGTH },
+  ) as JsonObject;
+  assert.match(String(over.text), /truncated by stratus/);
+  assert.ok(
+    JSON.stringify(over).length <= BRIDGED_RESULT_MIN_LENGTH,
+    `still inside the cap: ${JSON.stringify(over).length}`,
+  );
+});
+
 test('a result that has to explain four cuts still fits inside its cap', async () => {
   // Every annotation at once: text truncated, structured payload truncated,
   // resource links dropped, attachments skipped. Reserved as a flat share

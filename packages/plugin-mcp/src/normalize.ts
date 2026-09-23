@@ -632,6 +632,16 @@ const createResultBudget = (limit: number, initialReserve: number) => {
     release: (ownReserve: number): void => {
       reserve -= ownReserve;
     },
+    /**
+     * Whether everything still to come fits with no room held back at all
+     * — the question that decides whether anything has to be cut, and so
+     * whether any of it has to be announced.
+     */
+    fitsUntouched: (cost: number): boolean => spent + cost <= limit,
+    /** Nothing will be cut, so nothing will be announced. */
+    releaseAll: (): void => {
+      reserve = 0;
+    },
     spend: (value: string, what: string, ownReserve: number, envelope: number): string => {
       // `envelope` is what the value costs beyond its own characters — the
       // key it arrives under, its quotes and its separator. Part of what it
@@ -899,14 +909,6 @@ export const normalizeCallResult = async (
     }
   }
 
-  // Every block that was going to be written has been, so if none was
-  // skipped there is no `filesTruncated` to pay for — and everything below
-  // spends after this point, so holding the room would come out of the
-  // text and the links instead.
-  if (skippedBinary === 0) {
-    budget.release(reserve.files);
-  }
-
   // What the text will cost beyond its own characters. A result with
   // nothing but text is returned as the string itself rather than as an
   // object, so it pays for its two quotes and nothing else — the `- 1`
@@ -918,9 +920,6 @@ export const normalizeCallResult = async (
     && resources.length === 0
     && skippedBinary === 0
     && !isObject(shaped.structuredContent);
-  const text = texts.length > 0
-    ? budget.spend(texts.join('\n\n'), 'result', reserve.text, collapsesToText ? 2 - 1 : keyOverhead('text'))
-    : undefined;
 
   // Measured as its own serialized string rather than by walking the
   // object: what the provider is sent is the JSON, so the JSON is the cost.
@@ -930,6 +929,41 @@ export const normalizeCallResult = async (
   // reading `structured` never finds a half-object there.
   const structuredRaw = isObject(shaped.structuredContent) ? (shaped.structuredContent as JsonObject) : undefined;
   const structuredJson = structuredRaw === undefined ? undefined : JSON.stringify(structuredRaw);
+
+  // Nothing needs announcing if nothing needs cutting, so ask that first.
+  //
+  // The reservation is held per annotation and released per annotation,
+  // which is right when something does have to be cut — but it still
+  // charged each field for the *other* fields' unspent room, and a field
+  // that would have fitted got cut to make space for a sentence about a
+  // different field that was never going to be written either. Four
+  // hundred characters of text beside a three-character structured payload
+  // came back cut at a 512-character cap, for a result that weighed 434
+  // whole.
+  //
+  // So the untouched result is weighed once, against the cap with no room
+  // held back at all. If it fits, every reservation is released and each
+  // field below finds itself whole. Weighed rather than built: these are
+  // the same sums the fields are charged, so a ten-megabyte result is
+  // measured, not materialized.
+  const joinedText = texts.length > 0 ? texts.join('\n\n') : undefined;
+  const untouched = (joinedText === undefined
+      ? 0
+      : serializedLength(joinedText) + (collapsesToText ? 2 - 1 : keyOverhead('text')))
+    + (structuredJson === undefined ? 0 : `"structured":${structuredJson},`.length)
+    + (resources.length === 0 ? 0 : `"resources":${JSON.stringify(resources)},`.length);
+  if (skippedBinary === 0 && budget.fitsUntouched(untouched)) {
+    budget.releaseAll();
+  } else if (skippedBinary === 0) {
+    // Some cut is coming, but not to the attachments: every block that was
+    // going to be written has been, so there is no `filesTruncated` to pay
+    // for, and everything below spends after this point.
+    budget.release(reserve.files);
+  }
+
+  const text = joinedText !== undefined
+    ? budget.spend(joinedText, 'result', reserve.text, collapsesToText ? 2 - 1 : keyOverhead('text'))
+    : undefined;
   // Tried whole first, at the allowance it gets once the room for its own
   // marker is not held — the same release the links get, and for the same
   // reason: a payload that survives intact never produces the marker that
