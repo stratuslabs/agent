@@ -110,36 +110,77 @@ export const BRIDGED_SCHEMA_MAX_LENGTH = 16_384;
 export const BRIDGED_RESULT_MAX_LENGTH = 100_000;
 
 /**
- * Room set aside, before a server is charged for anything, for stratus's
- * own account of what it cut.
- *
- * The truncation markers and the `resourcesTruncated` / `filesTruncated`
- * notes are the reason a cap is safe to have at all: they are what tells
- * the model that a listing was stopped rather than ended. That makes them
- * the one thing in the result a server must not be able to squeeze out by
- * filling the allowance — and leaving them uncharged instead, which is
- * what they were, puts the result past the cap by however many of them
- * there are. A 100,000-character cap returned 107,306 for a result of
- * small binary blocks, and 100,083 for one whose text filled the
- * allowance and whose structured payload then arrived as a bare marker.
- *
- * So they are paid for first, out of a reservation the server never sees,
- * and `maxResultChars` bounds the whole result the way the docs say it
- * does. Four at most — a marker for the text, one for the structured
- * payload, and the two notes — plus the keys they arrive under; each is
- * under 100 characters of fixed prose and three numbers, so 512 is
- * generous for the lot.
- *
- * Never more than half the allowance, because a reservation that leaves a
- * server nothing is not a reservation: at a `maxResultChars` of a few
- * dozen there is no room for both a result and an account of what was cut
- * from it, and the degenerate case `cutToLimit` describes applies instead.
- * That regime is the only one where a result can still outweigh its cap.
+ * Stratus's own account of a cut, in the three shapes it takes. One home
+ * each, because the reservation below has to know what they cost and a
+ * second copy of the wording would drift from the one that ships.
  */
-const RESULT_NOTE_RESERVE = 512;
+const truncationMarker = (what: string, cap: number, sent: number): string =>
+  `\n… [${what} truncated by stratus at ${cap} characters; the server sent ${sent}]`;
 
-const noteReserveFor = (limit: number): number =>
-  Math.min(RESULT_NOTE_RESERVE, Math.floor(limit / 2));
+const resourcesTruncatedNote = (count: number, cap: number): string =>
+  `${count} more resource link${count === 1 ? '' : 's'} were not included: the result reached its ${cap}-character cap.`;
+
+const filesTruncatedNote = (count: number, cap: number): string =>
+  `${count} more attachment${count === 1 ? '' : 's'} were not saved: the result reached its ${cap}-character cap.`;
+
+/**
+ * The longest `what` a marker is built with. `spend` is reached with
+ * `result`, `structured result` and — on the `isError` path — `error
+ * message`, and the reservation has to hold the widest of them.
+ */
+const WIDEST_MARKER_SUBJECT = 'structured result';
+
+/**
+ * A worst-case count for a number one of those interpolates, so the
+ * reservation is measured against the wording rather than against a guess
+ * at how many digits a server can provoke.
+ */
+const WIDEST_COUNT = Number.MAX_SAFE_INTEGER;
+
+/** What a value under `key` adds to the result's JSON: `"key":"",`. */
+const keyOverhead = (key: string): number => key.length + 6;
+
+/**
+ * Room set aside, before a server is charged for anything, for stratus's
+ * own account of what it cut — sized to the annotations *this* result can
+ * actually produce.
+ *
+ * Derived rather than guessed, which matters in both directions. A flat
+ * 512 clamped to half the allowance was the first attempt and was wrong at
+ * both ends: too small where every annotation fires at once, so a
+ * 500-character cap returned 600, and too large for the ordinary result
+ * that has no links and no attachments and can only ever produce one
+ * marker.
+ *
+ * A marker is normally paid for out of what the server is spending —
+ * `cutToLimit` subtracts it from the allowance before cutting — so what
+ * needs reserving is the case where nothing is left to subtract from and
+ * the marker arrives alone. The two truncation notes are never charged at
+ * all: they are written after every spending decision has been made, so
+ * there is no later point at which they could be.
+ *
+ * They must not be chargeable in any case. They are what tells the model a
+ * listing was stopped rather than ended, and charging them to the same
+ * allowance the server is spending would let a server suppress its own
+ * truncation notice by filling the budget.
+ */
+const noteReserveFor = (content: readonly unknown[], hasStructured: boolean, limit: number): number => {
+  const kinds = content.filter(isObject).map((block) => block.type);
+  let reserve = 0;
+  if (content.length > 0) {
+    reserve += serializedLength(truncationMarker(WIDEST_MARKER_SUBJECT, limit, WIDEST_COUNT)) + keyOverhead('text');
+  }
+  if (hasStructured) {
+    reserve += serializedLength(truncationMarker(WIDEST_MARKER_SUBJECT, limit, WIDEST_COUNT)) + keyOverhead('structuredText');
+  }
+  if (kinds.includes('resource_link')) {
+    reserve += serializedLength(resourcesTruncatedNote(WIDEST_COUNT, limit)) + keyOverhead('resourcesTruncated');
+  }
+  if (kinds.some((kind) => kind === 'image' || kind === 'audio' || kind === 'resource')) {
+    reserve += serializedLength(filesTruncatedNote(WIDEST_COUNT, limit)) + keyOverhead('filesTruncated');
+  }
+  return reserve;
+};
 
 /**
  * `raw`'s length in code points, walked rather than materialized:
@@ -249,12 +290,10 @@ const withinSerialized = (raw: string, limit: number): boolean => {
  * settled the ordinary one without walking the whole string.
  *
  * A `limit` smaller than the marker yields just the marker, which is
- * longer than the limit. Inside a result budget the marker is paid for out
- * of {@link RESULT_NOTE_RESERVE} instead of out of what the server is
- * spending, so this only bites where that reservation is itself too small
- * to hold one — a `maxResultChars` of a hundred or so, where no result
- * could be useful anyway, and where the alternative is a cut with nothing
- * saying it happened.
+ * longer than the limit. Inside a result budget that case is what
+ * {@link noteReserveFor} sets room aside for, so the marker arriving alone
+ * does not push the result past its cap; the alternative would be a cut
+ * with nothing saying it happened.
  */
 const cutToLimit = (raw: string, limit: number, what: string, cap: number = limit): string => {
   if (withinSerialized(raw, limit)) {
@@ -265,7 +304,7 @@ const cutToLimit = (raw: string, limit: number, what: string, cap: number = limi
   // set, and `limit` is what was left of it after the reservation and
   // whatever the result already spent. Naming the remainder would tell
   // someone reading the transcript to raise a setting that does not exist.
-  const marker = `\n… [${what} truncated by stratus at ${cap} characters; the server sent ${characters}]`;
+  const marker = truncationMarker(what, cap, characters);
   return `${firstWithinCost(raw, Math.max(0, limit - serializedLength(marker)))}${marker}`;
 };
 
@@ -466,13 +505,13 @@ let fileSerial = 0;
  * places a server can put bytes in one result, and three separate caps
  * would let it spend the allowance three times.
  */
-const createResultBudget = (limit: number) => {
+const createResultBudget = (limit: number, reserve: number) => {
   let spent = 0;
   // `limit` is what the whole result may weigh; this is what a *server*
   // may spend of it. Stratus's own truncation markers and notes come out
   // of the difference, so that announcing a cut cannot itself push the
-  // result past the cut. See {@link RESULT_NOTE_RESERVE}.
-  const forServer = Math.max(0, limit - noteReserveFor(limit));
+  // result past the cut. See {@link noteReserveFor}.
+  const forServer = Math.max(0, limit - reserve);
   const remaining = (): number => Math.max(0, forServer - spent);
   // Two ways in, because a result carries two kinds of string. `fits` and
   // `charge` take a value that is ALREADY in the form the transcript holds
@@ -578,7 +617,11 @@ export const normalizeCallResult = async (
   // block's *bytes* go to disk, but the path it returns is a string in the
   // durable result like any other, and a thousand tiny images is a
   // thousand paths replayed on every later turn.
-  const budget = createResultBudget(options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH);
+  const resultLimit = options.maxResultChars ?? BRIDGED_RESULT_MAX_LENGTH;
+  const budget = createResultBudget(
+    resultLimit,
+    noteReserveFor(content, isObject(shaped.structuredContent), resultLimit),
+  );
   let skippedBinary = 0;
 
   // Settled before anything touches the disk: a failing result's binary
@@ -796,10 +839,10 @@ export const normalizeCallResult = async (
     ...(files.length > 0 ? { files } : {}),
     ...(kept.length > 0 ? { resources: kept } : {}),
     ...(droppedLinks > 0
-      ? { resourcesTruncated: `${droppedLinks} more resource link${droppedLinks === 1 ? '' : 's'} were not included: the result reached its ${budget.limit}-character cap.` }
+      ? { resourcesTruncated: resourcesTruncatedNote(droppedLinks, budget.limit) }
       : {}),
     ...(skippedBinary > 0
-      ? { filesTruncated: `${skippedBinary} more attachment${skippedBinary === 1 ? '' : 's'} were not saved: the result reached its ${budget.limit}-character cap.` }
+      ? { filesTruncated: filesTruncatedNote(skippedBinary, budget.limit) }
       : {}),
   };
 };

@@ -1497,17 +1497,20 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // key that says so, and `structured` is absent rather than half there.
   const structured = await normalizeCallResult(
     { content: [{ type: 'text', text: 'ok' }], structuredContent: { blob: 'y'.repeat(300) } },
-    { server: 'linear', tool: 'chart', agentId: 'ava', maxResultChars: 120 },
+    // 400, because a result that can truncate both its text and its
+    // structured payload sets aside room to say so about each, and below
+    // roughly three hundred characters there is nothing left for a result.
+    { server: 'linear', tool: 'chart', agentId: 'ava', maxResultChars: 400 },
   ) as JsonObject;
   assert.equal(structured.structured, undefined);
-  // The marker names the cap the operator set, not what was left of it
-  // after `text` spent two characters and the note reservation took its
-  // share. Those are real and are why the payload did not fit, but they
-  // are not a number anyone can raise — `maxResultChars` is.
-  // 315 rather than the 311 characters the JSON is long: it arrives as a
-  // string *value*, so its four quotes are escaped, and the size named is
-  // what the transcript pays rather than what the object measures.
-  assert.match(String(structured.structuredText), /structured result truncated by stratus at 120 characters; the server sent 315/);
+  // Two numbers, neither of them obvious. The cap named is the one the
+  // operator set, not what was left of it after `text` spent two
+  // characters and the reservation took its share — those are why the
+  // payload did not fit, but neither is a number anyone can raise. And the
+  // size is 315 rather than the 311 the JSON is long, because it arrives
+  // as a string *value*, so its four quotes are escaped: what the
+  // transcript pays rather than what the object measures.
+  assert.match(String(structured.structuredText), /structured result truncated by stratus at 400 characters; the server sent 315/);
   assert.equal(structured.text, 'ok');
 
   // One that fits still comes back as an object.
@@ -1525,19 +1528,19 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // reports.
   const emoji = await normalizeCallResult(
     { content: [{ type: 'text', text: '\u{1f600}'.repeat(100) }] },
-    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 180 },
+    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 200 },
   ) as string;
-  assert.match(emoji, /truncated by stratus at 180 characters; the server sent 100/);
+  assert.match(emoji, /truncated by stratus at 200 characters; the server sent 100/);
   // Never half a character: the walk advances by whole code points, so a
   // cut cannot land inside a surrogate pair.
   assert.doesNotMatch(emoji, /[\u{d800}-\u{dfff}]/u);
-  // And the emoji that fit were kept. Half the 180 is reserved for the
-  // notes, leaving a server 90; the marker costs 72 of those — its own
-  // leading newline escapes to two — leaving 18 whole emoji, not the nine
-  // a code-unit slice would have left.
+  // And the emoji that fit were kept. Room to announce one cut is set
+  // aside out of the 200, and the marker then costs 72 of what is left —
+  // its own leading newline escapes to two — leaving 22 whole emoji, not
+  // the eleven a code-unit slice would have left.
   const kept = Array.from(emoji).filter((character) => character === '\u{1f600}').length;
-  assert.equal(kept, 18, `spent the allowance in code points: kept ${kept}`);
-  assert.ok(Array.from(emoji).length <= 180, 'and stayed inside it');
+  assert.equal(kept, 22, `spent the allowance in code points: kept ${kept}`);
+  assert.ok(Array.from(emoji).length <= 200, 'and stayed inside it');
 
   // A fractional allowance is not a number of characters, and the walk
   // counts whole ones — so an equality test against it would never be true
@@ -1770,6 +1773,37 @@ test('an attachment path is measured, not assumed', async () => {
   // refusal: the check still happens before a byte is written.
   const onDisk = await readdir(path.join(workspaceRoot, 'ava', 'mcp', 'linear'));
   assert.equal(onDisk.length, written.length, 'no orphaned files were written');
+});
+
+test('a result that has to explain four cuts still fits inside its cap', async () => {
+  // Every annotation at once: text truncated, structured payload truncated,
+  // resource links dropped, attachments skipped. Reserved as a flat share
+  // of the allowance, the four of them plus their keys did not fit in it —
+  // a 500-character cap returned 600 — because the share was a guess made
+  // without knowing how many annotations the result could produce.
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-four-'));
+  const pixel = Buffer.from('x').toString('base64');
+  const result = await normalizeCallResult(
+    {
+      content: [
+        { type: 'text', text: 'T'.repeat(5_000) },
+        ...Array.from({ length: 20 }, () => ({ type: 'image', data: pixel, mimeType: 'image/png' })),
+        ...Array.from({ length: 50 }, (_entry, index) => ({ type: 'resource_link', uri: `https://e.test/${index}` })),
+      ],
+      structuredContent: { detail: 'S'.repeat(5_000) },
+    },
+    { server: 'linear', tool: 'all', agentId: 'ava', workspaceRoot, maxResultChars: 500 },
+  ) as JsonObject;
+
+  // All four fired, so the reservation was under the load it is sized for.
+  assert.match(String(result.text), /truncated by stratus/);
+  assert.match(String(result.structuredText), /structured result truncated by stratus/);
+  assert.match(String(result.resourcesTruncated), /more resource links were not included/);
+  assert.match(String(result.filesTruncated), /more attachments were not saved/);
+  assert.ok(
+    JSON.stringify(result).length <= 500,
+    `four annotations and their keys fit the cap: ${JSON.stringify(result).length}`,
+  );
 });
 
 test('a server is charged for what its text costs the transcript, escapes included', async () => {
