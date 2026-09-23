@@ -84,3 +84,9 @@ subscription sign-in to per-token billing.
 - **A gated tool call was refused overnight** — that is the daemon's
   honest default. [Approvals](./approvals.md) covers asking a human in
   Slack instead.
+- **A bridged MCP tool's output ends in `truncated by stratus`** — the
+  server returned more than one result may put into the transcript, which
+  every later turn of that conversation would then replay. The marker
+  names the size the server sent; raise that server's `maxResultChars` if
+  it is legitimately that large, or narrow the call. See
+  [MCP](./mcp.md#the-posture).
