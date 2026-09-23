@@ -212,15 +212,23 @@ interface NoteReserve {
 const markerReserve = (key: string, limit: number): number =>
   serializedLength(truncationMarker(WIDEST_MARKER_SUBJECT, limit, WIDEST_COUNT)) + keyOverhead(key);
 
-const noteReserveFor = (content: readonly unknown[], hasStructured: boolean, limit: number): NoteReserve => {
+const noteReserveFor = (
+  content: readonly unknown[],
+  hasStructured: boolean,
+  hasWorkspaceRoot: boolean,
+  limit: number,
+): NoteReserve => {
   const kinds = content.filter(isObject).map((block) => block.type);
   // Only where the result can actually produce text. `resource_link` never
   // does, so a list of links was reserving room for a marker that had
   // nothing to mark — and at a small cap that reservation was enough to
   // drop the links it was withheld from.
-  const producesText = kinds.some(
-    (kind) => kind === 'text' || kind === 'resource' || kind === 'image' || kind === 'audio',
-  );
+  const producesText = kinds.some((kind) => kind === 'text' || kind === 'resource')
+    // A binary block contributes text in exactly one case: there is
+    // nowhere to write it, so it says so instead. With a workspace root
+    // configured that cannot happen, and reserving for it costs the
+    // attachment the room its own path needs.
+    || (!hasWorkspaceRoot && kinds.some((kind) => kind === 'image' || kind === 'audio'));
   const text = producesText ? markerReserve('text', limit) : 0;
   const structured = hasStructured ? markerReserve('structuredText', limit) : 0;
   const resources = kinds.includes('resource_link')
@@ -556,7 +564,19 @@ let fileSerial = 0;
  * would let it spend the allowance three times.
  */
 const createResultBudget = (limit: number, initialReserve: number) => {
-  let spent = 0;
+  // One, not zero: the result is a flat object, so its JSON is `{`, its
+  // fields joined by commas, and `}`. Charging every field as
+  // `"key":value,` — comma included — overcounts by exactly one comma,
+  // which is what pays for the closing brace; the opening one is this.
+  //
+  // The point of doing it this way is that the sum stops being an
+  // approximation of `JSON.stringify(result).length` and becomes equal to
+  // it. Every round of review so far has found another part of the
+  // envelope nobody was charged for — separators between links, the
+  // `"resources":[…]` around them, the keys themselves — because a budget
+  // that adds up *some* of what the transcript carries will always have
+  // one more piece missing. This adds up all of it.
+  let spent = 1;
   let reserve = initialReserve;
   // `limit` is what the whole result may weigh; this is what a *server*
   // may spend of it. Stratus's own truncation markers and notes come out
@@ -589,16 +609,6 @@ const createResultBudget = (limit: number, initialReserve: number) => {
       spent += Math.min(value.length, codePointLength(value));
     },
     /**
-     * Raw text cut to what is left, with the cut announced, and charged.
-     *
-     * `ownReserve` is the room held back for the marker *this* call might
-     * emit. A value that fits without one is returned whole and that room
-     * released, because withholding it otherwise cuts a result that would
-     * have fitted and marks it truncated — a claim about a cut that never
-     * happened, which is the same lie as a silent cut told the other way
-     * round. 99,950 plain characters came back cut at a 100,000 cap.
-     */
-    /**
      * `value`, already serialized, taken whole if it fits once the room
      * held for the note that would report *dropping* it is released. The
      * note reports what did not fit; a collection that fits entirely never
@@ -607,6 +617,10 @@ const createResultBudget = (limit: number, initialReserve: number) => {
      * being dropped to hold room for the sentence saying it was dropped.
      */
     takeWhole: (value: string, ownReserve: number): boolean => {
+      // `value` here already carries its own key and separator — the
+      // callers build `"resources":[…],` and `"structured":…,` — so there
+      // is no envelope to add.
+
       if (!withinLimit(value, withoutOwn(ownReserve))) {
         return false;
       }
@@ -618,14 +632,17 @@ const createResultBudget = (limit: number, initialReserve: number) => {
     release: (ownReserve: number): void => {
       reserve -= ownReserve;
     },
-    spend: (value: string, what: string, ownReserve: number): string => {
-      if (withinSerialized(value, withoutOwn(ownReserve))) {
-        spent += serializedLength(value);
+    spend: (value: string, what: string, ownReserve: number, envelope: number): string => {
+      // `envelope` is what the value costs beyond its own characters — the
+      // key it arrives under, its quotes and its separator. Part of what it
+      // costs, so part of what it has to fit inside.
+      if (withinSerialized(value, withoutOwn(ownReserve) - envelope)) {
+        spent += serializedLength(value) + envelope;
         reserve -= ownReserve;
         return value;
       }
-      const bounded = cutToLimit(value, remaining(), what, limit);
-      spent += serializedLength(bounded);
+      const bounded = cutToLimit(value, Math.max(0, remaining() - envelope), what, limit);
+      spent += serializedLength(bounded) + envelope;
       return bounded;
     },
   };
@@ -714,7 +731,12 @@ export const normalizeCallResult = async (
   // does — `NormalizeOptions.maxResultChars` is reachable without going
   // through `mcpPlugin`'s validation at all.
   const resultLimit = boundedResultLimit(options.maxResultChars);
-  const reserve = noteReserveFor(content, isObject(shaped.structuredContent), resultLimit);
+  const reserve = noteReserveFor(
+    content,
+    isObject(shaped.structuredContent),
+    options.workspaceRoot !== undefined,
+    resultLimit,
+  );
   const budget = createResultBudget(resultLimit, reserve.total);
   let skippedBinary = 0;
 
@@ -734,7 +756,9 @@ export const normalizeCallResult = async (
     // must not get an unbounded channel into the transcript by failing
     // instead of succeeding.
     throw new Error(
-      budget.spend(message, 'error message', reserve.text)
+      // A failing call throws its message; nothing else is in the result,
+      // so it carries no envelope of its own.
+      budget.spend(message, 'error message', reserve.text, 0)
       || `MCP server ${options.server} reported an error for ${options.tool} with no message.`,
     );
   }
@@ -789,7 +813,10 @@ export const normalizeCallResult = async (
     // was left. Nothing needs reserving now that the name is built before
     // the write rather than after it.
     const entry = JSON.stringify(file);
-    const cost = files.length === 0 ? `"files":[${entry}]` : `,${entry}`;
+    // The first entry pays for the key, the brackets and the field's own
+    // separator; each one after it pays for the comma joining it to the
+    // last. The total is exactly what `"files":[…],` weighs in the result.
+    const cost = files.length === 0 ? `"files":[${entry}],` : `,${entry}`;
     if (!budget.fits(cost)) {
       skippedBinary += 1;
       return;
@@ -880,7 +907,20 @@ export const normalizeCallResult = async (
     budget.release(reserve.files);
   }
 
-  const text = texts.length > 0 ? budget.spend(texts.join('\n\n'), 'result', reserve.text) : undefined;
+  // What the text will cost beyond its own characters. A result with
+  // nothing but text is returned as the string itself rather than as an
+  // object, so it pays for its two quotes and nothing else — the `- 1`
+  // gives back the brace the budget starts out holding. Everything that
+  // decides this is already settled: the content loop has run, so the
+  // attachments, the links and the skipped count are known, and a
+  // structured payload either arrived or did not.
+  const collapsesToText = files.length === 0
+    && resources.length === 0
+    && skippedBinary === 0
+    && !isObject(shaped.structuredContent);
+  const text = texts.length > 0
+    ? budget.spend(texts.join('\n\n'), 'result', reserve.text, collapsesToText ? 2 - 1 : keyOverhead('text'))
+    : undefined;
 
   // Measured as its own serialized string rather than by walking the
   // object: what the provider is sent is the JSON, so the JSON is the cost.
@@ -890,13 +930,20 @@ export const normalizeCallResult = async (
   // reading `structured` never finds a half-object there.
   const structuredRaw = isObject(shaped.structuredContent) ? (shaped.structuredContent as JsonObject) : undefined;
   const structuredJson = structuredRaw === undefined ? undefined : JSON.stringify(structuredRaw);
-  const structuredFits = structuredJson !== undefined && budget.fits(structuredJson);
+  // Tried whole first, at the allowance it gets once the room for its own
+  // marker is not held — the same release the links get, and for the same
+  // reason: a payload that survives intact never produces the marker that
+  // room was held for. Weighed as the field it becomes, key and separator
+  // included, rather than as the bare JSON.
+  const structuredFits = structuredJson !== undefined
+    && budget.takeWhole(`"structured":${structuredJson},`, reserve.structured);
   const structured = structuredFits ? structuredRaw : undefined;
-  if (structuredFits) {
-    budget.charge(structuredJson!);
-  }
+  // Only ever reached when the object form did not fit, and the string
+  // form is strictly larger — it escapes every quote in that JSON — so
+  // this always cuts, and `structuredText` can never come back holding an
+  // untruncated payload under a key that says it was truncated.
   const structuredNote = structuredJson !== undefined && !structuredFits
-    ? budget.spend(structuredJson, 'structured result', reserve.structured)
+    ? budget.spend(structuredJson, 'structured result', reserve.structured, keyOverhead('structuredText'))
     : undefined;
 
   // Resource links are server-controlled strings too, and a list of them is
@@ -910,7 +957,7 @@ export const normalizeCallResult = async (
   // `resourcesTruncated` is not held. A list that fits entirely never
   // produces that note, so being charged for it is how a result came to
   // drop the one link it could comfortably have carried.
-  if (resources.length > 0 && budget.takeWhole(`"resources":${JSON.stringify(resources)}`, reserve.resources)) {
+  if (resources.length > 0 && budget.takeWhole(`"resources":${JSON.stringify(resources)},`, reserve.resources)) {
     kept.push(...resources);
   }
   for (const link of kept.length === resources.length ? [] : resources) {
@@ -923,7 +970,7 @@ export const normalizeCallResult = async (
     // separator, and the total is exactly what `"resources":[…]` weighs
     // in the result.
     const serialized = JSON.stringify(link);
-    const cost = kept.length === 0 ? `"resources":[${serialized}]` : `,${serialized}`;
+    const cost = kept.length === 0 ? `"resources":[${serialized}],` : `,${serialized}`;
     if (!budget.fits(cost)) {
       break;
     }

@@ -1554,7 +1554,7 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // that meant to charge one. The rest of the 600 went on the room set
   // aside to announce a cut and on the marker itself.
   const kept = Array.from(emoji).filter((character) => character === '\u{1f600}').length;
-  assert.equal(kept, 422, `spent the allowance in code points: kept ${kept}`);
+  assert.equal(kept, 420, `spent the allowance in code points: kept ${kept}`);
   assert.ok(Array.from(emoji).length <= 600, 'and stayed inside it');
 
   // A fractional allowance is not a number of characters, and the walk
@@ -1810,8 +1810,11 @@ test('a result that fits is not cut to make room for saying it was cut', async (
   assert.equal(untouched, whole);
 
   // Right up to the edge: a result that exactly fills the cap is whole,
-  // and one character more is not.
-  const exact = 'x'.repeat(BRIDGED_RESULT_MAX_LENGTH);
+  // and one character more is not. Two characters short of the cap,
+  // because a text-only result is returned as the string itself and a JSON
+  // string costs its two quotes — the cap bounds what the transcript
+  // carries, which includes them.
+  const exact = 'x'.repeat(BRIDGED_RESULT_MAX_LENGTH - 2);
   assert.equal(
     await normalizeCallResult(
       { content: [{ type: 'text', text: exact }] },
@@ -1820,14 +1823,14 @@ test('a result that fits is not cut to make room for saying it was cut', async (
     exact,
   );
   const over = await normalizeCallResult(
-    { content: [{ type: 'text', text: 'x'.repeat(BRIDGED_RESULT_MAX_LENGTH + 1) }] },
+    { content: [{ type: 'text', text: 'x'.repeat(BRIDGED_RESULT_MAX_LENGTH - 1) }] },
     { server: 'linear', tool: 'dump', agentId: 'ava' },
   ) as string;
   assert.match(over, /truncated by stratus/);
   // And the room is only released for the announcement that is not needed:
   // the result still weighs no more than the cap.
   assert.ok(
-    JSON.stringify(over).length <= BRIDGED_RESULT_MAX_LENGTH + 2,
+    JSON.stringify(over).length <= BRIDGED_RESULT_MAX_LENGTH,
     `still inside the cap: ${JSON.stringify(over).length}`,
   );
 });
@@ -1879,6 +1882,58 @@ test('a list that fits whole is not dropped to hold room for saying it was dropp
     JSON.stringify(withFile).length <= 600,
     `and the release did not become a way past the cap: ${JSON.stringify(withFile).length}`,
   );
+});
+
+test('no shape of result outweighs its cap', async () => {
+  // Nine rounds of review found nine different pieces of the result that
+  // nothing was charged for — the separators between links, the array they
+  // arrive in, the keys, the quotes, the braces. Each was found by someone
+  // thinking of a shape nobody had thought of, which is not a method that
+  // ends.
+  //
+  // So the accounting stopped approximating: every field is charged as
+  // `"key":value,` and the sum is now equal to `JSON.stringify(result)`
+  // rather than close to it. This sweeps the shapes rather than reasoning
+  // about them, which is the assertion that would have caught all nine at
+  // once.
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-shapes-'));
+  const pixel = Buffer.from('x').toString('base64');
+  // Every cap across a range rather than a handful of sizes, because an
+  // uncharged piece of the envelope only shows itself when the allowance
+  // lands on it exactly — a sweep over shapes at three or four caps walks
+  // straight past a missing comma. Stepping the cap one character at a
+  // time hits every alignment instead, and does it in under a second.
+  //
+  // Four shapes, because which parts go uncharged depends on which keys
+  // the result carries: text alone, attachments, links beside them, and
+  // one sized so the structured payload survives as an object rather than
+  // arriving as text.
+  let checked = 0;
+  for (let cap = BRIDGED_RESULT_MIN_LENGTH; cap <= 760; cap += 1) {
+    for (const shape of [0, 1, 2, 3]) {
+      const content: JsonObject[] = [];
+      if (shape !== 1) {
+        // A quote and newlines, so the escaping is exercised too.
+        content.push({ type: 'text', text: `"${'a\n'.repeat(shape === 3 ? 3 : 2_000)}` });
+      }
+      if (shape >= 1) {
+        content.push({ type: 'image', data: pixel, mimeType: 'image/png' });
+      }
+      if (shape >= 2) {
+        for (let index = 0; index < 6; index += 1) {
+          content.push({ type: 'resource_link', uri: `https://e.test/${index}`, description: 'd'.repeat(30) });
+        }
+      }
+      const result = await normalizeCallResult(
+        { content, structuredContent: { blob: 's'.repeat(shape === 3 ? 120 : 3_000) } },
+        { server: 'linear', tool: 'sweep', agentId: 'ava', workspaceRoot, maxResultChars: cap },
+      );
+      const weighed = JSON.stringify(result).length;
+      assert.ok(weighed <= cap, `cap ${cap}, shape ${shape}: the result weighed ${weighed}`);
+      checked += 1;
+    }
+  }
+  assert.ok(checked > 900, `the sweep actually ran: ${checked} caps and shapes`);
 });
 
 test('a result that has to explain four cuts still fits inside its cap', async () => {
