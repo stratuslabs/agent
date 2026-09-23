@@ -330,6 +330,52 @@ test('unknown tools produce a failure result the provider can react to', async (
   assert.equal(session.messages.at(-1)?.content, 'That tool does not exist.');
 });
 
+test('the smallest maxTurns still answers a turn that needs no tool call', async () => {
+  // The ceiling is tested before each provider call, so `maxTurns: 1`
+  // permits the first one and refuses the second. That makes 1 a real
+  // setting — an agent that can answer outright still answers — rather
+  // than an off switch, which is what the config reference used to say it
+  // was. Pinned here because the claim is documented, and prose drifts.
+  const provider: ModelProvider = {
+    name: 'plain-provider',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'answered outright' }] };
+    },
+  };
+
+  const answered = await new AgentRunner({ provider, maxTurns: 1 }).run({
+    sessionId: 'session-max-turns-1',
+    agent: { id: 'agent-max-turns-1', name: 'Terse Agent' },
+    userMessage: 'Something I can answer without tools',
+  });
+  assert.equal(answered.status, 'completed');
+  assert.equal(answered.messages.at(-1)?.content, 'answered outright');
+
+  // What 1 does stop is the turn that would read a tool's result.
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'loop',
+    async execute() {
+      return { again: true };
+    },
+  });
+  const calling: ModelProvider = {
+    name: 'calling-provider',
+    async generate() {
+      return { parts: [{ type: 'tool-call', call: { id: 'call-1', toolName: 'loop', input: {} } }] };
+    },
+  };
+
+  await assert.rejects(
+    () => new AgentRunner({ provider: calling, tools, maxTurns: 1 }).run({
+      sessionId: 'session-max-turns-1-tool',
+      agent: { id: 'agent-max-turns-1-tool', name: 'Tool Agent' },
+      userMessage: 'Something that needs a tool',
+    }),
+    /maximum of 1 provider turns/,
+  );
+});
+
 test('sessions fail when the provider never stops requesting tools', async () => {
   const tools = new ToolRegistry();
   tools.register({

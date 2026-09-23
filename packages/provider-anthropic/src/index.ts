@@ -28,7 +28,28 @@ import {
 } from '@stratusagent/core';
 
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5';
-const DEFAULT_MAX_TOKENS = 4096;
+/**
+ * The per-turn output cap the API requires, when nothing else names one.
+ *
+ * 16k rather than the 4k this was: 4096 is a Claude-3-era number, and the
+ * current models take up to 128k. It is not a budget — nothing is spent
+ * for being allowed — so the only thing a low cap buys is a reply cut off
+ * at the cap, which the check at the end of `generate` now refuses rather
+ * than delivering as an answer. The two have to move together: made loud
+ * against a 4k ceiling, an ordinary long answer would fail instead of
+ * being quietly clipped.
+ *
+ * Why not the 128k ceiling, or the 64k the vendor guidance suggests for a
+ * streaming request: `generate` serves both paths — it streams only when
+ * the caller attached `onDelta` — and the SDK *refuses* a non-streaming
+ * request whose cap puts its estimated duration past ten minutes, before
+ * anything is sent ("Streaming is required for operations that may take
+ * longer than 10 minutes"). A default that large would break every host
+ * that calls `generate` without a delta sink. 16k clears that check, and
+ * an operator who wants the model's full reach raises `maxTokens` — on a
+ * streaming path, which is what the daemon runs.
+ */
+const DEFAULT_MAX_TOKENS = 16_000;
 // Session metadata key holding raw assistant turns, keyed by tool_use id.
 export const RAW_TURNS_METADATA_KEY = 'anthropicRawTurns';
 
@@ -55,7 +76,7 @@ export interface AnthropicProviderConfig {
   /** Defaults to claude-opus-5, Anthropic's most capable generally available model. */
   model?: string;
   name?: string;
-  /** Response token cap per turn (Anthropic requires one). Default 4096. */
+  /** Response token cap per turn (Anthropic requires one). Default 16000. */
   maxTokens?: number;
   /** Extra system prompt, rendered before the agent's own persona. */
   systemPrompt?: string;
@@ -807,6 +828,43 @@ export const createAnthropicProvider = ({
         request.onUsage?.(usage);
       }
 
+      // The budget ran out before Claude finished, so whatever arrived is a
+      // fragment. Judged here, ahead of the parts, because the shape of the
+      // fragment does not change the answer: a sentence that stops
+      // mid-word, and a `tool_use` whose JSON input the cap cut off, are
+      // the same outcome — and the second is the dangerous one, since a
+      // truncated input can still rebuild into a well-formed object missing
+      // half its arguments, which is a call the executor would run.
+      //
+      // Only the empty case used to reach a check at all, so a reply cut
+      // off after saying anything was returned as the turn's answer: posted
+      // to whoever asked, mid-thought, with the session recorded
+      // `completed` and nothing anywhere saying it had been cut. A turn
+      // nobody asked for gets no exemption — saying nothing is a decision
+      // it is allowed to make, and running out of budget is not one.
+      if (response.stop_reason === 'max_tokens') {
+        throw new Error(
+          `Claude stopped at the ${maxTokens}-token output cap before finishing (stop_reason max_tokens), `
+          + 'so the reply is a fragment and was not delivered. Ask for a shorter answer, or raise '
+          + 'maxTokens for this provider.',
+        );
+      }
+      // The other way a limit rather than the model ends a turn: the
+      // context window filled *during* generation, so what arrived is a
+      // fragment for the same reason and needs the same refusal. A
+      // documented `StopReason` in the SDK this package installs, and
+      // easily missed because the two read as one case and are not — this
+      // one is not fixed by lowering the reply's length, so the remedy
+      // sentence differs.
+      if (response.stop_reason === 'model_context_window_exceeded') {
+        throw new Error(
+          'Claude ran out of context part-way through its answer '
+          + '(stop_reason model_context_window_exceeded), so the reply is a fragment and was not '
+          + 'delivered. The conversation, not the answer, is what is too long: start a new one with '
+          + '`stratus session rollover`, or move this agent to a model with a bigger context window.',
+        );
+      }
+
       const { text, calls } = extractParts(response.content, mapping);
 
       for (const call of calls) {
@@ -821,17 +879,14 @@ export const createAnthropicProvider = ({
       if (parts.length === 0) {
         // Nothing said is the answer a turn nobody asked for may give — see
         // `RunInput.addressed` in core — but only when the turn ended of
-        // its own accord. Thinking that consumed the output budget before
-        // any text or tool call surfaced ends with `max_tokens` and no
-        // parts, and that is the exhaustion the usage accounting above
-        // already treats as a failed outcome, not a decision.
+        // its own accord. Budget exhaustion is one way it does not, and it
+        // never reaches here: the check above refuses it whether or not
+        // anything surfaced. What is left is a stop reason that is neither
+        // an ending nor an exhaustion — a refusal, a pause — which is not
+        // a decision to stay quiet either.
         const ended = response.stop_reason === 'end_turn' || response.stop_reason === 'stop_sequence';
         if (!isUnaddressedTurn(request.session) || !ended) {
-          throw new Error(
-            response.stop_reason === 'max_tokens'
-              ? 'Claude returned an empty response: the output budget was exhausted before any text or tool call (stop_reason max_tokens).'
-              : 'Claude returned an empty response.',
-          );
+          throw new Error('Claude returned an empty response.');
         }
       }
 

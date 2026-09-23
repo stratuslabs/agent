@@ -337,6 +337,93 @@ test('a transcript past the context window is reported as recoverable, not as a 
   );
 });
 
+test('a reply cut off at the output cap is refused, not delivered as the answer', async () => {
+  const session = createSession();
+  // `stop_reason: max_tokens` with text is the case that used to pass. The
+  // check lived inside the empty-parts branch, so a reply that had said
+  // anything at all came back as the turn's answer: posted to whoever
+  // asked, mid-sentence, session recorded `completed`, nothing anywhere
+  // saying it had been cut.
+  const truncatedText = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: createMockFetch([
+      apiMessage([{ type: 'text', text: 'The three options are: first,' }], 'max_tokens'),
+    ]).fetchImpl,
+  });
+  await assert.rejects(
+    () => truncatedText.generate({ session }),
+    /stopped at the 16000-token output cap before finishing \(stop_reason max_tokens\)/,
+  );
+
+  // A truncated `tool_use` is the sharper half: the cap cuts the JSON
+  // input, and what rebuilds can be a well-formed object missing half its
+  // arguments — a call the executor would happily run.
+  const truncatedCall = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: createMockFetch([
+      apiMessage(
+        [{ type: 'tool_use', id: 'call-1', name: 'fs_read', input: { path: '/etc' } }],
+        'max_tokens',
+      ),
+    ]).fetchImpl,
+  });
+  await assert.rejects(() => truncatedCall.generate({ session }), /output cap before finishing/);
+
+  // A turn nobody asked for gets no exemption: saying nothing is a
+  // decision it may make, and running out of budget is not one.
+  const unasked = createSession();
+  unasked.messages.push({
+    id: 'session-1:user:2',
+    role: 'user',
+    content: 'Dylan: Bea, thoughts?',
+    createdAt: new Date().toISOString(),
+    overheard: true,
+  });
+  const truncatedUnasked = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: createMockFetch([apiMessage([{ type: 'text', text: 'Well, I think' }], 'max_tokens')]).fetchImpl,
+  });
+  await assert.rejects(() => truncatedUnasked.generate({ session: unasked }), /output cap before finishing/);
+
+  // The other way a limit rather than the model ends a turn: the context
+  // window filled during generation. A documented `StopReason` in the SDK
+  // this package installs, and a fragment for the same reason — easy to
+  // miss because the two read as one case, and they need different advice:
+  // this one is not fixed by asking for a shorter reply.
+  const outOfContext = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: createMockFetch([
+      apiMessage([{ type: 'text', text: 'Looking at the first file,' }], 'model_context_window_exceeded'),
+    ]).fetchImpl,
+  });
+  await assert.rejects(
+    () => outOfContext.generate({ session }),
+    /ran out of context part-way through its answer .*model_context_window_exceeded/,
+  );
+  // And on a turn nobody asked for, where silence would otherwise be a
+  // valid answer.
+  await assert.rejects(() => outOfContext.generate({ session: unasked }), /ran out of context/);
+
+  // And the cap the message names is the one that was actually sent, so
+  // the remedy it suggests is measured against the real ceiling.
+  const lowered = createAnthropicProvider({
+    apiKey: 'test-key',
+    maxTokens: 2048,
+    fetch: createMockFetch([apiMessage([{ type: 'text', text: 'a long answer that' }], 'max_tokens')]).fetchImpl,
+  });
+  await assert.rejects(() => lowered.generate({ session }), /stopped at the 2048-token output cap/);
+});
+
+test('the default output cap leaves room for an ordinary long answer', async () => {
+  // 4096 was a Claude-3-era number, and with truncation now refused rather
+  // than quietly delivered, a cap that low would turn an ordinary long
+  // reply into a failed turn.
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hello.' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  await provider.generate({ session: createSession() });
+  assert.equal(requests[0]!.body.max_tokens, 16_000);
+});
+
 test('failed tool results replay as is_error tool_result blocks', async () => {
   const { fetchImpl, requests } = createMockFetch([
     apiMessage([{ type: 'text', text: 'That tool failed, sorry.' }]),

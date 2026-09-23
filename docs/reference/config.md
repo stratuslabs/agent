@@ -50,6 +50,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `fallbackBaseUrl` | Base URL for an OpenAI-compatible fallback (e.g. a local model) |
 | `promptCache` | Cache the stable head of each Anthropic request. Default `true` — see below |
 | `promptCacheTtl` | How long a cache entry lives: `5m` (default) or `1h` |
+| `maxTokens` | Per-turn output cap sent to Anthropic. Default `16000`; lower it for a model or proxy whose ceiling is below that, raise it for longer answers — see below |
 | `vision` | Whether an OpenAI-compatible model takes images — the main one or the fallback, it is one setting. Default `true`; set `false` for a text-only model, which would otherwise reject every turn of a session an image was sent to — see [Slack](../guides/slack.md#sending-an-image) |
 | `approvals` | Unattended-approval policy for `stratus serve` — trusted configs only, see below |
 | `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), and whether anyone else gets a turn at all: `admit` (`anyone`, the default, or `principals`), each with a per-agent `agents` sub-block — trusted configs only, see below |
@@ -57,6 +58,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `plugins` | Plugins to load, keyed by package name — trusted configs only, see below |
 | `executor` | Which executor runs tool calls: `local` (the default) or the name a [plugin executor](../guides/extending.md#executors) registers — trusted configs only, see below |
 | `memoryStore` | Which store backs agent memory: `file` (the default) or the name a [plugin memory store](../guides/extending.md#memory-stores) registers — trusted configs only, see below |
+| `maxTurns` | How many provider turns one message may spend before the turn is failed as a runaway. Default `8` — trusted configs only, see below |
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
@@ -77,6 +79,104 @@ agent's `credentials:` soul list and resolved per call — the agent's own
 entry first, then the fleet's shared one, then the environment. Add one with
 [`stratus credential set`](./cli.md); never write a key into a config file,
 which is a file people commit.
+
+## How long an answer may be
+
+Anthropic requires a per-turn output cap, and `maxTokens` sets it. The
+default is 16000.
+
+```json
+{
+  "maxTokens": 4096
+}
+```
+
+A reply that hits the cap is **refused, not returned**: the model was still
+going, so what arrived is a fragment, and a fragment delivered as an answer
+reads exactly like a complete one. The error names the cap that was in
+force.
+
+Two reasons to set it:
+
+- **Lower**, for a model or a `baseUrl` proxy whose own ceiling is under
+  the default. The adapter takes whatever model name you give it, so it
+  cannot know — and a cap above what the endpoint accepts is refused
+  before anything is generated, on every turn.
+- **Higher**, for agents that write long answers. Past roughly 20000 this
+  only works where the request streams: the Anthropic SDK refuses a
+  non-streaming call whose cap puts its estimated duration past ten
+  minutes. `stratus serve` streams, so a daemon can go higher; `stratus
+  run` cannot always.
+
+A configured Anthropic `fallbackModel` runs under the same cap, like
+`promptCache` and `promptCacheTtl` — one setting for the daemon, applying
+to whichever Anthropic model ends up serving the turn. That matters most
+here: a fallback left on the default would fail every request from the
+moment it took over.
+
+It is not a budget — nothing is spent for being allowed, only for what the
+model actually writes. The other providers ignore it: the harnesses choose
+their own cap, and the OpenAI-compatible adapter sends none, so there the
+ceiling is the endpoint's own default.
+
+## How many turns one message may spend
+
+A dispatched turn calls the provider, runs whatever tools it asked for,
+calls the provider again with the results, and repeats. `maxTurns` is the
+ceiling on that loop — the point at which the turn is failed rather than
+allowed to keep going.
+
+```json
+{
+  "maxTurns": 24
+}
+```
+
+The default is 8, which is the whole budget for one Slack message: a task
+that needs nine rounds of tool calls fails on the ninth. It fails *before*
+the ninth provider call rather than after it, so there is no partial
+answer — the error is `Session exceeded the maximum of 8 provider turns`,
+and the work of the first eight turns is in the transcript but was never
+summed up. Sending the message again resumes the session with the ceiling
+reset, which is the recovery; raising `maxTurns` is the fix.
+
+Raise it for agents that do multi-step work — reading several files,
+walking a set of issues, anything with a fan-out. Leave it low for a fleet
+that answers questions.
+
+It is a **spending** limit as much as a safety one, which is why it is
+trusted-config only: a turn that loops 500 times costs 500 provider calls.
+That cuts both ways, so a project-local config cannot lower it either. The
+floor is 1, and 1 does not stop the daemon answering: the ceiling is
+tested before each provider call, so the first one is always allowed and a
+question the agent can answer outright still gets answered. What it stops
+is the *second* call — under a provider the kernel drives one call at a
+time (`anthropic`, `openai`, and plugin providers of that shape), an agent
+that reads a file, searches, or calls any tool at all fails the moment it
+tries to use the result.
+
+**The harness runtimes spend the ceiling differently.** `codex` and
+`claude-code` hold their own loop inside a single provider call, so the
+same number reaches them as an *inner* budget rather than a count of round
+trips, and the two spend it differently from each other.
+
+For `codex` it bounds hosted tool calls per run. At `maxTurns: 1` the first
+tool call executes and the agent answers with its result; it is the
+*second* that comes back refused as a tool error (`Turn budget
+exhausted: ...`), which ends the run with whatever it has rather than
+failing it. That is the case to watch: a ceiling too low shortens the work
+into an answer that reads like a complete one.
+
+For `claude-code` it is the Agent SDK's own turn cap, and running out is a
+failure rather than a short answer — the SDK ends the run with
+`error_max_turns`, and the provider refuses any non-success result. So the
+turn fails as it would under a kernel-driven provider, just from inside a
+single provider call and with the SDK's wording.
+
+A delegated sub-session gets its own allowance rather than a share of its
+parent's: `agent.delegate` starts a separate dispatch, and each dispatch is
+held to this ceiling. The bound on delegation *depth* is a different
+setting — see [Tools](../guides/tools.md).
 
 ## Prompt caching
 
@@ -131,6 +231,7 @@ set.
 | `approvals` | Who may authorize an agent's tool calls, and how | [Approvals](../guides/approvals.md) |
 | `principals` | Whose messages an agent takes as its operator's; everyone else's arrive as `unknown` | [Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator), [Memory](../concepts/memory.md#where-a-fact-came-from) |
 | `api` | Which interface and port a daemon binds | [Remote access](../guides/remote-access.md) |
+| `maxTurns` | How long a loop one message can buy, which is both a runaway guard and a spending limit | [Always on](../guides/always-on.md#how-many-turns-one-message-may-spend) |
 | `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
 | `soul`, `systemPrompt` | What the agent is told it is and what it may do — a persona in a cloned repo is a system prompt written by whoever pushed it. `--soul` and `STRATUS_SOUL` still name one; the run says once, on stderr, what the file asked for and did not get, and `stratus serve` says it once at startup, whether or not its runtime resolves | [Security](../concepts/security.md) |
 

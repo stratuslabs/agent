@@ -320,6 +320,7 @@ export const createRuntimeProvider = (
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
       ...(config.promptCache !== undefined ? { promptCache: config.promptCache } : {}),
       ...(config.promptCacheTtl ? { promptCacheTtl: config.promptCacheTtl } : {}),
+      ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
       ...(config.fetch ? { fetch: config.fetch } : {}),
     });
   }

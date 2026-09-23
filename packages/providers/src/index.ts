@@ -530,6 +530,27 @@ export const createOpenAICompatibleProvider = ({
         request.onUsage?.(usage);
       }
 
+      // Cut off at the endpoint's own output cap, so what arrived is a
+      // fragment. Judged here, ahead of the parts, for the reason the
+      // empty-response check below already gives in its own words — "a
+      // response cut off by length … is a failure" — and could not act on:
+      // it only ran when nothing usable surfaced, so a reply cut off after
+      // a paragraph was returned as the turn's answer. A truncated tool
+      // call is the sharper half: `arguments` stops mid-JSON, and a cut
+      // that happens to land on a closing brace parses into an object
+      // missing half its keys.
+      //
+      // No `maxTokens` to name in the remedy: this adapter sends no
+      // `max_tokens`, so the ceiling is whatever the endpoint defaults to
+      // and the fix is on that side.
+      if (payload.choices?.[0]?.finish_reason === 'length') {
+        throw new Error(
+          'The provider stopped at its output cap before finishing (finish_reason: length), so the reply '
+          + 'is a fragment and was not delivered. Ask for a shorter answer, or raise the output cap on the '
+          + 'endpoint serving this model.',
+        );
+      }
+
       const builder = createProviderResponseBuilder();
 
       const text = extractOpenAICompatibleText(payload);
@@ -546,10 +567,13 @@ export const createOpenAICompatibleProvider = ({
       if (result.parts.length === 0) {
         // Nothing said is the answer a turn nobody asked for may give — see
         // `RunInput.addressed` in core — but only when the model actually
-        // stopped: a response cut off by length, a content filter, or a
-        // tool call with no usable name is a failure reduced to no parts,
-        // and recording it as a decision would hide it. An endpoint that
-        // reports no finish reason at all is taken at its word.
+        // stopped: a content filter, or a tool call with no usable name, is
+        // a failure reduced to no parts, and recording it as a decision
+        // would hide it. An endpoint that reports no finish reason at all
+        // is taken at its word. Being cut off by length is the other way a
+        // turn does not end of its own accord, and it no longer reaches
+        // here — the check above refuses it whether or not anything
+        // surfaced.
         const choice = payload.choices?.[0];
         // A refusal is the model's own outcome, not silence: it arrives with
         // `content: null` and a `finish_reason` of `stop`, and only this

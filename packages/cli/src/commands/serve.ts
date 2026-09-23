@@ -50,6 +50,7 @@ import {
   loadServeApi,
   loadServePlugins,
   loadServeRuntimeSelection,
+  loadServeMaxTurns,
 } from '../trusted-config.ts';
 
 export const runServe = async (
@@ -180,6 +181,11 @@ const serveHeldHome = async (
   // at start when the name is nobody's.
   const executorName = await loadServeRuntimeSelection('executor', env, command.configPath, warn);
   const memoryStoreName = await loadServeRuntimeSelection('memoryStore', env, command.configPath, warn);
+  // How long a loop one message may buy. Same trust rule, and the last
+  // thing the daemon could not say for itself — `--max-turns` is a
+  // `stratus run` flag, so a served fleet was held to the kernel default
+  // with no override.
+  const maxTurns = await loadServeMaxTurns(env, command.configPath, warn);
 
   // Every kind of grant an agent holds — command scopes, origins, standing
   // tool grants — in one file per agent beside its soul, through one store
@@ -476,6 +482,7 @@ const serveHeldHome = async (
     ...(approvalsConfig.timeoutMs !== undefined ? { approvalTimeoutMs: approvalsConfig.timeoutMs } : {}),
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(channels.length > 0 ? { channels } : {}),
     // The Slack adapter is host-wired, so its (agent, kind) claims are
     // declared here; a plugin channel claiming one of them is refused at

@@ -67,7 +67,7 @@ The question every operator asks on their second day:
 | A skill installed, edited, or removed | No | `stratus skill add` reloads the daemon it finds; `stratus skill reload` after a hand edit. See [Skills](./skills.md#installing-while-the-daemon-runs) |
 | Tools from an MCP server that reconnects | No | Discovered on reconnect |
 | A plugin enabled, disabled, upgraded, or reconfigured | **Yes** | `stratus restart` |
-| Credentials, or the `api` and `approvals` blocks | **Yes** | `stratus restart` — they come from a trusted config and decide who may approve and what the daemon binds, so they are not re-read live |
+| Credentials, or the `api`, `approvals`, and `maxTurns` settings | **Yes** | `stratus restart` — they come from a trusted config and decide who may approve, what the daemon binds, and how much one message may spend, so they are not re-read live |
 | The `stratus` package itself | **Yes** | `stratus update`, which stops and starts the service around the upgrade |
 
 ### `stratus restart`: announced, drained, and back
@@ -175,3 +175,36 @@ bounds.
   turn's session comes back `failed` with a reason that says so — `Run
   aborted: no activity for 120000ms` — so it reads differently from a turn
   a person cancelled, whose reason is the bare `Run aborted`.
+
+## How many turns one message may spend
+
+A turn calls the provider, runs the tools it asked for, and calls the
+provider again with the results. `maxTurns` in the config file is the
+ceiling on that loop, and the default is **8** — the whole budget for one
+Slack message, one scheduled firing, or one control-API dispatch.
+
+A task that needs a ninth round fails on the ninth:
+
+```
+Session exceeded the maximum of 8 provider turns.
+```
+
+The ceiling is checked *before* the provider call rather than after it, so
+the agent never gets a last turn to sum up what it found — the work of the
+first eight is in the transcript, unanswered. Sending the message again
+resumes the session with a fresh allowance, which is how to recover;
+raising `maxTurns` is how to stop it happening.
+
+That is how the ceiling reads under a provider the kernel drives one call
+at a time. The `codex` and `claude-code` runtimes hold their own loop
+inside one call and take the number as an inner budget instead: codex
+refuses the call past the budget as a tool error and answers with what it
+has, while Claude Code's own limit fails the run (`error_max_turns`). See
+[Configuration](../reference/config.md#how-many-turns-one-message-may-spend).
+
+There is no flag for it on
+`stratus serve`: it is a trusted-config key, because a turn that loops 500
+times costs 500 provider calls. See
+[Configuration](../reference/config.md#how-many-turns-one-message-may-spend).
+
+`--max-turns` on `stratus run` is the same ceiling for a one-shot run.

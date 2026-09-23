@@ -13057,6 +13057,36 @@ test('re-running setup keeps the executor and memoryStore selections it has no m
   assert.equal(config.memoryStore, 'vector');
 });
 
+test('re-running setup keeps the output and turn bounds it has no menu for', async () => {
+  // Same hazard as the executor and memoryStore above, and sharper for
+  // these two: a `maxTokens` set because the endpoint's ceiling is under
+  // the default would silently return to the default and fail every
+  // request, and a raised `maxTurns` would return to 8 — both without a
+  // word, from a re-run the operator did for some unrelated reason.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ provider: 'demo', maxTokens: 4096, maxTurns: 24 })}\n`,
+  );
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => true,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) as Record<string, unknown>;
+  assert.equal(config.maxTokens, 4096);
+  assert.equal(config.maxTurns, 24);
+});
+
 test('a provider nobody registered is refused by name, with what is registered', async () => {
   const home = await seamHome({ plugins: { 'stratus-plugin-fixture-provider': {} } });
   const { streams, output } = createStreams();

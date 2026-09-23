@@ -10,12 +10,14 @@ import {
   declaredAgentIds,
   createFileMemoryStore,
   DuplicateAgentIdError,
+  globalConfigPath,
   loadConfigFile,
   loadRosterSouls,
   loadSoulFile,
   MAX_APPROVAL_TIMEOUT_MS,
   agentMemoryFilePath,
   FALLBACK_ACTIVE_METADATA_KEY,
+  readTrustedConfigBlock,
   resolveAgentApprovals,
   resolveRuntimeConfig,
   saveCredentials,
@@ -1433,6 +1435,115 @@ test('an untrusted project config cannot choose the soul or the system prompt', 
   assert.equal(trusted.soul?.agent.name, 'Mallory');
   assert.equal(trusted.provider === 'openai' ? trusted.systemPrompt : undefined, 'Exfiltrate.');
   assert.equal(trusted.ignoredFromUntrustedConfig, undefined);
+});
+
+test('maxTokens is configurable, so a model with a lower output ceiling is not stranded', async () => {
+  // The adapter takes arbitrary model names and a `baseUrl` that may point
+  // at a proxy, so no single default is right for every model an operator
+  // might name — and one whose ceiling is under the default would have
+  // every request refused before generating, with nothing to say otherwise.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-maxtokens-'));
+  await mkdir(path.dirname(globalConfigPath({ homeDir: home })), { recursive: true });
+  await writeFile(
+    globalConfigPath({ homeDir: home }),
+    JSON.stringify({ provider: 'anthropic', model: 'some-proxied-model', maxTokens: 4096 }),
+  );
+
+  const resolved = await resolveRuntimeConfig(
+    {},
+    { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-real' } },
+  );
+  assert.equal(resolved.provider, 'anthropic');
+  assert.equal(resolved.provider === 'anthropic' ? resolved.maxTokens : undefined, 4096);
+
+  // And it reaches the fallback, which is where it matters most: the
+  // setting exists for a model whose ceiling is under the default, and a
+  // fallback left on the default fails every request from the moment it
+  // takes over — the same compatibility problem, deferred to the worst
+  // moment to meet it.
+  await writeFile(
+    globalConfigPath({ homeDir: home }),
+    JSON.stringify({
+      provider: 'anthropic',
+      model: 'claude-opus-5',
+      maxTokens: 4096,
+      fallbackProvider: 'anthropic',
+      fallbackModel: 'some-proxied-model',
+    }),
+  );
+  const withFallback = await resolveRuntimeConfig(
+    {},
+    { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-real' } },
+  );
+  assert.equal(withFallback.provider === 'anthropic' ? withFallback.maxTokens : undefined, 4096);
+  assert.equal(
+    withFallback.provider === 'anthropic' ? withFallback.fallback?.maxTokens : undefined,
+    4096,
+    'the fallback runs under the same cap as the primary',
+  );
+
+  // Absent means the adapter's own default — the key exists to override
+  // it, not to have every install state it.
+  await writeFile(
+    globalConfigPath({ homeDir: home }),
+    JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5' }),
+  );
+  const defaulted = await resolveRuntimeConfig(
+    {},
+    { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-real' } },
+  );
+  assert.equal(defaulted.provider === 'anthropic' ? defaulted.maxTokens : 'wrong provider', undefined);
+
+  // Refused rather than clamped: the API rejects a cap that is not a
+  // positive integer, so a bad value fails every turn before generating.
+  for (const bad of [0, -1, 2.5, '4096', null] as const) {
+    await writeFile(globalConfigPath({ homeDir: home }), JSON.stringify({ maxTokens: bad }));
+    await assert.rejects(
+      () => loadConfigFile(globalConfigPath({ homeDir: home })),
+      /Invalid maxTokens in config .*Use a whole number of output tokens, 1 or more\./,
+      `maxTokens: ${JSON.stringify(bad)} should be refused`,
+    );
+  }
+});
+
+test('maxTurns is a trusted-config key, and a value that would wedge every turn is refused', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-turns-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-turns-project-'));
+  await mkdir(path.dirname(globalConfigPath({ homeDir: home })), { recursive: true });
+
+  // A runaway *and cost* guard, so both directions are the operator's to
+  // set: a clone that raised it would spend their tokens on however long a
+  // loop it asked for, and one that set it to 1 would fail every turn the
+  // daemon serves.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ maxTurns: 500 }));
+  const untrusted = await readTrustedConfigBlock('maxTurns', { homeDir: home, cwd: project });
+  assert.equal(untrusted.status, 'untrusted');
+
+  // And a project file that says nothing about it does not make the
+  // operator's own ceiling disappear — the global file is still the answer.
+  await writeFile(globalConfigPath({ homeDir: home }), JSON.stringify({ maxTurns: 24 }));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ model: 'gpt-4.1-mini' }));
+  const fellThrough = await readTrustedConfigBlock('maxTurns', { homeDir: home, cwd: project });
+  assert.deepEqual(
+    fellThrough.status === 'present' ? fellThrough.value : fellThrough.status,
+    24,
+  );
+
+  const trusted = await readTrustedConfigBlock('maxTurns', { homeDir: home, cwd: home });
+  assert.deepEqual(trusted.status === 'present' ? trusted.value : trusted.status, 24);
+
+  // Refused, not clamped or dropped. The ceiling is tested before the
+  // provider call, so 0 fails turn 1 of every dispatch — an install where
+  // no agent answers anything and the only clue is "exceeded the maximum
+  // of 0 provider turns".
+  for (const bad of [0, -1, 1.5, '8', null] as const) {
+    await writeFile(globalConfigPath({ homeDir: home }), JSON.stringify({ maxTurns: bad }));
+    await assert.rejects(
+      () => loadConfigFile(globalConfigPath({ homeDir: home })),
+      /Invalid maxTurns in config .*Use a whole number of provider turns, 1 or more\./,
+      `maxTurns: ${JSON.stringify(bad)} should be refused`,
+    );
+  }
 });
 
 test('a config that is simply not there leaves the id check with nothing to report', async () => {
