@@ -121,9 +121,44 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   if (config.promptCacheTtl === '5m' || config.promptCacheTtl === '1h') {
     resolved.promptCacheTtl = config.promptCacheTtl;
   }
+  if (config.maxTokens !== undefined) {
+    // Refused rather than clamped, like every other bound here: the API
+    // rejects a request whose cap is not a positive integer, so a bad value
+    // does not degrade, it fails every turn before generating.
+    if (
+      typeof config.maxTokens !== 'number'
+      || !Number.isInteger(config.maxTokens)
+      || config.maxTokens < 1
+    ) {
+      throw new Error(
+        `Invalid maxTokens in config ${configPath}: ${JSON.stringify(config.maxTokens)}. `
+        + 'Use a whole number of output tokens, 1 or more.',
+      );
+    }
+    resolved.maxTokens = config.maxTokens;
+  }
   // `false` is the whole point of this key too.
   if (typeof config.vision === 'boolean') {
     resolved.vision = config.vision;
+  }
+  if (config.maxTurns !== undefined) {
+    // Refused rather than clamped, like `approvals.timeoutMs`: every value
+    // this rejects breaks the daemon in a way nothing downstream reports.
+    // The ceiling is tested as `turn > maxTurns` before the provider call,
+    // so 0 or a negative fails turn 1 of every dispatch — an install where
+    // no agent can answer anything, with "exceeded the maximum of 0
+    // provider turns" as the only clue.
+    if (
+      typeof config.maxTurns !== 'number'
+      || !Number.isInteger(config.maxTurns)
+      || config.maxTurns < 1
+    ) {
+      throw new Error(
+        `Invalid maxTurns in config ${configPath}: ${JSON.stringify(config.maxTurns)}. `
+        + 'Use a whole number of provider turns, 1 or more.',
+      );
+    }
+    resolved.maxTurns = config.maxTurns;
   }
   const approvals = parseApprovalsConfig(config.approvals, configPath);
   if (approvals) {

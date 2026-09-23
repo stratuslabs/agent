@@ -84,6 +84,26 @@ subscription sign-in to per-token billing.
 - **A gated tool call was refused overnight** — that is the daemon's
   honest default. [Approvals](./approvals.md) covers asking a human in
   Slack instead.
+- **"Session exceeded the maximum of 8 provider turns"** — the task needed
+  more rounds of tool calls than one message may spend. Send it again to
+  resume with a fresh allowance; raise `maxTurns` so it stops happening.
+  See [how many turns one message may
+  spend](./always-on.md#how-many-turns-one-message-may-spend).
+- **"ran out of context part-way through its answer"** — different from
+  the cap below, and not fixed by asking for less: the *conversation* is
+  what no longer fits, so the model reached the end of its context window
+  mid-reply. `stratus session rollover <id>` starts the same id over, or
+  move that agent to a model with a bigger window.
+- **"stopped at the … output cap before finishing"** — the model ran out
+  of room mid-answer, so the reply was a fragment and was not delivered.
+  The turn is failed rather than answered on purpose: a cut-off reply
+  reads exactly like a complete one, which is worse than an error. Ask for
+  a shorter answer, or change
+  [`maxTokens`](../reference/config.md#how-long-an-answer-may-be). If the
+  message says the cap itself was rejected, the model or proxy you named
+  has a lower ceiling than the default — set `maxTokens` under it. On an
+  OpenAI-compatible endpoint the cap is the endpoint's own default, so the
+  fix is on that side.
 - **A bridged MCP tool's output ends in `truncated by stratus`** — the
   server returned more than one result may put into the transcript, which
   every later turn of that conversation would then replay. The marker
