@@ -1515,19 +1515,24 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   assert.deepEqual(intact.structured, { points: 4 });
   assert.equal(intact.structuredText, undefined);
 
-  // A cut never lands inside a surrogate pair: half an astral character is
-  // a malformed string a provider may refuse. The cap is chosen so the cut
-  // index really is odd — at 100 emoji and this marker, 71 puts it at one
-  // UTF-16 unit, which is the first half of the first pair.
+  // The allowance is counted in code points, so it has to be SPENT in code
+  // points. Slicing by UTF-16 index instead would charge every astral
+  // character twice and keep about half of what was allowed — safe, since
+  // nothing malformed comes out, but quietly lossy in a way no marker
+  // reports.
   const emoji = await normalizeCallResult(
     { content: [{ type: 'text', text: '\u{1f600}'.repeat(100) }] },
-    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 71 },
+    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 90 },
   ) as string;
-  assert.match(emoji, /truncated by stratus at 71 characters; the server sent 100/);
+  assert.match(emoji, /truncated by stratus at 90 characters; the server sent 100/);
+  // Never half a character: the walk advances by whole code points, so a
+  // cut cannot land inside a surrogate pair.
   assert.doesNotMatch(emoji, /[\u{d800}-\u{dfff}]/u);
-  // The lone surrogate was dropped rather than kept, so nothing of the
-  // split character survives.
-  assert.ok(emoji.startsWith('\n… ['), `dropped the half character: ${JSON.stringify(emoji.slice(0, 8))}`);
+  // And the emoji that fit were kept. The marker is 70 characters, leaving
+  // 20 — twenty whole emoji, not the ten a code-unit slice would have left.
+  const kept = Array.from(emoji).filter((character) => character === '\u{1f600}').length;
+  assert.equal(kept, 20, `spent the allowance in code points: kept ${kept}`);
+  assert.ok(Array.from(emoji).length <= 90, 'and stayed inside it');
 });
 
 test('every server-written string in a result shares one allowance', async () => {

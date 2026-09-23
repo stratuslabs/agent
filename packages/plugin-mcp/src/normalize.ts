@@ -173,13 +173,38 @@ const cutToLimit = (raw: string, limit: number, what: string): string => {
   const marker = `\n… [${what} truncated by stratus at ${limit} characters; the server sent ${codePoints}]`;
   // `marker` is ASCII apart from the ellipsis, so its own code-point count
   // is its length.
-  const cut = Math.max(0, limit - marker.length);
-  const sliced = raw.slice(0, cut);
-  const last = sliced.charCodeAt(sliced.length - 1);
-  // A trailing high surrogate is the first half of a pair whose second
-  // half was just cut away.
-  const whole = last >= 0xd800 && last <= 0xdbff ? sliced.slice(0, -1) : sliced;
-  return `${whole}${marker}`;
+  return `${firstCodePoints(raw, Math.max(0, limit - marker.length))}${marker}`;
+};
+
+/**
+ * The first `count` CODE POINTS of `raw`.
+ *
+ * Not `raw.slice(0, count)`, which is the obvious thing and is wrong here:
+ * the allowance is counted in code points and `slice` indexes UTF-16 code
+ * units, so an emoji-heavy result would keep about half of what it was
+ * allowed — every astral character costing two of a budget that meant to
+ * charge one. Walking the string instead charges each character once and,
+ * because it only ever advances by whole code points, can never cut inside
+ * a surrogate pair.
+ *
+ * Bounded by `count`, not by the length of `raw`: the input is a result
+ * that has already been found too long, and the point of stopping early is
+ * not walking ten megabytes to keep a hundred thousand characters.
+ */
+const firstCodePoints = (raw: string, count: number): string => {
+  if (count <= 0) {
+    return '';
+  }
+  let units = 0;
+  let taken = 0;
+  for (const character of raw) {
+    if (taken === count) {
+      break;
+    }
+    units += character.length;
+    taken += 1;
+  }
+  return raw.slice(0, units);
 };
 
 /**
