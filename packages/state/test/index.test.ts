@@ -14,7 +14,7 @@ import {
   loadRosterSouls,
   loadSoulFile,
   MAX_APPROVAL_TIMEOUT_MS,
-  memoryFilePath,
+  agentMemoryFilePath,
   readTrustedConfigBlock,
   resolveAgentApprovals,
   resolveRuntimeConfig,
@@ -24,7 +24,7 @@ import {
 const tempHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-state-'));
 
 test('file memory store appends and lists per agent with read-time dedupe', async () => {
-  const store = createFileMemoryStore(memoryFilePath({ homeDir: tempHome }));
+  const store = createFileMemoryStore(agentMemoryFilePath({ homeDir: tempHome }, 'ava'));
   await store.append('ava', 'likes short answers');
   await store.append('scout', 'reads everything');
   const { entries } = await store.list('ava');
@@ -335,7 +335,7 @@ test('the fallback switch persists before the fallback attempt begins', async ()
 
 test('the memory file is owner-only, pre-existing files included', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-mem-'));
-  const filePath = memoryFilePath({ homeDir: home });
+  const filePath = agentMemoryFilePath({ homeDir: home }, 'ava');
 
   // Simulate a file created earlier under a loose umask.
   await mkdir(path.dirname(filePath), { recursive: true });
@@ -465,6 +465,71 @@ test('two souls claiming one id refuse the roster, naming both files', async () 
   // Both files, so the collision can actually be fixed.
   assert.match(failure.message, /a-first\.md/);
   assert.match(failure.message, /b-second\.md/);
+});
+
+test('two ids that differ only in case are one directory, so the roster refuses them', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-case-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'a-first.md'), '---\nname: First\nid: Ava\n---\n\nYou are First.\n');
+  await writeFile(path.join(dir, 'b-second.md'), '---\nname: Second\nid: ava\n---\n\nYou are Second.\n');
+
+  // `agents/Ava/` and `agents/ava/` are one directory on macOS and Windows,
+  // and that directory holds the sessions, the memories, and the grant file
+  // that says what may run unattended. Refused on every platform: a souls
+  // directory is copied between machines, and the answer must not depend on
+  // which one loaded it.
+  const failure = await loadRosterSouls({ homeDir: home }, () => {}).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof DuplicateAgentIdError, `expected a typed refusal, got ${String(failure)}`);
+  assert.equal(failure.agentId, 'Ava');
+  assert.equal(failure.conflictingId, 'ava');
+  assert.match(failure.message, /a-first\.md/);
+  assert.match(failure.message, /b-second\.md/);
+  // Named as the case collision it is, not as two files claiming one string.
+  assert.match(failure.message, /differ only in case/);
+});
+
+test('two ids that differ only by Unicode normalization are one directory too', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-nfc-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  // The same name written two ways: one code point, and `e` followed by a
+  // combining acute. Distinct strings in JavaScript, one directory on
+  // APFS, which folds normalization as well as case — so a check that only
+  // lowercased let this pair straight through to sharing a whitelist.
+  const composed = 'caf\u00e9';
+  const decomposed = 'cafe\u0301';
+  assert.notEqual(composed, decomposed, 'the two spellings are different strings');
+  await writeFile(path.join(dir, 'a-first.md'), `---\nname: First\nid: ${composed}\n---\n\nYou are First.\n`);
+  await writeFile(path.join(dir, 'b-second.md'), `---\nname: Second\nid: ${decomposed}\n---\n\nYou are Second.\n`);
+
+  const failure = await loadRosterSouls({ homeDir: home }, () => {}).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof DuplicateAgentIdError, `expected a typed refusal, got ${String(failure)}`);
+  assert.equal(failure.agentId, composed);
+  assert.equal(failure.conflictingId, decomposed);
+  assert.match(failure.message, /a-first\.md/);
+  assert.match(failure.message, /b-second\.md/);
+});
+
+test('a soul claiming the built-in id in another case is ignored, not served', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-reserved-case-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'impostor.md'), '---\nname: Impostor\nid: Stratus\n---\n\nYou are not Stratus.\n');
+
+  const warnings: string[] = [];
+  const roster = await loadRosterSouls({ homeDir: home }, (message) => warnings.push(message));
+
+  // `agents/Stratus/` is the built-in agent's own state directory wherever
+  // case folds, so this is the reserved id, spelled differently.
+  assert.deepEqual(roster, []);
+  assert.match(warnings.join(' '), /reserved/);
 });
 
 test('an unreadable soul still degrades to a warning, unlike a duplicate', async () => {
@@ -1357,7 +1422,10 @@ test('a config that is simply not there leaves the id check with nothing to repo
 
   const absent = await declaredAgentIds({ homeDir: home, cwd: home, processEnv: {} }, configPath);
   assert.deepEqual(absent.unread, []);
-  assert.ok(absent.ids.has('stratus'));
+  assert.ok(absent.holds('stratus'));
+  // And by the rule the filesystem uses, not by the exact string: an id
+  // is claimed against what would name the same directory.
+  assert.ok(absent.holds('Stratus'));
 
   // A config that exists and will not parse is the other case, and stays
   // reported: there the ids really are unchecked.

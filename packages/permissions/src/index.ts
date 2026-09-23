@@ -78,6 +78,9 @@ export {
   createFileCommandWhitelist,
   describeAgentGrants,
   whitelistPathFor,
+  LEGACY_WHITELIST_SUFFIX,
+  legacyWhitelistPathFor,
+  resolveWhitelistPath,
   WhitelistUnreadableError,
   type AgentGrants,
   type AgentGrantsListing,
@@ -1114,3 +1117,10 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     },
   };
 };
+
+export {
+  isSymlinkedStatePath,
+  isSymlinkedStatePathSync,
+  symlinkedStateDirectoryMessage,
+  symlinkedStateFileMessage,
+} from './state-directory.ts';

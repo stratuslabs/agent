@@ -16,7 +16,7 @@ export { BUILTIN_PROVIDER_NAMES, type BuiltinProviderName } from '@stratusagent/
  */
 export { BUILTIN_EXECUTOR_NAME, BUILTIN_MEMORY_STORE_NAME } from '@stratusagent/core';
 
-export { createFileMemoryStore } from './memory.ts';
+export { createFileMemoryStore, createShardedFileMemoryStore, type FileMemoryStoreOptions } from './memory.ts';
 
 export {
   type StateEnvironment,
@@ -33,10 +33,24 @@ export {
   logsDirPath,
   credentialsPath,
   agentsDirPath,
-  memoryFilePath,
+  legacyMemoryFilePath,
+  legacyMemoryFileIn,
+  legacySessionDbPath,
+  legacySessionDbIn,
   workspacesDirPath,
   skillsDirPath,
   agentWorkspacePath,
+  agentStateDirPath,
+  agentStateDirIn,
+  agentsDirIn,
+  agentSessionDbPath,
+  agentSessionDbIn,
+  agentMemoryFilePath,
+  agentMemoryFileIn,
+  fleetDbPath,
+  fleetDbIn,
+  assertPathSafeAgentId,
+  foldedAgentId,
   gatewayTokenPath,
   gatewayInfoPath,
 } from './paths.ts';
@@ -102,12 +116,22 @@ export {
   type StateMigration,
   STATE_MIGRATIONS,
   readStateStamp,
+  mergeStateStamp,
   newerStateMessage,
   assertStateCompatible,
   pendingStateMigrations,
+  type StateMigrationRunOptions,
   type AppliedStateMigration,
   runStateMigrations,
 } from './migrations.ts';
+
+export {
+  drainSharedMemory,
+  hasBracketedLegacyState,
+  hasBracketedLegacyStateIn,
+  legacyStateHeld,
+  legacyStateHeldIn,
+} from './layout-migration.ts';
 
 export {
   ConfigFileError,
@@ -192,9 +216,23 @@ export {
 
 export {
   withLegacyDefaultMemories,
+  createHomeMemoryStore,
   declaredAgentIds,
   claimSoulFile,
   personaSnippet,
   type AgentSummary,
   listAgentSummaries,
 } from './roster.ts';
+
+/**
+ * The rule that an agent's state directory is never a symlink, re-exported
+ * from `@stratusagent/permissions`, which owns it. `gateway` depends on this
+ * package and not on that one, and a second spelling of the check is exactly
+ * what the one home exists to prevent.
+ */
+export {
+  isSymlinkedStatePath,
+  isSymlinkedStatePathSync,
+  symlinkedStateDirectoryMessage,
+  symlinkedStateFileMessage,
+} from '@stratusagent/permissions';

@@ -115,6 +115,7 @@ The trust model behind that is in
 | Run it as a service, read its logs, upgrade it | [Always on](docs/guides/always-on.md) · [Logs](docs/guides/logs.md) · [Updating](docs/guides/updating.md) |
 | Fix a surprise | [Troubleshooting](docs/guides/troubleshooting.md) |
 | Look up any command, flag, or config key | [CLI reference](docs/reference/cli.md) · [Configuration](docs/reference/config.md) |
+| Know what is on disk, and what belongs to one agent | [State layout](docs/reference/state-layout.md) |
 | Understand the ideas | [Agents](docs/concepts/agents.md) · [Memory](docs/concepts/memory.md) · [Plugins](docs/concepts/plugins.md) · [Security](docs/concepts/security.md) |
 | Build against it | [Control API](packages/control-api/README.md) · [Architecture](docs/architecture/stratus-v2.md) · [Roadmap](docs/roadmap/README.md) |
 

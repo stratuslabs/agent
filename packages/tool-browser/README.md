@@ -72,7 +72,7 @@ There is one now, and it is the vocabulary the address policy already
 speaks: the **origin of the page the conversation is on**.
 
 ```jsonc
-// ~/.stratus/agents/ava.whitelist.json — beside the agent's soul, 0600
+// ~/.stratus/agents/ava/whitelist.json — in the agent's own directory, 0600
 { "version": 1, "scopes": [], "origins": [{ "origin": "https://app.example.com" }] }
 ```
 

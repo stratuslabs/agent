@@ -56,7 +56,7 @@ So this pack contributes the command string, and
 - **"Always allow" persists a scope, not a command.** Approving `git push
   origin main` means `git push origin feature` stops asking, while `git
   push --force`, `git push origin :main`, and `git push origin +main` still
-  do. Scopes live per agent in `~/.stratus/agents/<id>.whitelist.json`.
+  do. Scopes live per agent in `~/.stratus/agents/<id>/whitelist.json`.
 
 ## The environment is replaced, not extended
 

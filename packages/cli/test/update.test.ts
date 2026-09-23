@@ -109,7 +109,9 @@ test('update --check reports what it would do and exits 1 only when something is
   // --check does none of it: no stamp was written.
   await assert.rejects(() => stat(stateFilePath(env)));
 
-  await runStateMigrations(env);
+  // Exclusive, because settling now means 0003 too, and 0003 belongs to a
+  // caller holding the home — which `stratus update` itself is.
+  await runStateMigrations(env, { exclusive: true });
   const settled = createStreams();
   const second = await runCli({
     argv: ['update', '--check'],
@@ -192,7 +194,7 @@ test('update --check reports a companion left behind by a CLI that is already cu
 
 test('update --check says none are behind when every companion is current', async () => {
   const home = await freshHome();
-  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });
+  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} }, { exclusive: true });
   const { streams, output } = createStreams();
   const code = await runCli({
     argv: ['update', '--check'],
@@ -322,7 +324,10 @@ test('every command migrates on first use of a newer build, and serve refuses ne
   assert.equal(listed, 0);
   assert.match(agents.output.stderr, /state migration 0001-owner-only-state-files/);
   assert.equal((await stat(loose)).mode & 0o777, 0o600);
-  assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, STATE_SCHEMA_VERSION);
+  // Still 0: 0003 waits for a caller holding the home, and a run that
+  // defers proposes no version — it records what it ran so an unwritable
+  // stamp is still found, and leaves the version to the run that finishes.
+  assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, 0);
 
   // State written by a newer build: read-only commands warn and continue…
   await writeFile(stateFilePath({ homeDir: home }), JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [] }));
@@ -445,7 +450,10 @@ test('update fails loudly when it cannot restore a deliberately stopped daemon',
 
 test('update and --check treat state from a newer build as a refusal, before any side effect', async () => {
   const home = await freshHome();
-  await runStateMigrations({ homeDir: home });
+  // Made here rather than as a side effect of `runStateMigrations`: a run
+  // that defers the exclusive half writes no stamp at all now, so it no
+  // longer creates `~/.stratus` on the way past.
+  await mkdir(path.dirname(stateFilePath({ homeDir: home })), { recursive: true });
   await writeFile(stateFilePath({ homeDir: home }), JSON.stringify({
     schemaVersion: STATE_SCHEMA_VERSION + 1,
     // Every known migration already applied — the case where pending-only
@@ -547,6 +555,54 @@ test('a migration failure after the service stop restarts the daemon on its prev
   assert.match(output.stderr, /State migration failed/);
   assert.match(output.stderr, /restarted on its previous unit/);
   assert.ok(starts.length > 0, 'the daemon must be restarted after the failed migration');
+  assert.ok(!output.stdout.includes('Rewriting the service unit'), 'the rewrite must not run on unmigrated state');
+});
+
+test('a home claim that fails after the service stop still restarts the daemon', async () => {
+  const home = await freshHome();
+  const starts: string[][] = [];
+  const runner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && args.includes('is-active')) {
+      return { code: 0, stdout: 'active', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('is-enabled')) {
+      return { code: 0, stdout: 'enabled', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('restart')) {
+      starts.push([command, ...args]);
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    {},
+  );
+  // Establishing exclusivity can fail on its own, and by then this command
+  // has already stopped the managed service. A directory where the lock
+  // file goes makes the open fail with EISDIR — not a held lock, so it is
+  // thrown rather than reported as "somebody else is serving" — and works
+  // whoever runs the test, root included.
+  await mkdir(path.join(home, '.stratus', 'stratusd.lock'), { recursive: true });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: runner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+
+  assert.equal(code, 1);
+  // Down after an update that failed before it migrated anything is the
+  // outcome this recovery path exists to prevent.
+  assert.ok(starts.length > 0, 'the daemon must be restarted after the failed claim');
+  assert.match(output.stderr, /restarted on its previous unit/);
   assert.ok(!output.stdout.includes('Rewriting the service unit'), 'the rewrite must not run on unmigrated state');
 });
 
@@ -813,4 +869,86 @@ test('a prerelease companion is upgraded to the stable release that supersedes i
   });
   assert.equal(code, 0, `${output.stdout}\n${output.stderr}`);
   assert.deepEqual(installs, [['@stratusagent/channel-slack@latest']]);
+});
+
+test('update leaves the per-agent move pending when something still holds the home', async () => {
+  const home = await freshHome();
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: {},
+    serviceRunner: runningServiceRunner,
+    packageVersionFetcher: async () => CLI_VERSION,
+  };
+  const { legacySessionDbPath, hasBracketedLegacyState } = await import('@stratusagent/state');
+  const { DatabaseSync } = await import('node:sqlite');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A pre-layout session database with a conversation in it.
+  const seeded = new DatabaseSync(legacySessionDbPath(env));
+  seeded.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, status TEXT NOT NULL,
+      body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )
+  `);
+  seeded
+    .prepare('INSERT INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('live-1', 'ava', 'completed', '{}', 'x', 'x');
+  seeded.close();
+
+  // And something serving it that stopping the managed service does not
+  // touch — a foreground `stratus serve`, or a supervisor this command
+  // knows nothing about. Stopping the unit is not the same question as
+  // having the home to ourselves, and moving the database out from under a
+  // live daemon loses every turn it saves afterwards.
+  const { claimHome } = await import('@stratusagent/gateway');
+  const held = claimHome(env);
+
+  const output = createStreams();
+  try {
+    assert.equal(await runCli({ argv: ['update'], streams: output.streams, env }), 0, output.output.stderr);
+  } finally {
+    held.release();
+  }
+
+  assert.match(output.output.stderr, /is serving this home/);
+  assert.match(output.output.stderr, /left pending/);
+  // The database is where it was, and the home still reads as un-migrated.
+  await stat(legacySessionDbPath(env));
+  assert.equal(await hasBracketedLegacyState(env), true);
+});
+
+test('update finishes the per-agent move when nothing else holds the home', async () => {
+  const home = await freshHome();
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: {},
+    serviceRunner: runningServiceRunner,
+    packageVersionFetcher: async () => CLI_VERSION,
+  };
+  const { legacySessionDbPath, agentSessionDbPath, hasBracketedLegacyState } = await import('@stratusagent/state');
+  const { DatabaseSync } = await import('node:sqlite');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const seeded = new DatabaseSync(legacySessionDbPath(env));
+  seeded.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, status TEXT NOT NULL,
+      body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )
+  `);
+  seeded
+    .prepare('INSERT INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('live-1', 'ava', 'completed', '{}', 'x', 'x');
+  seeded.close();
+
+  const output = createStreams();
+  assert.equal(await runCli({ argv: ['update'], streams: output.streams, env }), 0, output.output.stderr);
+
+  // Moved, and the claim let go again so the restart can take it.
+  await stat(agentSessionDbPath(env, 'ava'));
+  await stat(`${legacySessionDbPath(env)}.migrated`);
+  assert.equal(await hasBracketedLegacyState(env), false);
+  const { claimHome } = await import('@stratusagent/gateway');
+  claimHome(env).release();
 });

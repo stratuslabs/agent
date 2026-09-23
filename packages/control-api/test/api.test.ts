@@ -2026,7 +2026,8 @@ test('schedules are listable and cancellable over the API', async () => {
     // The daemon's own database, from a second connection the way the CLI
     // opens it: the API's listing must be read-through, not a snapshot.
     const { SqliteScheduleStore } = await import('@stratusagent/gateway');
-    const store = new SqliteScheduleStore(path.join(harness.home, '.stratus', 'sessions.db'));
+    const { fleetDbPath } = await import('@stratusagent/state');
+    const store = new SqliteScheduleStore(fleetDbPath({ homeDir: harness.home }));
     store.insert({
       id: 'sched-1',
       agentId: 'stratus',
@@ -2379,9 +2380,10 @@ test('grants are listable and revocable over the API, through the daemon\'s own 
 test('a whitelist that will not parse refuses a revoke with the fix, rather than being written over', async () => {
   const home = await newHome();
   const directory = path.join(home, '.stratus', 'agents');
-  await mkdir(directory, { recursive: true });
-  await writeFile(path.join(directory, 'stratus.whitelist.json'), '{ not json');
-  const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
+  const { createFileCommandWhitelist, whitelistPathFor } = await import('@stratusagent/permissions');
+  const file = whitelistPathFor(directory, 'stratus');
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, '{ not json');
   const store = createFileCommandWhitelist({ directory });
   const harness = await startApi({ home, options: { grants: store } });
   try {
@@ -2398,7 +2400,7 @@ test('a whitelist that will not parse refuses a revoke with the fix, rather than
     const body = await json<{ error: { code: string; message: string } }>(response);
     assert.equal(body.error.code, 'grants_unreadable');
     assert.match(body.error.message, /could not be read .* Fix the file and restart the daemon/);
-    assert.equal(await readFile(path.join(directory, 'stratus.whitelist.json'), 'utf8'), '{ not json');
+    assert.equal(await readFile(file, 'utf8'), '{ not json');
   } finally {
     await harness.stop();
   }

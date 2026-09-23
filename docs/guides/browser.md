@@ -42,7 +42,7 @@ can name, which is what a single risk word gave up on.
 ## Which pages an agent may act on unattended
 
 1. **Sites approved this session**, then
-2. **the agent's whitelist** — `~/.stratus/agents/<id>.whitelist.json`, the
+2. **the agent's whitelist** — `~/.stratus/agents/<id>/whitelist.json`, the
    same file [command scopes](./shell.md) are written to, written by
    **Always allow**.
 
@@ -80,7 +80,7 @@ For a `headless` daemon nothing is ever asked, so the grant is written by
 hand. The file is per agent, `0600`, and read once at startup:
 
 ```jsonc
-// ~/.stratus/agents/ava.whitelist.json
+// ~/.stratus/agents/ava/whitelist.json
 {
   "version": 1,
   "scopes": [],

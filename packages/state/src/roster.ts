@@ -13,7 +13,7 @@ import {
 import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
 import { DEFAULT_CODEX_MODEL } from '@stratusagent/provider-codex';
-import { createFileMemoryStore } from './memory.ts';
+import { createShardedFileMemoryStore } from './memory.ts';
 import { ConfigFileError } from './config-file.ts';
 import { discoverActiveConfig } from './config-location.ts';
 import {
@@ -22,7 +22,7 @@ import {
   readWorkingDirectory,
   readNonEmptyString,
 } from './environment.ts';
-import { agentsDirPath, memoryFilePath } from './paths.ts';
+import { agentMemoryFilePath, agentsDirPath, foldedAgentId } from './paths.ts';
 import {
   isRegisteredProviderName,
   DEFAULT_OPENAI_MODEL,
@@ -108,6 +108,20 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
   };
 };
 
+/**
+ * The memory every surface in this repository reads and writes: one file
+ * per agent under `agents/<id>/`, with the built-in agent's inherited
+ * aliases folded in.
+ *
+ * One factory rather than the same two-line composition in the gateway, in
+ * `stratus run`, in `stratus memory`, and in the roster listing — the
+ * sharding and the alias merge are both rules, and four hand-rolled copies
+ * are four chances for one surface to answer "what does this agent
+ * remember" differently from the next.
+ */
+export const createHomeMemoryStore = (env: StateEnvironment): AgentMemoryStore =>
+  withLegacyDefaultMemories(createShardedFileMemoryStore((agentId) => agentMemoryFilePath(env, agentId)));
+
 // ---------------------------------------------------------------------------
 // Creating a soul under an id nothing else holds
 // ---------------------------------------------------------------------------
@@ -153,10 +167,20 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
 const isAbsentConfig = (reason: unknown): boolean =>
   reason instanceof ConfigFileError && reason.code === 'ENOENT';
 
+/**
+ * `holds` rather than a set to test with `has`, and the rename is the
+ * point: an id is claimed against what a *filesystem* would call the same
+ * name, not against the exact string. `renamed.md` declaring the legacy id
+ * `AVA` is what `agent new Ava` has to lose to — otherwise the write
+ * succeeds, the command reports a new agent, and the next roster load
+ * refuses every soul on every platform, leaving a daemon that will not
+ * start. Every caller here is asking "is this id available", so none of
+ * them wants the literal set.
+ */
 export const declaredAgentIds = async (
   env: StateEnvironment,
   configPath?: string,
-): Promise<{ ids: Set<string>; unread: string[] }> => {
+): Promise<{ holds: (agentId: string) => boolean; unread: string[] }> => {
   const [roster, configured] = await Promise.allSettled([
     loadRosterSouls(env, () => {}),
     // The soul a run started here would resolve, by the same precedence the
@@ -169,23 +193,23 @@ export const declaredAgentIds = async (
     resolveConfiguredSoul(configPath ? { configPath } : {}, env),
   ]);
 
-  const ids = new Set([DEFAULT_STRATUS_AGENT.id]);
+  const ids = new Set([foldedAgentId(DEFAULT_STRATUS_AGENT.id)]);
   const unread: string[] = [];
   if (roster.status === 'fulfilled') {
     for (const entry of roster.value) {
-      ids.add(entry.soul.agent.id);
+      ids.add(foldedAgentId(entry.soul.agent.id));
     }
   } else {
     unread.push('the roster');
   }
   if (configured.status === 'fulfilled') {
     if (configured.value) {
-      ids.add(configured.value.soul.agent.id);
+      ids.add(foldedAgentId(configured.value.soul.agent.id));
     }
   } else if (!isAbsentConfig(configured.reason)) {
     unread.push('the configured default soul');
   }
-  return { ids, unread };
+  return { holds: (agentId) => ids.has(foldedAgentId(agentId)), unread };
 };
 
 /**
@@ -197,9 +221,12 @@ export const declaredAgentIds = async (
  * a repeat name would otherwise share an earlier agent's memory. Two
  * claims have to fail here, and only one of them is a filename:
  *
- * - An id another soul declares, whatever that soul is called on disk.
- *   Since a duplicate refuses the whole roster, writing one would leave a
- *   daemon that will not start — created by the command meant to help.
+ * - An id another soul declares, whatever that soul is called on disk, and
+ *   whatever case or Unicode form it is written in — `declaredAgentIds`
+ *   answers the folded question, because that is the one the filesystem
+ *   and the roster both ask. Since a duplicate refuses the whole roster,
+ *   writing one would leave a daemon that will not start — created by the
+ *   command meant to help.
  * - The path itself, via `wx`, which makes the claim atomic against a
  *   concurrent writer that the roster read above cannot see.
  *
@@ -214,7 +241,7 @@ export const claimSoulFile = async (
   note: (message: string) => void,
   configPath?: string,
 ): Promise<{ agent: AgentDefinition; soulPath: string }> => {
-  const { ids: taken, unread } = await declaredAgentIds(env, configPath);
+  const { holds: taken, unread } = await declaredAgentIds(env, configPath);
   if (unread.length > 0) {
     note(`Note: could not read ${unread.join(' or ')}, so this id was not checked against the ids it declares.`);
   }
@@ -223,7 +250,7 @@ export const claimSoulFile = async (
   const baseId = agent.id;
   for (;;) {
     const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
-    if (!taken.has(agent.id)) {
+    if (!taken(agent.id)) {
       try {
         await writeFile(soulPath, render(agent), { flag: 'wx' });
         return { agent, soulPath };
@@ -294,7 +321,7 @@ export const listAgentSummaries = async (
   /** The config the caller is pinned to; see `discoverActiveConfig`. */
   configPath?: string,
 ): Promise<AgentSummary[]> => {
-  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+  const memory = createHomeMemoryStore(env);
   const processEnv = readProcessEnv(env);
   // Listing must never be blocked by a broken config — it only feeds the
   // default marker and the "runs on" lines.
