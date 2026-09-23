@@ -666,8 +666,23 @@ const createResultBudget = (limit: number, initialReserve: number) => {
         reserve = Math.max(0, reserve - ownReserve);
         return value;
       }
-      const bounded = cutToLimit(value, Math.max(0, remaining() - envelope), what, limit);
-      spent += serializedLength(bounded) + envelope;
+      // Cut against the allowance that does *not* hold this marker's room,
+      // because the cut is what writes the marker: `cutToLimit` subtracts
+      // it from whatever it is given, so cutting against the reduced
+      // allowance charged it twice and threw away a second marker's worth
+      // of the server's text for nothing. A 511-character result came back
+      // as 406 of its 512.
+      const allowance = Math.max(0, withoutOwn(ownReserve) - envelope);
+      const bounded = cutToLimit(value, allowance, what, limit);
+      const cost = serializedLength(bounded) + envelope;
+      // Released only when the marker did fit inside that allowance. When
+      // it did not — the bare-marker case, at a cap too small to hold one
+      // — the room stays held, and it is what covers the overspend, so the
+      // result still weighs no more than the cap either way.
+      if (cost <= withoutOwn(ownReserve)) {
+        reserve = Math.max(0, reserve - ownReserve);
+      }
+      spent += cost;
       return bounded;
     },
   };

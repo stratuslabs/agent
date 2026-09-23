@@ -1550,12 +1550,13 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   // Never half a character: the walk advances by whole code points, so a
   // cut cannot land inside a surrogate pair.
   assert.doesNotMatch(emoji, /[\u{d800}-\u{dfff}]/u);
-  // And the emoji that fit were kept: 422 of them, where a code-unit slice
-  // would have left 211 — every astral character costing two of a budget
-  // that meant to charge one. The rest of the 600 went on the room set
-  // aside to announce a cut and on the marker itself.
+  // And the emoji that fit were kept: 526 of them, where a code-unit slice
+  // would have left 263 — every astral character costing two of a budget
+  // that meant to charge one. The rest of the 600 went on the marker,
+  // which is charged once rather than both held in reserve and subtracted
+  // from what the reserve left.
   const kept = Array.from(emoji).filter((character) => character === '\u{1f600}').length;
-  assert.equal(kept, 420, `spent the allowance in code points: kept ${kept}`);
+  assert.equal(kept, 526, `spent the allowance in code points: kept ${kept}`);
   assert.ok(Array.from(emoji).length <= 600, 'and stayed inside it');
 
   // A fractional allowance is not a number of characters, and the walk
@@ -1992,6 +1993,30 @@ test('an attachment is judged against the whole list, not against half of one', 
   assert.match(String(many.filesTruncated), /more attachments were not saved/);
   const onDisk = await readdir(path.join(manyRoot, 'ava', 'mcp', 'linear'));
   assert.equal(onDisk.length, written.length, 'the blocks that were refused were never written');
+});
+
+test('a cut spends the room held for announcing it, rather than paying twice', async () => {
+  // The reservation holds room for the marker; the cut then subtracts the
+  // marker from whatever allowance it is given. Cutting against the
+  // allowance that still held that room charged it twice and threw away a
+  // second marker's worth of the server's text for nothing — a
+  // 511-character result, one character over its 512-character cap, came
+  // back as 406.
+  for (const sent of [511, 600, 5_000]) {
+    const result = await normalizeCallResult(
+      { content: [{ type: 'text', text: 'a'.repeat(sent) }] },
+      { server: 'linear', tool: 'dump', agentId: 'ava', maxResultChars: BRIDGED_RESULT_MIN_LENGTH },
+    ) as string;
+    const weighed = Array.from(JSON.stringify(result)).length;
+    assert.match(result, /truncated by stratus/);
+    // Right up to the cap, and never past it: the room is spent on the
+    // marker rather than held beside it.
+    assert.equal(
+      weighed,
+      BRIDGED_RESULT_MIN_LENGTH,
+      `sent ${sent}: the result used its whole allowance, weighing ${weighed}`,
+    );
+  }
 });
 
 test('an attachment is not dropped because a different field had to be cut', async () => {
