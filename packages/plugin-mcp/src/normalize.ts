@@ -198,7 +198,13 @@ const firstCodePoints = (raw: string, count: number): string => {
   let units = 0;
   let taken = 0;
   for (const character of raw) {
-    if (taken === count) {
+    // `>=`, not `===`. `taken` counts whole characters, so an equality
+    // test against a fractional `count` is never true and the loop runs to
+    // the end of the string — returning the entire payload with a
+    // truncation marker on it, which is larger than what came in. The
+    // callers are guarded (see `asPositiveInteger`), and this is the layer
+    // that must not depend on them being right.
+    if (taken >= count) {
       break;
     }
     units += character.length;

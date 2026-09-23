@@ -1533,6 +1533,47 @@ test('a result too large for the transcript is cut, with the cut announced', asy
   const kept = Array.from(emoji).filter((character) => character === '\u{1f600}').length;
   assert.equal(kept, 20, `spent the allowance in code points: kept ${kept}`);
   assert.ok(Array.from(emoji).length <= 90, 'and stayed inside it');
+
+  // A fractional allowance is not a number of characters, and the walk
+  // counts whole ones — so an equality test against it would never be true
+  // and the whole payload would come back with a truncation marker on it,
+  // longer than what went in. Guarded at the config boundary and again in
+  // the walk, because the walk must not depend on its callers being right.
+  const fractional = await normalizeCallResult(
+    { content: [{ type: 'text', text: 'y'.repeat(5_000) }] },
+    { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: 400.5 },
+  ) as string;
+  assert.ok(fractional.length < 600, `a fractional cap still bounds the result: ${fractional.length}`);
+  assert.match(fractional, /truncated by stratus/);
+});
+
+test('a cap that is not a whole number of characters falls back to the default', async () => {
+  // The per-server settings take an invalid value as "use the default"
+  // rather than refusing it, the way the two timeouts beside them do — and
+  // a fraction is invalid here in a way it is not for a timeout, because
+  // this bound is counted up to one character at a time.
+  const handle = fakeServer({
+    current: (server) => {
+      server.registerTool('chatty', { description: 'Says a lot.' }, async () => ({
+        content: [{ type: 'text', text: 'z'.repeat(BRIDGED_RESULT_MAX_LENGTH + 2_000) }],
+      }));
+    },
+  });
+  const target = new ToolRegistry();
+  const plugin = pluginFor(handle, {
+    servers: { linear: { url: 'http://127.0.0.1:9/unused', maxResultChars: 400.5 } },
+  });
+  await loadThroughView(plugin, target);
+  try {
+    const answer = await target.get('mcp.linear.chatty')!.execute({}, sessionFor('ava')) as string;
+    assert.ok(
+      Array.from(answer).length <= BRIDGED_RESULT_MAX_LENGTH,
+      `bounded by the default rather than by nothing: ${answer.length}`,
+    );
+    assert.match(answer, /truncated by stratus at 100000 characters/);
+  } finally {
+    await plugin.dispose?.();
+  }
 });
 
 test('every server-written string in a result shares one allowance', async () => {

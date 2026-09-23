@@ -189,6 +189,16 @@ const asStringRecord = (value: unknown, where: string): Record<string, string> =
 const asPositiveNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 
+/**
+ * The same, for a bound that is counted rather than measured. A fractional
+ * millisecond is a harmless way to say a timeout, but a fractional
+ * character is not a number of characters — and it reaches code that
+ * counts up to it one character at a time, where "400.5" is a target no
+ * integer ever hits.
+ */
+const asPositiveInteger = (value: unknown, fallback: number): number =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback;
+
 const asStringArray = (value: unknown, where: string): string[] | undefined => {
   if (value === undefined) {
     return undefined;
@@ -331,10 +341,11 @@ const resolveServerSpec = (
     headers: asStringRecord(block.headers, `${where}.headers`),
     connectTimeoutMs: asPositiveNumber(block.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS),
     callTimeoutMs: asPositiveNumber(block.callTimeoutMs, DEFAULT_CALL_TIMEOUT_MS),
-    // A `0` or a negative is not "no cap" — see `asPositiveNumber`. The one
-    // thing this must not be is switchable off from a config key, since a
-    // server that wanted the cap gone is the server it exists for.
-    maxResultChars: asPositiveNumber(block.maxResultChars, BRIDGED_RESULT_MAX_LENGTH),
+    // A `0`, a negative, or a fraction is not "no cap" — see
+    // `asPositiveInteger`. The one thing this must not be is switchable off
+    // from a config key, since a server that wanted the cap gone is the
+    // server it exists for.
+    maxResultChars: asPositiveInteger(block.maxResultChars, BRIDGED_RESULT_MAX_LENGTH),
   };
 };
 
