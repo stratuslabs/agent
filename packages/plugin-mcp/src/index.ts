@@ -55,6 +55,7 @@ export {
   BRIDGED_SCHEMA_MAX_DEPTH,
   BRIDGED_SEGMENT_MAX_LENGTH,
   boundedResultLimit,
+  boundServerText,
   bridgedDescription,
   bridgedSchema,
   bridgedToolName,

@@ -665,9 +665,17 @@ const createResultBudget = (limit: number, initialReserve: number) => {
  * carrying an HTTP body. Those reach the agent as a thrown message, which
  * `DefaultExecutor` copies into `ToolResult.error` and the session persists
  * and replays exactly like output.
+ *
+ * Bounded to the cap *minus the envelope it is replayed in*, for the same
+ * reason a result's fields are: it does not travel as a bare string but as
+ * a JSON string value under a key, and a message cut to exactly the cap
+ * arrives a dozen characters over it. The marker still names the cap the
+ * operator set rather than the number left after that deduction.
  */
+export const THROWN_MESSAGE_ENVELOPE = `{"error":""}`.length;
+
 export const boundServerText = (raw: string, limit: number, what: string): string =>
-  cutToLimit(raw, limit, what);
+  cutToLimit(raw, Math.max(0, limit - THROWN_MESSAGE_ENVELOPE), what, limit);
 
 export interface NormalizeOptions {
   /** The bridged server's config key — part of where a binary block lands. */
@@ -766,9 +774,11 @@ export const normalizeCallResult = async (
     // must not get an unbounded channel into the transcript by failing
     // instead of succeeding.
     throw new Error(
-      // A failing call throws its message; nothing else is in the result,
-      // so it carries no envelope of its own.
-      budget.spend(message, 'error message', reserve.text, 0)
+      // A failing call throws rather than returning a result, so what is
+      // replayed is the message inside `ToolResult.error` — the same
+      // envelope `boundServerText` deducts for, less the brace the budget
+      // starts out holding against a result object that is never built.
+      budget.spend(message, 'error message', reserve.text, THROWN_MESSAGE_ENVELOPE - 1)
       || `MCP server ${options.server} reported an error for ${options.tool} with no message.`,
     );
   }
@@ -793,7 +803,19 @@ export const normalizeCallResult = async (
     return resolvedDirectory;
   };
 
-  const writeBlock = async (data: unknown, mimeType: unknown): Promise<void> => {
+  /**
+   * A binary block's name, worked out without writing anything.
+   *
+   * Two phases, because a block cannot be judged on its own: the cost of
+   * an attachment list is only known once every name in it is, and a block
+   * refused against a half-known list was being dropped when the whole
+   * result would have fitted. So every name is planned first, the list is
+   * weighed as a list, and only the blocks that fit are written. Nothing
+   * reaches the disk before that decision, which is the property the
+   * single-phase version was built around and this keeps.
+   */
+  const planned: { file: string; data: string }[] = [];
+  const planBlock = async (data: unknown, mimeType: unknown): Promise<void> => {
     if (typeof data !== 'string') {
       return;
     }
@@ -812,25 +834,19 @@ export const normalizeCallResult = async (
       directory,
       `${sanitizeToolSegment(options.tool) ?? 'tool'}-${stamp}-${fileSerial}.${extensionFor(typeof mimeType === 'string' ? mimeType : undefined)}`,
     );
-    // Charged on the exact entry, and checked before anything touches the
-    // disk: refusing to *return* a path for bytes already written would
-    // leave a file in the workspace that nothing references, delivers, or
-    // cleans up — the same orphan the `isError` guard above exists to
-    // avoid. A fixed reservation stood in for this while the path was not
-    // yet known, and it was a guess in the wrong direction: a deeply
-    // nested `workspaceRoot` makes an entry longer than the 256 reserved,
-    // so a block could clear the reservation and then be charged more than
-    // was left. Nothing needs reserving now that the name is built before
-    // the write rather than after it.
-    const entry = JSON.stringify(file);
-    // The first entry pays for the key, the brackets and the field's own
-    // separator; each one after it pays for the comma joining it to the
-    // last. The total is exactly what `"files":[…],` weighs in the result.
-    const cost = files.length === 0 ? `"files":[${entry}],` : `,${entry}`;
-    if (!budget.fits(cost)) {
-      skippedBinary += 1;
-      return;
-    }
+    planned.push({ file, data });
+  };
+
+  /**
+   * What an attachment adds to the result: the first entry pays for the
+   * key, the brackets and the field's own separator, each one after it for
+   * the comma joining it to the last. The total is exactly what
+   * `"files":[…],` weighs.
+   */
+  const fileEntryCost = (file: string, first: boolean): string =>
+    (first ? `"files":[${JSON.stringify(file)}],` : `,${JSON.stringify(file)}`);
+
+  const commitBlock = async (file: string, data: string): Promise<void> => {
     // Recorded before the bytes land, like a tainted `fs.write`: a crash
     // between the two leaves a labelled path with no file, never a file
     // with no label.
@@ -866,8 +882,6 @@ export const normalizeCallResult = async (
     } finally {
       await handle.close();
     }
-    budget.charge(cost);
-    files.push(file);
   };
 
   for (const block of content) {
@@ -882,7 +896,7 @@ export const normalizeCallResult = async (
         break;
       case 'image':
       case 'audio':
-        await writeBlock(block.data, block.mimeType);
+        await planBlock(block.data, block.mimeType);
         break;
       case 'resource': {
         const resource = isObject(block.resource) ? block.resource : {};
@@ -890,7 +904,7 @@ export const normalizeCallResult = async (
           const uri = typeof resource.uri === 'string' ? resource.uri : undefined;
           texts.push(uri ? `${uri}:\n${resource.text}` : resource.text);
         } else {
-          await writeBlock(resource.blob, resource.mimeType);
+          await planBlock(resource.blob, resource.mimeType);
         }
         break;
       }
@@ -912,13 +926,9 @@ export const normalizeCallResult = async (
   // What the text will cost beyond its own characters. A result with
   // nothing but text is returned as the string itself rather than as an
   // object, so it pays for its two quotes and nothing else — the `- 1`
-  // gives back the brace the budget starts out holding. Everything that
-  // decides this is already settled: the content loop has run, so the
-  // attachments, the links and the skipped count are known, and a
-  // structured payload either arrived or did not.
-  const collapsesToText = files.length === 0
+  // gives back the brace the budget starts out holding.
+  const collapsesToText = planned.length === 0
     && resources.length === 0
-    && skippedBinary === 0
     && !isObject(shaped.structuredContent);
 
   // Measured as its own serialized string rather than by walking the
@@ -947,17 +957,36 @@ export const normalizeCallResult = async (
   // the same sums the fields are charged, so a ten-megabyte result is
   // measured, not materialized.
   const joinedText = texts.length > 0 ? texts.join('\n\n') : undefined;
-  const untouched = (joinedText === undefined
+  const plannedFiles = planned.map((block, index) => fileEntryCost(block.file, index === 0)).join('');
+  const untouched = plannedFiles.length
+    + (joinedText === undefined
       ? 0
       : serializedLength(joinedText) + (collapsesToText ? 2 - 1 : keyOverhead('text')))
     + (structuredJson === undefined ? 0 : `"structured":${structuredJson},`.length)
     + (resources.length === 0 ? 0 : `"resources":${JSON.stringify(resources)},`.length);
-  if (skippedBinary === 0 && budget.fitsUntouched(untouched)) {
+  const nothingCut = budget.fitsUntouched(untouched);
+  if (nothingCut) {
     budget.releaseAll();
-  } else if (skippedBinary === 0) {
-    // Some cut is coming, but not to the attachments: every block that was
-    // going to be written has been, so there is no `filesTruncated` to pay
-    // for, and everything below spends after this point.
+  }
+
+  // The attachments are decided here rather than as each block arrived,
+  // because what one costs depends on how many came before it, and a block
+  // judged against a half-known list was refused while the whole result
+  // would have fitted. Charged in order and written only once admitted, so
+  // a refusal still leaves nothing on disk.
+  for (const block of planned) {
+    const cost = fileEntryCost(block.file, files.length === 0);
+    if (!nothingCut && !budget.fits(cost)) {
+      skippedBinary += 1;
+      continue;
+    }
+    await commitBlock(block.file, block.data);
+    budget.charge(cost);
+    files.push(block.file);
+  }
+  if (skippedBinary === 0) {
+    // No `filesTruncated` to pay for, and everything below spends after
+    // this point, so holding its room would come out of the text.
     budget.release(reserve.files);
   }
 

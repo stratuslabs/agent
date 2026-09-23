@@ -32,6 +32,7 @@ import { ManifestBoundToolRegistry, parsePluginManifest } from '@stratusagent/pl
 import {
   createMcpPlugin,
   normalizeCallResult,
+  boundServerText,
   BRIDGED_RESULT_MAX_LENGTH,
   BRIDGED_RESULT_MIN_LENGTH,
   PLUGIN_MCP_VERSION,
@@ -1934,6 +1935,81 @@ test('no shape of result outweighs its cap', async () => {
     }
   }
   assert.ok(checked > 900, `the sweep actually ran: ${checked} caps and shapes`);
+});
+
+test('an attachment is judged against the whole list, not against half of one', async () => {
+  // A block used to be admitted or refused as it arrived, before the rest
+  // of the list existed — so what it cost depended on how many came after
+  // it, which was not yet known, and it was judged against reservations
+  // that later turned out to be unneeded. Every name is planned first now,
+  // the list is weighed as a list, and only what fits is written.
+  //
+  // A root of about 350 characters, split across components because one
+  // may not exceed 255. The complete result is ~400 of the 512, so the
+  // attachment belongs in it.
+  const base = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-plan-'));
+  const workspaceRoot = path.join(base, 'd'.repeat(170), 'e'.repeat(160));
+  const result = await normalizeCallResult(
+    { content: [{ type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' }] },
+    { server: 'linear', tool: 'shot', agentId: 'ava', workspaceRoot, maxResultChars: BRIDGED_RESULT_MIN_LENGTH },
+  ) as JsonObject;
+  assert.equal(((result.files ?? []) as unknown[]).length, 1, 'the attachment that fits was written');
+  assert.equal(result.filesTruncated, undefined, 'and nothing claims it was not');
+  assert.ok(
+    JSON.stringify(result).length <= BRIDGED_RESULT_MIN_LENGTH,
+    `still inside the cap: ${JSON.stringify(result).length}`,
+  );
+
+  // Planning before writing must not mean writing before deciding: blocks
+  // past the allowance still leave nothing behind.
+  const manyRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-plan-many-'));
+  const many = await normalizeCallResult(
+    {
+      content: Array.from({ length: 40 }, () => ({
+        type: 'image',
+        data: Buffer.from('x').toString('base64'),
+        mimeType: 'image/png',
+      })),
+    },
+    { server: 'linear', tool: 'shot', agentId: 'ava', workspaceRoot: manyRoot, maxResultChars: 1_200 },
+  ) as JsonObject;
+  const written = (many.files ?? []) as string[];
+  assert.ok(written.length < 40, `stopped short of every block: ${written.length}`);
+  assert.match(String(many.filesTruncated), /more attachments were not saved/);
+  const onDisk = await readdir(path.join(manyRoot, 'ava', 'mcp', 'linear'));
+  assert.equal(onDisk.length, written.length, 'the blocks that were refused were never written');
+});
+
+test('a thrown message is bounded for the envelope it is replayed in', async () => {
+  // A failing call reaches the agent as a thrown message that the executor
+  // copies into `ToolResult.error`, so it is replayed as a JSON string
+  // value under a key — not as a bare string. Bounded to exactly the cap,
+  // it arrived a dozen characters over it.
+  const bounded = boundServerText('E'.repeat(5_000), BRIDGED_RESULT_MIN_LENGTH, 'error message');
+  assert.match(bounded, /truncated by stratus/);
+  assert.ok(
+    JSON.stringify({ error: bounded }).length <= BRIDGED_RESULT_MIN_LENGTH,
+    `the replayed payload stayed inside the cap: ${JSON.stringify({ error: bounded }).length}`,
+  );
+  // And the marker still names the cap the operator set, not the number
+  // left after the deduction.
+  assert.match(bounded, new RegExp(`at ${BRIDGED_RESULT_MIN_LENGTH} characters`));
+
+  // The `isError` path lands in the same place, so it is bounded the same.
+  await assert.rejects(
+    () => normalizeCallResult(
+      { isError: true, content: [{ type: 'text', text: 'e'.repeat(5_000) }] },
+      { server: 'linear', tool: 'get_issue', agentId: 'ava', maxResultChars: BRIDGED_RESULT_MIN_LENGTH },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok(
+        JSON.stringify({ error: error.message }).length <= BRIDGED_RESULT_MIN_LENGTH,
+        `the replayed payload stayed inside the cap: ${JSON.stringify({ error: error.message }).length}`,
+      );
+      return true;
+    },
+  );
 });
 
 test('a result that fits whole is not cut for a sentence about a different field', async () => {
