@@ -151,10 +151,10 @@ const truncationMarker = (what: string, cap: number, sent: number): string =>
   `\n… [${what} truncated by stratus at ${cap} characters; the server sent ${sent}]`;
 
 const resourcesTruncatedNote = (count: number, cap: number): string =>
-  `${count} more resource link${count === 1 ? '' : 's'} were not included: the result reached its ${cap}-character cap.`;
+  `${count} more resource link${count === 1 ? ' was' : 's were'} not included: the result reached its ${cap}-character cap.`;
 
 const filesTruncatedNote = (count: number, cap: number): string =>
-  `${count} more attachment${count === 1 ? '' : 's'} were not saved: the result reached its ${cap}-character cap.`;
+  `${count} more attachment${count === 1 ? ' was' : 's were'} not saved: the result reached its ${cap}-character cap.`;
 
 /**
  * The longest `what` a marker is built with. `spend` is reached with
@@ -214,7 +214,14 @@ const markerReserve = (key: string, limit: number): number =>
 
 const noteReserveFor = (content: readonly unknown[], hasStructured: boolean, limit: number): NoteReserve => {
   const kinds = content.filter(isObject).map((block) => block.type);
-  const text = content.length > 0 ? markerReserve('text', limit) : 0;
+  // Only where the result can actually produce text. `resource_link` never
+  // does, so a list of links was reserving room for a marker that had
+  // nothing to mark — and at a small cap that reservation was enough to
+  // drop the links it was withheld from.
+  const producesText = kinds.some(
+    (kind) => kind === 'text' || kind === 'resource' || kind === 'image' || kind === 'audio',
+  );
+  const text = producesText ? markerReserve('text', limit) : 0;
   const structured = hasStructured ? markerReserve('structuredText', limit) : 0;
   const resources = kinds.includes('resource_link')
     ? serializedLength(resourcesTruncatedNote(WIDEST_COUNT, limit)) + keyOverhead('resourcesTruncated')
@@ -556,6 +563,14 @@ const createResultBudget = (limit: number, initialReserve: number) => {
   // of the difference, so that announcing a cut cannot itself push the
   // result past the cut. See {@link noteReserveFor}.
   const remaining = (): number => Math.max(0, limit - reserve - spent);
+  /**
+   * What is left if the room held for one particular annotation is not
+   * held — the allowance a value gets to prove it needs no annotation at
+   * all. Releasing that room is safe precisely when the value fits in it,
+   * because then the annotation it was held for will never be written.
+   */
+  const withoutOwn = (ownReserve: number): number =>
+    Math.max(0, limit - spent - (reserve - ownReserve));
   // Two ways in, because a result carries two kinds of string. `fits` and
   // `charge` take a value that is ALREADY in the form the transcript holds
   // — a `JSON.stringify`d link or path, whose escapes are characters in it
@@ -583,9 +598,28 @@ const createResultBudget = (limit: number, initialReserve: number) => {
      * happened, which is the same lie as a silent cut told the other way
      * round. 99,950 plain characters came back cut at a 100,000 cap.
      */
+    /**
+     * `value`, already serialized, taken whole if it fits once the room
+     * held for the note that would report *dropping* it is released. The
+     * note reports what did not fit; a collection that fits entirely never
+     * produces one, so it should not be charged for one — a single
+     * resource link that would have fitted in a 512-character result was
+     * being dropped to hold room for the sentence saying it was dropped.
+     */
+    takeWhole: (value: string, ownReserve: number): boolean => {
+      if (!withinLimit(value, withoutOwn(ownReserve))) {
+        return false;
+      }
+      spent += Math.min(value.length, codePointLength(value));
+      reserve -= ownReserve;
+      return true;
+    },
+    /** Give back room held for an annotation this result will not carry. */
+    release: (ownReserve: number): void => {
+      reserve -= ownReserve;
+    },
     spend: (value: string, what: string, ownReserve: number): string => {
-      const withoutOwn = Math.max(0, limit - spent - (reserve - ownReserve));
-      if (withinSerialized(value, withoutOwn)) {
+      if (withinSerialized(value, withoutOwn(ownReserve))) {
         spent += serializedLength(value);
         reserve -= ownReserve;
         return value;
@@ -838,6 +872,14 @@ export const normalizeCallResult = async (
     }
   }
 
+  // Every block that was going to be written has been, so if none was
+  // skipped there is no `filesTruncated` to pay for — and everything below
+  // spends after this point, so holding the room would come out of the
+  // text and the links instead.
+  if (skippedBinary === 0) {
+    budget.release(reserve.files);
+  }
+
   const text = texts.length > 0 ? budget.spend(texts.join('\n\n'), 'result', reserve.text) : undefined;
 
   // Measured as its own serialized string rather than by walking the
@@ -864,7 +906,14 @@ export const normalizeCallResult = async (
   // one cut — half a URI is no use to anybody, while nine links and a note
   // saying there were ninety is.
   const kept: JsonObject[] = [];
-  for (const link of resources) {
+  // The whole list first, at the allowance it gets when the room held for
+  // `resourcesTruncated` is not held. A list that fits entirely never
+  // produces that note, so being charged for it is how a result came to
+  // drop the one link it could comfortably have carried.
+  if (resources.length > 0 && budget.takeWhole(`"resources":${JSON.stringify(resources)}`, reserve.resources)) {
+    kept.push(...resources);
+  }
+  for (const link of kept.length === resources.length ? [] : resources) {
     // Charged as the list costs, not as the link costs. A link measured on
     // its own leaves the comma joining it to the last one unpaid, and the
     // key and brackets the collection arrives in unpaid entirely — so

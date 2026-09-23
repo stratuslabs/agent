@@ -1832,6 +1832,55 @@ test('a result that fits is not cut to make room for saying it was cut', async (
   );
 });
 
+test('a list that fits whole is not dropped to hold room for saying it was dropped', async () => {
+  // The same mistake as cutting a text that fitted, on the collection
+  // paths. A links-only result was charged for a text marker it could
+  // never produce, and the list was never tested against the allowance it
+  // gets once the note reporting *dropped* links is not held — so one link
+  // that fits comfortably was dropped, and replaced by a sentence saying a
+  // link had been dropped.
+  const linksOnly = await normalizeCallResult(
+    // 420, so the list fits only once the room for the note reporting a
+    // dropped link is released — a shorter one fits either way and would
+    // pass without testing anything.
+    { content: [{ type: 'resource_link', uri: 'u', description: 'x'.repeat(420) }] },
+    { server: 'linear', tool: 'list', agentId: 'ava', maxResultChars: BRIDGED_RESULT_MIN_LENGTH },
+  ) as JsonObject;
+  assert.equal(
+    ((linksOnly.resources ?? []) as unknown[]).length,
+    1,
+    'the link that fits was kept',
+  );
+  assert.equal(linksOnly.resourcesTruncated, undefined, 'and nothing claims it was not');
+  assert.ok(
+    JSON.stringify(linksOnly).length <= BRIDGED_RESULT_MIN_LENGTH,
+    `still inside the cap: ${JSON.stringify(linksOnly).length}`,
+  );
+
+  // Attachments the same way: the room for `filesTruncated` is given back
+  // once the content loop has written every block it was going to, since
+  // everything that spends after it would otherwise pay for a note that
+  // will not be written.
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-release-'));
+  const withFile = await normalizeCallResult(
+    {
+      content: [
+        { type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' },
+        // 440 for the same reason: it fits only once the attachment note's
+        // room is given back.
+        { type: 'text', text: 'y'.repeat(440) },
+      ],
+    },
+    { server: 'linear', tool: 'shot', agentId: 'ava', workspaceRoot, maxResultChars: 600 },
+  ) as JsonObject;
+  assert.equal(withFile.filesTruncated, undefined, 'every block was written');
+  assert.equal(withFile.text, 'y'.repeat(440), 'so the text was not squeezed by a note nobody needs');
+  assert.ok(
+    JSON.stringify(withFile).length <= 600,
+    `and the release did not become a way past the cap: ${JSON.stringify(withFile).length}`,
+  );
+});
+
 test('a result that has to explain four cuts still fits inside its cap', async () => {
   // Every annotation at once: text truncated, structured payload truncated,
   // resource links dropped, attachments skipped. Reserved as a flat share
