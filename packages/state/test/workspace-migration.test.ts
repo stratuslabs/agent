@@ -9,6 +9,7 @@ import { createFileLedger, LEDGER_FILENAME } from '@stratusagent/plugins';
 
 import {
   STATE_SCHEMA_VERSION,
+  agentStateDirPath,
   agentWorkspacePath,
   agentsDirPath,
   createAgentWorkspaces,
@@ -619,6 +620,39 @@ test('preparing a workspace leaves its state directory 0700, whatever the umask'
   } finally {
     process.umask(previous);
   }
+});
+
+test('a symlinked agents/ is refused too, though the agent’s own directory is real', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // The component above the one the check used to look at. Every
+  // `agents/<id>` under here is a real directory, so a leaf question
+  // answers "not a symlink" and this agent's workspace, sessions, memories
+  // and grants are created and tightened wherever this one link points.
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-fleet-elsewhere-'));
+  await mkdir(path.join(elsewhere, 'ava'), { recursive: true });
+  await rm(agentsDirPath(env), { recursive: true });
+  await symlink(elsewhere, agentsDirPath(env));
+
+  assert.throws(() => createAgentWorkspaces(env).prepare('ava'), /is a symlink/);
+  // Named by the component that has to be replaced, not the leaf that was fine.
+  assert.throws(() => createAgentWorkspaces(env).prepare('ava'), new RegExp(agentsDirPath(env)));
+});
+
+test('a workspace an operator relocated behind a link is still prepared through a real agents/', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // `workspace/` is the one name below the home that may itself be a link —
+  // an operator putting an agent's output on another volume — and the walk
+  // above it is what makes that safe to allow rather than a hole in it.
+  const volume = await mkdtemp(path.join(os.tmpdir(), 'stratus-volume-'));
+  await chmod(volume, 0o755);
+  await mkdir(agentStateDirPath(env, 'ava'), { recursive: true });
+  await symlink(volume, agentWorkspacePath(env, 'ava'));
+
+  assert.equal(createAgentWorkspaces(env).prepare('ava'), agentWorkspacePath(env, 'ava'));
+  // Followed, and its mode left to whoever chose it.
+  assert.equal((await stat(volume)).mode & 0o777, 0o755);
 });
 
 test('a symlinked state directory is refused rather than chmodded through', async () => {
