@@ -4125,6 +4125,108 @@ test('streamed text from consecutive provider turns stays separated', async () =
   assert.ok(web.updates.every((update) => !update.text.includes("check.The")));
 });
 
+/** A reply's text as the thread shows it: the placeholder's last edit, then the follow-ups. */
+const threadChunks = (web: ReturnType<typeof createFakeWeb>): string[] =>
+  [web.updates.at(-1)?.text ?? '', ...web.posts.slice(1).map((post) => post.text)];
+
+/** Whether every code fence a chunk opens, it also closes. */
+const fencesBalanced = (chunk: string): boolean => (chunk.match(/```/g) ?? []).length % 2 === 0;
+
+const replyInThread = async (reply: string): Promise<string[]> => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'stream' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> paste the log'));
+  await adapter.stop();
+  return threadChunks(web);
+};
+
+test('a code block straddling the message limit moves whole into the next message', async () => {
+  const prose = 'Here is what the build printed.\n'.repeat(90);
+  const block = `\`\`\`\n${'error: *not* a _formatting_ mark\n'.repeat(60)}\`\`\``;
+  const chunks = await replyInThread(`${prose}${block}`);
+
+  // The cut used to land inside the block: the first message ended on an
+  // open fence and the second read the rest of the log as prose.
+  assert.equal(chunks.length, 2);
+  assert.ok(chunks.every(fencesBalanced), `a chunk left a fence open: ${chunks.map((chunk) => chunk.slice(-20)).join(' | ')}`);
+  assert.ok(chunks[1]?.startsWith('```\n'));
+  assert.ok(!chunks[0]?.includes('```'));
+});
+
+test('a code block longer than two messages is closed and reopened at each cut', async () => {
+  const lines = Array.from({ length: 400 }, (_, index) => `line ${index}: *starred* _underscored_`);
+  const chunks = await replyInThread(`\`\`\`text\n${lines.join('\n')}\n\`\`\``);
+
+  assert.ok(chunks.length >= 3, `expected three or more messages, got ${chunks.length}`);
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
+    assert.ok(fencesBalanced(chunk), `a chunk left a fence open: …${chunk.slice(-20)}`);
+    // Reopened with the info string it was opened with.
+    assert.ok(chunk.startsWith('```text\n'), `a chunk did not reopen the fence: ${chunk.slice(0, 20)}`);
+  }
+  // Nothing lost or duplicated across the cuts.
+  const body = chunks.map((chunk) => chunk.replace(/^```text\n/, '').replace(/\n?```$/, '')).join('\n');
+  assert.equal(body, lines.join('\n'));
+});
+
+test('a fence with a very long opening line is still closed and reopened, without the line', async () => {
+  const info = 'x'.repeat(2500);
+  const lines = Array.from({ length: 500 }, (_, index) => `line ${index}: *starred*`);
+  const chunks = await replyInThread(`\`\`\`${info}\n${lines.join('\n')}\n\`\`\``);
+
+  assert.ok(chunks.length >= 3);
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
+    assert.ok(fencesBalanced(chunk), `a chunk left a fence open: …${chunk.slice(-20)}`);
+  }
+  // The info line travels once; each continuation reopens with the fence alone.
+  assert.ok(chunks.slice(1).every((chunk) => chunk.startsWith('```\n')));
+});
+
+test('a fence of absurdly many backticks is cut within the limit and makes progress', async () => {
+  const fence = '`'.repeat(1999);
+  const chunks = await replyInThread(`${fence}\n${'y'.repeat(9000)}\n${fence}`);
+
+  // Reopening a delimiter this size would overflow every message and move one
+  // character at a time; it is cut the way everything was before.
+  assert.ok(chunks.length <= 6, `expected a handful of messages, got ${chunks.length}`);
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
+  }
+});
+
+test('a cut forced just past a long fence opener never lands inside an emoji', async () => {
+  // An opener 3,995 units long leaves room for one code point, and the first
+  // one after it is an emoji: the progress step used to split its halves.
+  const opener = `\`\`\`${'x'.repeat(3991)}\n`;
+  const chunks = await replyInThread(`${opener}😀${'y'.repeat(6000)}\n\`\`\``);
+
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
+    assert.ok(chunk.isWellFormed(), `a chunk split a surrogate pair: …${chunk.slice(-5)}`);
+  }
+});
+
+test('an inline code span too long for one message is never given delimiters of its own', async () => {
+  // Closing a one-backtick span beside a two-backtick run inside it made
+  // three, a different delimiter; neither half read as code any more.
+  const reply = `\`${'a'.repeat(3997)}\`\`${'b'.repeat(100)}\``;
+  const chunks = await replyInThread(reply);
+
+  assert.equal(chunks.join(''), reply, 'a span is cut as text, adding no backticks');
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
+  }
+});
+
 test('long replies never split an emoji across the message boundary', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

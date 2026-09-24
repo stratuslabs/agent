@@ -33,7 +33,7 @@ import {
   type SessionRouting,
 } from '@stratusagent/channels';
 
-import { toSlackMrkdwn } from './mrkdwn.ts';
+import { codeRunsOf, toSlackMrkdwn } from './mrkdwn.ts';
 
 /**
  * The longest display name the model is shown. Slack caps profile names
@@ -1260,11 +1260,26 @@ const safeCutIndex = (text: string, index: number): number => {
   return code >= 0xd800 && code <= 0xdbff ? index - 1 : index;
 };
 
+/** `index` moved forward, never back, off the middle of a surrogate pair. */
+const pastCodePoint = (text: string, index: number): number => {
+  const code = text.charCodeAt(index - 1);
+  return code >= 0xd800 && code <= 0xdbff ? index + 1 : index;
+};
+
 const truncateForSlack = (text: string): string =>
   text.length <= SLACK_MAX_MESSAGE_CHARS
     ? text
     : `${text.slice(0, safeCutIndex(text, SLACK_MAX_MESSAGE_CHARS - 1))}…`;
 
+/**
+ * Text as however many messages Slack's limit makes it, never leaving a
+ * code block broken across the cut. A cut blind to fences ended one
+ * message on an unterminated block and started the next mid-block, where
+ * Slack read the rest of somebody's log as prose — every `*` and `_` in it
+ * formatting. So a cut that would land inside a code run moves in front of
+ * it when that still leaves a message worth sending, and otherwise closes
+ * the run at the cut and reopens it in the next.
+ */
 const splitForSlack = (text: string): string[] => {
   if (text.length <= SLACK_MAX_MESSAGE_CHARS) {
     return [text];
@@ -1274,11 +1289,49 @@ const splitForSlack = (text: string): string[] => {
   while (rest.length > SLACK_MAX_MESSAGE_CHARS) {
     // Prefer a newline break inside the window; fall back to a hard cut.
     const window = rest.slice(0, SLACK_MAX_MESSAGE_CHARS);
-    const breakAt = window.lastIndexOf('\n') > SLACK_MAX_MESSAGE_CHARS / 2
-      ? window.lastIndexOf('\n')
-      : safeCutIndex(rest, SLACK_MAX_MESSAGE_CHARS);
-    chunks.push(rest.slice(0, breakAt));
-    rest = rest.slice(breakAt).replace(/^\n+/, '');
+    const newline = window.lastIndexOf('\n');
+    const cut = newline > SLACK_MAX_MESSAGE_CHARS / 2 ? newline : safeCutIndex(rest, SLACK_MAX_MESSAGE_CHARS);
+    // Scanned two messages deep, not to the end: rescanning the whole rest
+    // for every chunk made a megabyte reply quadratic on the event loop. A
+    // fence that closes past the window still reads as open to its end,
+    // which is what it is here; an inline span that does is longer than a
+    // message, and is cut as text either way.
+    const run = codeRunsOf(rest.slice(0, SLACK_MAX_MESSAGE_CHARS * 2))
+      .find((candidate) => candidate.start < cut && cut < candidate.end);
+    if (run !== undefined && run.start > SLACK_MAX_MESSAGE_CHARS / 4) {
+      chunks.push(rest.slice(0, run.start).replace(/\n+$/, ''));
+      rest = rest.slice(run.start);
+      continue;
+    }
+    // The run is most of the message, so it is cut itself — at its last
+    // newline that leaves room for the closer, and past its opener so the
+    // continuation always makes progress. A continuation reopens with the
+    // info string only while it is short: a two-thousand-character info
+    // line repeated on every part would crowd out the code it labels.
+    const budget = SLACK_MAX_MESSAGE_CHARS - (run?.closer.length ?? 0);
+    const floor = run === undefined ? 0 : run.start + run.opener.length;
+    const reopen = run === undefined || run.opener.length <= SLACK_MAX_MESSAGE_CHARS / 8
+      ? run?.opener
+      : run.opener.endsWith('\n') ? `${run.closer.slice(1)}\n` : run.opener;
+    // A delimiter too long to close and reopen inside one message — a fence
+    // of a thousand backticks, an opening line that fills the window — is
+    // cut raw, as before this existed. Reopening it would send a message
+    // over the limit, and consume a character a message after that.
+    // Only a fence is reopened. Its closer and opener sit on lines of their
+    // own, so they can never run into a backtick of the code; an inline
+    // span's would, and `x` + `` would read as a different delimiter.
+    // `floor + 2`: the first cut past the opener has to fit a whole code
+    // point, or the step that guarantees progress lands inside an emoji.
+    const fence = run !== undefined && run.closer.startsWith('\n');
+    if (run === undefined || !fence || reopen === undefined || reopen.length + run.closer.length > SLACK_MAX_MESSAGE_CHARS / 4 || floor + 2 > budget) {
+      chunks.push(rest.slice(0, cut));
+      rest = rest.slice(cut).replace(/^\n+/, '');
+      continue;
+    }
+    const inner = rest.lastIndexOf('\n', budget - 1);
+    const within = inner > Math.max(floor, SLACK_MAX_MESSAGE_CHARS / 2) ? inner : Math.max(safeCutIndex(rest, budget), pastCodePoint(rest, floor + 1));
+    chunks.push(`${rest.slice(0, within)}${run.closer}`);
+    rest = `${reopen}${rest.slice(within).replace(/^\n/, '')}`;
   }
   if (rest.length > 0) {
     chunks.push(rest);
