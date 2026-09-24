@@ -1127,10 +1127,12 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
   // a code block is its source text rather than something to click — so a
   // table with either takes the list form, where mrkdwn reads the cells as
   // it reads prose. Links are found by the converter's own reader.
-  // A bare address counts too: Slack links `https://…`, `mailto:` and
-  // `<…>` in prose, and does nothing with them inside a code block.
+  // A bare address counts too, and so does Slack's own markup — `<@U…>`,
+  // `<#C…>`, `<!here>`: Slack acts on all of them in prose and on none of
+  // them inside a code block.
   const linked = [header, ...rows].some((row) => row.some((cell) =>
-    readEmphasis(scan(cell)).links.size > 0 || /\b(?:https?:\/\/|mailto:)\S|<[a-z][a-z0-9+.-]*:[^>\s]+>/i.test(cell)));
+    readEmphasis(scan(cell)).links.size > 0
+    || /\b(?:https?:\/\/|mailto:)\S|<[a-z][a-z0-9+.-]*:[^>\s]+>|<[@#!][^>\s]+>/i.test(cell)));
   if (width <= TABLE_MAX_WIDTH && !linked && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
     const line = (row: string[]): string =>
       row.map((cell, index) => pad(cell, widths[index] ?? 0, alignments[index] ?? 'left')).join(' │ ').trimEnd();
@@ -1153,6 +1155,9 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
     .filter((line) => line.length > 0);
   return listed.length > 0 ? listed.join('\n') : headerOnly;
 };
+
+/** Four spaces or a tab: an indented code block, which no table row may be. */
+const isIndentedCode = (line: string): boolean => /^(?: {4,}|\t)/.test(line);
 
 /**
  * The reply with every pipe table outside code rendered for Slack. A table
@@ -1187,7 +1192,7 @@ const renderTables = (text: string): string => {
     const header = tableCells(headerLine);
     // Four spaces or a tab of indentation is an indented code block, not a
     // table — GFM allows a table at most three.
-    const indented = /^(?: {4,}|\t)/.test(headerLine) || /^(?: {4,}|\t)/.test(lines[at + 1] ?? '');
+    const indented = isIndentedCode(headerLine) || isIndentedCode(lines[at + 1] ?? '');
     if (alignments === undefined || indented || !isTableRow(headerLine) || header.length !== alignments.length) {
       out.push(headerLine);
       at += 1;
@@ -1195,7 +1200,7 @@ const renderTables = (text: string): string => {
     }
     const rows: string[][] = [];
     let next = at + 2;
-    while (next < lines.length && !inCode[next] && isTableRow(lines[next] ?? '')) {
+    while (next < lines.length && !inCode[next] && !isIndentedCode(lines[next] ?? '') && isTableRow(lines[next] ?? '')) {
       rows.push(tableCells(lines[next] ?? ''));
       next += 1;
     }

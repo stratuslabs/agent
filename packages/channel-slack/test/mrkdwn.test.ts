@@ -668,3 +668,15 @@ test('a table indented four spaces is an indented code block, left as written', 
   const block = ['    | a | b |', '    | - | - |', '    | 1 | 2 |'].join('\n');
   assert.equal(toSlackMrkdwn(block), block);
 });
+
+test('an indented line after a table is code, not another row', () => {
+  const reply = ['| a | b |', '| - | - |', '| 1 | 2 |', '    | code | line |'].join('\n');
+  assert.equal(toSlackMrkdwn(reply), ['```', 'a │ b', '──┼──', '1 │ 2', '```', '    | code | line |'].join('\n'));
+});
+
+test('a table with a Slack mention in it keeps the mention live', () => {
+  for (const reference of ['<@U123>', '<#C123>', '<!here>']) {
+    const converted = toSlackMrkdwn(['| Who | N |', '| --- | --- |', `| ${reference} | 1 |`].join('\n'));
+    assert.ok(!converted.startsWith('```'), `${reference} went into the grid`);
+  }
+});
