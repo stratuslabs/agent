@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { appendFile, chmod, mkdir, readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { isValidAgentId } from '@stratusagent/agents';
 import {
@@ -400,15 +401,29 @@ export const agentDirectoryOrQuarantine = async (
 
 const openDatabase = async (filePath: string, own = true): Promise<SqliteDatabase> => {
   const { DatabaseSync } = await loadSqlite();
+  if (!own) {
+    // A source that is not ours — the legacy database behind a link — is
+    // opened read-only, with no journal pragma: setting WAL is a write to
+    // their file, and on a relocated read-only volume it fails the upgrade
+    // outright. Reading is the whole of what this migration does to it.
+    const db = new DatabaseSync(filePath, { readOnly: true });
+    db.exec('PRAGMA busy_timeout = 5000');
+    return db;
+  }
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(filePath);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA busy_timeout = 5000');
-  if (own) {
-    await tighten(filePath);
-  }
+  await tighten(filePath);
   return db;
 };
+
+/**
+ * The legacy database as an `ATTACH` target that cannot be written through:
+ * a `mode=ro` URI, which SQLite honours on the attached schema even from a
+ * writable connection. Every attach of it here only reads.
+ */
+const readOnlyAttachTarget = (filePath: string): string => `${pathToFileURL(filePath).href}?mode=ro`;
 
 /**
  * What one run of the migration changed, for the line it reports — plus
@@ -438,7 +453,7 @@ interface LayoutMigrationReport {
  * leaves it half-populated. `INSERT OR REPLACE` keyed on the schedule id
  * makes both cases the same case.
  */
-const moveSchedules = async (legacyDb: SqliteDatabase, env: StateEnvironment): Promise<number> => {
+const moveSchedules = async (legacyDb: SqliteDatabase, env: StateEnvironment, legacyReadOnly = false): Promise<number> => {
   if (!hasTable(legacyDb, 'schedules')) {
     return 0;
   }
@@ -480,6 +495,9 @@ const moveSchedules = async (legacyDb: SqliteDatabase, env: StateEnvironment): P
   // (every store here sets a busy timeout for exactly this) and then runs
   // against a copy that has already happened — which the cancel finishes by
   // deleting from the fleet database too.
+  if (legacyReadOnly) {
+    return copySchedulesIntoFleet(env, fleetPath);
+  }
   legacyDb.prepare('ATTACH ? AS fleet').run(fleetPath);
   try {
     const columns = columnsOf(legacyDb, 'main', 'schedules').join(', ');
@@ -495,6 +513,41 @@ const moveSchedules = async (legacyDb: SqliteDatabase, env: StateEnvironment): P
     }
   } finally {
     legacyDb.exec('DETACH fleet');
+    await tighten(fleetPath);
+  }
+};
+
+/**
+ * The schedule copy for a legacy database opened read-only, run from the
+ * *fleet* side: a read-only connection cannot take the legacy write lock
+ * `moveSchedules` otherwise holds, nor write through an attach. The cancel
+ * race that lock closes stays closed from here, because `cancelEverywhere`
+ * deletes from the legacy database *first* and `fleet.db` second: a legacy
+ * delete before this read leaves nothing to copy, and one after it is
+ * followed by a fleet delete that waits on this IMMEDIATE transaction and
+ * so removes the copied row once it commits.
+ */
+const copySchedulesIntoFleet = async (env: StateEnvironment, fleetPath: string): Promise<number> => {
+  const fleet = await openDatabase(fleetPath);
+  try {
+    fleet.prepare('ATTACH ? AS legacy').run(readOnlyAttachTarget(legacySessionDbPath(env)));
+    try {
+      const columns = columnsOf(fleet, 'legacy', 'schedules').join(', ');
+      fleet.exec('BEGIN IMMEDIATE');
+      try {
+        fleet.exec(`INSERT OR REPLACE INTO main.schedules (${columns}) SELECT ${columns} FROM legacy.schedules`);
+        const counted = fleet.prepare('SELECT COUNT(*) AS total FROM legacy.schedules').get() as { total: number };
+        fleet.exec('COMMIT');
+        return Number(counted.total);
+      } catch (error) {
+        fleet.exec('ROLLBACK');
+        throw error;
+      }
+    } finally {
+      fleet.exec('DETACH legacy');
+    }
+  } finally {
+    fleet.close();
     await tighten(fleetPath);
   }
 };
@@ -547,7 +600,7 @@ const shardSessions = async (
       if (!hasTable(shard, 'sessions')) {
         shard.exec(schema);
       }
-      shard.prepare('ATTACH ? AS legacy').run(legacySessionDbPath(env));
+      shard.prepare('ATTACH ? AS legacy').run(readOnlyAttachTarget(legacySessionDbPath(env)));
       try {
         const columns = columnsOf(shard, 'legacy', 'sessions').join(', ');
         shard
@@ -1146,6 +1199,15 @@ export const drainSharedMemory = async (env: StateEnvironment): Promise<string |
  * and the note on `moveWhitelists`.
  */
 export const applyPerAgentLayout = async (env: StateEnvironment): Promise<string | undefined> => {
+  // A linked `agents/` first, before any stage reads or writes under it.
+  // Each stage guards its own writes, but `moveWhitelists` archives the
+  // grant files it cannot place by renaming them *in* `agents/`, and a
+  // rename there goes through the link — a migration that then stamps
+  // itself applied, having moved files outside the home. Refused rather
+  // than quarantined: the link redirects every agent at once, so there is
+  // no per-agent line to report it on, and the operator has one component
+  // to replace before the upgrade can run.
+  await assertDerivedStatePath(stratusHomePath(env), agentsDirPath(env), 'directory');
   const report = emptyReport(env);
   const legacyPath = legacySessionDbPath(env);
   if (await exists(legacyPath)) {
@@ -1160,11 +1222,13 @@ export const applyPerAgentLayout = async (env: StateEnvironment): Promise<string
     // What the rule is actually about is not done to it: a link is read and
     // then *renamed* (which renames the link, leaving their file where it
     // is), and it is not tightened, so no mode of theirs is changed through
-    // it. Reading an operator's own data is what this migration is for.
+    // it, nor written at all: it is opened read-only, and every attach of
+    // it is `mode=ro`. Reading an operator's own data is what this
+    // migration is for.
     const legacyIsLink = await linkedDerivedComponent(stratusHomePath(env), legacyPath) !== undefined;
     const legacyDb = await openDatabase(legacyPath, !legacyIsLink);
     try {
-      report.schedulesMoved = await moveSchedules(legacyDb, env);
+      report.schedulesMoved = await moveSchedules(legacyDb, env, legacyIsLink);
       await shardSessions(legacyDb, env, report);
     } finally {
       legacyDb.close();

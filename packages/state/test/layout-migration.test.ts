@@ -781,6 +781,51 @@ test('a legacy database an operator relocated is migrated, and its mode is left 
   assert.equal((await stat(elsewhere)).mode & 0o777, 0o644);
 });
 
+test('a relocated legacy database is only read: no journal switch, schedules copied from the fleet side', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // Not tightening it was half of reading-only. `PRAGMA journal_mode = WAL`
+  // is a write to their file too — it converts it for good, and on a
+  // read-only volume it fails the upgrade — and the schedule copy took the
+  // legacy write lock through it.
+  const { rename } = await import('node:fs/promises');
+  const elsewhere = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-volume-')), 'sessions.db');
+  await seedSharedState(home);
+  await rename(legacySessionDbPath(env), elsewhere);
+  await symlink(elsewhere, legacySessionDbPath(env));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const theirs = new DatabaseSync(elsewhere, { readOnly: true });
+  const mode = theirs.prepare('PRAGMA journal_mode').get() as { journal_mode: string };
+  theirs.close();
+  assert.equal(mode.journal_mode, 'delete');
+  // And the rows still arrived, copied from the fleet side.
+  const fleet = new DatabaseSync(fleetDbPath(env));
+  const schedules = fleet.prepare('SELECT id FROM schedules').all() as { id: string }[];
+  fleet.close();
+  assert.deepEqual(schedules.map((row) => row.id), ['sched-1']);
+  assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
+});
+
+test('a symlinked agents/ stops the upgrade before any grant file is archived through it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // Every stage guards its own writes, but the grant files it cannot place
+  // are archived by a rename *in* agents/ — through the link — and the run
+  // then stamped itself applied.
+  const { rename } = await import('node:fs/promises');
+  await seedSharedState(home);
+  const outside = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-outside-')), 'agents');
+  await rename(agentsDirPath(env), outside);
+  await symlink(outside, agentsDirPath(env));
+
+  await assert.rejects(() => runStateMigrations(env, { exclusive: true }), /is a symlink/);
+  assert.deepEqual((await readdir(outside)).sort(), ['ava.whitelist.json']);
+  // Not stamped, so the upgrade runs again once the link is replaced.
+  assert.ok(!(await readStateStamp(env)).applied.includes('0003-per-agent-state-layout'));
+});
+
 test('a symlinked fleet.db stops the upgrade before the schedules are copied through it', async () => {
   const home = await newHome();
   const env = { homeDir: home };

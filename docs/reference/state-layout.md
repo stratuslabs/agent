@@ -80,12 +80,17 @@ that are worth knowing:
   Reads are refused as well as writes, because a
   store that will not *place* a memory through a link but answers happily
   with what is on the far side of one has only moved the leak. A daemon
-  refuses; the upgrade move quarantines and says which component. The one
+  refuses, and so do the commands that write here on their own —
+  `stratus agent new`, `template add`, and `stratus schedules` opening
+  `fleet.db`; the upgrade move quarantines a linked `agents/<id>/` and says
+  which component, and refuses to run at all under a linked `agents/`,
+  which it cannot move around. The one
   path it reads through a link rather than refusing is the *legacy* shared
   `sessions.db` of a home upgrading from before this rule: refusing it would
   strand that home with every session inside the file being refused for, so
-  it is read, its link is renamed (which leaves their file where it is), and
-  its mode is not changed through the link. This is
+  it is read — opened read-only, with no journal switch and no write lock
+  taken on it — its link is renamed (which leaves their file where it is),
+  and its mode is not changed through the link. This is
   about Stratus's own paths only — `~/.stratus` itself may be a symlink to a
   directory elsewhere (another volume, a synced folder), and is followed
   wherever it is checked, which is the asymmetry the whole rule turns on:
