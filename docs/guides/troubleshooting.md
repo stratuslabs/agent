@@ -92,9 +92,9 @@ subscription sign-in to per-token billing.
   spend](./always-on.md#how-many-turns-one-message-may-spend).
 - **"ran out of context part-way through its answer"** — different from
   the cap below, and not fixed by asking for less: the *conversation* is
-  what no longer fits, so the model reached the end of its context window
-  mid-reply. `stratus session rollover <id>` starts the same id over, or
-  move that agent to a model with a bigger window.
+  what no longer fits. A daemon narrows the history and retries rather
+  than failing, so seeing this means one turn is too large on its own —
+  see below.
 - **"stopped at the … output cap before finishing"** — the model ran out
   of room mid-answer, so the reply was a fragment and was not delivered.
   The turn is failed rather than answered on purpose: a cut-off reply
@@ -105,3 +105,39 @@ subscription sign-in to per-token billing.
   has a lower ceiling than the default — set `maxTokens` under it. On an
   OpenAI-compatible endpoint the cap is the endpoint's own default, so the
   fix is on that side.
+- **An agent has forgotten the start of a long conversation** — see below.
+
+## A conversation that outgrows the model
+
+A session is durable and a Slack DM is one session for the life of the
+install, so a busy thread's transcript grows without limit. Every turn
+replays the whole thing to the model, and eventually it no longer fits.
+
+When that happens the conversation **narrows rather than stopping**. The
+request is refused for length, the daemon halves how much history it sends
+and tries again until it fits, and it remembers the window it landed on so
+the next turn does not pay for the discovery again. The agent is told, in
+the request, that earlier messages are not being shown.
+
+What this costs is real and worth knowing:
+
+- **The agent cannot see the messages that fell out of the window.** It
+  knows how many there were and nothing about them, so it will answer
+  questions about the start of the conversation as though it had just
+  joined. Summarizing what leaves is
+  [planned, not shipped](../roadmap/32-context-management.md).
+- **Nothing is deleted.** The window bounds what is *sent*; the transcript
+  on disk is whole, and `stratus logs` shows every trim as
+  `session.context-trimmed`.
+- **The window only ever narrows.** A conversation that trimmed once will
+  trim again as it grows.
+
+`stratus session rollover <id>` starts the same id over with an empty
+transcript when you would rather begin again than keep narrowing — the old
+conversation is archived, not lost.
+
+One case this cannot rescue: a **single turn** too large for the model, for
+example a tool result of several megabytes. There is no earlier history to
+give up, so the turn fails saying exactly that. Cut what the call returns — `maxBytes` on
+`fs.read`, `maxOutputBytes` on `shell.run`, see [Tools](./tools.md) — or
+move that agent to a model with a bigger context window.

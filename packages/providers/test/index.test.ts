@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { UNADDRESSED_TURN_NOTE, type ProviderCallUsage, type ProviderRequest } from '@stratusagent/core';
+import { ContextOverflowError, UNADDRESSED_TURN_NOTE, type ProviderCallUsage, type ProviderRequest } from '@stratusagent/core';
 import {
   createOpenAICompatibleProvider,
   createProviderRegistry,
@@ -636,6 +636,121 @@ test('createOpenAICompatibleProvider rejects malformed tool call arguments', asy
   await assert.rejects(
     () => provider.generate(createRequest()),
     /invalid arguments for tool demo\.echo/,
+  );
+});
+
+test('a transcript past the context window is reported as recoverable, not as a dead turn', async () => {
+  const rejectWith = (body: Record<string, unknown>) => async () => ({
+    ok: false,
+    status: 400,
+    text: async () => JSON.stringify(body),
+  }) as Response;
+
+  // The first-party API sets a code, and a code needs no pattern.
+  const coded = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: rejectWith({ error: { message: 'This model\'s maximum context length is 128000 tokens.', code: 'context_length_exceeded' } }),
+  });
+  await assert.rejects(
+    () => coded.generate(createRequest()),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+
+  // Everything else implementing this wire format says it in prose, and
+  // differently — a local runtime has no code to read.
+  const prose = createOpenAICompatibleProvider({
+    model: 'local-llama',
+    apiKey: 'test-key',
+    fetch: rejectWith({ error: { message: 'the request exceeds the available context size. Try to lower the number of tokens.' } }),
+  });
+  await assert.rejects(
+    () => prose.generate(createRequest()),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+
+  // Narrow on purpose: an unrelated 400 read as an overflow would have the
+  // kernel throw conversation history away over a request that was
+  // malformed in some other way.
+  const unrelated = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: rejectWith({ error: { message: 'Unrecognized request argument supplied: tool_choce' } }),
+  });
+  await assert.rejects(
+    () => unrelated.generate(createRequest()),
+    (error: unknown) => error instanceof Error && !(error instanceof ContextOverflowError),
+  );
+
+  // And narrow on STATUS as well as wording. A 5xx is transient, whatever
+  // it says: read as an overflow, it would have the kernel permanently
+  // raise the floor — giving up conversation history for good — over a
+  // proxy that was briefly unwell, and rob the fallback of its turn.
+  const transient = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: (async () => ({
+      ok: false,
+      status: 503,
+      text: async () => JSON.stringify({ error: { message: 'failed to determine model context length' } }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => transient.generate(createRequest()),
+    (error: unknown) => error instanceof Error && !(error instanceof ContextOverflowError),
+  );
+});
+
+test('an overflow that names an image is not answered by throwing the images away', async () => {
+  // The image recovery is the destructive one: `omitImage` empties
+  // attachments on the live session and cannot be undone. An overflow
+  // message can name an image — "maximum context length is 8192 tokens;
+  // your messages including 1 image resulted in …" — so the two branches
+  // overlap, and order decides which runs. Taken as an image rejection,
+  // the turn loses the pictures it was about and retries, when what the
+  // request needed was less history.
+  const request = requestWithImage();
+  let attempts = 0;
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: (async () => {
+      attempts += 1;
+      return {
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({
+          error: {
+            message: "This model's maximum context length is 8192 tokens; your messages including 1 image resulted in 10000 tokens.",
+          },
+        }),
+      };
+    }) as unknown as typeof fetch,
+  });
+
+  await assert.rejects(
+    () => provider.generate(request),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+  assert.equal(attempts, 1, 'did not retry without the images');
+  // The attachment is intact, so the kernel's shorter retry still has it.
+  const image = request.session.messages[0]?.images?.[0];
+  assert.ok(image);
+  assert.notEqual(image.data, '', 'the image was not emptied on the session');
+
+  // A 400 that really is about an image still takes the image path.
+  const badImage = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: (async () => ({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({ error: { message: 'Could not process image: unsupported format' } }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => badImage.generate(requestWithImage()),
+    (error: unknown) => error instanceof Error && !(error instanceof ContextOverflowError),
   );
 });
 
