@@ -842,8 +842,168 @@ const renderLine = (context: Context, from: number, to: number): string => {
   return plain ? `*${heading.text}*` : heading.text;
 };
 
+/**
+ * A code run in text as Slack will read it, and what it takes to cut one in
+ * two: `opener` starts a continuation (a fence's whole first line, info
+ * string included) and `closer` ends the part before the cut.
+ */
+export interface CodeRun {
+  start: number;
+  end: number;
+  opener: string;
+  closer: string;
+}
+
+/**
+ * Where the code runs sit in already-converted text, read by the same scan
+ * that converts it — so the splitter agrees with the converter about what
+ * is code, rather than keeping a second idea of it that drifts. Conversion
+ * never touches a code token, so the runs of its output are the runs of its
+ * input, and scanning it again finds them where they are.
+ */
+export const codeRunsOf = (text: string): CodeRun[] => {
+  const runs: CodeRun[] = [];
+  let at = 0;
+  for (const token of scan(text)) {
+    const source = sourceOf(token);
+    if (token.kind === 'code') {
+      let ticks = 0;
+      while (source[ticks] === '`') {
+        ticks += 1;
+      }
+      const fence = '`'.repeat(ticks);
+      const lineEnd = source.indexOf('\n');
+      runs.push(ticks >= 3 && lineEnd !== -1
+        ? { start: at, end: at + source.length, opener: source.slice(0, lineEnd + 1), closer: `\n${fence}` }
+        : { start: at, end: at + source.length, opener: fence, closer: fence });
+    }
+    at += source.length;
+  }
+  return runs;
+};
+
+/**
+ * Slack's mrkdwn has no tables, so a GFM pipe table reached a thread as rows
+ * of literal `|` and a `|---|---|` line (#217). A table becomes a code block
+ * with its columns padded to line up — monospace reads as a grid in every
+ * client — or, when that grid is wider than a phone shows without wrapping,
+ * one line per row naming each value by its header.
+ */
+const TABLE_MAX_WIDTH = 60;
+
+/** A row's cells: outer pipes dropped, split on the pipes that are not escaped. */
+const tableCells = (line: string): string[] => {
+  let row = line.trim();
+  if (row.startsWith('|')) {
+    row = row.slice(1);
+  }
+  if (row.endsWith('|') && !row.endsWith('\\|')) {
+    row = row.slice(0, -1);
+  }
+  return row.split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll('\\|', '|'));
+};
+
+type Alignment = 'left' | 'right' | 'center';
+
+/** The delimiter row's alignments, or nothing when the line is not one. */
+const tableAlignments = (line: string): Alignment[] | undefined => {
+  if (!line.includes('-')) {
+    return undefined;
+  }
+  const cells = tableCells(line);
+  if (!cells.every((cell) => /^:?-+:?$/.test(cell))) {
+    return undefined;
+  }
+  return cells.map((cell) => (cell.startsWith(':') && cell.endsWith(':') ? 'center' : cell.endsWith(':') ? 'right' : 'left'));
+};
+
+/**
+ * A cell as the grid shows it. Inside a code block Slack renders nothing,
+ * so the emphasis and code markers a model wraps a cell in would show as
+ * characters; they are dropped, and the words they marked stay.
+ */
+const plainCell = (cell: string): string =>
+  cell.replace(/(\*\*|__)(.+?)\1/g, '$2').replace(/`([^`]+)`/g, '$1');
+
+const pad = (text: string, width: number, alignment: Alignment): string => {
+  const gap = width - text.length;
+  if (alignment === 'right') {
+    return `${' '.repeat(gap)}${text}`;
+  }
+  if (alignment === 'center') {
+    const left = Math.floor(gap / 2);
+    return `${' '.repeat(left)}${text}${' '.repeat(gap - left)}`;
+  }
+  return `${text}${' '.repeat(gap)}`;
+};
+
+const renderTable = (header: string[], alignments: Alignment[], rows: string[][]): string => {
+  const columns = header.length;
+  const fit = (row: string[]): string[] => Array.from({ length: columns }, (_, index) => row[index] ?? '');
+  const grid = [header, ...rows.map(fit)].map((row) => row.map(plainCell));
+  const widths = Array.from({ length: columns }, (_, index) => Math.max(...grid.map((row) => row[index]?.length ?? 0)));
+  const width = widths.reduce((sum, each) => sum + each, 0) + (columns - 1) * 3;
+  // A backtick run in a cell could close the fence early, so such a table
+  // takes the list form, where mrkdwn reads the cells as it reads prose.
+  if (width <= TABLE_MAX_WIDTH && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
+    const line = (row: string[]): string =>
+      row.map((cell, index) => pad(cell, widths[index] ?? 0, alignments[index] ?? 'left')).join(' │ ').trimEnd();
+    const rule = widths.map((each) => '─'.repeat(each)).join('─┼─');
+    return ['```', line(grid[0] ?? []), rule, ...grid.slice(1).map(line), '```'].join('\n');
+  }
+  return rows
+    .map(fit)
+    .map((row) => row
+      .map((cell, index) => ({ label: plainCell(header[index] ?? ''), cell }))
+      .filter(({ cell }) => cell.length > 0)
+      .map(({ label, cell }) => (label.length > 0 ? `**${label}**: ${cell}` : cell))
+      .join(' · '))
+    .join('\n');
+};
+
+/**
+ * The reply with every pipe table outside code rendered for Slack. A table
+ * inside a fence is somebody's text and stays as written — found by the
+ * converter's own scan, so this agrees with it about what is code.
+ */
+const renderTables = (text: string): string => {
+  // Only a run that spans lines hides a table; an inline span in a cell is
+  // part of the row, the way GFM reads it.
+  const code = codeRunsOf(text).filter((run) => text.slice(run.start, run.end).includes('\n'));
+  const lines = text.split('\n');
+  const inCode: boolean[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    const start = offset;
+    const end = offset + line.length;
+    inCode.push(code.some((run) => run.start < end + 1 && start < run.end));
+    offset = end + 1;
+  }
+  const out: string[] = [];
+  let at = 0;
+  while (at < lines.length) {
+    const headerLine = lines[at] ?? '';
+    const alignments = inCode[at] || inCode[at + 1] ? undefined : tableAlignments(lines[at + 1] ?? '');
+    const header = tableCells(headerLine);
+    if (alignments === undefined || !headerLine.includes('|') || header.length !== alignments.length) {
+      out.push(headerLine);
+      at += 1;
+      continue;
+    }
+    const rows: string[][] = [];
+    let next = at + 2;
+    while (next < lines.length && !inCode[next] && (lines[next] ?? '').includes('|') && (lines[next] ?? '').trim().length > 0) {
+      rows.push(tableCells(lines[next] ?? ''));
+      next += 1;
+    }
+    out.push(renderTable(header, alignments, rows));
+    at = next;
+  }
+  return out.join('\n');
+};
+
 export const toSlackMrkdwn = (text: string): string => {
-  const tokens = scan(text);
+  const tokens = scan(renderTables(text));
   // Links are found before emphasis is paired, because what they turn out
   // to cover decides what is left for a delimiter to pair with: the
   // characters of a destination are the address, not markup.

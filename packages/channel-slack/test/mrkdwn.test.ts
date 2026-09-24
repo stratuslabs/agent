@@ -507,3 +507,48 @@ test('no reply, however written, has a character taken out of its code', () => {
     }
   }
 });
+
+test('a pipe table becomes a code block whose columns line up', () => {
+  const table = [
+    '| Tool | Status | Runs |',
+    '| :--- | :----: | ---: |',
+    '| fs.read | **ok** | 12 |',
+    '| `web.fetch` | failing | 3 |',
+  ].join('\n');
+
+  // Slack has no table syntax: this used to arrive as literal pipes.
+  assert.equal(toSlackMrkdwn(table), [
+    '```',
+    'Tool      │ Status  │ Runs',
+    '──────────┼─────────┼─────',
+    'fs.read   │   ok    │   12',
+    'web.fetch │ failing │    3',
+    '```',
+  ].join('\n'));
+});
+
+test('an escaped pipe in a cell is a character, not a column', () => {
+  const table = ['| Pattern | Means |', '| --- | --- |', '| a\\|b | either |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'Pattern │ Means', '────────┼───────', 'a|b     │ either', '```'].join('\n'));
+});
+
+test('a table inside a code fence is left as written', () => {
+  const fenced = ['```', '| a | b |', '| - | - |', '| 1 | 2 |', '```'].join('\n');
+  assert.equal(toSlackMrkdwn(fenced), fenced);
+});
+
+test('prose after a table is converted as prose', () => {
+  const reply = ['| a | b |', '| - | - |', '| 1 | 2 |', '', 'That is **all**.'].join('\n');
+  assert.equal(toSlackMrkdwn(reply), ['```', 'a │ b', '──┼──', '1 │ 2', '```', '', 'That is *all*.'].join('\n'));
+});
+
+test('a table too wide for a phone becomes one line per row, each value named by its header', () => {
+  const long = 'a description long enough to push the grid past sixty columns';
+  const reply = ['| **Name** | Description |', '| --- | --- |', `| alpha | ${long} |`, '| beta | |'].join('\n');
+  assert.equal(toSlackMrkdwn(reply), [`*Name*: alpha · *Description*: ${long}`, '*Name*: beta'].join('\n'));
+});
+
+test('pipes without a delimiter row are not a table', () => {
+  const reply = 'Run `a | b` and then c | d.';
+  assert.equal(toSlackMrkdwn(reply), reply);
+});

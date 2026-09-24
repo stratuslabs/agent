@@ -188,7 +188,10 @@ without it, so one bad file cannot fail a thread from then on.
 - **Replies are translated to Slack's markup.** Agents write Markdown; Slack
   renders mrkdwn, where bold is `*one asterisk*` and headings do not exist. The
   adapter converts on the way out, leaving code spans and fences as written —
-  so a soul does not need a "you are on Slack" rule to be readable there. The
+  so a soul does not need a "you are on Slack" rule to be readable there.
+  Slack has no tables either, so a Markdown pipe table becomes a code block
+  with its columns lined up, or, when that is wider than 60 characters, one
+  line per row with each value named by its column. The
   full list of what is converted is in the
   [`@stratusagent/channel-slack` README](../../packages/channel-slack/README.md).
 - **Approval buttons** — with [`--approvals remote`](./approvals.md), a gated
