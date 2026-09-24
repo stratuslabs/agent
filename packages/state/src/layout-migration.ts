@@ -4,7 +4,12 @@ import { appendFile, chmod, mkdir, readdir, readFile, realpath, rename, rm, stat
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
-import { LEGACY_WHITELIST_SUFFIX, linkedDerivedComponent, whitelistPathFor } from '@stratusagent/permissions';
+import {
+  LEGACY_WHITELIST_SUFFIX,
+  assertDerivedStatePath,
+  linkedDerivedComponent,
+  whitelistPathFor,
+} from '@stratusagent/permissions';
 import { type StateEnvironment } from './environment.ts';
 import { memoryAppendNeedsNewline } from './memory.ts';
 import { DEFAULT_STRATUS_AGENT } from './souls.ts';
@@ -440,6 +445,17 @@ const moveSchedules = async (legacyDb: SqliteDatabase, env: StateEnvironment): P
   // needs no rewriting of the source's `CREATE TABLE` to name an attached
   // schema.
   const fleetPath = fleetDbPath(env);
+  // Before the open, because opening is already a write: `openDatabase`
+  // creates the file, sets WAL and chmods it, and the copy below creates
+  // the schedules table and the rows. The daemon's own store refuses a
+  // linked `fleet.db`, but it is constructed long after this — a migration
+  // runs first on the upgrade that introduces the file, so a guard only at
+  // the store is a guard the migration walks past.
+  //
+  // Refused rather than quarantined: this is the fleet's index and its
+  // schedule rows, not one agent's state, so there is no per-agent line to
+  // report it on and nothing that could carry on without it.
+  await assertDerivedStatePath(stratusHomePath(env), fleetPath, 'file');
   const fleet = await openDatabase(fleetPath);
   try {
     if (!hasTable(fleet, 'schedules') && schema !== undefined) {

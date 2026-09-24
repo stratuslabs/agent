@@ -180,7 +180,14 @@ const openStratusDatabase = (filePath: string, options: SqliteSessionStoreOption
   // `mkdir`'s mode applies only to what it creates, so a directory an
   // earlier build left at `0755` keeps it without this. The home itself only
   // when it is ours; anything below it is a name we chose.
-  if (options.stateHome !== undefined && (dir !== options.stateHome || options.ownedHome === true)) {
+  // Resolved on both sides before comparing. An embedder can hand us
+  // `/srv/shared/state/` with the separator still on it, or a `.` component
+  // in the middle; `path.join` normalizes what it builds and `path.dirname`
+  // answers in that spelling, so a raw string comparison reads the home as
+  // its own child and tightens a directory that is not ours — following the
+  // link, if the home is one.
+  if (options.stateHome !== undefined
+    && (path.resolve(dir) !== path.resolve(options.stateHome) || options.ownedHome === true)) {
     chmodSync(dir, 0o700);
   }
   const db = new DatabaseSync(filePath);

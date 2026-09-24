@@ -755,6 +755,25 @@ test('retiring the shared file appends to an earlier archive rather than renamin
   assert.match(archived, /likes jazz/);
 });
 
+test('a symlinked fleet.db stops the upgrade before the schedules are copied through it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // The migration reaches `fleet.db` long before any store is constructed,
+  // and opening it is already a write: the file is created, put in WAL and
+  // chmodded, then the schedule rows are copied in. A guard only at the
+  // daemon's store is one this walks straight past.
+  await seedSharedState(home);
+  const outside = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-outside-')), 'theirs.db');
+  await writeFile(outside, 'not a database');
+  const before = (await stat(outside)).mode & 0o777;
+  await symlink(outside, fleetDbPath(env));
+
+  await assert.rejects(() => runStateMigrations(env, { exclusive: true }), /is a symlink/);
+  // Untouched: not opened, not filled, not tightened.
+  assert.equal(await readFile(outside, 'utf8'), 'not a database');
+  assert.equal((await stat(outside)).mode & 0o777, before);
+});
+
 test('an agent directory that is a symlink is quarantined, not written through', async () => {
   const home = await newHome();
   const env = { homeDir: home };

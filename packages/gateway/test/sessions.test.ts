@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -405,6 +405,22 @@ test('a linked fleet.db is refused rather than indexed outside the home', async 
     () => new ShardedSessionStore({ stateDir }),
     (error: unknown) => error instanceof Error && /symlink/.test(error.message),
   );
+});
+
+test('an unowned state directory is not chmodded, whatever spelling it arrives in', async () => {
+  const stateDir = await newStateDir();
+  await chmod(stateDir, 0o755);
+  // An embedder's own directory, handed over with the separator still on
+  // it. `path.join` normalizes what it builds, so comparing the spellings
+  // raw reads this home as its own child and tightens a directory that is
+  // not ours — and follows the link, where the home is one.
+  const store = new ShardedSessionStore({ stateDir: `${stateDir}${path.sep}` });
+  await store.create(session('a-1', 'ava'));
+  store.close();
+
+  assert.equal((await stat(stateDir)).mode & 0o777, 0o755);
+  // And the agent's own directory, which *is* ours, still is.
+  assert.equal((await stat(path.join(stateDir, 'agents', 'ava'))).mode & 0o777, 0o700);
 });
 
 test('a home that is itself a link is followed, which is a supported layout', async () => {
