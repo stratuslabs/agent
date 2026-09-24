@@ -43,6 +43,7 @@ import {
   type ApprovalsConfig,
   type CatalogModel,
   type PrincipalsConfig,
+  type SlackConfig,
   type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
@@ -137,6 +138,7 @@ interface SetupState {
   approvals?: ApprovalsConfig;
   api?: ApiConfig;
   principals?: PrincipalsConfig;
+  slack?: SlackConfig;
   /** Trusted-only selections with no menu here; carried through a save. */
   executor?: string;
   memoryStore?: string;
@@ -235,6 +237,7 @@ export const runSetup = async (
     ...(existing.approvals !== undefined ? { approvals: existing.approvals } : {}),
     ...(existing.api !== undefined ? { api: existing.api } : {}),
     ...(existing.principals !== undefined ? { principals: existing.principals } : {}),
+    ...(existing.slack !== undefined ? { slack: existing.slack } : {}),
     // Settings setup has no menu for, carried through a save untouched: a
     // re-run that dropped them would put the operator's agents back on the
     // host and the file store without a word — and, for the two bounds,
@@ -2565,8 +2568,8 @@ export const runSetup = async (
     if (state.promptCacheTtl !== undefined) {
       config.promptCacheTtl = state.promptCacheTtl;
     }
-    // `plugins` and `approvals` have menus above; `api` and `principals`
-    // do not and are written back exactly as they were read. Both cases
+    // `plugins` and `approvals` have menus above; `api`, `principals`, and
+    // `slack` do not and are written back exactly as they were read. Both cases
     // land here the same way, because the menus edit this state rather
     // than the file — so there is nothing to merge, only to not lose.
     if (state.plugins !== undefined) {
@@ -2580,6 +2583,9 @@ export const runSetup = async (
     }
     if (state.principals !== undefined) {
       config.principals = state.principals;
+    }
+    if (state.slack !== undefined) {
+      config.slack = state.slack;
     }
     if (state.executor !== undefined) {
       config.executor = state.executor;

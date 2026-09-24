@@ -29,6 +29,7 @@ import {
   warnOnUntrustedConfig,
   describePrincipals,
   loadServePrincipals,
+  loadServeSlack,
   currentLogPosition,
   describeApprovalCall,
   eventDetail,
@@ -2518,6 +2519,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
     },
     api: { enabled: true, port: 4123 },
     principals: { slackUsers: ['U01DYLAN'], agents: { blair: { slackUsers: ['U01BLAIR'] } } },
+    slack: { replies: 'stream', agents: { blair: { replies: 'final' } } },
   };
   // The scalar preferences setup has no menu for either — same defect, and
   // an operator who turned caching off was silently put back on it.
@@ -2542,6 +2544,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
   assert.deepEqual(written.approvals, carried.approvals);
   assert.deepEqual(written.api, carried.api);
   assert.deepEqual(written.principals, carried.principals);
+  assert.deepEqual(written.slack, carried.slack);
   assert.equal(written.promptCache, false);
   assert.equal(written.promptCacheTtl, '1h');
   // The keys setup does own still get written, so this is a merge rather
@@ -12908,6 +12911,25 @@ test('a global config that cannot be read behind a project config closes the doo
     await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, () => {}),
     { admit: 'principals' },
   );
+});
+
+test('the slack block is read from the operator\'s config, never a cloned repository\'s', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ slack: { replies: 'stream' } }));
+  const warnings: string[] = [];
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo', slack: { replies: 'final' } }));
+
+  assert.deepEqual(
+    await loadServeSlack({ homeDir: home, cwd: project, processEnv: {} }, undefined, (line) => warnings.push(line)),
+    { replies: 'stream' },
+  );
+  assert.match(warnings[0] ?? '', /ignoring the slack config in .*stratus\.config\.json.*Using ~\/\.stratus\/config\.json instead/);
+  // No block anywhere is the defaults, which resolve to `final`.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(await loadServeSlack({ homeDir: home, cwd: project, processEnv: {} }, undefined, () => {}), {});
 });
 
 test('a project config that shadows the global one does not suppress the global principals policy', async () => {

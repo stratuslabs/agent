@@ -54,6 +54,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `vision` | Whether an OpenAI-compatible model takes images — the main one or the fallback, it is one setting. Default `true`; set `false` for a text-only model, which would otherwise reject every turn of a session an image was sent to — see [Slack](../guides/slack.md#sending-an-image) |
 | `approvals` | Unattended-approval policy for `stratus serve` — trusted configs only, see below |
 | `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), and whether anyone else gets a turn at all: `admit` (`anyone`, the default, or `principals`), each with a per-agent `agents` sub-block — trusted configs only, see below |
+| `slack` | How agents' replies appear in Slack: `replies` is `final` (the default — Slack's loading status while the agent works, then the finished reply posted once) or `stream` (a `…` placeholder edited as the reply is written), with a per-agent `agents` sub-block — trusted configs only, see [Slack](../guides/slack.md#how-replies-appear) |
 | `api` | Control API binding for `stratus serve` — trusted configs only, see below |
 | `plugins` | Plugins to load, keyed by package name — trusted configs only, see below |
 | `executor` | Which executor runs tool calls: `local` (the default) or the name a [plugin executor](../guides/extending.md#executors) registers — trusted configs only, see below |
@@ -237,13 +238,14 @@ set.
 | `executor`, `memoryStore` | Which of that code an agent's commands run in, and where its memories are written — a cloned repo swapping a sandbox for the host is the downgrade this refuses | [Extending](../guides/extending.md) |
 | `approvals` | Who may authorize an agent's tool calls, and how | [Approvals](../guides/approvals.md) |
 | `principals` | Whose messages an agent takes as its operator's; everyone else's arrive as `unknown` | [Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator), [Memory](../concepts/memory.md#where-a-fact-came-from) |
+| `slack` | How the daemon's agents post into your workspace | [Slack](../guides/slack.md#how-replies-appear) |
 | `api` | Which interface and port a daemon binds | [Remote access](../guides/remote-access.md) |
 | `maxTurns` | How long a loop one message can buy, which is both a runaway guard and a spending limit | [Always on](../guides/always-on.md#how-many-turns-one-message-may-spend) |
 | `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
 | `soul`, `systemPrompt` | What the agent is told it is and what it may do — a persona in a cloned repo is a system prompt written by whoever pushed it. `--soul` and `STRATUS_SOUL` still name one; the run says once, on stderr, what the file asked for and did not get, and `stratus serve` says it once at startup, whether or not its runtime resolves | [Security](../concepts/security.md) |
 
 Each block's keys and shape are documented in its own guide. `approvals`,
-`principals`, and each plugin's entry also take a per-agent `agents`
+`principals`, `slack`, and each plugin's entry also take a per-agent `agents`
 sub-block, where an agent's entry overrides the defaults above it key by key
 (an explicit `"slackUsers": []` excludes an agent from a shared list); the `api` block
 has no per-agent form — its keys are exactly `enabled`, `host`, and

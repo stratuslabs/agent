@@ -19,6 +19,8 @@ import {
   FALLBACK_ACTIVE_METADATA_KEY,
   readTrustedConfigBlock,
   resolveAgentApprovals,
+  resolveAgentSlack,
+  validateConfigFile,
   resolveRuntimeConfig,
   saveCredentials,
 } from '../src/index.ts';
@@ -1573,4 +1575,26 @@ test('a config that is simply not there leaves the id check with nothing to repo
   await writeFile(configPath, JSON.stringify({ soul: path.join(home, 'missing.md') }));
   const dangling = await declaredAgentIds({ homeDir: home, cwd: home, processEnv: {} }, configPath);
   assert.deepEqual(dangling.unread, ['the configured default soul']);
+});
+
+test('the slack block sets each agent\'s reply mode, per agent over the default, and final when unset', () => {
+  const config = validateConfigFile({
+    slack: { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {} } },
+  }, 'test-config');
+  assert.deepEqual(config.slack, { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {} } });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'ava'), { replies: 'stream' });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'bea'), { replies: 'final' });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'cy'), { replies: 'stream' });
+  // No block at all: the default is the reply posted once, finished.
+  assert.deepEqual(resolveAgentSlack(undefined, 'ava'), { replies: 'final' });
+  // A misspelling is refused rather than read as the default, which would
+  // look like the setting silently did nothing.
+  assert.throws(
+    () => validateConfigFile({ slack: { replies: 'streaming' } }, 'test-config'),
+    /Invalid slack\.replies in config test-config: expected "final" or "stream", received "streaming"\./,
+  );
+  assert.throws(
+    () => validateConfigFile({ slack: { agents: { ava: { replies: 'live' } } } }, 'test-config'),
+    /Invalid slack\.agents\.ava\.replies/,
+  );
 });
