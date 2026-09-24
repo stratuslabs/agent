@@ -4252,6 +4252,18 @@ test('a long fenced log that opens with an underlined title is not mistaken for 
   assert.equal(chunks.filter((chunk) => chunk.includes('Build log')).length, 1);
 });
 
+test('a table whose header holds an emoji still repeats it in every part', async () => {
+  const rows = Array.from({ length: 700 }, (_, index) => `| row ${index} | ok |`);
+  const chunks = await replyInThread(['| 😀 | Status |', '| --- | --- |', ...rows].join('\n'));
+
+  // Counted in different units, the emoji moved the separator and the
+  // header stopped being recognised as a grid's.
+  assert.ok(chunks.length >= 2);
+  for (const chunk of chunks) {
+    assert.ok(chunk.startsWith('```\n😀'), `a part lost its header: ${chunk.slice(0, 30)}`);
+  }
+});
+
 test('long replies never split an emoji across the message boundary', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

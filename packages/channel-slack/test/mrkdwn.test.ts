@@ -594,3 +594,16 @@ test('a one-column table is a list under its header', () => {
   const table = ['| Steps |', '| --- |', '| **build** |', '| test |'].join('\n');
   assert.equal(toSlackMrkdwn(table), ['*Steps*', '• *build*', '• test'].join('\n'));
 });
+
+test('a cell sheds every emphasis marker the converter reads, italics included', () => {
+  const table = ['| State | Note |', '| --- | --- |', '| *pending* | _soon_ |', '| ***both*** | 2 * 3 |'].join('\n');
+  // Only bold was stripped before, so single markers showed inside the code block.
+  assert.equal(toSlackMrkdwn(table), ['```', 'State   │ Note', '────────┼──────', 'pending │ soon', 'both    │ 2 * 3', '```'].join('\n'));
+});
+
+test('wide characters are padded by the columns they take', () => {
+  const table = ['| Word | Count |', '| --- | --- |', '| 漢字 | 1 |', '| abcd | 2 |'].join('\n');
+  // 漢字 is two characters wide on screen each; counted as two units, the
+  // separator after it drew two columns late.
+  assert.equal(toSlackMrkdwn(table), ['```', 'Word │ Count', '─────┼──────', '漢字 │ 1', 'abcd │ 2', '```'].join('\n'));
+});

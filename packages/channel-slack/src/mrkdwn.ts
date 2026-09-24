@@ -865,8 +865,10 @@ const isGridHeader = (header: string, rule: string): boolean => {
   if (!/^─[─┼]*─$/.test(rule) || !rule.includes('┼')) {
     return false;
   }
-  const crossings = [...rule].flatMap((char, index) => (char === '┼' ? [index] : []));
-  const separators = [...header].flatMap((char, index) => (char === '│' ? [index] : []));
+  // In display columns, the unit the grid was padded in: counted any other
+  // way, an emoji or a CJK character before a separator moved it.
+  const crossings = columnsOf(rule, '┼');
+  const separators = columnsOf(header, '│');
   return crossings.length === separators.length && crossings.every((column, index) => separators[index] === column);
 };
 
@@ -986,21 +988,88 @@ const tableAlignments = (line: string): Alignment[] | undefined => {
 /**
  * A cell as the grid shows it. Inside a code block Slack renders nothing,
  * so the emphasis and code markers a model wraps a cell in would show as
- * characters; they are dropped, and the words they marked stay.
+ * characters; they are dropped, and the words they marked stay. Which
+ * markers are emphasis is the converter's own reading (`readEmphasis`), not
+ * a second one: patterns written here missed italics and `***both***`, and
+ * then stripped `2 ** 3 ** 4`, each a rule the converter already had.
  */
-const plainCell = (cell: string): string =>
-  cell
-    // Emphasis by the converter's own rules: a delimiter hugs what it
-    // marks, and an underscore stands clear of a word — so `2 ** 3 ** 4`
-    // and `snake__case__name` keep every character.
-    .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '$1')
-    .replace(/(?<![\p{L}\p{N}_])__(?=\S)(.+?)(?<=\S)__(?![\p{L}\p{N}_])/gu, '$1')
-    // A code span's whole delimiter, however many backticks: a run opens and
-    // only a run of the same length closes, as the scan above reads it.
-    .replace(/(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)/g, (_, _ticks: string, code: string) => code.trim());
+const plainCell = (cell: string): string => {
+  const tokens = scan(cell);
+  const spent = new Map<number, number>();
+  for (const pairs of readEmphasis(tokens).pairs.values()) {
+    for (const pair of pairs) {
+      spent.set(pair.open, (spent.get(pair.open) ?? 0) + pair.use);
+      spent.set(pair.close, (spent.get(pair.close) ?? 0) + pair.use);
+    }
+  }
+  return tokens
+    .map((token, index) => {
+      if (token.kind === 'run') {
+        return token.char.repeat(token.length - (spent.get(index) ?? 0));
+      }
+      if (token.kind === 'code' && token.closed) {
+        let ticks = 0;
+        while (token.text[ticks] === '`') {
+          ticks += 1;
+        }
+        return token.text.slice(ticks, -ticks).trim();
+      }
+      return sourceOf(token);
+    })
+    .join('')
+    // The one italic the converter leaves alone, because Slack already
+    // reads `_x_` as italic outside code — inside the grid it would show.
+    // Same hugging and word-boundary rule the converter applies to runs.
+    .replace(/(?<![\p{L}\p{N}_])_(?=[^\s_])([^_]*?[^\s_])_(?![\p{L}\p{N}_])/gu, '$1');
+};
+
+/**
+ * How many monospace columns text takes: two for wide East Asian characters
+ * and emoji, none for combining marks and joiners, one for the rest. A grid
+ * padded by UTF-16 length put `漢` in one column and drew two, and every
+ * separator after it moved. An approximation of Unicode's width tables,
+ * which Slack's own font does not follow exactly either.
+ */
+const displayWidth = (text: string): number => {
+  let width = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (/[\p{Mn}\p{Me}\u200b-\u200f\ufe00-\ufe0f]/u.test(char)) {
+      continue;
+    }
+    const wide = /\p{Extended_Pictographic}/u.test(char)
+      || (code >= 0x1100 && code <= 0x115f)
+      || (code >= 0x2e80 && code <= 0x303e)
+      || (code >= 0x3041 && code <= 0x33ff)
+      || (code >= 0x3400 && code <= 0x4dbf)
+      || (code >= 0x4e00 && code <= 0x9fff)
+      || (code >= 0xa000 && code <= 0xa4cf)
+      || (code >= 0xac00 && code <= 0xd7a3)
+      || (code >= 0xf900 && code <= 0xfaff)
+      || (code >= 0xfe30 && code <= 0xfe4f)
+      || (code >= 0xff00 && code <= 0xff60)
+      || (code >= 0xffe0 && code <= 0xffe6)
+      || (code >= 0x20000 && code <= 0x3fffd);
+    width += wide ? 2 : 1;
+  }
+  return width;
+};
+
+/** The display columns at which `mark` stands in a line. */
+const columnsOf = (line: string, mark: string): number[] => {
+  const columns: number[] = [];
+  let column = 0;
+  for (const char of line) {
+    if (char === mark) {
+      columns.push(column);
+    }
+    column += displayWidth(char);
+  }
+  return columns;
+};
 
 const pad = (text: string, width: number, alignment: Alignment): string => {
-  const gap = width - text.length;
+  const gap = width - displayWidth(text);
   if (alignment === 'right') {
     return `${' '.repeat(gap)}${text}`;
   }
@@ -1023,7 +1092,7 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
     return [...(label.length > 0 ? [`**${label}**`] : []), ...items].join('\n');
   }
   const grid = [header, ...rows.map(fit)].map((row) => row.map(plainCell));
-  const widths = Array.from({ length: columns }, (_, index) => Math.max(...grid.map((row) => row[index]?.length ?? 0)));
+  const widths = Array.from({ length: columns }, (_, index) => Math.max(...grid.map((row) => displayWidth(row[index] ?? ''))));
   const width = widths.reduce((sum, each) => sum + each, 0) + (columns - 1) * 3;
   // A backtick run in a cell could close the fence early, so such a table
   // takes the list form, where mrkdwn reads the cells as it reads prose.
@@ -1089,8 +1158,12 @@ const renderTables = (text: string): string => {
   return out.join('\n');
 };
 
-export const toSlackMrkdwn = (text: string): string => {
-  const tokens = scan(renderTables(text));
+/**
+ * The links in a token stream and the emphasis pairs around them — the one
+ * reading of emphasis, shared by conversion and by a table cell shedding its
+ * markers, so the two cannot disagree about what a `*` is.
+ */
+const readEmphasis = (tokens: readonly Token[]): { links: Map<number, Link>; pairs: Map<number, Pair[]> } => {
   // Links are found before emphasis is paired, because what they turn out
   // to cover decides what is left for a delimiter to pair with: the
   // characters of a destination are the address, not markup.
@@ -1109,7 +1182,13 @@ export const toSlackMrkdwn = (text: string): string => {
       labelled[at] = opener;
     }
   }
-  const context: Context = { tokens, pairs: pairEmphasis(tokens, inert, labelled), links, edits: new Map() };
+  return { links, pairs: pairEmphasis(tokens, inert, labelled) };
+};
+
+export const toSlackMrkdwn = (text: string): string => {
+  const tokens = scan(renderTables(text));
+  const { links, pairs } = readEmphasis(tokens);
+  const context: Context = { tokens, pairs, links, edits: new Map() };
 
   const lines: string[] = [];
   let start = 0;
