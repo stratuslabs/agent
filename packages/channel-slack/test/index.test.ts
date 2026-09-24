@@ -4177,6 +4177,32 @@ test('a code block longer than two messages is closed and reopened at each cut',
   assert.equal(body, lines.join('\n'));
 });
 
+test('a fence with a very long opening line is still closed and reopened, without the line', async () => {
+  const info = 'x'.repeat(2500);
+  const lines = Array.from({ length: 500 }, (_, index) => `line ${index}: *starred*`);
+  const chunks = await replyInThread(`\`\`\`${info}\n${lines.join('\n')}\n\`\`\``);
+
+  assert.ok(chunks.length >= 3);
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
+    assert.ok(fencesBalanced(chunk), `a chunk left a fence open: …${chunk.slice(-20)}`);
+  }
+  // The info line travels once; each continuation reopens with the fence alone.
+  assert.ok(chunks.slice(1).every((chunk) => chunk.startsWith('```\n')));
+});
+
+test('a fence of absurdly many backticks is cut within the limit and makes progress', async () => {
+  const fence = '`'.repeat(1999);
+  const chunks = await replyInThread(`${fence}\n${'y'.repeat(9000)}\n${fence}`);
+
+  // Reopening a delimiter this size would overflow every message and move one
+  // character at a time; it is cut the way everything was before.
+  assert.ok(chunks.length <= 6, `expected a handful of messages, got ${chunks.length}`);
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
+  }
+});
+
 test('long replies never split an emoji across the message boundary', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

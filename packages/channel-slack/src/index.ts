@@ -1272,7 +1272,7 @@ const truncateForSlack = (text: string): string =>
  * Slack read the rest of somebody's log as prose — every `*` and `_` in it
  * formatting. So a cut that would land inside a code run moves in front of
  * it when that still leaves a message worth sending, and otherwise closes
- * the run at the cut and reopens it, info string and all, in the next.
+ * the run at the cut and reopens it in the next.
  */
 const splitForSlack = (text: string): string[] => {
   if (text.length <= SLACK_MAX_MESSAGE_CHARS) {
@@ -1286,25 +1286,34 @@ const splitForSlack = (text: string): string[] => {
     const newline = window.lastIndexOf('\n');
     const cut = newline > SLACK_MAX_MESSAGE_CHARS / 2 ? newline : safeCutIndex(rest, SLACK_MAX_MESSAGE_CHARS);
     const run = codeRunsOf(rest).find((candidate) => candidate.start < cut && cut < candidate.end);
-    if (run === undefined || run.opener.length > SLACK_MAX_MESSAGE_CHARS / 2) {
-      chunks.push(rest.slice(0, cut));
-      rest = rest.slice(cut).replace(/^\n+/, '');
-      continue;
-    }
-    if (run.start > SLACK_MAX_MESSAGE_CHARS / 4) {
+    if (run !== undefined && run.start > SLACK_MAX_MESSAGE_CHARS / 4) {
       chunks.push(rest.slice(0, run.start).replace(/\n+$/, ''));
       rest = rest.slice(run.start);
       continue;
     }
     // The run is most of the message, so it is cut itself — at its last
     // newline that leaves room for the closer, and past its opener so the
-    // continuation always makes progress.
-    const budget = SLACK_MAX_MESSAGE_CHARS - run.closer.length;
+    // continuation always makes progress. A continuation reopens with the
+    // info string only while it is short: a two-thousand-character info
+    // line repeated on every part would crowd out the code it labels.
+    const budget = SLACK_MAX_MESSAGE_CHARS - (run?.closer.length ?? 0);
+    const floor = run === undefined ? 0 : run.start + run.opener.length;
+    const reopen = run === undefined || run.opener.length <= SLACK_MAX_MESSAGE_CHARS / 8
+      ? run?.opener
+      : run.opener.endsWith('\n') ? `${run.closer.slice(1)}\n` : run.opener;
+    // A delimiter too long to close and reopen inside one message — a fence
+    // of a thousand backticks, an opening line that fills the window — is
+    // cut raw, as before this existed. Reopening it would send a message
+    // over the limit, and consume a character a message after that.
+    if (run === undefined || reopen === undefined || reopen.length + run.closer.length > SLACK_MAX_MESSAGE_CHARS / 4 || floor >= budget) {
+      chunks.push(rest.slice(0, cut));
+      rest = rest.slice(cut).replace(/^\n+/, '');
+      continue;
+    }
     const inner = rest.lastIndexOf('\n', budget - 1);
-    const floor = run.start + run.opener.length;
     const within = inner > Math.max(floor, SLACK_MAX_MESSAGE_CHARS / 2) ? inner : Math.max(safeCutIndex(rest, budget), floor + 1);
     chunks.push(`${rest.slice(0, within)}${run.closer}`);
-    rest = `${run.opener}${rest.slice(within).replace(/^\n/, '')}`;
+    rest = `${reopen}${rest.slice(within).replace(/^\n/, '')}`;
   }
   if (rest.length > 0) {
     chunks.push(rest);
