@@ -4216,6 +4216,18 @@ test('a table longer than one message stays a grid in every part', async () => {
   }
 });
 
+test('a cut forced just past a long fence opener never lands inside an emoji', async () => {
+  // An opener 3,995 units long leaves room for one code point, and the first
+  // one after it is an emoji: the progress step used to split its halves.
+  const opener = `\`\`\`${'x'.repeat(3991)}\n`;
+  const chunks = await replyInThread(`${opener}😀${'y'.repeat(6000)}\n\`\`\``);
+
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
+    assert.ok(chunk.isWellFormed(), `a chunk split a surrogate pair: …${chunk.slice(-5)}`);
+  }
+});
+
 test('long replies never split an emoji across the message boundary', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
