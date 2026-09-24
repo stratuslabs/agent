@@ -951,6 +951,11 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
     const rule = widths.map((each) => '─'.repeat(each)).join('─┼─');
     return ['```', line(grid[0] ?? []), rule, ...grid.slice(1).map(line), '```'].join('\n');
   }
+  // The list form names each value by its header, so a table with no rows
+  // has nothing to name; its header is what it says, and it stays said.
+  if (rows.length === 0) {
+    return header.map(plainCell).filter((label) => label.length > 0).map((label) => `**${label}**`).join(' · ');
+  }
   return rows
     .map(fit)
     .map((row) => row

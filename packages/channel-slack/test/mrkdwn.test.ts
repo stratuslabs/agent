@@ -552,3 +552,10 @@ test('pipes without a delimiter row are not a table', () => {
   const reply = 'Run `a | b` and then c | d.';
   assert.equal(toSlackMrkdwn(reply), reply);
 });
+
+test('a wide table with no rows keeps its header', () => {
+  const label = 'A column heading long enough to push the grid well past sixty';
+  const reply = [`| ${label} | B |`, '| --- | --- |'].join('\n');
+  // The list form had no row to name a value in, and returned nothing at all.
+  assert.equal(toSlackMrkdwn(reply), `*${label}* · *B*`);
+});
