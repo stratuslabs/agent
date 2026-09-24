@@ -68,6 +68,12 @@ subscription sign-in to per-token billing.
 - **A Slack app is silent** — the daemon isn't running
   ([Always on](./always-on.md)), or the channel package isn't installed
   (`stratus serve` names it at startup).
+- **An agent's shell cannot find `node`, `npm`, `gh`, or another tool you
+  have installed** — the always-on service runs with the `PATH` of the
+  shell `stratus service install` was run from, and a unit written before
+  that existed has the service manager's minimal default. Run `stratus
+  service install` (or `stratus update`) from a terminal where `which node`
+  works. See [Always on](./always-on.md).
 - **It answers mentions but not replies in its own thread** — the app was
   installed before the channel history scopes were in the manifest, so
   Slack tells it about mentions only. Add `channels:history` /

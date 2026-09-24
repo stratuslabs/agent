@@ -35,6 +35,7 @@ import {
   formatEvent,
   truncateRedirectLogs,
   installService,
+  readServiceCommand,
   readServiceStatus,
   serviceUnitPath,
   startService,
@@ -7781,6 +7782,74 @@ test('the unit runs where it was installed, so relative config paths still work'
   // or missing — soul than `stratus serve` does from the same project.
   const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
   assert.match(unit, new RegExp(`WorkingDirectory=${project}`));
+});
+
+test('the unit carries the installing shell\'s PATH, so a Homebrew node and gh are found', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'darwin',
+    homeDir: home,
+    execPath: '/Users/ava/.nvm/versions/node/v22.14.0/bin/node',
+    scriptPath: '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    uid: 501,
+    // A relative entry, a duplicate, and an empty segment, as real shells have.
+    path: '/opt/homebrew/bin:.:/usr/bin::/opt/homebrew/bin:/bin',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  // The reported shape: launchd's default PATH has no /opt/homebrew/bin, so
+  // an agent's shell could not see node, npm, or gh on any Mac.
+  // Node's own directory first, relative entries gone, each entry once.
+  assert.match(
+    plist,
+    /<key>EnvironmentVariables<\/key>\s*<dict>\s*<key>PATH<\/key>\s*<string>\/Users\/ava\/\.nvm\/versions\/node\/v22\.14\.0\/bin:\/opt\/homebrew\/bin:\/usr\/bin:\/bin<\/string>/,
+  );
+  // Still read back the way `stratus update` and doctor read it.
+  const command = await readServiceCommand({ platform: 'darwin', homeDir: home });
+  assert.equal(command?.execPath, '/Users/ava/.nvm/versions/node/v22.14.0/bin/node');
+  assert.equal(command?.scriptPath, '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js');
+});
+
+test('a unit installed with no PATH keeps the service manager\'s default', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'darwin',
+    homeDir: home,
+    execPath: '/Users/ava/.nvm/versions/node/v22.14.0/bin/node',
+    scriptPath: '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    uid: 501,
+    // Only relative entries, as good as none.
+    path: '.:bin',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  // Node's directory alone would replace launchd's /usr/bin:/bin:/usr/sbin:/sbin
+  // rather than add to it, and a command could no longer find `ls`.
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  assert.doesNotMatch(plist, /EnvironmentVariables/);
+});
+
+test('service install writes the PATH of the shell it was run from into the systemd unit', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await runCli({
+    argv: ['service', 'install'],
+    streams: createStreams().streams,
+    env: {
+      cwd: home,
+      homeDir: home,
+      processEnv: { PATH: '/home/ava/.local/bin:/home/ava/100%/bin:/usr/bin' },
+      serviceRunner: stubServiceRunner,
+      servicePlatform: 'linux',
+    },
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  const line = /^Environment=(.*)$/m.exec(unit)?.[1];
+  // Quoted, and `%` doubled so systemd does not read it as a specifier.
+  assert.equal(line, JSON.stringify(`PATH=${path.dirname(process.execPath)}:/home/ava/.local/bin:/home/ava/100%%/bin:/usr/bin`));
+  const command = await readServiceCommand({ platform: 'linux', homeDir: home });
+  assert.equal(command?.argv.at(-2), 'serve');
 });
 
 test('a failed disable stops --no-login claiming the login trigger is gone', async () => {

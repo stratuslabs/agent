@@ -36,6 +36,15 @@ puts `stratus` on your `PATH`. It stops with SIGTERM, so the gateway's
 drain actually runs. (Upgrading node moves those absolute paths — see
 [Updating](./updating.md) for why `stratus update` rewrites the unit.)
 
+For the same reason the unit carries a **`PATH`**: the one in the shell
+you installed from, with node's own directory first and relative entries
+(`.`) dropped. Without it the daemon gets the service manager's default —
+`/usr/bin:/bin:/usr/sbin:/sbin` under launchd — and so does every command
+an agent runs through the [shell tool](./shell.md), which on a Mac with
+Homebrew means no `node`, `npm`, or `gh`. Installed a tool somewhere new
+since? Run `stratus service install` (or `stratus update`) from a shell that
+finds it, and the unit picks up that shell's `PATH`.
+
 ## Crash restarts, and the `--no-login` asymmetry
 
 A default install restarts the daemon if it crashes, but not after a clean
