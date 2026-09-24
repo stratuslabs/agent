@@ -1390,11 +1390,26 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     if (!(await anyWorkspaceNamesLegacy(env, legacy))) {
       await rmdir(legacy);
     }
-  } catch {
+  } catch (error) {
     // Still holding something this run is right to leave: an operator's own
     // file, a quarantined workspace, or a workspace still naming this
     // directory. All three are named above or were never this migration's —
     // which the check above is what makes true.
+    //
+    // Unless the rescan just saw it hold *nothing*. Then the only thing
+    // that can make this `rmdir` fail for being non-empty is something that
+    // arrived in between, which is the same older command as ever, in the
+    // window the rescan narrowed rather than closed. Nothing distinguishes
+    // it afterwards — the directory is gone from the report's point of view
+    // and the files are at a path the new build never reads — so it is the
+    // one leftover that cannot be swallowed.
+    if (remaining.length === 0 && (error as NodeJS.ErrnoException).code === 'ENOTEMPTY') {
+      throw new Error(
+        `Something appeared in ${path.relative(stratusHomePath(env), legacy)}/ as it was being removed, so `
+        + 'the upgrade was stopped rather than leaving it where nothing will read it — a command of an older '
+        + 'build is most likely still running. Nothing was lost. Stop it and run `stratus update` again.',
+      );
+    }
   }
   if (report.moved === 0 && report.quarantined.length === 0 && finished === 0) {
     return undefined;
