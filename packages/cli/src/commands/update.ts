@@ -22,54 +22,11 @@ import {
   defaultPackageVersionFetcher,
   compareVersions,
   defaultPackageInstaller,
-  defaultInstalledVersionReader,
   CLI_VERSION,
   CLI_PACKAGE_NAME,
 } from '../npm.ts';
 import type { ParsedUpdateCommand } from '../parse.ts';
-import {
-  FIRST_PARTY_CAPABILITY_PACKAGES,
-  FIRST_PARTY_CONTRIBUTION_PACKAGES,
-  FIRST_PARTY_COMPANION_PACKAGES,
-} from '../plugin-catalog.ts';
-
-/** One first-party package this machine has, and how it compares to the CLI's target. */
-interface CompanionPackage {
-  name: string;
-  version: string;
-  stale: boolean;
-}
-
-/**
- * The first-party packages installed beside the CLI, and whether each one
- * lags the version the CLI is heading for.
- *
- * The gap this closes: the CLI and its companions are separate global
- * installs, so upgrading `@stratusagent/cli` left every one of them at
- * whatever version was installed the day setup first ran. A Slack adapter
- * two releases behind the daemon loading it is not a configuration anyone
- * chose, and nothing reported it — `doctor` says "installed", which was
- * true of the stale one too.
- *
- * Read from each package's own manifest rather than asked of npm: the
- * question is what this machine has, one registry round trip per package
- * would answer a different one, and they ship in lockstep so the CLI's
- * target version is theirs.
- */
-const readCompanions = async (
-  target: string,
-  env: CliEnvironment,
-): Promise<CompanionPackage[]> => {
-  const read = env.installedVersionReader ?? defaultInstalledVersionReader;
-  const found: CompanionPackage[] = [];
-  for (const name of [...FIRST_PARTY_COMPANION_PACKAGES, ...FIRST_PARTY_CAPABILITY_PACKAGES, ...FIRST_PARTY_CONTRIBUTION_PACKAGES]) {
-    const version = await read(name);
-    if (version !== undefined) {
-      found.push({ name, version, stale: compareVersions(target, version) > 0 });
-    }
-  }
-  return found;
-};
+import { readCompanions } from '../companions.ts';
 
 /**
  * `stratus update` — the whole upgrade dance, in the order that cannot lose

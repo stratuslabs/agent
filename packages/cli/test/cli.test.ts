@@ -4044,6 +4044,31 @@ test('serve names the agents no channel can ask for', async () => {
   assert.match(output.stderr, /wait out the \napproval timeout|wait out the approval timeout/);
 });
 
+test('serve warns at startup when a first-party package is older than the CLI', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-behind-'));
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      shutdownSignal: controller.signal,
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.6.0' : undefined,
+    },
+  });
+
+  assert.equal(code, 0);
+  // The daemon is where a stale adapter costs something, and the log is
+  // where someone asking "why does it ignore thread replies" looks.
+  assert.match(output.stderr, /Warning: @stratusagent\/channel-slack 0\.6\.0 is older than this CLI/);
+});
+
 test('serve keeps refusing gated calls when the approvals config cannot be read', async () => {
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-badconfig-'));
   await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
@@ -4520,6 +4545,48 @@ test('doctor --format json returns the same findings as data', async () => {
   assert.equal(report.provider.value, 'demo');
   assert.equal(report.slackPackageInstalled, true);
   assert.ok(report.problems.some((problem: string) => /offline demo model/.test(problem)));
+});
+
+test('doctor names a first-party package older than the CLI', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      // The reported shape: a CLI upgraded around `stratus update`, and the
+      // Slack adapter it loads left at the version setup first installed.
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.6.0' : undefined,
+    },
+  });
+
+  assert.match(output.stdout, /@stratusagent\/channel-slack 0\.6\.0 is older than this CLI/);
+  assert.match(output.stdout, /Run `stratus update` to bring it level/);
+});
+
+test('doctor says nothing about packages that match the CLI', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? CLI_VERSION : undefined,
+    },
+  });
+
+  assert.doesNotMatch(output.stdout, /older than this CLI/);
 });
 
 test('a run warns when an environment key overrides the subscription sign-in', async () => {
