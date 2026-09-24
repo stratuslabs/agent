@@ -1311,9 +1311,13 @@ const splitForSlack = (text: string): string[] => {
     // of a thousand backticks, an opening line that fills the window — is
     // cut raw, as before this existed. Reopening it would send a message
     // over the limit, and consume a character a message after that.
+    // Only a fence is reopened. Its closer and opener sit on lines of their
+    // own, so they can never run into a backtick of the code; an inline
+    // span's would, and `x` + `` would read as a different delimiter.
     // `floor + 2`: the first cut past the opener has to fit a whole code
     // point, or the step that guarantees progress lands inside an emoji.
-    if (run === undefined || reopen === undefined || reopen.length + run.closer.length > SLACK_MAX_MESSAGE_CHARS / 4 || floor + 2 > budget) {
+    const fence = run !== undefined && run.closer.startsWith('\n');
+    if (run === undefined || !fence || reopen === undefined || reopen.length + run.closer.length > SLACK_MAX_MESSAGE_CHARS / 4 || floor + 2 > budget) {
       chunks.push(rest.slice(0, cut));
       rest = rest.slice(cut).replace(/^\n+/, '');
       continue;
