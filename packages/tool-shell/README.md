@@ -72,7 +72,7 @@ read would not have said so.
 
 | Key | Default | What |
 | --- | --- | --- |
-| `passEnv` | `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ` | Names forwarded from the daemon's environment. Nothing on the default list is a secret; that is the test for adding one. |
+| `passEnv` | `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ` | Names forwarded from the daemon's environment. Nothing on the default list is a secret; that is the test for adding one. Under the always-on service the daemon's `PATH` is the one the service was installed from — see [Always on](../../docs/guides/always-on.md). |
 | `env` | none | Variables set outright. Where a token goes if a command genuinely needs one — deliberately, in config, where an auditor can see it. |
 | `cwd` | the agent's workspace | Where commands start; a leading `~` is your home directory. The default — `~/.stratus/workspaces/<agent-id>` — is created on first use; a directory you name is not, and a missing one is reported by name rather than as a spawn failure. |
 | `timeoutMs` | `60000` | Killed with its whole process group after this. A process the command left in its own session (`setsid`, a daemon that detaches itself) survives, but no longer holds the call open — see [the guide](https://github.com/stratuslabs/agent/blob/main/docs/guides/shell.md#timeouts-and-background-processes). |
