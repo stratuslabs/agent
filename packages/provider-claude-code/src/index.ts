@@ -239,7 +239,9 @@ const runPrompt = (text: string, images: readonly ImageAttachment[]): string | A
     message: {
       role: 'user',
       content: [
-        { type: 'text', text },
+        // A screenshot sent with no words leaves the text empty, and the API
+        // refuses an empty text block — the direct provider omits it too.
+        ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
         ...images.map((image) => ({
           type: 'image' as const,
           source: { type: 'base64' as const, media_type: image.mediaType, data: image.data },

@@ -135,6 +135,42 @@ test('an image on the newest message reaches Claude Code as an image, not a note
   assert.deepEqual(response.parts, [{ type: 'text', text: 'Three items: eggs, milk, bread.' }]);
 });
 
+test('an image sent with no words reaches Claude Code without an empty text block', async () => {
+  const prompts: unknown[] = [];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    prompts.push(params.prompt);
+    return (async function* () {
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'A receipt.' } as ClaudeCodeStreamMessage;
+    })();
+  };
+  const session = createSession({
+    messages: [{
+      id: 'session-1:user:1',
+      role: 'user',
+      content: '',
+      createdAt: new Date().toISOString(),
+      images: [{ mediaType: 'image/png', data: 'iVBORw0K', name: 'screenshot.png' }],
+    }],
+  });
+
+  await createClaudeCodeProvider({ queryFn }).generate({ session });
+
+  // Slack hands a screenshot-only message over with empty text, and the API
+  // rejects `{ type: 'text', text: '' }` outright.
+  const sent: unknown[] = [];
+  for await (const message of prompts[0] as AsyncIterable<unknown>) {
+    sent.push(message);
+  }
+  assert.deepEqual(sent, [{
+    type: 'user',
+    parent_tool_use_id: null,
+    message: {
+      role: 'user',
+      content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' } }],
+    },
+  }]);
+});
+
 test('a message with no image still reaches Claude Code as a plain prompt string', async () => {
   const { queryFn, calls } = createFakeQuery([{ type: 'result', subtype: 'success', is_error: false, result: 'Hi.' }]);
   await createClaudeCodeProvider({ queryFn }).generate({ session: createSession() });
