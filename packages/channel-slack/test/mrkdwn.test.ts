@@ -565,3 +565,9 @@ test('a pipe after an escaped backslash still separates columns', () => {
   const table = ['| Path | Kind |', '| --- | --- |', '| C:\\\\| drive |'].join('\n');
   assert.equal(toSlackMrkdwn(table), ['```', 'Path │ Kind', '─────┼──────', 'C:\\\\ │ drive', '```'].join('\n'));
 });
+
+test('a code span in a cell loses its whole delimiter, however many backticks', () => {
+  const table = ['| One | Two | Three |', '| --- | --- | --- |', '| `a` | ``b`` | ```c``` |'].join('\n');
+  // Only one tick came off each side, leaving `b` and ``c`` showing.
+  assert.equal(toSlackMrkdwn(table), ['```', 'One │ Two │ Three', '────┼─────┼──────', 'a   │ b   │ c', '```'].join('\n'));
+});

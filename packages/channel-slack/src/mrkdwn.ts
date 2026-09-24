@@ -948,7 +948,11 @@ const tableAlignments = (line: string): Alignment[] | undefined => {
  * characters; they are dropped, and the words they marked stay.
  */
 const plainCell = (cell: string): string =>
-  cell.replace(/(\*\*|__)(.+?)\1/g, '$2').replace(/`([^`]+)`/g, '$1');
+  cell
+    .replace(/(\*\*|__)(.+?)\1/g, '$2')
+    // A code span's whole delimiter, however many backticks: a run opens and
+    // only a run of the same length closes, as the scan above reads it.
+    .replace(/(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)/g, (_, _ticks: string, code: string) => code.trim());
 
 const pad = (text: string, width: number, alignment: Alignment): string => {
   const gap = width - text.length;
