@@ -165,16 +165,21 @@ That used to stop the upgrade, because schema 4 is stamped once and nothing
 read `workspaces/` afterwards: carrying on left those files and every
 provenance label in them where no build would look.
 
-**The move now runs on every `stratus serve`, whatever the schema says** —
-under the daemon's home claim, before any store is opened. So a stray
-workspace is folded by the next start rather than stranded by the stamp,
-and one appearing mid-move is reported and left rather than refused. The
-same pass handles a home that was never updated through `stratus update`,
-which is what it was already there for.
+**The move now runs on every `stratus serve` and every `stratus update`,
+whatever the schema says** — under the home claim, before any store is
+opened. So a stray workspace is folded by the next one rather than stranded
+by the stamp, and one appearing mid-move is reported and left rather than
+refused. `stratus update` matters for a home with no daemon at all:
+`stratus run` takes no claim, so it cannot do this safely.
+
+It costs a single `stat` on a home that has finished moving. Everything
+expensive — reading every agent's ledger, to finish a move interrupted
+between its rename and its record rewrite — happens only once
+`~/.stratus/workspaces/` is found to still be there.
 
 `stratus doctor` names any workspace still at the old path, since that is
-where someone looks when a file seems to have gone missing. The remedy is a
-restart, not anything by hand.
+where someone looks when a file seems to have gone missing. The remedy is to
+start the daemon or run `stratus update` — not anything by hand.
 
 Two halves to what the fold rescues, and the difference matters. Where the
 new path does **not** exist yet, the whole directory is moved and its

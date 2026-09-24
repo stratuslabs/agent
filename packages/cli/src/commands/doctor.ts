@@ -404,8 +404,10 @@ export const collectDoctorReport = async (
     problems.push(
       `${stray.join(', ')} still ${stray.length === 1 ? 'has a workspace' : 'have workspaces'} at the old `
       + `${path.basename(legacyWorkspacesDirPath(env))}/ path, which this build does not read — most likely `
-      + 'left by a command of an older build running during the upgrade. Restart the daemon (`stratus restart`) '
-      + 'and it is folded into the agent\'s own directory, provenance labels and all.',
+      + 'left by a command of an older build running during the upgrade. Start the daemon (`stratus serve`, or '
+      + '`stratus service start`) or run `stratus update`, and the provenance labels are folded into the '
+      + "agent's live ledger. The files move too unless the agent's own workspace already holds files of its "
+      + 'own, in which case they stay where they are rather than overwriting newer ones, and the start says so.',
     );
   }
 

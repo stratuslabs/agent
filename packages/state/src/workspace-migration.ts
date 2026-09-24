@@ -894,6 +894,38 @@ const anyWorkspaceNamesLegacy = async (env: StateEnvironment, legacy: string): P
 };
 
 /**
+ * Whether the pre-schema-4 `workspaces/` directory is there at all.
+ *
+ * The gate the repair callers ask before running the pass, and the reason
+ * they can run it on every start. The pass itself opens by finishing any
+ * interrupted move, which asks *every* agent and reads each provenance
+ * ledger whole — append-only files on a fleet that has been up for months.
+ * Paying that on every daemon start, for a state that no longer exists, is
+ * not a cost worth carrying.
+ *
+ * Presence rather than contents: a run killed between a rename and its
+ * ledger rewrite leaves this directory behind — empty, since the `rmdir`
+ * that removes it comes after every agent is done — and that is exactly the
+ * case the interrupted-move repair exists for. Gating on whether it holds
+ * anything would skip it.
+ *
+ * Absence answers, and so does a regular file somebody left at the name.
+ * Every other failure propagates: a gate that cannot ask must not answer
+ * "nothing to do" about state nothing else is looking at.
+ */
+export const legacyWorkspacesPresent = async (env: StateEnvironment): Promise<boolean> => {
+  try {
+    return (await stat(legacyWorkspacesDirPath(env))).isDirectory();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return false;
+    }
+    throw error;
+  }
+};
+
+/**
  * The names still sitting in `workspaces/` that a repair would fold, or an
  * empty list once the layout has finished moving.
  *
@@ -948,9 +980,15 @@ export const strayWorkspaceNames = async (env: StateEnvironment): Promise<readon
  *
  * Running on every start is what retires that. A stray `workspaces/<id>` is
  * always foldable, so a race that used to cost an agent its labels now costs
- * one start's delay. Cheap in the steady state, which is the state every
- * home reaches: one `readdir` that finds nothing, and the repair of
- * interrupted moves it already did.
+ * one start's delay.
+ *
+ * And it is one `readdir` on a home that has finished moving, which is the
+ * state every home reaches. Everything expensive here — reading every
+ * agent's ledger to finish an interrupted move — happens *after* that
+ * directory is found, because nothing it repairs can be outstanding while
+ * the directory is gone. Ledgers are append-only and a fleet runs for
+ * months; parsing all of them on every start would be a real cost to pay
+ * for a state that no longer exists.
  */
 export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<string | undefined> => {
   // Before anything else: a previous run may have moved a workspace and

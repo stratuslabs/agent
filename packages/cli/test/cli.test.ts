@@ -4459,9 +4459,17 @@ test('doctor names a workspace left at the pre-schema-4 path, and says a restart
 
   assert.equal(exitCode, 1, 'a home with state at a dead path is a problem, not a note');
   assert.match(output.stdout, /ava still has a workspace at the old workspaces\/ path/);
-  // The remedy is a restart, because the repair is something `serve` does —
-  // doctor diagnoses and fixes nothing.
-  assert.match(output.stdout, /stratus restart/);
+  // The remedy has to work on the home this is printed for, which may have
+  // no daemon at all: `stratus restart` exits 1 when nothing is serving, so
+  // it is the wrong advice for exactly the person reading this.
+  assert.match(output.stdout, /stratus serve/);
+  assert.match(output.stdout, /stratus update/);
+  assert.doesNotMatch(output.stdout, /stratus restart/);
+  // And it does not promise the files move: where the agent is already
+  // writing at the new path they stay, which is the case somebody hunting a
+  // file most needs to know.
+  assert.match(output.stdout, /provenance labels are folded/);
+  assert.match(output.stdout, /they stay where they are/);
 });
 
 test('doctor reports the resolved provider and where it came from', async () => {

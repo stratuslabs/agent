@@ -16,6 +16,7 @@ import {
   agentsDirPath,
   createAgentWorkspaces,
   legacyWorkspacesDirPath,
+  legacyWorkspacesPresent,
   pendingStateMigrations,
   readStateStamp,
   runStateMigrations,
@@ -582,10 +583,20 @@ test('a home that has finished moving has nothing stray and nothing to say', asy
   await seedWorkspace(home, 'ava', { 'own.md': 'mine' });
   await runStateMigrations(env, { exclusive: true });
 
-  // The steady state every home reaches, and the one this pass pays for on
-  // every start: no directory, nothing to report.
+  // The steady state every home reaches, and what its starts now cost: the
+  // gate says no, so the pass — which would read every agent's ledger to
+  // finish an interrupted move — is never entered.
+  assert.equal(await legacyWorkspacesPresent(env), false);
   assert.deepEqual(await strayWorkspaceNames(env), []);
   assert.equal(await applyPerAgentWorkspaces(env), undefined);
+
+  // And the gate is presence, not contents: a run killed between a rename
+  // and its ledger rewrite leaves this directory behind *empty*, which is
+  // exactly the state the interrupted-move repair exists for. Gating on
+  // whether it holds anything would skip it.
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  assert.equal(await legacyWorkspacesPresent(env), true);
+  assert.deepEqual(await strayWorkspaceNames(env), []);
 });
 
 test('the workspace move is idempotent, and a second run has nothing to say', async () => {

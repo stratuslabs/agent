@@ -17,7 +17,11 @@ export { BUILTIN_PROVIDER_NAMES, type BuiltinProviderName } from '@stratusagent/
 export { BUILTIN_EXECUTOR_NAME, BUILTIN_MEMORY_STORE_NAME } from '@stratusagent/core';
 
 export { createFileMemoryStore, createShardedFileMemoryStore, type FileMemoryStoreOptions } from './memory.ts';
-export { applyPerAgentWorkspaces, strayWorkspaceNames } from './workspace-migration.ts';
+export {
+  applyPerAgentWorkspaces,
+  legacyWorkspacesPresent,
+  strayWorkspaceNames,
+} from './workspace-migration.ts';
 
 export {
   type StateEnvironment,

@@ -26,6 +26,7 @@ import {
   resolveAgentPrincipals,
   resolveAgentSlack,
   applyPerAgentWorkspaces,
+  legacyWorkspacesPresent,
   runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
@@ -180,9 +181,16 @@ const serveHeldHome = async (
   // daemon is racing, and the stores are not open yet, so nothing is reading
   // a path this may still be populating. Costs one `readdir` on a home that
   // has finished moving, which is every home eventually.
-  const repaired = await applyPerAgentWorkspaces(env);
-  if (repaired !== undefined) {
-    log(`workspace layout: ${repaired}`);
+  // Gated on the directory being there at all, which is the one cheap
+  // question: the pass opens by finishing any interrupted move, and that
+  // asks every agent and reads each provenance ledger whole. Append-only
+  // files on a fleet that has been up for months are not something to parse
+  // on every start for a state that no longer exists.
+  if (await legacyWorkspacesPresent(env)) {
+    const repaired = await applyPerAgentWorkspaces(env);
+    if (repaired !== undefined) {
+      log(`workspace layout: ${repaired}`);
+    }
   }
 
   // Agents with stored Slack tokens go live in Slack automatically — the
