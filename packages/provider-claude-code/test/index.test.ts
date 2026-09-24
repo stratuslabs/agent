@@ -674,6 +674,69 @@ test('an SDK session that no longer exists replays history into a fresh one', as
   assert.equal(session.metadata?.[SDK_SESSION_METADATA_KEY], 'sdk-new');
 });
 
+test('an image the API refuses is dropped, and the turn replays into a fresh session without it', async () => {
+  const attempts: Array<{ resume: string | undefined; prompt: unknown }> = [];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const resume = (params.options as { resume?: string }).resume;
+    attempts.push({ resume, prompt: params.prompt });
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      if (typeof params.prompt !== 'string') {
+        yield {
+          type: 'result',
+          subtype: 'success',
+          is_error: true,
+          result: 'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.2.content.1.image.source.base64.data: Could not process image"}}',
+          session_id: 'sdk-old',
+        };
+        return;
+      }
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'That image did not come through.', session_id: 'sdk-new' };
+    })();
+  };
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+  const image = { mediaType: 'image/png' as const, data: 'iVBORw0K', name: 'broken.png' };
+  const session = createSession({ metadata: { [SDK_SESSION_METADATA_KEY]: 'sdk-old' } });
+  session.messages.push(
+    { id: 'session-1:assistant:2', role: 'assistant', content: 'Hi.', createdAt: new Date().toISOString() },
+    { id: 'session-1:user:3', role: 'user', content: 'what is this?', createdAt: new Date().toISOString(), images: [image] },
+  );
+
+  const response = await provider.generate({ session, memory: [] });
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'That image did not come through.' }]);
+  // Emptied on the session itself: it is stored, and left alone it would
+  // fail every later turn the same way.
+  assert.equal(image.data, '');
+  assert.equal((image as { omitted?: boolean }).omitted, true);
+  assert.equal(attempts.length, 2);
+  // Not resumed: the SDK recorded the refused message in its own session,
+  // so resuming would send the image again.
+  assert.equal(attempts[0]?.resume, 'sdk-old');
+  assert.equal(attempts[1]?.resume, undefined);
+  assert.match(String(attempts[1]?.prompt), /Conversation so far:/);
+  assert.match(String(attempts[1]?.prompt), /broken\.png/);
+  assert.equal(session.metadata?.[SDK_SESSION_METADATA_KEY], 'sdk-new');
+});
+
+test('an image refusal is recovered once, and a second refusal fails the turn', async () => {
+  let calls = 0;
+  const queryFn: ClaudeCodeQueryFn = () => {
+    calls += 1;
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      yield { type: 'result', subtype: 'success', is_error: true, result: 'API Error: 400 messages.0.content.1.image.source.base64.data: Could not process image' };
+    })();
+  };
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+  const session = createSession({
+    messages: [{ id: 'session-1:user:1', role: 'user', content: 'look', createdAt: new Date().toISOString(), images: [{ mediaType: 'image/png', data: 'iVBORw0K' }] }],
+  });
+
+  // The retry sends no image, so a refusal naming one is not this turn's
+  // image any more: it fails rather than looping.
+  await assert.rejects(provider.generate({ session, memory: [] }));
+  assert.equal(calls, 2);
+});
+
 test('a failed resume is not replayed once a hosted tool has run', async () => {
   // Replaying would execute the tool a second time. Its side effects are
   // real and already recorded, so a costlier turn is not the trade — a
