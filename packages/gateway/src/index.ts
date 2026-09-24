@@ -958,7 +958,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
   // The same database sessions live in — one file to back up — through the
   // schedule store's own connection (see its docs for why).
-  const scheduleStore = new SqliteScheduleStore(fleetDbIn(stateDir));
+  const scheduleStore = new SqliteScheduleStore(fleetDbIn(stateDir), { stateHome: stateDir });
 
   /**
    * The write side of an addressable destination, through whichever

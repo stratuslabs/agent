@@ -1,7 +1,7 @@
 import { stat } from 'node:fs/promises';
 
 import { canonicalDestination, describeCadence, describeSchedule, type ScheduleRecord } from '@stratusagent/agents';
-import { fleetDbPath, legacySessionDbPath, legacyStateHeld } from '@stratusagent/state';
+import { fleetDbPath, legacySessionDbPath, legacyStateHeld, stratusHomePath } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
 import type { ParsedSchedulesCommand } from '../parse.ts';
@@ -39,7 +39,12 @@ const listEverywhere = async (env: CliEnvironment): Promise<ScheduleRecord[]> =>
     if (!(await pathExists(dbPath))) {
       continue;
     }
-    const store = new SqliteScheduleStore(dbPath);
+    // `fleet.db` is a name Stratus derived and is refused behind a link;
+    // the legacy database may be one an operator relocated, and is not.
+    const store = new SqliteScheduleStore(
+      dbPath,
+      dbPath === fleetDbPath(env) ? { stateHome: stratusHomePath(env) } : {},
+    );
     try {
       for (const record of store.list()) {
         // Unconditional, so the fleet row read second replaces the legacy
@@ -80,7 +85,12 @@ const cancelEverywhere = async (env: CliEnvironment, id: string): Promise<Schedu
     if (!(await pathExists(dbPath))) {
       continue;
     }
-    const store = new SqliteScheduleStore(dbPath);
+    // `fleet.db` is a name Stratus derived and is refused behind a link;
+    // the legacy database may be one an operator relocated, and is not.
+    const store = new SqliteScheduleStore(
+      dbPath,
+      dbPath === fleetDbPath(env) ? { stateHome: stratusHomePath(env) } : {},
+    );
     try {
       const record = store.get(id);
       if (store.delete(id) && record) {

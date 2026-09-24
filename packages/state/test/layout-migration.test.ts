@@ -276,11 +276,11 @@ test('a grant file the move has not reached yet is still the one that is read', 
   // standing grants — and would hide a revocation the still-serving daemon
   // had just written there.
   await runStateMigrations(env);
-  const store = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const store = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   assert.deepEqual((await store.scopesFor('ava')).map((scope) => scope.command), ['git']);
 
   await runStateMigrations(env, { exclusive: true });
-  const after = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const after = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   assert.deepEqual((await after.scopesFor('ava')).map((scope) => scope.command), ['git']);
 });
 
@@ -421,7 +421,7 @@ test('a grant written before the move lands in the file the move will carry', as
   // fork the list — the migration would find its destination occupied,
   // leave the old file aside as it must, and lose every revocation the old
   // daemon wrote to it afterwards.
-  const store = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const store = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   await store.rememberTool('ava', { tool: 'web.fetch', grantedAt: '2026-03-01T00:00:00.000Z' });
   await assert.rejects(() => stat(whitelistPathFor(agentsDirPath(env), 'ava')));
   const legacy = JSON.parse(await readFile(path.join(agentsDirPath(env), 'ava.whitelist.json'), 'utf8')) as {
@@ -433,7 +433,7 @@ test('a grant written before the move lands in the file the move will carry', as
 
   // And the move then carries the one file, with both grants in it.
   await runStateMigrations(env, { exclusive: true });
-  const moved = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const moved = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   assert.deepEqual((await moved.toolGrantsFor('ava')).map((grant) => grant.tool), ['web.fetch']);
   assert.deepEqual((await moved.scopesFor('ava')).map((scope) => scope.command), ['git']);
 });
@@ -450,7 +450,7 @@ test('a grant write never recreates the old file the move has already taken', as
   // copied and stamped — the grants the daemon now reads would be missing
   // this write, and the legacy file left behind would make every later
   // `start()` refuse the home as un-migrated, with no migration left to run.
-  const store = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const store = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   await store.scopesFor('ava'); // resolve and cache, as a revoke does first
   await runStateMigrations(env, { exclusive: true });
   await store.rememberTool('ava', { tool: 'web.fetch', grantedAt: '2026-03-01T00:00:00.000Z' });
@@ -753,6 +753,96 @@ test('retiring the shared file appends to an earlier archive rather than renamin
   const archived = await readFile(`${legacyMemoryFilePath(env)}.migrated`, 'utf8');
   assert.match(archived, /from an earlier pass/);
   assert.match(archived, /likes jazz/);
+});
+
+test('a legacy database an operator relocated is migrated, and its mode is left alone', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // The asymmetry against `fleet.db` above: this is a file that predates
+  // the rule, and refusing it would strand the home on an upgrade it can
+  // never complete — with every session in the file being refused for. So
+  // it is read and its link renamed, and the one thing the rule is actually
+  // about is not done to it: their file's mode is not changed through it.
+  const { rename } = await import('node:fs/promises');
+  const elsewhere = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-volume-')), 'sessions.db');
+  await seedSharedState(home);
+  await rename(legacySessionDbPath(env), elsewhere);
+  await chmod(elsewhere, 0o644);
+  await symlink(elsewhere, legacySessionDbPath(env));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  // The sessions arrived where the new build reads them.
+  const shard = new DatabaseSync(agentSessionDbPath(env, 'ava'));
+  const rows = shard.prepare('SELECT id FROM sessions ORDER BY id').all() as { id: string }[];
+  shard.close();
+  assert.deepEqual(rows.map((row) => row.id), ['a-1', 'a-2']);
+  // Their file, still theirs: not tightened through the link.
+  assert.equal((await stat(elsewhere)).mode & 0o777, 0o644);
+});
+
+test('a relocated legacy database is only read: no journal switch, schedules copied from the fleet side', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // Not tightening it was half of reading-only. `PRAGMA journal_mode = WAL`
+  // is a write to their file too — it converts it for good, and on a
+  // read-only volume it fails the upgrade — and the schedule copy took the
+  // legacy write lock through it.
+  const { rename } = await import('node:fs/promises');
+  const elsewhere = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-volume-')), 'sessions.db');
+  await seedSharedState(home);
+  await rename(legacySessionDbPath(env), elsewhere);
+  await symlink(elsewhere, legacySessionDbPath(env));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const theirs = new DatabaseSync(elsewhere, { readOnly: true });
+  const mode = theirs.prepare('PRAGMA journal_mode').get() as { journal_mode: string };
+  theirs.close();
+  assert.equal(mode.journal_mode, 'delete');
+  // And the rows still arrived, copied from the fleet side.
+  const fleet = new DatabaseSync(fleetDbPath(env));
+  const schedules = fleet.prepare('SELECT id FROM schedules').all() as { id: string }[];
+  fleet.close();
+  assert.deepEqual(schedules.map((row) => row.id), ['sched-1']);
+  assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
+});
+
+test('a symlinked agents/ stops the upgrade before any grant file is archived through it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // Every stage guards its own writes, but the grant files it cannot place
+  // are archived by a rename *in* agents/ — through the link — and the run
+  // then stamped itself applied.
+  const { rename } = await import('node:fs/promises');
+  await seedSharedState(home);
+  const outside = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-outside-')), 'agents');
+  await rename(agentsDirPath(env), outside);
+  await symlink(outside, agentsDirPath(env));
+
+  await assert.rejects(() => runStateMigrations(env, { exclusive: true }), /is a symlink/);
+  assert.deepEqual((await readdir(outside)).sort(), ['ava.whitelist.json']);
+  // Not stamped, so the upgrade runs again once the link is replaced.
+  assert.ok(!(await readStateStamp(env)).applied.includes('0003-per-agent-state-layout'));
+});
+
+test('a symlinked fleet.db stops the upgrade before the schedules are copied through it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // The migration reaches `fleet.db` long before any store is constructed,
+  // and opening it is already a write: the file is created, put in WAL and
+  // chmodded, then the schedule rows are copied in. A guard only at the
+  // daemon's store is one this walks straight past.
+  await seedSharedState(home);
+  const outside = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-outside-')), 'theirs.db');
+  await writeFile(outside, 'not a database');
+  const before = (await stat(outside)).mode & 0o777;
+  await symlink(outside, fleetDbPath(env));
+
+  await assert.rejects(() => runStateMigrations(env, { exclusive: true }), /is a symlink/);
+  // Untouched: not opened, not filled, not tightened.
+  assert.equal(await readFile(outside, 'utf8'), 'not a database');
+  assert.equal((await stat(outside)).mode & 0o777, before);
 });
 
 test('an agent directory that is a symlink is quarantined, not written through', async () => {
@@ -1086,7 +1176,7 @@ test('a grant write tightens an agent directory an older build left loose', asyn
   await mkdir(directory, { recursive: true });
   await chmod(directory, 0o755);
 
-  const whitelist = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const whitelist = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   await whitelist.remember('ava', { command: 'git', args: ['push'] });
 
   assert.equal((await stat(directory)).mode & 0o777, 0o700);
@@ -1156,7 +1246,7 @@ test('a legacy grant file that is a symlink is refused, like the current one', a
   // truncate whatever it points at.
   await symlink(elsewhere, path.join(agentsDirPath(env), 'ava.whitelist.json'));
 
-  const whitelist = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const whitelist = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   await assert.rejects(
     () => whitelist.grantsFor('ava'),
     (error: unknown) => error instanceof Error && /symlink/.test(error.message),

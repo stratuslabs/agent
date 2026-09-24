@@ -177,7 +177,7 @@ test('an approved scope belongs to the agent that was approved, not to the tool'
 test('always allow persists a scope per agent, and a later session reads it back', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-whitelist-'));
   const remembered: CommandScope[] = [];
-  const whitelist = createFileCommandWhitelist({ directory });
+  const whitelist = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
 
   const first = createPermissionPolicy({
     mode: 'interactive',
@@ -206,7 +206,7 @@ test('always allow persists a scope per agent, and a later session reads it back
   const second = createPermissionPolicy({
     mode: 'headless',
     onDecision: (decision) => decisions.push(decision),
-    commands: { whitelist: createFileCommandWhitelist({ directory }) },
+    commands: { whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
   });
   assert.equal(await second.approve(contextFor('git push origin release')), true);
   assert.equal(await second.approve(contextFor('git push --force')), false);
@@ -217,7 +217,7 @@ test('always allow persists a scope per agent, and a later session reads it back
 test('a whitelist that exists but will not read is said once, ignored, and never written over', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-whitelist-bad-'));
   const warnings: string[] = [];
-  const whitelist = createFileCommandWhitelist({ directory, warn: (line) => warnings.push(line) });
+  const whitelist = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory), warn: (line) => warnings.push(line) });
 
   // No file is the ordinary starting state, and not a warning. (Another
   // agent's, since a read is cached for the life of the store.)
@@ -255,7 +255,7 @@ test('a whitelist that exists but will not read is said once, ignored, and never
 
   // Once even when the first two readers arrive together — two sessions
   // for one agent, each missing the cache, each failing the same read.
-  const together = createFileCommandWhitelist({ directory, warn: (line) => warnings.push(line) });
+  const together = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory), warn: (line) => warnings.push(line) });
   await Promise.all([together.scopesFor('ava'), together.scopesFor('ava')]);
   assert.equal(warnings.length, 2, 'a second store warns once more, not twice');
 });
@@ -358,7 +358,7 @@ test('a scope approved for a flag-first command covers that command', () => {
 
 test('always allow on a flag-first command runs it unattended next time', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-whitelist-'));
-  const whitelist = createFileCommandWhitelist({ directory });
+  const whitelist = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   const decisions: PermissionDecision[] = [];
   const first = createPermissionPolicy({
     mode: 'interactive',
@@ -371,7 +371,7 @@ test('always allow on a flag-first command runs it unattended next time', async 
 
   const second = createPermissionPolicy({
     mode: 'headless',
-    commands: { whitelist: createFileCommandWhitelist({ directory }) },
+    commands: { whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
   });
   assert.equal(await second.approve(contextFor('mkdir -p build')), true);
   assert.equal(await second.approve(contextFor('mkdir -p build extra')), false, 'a flag-first scope is exact on its arguments');

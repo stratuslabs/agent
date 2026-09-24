@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -368,6 +368,72 @@ test('a directory under agents/ that holds no shard is not an agent to reconcile
 
   await assert.rejects(() => stat(path.join(theirs, 'sessions.db')));
   assert.equal((await stat(theirs)).mode & 0o777, 0o755);
+});
+
+test('a linked agents/ is refused, though the directory the shard names is real', async () => {
+  const stateDir = await newStateDir();
+  const elsewhere = path.join(stateDir, 'elsewhere');
+  // Every per-agent directory under it is a real directory, so a rule that
+  // asks only about `agents/<id>` answers "not a symlink" and writes the
+  // whole fleet's sessions wherever this one link points.
+  await mkdir(path.join(elsewhere, 'ava'), { recursive: true });
+  await symlink(elsewhere, path.join(stateDir, 'agents'));
+
+  const store = new ShardedSessionStore({ stateDir });
+  await assert.rejects(
+    () => store.create(session('a-1', 'ava')),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+  // And it names the component to replace, not the leaf that was fine.
+  await assert.rejects(
+    () => store.create(session('a-2', 'ava')),
+    (error: unknown) => error instanceof Error && error.message.startsWith(path.join(stateDir, 'agents')),
+  );
+});
+
+test('a linked fleet.db is refused rather than indexed outside the home', async () => {
+  const stateDir = await newStateDir();
+  const outside = path.join(await newStateDir(), 'somebody-elses.db');
+  await writeFile(outside, '');
+  // The index carries every session id and the schedule rows. It lives
+  // directly in the home, which is the one directory that may itself be a
+  // link — so the guard that asked about the *parent* exempted this file
+  // and the guard that asked about per-agent paths never saw it.
+  await symlink(outside, path.join(stateDir, 'fleet.db'));
+
+  assert.throws(
+    () => new ShardedSessionStore({ stateDir }),
+    (error: unknown) => error instanceof Error && /symlink/.test(error.message),
+  );
+});
+
+test('an unowned state directory is not chmodded, whatever spelling it arrives in', async () => {
+  const stateDir = await newStateDir();
+  await chmod(stateDir, 0o755);
+  // An embedder's own directory, handed over with the separator still on
+  // it. `path.join` normalizes what it builds, so comparing the spellings
+  // raw reads this home as its own child and tightens a directory that is
+  // not ours — and follows the link, where the home is one.
+  const store = new ShardedSessionStore({ stateDir: `${stateDir}${path.sep}` });
+  await store.create(session('a-1', 'ava'));
+  store.close();
+
+  assert.equal((await stat(stateDir)).mode & 0o777, 0o755);
+  // And the agent's own directory, which *is* ours, still is.
+  assert.equal((await stat(path.join(stateDir, 'agents', 'ava'))).mode & 0o777, 0o700);
+});
+
+test('a home that is itself a link is followed, which is a supported layout', async () => {
+  const real = await newStateDir();
+  const linked = path.join(await newStateDir(), 'state');
+  // `~/.stratus` on another disk. The operator chose this path; everything
+  // below it is a name Stratus chose, and only those are refused.
+  await symlink(real, linked);
+
+  const store = new ShardedSessionStore({ stateDir: linked, ownedDirectory: true });
+  await store.create(session('a-1', 'ava'));
+  assert.equal((await store.get('a-1'))?.agent.id, 'ava');
+  store.close();
 });
 
 test('an agent directory that is a symlink is refused at the live shard, not written through', async () => {

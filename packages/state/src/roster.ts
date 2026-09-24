@@ -23,6 +23,7 @@ import {
 import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
 import { DEFAULT_CODEX_MODEL } from '@stratusagent/provider-codex';
+import { assertDerivedStatePath } from '@stratusagent/permissions';
 import { createShardedFileMemoryStore } from './memory.ts';
 import { ConfigFileError } from './config-file.ts';
 import { discoverActiveConfig } from './config-location.ts';
@@ -32,7 +33,7 @@ import {
   readWorkingDirectory,
   readNonEmptyString,
 } from './environment.ts';
-import { agentMemoryFilePath, agentsDirPath, foldedAgentId } from './paths.ts';
+import { agentMemoryFilePath, agentsDirPath, foldedAgentId, stratusHomePath } from './paths.ts';
 import {
   isRegisteredProviderName,
   DEFAULT_OPENAI_MODEL,
@@ -456,7 +457,10 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
  * remember" differently from the next.
  */
 export const createHomeMemoryStore = (env: StateEnvironment): AgentMemoryStore =>
-  withLegacyDefaultMemories(createShardedFileMemoryStore((agentId) => agentMemoryFilePath(env, agentId)));
+  withLegacyDefaultMemories(createShardedFileMemoryStore(
+    (agentId) => agentMemoryFilePath(env, agentId),
+    stratusHomePath(env),
+  ));
 
 // ---------------------------------------------------------------------------
 // Creating a soul under an id nothing else holds
@@ -581,6 +585,11 @@ export const claimSoulFile = async (
   if (unread.length > 0) {
     note(`Note: could not read ${unread.join(' or ')}, so this id was not checked against the ids it declares.`);
   }
+  // Never through a linked `agents/` — the rule `assertDerivedStatePath`
+  // owns. Every agent's state lives under it, so the stores refuse the
+  // link; a soul written through it first would be the one write that
+  // got past them.
+  await assertDerivedStatePath(stratusHomePath(env), agentsDirPath(env), 'directory');
   await mkdir(agentsDirPath(env), { recursive: true });
   let agent = defineAgent({ ...(input.name ? { name: input.name } : {}), instructions: input.instructions });
   const baseId = agent.id;

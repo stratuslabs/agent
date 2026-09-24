@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -83,6 +83,23 @@ test('claimSoulFile creates the agents directory it writes into', async () => {
 
   assert.equal(path.dirname(claimed.soulPath), agentsDirPath({ homeDir: home }));
   assert.match(await readFile(claimed.soulPath, 'utf8'), /Ava/);
+});
+
+test('claimSoulFile refuses a symlinked agents/ rather than writing a soul through it', async () => {
+  const home = await newHome();
+  // Every agent's state lives under agents/, so the stores refuse a link
+  // there; a soul written through it first was the one write that got past.
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'stratus-outside-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await symlink(outside, agentsDirPath({ homeDir: home }));
+
+  await assert.rejects(() => claimSoulFile(
+    { homeDir: home, cwd: home, processEnv: {} },
+    { name: 'Ava', instructions: 'You are Ava.' },
+    (agent) => formatSoul({ agent }),
+    () => {},
+  ), /is a symlink/);
+  assert.deepEqual(await readdir(outside), []);
 });
 
 test('claimSoulFile refuses an id the roster already declares and takes a suffix', async () => {

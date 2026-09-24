@@ -1119,6 +1119,11 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
 };
 
 export {
+  assertDerivedStatePath,
+  assertDerivedStatePathSync,
+  linkedDerivedComponent,
+  linkedDerivedComponentMessage,
+  linkedDerivedComponentSync,
   isSymlinkedStatePath,
   isSymlinkedStatePathSync,
   symlinkedStateDirectoryMessage,

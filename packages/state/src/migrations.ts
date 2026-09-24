@@ -16,7 +16,7 @@ import {
 import path from 'node:path';
 import type { MemoryEntry } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
-import { isSymlinkedStatePath } from '@stratusagent/permissions';
+import { linkedDerivedComponent } from '@stratusagent/permissions';
 import { type StateEnvironment, readWorkingDirectory } from './environment.ts';
 import { memoryAppendNeedsNewline } from './memory.ts';
 import {
@@ -129,7 +129,7 @@ export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> 
       // open — see `usableStateFile` in the layout migration, which is the
       // same rule. Skipped rather than thrown: the lines stay in the
       // archive, and this runs before every command.
-      if (await isSymlinkedStatePath(destination)) {
+      if (await linkedDerivedComponent(stratusHomePath(env), destination) !== undefined) {
         continue;
       }
       let existingIds: Set<string>;

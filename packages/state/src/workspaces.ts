@@ -2,9 +2,9 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import type { AgentWorkspaces } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
-import { isSymlinkedStatePathSync, symlinkedStateDirectoryMessage } from '@stratusagent/permissions';
+import { assertDerivedStatePathSync, isSymlinkedStatePathSync } from '@stratusagent/permissions';
 import { type StateEnvironment } from './environment.ts';
-import { agentStateDirPath, agentWorkspacePath, agentsDirPath } from './paths.ts';
+import { agentStateDirPath, agentWorkspacePath, agentsDirPath, stratusHomePath } from './paths.ts';
 
 /**
  * The host's answer to "where does this agent's output go", handed to
@@ -43,13 +43,12 @@ export const createAgentWorkspaces = (env: StateEnvironment): AgentWorkspaces =>
     prepare: (agentId) => {
       const workspace = agentWorkspacePath(env, agentId);
       const stateDir = agentStateDirPath(env, agentId);
-      // `chmod` follows links, so a planted `agents/<id>` would hand its
-      // target's mode to whatever it points at — and the state written
-      // through it would land there too. Same rule, same message, as every
-      // other writer of an agent's state directory.
-      if (isSymlinkedStatePathSync(stateDir)) {
-        throw new Error(symlinkedStateDirectoryMessage(stateDir));
-      }
+      // `chmod` follows links, so a planted `agents/<id>` — or a planted
+      // `agents/` above it — would hand its target's mode to whatever it
+      // points at, and the state written through it would land there too.
+      // The walk rather than the leaf, and the same rule as every other
+      // writer of an agent's state directory: see `assertDerivedStatePath`.
+      assertDerivedStatePathSync(stratusHomePath(env), stateDir, 'directory');
       mkdirSync(workspace, { recursive: true, mode: 0o700 });
       // `mkdir`'s mode applies only to what it creates, so a directory an
       // older build or a pre-fix plugin already left is whatever it was —
@@ -60,7 +59,9 @@ export const createAgentWorkspaces = (env: StateEnvironment): AgentWorkspaces =>
       // one thing under `agents/<id>/` that may be a symlink — an operator
       // relocating an agent's output to another volume is supported — and
       // `chmod` follows links, so the mode of a directory they chose is
-      // not this build's to change.
+      // not this build's to change. The *leaf* question, deliberately, and
+      // the only place below the home that asks it: everything reaching
+      // this path has already been walked above.
       if (!isSymlinkedStatePathSync(workspace)) {
         chmodSync(workspace, 0o700);
       }

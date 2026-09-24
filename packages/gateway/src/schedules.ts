@@ -14,6 +14,7 @@ import {
   type ScheduleRecord,
   type SchedulerHandle,
 } from '@stratusagent/agents';
+import { assertDerivedStatePathSync } from '@stratusagent/state';
 
 /**
  * Durable schedules, in the same database sessions live in — a schedule
@@ -29,10 +30,27 @@ import {
  * fired, kept only until the turn it pre-authorized finishes) and sorts
  * before every real timestamp, which is why the scan compares both ends.
  */
+export interface SqliteScheduleStoreOptions {
+  /**
+   * The state home `filePath` was derived under, when it was — `fleet.db`
+   * is. Every component below it must then be real, the rule
+   * `assertDerivedStatePath` owns: this constructor creates the file, puts
+   * it in WAL, chmods it and creates the table, so without the check a
+   * linked `fleet.db` has all of that done to whatever it points at. The
+   * `stratus schedules` commands open it directly, with no session index
+   * or migration ahead of them to refuse the link first. Omitted for the
+   * legacy database, which an operator may have relocated before the rule.
+   */
+  stateHome?: string;
+}
+
 export class SqliteScheduleStore {
   private readonly db: DatabaseSync;
 
-  constructor(filePath: string) {
+  constructor(filePath: string, options: SqliteScheduleStoreOptions = {}) {
+    if (options.stateHome !== undefined) {
+      assertDerivedStatePathSync(options.stateHome, filePath, 'file');
+    }
     // Same posture as the session store sharing this file: the directory
     // and the database must not be readable by other local users, and the
     // sidecar chmods cover databases created under a looser umask.

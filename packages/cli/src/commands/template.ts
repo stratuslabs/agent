@@ -15,6 +15,7 @@ import { createInterface } from 'node:readline';
 import { escapeControlCharacters, type JsonObject, type JsonValue } from '@stratusagent/core';
 import {
   agentsDirPath,
+  assertDerivedStatePath,
   foldedAgentId,
   globalConfigPath,
   discoverSkillsInDirectory,
@@ -24,6 +25,7 @@ import {
   loadConfigFile,
   validateConfigFile,
   saveConfigFile,
+  stratusHomePath,
 } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment, CliConfigFile } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -592,6 +594,9 @@ export const runTemplateAdd = async (
       }
     }
 
+    // Never through a linked `agents/`; see `claimSoulFile`, which the
+    // same rule guards for `stratus agent new`.
+    await assertDerivedStatePath(stratusHomePath(env), agentsDirPath(env), 'directory');
     await mkdir(agentsDirPath(env), { recursive: true });
     // Re-read the claimed ids rather than trusting the plan's snapshot. The
     // exclusive write below only catches a collision on the same *path*, and

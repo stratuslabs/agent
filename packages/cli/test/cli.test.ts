@@ -9261,7 +9261,10 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-cli-'));
   const env = { cwd: home, homeDir: home, processEnv: {} };
   const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
-  const store = createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents') });
+  const store = createFileCommandWhitelist({
+    directory: path.join(home, '.stratus', 'agents'),
+    stateHome: path.join(home, '.stratus'),
+  });
   await store.remember('ava', { command: 'git', args: ['push'], denyRefspecForms: true });
   await store.rememberOrigin('ava', { origin: 'https://app.example.com' });
   await store.rememberTool('ava', { tool: 'web.fetch', package: 'stratus-plugin-web', grantedAt: '2026-09-07T01:00:00.000Z', grantedBy: 'U1' });
@@ -9293,7 +9296,10 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   assert.match(missing.output.stderr, /ava has no such grant/);
 
   // Gone from the file, not just from a cache: a fresh store reads it back empty.
-  const after = await createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents') }).grantsFor('ava');
+  const after = await createFileCommandWhitelist({
+    directory: path.join(home, '.stratus', 'agents'),
+    stateHome: path.join(home, '.stratus'),
+  }).grantsFor('ava');
   assert.deepEqual(after, { scopes: [], origins: [], tools: [] });
 
   const empty = createStreams();
@@ -11133,6 +11139,26 @@ test('stratus memory export tightens an existing file before the corpus lands in
   assert.match(await readFile(dump, 'utf8'), /Likes jazz/);
 });
 
+test('stratus schedules refuses a symlinked fleet.db rather than opening it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-link-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const { fleetDbPath: fleetPath } = await import('@stratusagent/state');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The schedule store opens fleet.db itself — creating, WAL-ing, chmodding
+  // and creating the table — with no session index or migration ahead of it
+  // to refuse the link first.
+  const outside = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-outside-')), 'theirs.db');
+  await writeFile(outside, 'not a database');
+  await chmod(outside, 0o644);
+  await symlink(outside, fleetPath(env));
+
+  const listed = createStreams();
+  assert.notEqual(await runCli({ argv: ['schedules'], streams: listed.streams, env }), 0);
+  assert.match(listed.output.stderr, /is a symlink/);
+  assert.equal(await readFile(outside, 'utf8'), 'not a database');
+  assert.equal((await stat(outside)).mode & 0o777, 0o644);
+});
+
 test('stratus schedules reads where the rows are, not which database files exist', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-where-'));
   const env = { cwd: home, homeDir: home, processEnv: {} };
@@ -11341,6 +11367,25 @@ const writeTemplateDir = async (files: Record<string, string>): Promise<string> 
 
 const EXAMPLE_MANIFEST = JSON.stringify({ name: 'Example', description: 'A template written for a test.' });
 const EXAMPLE_SOUL = '---\nname: Scribe\ntools:\n  - fs.read\n---\n\nYou keep notes.\n';
+
+test('template add refuses a symlinked agents/ rather than installing souls through it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'stratus-outside-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await symlink(outside, path.join(home, '.stratus', 'agents'));
+  const source = await writeTemplateDir({ 'template.json': EXAMPLE_MANIFEST, 'agents/scribe.md': EXAMPLE_SOUL });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.notEqual(code, 0);
+  assert.match(output.stderr, /is a symlink/);
+  assert.deepEqual(await readdir(outside), []);
+});
 
 test('template add installs the souls, skills, and plugin config a template carries', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
