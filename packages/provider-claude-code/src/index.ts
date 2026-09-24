@@ -5,6 +5,7 @@ import {
   query as sdkQuery,
   tool as sdkTool,
   type Options,
+  type SDKUserMessage,
   type SdkMcpToolDefinition,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
@@ -20,11 +21,13 @@ import {
   type Session,
   type ToolDescriptor,
   type ExecutionContext,
+  type ImageAttachment,
 } from '@stratusagent/core';
 import {
   bridgedToolNames,
   hasHostedToolSideEffects,
   latestUserMessagePrompt,
+  promptImagesOf,
   markHostedToolSideEffects,
   renderTranscriptPrompt,
   type HostedToolExecutor,
@@ -208,9 +211,46 @@ export interface ClaudeCodeStreamMessage {
 }
 
 export type ClaudeCodeQueryFn = (params: {
-  prompt: string;
+  /** A string, or — when the message carries images — one user message with its image blocks. */
+  prompt: string | AsyncIterable<SDKUserMessage>;
   options?: Options;
 }) => AsyncIterable<ClaudeCodeStreamMessage>;
+
+/**
+ * The prompt for one run: the rendered text, and beside it the newest
+ * message's images as image blocks.
+ *
+ * The Agent SDK takes images only through its message-stream input, never
+ * in a prompt string, so this runtime used to be told an image was attached
+ * and that it could not see it — an agent on a Claude subscription was
+ * shown a screenshot's name and nothing else. A message with no image keeps
+ * the plain string, exactly as before: the stream input is only for what a
+ * string cannot carry. The SDK holds its input open until the first result
+ * while in-process MCP tools are attached, so a stream of one message still
+ * runs the whole tool loop.
+ */
+const runPrompt = (text: string, images: readonly ImageAttachment[]): string | AsyncIterable<SDKUserMessage> => {
+  if (images.length === 0) {
+    return text;
+  }
+  const message: SDKUserMessage = {
+    type: 'user',
+    parent_tool_use_id: null,
+    message: {
+      role: 'user',
+      content: [
+        { type: 'text', text },
+        ...images.map((image) => ({
+          type: 'image' as const,
+          source: { type: 'base64' as const, media_type: image.mediaType, data: image.data },
+        })),
+      ],
+    },
+  };
+  return (async function* () {
+    yield message;
+  })();
+};
 
 export interface ClaudeCodeProviderConfig {
   /**
@@ -577,7 +617,12 @@ export const createClaudeCodeProvider = ({
       let attemptUsage: Record<string, ClaudeCodeModelUsage> | undefined;
       try {
         for await (const message of queryFn({
-          prompt: resume ? latestUserMessagePrompt(request) : renderTranscriptPrompt(request),
+          prompt: runPrompt(
+            resume
+              ? latestUserMessagePrompt(request, { inlineImages: true })
+              : renderTranscriptPrompt(request, { inlineImages: true }),
+            promptImagesOf(request),
+          ),
           options: attemptOptions,
         })) {
           resetIdleTimer();

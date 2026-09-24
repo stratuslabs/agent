@@ -91,6 +91,56 @@ test('generate runs a turn through the Agent SDK and returns the result text', a
   assert.equal(options.env?.ANTHROPIC_API_KEY, undefined);
 });
 
+test('an image on the newest message reaches Claude Code as an image, not a note', async () => {
+  const prompts: unknown[] = [];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    prompts.push(params.prompt);
+    return (async function* () {
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'Three items: eggs, milk, bread.' } as ClaudeCodeStreamMessage;
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn });
+  const session = createSession({
+    messages: [{
+      id: 'session-1:user:1',
+      role: 'user',
+      content: 'can you read the list off this image?',
+      createdAt: new Date().toISOString(),
+      images: [{ mediaType: 'image/jpeg', data: '/9j/4AAQ', name: 'IMG_3612.jpg' }],
+    }],
+  });
+
+  const response = await provider.generate({ session });
+
+  // The reported shape: an agent on a Claude subscription answered "the
+  // attachment didn't reach me", because this runtime was only ever told an
+  // image's name. The SDK takes images through its message stream.
+  const prompt = prompts[0];
+  assert.equal(typeof prompt, 'object');
+  const sent: unknown[] = [];
+  for await (const message of prompt as AsyncIterable<unknown>) {
+    sent.push(message);
+  }
+  assert.deepEqual(sent, [{
+    type: 'user',
+    parent_tool_use_id: null,
+    message: {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'can you read the list off this image?' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/4AAQ' } },
+      ],
+    },
+  }]);
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Three items: eggs, milk, bread.' }]);
+});
+
+test('a message with no image still reaches Claude Code as a plain prompt string', async () => {
+  const { queryFn, calls } = createFakeQuery([{ type: 'result', subtype: 'success', is_error: false, result: 'Hi.' }]);
+  await createClaudeCodeProvider({ queryFn }).generate({ session: createSession() });
+  assert.equal(calls[0]!.prompt, 'Hello there');
+});
+
 test('multi-turn sessions are rendered as a transcript', async () => {
   const { queryFn, calls } = createFakeQuery([
     { type: 'result', subtype: 'success', is_error: false, result: 'Continuing!' },
@@ -478,7 +528,8 @@ test('transcripts replay hosted tool calls alongside their results', async () =>
   const prompts: string[] = [];
   const provider = createClaudeCodeProvider({
     queryFn: ({ prompt }) => {
-      prompts.push(prompt);
+      // A text-only run: always the plain string.
+      prompts.push(String(prompt));
       return (async function* () {
         yield { type: 'result', subtype: 'success', result: 'ok' } as never;
       })();
@@ -551,7 +602,7 @@ test('an SDK session that no longer exists replays history into a fresh one', as
   const attempts: Array<{ resume: string | undefined; prompt: string }> = [];
   const queryFn: ClaudeCodeQueryFn = (params) => {
     const resume = (params.options as { resume?: string }).resume;
-    attempts.push({ resume, prompt: params.prompt });
+    attempts.push({ resume, prompt: String(params.prompt) });
     return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
       if (resume) {
         throw new Error(`No conversation found with session ID: ${resume}`);

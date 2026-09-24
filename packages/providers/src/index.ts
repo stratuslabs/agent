@@ -979,21 +979,47 @@ const describeImageAttachments = (images: readonly ImageAttachment[] | undefined
  * it. `latest` marks the newest user message of the turn — the one an
  * unaddressed turn's note follows; see `PromptTextOptions`.
  */
-const userMessageText = (message: Pick<Message, 'content' | 'overheard' | 'images'>, latest = false): string =>
-  `${promptTextOf(message, { latest })}${describeImageAttachments(message.images)}`;
+const userMessageText = (
+  message: Pick<Message, 'content' | 'overheard' | 'images'>,
+  latest = false,
+  imagesTravel = false,
+): string =>
+  `${promptTextOf(message, { latest })}${describeImageAttachments(imagesTravel ? message.images?.filter((image) => !travels(image)) : message.images)}`;
+
+/** Whether an image still has its bytes to send; one past the replay window is a name only. */
+const travels = (image: ImageAttachment): boolean => image.omitted !== true && image.data.length > 0;
+
+/**
+ * For a harness that can take images beside its prompt text: whether the
+ * newest user message's images are sent that way, and so are left out of
+ * the text note that would otherwise say they cannot be seen.
+ */
+export interface PromptImageOptions {
+  inlineImages?: boolean;
+}
+
+/**
+ * The newest user message's images that still have their bytes: what a
+ * harness able to take images sends beside the prompt text rendered with
+ * `inlineImages`. Only the newest message's — a transcript replayed as text
+ * names older images, as it always has.
+ */
+export const promptImagesOf = (request: ProviderRequest): ImageAttachment[] =>
+  (latestUserMessageOf(transcriptOf(request))?.images ?? []).filter(travels);
 
 /** The newest user message — the one the turn being run ends on. */
 const latestUserMessageOf = (messages: readonly Message[]): Message | undefined =>
   messages.findLast((message) => message.role === 'user');
 
-export const renderTranscriptPrompt = (request: ProviderRequest): string => {
+export const renderTranscriptPrompt = (request: ProviderRequest, options: PromptImageOptions = {}): string => {
   const conversational = transcriptOf(request).filter(
     (message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool',
   );
 
   const latest = latestUserMessageOf(conversational);
+  const inline = options.inlineImages === true;
   if (conversational.length === 1 && conversational[0]?.role === 'user') {
-    return userMessageText(conversational[0], true);
+    return userMessageText(conversational[0], true, inline);
   }
 
   const lines: string[] = ['Conversation so far:'];
@@ -1016,7 +1042,7 @@ export const renderTranscriptPrompt = (request: ProviderRequest): string => {
       // asked for ends in — neither is a line the model should read.
       continue;
     }
-    lines.push(`[${message.role}] ${message.role === 'user' ? userMessageText(message, message === latest) : message.content}`);
+    lines.push(`[${message.role}] ${message.role === 'user' ? userMessageText(message, message === latest, inline && message === latest) : message.content}`);
   }
   // A turn nobody asked for ends on an overheard message carrying its own
   // instruction, and "reply to the latest user message" would countermand
@@ -1049,7 +1075,7 @@ export const renderTranscriptPrompt = (request: ProviderRequest): string => {
  * did. Falls back to the full transcript when there is no user message to
  * isolate, so a caller can never end up sending nothing.
  */
-export const latestUserMessagePrompt = (request: ProviderRequest): string => {
+export const latestUserMessagePrompt = (request: ProviderRequest, options: PromptImageOptions = {}): string => {
   const messages = transcriptOf(request);
   let start = messages.length;
   while (start > 0 && messages[start - 1]?.role !== 'assistant') {
@@ -1058,11 +1084,12 @@ export const latestUserMessagePrompt = (request: ProviderRequest): string => {
   const since = messages.slice(start).filter((message) => message.role === 'user');
   const newest = since.at(-1);
   if (!newest) {
-    return renderTranscriptPrompt(request);
+    return renderTranscriptPrompt(request, options);
   }
   const unheard = since.filter((message) => message.overheard === true || message === newest);
+  const inline = options.inlineImages === true;
   if (unheard.length === 1 && newest.overheard !== true) {
-    return userMessageText(newest);
+    return userMessageText(newest, false, inline);
   }
-  return unheard.map((message) => userMessageText(message, message === newest)).join('\n');
+  return unheard.map((message) => userMessageText(message, message === newest, inline && message === newest)).join('\n');
 };

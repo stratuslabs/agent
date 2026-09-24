@@ -127,9 +127,10 @@ thread.
 An OpenAI-compatible model that takes only text needs `"vision": false` in
 config, which turns every image into that note; see the
 [Slack guide](../../docs/guides/slack.md#sending-an-image). Whether the model actually *sees* the image depends on the
-agent's runtime: the Anthropic API and OpenAI-compatible providers send it
-as image content; the Claude Code and Codex harnesses take a text prompt,
-so there the agent is told the image's name and that it cannot see it.
+agent's runtime: the Anthropic API, OpenAI-compatible providers, and the
+Claude Code runtime send it as image content; the Codex harness takes a
+text prompt, so there the agent is told the image's name and that it cannot
+see it.
 **Every other attachment is unreadable** — a log, a PDF, an image that was
 too large — so the message reaches the agent naming those files and saying
 they cannot be opened, which is what lets it answer honestly instead of as
