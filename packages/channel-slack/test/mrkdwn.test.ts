@@ -643,3 +643,9 @@ test('a list-form label keeps a code span showing backticks as a code span', () 
   assert.ok(converted.startsWith('```` ``` ````: '), converted.slice(0, 40));
   assert.ok(converted.endsWith('\n\nAfter the table.'));
 });
+
+test('a label with a loose asterisk is not wrapped in bold', () => {
+  const table = ['| glob *.ts |', '| --- |', '| a.ts |'].join('\n');
+  // Wrapped, the new markers paired with the literal one and rewrote it.
+  assert.equal(toSlackMrkdwn(table), ['glob *.ts', '• a.ts'].join('\n'));
+});

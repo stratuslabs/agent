@@ -1099,13 +1099,15 @@ const pad = (text: string, width: number, alignment: Alignment): string => {
 
 /**
  * A header as a label in the list and one-column forms, which mrkdwn reads
- * like prose. Bold only when there is nothing in it to strip; otherwise the
+ * like prose. Bold only when it holds no marker character at all — the
+ * heading renderer's rule, since a loose `*` in `glob *.ts` pairs with the
+ * wrapper's own; otherwise the
  * header goes as written, so its own markup is converted rather than
  * unwrapped — a header showing ``` in a code span kept only the three
  * backticks, and they opened a fence that ran to the end of the reply.
  */
 const tableLabel = (header: string): string =>
-  header.length === 0 ? '' : plainCell(header) === header ? `**${header}**` : header;
+  header.length === 0 ? '' : /[*_~`]/.test(header) ? header : `**${header}**`;
 
 const renderTable = (header: string[], alignments: Alignment[], rows: string[][]): string => {
   const columns = header.length;
