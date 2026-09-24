@@ -4142,7 +4142,11 @@ export class AgentRunner {
         // not call a tool, so a turn that reaches `maxTurns + 2` is a
         // provider that ignored `toolChoice` and was already failed below.
         const wrappingUp = turn > this.maxTurns;
-        if (turn > this.maxTurns + 1) {
+        // A recovered call is a tool turn too, so one parked past the
+        // ceiling — `maxTurns` lowered while it waited — is refused as it
+        // was before wrap-up existed, not run on the one call reserved for
+        // saying what happened.
+        if (turn > this.maxTurns + 1 || (wrappingUp && pendingEntry)) {
           throw new Error(turnLimitMessage(this.maxTurns));
         }
 

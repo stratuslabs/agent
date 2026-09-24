@@ -194,7 +194,9 @@ That is how the ceiling reads under a provider the kernel drives one call
 at a time. The `codex` and `claude-code` runtimes hold their own loop
 inside one call and take the number as an inner budget instead: codex
 refuses the call past the budget as a tool error and answers with what it
-has, while Claude Code's own limit fails the run (`error_max_turns`). See
+has, and when Claude Code reaches its own limit (`error_max_turns`) the
+provider resumes that session once, with no tools it may run, for the same
+summary. See
 [Configuration](../reference/config.md#how-many-turns-one-message-may-spend).
 
 There is no flag for it on

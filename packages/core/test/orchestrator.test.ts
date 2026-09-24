@@ -1790,6 +1790,46 @@ test('recovery holds the checkpoint until the wait is re-established or answered
   assert.ok(done!.messages.some((message) => message.toolResult?.callId === 'c1'));
 });
 
+test('a call parked past a lowered ceiling is refused, not run on the wrap-up turn', async () => {
+  // Parked on turn 4 of what was a larger allowance; the daemon came back
+  // with maxTurns 3. Turn 4 is now the wrap-up, which may not act.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  const executed: string[] = [];
+  tools.register({
+    name: 'gated',
+    risk: 'gated',
+    async execute() {
+      executed.push('gated');
+      return { ok: true };
+    },
+  });
+  const now = new Date().toISOString();
+  const call = { id: 'c1', toolName: 'gated', input: {} };
+  await store.create({
+    id: 'lowered',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [call] },
+    ],
+    metadata: { [PENDING_APPROVAL_METADATA_KEY]: { call, remaining: [], turn: 4, parkedAt: now } },
+  });
+  let generates = 0;
+  const runner = new AgentRunner({
+    provider: { name: 'fake', async generate() { generates += 1; return { parts: [{ type: 'text' as const, text: 'x' }] }; } },
+    tools,
+    store,
+    maxTurns: 3,
+    approvals: { async approve() { return true; } },
+  });
+
+  await assert.rejects(runner.recoverPendingApproval('lowered'), /maximum of 3 provider turns/);
+  assert.deepEqual(executed, []);
+  assert.equal(generates, 0);
+});
+
 test('a recovered turn spends the provider budget it was already on', async () => {
   // maxTurns is a runaway and cost guard. Restarting the counter would let
   // a call parked on the last permitted turn buy the whole allowance again,
