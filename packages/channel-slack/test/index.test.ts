@@ -4228,6 +4228,18 @@ test('a cut forced just past a long fence opener never lands inside an emoji', a
   }
 });
 
+test('an inline code span too long for one message is never given delimiters of its own', async () => {
+  // Closing a one-backtick span beside a two-backtick run inside it made
+  // three, a different delimiter; neither half read as code any more.
+  const reply = `\`${'a'.repeat(3997)}\`\`${'b'.repeat(100)}\``;
+  const chunks = await replyInThread(reply);
+
+  assert.equal(chunks.join(''), reply, 'a span is cut as text, adding no backticks');
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
+  }
+});
+
 test('long replies never split an emoji across the message boundary', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
