@@ -436,6 +436,109 @@ const appendRecords = async (destination: string, body: string): Promise<void> =
 };
 
 /**
+ * The keys a ledger already carries, as `remapLedger` keys them: a path and
+ * the label recorded for it. A record whose pair is already there resolves
+ * to the same label wherever it is read, so appending it again would only
+ * grow the file.
+ */
+const recordedKeys = async (ledgerPath: string): Promise<Set<string>> => {
+  const keys = new Set<string>();
+  let raw: string;
+  try {
+    raw = await readFile(ledgerPath, 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return keys;
+    }
+    throw error;
+  }
+  for (const line of raw.split('\n')) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+      continue;
+    }
+    const record = parsed as { path?: unknown; trust?: unknown };
+    if (typeof record.path === 'string') {
+      keys.add(`${record.path}\u0000${String(record.trust)}`);
+    }
+  }
+  return keys;
+};
+
+/**
+ * Drain any archive an earlier fold left in this workspace into the ledger
+ * at the new path.
+ *
+ * A fold retires the source by renaming it, then reads the archive once more
+ * for whatever a writer appended in between — `recordWrite` holds a single
+ * descriptor across its read and its append, so the rename does not stop one
+ * already inside that window. A run that dies between the rename and that
+ * last read leaves those records in the archive alone, and the retry finds no
+ * ledger at the source: without this it reads as nothing to fold, 0004 is
+ * stamped, and the labels are gone for files that are still there.
+ *
+ * Deduplicated against what the destination already carries rather than
+ * marked as drained, because a marker is another thing to keep true — and
+ * the honest shape of the question is "which of these records is not yet
+ * over there", which the destination itself answers. So this is safe to run
+ * on every fold, which is what makes the leftover from a crashed run
+ * recoverable at all.
+ */
+const foldArchivesInto = async (from: string, destination: string): Promise<number> => {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(from, { withFileTypes: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return 0;
+    }
+    throw error;
+  }
+  const archives = entries
+    .filter((entry) => entry.isFile() && entry.name.startsWith(`${LEDGER_FILENAME}.migrated`))
+    .map((entry) => entry.name)
+    .sort();
+  if (archives.length === 0) {
+    return 0;
+  }
+  let dropped = 0;
+  const already = await recordedKeys(destination);
+  for (const name of archives) {
+    const { body, dropped: lost } = foldableLines(await readFile(path.join(from, name), 'utf8'));
+    dropped += lost;
+    const lines = body.split('\n').filter((line) => {
+      if (line.length === 0) {
+        return false;
+      }
+      const record = JSON.parse(line) as { path?: unknown; trust?: unknown };
+      if (typeof record.path !== 'string') {
+        return true;
+      }
+      const key = `${record.path}\u0000${String(record.trust)}`;
+      if (already.has(key)) {
+        return false;
+      }
+      already.add(key);
+      return true;
+    });
+    if (lines.length > 0) {
+      await appendRecords(destination, `${lines.join('\n')}\n`);
+    }
+  }
+  return dropped;
+};
+
+/**
  * Fold the legacy workspace's ledger into the one already at the new path.
  *
  * Append-only and order-independent by construction — see the note at the
@@ -480,19 +583,27 @@ const foldLedgerInto = async (
   if (await sameEntry(source, ledgerIn(target))) {
     return { outcome: 'aliased', dropped: 0 };
   }
+  const destination = ledgerIn(target);
+  // First whatever an earlier run left half folded. Before the live source,
+  // so the archive this run is about to create is not one of them.
+  const fromArchives = await foldArchivesInto(from, destination);
   let raw: Buffer;
   try {
     raw = await readFile(source);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { outcome: 'none', dropped: 0 };
+      // No ledger of its own, and the archives are now over there: a run
+      // that died between a retire and its last read is finished, not read
+      // as nothing to do.
+      return fromArchives > 0
+        ? { outcome: 'folded', dropped: fromArchives }
+        : { outcome: 'none', dropped: 0 };
     }
     throw error;
   }
-  const destination = ledgerIn(target);
   // Bytes, not characters: this offset indexes back into a file on disk.
   const complete = raw.lastIndexOf(0x0a) + 1;
-  let dropped = 0;
+  let dropped = fromArchives;
   const first = foldableLines(raw.subarray(0, complete).toString('utf8'));
   dropped += first.dropped;
   if (first.body.length > 0) {

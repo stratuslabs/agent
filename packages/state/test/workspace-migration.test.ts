@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { whitelistPathFor } from '@stratusagent/permissions';
-import { createFileLedger } from '@stratusagent/plugins';
+import { createFileLedger, LEDGER_FILENAME } from '@stratusagent/plugins';
 
 import {
   STATE_SCHEMA_VERSION,
@@ -185,6 +185,40 @@ test('a destination the deferral window already created is merged, not refused',
   assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'fs-provenance.jsonl'), 'utf8'), live);
   assert.ok((await readdir(path.join(legacyWorkspacesDirPath(env), 'ava'))).includes('fs-provenance.jsonl.migrated'));
 });
+test('an archive a killed fold left behind is drained by the next run, not read as nothing to do', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // What a run that died between retiring the source and its last read
+  // leaves: no ledger at the source, an archive beside it holding a record
+  // that never reached the destination, and the destination already carrying
+  // the rest. Without draining it, the next run sees no source ledger, reads
+  // that as nothing to fold, and stamps over the label.
+  const legacy = await seedWorkspace(home, 'ava', { 'fetched.md': 'from a page' });
+  const late = path.join(legacy, 'late.md');
+  await writeFile(late, 'appended while the fold ran');
+  await writeFile(
+    path.join(legacy, `${LEDGER_FILENAME}.migrated`),
+    `${ledgerLine(path.join(legacy, 'fetched.md'))}${ledgerLine(late)}`,
+  );
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  await writeFile(
+    path.join(agentWorkspacePath(env, 'ava'), LEDGER_FILENAME),
+    ledgerLine(path.join(legacy, 'fetched.md')),
+  );
+
+  const results = await runStateMigrations(env, { exclusive: true });
+
+  assert.ok(applied(results).includes(MIGRATION));
+  const recorded = await recordedIn(path.join(agentWorkspacePath(env, 'ava'), LEDGER_FILENAME));
+  // The late record arrives — it was only in the archive, and the agent whose
+  // ledger this is no longer consults that file.
+  assert.equal(recorded.filter((at) => at === late).length, 1);
+  // And the one the destination already carried is not appended a second
+  // time: the archive is deduplicated against what is over there, which is
+  // what lets it be drained on every fold rather than once.
+  assert.equal(recorded.filter((at) => at === path.join(legacy, 'fetched.md')).length, 1);
+});
+
 test('a line no reader can parse is left in the archive rather than folded into a ledger that works', async () => {
   const home = await newHome();
   const env = { homeDir: home };
