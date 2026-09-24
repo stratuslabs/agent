@@ -1012,7 +1012,11 @@ const plainCell = (cell: string): string => {
         while (token.text[ticks] === '`') {
           ticks += 1;
         }
-        return token.text.slice(ticks, -ticks).trim();
+        // CommonMark's rule, not a trim: one space comes off each side when
+        // both sides have one and the code is not all spaces, so `  a  `
+        // keeps the ` a ` it was written to show.
+        const code = token.text.slice(ticks, -ticks);
+        return code.startsWith(' ') && code.endsWith(' ') && code.trim().length > 0 ? code.slice(1, -1) : code;
       }
       return sourceOf(token);
     })
@@ -1024,33 +1028,44 @@ const plainCell = (cell: string): string => {
 };
 
 /**
- * How many monospace columns text takes: two for wide East Asian characters
- * and emoji, none for combining marks and joiners, one for the rest. A grid
+ * How many monospace columns text takes, counted per displayed character
+ * (grapheme cluster): two for wide East Asian characters and any emoji —
+ * `👨‍👩‍👧‍👦` is one glyph, not four — none for a stray combining mark, one
+ * for the rest. A grid
  * padded by UTF-16 length put `漢` in one column and drew two, and every
  * separator after it moved. An approximation of Unicode's width tables,
  * which Slack's own font does not follow exactly either.
  */
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/** One displayed character's columns: what its first code point takes, or two for any emoji. */
+const clusterWidth = (cluster: string): number => {
+  if (/\p{Extended_Pictographic}/u.test(cluster)) {
+    return 2;
+  }
+  const code = cluster.codePointAt(0) ?? 0;
+  if (/^[\p{Mn}\p{Me}\u200b-\u200f\ufe00-\ufe0f]/u.test(cluster)) {
+    return 0;
+  }
+  const wide = (code >= 0x1100 && code <= 0x115f)
+    || (code >= 0x2e80 && code <= 0x303e)
+    || (code >= 0x3041 && code <= 0x33ff)
+    || (code >= 0x3400 && code <= 0x4dbf)
+    || (code >= 0x4e00 && code <= 0x9fff)
+    || (code >= 0xa000 && code <= 0xa4cf)
+    || (code >= 0xac00 && code <= 0xd7a3)
+    || (code >= 0xf900 && code <= 0xfaff)
+    || (code >= 0xfe30 && code <= 0xfe4f)
+    || (code >= 0xff00 && code <= 0xff60)
+    || (code >= 0xffe0 && code <= 0xffe6)
+    || (code >= 0x20000 && code <= 0x3fffd);
+  return wide ? 2 : 1;
+};
+
 const displayWidth = (text: string): number => {
   let width = 0;
-  for (const char of text) {
-    const code = char.codePointAt(0) ?? 0;
-    if (/[\p{Mn}\p{Me}\u200b-\u200f\ufe00-\ufe0f]/u.test(char)) {
-      continue;
-    }
-    const wide = /\p{Extended_Pictographic}/u.test(char)
-      || (code >= 0x1100 && code <= 0x115f)
-      || (code >= 0x2e80 && code <= 0x303e)
-      || (code >= 0x3041 && code <= 0x33ff)
-      || (code >= 0x3400 && code <= 0x4dbf)
-      || (code >= 0x4e00 && code <= 0x9fff)
-      || (code >= 0xa000 && code <= 0xa4cf)
-      || (code >= 0xac00 && code <= 0xd7a3)
-      || (code >= 0xf900 && code <= 0xfaff)
-      || (code >= 0xfe30 && code <= 0xfe4f)
-      || (code >= 0xff00 && code <= 0xff60)
-      || (code >= 0xffe0 && code <= 0xffe6)
-      || (code >= 0x20000 && code <= 0x3fffd);
-    width += wide ? 2 : 1;
+  for (const { segment } of graphemes.segment(text)) {
+    width += clusterWidth(segment);
   }
   return width;
 };
@@ -1059,11 +1074,11 @@ const displayWidth = (text: string): number => {
 const columnsOf = (line: string, mark: string): number[] => {
   const columns: number[] = [];
   let column = 0;
-  for (const char of line) {
-    if (char === mark) {
+  for (const { segment } of graphemes.segment(line)) {
+    if (segment === mark) {
       columns.push(column);
     }
-    column += displayWidth(char);
+    column += clusterWidth(segment);
   }
   return columns;
 };
@@ -1104,17 +1119,19 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
   }
   // The list form names each value by its header, so a table with no rows
   // has nothing to name; its header is what it says, and it stays said.
+  const headerOnly = header.map(plainCell).filter((label) => label.length > 0).map((label) => `**${label}**`).join(' · ');
   if (rows.length === 0) {
-    return header.map(plainCell).filter((label) => label.length > 0).map((label) => `**${label}**`).join(' · ');
+    return headerOnly;
   }
-  return rows
+  const listed = rows
     .map(fit)
     .map((row) => row
       .map((cell, index) => ({ label: plainCell(header[index] ?? ''), cell }))
       .filter(({ cell }) => cell.length > 0)
       .map(({ label, cell }) => (label.length > 0 ? `**${label}**: ${cell}` : cell))
       .join(' · '))
-    .join('\n');
+    .filter((line) => line.length > 0);
+  return listed.length > 0 ? listed.join('\n') : headerOnly;
 };
 
 /**
@@ -1127,12 +1144,19 @@ const renderTables = (text: string): string => {
   // part of the row, the way GFM reads it.
   const code = codeRunsOf(text).filter((run) => text.slice(run.start, run.end).includes('\n'));
   const lines = text.split('\n');
+  // Runs and lines are both in order, so one pointer walks the runs: asking
+  // every run about every line was quadratic in a reply of many snippets.
   const inCode: boolean[] = [];
   let offset = 0;
+  let next = 0;
   for (const line of lines) {
     const start = offset;
     const end = offset + line.length;
-    inCode.push(code.some((run) => run.start < end + 1 && start < run.end));
+    while (next < code.length && (code[next]?.end ?? 0) <= start) {
+      next += 1;
+    }
+    const run = code[next];
+    inCode.push(run !== undefined && run.start < end + 1 && start < run.end);
     offset = end + 1;
   }
   const out: string[] = [];

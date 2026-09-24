@@ -607,3 +607,20 @@ test('wide characters are padded by the columns they take', () => {
   // separator after it drew two columns late.
   assert.equal(toSlackMrkdwn(table), ['```', 'Word │ Count', '─────┼──────', '漢字 │ 1', 'abcd │ 2', '```'].join('\n'));
 });
+
+test('a wide table whose rows hold no values keeps its header', () => {
+  const label = 'A column heading long enough to push the grid well past sixty';
+  const reply = [`| ${label} | B |`, '| --- | --- |', '| | |'].join('\n');
+  assert.equal(toSlackMrkdwn(reply), `*${label}* · *B*`);
+});
+
+test('an emoji made of several code points is one wide glyph', () => {
+  const table = ['| Who | N |', '| --- | --- |', '| 👨‍👩‍👧‍👦 | 1 |', '| ab | 2 |'].join('\n');
+  // Counted per code point, the family was eight columns wide.
+  assert.equal(toSlackMrkdwn(table), ['```', 'Who │ N', '────┼──', '👨‍👩‍👧‍👦  │ 1', 'ab  │ 2', '```'].join('\n'));
+});
+
+test('a code span in a cell loses one space a side, not every space', () => {
+  const table = ['| Pad | X |', '| --- | --- |', '| `  a  ` | y |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'Pad │ X', '────┼──', ' a  │ y', '```'].join('\n'));
+});
