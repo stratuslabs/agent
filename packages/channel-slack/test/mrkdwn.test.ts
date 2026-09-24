@@ -559,3 +559,9 @@ test('a wide table with no rows keeps its header', () => {
   // The list form had no row to name a value in, and returned nothing at all.
   assert.equal(toSlackMrkdwn(reply), `*${label}* · *B*`);
 });
+
+test('a pipe after an escaped backslash still separates columns', () => {
+  // The two backslashes escape each other, so the pipe is a separator.
+  const table = ['| Path | Kind |', '| --- | --- |', '| C:\\\\| drive |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'Path │ Kind', '─────┼──────', 'C:\\\\ │ drive', '```'].join('\n'));
+});

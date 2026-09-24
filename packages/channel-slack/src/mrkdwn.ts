@@ -891,16 +891,41 @@ export const codeRunsOf = (text: string): CodeRun[] => {
  */
 const TABLE_MAX_WIDTH = 60;
 
-/** A row's cells: outer pipes dropped, split on the pipes that are not escaped. */
+/**
+ * A row's cells: outer pipes dropped, split on the pipes that are not
+ * escaped. Read a character at a time, because escaping is a matter of
+ * parity: in `a\\|b` the backslashes escape each other and the pipe
+ * separates, which no single-character lookbehind can see.
+ */
 const tableCells = (line: string): string[] => {
-  let row = line.trim();
+  const row = line.trim();
+  const cells: string[] = [];
+  let cell = '';
+  let endedOnSeparator = false;
+  for (let at = 0; at < row.length; at += 1) {
+    const char = row[at] ?? '';
+    endedOnSeparator = false;
+    if (char === '\\' && at + 1 < row.length) {
+      const next = row[at + 1] ?? '';
+      cell += next === '|' ? '|' : `${char}${next}`;
+      at += 1;
+      continue;
+    }
+    if (char === '|') {
+      cells.push(cell.trim());
+      cell = '';
+      endedOnSeparator = true;
+      continue;
+    }
+    cell += char;
+  }
+  if (!endedOnSeparator) {
+    cells.push(cell.trim());
+  }
   if (row.startsWith('|')) {
-    row = row.slice(1);
+    cells.shift();
   }
-  if (row.endsWith('|') && !row.endsWith('\\|')) {
-    row = row.slice(0, -1);
-  }
-  return row.split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll('\\|', '|'));
+  return cells;
 };
 
 type Alignment = 'left' | 'right' | 'center';
