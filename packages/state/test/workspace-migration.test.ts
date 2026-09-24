@@ -9,6 +9,8 @@ import { createFileLedger, LEDGER_FILENAME } from '@stratusagent/plugins';
 
 import {
   STATE_SCHEMA_VERSION,
+  applyPerAgentWorkspaces,
+  strayWorkspaceNames,
   agentStateDirPath,
   agentWorkspacePath,
   agentsDirPath,
@@ -509,6 +511,81 @@ test('what this run left behind on purpose is not read as a workspace that appea
   assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'note.md'), 'utf8'), 'moves');
   assert.equal(await readFile(path.join(legacyWorkspacesDirPath(env), 'bea', 'note.md'), 'utf8'), 'stays');
   assert.deepEqual((await readdir(legacyWorkspacesDirPath(env))).sort(), ['README', 'bea']);
+});
+
+test('a workspace that appears after the stamp is moved by the next pass, not stranded by it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'own.md': 'from the upgrade' });
+
+  await runStateMigrations(env, { exclusive: true });
+  assert.equal((await readStateStamp(env))?.schemaVersion, STATE_SCHEMA_VERSION);
+  // Nothing is pending any more, and that used to be the door closing:
+  // whatever appeared here afterwards sat at a path no build reads, with its
+  // provenance labels, and nothing was ever going to look again.
+  assert.deepEqual((await pendingStateMigrations(env)).map((migration) => migration.id), []);
+
+  // An older build's command, resolving `workspaces/<id>` by pathname — for
+  // an agent whose new path does not exist yet, which is the whole-directory
+  // case.
+  const legacy = path.join(legacyWorkspacesDirPath(env), 'bea');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'fetched.md'), 'from a page');
+  await writeFile(path.join(legacy, LEDGER_FILENAME), ledgerLine(path.join(legacy, 'fetched.md')));
+  assert.deepEqual(await strayWorkspaceNames(env), ['bea']);
+
+  // What `serve` does on its next start, whatever the stamp says.
+  const summary = await applyPerAgentWorkspaces(env);
+
+  assert.match(summary ?? '', /moved 1 workspace/);
+  const workspace = agentWorkspacePath(env, 'bea');
+  assert.equal(await readFile(path.join(workspace, 'fetched.md'), 'utf8'), 'from a page');
+  // And the label followed the file, which is the half that goes missing
+  // silently: the records are absolute paths, so a move without a rewrite
+  // leaves them naming nothing.
+  assert.deepEqual(await recordedIn(path.join(workspace, LEDGER_FILENAME)), [
+    path.join(legacy, 'fetched.md'),
+    path.join(workspace, 'fetched.md'),
+  ]);
+  assert.deepEqual(await strayWorkspaceNames(env), []);
+});
+
+test('a stray whose new path is already in use has its labels folded and its files named', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'own.md': 'from the upgrade' });
+  await runStateMigrations(env, { exclusive: true });
+
+  // The other half of the promise, and the limit of it. The agent is already
+  // writing at the new path, so its files are not overwritten with older
+  // ones: the labels are folded — losing those is the silent failure — and
+  // where the files still sit is said out loud instead.
+  const legacy = path.join(legacyWorkspacesDirPath(env), 'ava');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'fetched.md'), 'from a page');
+  await writeFile(path.join(legacy, LEDGER_FILENAME), ledgerLine(path.join(legacy, 'fetched.md')));
+
+  const summary = await applyPerAgentWorkspaces(env);
+
+  assert.match(summary ?? '', /folded 1 provenance ledger/);
+  assert.match(summary ?? '', /the files they name have not moved/);
+  // The label is live where the agent's reads look for it.
+  assert.ok((await recordedIn(path.join(agentWorkspacePath(env, 'ava'), LEDGER_FILENAME)))
+    .includes(path.join(legacy, 'fetched.md')));
+  // The file is where it was, not silently gone and not overwriting anything.
+  assert.equal(await readFile(path.join(legacy, 'fetched.md'), 'utf8'), 'from a page');
+});
+
+test('a home that has finished moving has nothing stray and nothing to say', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'own.md': 'mine' });
+  await runStateMigrations(env, { exclusive: true });
+
+  // The steady state every home reaches, and the one this pass pays for on
+  // every start: no directory, nothing to report.
+  assert.deepEqual(await strayWorkspaceNames(env), []);
+  assert.equal(await applyPerAgentWorkspaces(env), undefined);
 });
 
 test('the workspace move is idempotent, and a second run has nothing to say', async () => {

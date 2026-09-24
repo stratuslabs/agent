@@ -25,6 +25,7 @@ import {
   resolveAgentApprovals,
   resolveAgentPrincipals,
   resolveAgentSlack,
+  applyPerAgentWorkspaces,
   runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
@@ -164,6 +165,24 @@ const serveHeldHome = async (
   // nothing here reads a path the migration is still populating.
   for (const migration of await runStateMigrations(env, { exclusive: true })) {
     log(`state migration ${migration.id}: ${migration.detail ?? migration.description}`);
+  }
+
+  // And then the workspace pass again, unconditionally, whatever the schema
+  // stamp says. It is registered as `0004` and runs once as a migration, but
+  // the stamp is not what makes that move safe: ordinary commands take no
+  // home lock, so a command of an *older* build can create
+  // `workspaces/<id>` by pathname at any moment — including after the
+  // migration that was meant to be the last word on it. With nothing looking
+  // there afterwards, those files and every provenance label in them were
+  // stranded where no build reads, silently.
+  //
+  // Here is the right moment for it: the home claim is held, so no second
+  // daemon is racing, and the stores are not open yet, so nothing is reading
+  // a path this may still be populating. Costs one `readdir` on a home that
+  // has finished moving, which is every home eventually.
+  const repaired = await applyPerAgentWorkspaces(env);
+  if (repaired !== undefined) {
+    log(`workspace layout: ${repaired}`);
   }
 
   // Agents with stored Slack tokens go live in Slack automatically — the

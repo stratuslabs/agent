@@ -23,6 +23,8 @@ import {
   type RuntimeConfig,
   type StratusConfigFile,
   ignoredUntrustedConfigKeys,
+  legacyWorkspacesDirPath,
+  strayWorkspaceNames,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
 import { serviceEnvFor } from '../daemon.ts';
@@ -388,6 +390,22 @@ export const collectDoctorReport = async (
     problems.push(
       `The service unit points at a CLI entrypoint that no longer exists (${unitCommand.scriptPath}), so stratusd cannot start. `
       + 'Run `stratus update` (or `stratus service install`) to rewrite it with current paths.',
+    );
+  }
+
+  // A workspace left at the pre-schema-4 path. Its files are an agent's own
+  // output and its ledger is what says which of them a model did not write,
+  // and nothing in this build reads either there — so this is the state
+  // somebody stares at when a file has "gone missing". Reported rather than
+  // repaired: doctor diagnoses, and the next `serve` folds it anyway, which
+  // makes the remedy a restart rather than anything by hand.
+  const stray = await strayWorkspaceNames(env);
+  if (stray.length > 0) {
+    problems.push(
+      `${stray.join(', ')} still ${stray.length === 1 ? 'has a workspace' : 'have workspaces'} at the old `
+      + `${path.basename(legacyWorkspacesDirPath(env))}/ path, which this build does not read — most likely `
+      + 'left by a command of an older build running during the upgrade. Restart the daemon (`stratus restart`) '
+      + 'and it is folded into the agent\'s own directory, provenance labels and all.',
     );
   }
 

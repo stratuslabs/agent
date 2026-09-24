@@ -158,14 +158,31 @@ no memory of having started. Nothing to delete means nothing an agent can
 delete to skip it, and `shell.run`'s working directory is a starting point
 rather than a boundary.
 
-One thing stops the upgrade rather than completing it: a workspace that
-*appears* in `workspaces/` while the move is running — a command of an
-older build, which holds no lock and resolves that path by name, creating
-one after the sweep began or recreating one already moved. Schema 4 is
-stamped once and nothing reads `workspaces/` afterwards, so carrying on
-would leave those files and every provenance label in them where no build
-will look. Nothing is lost and nothing is stamped: stop the older command
-and run `stratus update` again, and the two are merged.
+A workspace can still *appear* in `workspaces/` while the move is running —
+a command of an older build, which holds no lock and resolves that path by
+name, creating one after the sweep began or recreating one already moved.
+That used to stop the upgrade, because schema 4 is stamped once and nothing
+read `workspaces/` afterwards: carrying on left those files and every
+provenance label in them where no build would look.
+
+**The move now runs on every `stratus serve`, whatever the schema says** —
+under the daemon's home claim, before any store is opened. So a stray
+workspace is folded by the next start rather than stranded by the stamp,
+and one appearing mid-move is reported and left rather than refused. The
+same pass handles a home that was never updated through `stratus update`,
+which is what it was already there for.
+
+`stratus doctor` names any workspace still at the old path, since that is
+where someone looks when a file seems to have gone missing. The remedy is a
+restart, not anything by hand.
+
+Two halves to what the fold rescues, and the difference matters. Where the
+new path does **not** exist yet, the whole directory is moved and its
+ledger records are rewritten to follow the files. Where it **does** — the
+agent is already writing there — the *labels* are folded into the live
+ledger and the files are left where they are and named in the report:
+overwriting an agent's current file with an older one of the same name
+would be a worse failure than telling you where the older one is.
 
 If the new path already holds a workspace, the two ledgers are folded
 together rather than one being refused. That is the ordinary shape of an

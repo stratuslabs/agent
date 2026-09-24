@@ -894,11 +894,63 @@ const anyWorkspaceNamesLegacy = async (env: StateEnvironment, legacy: string): P
 };
 
 /**
+ * The names still sitting in `workspaces/` that a repair would fold, or an
+ * empty list once the layout has finished moving.
+ *
+ * For the readers that must not *act* — `stratus doctor` says what is wrong
+ * with a home and fixes nothing, and this is a thing worth saying: a
+ * workspace here is an agent's output, and its provenance labels, at a path
+ * no build reads any more. It is repaired by the next `serve`, so the remedy
+ * is a restart rather than anything by hand, and that is what doctor can
+ * tell someone who is looking at a home wondering where a file went.
+ *
+ * Deliberately not the pass itself. Absence answers — a home that finished
+ * upgrading has no such directory — and every other failure propagates, for
+ * the reason the pass gives: a check that cannot ask must not answer "all
+ * clear" about state nothing else is looking at.
+ */
+export const strayWorkspaceNames = async (env: StateEnvironment): Promise<readonly string[]> => {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(legacyWorkspacesDirPath(env), { withFileTypes: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return [];
+    }
+    throw error;
+  }
+  return entries.filter((entry) => isWorkspaceEntry(entry)).map((entry) => entry.name).sort();
+};
+
+/**
  * Move each `workspaces/<id>` into `agents/<id>/workspace`.
  *
  * Idempotent and restartable at every agent: one rename each, a ledger
  * rewrite after it, and an agent whose directory cannot be made is named
  * and skipped rather than aborting the fleet.
+ *
+ * **Run by the migration, and by every `serve` after it.** Registered as
+ * `0004`, and called again — unconditionally, under the home claim, before
+ * any store is opened — for as long as the layout exists. That is not
+ * belt-and-braces; it is what makes this safe at all.
+ *
+ * The migration holds the home against other *migrations*, never against
+ * ordinary commands, which take no home lock by design (see
+ * `layout-migration.ts`). An older build's command resolves
+ * `workspaces/<id>` by pathname on every tainted write, so it can create one
+ * at any moment during this pass — or after it. Four rounds of review
+ * narrowed that window and none of them closed it, because nothing in Node
+ * can: what made each window *destructive* was the stamp. Once the schema
+ * read 4, nothing looked at `workspaces/` again, and a directory that
+ * appeared was stranded where no build would find it, with every provenance
+ * label in it, silently.
+ *
+ * Running on every start is what retires that. A stray `workspaces/<id>` is
+ * always foldable, so a race that used to cost an agent its labels now costs
+ * one start's delay. Cheap in the steady state, which is the state every
+ * home reaches: one `readdir` that finds nothing, and the repair of
+ * interrupted moves it already did.
  */
 export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<string | undefined> => {
   // Before anything else: a previous run may have moved a workspace and
@@ -1484,17 +1536,17 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   const appeared = remaining
     .filter((entry) => isWorkspaceEntry(entry) && (emptied.has(entry.name) || !snapshot.has(entry.name)))
     .map((entry) => entry.name);
-  if (appeared.length > 0) {
-    // Nothing is stamped, so the next run does 0004 again from what it
-    // finds — re-enterable by construction, and a workspace at both paths
-    // is the fold this migration already knows how to do. Refusing here
-    // costs a start that says why; the alternative costs the files.
-    throw new Error(
-      `${appeared.map((name) => JSON.stringify(name)).join(', ')} appeared in `
-      + `${path.relative(stratusHomePath(env), legacy)}/ while it was being migrated, so the upgrade was `
-      + 'stopped rather than leaving them where nothing will read them — a command of an older build is '
-      + 'most likely still running. Nothing was lost. Stop it and run `stratus update` again, and they '
-      + 'will be merged.',
+  // Reported and left, not refused. This pass runs again on every start —
+  // see the note on this function — so a workspace that appeared under it is
+  // folded by the next one, and the stamp is no longer the door closing. It
+  // used to throw, because it had to: with nothing looking at `workspaces/`
+  // after the stamp, carrying on meant those files and their provenance
+  // labels stranded silently, so a start that said why was the cheaper of
+  // two bad answers. Now there is a third.
+  for (const name of appeared) {
+    report.quarantined.push(
+      `${JSON.stringify(name)} — appeared while this ran, most likely a command of an older build; `
+      + 'left where it is and folded on the next start',
     );
   }
   try {
@@ -1515,10 +1567,9 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // and the files are at a path the new build never reads — so it is the
     // one leftover that cannot be swallowed.
     if (remaining.length === 0 && (error as NodeJS.ErrnoException).code === 'ENOTEMPTY') {
-      throw new Error(
-        `Something appeared in ${path.relative(stratusHomePath(env), legacy)}/ as it was being removed, so `
-        + 'the upgrade was stopped rather than leaving it where nothing will read it — a command of an older '
-        + 'build is most likely still running. Nothing was lost. Stop it and run `stratus update` again.',
+      report.quarantined.push(
+        'something appeared as the directory was being removed, most likely a command of an older build; '
+        + 'left where it is and folded on the next start',
       );
     }
   }

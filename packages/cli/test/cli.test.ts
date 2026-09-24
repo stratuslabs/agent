@@ -4430,6 +4430,40 @@ test('the Channels menu follows STRATUS_SOUL over the configured soul', async ()
   assert.match(output.stderr, /STRATUS_SOUL points at .*override\.md/);
 });
 
+test('doctor names a workspace left at the pre-schema-4 path, and says a restart folds it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  const soulPath = path.join(agentsDir, 'ava.md');
+  await writeFile(soulPath, '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5', soul: soulPath }),
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+  // What an older build's command leaves behind: an agent's output, and the
+  // ledger saying which of it a model did not write, at a path this build
+  // does not read. Nothing else in the CLI would mention it.
+  await mkdir(path.join(home, '.stratus', 'workspaces', 'ava'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'workspaces', 'ava', 'fetched.md'), 'from a page');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1, 'a home with state at a dead path is a problem, not a note');
+  assert.match(output.stdout, /ava still has a workspace at the old workspaces\/ path/);
+  // The remedy is a restart, because the repair is something `serve` does —
+  // doctor diagnoses and fixes nothing.
+  assert.match(output.stdout, /stratus restart/);
+});
+
 test('doctor reports the resolved provider and where it came from', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
