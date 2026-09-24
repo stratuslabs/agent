@@ -12,7 +12,7 @@ import {
   readPluginManifest,
   riskFloorFor,
 } from '@stratusagent/plugins';
-import { loadRosterSouls, workspacesDirPath } from '@stratusagent/state';
+import { loadRosterSouls } from '@stratusagent/state';
 import { describeUnattendedReach } from '../approvals.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -133,9 +133,6 @@ export const collectPluginsReport = async (
 ): Promise<PluginsReport> => {
   const pluginsConfig = await loadServePlugins(env, command.configPath, warn);
   const approvals = await loadServeApprovals(env, command.configPath, warn);
-  // What the loader would fold in, so the validation below is against the
-  // object a daemon on this machine would build.
-  const workspaceRoot = workspacesDirPath(env);
   // Read the same way the daemon reads it: installed, and not switched off
   // by the trusted config's `api` block.
   const api = await loadServeApi(env, command.configPath, warn);
@@ -239,7 +236,7 @@ export const collectPluginsReport = async (
       // preflighting one would report `plugin-mcp` that nobody configured as
       // broken settings instead of as the install to enable.
       if (base.enabled) {
-        await preflightPlugin(manifest, directory, block, workspaceRoot);
+        await preflightPlugin(manifest, directory, block);
       }
       // One row per tool the report will name, tracked as they are emitted.
       // A concrete name can be reached more than one way — declared outright

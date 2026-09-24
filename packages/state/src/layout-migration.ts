@@ -341,6 +341,18 @@ const usableStateFile = async (
 };
 
 /**
+ * The two fields {@link agentDirectoryOrQuarantine} needs of a migration's
+ * report. Named separately because 0004 has a report of its own and gets
+ * this rule from here rather than writing a second copy of it.
+ */
+export interface DirectoryReport {
+  /** Agent ids that could not be given a directory, and what held them back. */
+  quarantined: string[];
+  /** Which id owns which directory name in this run. */
+  directoryNames: StateDirectoryNames;
+}
+
+/**
  * {@link makeAgentStateDirectory}, naming what it could not make in
  * `report` and holding the directory name against the rest of the run
  * (see {@link StateDirectoryNames}).
@@ -349,11 +361,11 @@ const usableStateFile = async (
  * for some other reason does not take the name away from a second
  * spelling that would have been fine.
  */
-const agentDirectoryOrQuarantine = async (
+export const agentDirectoryOrQuarantine = async (
   env: StateEnvironment,
   agentId: string,
   what: string,
-  report: LayoutMigrationReport,
+  report: DirectoryReport,
 ): Promise<string | undefined> => {
   const holder = await report.directoryNames.heldBy(agentId);
   if (holder !== undefined) {

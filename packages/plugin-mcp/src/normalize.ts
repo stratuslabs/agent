@@ -713,14 +713,21 @@ export interface NormalizeOptions {
   /** The server-side tool name — part of the written file's name. */
   tool: string;
   /**
-   * The workspace root the host supplied. Binary content lands under
-   * `<workspaceRoot>/<agentId>/mcp/<server>/` — per agent, same as
-   * screenshots, so two agents never read each other's files.
+   * Where this agent's workspace is, asked for rather than passed in — not
+   * a root to join an id onto. Binary content lands under
+   * `<workspace>/mcp/<server>/`, so two agents never read each other's
+   * files, the same shape screenshots take.
+   *
+   * A function because asking is no longer free: the host's seam *creates*
+   * the directory and settles its permissions, and it can fail. A
+   * text-only result must not be reported as an error because a workspace
+   * it never wanted could not be made — the remote call has already
+   * happened, and whoever retries it does the side effect twice.
    */
-  workspaceRoot?: string;
+  workspace?: () => string;
   agentId: string;
   /**
-   * The filesystem provenance ledger for `workspaceRoot`. A binary block
+   * The filesystem provenance ledger for `workspace`. A binary block
    * is a server's bytes written to disk without going through `fs.write`,
    * so the write records itself here at `external` before the bytes land —
    * a later `fs.read` of the file then carries the label the tool result
@@ -812,7 +819,7 @@ const normalizeAdmittedResult = async (
   const reserve = noteReserveFor(
     content,
     isObject(shaped.structuredContent),
-    options.workspaceRoot !== undefined,
+    options.workspace !== undefined,
     resultLimit,
   );
   const budget = createResultBudget(resultLimit, reserve.total);
@@ -856,13 +863,13 @@ const normalizeAdmittedResult = async (
   // result, so it cannot hand a later call another agent's directory the
   // way a setup-time cache would.
   let resolvedDirectory: string | undefined;
-  const binaryDirectory = async (root: string): Promise<string> => {
+  const binaryDirectory = async (workspace: string): Promise<string> => {
     if (resolvedDirectory === undefined) {
       // Canonical, because the ledger is keyed the way `fs.read` looks a
-      // path up — through `realpath` — and a workspace root or agent
-      // directory an operator moved behind a link would otherwise leave
-      // the record under a spelling no read ever asks for.
-      const lexical = path.join(root, options.agentId, 'mcp', options.server);
+      // path up — through `realpath` — and a workspace an operator moved
+      // behind a link would otherwise leave the record under a spelling no
+      // read ever asks for.
+      const lexical = path.join(workspace, 'mcp', options.server);
       await mkdir(lexical, { recursive: true });
       resolvedDirectory = await realpath(lexical);
     }
@@ -885,11 +892,12 @@ const normalizeAdmittedResult = async (
     if (typeof data !== 'string') {
       return;
     }
-    if (!options.workspaceRoot) {
-      texts.push(`[binary ${typeof mimeType === 'string' ? mimeType : 'content'} dropped: no workspaceRoot is configured for @stratusagent/plugin-mcp]`);
+    const workspace = options.workspace?.();
+    if (workspace === undefined || workspace.length === 0) {
+      texts.push(`[binary ${typeof mimeType === 'string' ? mimeType : 'content'} dropped: @stratusagent/plugin-mcp has no workspace for ${options.agentId} — the host supplied neither a workspaces seam nor a workspaceRoot]`);
       return;
     }
-    const directory = await binaryDirectory(options.workspaceRoot);
+    const directory = await binaryDirectory(workspace);
     const stamp = (options.now ?? Date.now)();
     fileSerial += 1;
     // The tool name is the server's own string, so it is folded to the

@@ -135,7 +135,7 @@ import {
   assertStateCompatible,
   stratusHomePath,
   fleetDbIn,
-  workspacesDirPath,
+  createAgentWorkspaces,
   type FallbackRuntime,
   type OperatorSkillInfo,
   type RosterEntry,
@@ -2778,7 +2778,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // *calling* agent's — its allowlist checked, its own entry before the
       // fleet's shared one.
       credentials: createFileCredentialResolver(env),
-      workspaceRoot: workspacesDirPath(env),
+      workspaces: createAgentWorkspaces(env),
       // The structured log, so a plugin's lifecycle lines — an MCP server
       // that dropped, a reconnect that failed — are in `stratus logs` and
       // not only on a stderr the service manager owns.

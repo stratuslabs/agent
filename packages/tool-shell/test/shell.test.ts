@@ -8,6 +8,7 @@ import {
   AgentRunner,
   InMemorySessionStore,
   ToolRegistry,
+  type AgentWorkspaces,
   type JsonObject,
   type ModelProvider,
   type Session,
@@ -26,11 +27,16 @@ const session = (agentId = 'ava'): Session => ({
   updatedAt: new Date().toISOString(),
 });
 
-const registryFor = async (config: JsonObject, processEnv?: NodeJS.ProcessEnv): Promise<ToolRegistry> => {
+const registryFor = async (
+  config: JsonObject,
+  processEnv?: NodeJS.ProcessEnv,
+  workspaces?: AgentWorkspaces,
+): Promise<ToolRegistry> => {
   const tools = new ToolRegistry();
   await createShellPlugin(config, processEnv ? { processEnv } : {}).setup({
     bus: { emit: async () => undefined, subscribe: () => () => undefined } as never,
     tools,
+    ...(workspaces !== undefined ? { workspaces } : {}),
   });
   return tools;
 };
@@ -220,6 +226,42 @@ test('the agent’s workspace is created before the first command runs', async (
   // in the first agent's.
   const juno = await runCommand(tools, 'pwd', 'juno');
   assert.equal(String(juno.stdout).trim(), path.join(workspaceRoot, 'juno'));
+});
+
+test('the workspace is prepared once, before the command, and not again to read its output', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-prep-'));
+  // Preparing is the half that can fail. `parseResult` runs after the
+  // subprocess has finished, so asking again there would let a workspace
+  // that went away in between turn a command that already ran — and may
+  // already have changed something — into a failure somebody retries.
+  let prepared = 0;
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => {
+      prepared += 1;
+      return path.join(home, 'agents', agentId, 'workspace');
+    },
+    all: async () => [],
+  };
+  const tools = await registryFor({}, undefined, workspaces);
+  const result = await runCommand(tools, 'echo hello');
+
+  assert.equal(String(result.stdout).trim(), 'hello');
+  assert.equal(prepared, 1);
+});
+
+test('with no configured root the workspace comes from the host, which is not a root plus an id', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-seam-'));
+  // The layout the daemon actually has: the id is in the middle, so a
+  // plugin that joined it onto a root would run in the wrong directory.
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    all: async () => [],
+  };
+  const tools = await registryFor({}, undefined, workspaces);
+  const result = await runCommand(tools, 'pwd');
+  assert.equal(String(result.stdout).trim(), path.join(home, 'agents', 'ava', 'workspace'));
 });
 
 test('a working directory the operator named is reported by name when it is missing', async () => {

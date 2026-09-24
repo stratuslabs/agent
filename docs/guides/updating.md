@@ -114,6 +114,89 @@ without following links, so a link is not a grant file it can carry. That agent 
 grants until you rename its id and put the file back — the safe direction,
 and the reason the original is kept.
 
+Schema 4 finishes the same move with the fourth resource an agent owns: its
+**workspace**, from `~/.stratus/workspaces/<id>` to
+`~/.stratus/agents/<id>/workspace`. That is where its tools put the files
+they produce, and where `fs-provenance.jsonl` — the ledger saying which of
+those files came from outside — lives. With it under `agents/<id>/`, that
+one directory is everything an agent owns, which is what makes backing one
+up or erasing one a single path to name. The extra `workspace/` segment is
+deliberate rather than tidy: this is the directory you would name as an
+`fs` root to let an agent read back what its tools produced, and one level
+up its `whitelist.json`, `sessions.db` and `memory.jsonl` are siblings of
+it rather than files inside it.
+
+It waits for `stratus update` or the next `stratus serve`, for the same
+reason the sessions do and one of its own: the older daemon resolves
+`workspaces/<id>` by pathname on every tool call that writes a file, so it
+does not notice a move — it rebuilds the old tree and goes on appending
+provenance records there, and a record the new ledger never sees is a
+fetched file that reads back as the agent's own words.
+
+Nothing is deleted here either. Each workspace is renamed, so it is in one
+place or the other and never both; a workspace an operator relocated behind
+a symlink is moved *as the link*, so their files stay where they put them.
+A link pointing at another agent's workspace is followed to where that
+workspace is going — including through an alias outside `~/.stratus`, such
+as `workspaces/ava -> /srv/stratus/shared -> workspaces/bea`, since the
+alias is not this migration's to rewrite and keeping it would leave `ava`
+naming nothing. That agent's link is retargeted at the workspace itself, so
+repointing the alias afterwards no longer moves it.
+The ledger's own records follow the move — they are absolute paths, and
+every binary an MCP server returned was written and recorded *inside* the
+workspace, so leaving them would strip the label off each one. They are
+re-recorded at the new path rather than edited in place, because ordinary
+commands keep appending to that file and a read-modify-write would drop
+whatever landed in between; the old records stay, naming paths nothing is
+at, which costs a line each and can only ever add a label. The re-recording
+happens after the move lands, and a run interrupted between the two is
+finished by the next one — from what it can see rather than from a note
+left behind. A workspace at the new path with no entry left beside it in
+`workspaces/`, whose ledger still names that old path, is a move whose
+records have not followed yet; re-recording them is the repair, so it needs
+no memory of having started. Nothing to delete means nothing an agent can
+delete to skip it, and `shell.run`'s working directory is a starting point
+rather than a boundary.
+
+One thing stops the upgrade rather than completing it: a workspace that
+*appears* in `workspaces/` while the move is running — a command of an
+older build, which holds no lock and resolves that path by name, creating
+one after the sweep began or recreating one already moved. Schema 4 is
+stamped once and nothing reads `workspaces/` afterwards, so carrying on
+would leave those files and every provenance label in them where no build
+will look. Nothing is lost and nothing is stamped: stop the older command
+and run `stratus update` again, and the two are merged.
+
+If the new path already holds a workspace, the two ledgers are folded
+together rather than one being refused. That is the ordinary shape of an
+upgrade: an ordinary command on the new build defers this move but already
+writes to the new path, so anyone who ran one before restarting the daemon
+has a ledger there. Folding is safe because the format is order-independent
+— a path keeps the lowest label recorded for it, whichever process wrote it
+first. What is left of the old workspace stays where it is and is named in
+the report; its records are *not* rewritten, because those files did not
+move. A directory whose name is not an agent id (a `.cache/` something
+dropped in there) is left alone the same way, and `workspaces/` itself is
+removed only if it empties, never recursively — and not at all if a
+workspace link still names it, which `workspaces/<id> -> .` does.
+
+The old ledger is retired to `fs-provenance.jsonl.migrated` afterwards, so
+a re-run does not append the same records again — unless another workspace
+is that same directory. Two agents pointed at one directory share its
+ledger, which the format allows, and retiring it to migrate one of them
+would leave the other with no ledger at all and every externally sourced
+file in it reading back as the agent's own words. In that case the records
+are copied and the original left live.
+
+Only lines a reader could parse are folded. A ledger has one record per
+line and is refused in full if any line is unreadable, so a record cut off
+mid-append by a kill — the likeliest thing to be wrong with a file left
+behind in an old workspace — would otherwise take the working ledger at the
+new path down with it, and every `fs` call for that agent with it. Such
+lines stay in the retired `fs-provenance.jsonl.migrated` beside the old
+workspace, which keeps the file's original bytes, and the report says how
+many there were.
+
 One thing a rollback does lose, and it is not stamped: an agent's
 `origins` and `tools` grants. `whitelist.json` holds every kind of
 grant under the same version, so a daemon predating

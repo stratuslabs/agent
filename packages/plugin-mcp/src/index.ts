@@ -17,7 +17,7 @@ import {
   type Tool,
   type ToolRegistry,
 } from '@stratusagent/core';
-import { createFileLedger } from '@stratusagent/plugins';
+import { createFileLedger, workspacePreparer, workspaceResolver, type TaintedWriteLedger } from '@stratusagent/plugins';
 
 import {
   boundServerText,
@@ -772,11 +772,20 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     ?? ((attempt: number) => Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS));
   const workspaceRoot = typeof config.workspaceRoot === 'string' ? config.workspaceRoot : undefined;
   // The same ledger `tool-fs` reads, so a server's image or audio block
-  // written here reads back labelled there: its home is the host's
-  // `ledgerRoot`, which the loader sets for both and lets neither config
-  // block move, with `workspaceRoot` the fallback for a hand-wired host.
-  const ledgerRoot = typeof config.ledgerRoot === 'string' ? config.ledgerRoot : workspaceRoot;
-  const ledger = ledgerRoot !== undefined ? createFileLedger(ledgerRoot) : undefined;
+  // written here reads back labelled there — and a *different* location
+  // from the artifacts it records. An operator may point this plugin's
+  // output at a volume of their own (`workspaceRoot`); the ledger follows
+  // the host's `workspaces` seam regardless, because `tool-fs` writes the
+  // same one and `fs.read` consults exactly one — a file recorded in a
+  // second ledger reads back unlabelled. `ledgerRoot` and `workspaceRoot`
+  // are the fallback for a host that wires this plugin by hand and has no
+  // layout to offer.
+  //
+  // Both resolvers are built in `setup`, because the seam arrives with the
+  // context; this holds only what config said.
+  const handWiredLedgerRoot = typeof config.ledgerRoot === 'string' ? config.ledgerRoot : workspaceRoot;
+  let workspaceFor: ((agentId: string) => string) | undefined;
+  let ledger: TaintedWriteLedger | undefined;
 
   if (!isObject(config.servers)) {
     throw new McpConfigError(
@@ -866,12 +875,17 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         }
         throw new Error(boundServerText(described, limit, 'error message'));
       }
+      // The resolver, not its answer: resolving creates the workspace and
+      // settles its permissions, and a text-only result must not be
+      // reported as a failure over a directory it never needed — the remote
+      // call has already happened, and a retry does the side effect twice.
+      const resolve = workspaceFor;
       return normalizeCallResult(result, {
         server: state.spec.name,
         tool: info.mcpName,
         agentId: session.agent.id,
         maxResultChars: state.spec.maxResultChars,
-        ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+        ...(resolve !== undefined ? { workspace: () => resolve(session.agent.id) } : {}),
         ...(ledger !== undefined ? { ledger } : {}),
       });
     },
@@ -1167,6 +1181,21 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
 
     async setup(context) {
       view = context.tools;
+      // Where the bytes land: the operator's `workspaceRoot` if they wrote
+      // one, else the host's layout — see `workspaceResolver`. Without
+      // either, a binary block is dropped with a line saying so rather
+      // than written somewhere this plugin chose.
+      // Prepared rather than resolved: this one is only ever asked when a
+      // binary block is about to be written.
+      workspaceFor = workspacePreparer(context.workspaces, workspaceRoot);
+      // Where the record of them lands: the host's seam wins here, so
+      // relocating the output cannot fork the ledger.
+      const ledgerRoot = context.workspaces === undefined ? handWiredLedgerRoot : undefined;
+      const ledgerWorkspaceFor = workspaceResolver(context.workspaces, ledgerRoot);
+      const ledgerPrepareFor = workspacePreparer(context.workspaces, ledgerRoot);
+      ledger = ledgerWorkspaceFor !== undefined && ledgerPrepareFor !== undefined
+        ? createFileLedger(ledgerWorkspaceFor, ledgerPrepareFor)
+        : undefined;
       if (options.log === undefined && context.log !== undefined) {
         log = boundedSink(context.log);
       }

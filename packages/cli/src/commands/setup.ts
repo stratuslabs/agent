@@ -38,7 +38,6 @@ import {
   saveCredentials,
   CREDENTIAL_PROVIDER_NAMES,
   verifyProviderKey,
-  workspacesDirPath,
   type ApiConfig,
   type ApprovalsConfig,
   type CatalogModel,
@@ -1322,7 +1321,7 @@ export const runSetup = async (
       const { manifest, directory } = await readPluginManifest(name, {
         resolve: (target) => import.meta.resolve(target),
       });
-      await preflightPlugin(manifest, directory, block as JsonObject, workspacesDirPath(env));
+      await preflightPlugin(manifest, directory, block as JsonObject);
       return undefined;
     } catch (error) {
       // A package that will not *resolve* is not a verdict about the block —

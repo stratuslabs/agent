@@ -19,7 +19,6 @@ what moves when you rename an agent.
 | `logs/` | `stratusd.jsonl`, the structured trace [`stratus logs`](../guides/logs.md) reads, plus the macOS LaunchAgent's stdout/stderr redirects. `0700`. |
 | `skills/` | Operator-installed [skills](../guides/skills.md), one directory each. |
 | `agents/` | One `<id>.md` soul per agent, plus one directory per agent — below. |
-| `workspaces/<id>/` | Where an agent's tools put the files they produce — a screenshot a channel uploads, a report it wrote. |
 
 ## One directory per agent
 
@@ -30,6 +29,7 @@ what moves when you rename an agent.
 | `agents/<id>/sessions.db` | Its conversations, whole: messages, status, and the provider replay state a resumed turn needs. `0600`. |
 | `agents/<id>/memory.jsonl` | What it [remembers](../concepts/memory.md), one JSON record per line, plus the derived `memory.jsonl.index` beside it. `0600`. |
 | `agents/<id>/whitelist.json` | What it may do unattended: command scopes, origins, and standing tool grants. See [Approvals](../guides/approvals.md#standing-grants). `0600`. An install still waiting on the upgrade move has this as `agents/<id>.whitelist.json`, and that file is the one both read and written until it moves. |
+| `agents/<id>/workspace/` | Where its tools put the files they produce — a screenshot a channel uploads, a report it wrote, an image an MCP server returned — plus `fs-provenance.jsonl`, the ledger that remembers which of those files came from outside (see [Tools](../guides/tools.md)). `0700`. An install still waiting on the upgrade move has this as `workspaces/<id>/`. |
 
 The agent's **soul stays a file in `agents/`**, not in this directory: a
 soul is your input — edited, copied between machines, read by `stratus
@@ -42,17 +42,32 @@ conversations or memories could come back from: the handle does not exist,
 rather than a filter having remembered to exclude them. Two things follow
 that are worth knowing:
 
-- **Deleting `agents/<id>/` forgets that agent's history, memories, and
-  grants together**, and leaves every other agent untouched. Its
-  `workspaces/<id>/` is separate and outlives it — the files its tools
-  produced are yours, not its state. Deleting only the soul keeps both,
-  which is deliberate: restore the soul later and the agent finds its
-  history where it left it.
+- **Deleting `agents/<id>/` forgets that agent's history, memories, grants
+  and produced files together**, and leaves every other agent untouched.
+  One path to name is the point of the workspace living in here: before it
+  did, an "erase this agent" had two directories to remember. Copy
+  `agents/<id>/workspace/` out first if the files its tools produced are
+  yours to keep. Deleting only the soul keeps all of it, which is
+  deliberate: restore the soul later and the agent finds its history where
+  it left it.
 - **Renaming an agent's `id:` re-keys all of it.** The old directory stays
   where it is under the old id; nothing moves it, because nothing can tell
   a rename from a new agent.
+- **The `workspace/` segment is load-bearing, not tidiness.** `fs` has no
+  default roots — no roots means no filesystem — but this is the directory
+  you would name as one to let an agent read back what its own tools
+  produced, it is where `shell.run` starts, and it is what a sandboxed
+  executor mounts. One level up, its `whitelist.json` — the file saying
+  what it may do unattended — its `sessions.db` and its `memory.jsonl` are
+  *siblings* of that directory rather than descendants, and no path inside
+  it reaches them. Were the workspace `agents/<id>/` itself, that same
+  choice would hand the agent its own grant file.
 - **Nothing in `agents/<id>/` may be a symlink** — not the directory, not
   `sessions.db`, `memory.jsonl`, `memory.jsonl.index` or `whitelist.json`.
+  `workspace/` is the exception: it may be a link, because where an agent's
+  *output* lives is a layout decision an operator can legitimately make
+  (another volume, a larger disk), and the upgrade move carries an existing
+  one across as a link rather than copying through it.
   Stratus chose these paths, so a link there is not a layout decision
   somebody made, it is this agent's state pointing at another agent's file
   or outside the home; and the `0700`/`0600` tightening would be applied to

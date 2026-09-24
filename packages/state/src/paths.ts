@@ -8,6 +8,8 @@ const STRATUS_HOME_DIRNAME = '.stratus';
 
 const WORKSPACES_DIRNAME = 'workspaces';
 
+const WORKSPACE_DIRNAME = 'workspace';
+
 const GLOBAL_CONFIG_FILENAME = 'config.json';
 
 const CREDENTIALS_FILENAME = 'credentials.json';
@@ -74,18 +76,34 @@ export const legacySessionDbIn = (stateDir: string): string =>
   path.join(stateDir, SESSIONS_DB_FILENAME);
 
 /**
- * Where tools put files they produce — a screenshot a channel then uploads,
- * a report an agent wrote. One directory per agent, for the same reason
- * sessions, memory, and credentials are keyed that way: an agent's output
- * is that agent's, and a shared scratch directory is two agents reading
- * each other's work.
+ * The shared directory the workspaces used to live in, one subdirectory per
+ * agent. Nothing writes here any more — {@link agentWorkspacePath} is where
+ * an agent's output goes — and it survives as the migration's source.
  *
- * The layout lives here because this package owns `~/.stratus`. Plugins do
- * not derive it — the host passes the resolved path in, so a plugin has no
- * copy of this repository's directory conventions to drift from.
+ * Kept under its own name rather than repointed, because a plugin handed
+ * this path joins the agent id onto it: that is the documented
+ * `workspaceRoot` contract, and it is still how a hand-wired host that
+ * supplies no `AgentWorkspaces` seam addresses an agent's files.
  */
-export const workspacesDirPath = (env: StateEnvironment): string =>
-  path.join(stratusHomePath(env), WORKSPACES_DIRNAME);
+export const legacyWorkspacesDirPath = (env: StateEnvironment): string =>
+  legacyWorkspacesDirIn(stratusHomePath(env));
+
+/** {@link legacyWorkspacesDirPath} against an explicit state directory. */
+export const legacyWorkspacesDirIn = (stateDir: string): string =>
+  path.join(stateDir, WORKSPACES_DIRNAME);
+
+/**
+ * One agent's workspace as it used to be addressed.
+ *
+ * The migration's source, and — more to the point — the answer it *derives*
+ * when finishing a move it did not start. That recovery reads a marker in a
+ * directory the agent owns, so where the workspace came from cannot come
+ * from the marker: it is this join, over an id read from the directory name.
+ */
+export const legacyAgentWorkspaceIn = (stateDir: string, agentId: string): string => {
+  assertPathSafeAgentId(agentId);
+  return path.join(legacyWorkspacesDirIn(stateDir), agentId);
+};
 
 /**
  * Where operator-installed skills live: one directory per skill, the
@@ -95,9 +113,6 @@ export const workspacesDirPath = (env: StateEnvironment): string =>
  */
 export const skillsDirPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), SKILLS_DIRNAME);
-
-export const agentWorkspacePath = (env: StateEnvironment, agentId: string): string =>
-  path.join(workspacesDirPath(env), agentId);
 
 /**
  * The control API's bearer token (0600). Programmatic clients — the CLI's
@@ -174,6 +189,35 @@ export const agentMemoryFilePath = (env: StateEnvironment, agentId: string): str
 /** {@link agentMemoryFilePath} against an explicit state directory. */
 export const agentMemoryFileIn = (stateDir: string, agentId: string): string =>
   path.join(agentStateDirIn(stateDir, agentId), MEMORY_FILENAME);
+
+/**
+ * Where tools put files they produce for one agent — a screenshot a channel
+ * then uploads, a report the agent wrote. Inside the agent's own state
+ * directory, for the same reason its sessions and memories are: an agent's
+ * output is that agent's, and a shared scratch directory is two agents
+ * reading each other's work.
+ *
+ * A `workspace` subdirectory rather than the state directory itself, and
+ * the extra segment is load-bearing. This is a directory an operator can
+ * hand to `tool-fs` as a root — it is not one by default, but `tool-fs`
+ * carries a comment about the case, and a sandboxed executor mounts it —
+ * and it is where `tool-shell` starts. Naming it must reach that agent's
+ * output and nothing else. Its own sessions, memories and, the one that
+ * matters, the `whitelist.json` saying what it may do unattended are
+ * siblings of this directory rather than descendants, so no canonicalized
+ * path inside it reaches them; with the workspace *as* the state directory
+ * they would all be inside it.
+ *
+ * The layout lives here because this package owns `~/.stratus`. Plugins do
+ * not derive it: they ask the host through `AgentWorkspaces`, which
+ * {@link createAgentWorkspaces} implements from this join.
+ */
+export const agentWorkspacePath = (env: StateEnvironment, agentId: string): string =>
+  agentWorkspaceIn(stratusHomePath(env), agentId);
+
+/** {@link agentWorkspacePath} against an explicit state directory. */
+export const agentWorkspaceIn = (stateDir: string, agentId: string): string =>
+  path.join(agentStateDirIn(stateDir, agentId), WORKSPACE_DIRNAME);
 
 // One agent's persistent grants live in this directory too, at
 // `whitelist.json`. The join is `whitelistPathFor` in

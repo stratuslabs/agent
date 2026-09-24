@@ -121,7 +121,7 @@ version of all of this.
 | `maxContexts` | `4` | Contexts at once; the least recently used goes first. |
 | `maxTextBytes` | `100000` | Cap on `browser.read`, then a `truncated` marker. A call's own `maxBytes` may ask for less, never more. |
 | `navigationTimeoutMs` | `30000` | Per navigation, per action, and on reading a page — one whose script never yields is given up on, its context closed, and the next call opens a fresh page. |
-| `workspaceRoot` | supplied by the daemon | Where screenshots go: `<root>/<agent-id>/screenshots`. |
+| `workspaceRoot` | the host's answer | Where screenshots go. Under the daemon the host answers per agent, so they land in `~/.stratus/agents/<id>/workspace/screenshots/`. Set here, it means one directory per agent under the root you name (`<root>/<agent-id>/screenshots`) — which is also how a host wiring this plugin by hand supplies one. |
 
 Address settings apply per agent under `agents`, and they are enforced —
 including when an agent's policy is *narrower* than the default. A proxy is
@@ -170,7 +170,8 @@ an SSRF hole.
 
 ## Screenshots come back as files, not bytes
 
-`browser.screenshot` writes to `<workspaceRoot>/<agent-id>/screenshots/` and
+`browser.screenshot` writes to `screenshots/` inside the agent's workspace —
+`~/.stratus/agents/<id>/workspace/screenshots/` under the daemon — and
 returns `{ file, url, title }`. The `file` key is the channel contract's
 convention for a result that refers to a local file, so a Slack thread that
 asked for a screenshot gets the image posted into it rather than a path nobody

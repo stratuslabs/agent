@@ -245,14 +245,23 @@ Tool results normalize into plain values:
 - Text content comes back as a string (or under `text` when there is more).
 - `structuredContent` passes through as `structured`.
 - **Images, audio, and binary resources are written into the agent's
-  workspace** (`~/.stratus/workspaces/<agent>/mcp/<server>/`) and returned
-  under `files` — the key channels deliver as attachments, so an image from
-  a bridged tool reaches Slack like a screenshot does. Each such file is a
-  server's bytes on disk, so it is recorded in the agent's filesystem
-  provenance ledger at `external` before it is written — the same ledger
-  `@stratusagent/tool-fs` reads, at the host's `ledgerRoot`, which the daemon
-  sets for both plugins and lets neither config block move — and a later
-  `fs.read` of it carries the label the tool result did.
+  workspace** (`~/.stratus/agents/<agent>/workspace/mcp/<server>/`) and
+  returned under `files` — the key channels deliver as attachments, so an
+  image from a bridged tool reaches Slack like a screenshot does. Each such
+  file is a server's bytes on disk, so it is recorded in the agent's
+  filesystem provenance ledger at `external` before it is written — the
+  same ledger `@stratusagent/tool-fs` reads — and a later `fs.read` of it
+  carries the label the tool result did.
+
+  Where the bytes land and where the record lands are answered separately,
+  on purpose. A `workspaceRoot` in this plugin's config block moves the
+  output (one directory per agent under the root you name); the ledger
+  follows the host's per-agent workspace regardless, because `tool-fs`
+  writes that same ledger and `fs.read` consults exactly one — a file
+  recorded in a second one reads back as the agent's own words. With
+  neither the host's answer nor a `workspaceRoot`, a binary block is
+  dropped with a line saying so rather than written somewhere this plugin
+  picked.
 - Resource links pass through under `resources`.
 - A result the server marks `isError` fails the call, like any failing tool.
 

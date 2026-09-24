@@ -25,6 +25,7 @@ import {
   hasBracketedLegacyState,
   makeAgentStateDirectory,
 } from './layout-migration.ts';
+import { applyPerAgentWorkspaces } from './workspace-migration.ts';
 import {
   MEMORY_FILENAME,
   stratusHomePath,
@@ -213,8 +214,14 @@ const STATE_FILENAME = 'state.json';
  * open the shared `sessions.db` that is no longer there, find no history,
  * and start a second one beside the real stores — two divergent
  * populations, which is exactly what the stamp exists to stop.
+ *
+ * 4 moves each agent's workspace inside its state directory. An older build
+ * writes `workspaces/<id>` by pathname on every tool call, so against a
+ * migrated home it would rebuild that tree and append the provenance
+ * records for it to a ledger the new path never reads — the files it
+ * fetched would then read back as the agent's own words.
  */
-export const STATE_SCHEMA_VERSION = 3;
+export const STATE_SCHEMA_VERSION = 4;
 
 export const stateFilePath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), STATE_FILENAME);
@@ -371,10 +378,34 @@ const PER_AGENT_LAYOUT_MIGRATION: StateMigration = {
   apply: applyPerAgentLayout,
 };
 
+/**
+ * Step 15's layer A, finished: each agent's workspace moves from
+ * `workspaces/<id>` into `agents/<id>/workspace`, so that `agents/<id>/` is
+ * the one path everything an agent owns lives under. The move, and the two
+ * things it does about the provenance ledger that are the whole reason it
+ * is not a bare rename, are in `applyPerAgentWorkspaces`.
+ *
+ * Exclusive for the reason 0003 is, and one of its own. A daemon of the
+ * older build resolves `workspaces/<id>` by pathname on every tool call
+ * that writes a file, so it does not notice the move: it recreates the old
+ * tree and goes on appending provenance records there, and a record the
+ * ledger at the new path never sees is a fetched file that reads back as
+ * the agent's own text. Unlike a session row, that is not state left
+ * behind — it is a label silently removed from state that moved.
+ */
+const PER_AGENT_WORKSPACES_MIGRATION: StateMigration = {
+  id: '0004-per-agent-workspaces',
+  description: "move each agent's workspace into agents/<id>/workspace",
+  /** Always, for the reason 0003 gives: see `PER_AGENT_LAYOUT_MIGRATION`. */
+  requiresExclusive: async () => true,
+  apply: applyPerAgentWorkspaces,
+};
+
 export const STATE_MIGRATIONS: readonly StateMigration[] = [
   OWNER_ONLY_STATE_FILES_MIGRATION,
   PROVENANCE_LABELS_MIGRATION,
   PER_AGENT_LAYOUT_MIGRATION,
+  PER_AGENT_WORKSPACES_MIGRATION,
 ];
 
 const unversionedStamp = (): StateStamp => ({ schemaVersion: 0, applied: [] });

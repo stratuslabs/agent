@@ -83,6 +83,12 @@ registering nothing and reporting itself loaded. The `@stratusagent/plugins`
 loader supplies all four. See
 [Registering providers, channels, memory stores, and executors](#registering-providers-channels-memory-stores-and-executors).
 
+And a `workspaces` slot: where each agent's produced files go, answered by
+the host rather than derived by the plugin — see **Where an agent's files
+go** below. A host that omits it leaves a plugin falling back to a
+`workspaceRoot` an operator configured, and with neither, failing the call
+naming what is missing.
+
 A tool also says **where its output comes from**, and that is part of the
 contract rather than a courtesy: a result written by a party the operator
 has not authorized — a web page, a search snippet, an MCP server's response,
@@ -141,16 +147,49 @@ The host that implements all of this is `@stratusagent/plugins`.
   turns have drained, and a plugin that throws there is logged rather than
   allowed to hold up the drain.
 
-**Two keys in the config block are the host's, not the plugin's.** A plugin whose
-manifest schema declares `workspaceRoot` is given the platform's answer
-(`~/.stratus/workspaces`) when the operator did not set one, because the
-`~/.stratus` layout is this repository's to own and a plugin deriving it would
-be a second copy of a path that can drift. A plugin that declares `ledgerRoot`
-— one that writes the filesystem provenance ledger, as `tool-fs` and
-`plugin-mcp` do — is handed the host's workspace root there *whatever the
-operator set*, so two writers can never keep two ledgers: `fs.read` consults
-one, and a file recorded in another would read back unlabelled. A plugin that
-never declares either is never handed it.
+**Where an agent's files go is asked, not derived.** `setup` receives
+`context.workspaces`, an `AgentWorkspaces` seam whose `forAgent(agentId)`
+answers with that agent's workspace directory and whose `all()` lists every
+one on the host. The `~/.stratus` layout is this repository's to own, and a
+plugin that spelled it would be a second copy of a path that can drift —
+which is not hypothetical: the seam exists because five plugins were each
+handed a `workspaceRoot` and each appended the agent id to it, so all five
+had to change when the workspace moved from `workspaces/<id>` to
+`agents/<id>/workspace` and the id stopped being the last segment.
+
+`prepare` **creates** the directory, `0700`, before answering; `forAgent`
+only resolves. A caller that is about to write asks the first, one that
+merely needs the name — the provenance ledger looking for a file that may
+not exist — asks the second, and the split matters because preparing can
+fail: a `browser.goto`, an `fs.read`'s ledger lookup, or a tool result that
+turned out to be text must not go down with a directory they were never
+going to use. Creating is the host's job and not the plugin's for the same
+reason the seam exists at all:
+the workspace now sits inside the agent's state directory, beside its
+sessions, memories and grants, and the recursive `mkdir` a file-producing
+plugin reaches for takes its mode from the process umask — which under the
+usual `0022` would leave `agents/<id>/` itself world-readable the first time
+an agent's opening move was `shell.run`. A plugin has no way to know that
+about a path it was handed; it may still make subdirectories under it.
+
+`workspaceRoot` survives as an operator's key and a hand-wired host's
+fallback, with the old meaning — one directory per agent directly under the
+root. A value there **wins** over the seam, because the loader no longer
+fills it in, so a value is one somebody chose, and relocating a plugin's
+output by writing it down is supported. Use `workspaceResolver` from
+`@stratusagent/plugins` rather than reading either directly: it owns the
+precedence, and a host that supplies neither gets `undefined` back, which a
+plugin reports as a call it cannot make rather than picking a directory of
+its own.
+
+**`ledgerRoot` is the host's key and is stripped**, the way `toolRisks` is,
+so a plugin's code never sees it. Two plugins write the filesystem
+provenance ledger (`tool-fs` and `plugin-mcp`), and an operator who
+relocates one writer's output must not thereby give it a second ledger:
+`fs.read` consults exactly one, and a file recorded in the other reads back
+unlabelled. Both bind the ledger to the seam and ignore their own
+`workspaceRoot` for it, so there is one ledger by construction rather than
+by the loader holding a key down.
 
 A package may export additional, more specific factories for direct import
 (`createFsPlugin` for a test or an embedding host that skips the loader

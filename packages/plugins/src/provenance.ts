@@ -1,6 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
-import type { Dirent } from 'node:fs';
+import { lstat, mkdir, open, readFile, realpath, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -208,12 +207,30 @@ export const ledgerTrustOfContent = (raw: string): TrustLevel | undefined => {
 
 /**
  * The durable ledger, one append-only JSONL file per agent at
- * `<workspaceRoot>/<agentId>/fs-provenance.jsonl`, owner-only. Each record
- * is one `O_APPEND` write, so processes that share an agent — the daemon and
- * a `stratus run` — interleave records rather than overwrite each other.
+ * `<the agent's workspace>/fs-provenance.jsonl`, owner-only. Each record is
+ * one `O_APPEND` write, so processes that share an agent — the daemon and a
+ * `stratus run` — interleave records rather than overwrite each other.
+ *
+ * Takes resolvers rather than a root, because where an agent's workspace
+ * is is the host's to say: this package depends on `core` and `agents` only
+ * and cannot see the `~/.stratus` layout, which is exactly why it must not
+ * spell a depth. See `workspaceResolver`.
+ *
+ * Two of them, and the split is the point. Reading a ledger only needs the
+ * *name* of a file that may not exist — every `fs.read`, `fs.list` and
+ * `fs.search` takes a snapshot before it does anything — while recording a
+ * write needs the directory to be there and owner-only. Asking the
+ * preparing one on a read would let a workspace that cannot be made stop
+ * reads whose own roots are perfectly readable, and which could not have
+ * had a ledger at the blocked path anyway. `prepareFor` defaults to
+ * `workspaceFor` for a host that wires this by hand with one resolver.
  */
-export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
-  const ledgerPath = (agentId: string): string => path.join(workspaceRoot, agentId, LEDGER_FILENAME);
+export const createFileLedger = (
+  workspaceFor: (agentId: string) => string,
+  prepareFor: (agentId: string) => string = workspaceFor,
+): TaintedWriteLedger => {
+  const ledgerPath = (agentId: string): string => path.join(workspaceFor(agentId), LEDGER_FILENAME);
+  const ledgerPathForWrite = (agentId: string): string => path.join(prepareFor(agentId), LEDGER_FILENAME);
 
   const read = async (agentId: string): Promise<Record<string, TrustLevel>> => {
     const filePath = ledgerPath(agentId);
@@ -245,7 +262,7 @@ export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
           // A clean write records nothing — see `TaintedWriteLedger`.
           return;
         }
-        const filePath = ledgerPath(agentId);
+        const filePath = ledgerPathForWrite(agentId);
         await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
         // Read and appended through ONE descriptor. A ledger reached through
         // a link (a relocated workspace, a relocated file — both supported)
@@ -283,41 +300,50 @@ export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
 
 /**
  * Whether `absolutePath` is an agent's ledger — exactly
- * `<workspaceRoot>/<agentId>/fs-provenance.json`, any agent's — which is the
- * one path `fs.write` refuses. Exactly that depth, not any descendant with
- * the name: a project an agent keeps under its workspace may legitimately
- * have a file called `fs-provenance.json` of its own.
+ * `<workspace>/fs-provenance.jsonl`, for any of the workspaces given —
+ * which is the one path `fs.write` refuses. Exactly that depth, not any
+ * descendant with the name: a project an agent keeps under its workspace
+ * may legitimately have a file called `fs-provenance.jsonl` of its own.
  *
- * `workspaceRoots` are every spelling of the workspace root worth checking
- * — the configured path and its canonical form — because the path being
- * judged arrives canonical from the root resolver, and a workspace an
+ * `workspaces` are the directories themselves, and every spelling worth
+ * checking — each configured path and its canonical form — because the path
+ * being judged arrives canonical from the root resolver, and a workspace an
  * operator moved behind a symlink would otherwise compare as outside.
+ *
+ * Directories, not a root to join an id onto: the depth from any root to an
+ * agent's workspace is the host's business, and this package cannot see it.
+ * When that depth lived here it was `<root>/<agent>/`, and the move to
+ * `agents/<id>/workspace/` would have left this guard silently matching
+ * nothing — the one failure mode it exists to prevent.
  */
-export const isLedgerPath = (workspaceRoots: readonly string[], absolutePath: string): boolean =>
-  workspaceRoots.some((workspaceRoot) => {
-    const relative = path.relative(workspaceRoot, absolutePath);
+export const isLedgerPath = (workspaces: readonly string[], absolutePath: string): boolean =>
+  workspaces.some((workspace) => {
+    const relative = path.relative(workspace, absolutePath);
     if (relative.length === 0 || relative.startsWith('..') || path.isAbsolute(relative)) {
       return false;
     }
     const segments = relative.split(path.sep);
-    return segments.length === 2 && segments[1] === LEDGER_FILENAME;
+    return segments.length === 1 && segments[0] === LEDGER_FILENAME;
   });
 
 /**
  * The predicate `fs.write` refuses on and `fs.read` labels by, built once
- * per tool call from what the workspace holds right now. A path is an
- * agent's ledger two ways: lexically —
- * `<workspaceRoot>/<agent>/fs-provenance.jsonl` under the configured or the
- * canonical root — or through a link at the agent directory. An operator
- * who relocated one agent's workspace with `<workspaceRoot>/ava -> /data/ava`
- * has the ledger at `/data/ava/fs-provenance.jsonl`, which is how the root
- * resolver spells every path under it and which no spelling of the root
- * reaches, so every entry of the workspace is canonicalized and its ledger
- * path listed — the ledger file's own canonical path too, for a link at
- * the file rather than the directory, and its device and inode, for a hard
- * link to it from inside a root. Built per call and never cached: a
- * link repointed under a running daemon is judged where it points now, and
- * one `readdir` plus two `realpath`s per agent is nothing next to the write.
+ * per tool call from what the workspaces hold right now. A path is an
+ * agent's ledger two ways: lexically — `<workspace>/fs-provenance.jsonl`,
+ * under the path the host gave or its canonical form — or through a link at
+ * the workspace directory. An operator who relocated one agent's workspace
+ * with a link has the ledger wherever it points, which is how the root
+ * resolver spells every path under it and which no spelling the host gave
+ * reaches, so every workspace is canonicalized and its ledger path listed —
+ * the ledger file's own canonical path too, for a link at the file rather
+ * than the directory, and its device and inode, for a hard link to it from
+ * inside a root. Built per call and never cached: a link repointed under a
+ * running daemon is judged where it points now, and two `realpath`s per
+ * agent is nothing next to the write.
+ *
+ * Takes the workspaces themselves rather than a root to enumerate, because
+ * how a root reaches an agent's workspace is the host's business — see
+ * `allAgentWorkspaces`.
  */
 export interface FileIdentity {
   dev: number;
@@ -336,18 +362,78 @@ export type LedgerGuard = (absolutePath: string, identity?: FileIdentity) => Pro
 
 const identityKey = (identity: FileIdentity): string => `${identity.dev}:${identity.ino}`;
 
-export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<LedgerGuard> => {
-  if (workspaceRoot === undefined) {
+/**
+ * Roots whose immediate children are workspaces, judged lexically.
+ *
+ * This is the `workspaceRoot` contract and nothing else: one directory per
+ * agent directly under the root. It is kept because a workspace that does
+ * not exist *yet* still has a reserved ledger path, and enumerating what is
+ * on disk cannot name it — so an agent's very first `fs.write` could create
+ * or clobber `<root>/<id>/fs-provenance.jsonl` before any tainted write had
+ * made the directory.
+ *
+ * The host's own layout gets no such rule, deliberately. There the
+ * workspace sits inside `agents/<id>/`, so a root wide enough to reach an
+ * agent that has no directory yet already reaches every other agent's
+ * `whitelist.json` and `sessions.db` — there is nothing left for this to
+ * save. Under a configured root, which holds workspaces and nothing else,
+ * the reason the rule existed still holds.
+ */
+const isLedgerUnderRoot = (roots: readonly string[], absolutePath: string): boolean =>
+  roots.some((root) => {
+    const relative = path.relative(root, absolutePath);
+    if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
+      return false;
+    }
+    const segments = relative.split(path.sep);
+    return segments.length === 2 && segments[1] === LEDGER_FILENAME;
+  });
+
+/**
+ * Whether a canonicalization failure is one that *answers*: nothing is at
+ * that path, or it leads nowhere at all.
+ *
+ * Every other failure is this guard deciding a question by not being able
+ * to ask it, and in the direction that destroys something. `EIO`, `EACCES`
+ * or `EMFILE` on one workspace drops that agent's ledger out of the set
+ * below, and the set is the whole of what the guard refuses — so a write
+ * aimed at `fs-provenance.jsonl` would pass and truncate the file this
+ * exists to protect. The caller is a single tool call: propagating costs
+ * that call, which is the cheaper of the two answers by a long way.
+ */
+const holdsNoLedger = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP';
+};
+
+export const ledgerGuard = async (
+  workspaces: readonly string[],
+  roots: readonly string[] = [],
+): Promise<LedgerGuard> => {
+  if (workspaces.length === 0 && roots.length === 0) {
     return async () => false;
   }
-  const roots = [workspaceRoot];
-  try {
-    const canonical = await realpath(workspaceRoot);
-    if (canonical !== workspaceRoot) {
-      roots.push(canonical);
+  // Every spelling of every agent's workspace: the path the host gave and
+  // its canonical form, because the path being judged arrives canonical
+  // from the root resolver and a workspace behind a link would otherwise
+  // compare as outside.
+  const spellings: string[] = [];
+  // Both spellings of each root too, for the same reason the workspaces
+  // have both: the path being judged arrives canonical from the resolver.
+  const rootSpellings: string[] = [];
+  for (const root of roots) {
+    rootSpellings.push(root);
+    try {
+      const canonical = await realpath(root);
+      if (canonical !== root) {
+        rootSpellings.push(canonical);
+      }
+    } catch (error) {
+      if (!holdsNoLedger(error)) {
+        throw error;
+      }
+      // Not there yet: only the spelling the operator gave.
     }
-  } catch {
-    // Not there yet: only the configured spelling, and no agents to list.
   }
   const ledgers = new Set<string>();
   // And the files themselves, by identity: a hard link to a ledger from
@@ -355,36 +441,39 @@ export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<Le
   // alone, and is the same bytes. Plain numbers, like the resolver's
   // `identity`, so the two sides of a comparison round the same way.
   const identities = new Set<string>();
-  let entries: Dirent[] = [];
-  try {
-    entries = await readdir(workspaceRoot, { withFileTypes: true });
-  } catch {
-    entries = [];
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory() && !entry.isSymbolicLink()) {
-      continue;
-    }
-    const lexical = path.join(workspaceRoot, entry.name, LEDGER_FILENAME);
-    // Two canonical spellings, because either component can be a link: the
-    // agent directory (`ava -> /data/ava`, judged even before the ledger
-    // exists there) and the ledger file itself (`fs-provenance.jsonl ->
-    // /data/ava-ledger.jsonl`, whose target is what the resolver returns
-    // and what a truncating write would empty).
+  for (const workspace of workspaces) {
+    spellings.push(workspace);
+    // Two canonical spellings, because either the workspace directory or
+    // the ledger file can be a link: the directory (`ava/workspace ->
+    // /data/ava`, judged even before the ledger exists there) and the file
+    // itself (`fs-provenance.jsonl -> /data/ava-ledger.jsonl`, whose target
+    // is what the resolver returns and what a truncating write would
+    // empty).
     try {
-      ledgers.add(path.join(await realpath(path.dirname(lexical)), LEDGER_FILENAME));
-    } catch {
-      // A dangling link holds no ledger.
+      const canonical = await realpath(workspace);
+      if (canonical !== workspace) {
+        spellings.push(canonical);
+      }
+      ledgers.add(path.join(canonical, LEDGER_FILENAME));
+    } catch (error) {
+      if (!holdsNoLedger(error)) {
+        throw error;
+      }
+      // Not there yet, or a dangling link: holds no ledger.
     }
+    const lexical = path.join(workspace, LEDGER_FILENAME);
     try {
       ledgers.add(await realpath(lexical));
       identities.add(identityKey(await stat(lexical)));
-    } catch {
+    } catch (error) {
+      if (!holdsNoLedger(error)) {
+        throw error;
+      }
       // No ledger there yet, or a dangling link: nothing to protect.
     }
   }
   return async (absolutePath, identity) => {
-    if (isLedgerPath(roots, absolutePath) || ledgers.has(absolutePath)) {
+    if (isLedgerPath(spellings, absolutePath) || isLedgerUnderRoot(rootSpellings, absolutePath) || ledgers.has(absolutePath)) {
       return true;
     }
     if (identities.size === 0) {

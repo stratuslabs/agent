@@ -245,7 +245,7 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
   assert.deepEqual(await readStateStamp(env), { schemaVersion: 0, applied: [] });
   assert.deepEqual(
     (await pendingStateMigrations(env)).map((migration) => migration.id),
-    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout'],
+    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
   );
 
   // The memories move anyway, because nothing about them needs the bracket
@@ -258,7 +258,7 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
   const exclusive = await runStateMigrations(env, { exclusive: true });
   assert.deepEqual(
     exclusive.map((result) => result.id),
-    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout'],
+    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
   );
   assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
   // And now the stamp, once and whole.
