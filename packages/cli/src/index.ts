@@ -112,7 +112,7 @@ export {
 export { formatEvent, eventDetail } from './events.ts';
 
 export { describeApprovalCall, createApprovalPolicy, describePrincipals } from './approvals.ts';
-export { loadServePrincipals } from './trusted-config.ts';
+export { loadServePrincipals, loadServeSlack } from './trusted-config.ts';
 
 export {
   resolveRuntimeConfig,

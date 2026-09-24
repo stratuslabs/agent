@@ -23,6 +23,7 @@ import {
   logsDirPath,
   resolveAgentApprovals,
   resolveAgentPrincipals,
+  resolveAgentSlack,
   runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
@@ -49,6 +50,7 @@ import {
 import {
   loadServeApprovals,
   loadServePrincipals,
+  loadServeSlack,
   loadServeApi,
   loadServePlugins,
   loadServeRuntimeSelection,
@@ -173,6 +175,7 @@ const serveHeldHome = async (
   const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
   const approvalMode = command.approvals ?? approvalsConfig.mode ?? 'headless';
   const principalsConfig = await loadServePrincipals(env, command.configPath, warn);
+  const slackConfig = await loadServeSlack(env, command.configPath, warn);
 
   // Read here rather than inside the gateway for the same reason as the two
   // blocks above: the trust boundary is a property of *which file* said it,
@@ -302,6 +305,7 @@ const serveHeldHome = async (
             ...(route.slackChannel ? { approvalChannel: route.slackChannel } : {}),
             ...(principals.slackUsers ? { principals: principals.slackUsers } : {}),
             ...(principals.admit ? { admit: principals.admit } : {}),
+            replies: resolveAgentSlack(slackConfig, agentId).replies,
           };
         }),
         log,

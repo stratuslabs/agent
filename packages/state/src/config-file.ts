@@ -10,7 +10,9 @@ import {
   MAX_APPROVAL_TIMEOUT_MS,
   type ApprovalsConfig,
   type AgentPrincipalsConfig,
+  type AgentSlackConfig,
   type PrincipalsConfig,
+  type SlackConfig,
   type ApiConfig,
   type PluginConfigBlock,
   type PluginsConfig,
@@ -167,6 +169,10 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   const principals = parsePrincipalsConfig(config.principals, configPath);
   if (principals) {
     resolved.principals = principals;
+  }
+  const slack = parseSlackConfig(config.slack, configPath);
+  if (slack) {
+    resolved.slack = slack;
   }
   const api = parseApiConfig(config.api, configPath);
   if (api) {
@@ -462,6 +468,68 @@ export const resolveAgentPrincipals = (
   const admit = agent?.admit ?? principals?.admit;
   return { ...(slackUsers ? { slackUsers } : {}), ...(admit ? { admit } : {}) };
 };
+
+const parseSlackEntry = (raw: unknown, configPath: string, where: string): AgentSlackConfig | undefined => {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid ${where} in config ${configPath}: expected an object, received ${JSON.stringify(raw)}.`);
+  }
+  const source = raw as Record<string, unknown>;
+  const entry: AgentSlackConfig = {};
+  if (source.replies !== undefined) {
+    // Refused rather than defaulted: a misspelt "streem" that quietly meant
+    // `final` would look like the setting did nothing.
+    if (source.replies !== 'final' && source.replies !== 'stream') {
+      throw new Error(
+        `Invalid ${where}.replies in config ${configPath}: expected "final" or "stream", received ${JSON.stringify(source.replies)}.`,
+      );
+    }
+    entry.replies = source.replies;
+  }
+  return entry;
+};
+
+const parseSlackConfig = (raw: unknown, configPath: string): SlackConfig | undefined => {
+  const shared = parseSlackEntry(raw, configPath, 'slack');
+  if (!shared) {
+    return undefined;
+  }
+  const slack: SlackConfig = { ...shared };
+  const source = raw as Record<string, unknown>;
+  if (source.agents !== undefined) {
+    if (typeof source.agents !== 'object' || source.agents === null || Array.isArray(source.agents)) {
+      throw new Error(
+        `Invalid slack.agents in config ${configPath}: expected an object keyed by agent id, received ${JSON.stringify(source.agents)}.`,
+      );
+    }
+    const agents: Record<string, AgentSlackConfig> = {};
+    for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
+      const parsed = parseSlackEntry(entry, configPath, `slack.agents.${agentId}`);
+      if (parsed) {
+        agents[agentId] = parsed;
+      }
+    }
+    if (Object.keys(agents).length > 0) {
+      slack.agents = agents;
+    }
+  }
+  return slack;
+};
+
+/**
+ * One agent's Slack presentation: its own entry where it has one, the
+ * top-level block otherwise — per key, the precedence `resolveAgentPrincipals`
+ * uses. `replies` defaults to `final` here, the one place, so nothing
+ * downstream has to know what an absent key means.
+ */
+export const resolveAgentSlack = (
+  slack: SlackConfig | undefined,
+  agentId: string,
+): Required<AgentSlackConfig> => ({
+  replies: slack?.agents?.[agentId]?.replies ?? slack?.replies ?? 'final',
+});
 
 // ---------------------------------------------------------------------------
 // Writing the config file

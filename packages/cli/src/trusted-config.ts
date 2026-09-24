@@ -5,6 +5,7 @@ import {
   type ApprovalsConfig,
   type PrincipalsConfig,
   type PluginsConfig,
+  type SlackConfig,
 } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 
@@ -105,6 +106,33 @@ export const loadServePrincipals = async (
       + 'refusing every Slack sender until it is fixed',
     );
     return { admit: 'principals' };
+  }
+  return block.status === 'present' ? block.value : {};
+};
+
+/**
+ * The `slack` block — how agents present themselves in Slack — under the
+ * `principals` rule: a project-local config is refused with a warning and
+ * the operator's global one read instead, so a cloned repository neither
+ * sets it nor makes it disappear. A block that will not read is a warning
+ * and the defaults, since nothing here is a boundary.
+ */
+export const loadServeSlack = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<SlackConfig> => {
+  let block = await readTrustedConfigBlock('slack', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring the slack config in ${block.path}: a project-local config cannot decide how this daemon's agents `
+      + 'post in Slack. Using ~/.stratus/config.json instead.',
+    );
+    block = await readGlobalConfigBlock('slack', env);
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring the slack config (${block.error instanceof Error ? block.error.message : String(block.error)}); using the defaults`);
+    return {};
   }
   return block.status === 'present' ? block.value : {};
 };

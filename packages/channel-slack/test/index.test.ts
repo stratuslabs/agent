@@ -7,13 +7,26 @@ import path from 'node:path';
 import { EventBus, type ApprovalAnswer, type ImageAttachment, type JsonObject, type Session, type StratusEvent } from '@stratusagent/core';
 import type { GatewayLike } from '@stratusagent/channels';
 import {
-  createSlackChannelAdapter,
+  createSlackChannelAdapter as createAdapterAsShipped,
   createSlackFileFetcher,
+  type SlackAdapterOptions,
   type SlackBlock,
   type SlackSocketEventArgs,
   type SlackSocketLike,
   type SlackWebLike,
 } from '../src/index.ts';
+
+/**
+ * The adapter with every agent on the `stream` reply mode, unless a test
+ * says otherwise. Nearly every test in this file was written against the
+ * placeholder-then-edit renderer — handovers, ordering, overflow, silent
+ * turns — and those mechanics are what `stream` still ships. The default,
+ * `final`, is tested through `createAdapterAsShipped` directly.
+ */
+const createSlackChannelAdapter = (options: SlackAdapterOptions) => createAdapterAsShipped({
+  ...options,
+  agents: options.agents.map((agent) => ({ replies: 'stream' as const, ...agent })),
+});
 
 interface FakeSocket extends SlackSocketLike {
   /**
@@ -292,6 +305,152 @@ test('a channel mention dispatches with a thread-rooted session key and streams 
 
   await adapter.stop();
   assert.equal(socket.disconnected, true);
+});
+
+const recordStatuses = (web: FakeWeb, refuse = false): Array<{ channel_id: string; thread_ts: string; status: string }> => {
+  const statuses: Array<{ channel_id: string; thread_ts: string; status: string }> = [];
+  web.assistant = {
+    threads: {
+      async setStatus(args) {
+        statuses.push(args);
+        if (refuse) {
+          throw new Error('not_allowed');
+        }
+        return {};
+      },
+    },
+  };
+  return statuses;
+};
+
+test('by default a reply posts once, finished, behind Slack\'s loading status', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  let postsWhileWorking = -1;
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Let me look' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    postsWhileWorking = web.posts.length;
+    return sessionWithReply(sessionId, 'The build passes.');
+  });
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> is the build green?'));
+  await adapter.stop();
+
+  // The reported annoyance: a `…` posted at once and edited as the agent
+  // worked, with the notification firing on the `…`. Nothing is posted
+  // while the turn runs, and the reply is one message, never edited.
+  assert.equal(postsWhileWorking, 0);
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['The build passes.', '100.1']]);
+  assert.deepEqual(web.updates, []);
+  // What the agent is doing is in Slack's status line instead.
+  assert.deepEqual(statuses.map((status) => status.status), ['is thinking…', 'is running shell.run…', 'is thinking…']);
+  assert.ok(statuses.every((status) => status.channel_id === 'C1' && status.thread_ts === '100.1'));
+});
+
+test('the loading status comes back once an approval asked mid-turn is answered', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  let before = 0;
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    before = statuses.length;
+    // The question was posted into the thread, and Slack took the status
+    // down with it; this is the answer arriving.
+    await gateway.bus.emit({ type: 'tool.approval-resolved', sessionId, requestId: 'r1', answer: 'once', reason: 'decided' });
+    return sessionWithReply(sessionId, 'done');
+  });
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> deploy it'));
+  await adapter.stop();
+
+  assert.deepEqual(statuses.slice(before).map((status) => status.status), ['is thinking…']);
+});
+
+test('an agent on the stream reply mode still posts a placeholder and edits it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hello from Ava'));
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'stream' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hi'));
+  await adapter.stop();
+
+  assert.equal(web.posts[0]?.text, '…');
+  assert.equal(web.updates.at(-1)?.text, 'hello from Ava');
+  // The placeholder is its status; a second one would be noise.
+  assert.deepEqual(statuses, []);
+});
+
+test('a loading status Slack refuses is said once, and replies still post', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  recordStatuses(web, true);
+  const warnings: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'still here'));
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> one', { ts: '100.1' }));
+  await socket.deliver('app_mention', mention('<@B-AVA> two', { ts: '100.2' }));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['still here', 'still here']);
+  assert.equal(warnings.filter((line) => /could not show a loading status/.test(line)).length, 1);
+});
+
+test('a reply Slack refuses does not leave the loading status standing', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  web.chat.postMessage = async () => {
+    throw new Error('rate_limited');
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'lost'));
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hi'));
+  await adapter.stop();
+
+  // A posted reply clears the status itself; a refused one has to.
+  assert.equal(statuses.at(-1)?.status, '');
 });
 
 test('a threaded mention resumes the thread conversation; DMs key on the channel alone', async () => {

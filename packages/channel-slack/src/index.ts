@@ -85,6 +85,17 @@ const MAX_UNRENDERED_FILES = 20;
 
 const PLACEHOLDER_TEXT = '…';
 
+/** What the loading status says while a turn works, and while it runs a tool. */
+const THINKING_STATUS = 'is thinking…';
+const toolStatus = (toolName: string): string => `is running ${toolName}…`;
+
+/**
+ * How often a loading status is set again while its turn runs. Slack drops
+ * one after two minutes with no message, and a long turn — a tool, an
+ * approval wait — is exactly the one whose status must not vanish.
+ */
+const STATUS_REFRESH_MS = 60_000;
+
 /**
  * How long an agent that judges stays attentive after it last answered a
  * message that addressed it: this many messages, or this many minutes,
@@ -149,6 +160,12 @@ export interface SlackAgentConfig {
    * out. The label above is provenance; this is authorization.
    */
   admit?: 'anyone' | 'principals';
+  /**
+   * How replies appear. `final` (the default) shows Slack's loading status
+   * while the turn runs and posts the reply once, finished; `stream` posts
+   * a `…` placeholder at once and edits it as the reply is written.
+   */
+  replies?: 'final' | 'stream';
 }
 
 // The thin surfaces of the Slack SDKs the adapter touches — injectable so
@@ -287,6 +304,17 @@ export interface SlackWebLike {
      * who clicked without announcing to the channel that they tried.
      */
     postEphemeral(args: { channel: string; user: string; text: string; thread_ts?: string }): Promise<unknown>;
+  };
+  /**
+   * Slack's loading status for a thread — "is thinking…" under the agent's
+   * name until it replies. Optional: an older SDK, or a fake, without it
+   * leaves a `final` reply with no status, never without the reply.
+   * `chat:write` is enough for it in channels since March 2026.
+   */
+  assistant?: {
+    threads: {
+      setStatus(args: { channel_id: string; thread_ts: string; status: string }): Promise<unknown>;
+    };
   };
   files: {
     // The real SDK takes file DATA (a buffer or stream), never a path
@@ -469,10 +497,13 @@ const uploadPlace = (result: SlackUploadResult, channel: string): string | undef
 };
 
 /**
- * Renders one turn's reply into Slack with the placeholder-then-edit
- * pattern: post `…` immediately, fold streaming deltas and tool status
- * lines into throttled edits, and finalize with the authoritative reply
- * (split across messages when it outgrows one).
+ * Renders one turn's reply into Slack, one of two ways. Streaming (the
+ * `stream` reply mode): post `…` immediately, fold streaming deltas and
+ * tool status lines into throttled edits, and finalize with the
+ * authoritative reply. Otherwise (`final`, the default): no placeholder —
+ * Slack's loading status says the agent is working, and the finished reply
+ * is posted once, so the notification carries the answer rather than a
+ * `…`. Either way a reply that outgrows one message is split.
  */
 class ReplyRenderer {
   /**
@@ -538,6 +569,27 @@ class ReplyRenderer {
    * had nothing to add is a message the decision cannot take back.
    */
   readonly lazy: boolean;
+  /**
+   * Whether this turn streams into a placeholder. When it does not, there
+   * is never a placeholder: `finalize` finds none and posts the reply as
+   * messages of its own, and a handover has nothing to hand over and says
+   * so (`untaken`), so the recovery's reply is posted ahead of this one
+   * the ordinary way — both already the paths for a placeholder that
+   * could not be opened.
+   */
+  readonly streaming: boolean;
+  /**
+   * The thread the loading status belongs to: the reply's thread, or the
+   * message itself in a DM, whose reply has no thread to key one on.
+   */
+  private readonly statusThread: string | undefined;
+  /** Shared by a connection's renderers, so a status Slack refuses is said once, not per message. */
+  private readonly statusWarned: { value: boolean };
+  private loading = false;
+  private statusText: string | undefined;
+  private statusTimer: NodeJS.Timeout | undefined;
+  /** The tool the turn is running, for the status line; the streamed `toolLine` is the other mode's. */
+  private runningTool: string | undefined;
   private readonly web: SlackWebLike;
   private readonly channel: string;
   private readonly threadTs: string | undefined;
@@ -551,7 +603,13 @@ class ReplyRenderer {
     threadTs: string | undefined,
     editIntervalMs: number,
     warn: (line: string) => void,
-    options: { lazy?: boolean; now?: () => number } = {},
+    options: {
+      lazy?: boolean;
+      now?: () => number;
+      streaming?: boolean;
+      statusThread?: string;
+      statusWarned?: { value: boolean };
+    } = {},
   ) {
     this.web = web;
     this.channel = channel;
@@ -560,6 +618,70 @@ class ReplyRenderer {
     this.warn = warn;
     this.lazy = options.lazy ?? false;
     this.now = options.now ?? Date.now;
+    this.streaming = options.streaming ?? true;
+    this.statusThread = options.statusThread ?? threadTs;
+    this.statusWarned = options.statusWarned ?? { value: false };
+  }
+
+  /**
+   * Show Slack's loading status for this turn, and keep it up until the
+   * turn is finalized. Not for a streaming turn, which has its placeholder,
+   * nor for one nobody asked for: "is thinking…" over a turn that may
+   * decide to say nothing is the interruption silence exists to avoid.
+   */
+  showLoading(): void {
+    if (this.streaming || this.lazy || this.loading || this.finalized) {
+      return;
+    }
+    this.loading = true;
+    this.setStatus(THINKING_STATUS);
+    this.statusTimer = setInterval(() => this.refreshLoading(), STATUS_REFRESH_MS);
+    this.statusTimer.unref?.();
+  }
+
+  /**
+   * Set the status again. Slack clears a thread's status whenever the app
+   * posts in it, so a reply or file from the turn ahead of this one — or
+   * this turn's own upload — takes it down while this turn is still
+   * working; the adapter calls this once that post has landed.
+   */
+  refreshLoading(): void {
+    if (this.loading && !this.finalized) {
+      this.setStatus(this.statusText ?? THINKING_STATUS);
+    }
+  }
+
+  private stopLoading(): void {
+    if (this.statusTimer) {
+      clearInterval(this.statusTimer);
+      this.statusTimer = undefined;
+    }
+    this.loading = false;
+  }
+
+  private setStatus(text: string): void {
+    const setStatus = this.web.assistant?.threads.setStatus;
+    if (!setStatus || this.statusThread === undefined) {
+      return;
+    }
+    this.statusText = text;
+    // Not awaited: a status is a courtesy, and the reply must never wait
+    // on one. A refusal — a workspace or plan without it, a token Slack
+    // will not honour for it — is said once and then left alone; the
+    // reply still arrives, just without the status ahead of it.
+    void setStatus.call(this.web.assistant?.threads, {
+      channel_id: this.channel,
+      thread_ts: this.statusThread,
+      status: text,
+    }).catch((error: unknown) => {
+      if (!this.statusWarned.value) {
+        this.statusWarned.value = true;
+        this.warn(
+          `slack: could not show a loading status (${error instanceof Error ? error.message : String(error)}); `
+          + 'replies still post when they are ready, without one',
+        );
+      }
+    });
   }
 
   /**
@@ -577,8 +699,13 @@ class ReplyRenderer {
     }
     this.buffer = '';
     this.toolLine = undefined;
+    this.runningTool = undefined;
     this.turnBreakPending = false;
     this.generation += 1;
+    // The status may be showing a tool the turn ahead of this one ran.
+    if (this.loading && this.statusText !== THINKING_STATUS) {
+      this.setStatus(THINKING_STATUS);
+    }
   }
 
   async open(): Promise<void> {
@@ -629,6 +756,7 @@ class ReplyRenderer {
       // the text after it — without it they fuse in the live message.
       this.turnBreakPending = true;
       this.toolLine = `⚙ ${event.call.toolName}…`;
+      this.runningTool = event.call.toolName;
       this.scheduleEdit();
       return;
     }
@@ -638,12 +766,14 @@ class ReplyRenderer {
       // message would keep claiming a refused tool is running, and the
       // model's follow-up would fuse with the text before the attempt.
       this.toolLine = undefined;
+      this.runningTool = undefined;
       this.turnBreakPending = true;
       this.scheduleEdit();
       return;
     }
     if (event.type === 'tool.completed') {
       this.toolLine = undefined;
+      this.runningTool = undefined;
       // Also a boundary, and not only for symmetry: a call rejected before
       // execution settles as tool.completed without ever having emitted
       // tool.called, so this is the only mark that attempt leaves.
@@ -702,6 +832,9 @@ class ReplyRenderer {
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
         this.uploaded = true;
+        // The upload is a post of the app's in this thread, which takes
+        // the status down with it while the turn is still working.
+        this.refreshLoading();
         const placed = uploadPlace(result, this.channel) ?? before;
         if (this.uploadedAt === undefined || placed > this.uploadedAt) {
           this.uploadedAt = placed;
@@ -716,6 +849,15 @@ class ReplyRenderer {
   }
 
   private scheduleEdit(): void {
+    if (!this.streaming) {
+      // Nothing to edit: what the turn is doing goes into the status line,
+      // and only once the turn is this renderer's own (see `beginTurn`).
+      const status = this.runningTool !== undefined ? toolStatus(this.runningTool) : THINKING_STATUS;
+      if (this.loading && this.turnStarted && !this.finalized && status !== this.statusText) {
+        this.setStatus(status);
+      }
+      return;
+    }
     // Not gated on having a placeholder: during a handover there is none
     // for a moment, and the edit reads the fresh one when its turn comes.
     if (this.pendingEdit) {
@@ -798,6 +940,8 @@ class ReplyRenderer {
    */
   async finalize(reply: string): Promise<ReplyOutcome> {
     await this.handover;
+    const hadStatus = this.loading;
+    this.stopLoading();
     this.finalized = true;
     if (this.pendingEdit) {
       clearTimeout(this.pendingEdit);
@@ -854,6 +998,11 @@ class ReplyRenderer {
       if (stranded) {
         this.placeText(this.ref?.ts);
       }
+    }
+    // A reply posted clears the status itself; one Slack refused would
+    // leave "is thinking…" standing over a turn that has ended.
+    if (hadStatus && !landed) {
+      this.setStatus('');
     }
     return this.outcome(published, landed || this.edited || this.uploaded || stranded);
   }
@@ -1545,6 +1694,8 @@ interface AgentConnection {
   socket: SlackSocketLike;
   botUserId: string;
   teamId: string;
+  /** Whether a refused loading status has been said for this app yet; see `ReplyRenderer.setStatus`. */
+  statusWarned: { value: boolean };
 }
 
 /**
@@ -1556,7 +1707,9 @@ interface AgentConnection {
  * Session keys are `slack:<agent>:<team>:<channel>:<thread_ts ?? ts>`
  * (DMs: the DM channel id alone), so threads are resumable conversations
  * and two agents sharing a thread keep fully separate sessions. Replies
- * stream via placeholder-then-edit, throttled for chat.update limits.
+ * post once, finished, behind Slack's loading status — or, in the `stream`
+ * reply mode, stream via placeholder-then-edit, throttled for chat.update
+ * limits.
  *
  * A mention starts a thread conversation; inside one, the agent keeps
  * listening without being tagged again — see `couldBeFollowUp` and
@@ -3309,9 +3462,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
 
       // A turn nobody asked for opens its placeholder on its first text,
-      // if it ever has any — see `ReplyRenderer.lazy`.
-      const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn, { lazy: judged, now });
-      if (!judged) {
+      // if it ever has any — see `ReplyRenderer.lazy`. One the agent's
+      // reply mode does not stream opens none at all, and shows the
+      // loading status instead — see `ReplyRenderer.streaming`.
+      const streaming = connection.config.replies === 'stream';
+      const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn, {
+        lazy: judged,
+        now,
+        streaming,
+        statusThread: thread ?? event.ts,
+        statusWarned: connection.statusWarned,
+      });
+      if (!judged && streaming) {
         try {
           await renderer.open();
         } catch (error) {
@@ -3319,6 +3481,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           return undefined;
         }
       }
+      renderer.showLoading();
 
       // The push and the dispatch happen in the same microtask, so queue
       // order matches the gateway's single-flight turn order for this
@@ -3408,6 +3571,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // running, which the other may therefore still take.
         rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);
       }
+      // The reply just posted took the thread's status down with it, and a
+      // turn queued behind this one is still working.
+      renderers.get(sessionId)?.[0]?.refreshLoading();
       await heard;
     } else {
       const { spoke, spokeAt } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
@@ -3415,6 +3581,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // A file it posted before breaking is still the last thing said.
         rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);
       }
+      renderers.get(sessionId)?.[0]?.refreshLoading();
     }
   };
 
@@ -3433,7 +3600,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           return;
         }
         if (event.type === 'tool.approval-resolved') {
-          track(retractApprovalRequest(event));
+          // The question was posted into the turn's thread, which took the
+          // loading status down with it; the turn works on once answered.
+          track(retractApprovalRequest(event).finally(() => renderers.get(event.sessionId)?.[0]?.refreshLoading()));
           return;
         }
         // A turn ends here in one of two hands. One this adapter started
@@ -3504,12 +3673,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // connection — never leaves the queued reply stalled behind it.
         if (event.type === 'session.failed' && !rendered) {
           const claim = head?.reserveHandover();
-          track(reportUnrenderedFailure(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => claim?.release()));
+          track(reportUnrenderedFailure(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => {
+            claim?.release();
+            head?.refreshLoading();
+          }));
           return;
         }
         if (event.type === 'session.completed' && !rendered) {
           const claim = head?.reserveHandover();
-          track(reportUnrenderedReply(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => claim?.release()));
+          track(reportUnrenderedReply(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => {
+            claim?.release();
+            head?.refreshLoading();
+          }));
           return;
         }
         if ('sessionId' in event) {
@@ -3545,6 +3720,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
             socket: createSocket(config.appToken),
             botUserId,
             teamId,
+            statusWarned: { value: false },
           });
         } catch (error) {
           // One broken app must not take the rest of the fleet down.

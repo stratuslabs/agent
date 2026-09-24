@@ -87,6 +87,33 @@ export interface AgentPrincipalsConfig {
 
 export type PrincipalsAdmit = 'anyone' | 'principals';
 
+/**
+ * How an agent's replies appear in Slack. `final`, the default, shows
+ * Slack's own loading status while the turn runs and posts the reply once,
+ * finished — so the notification carries the answer, not a `…`. `stream`
+ * posts a placeholder at once and edits it as the reply is written, which
+ * is how every reply looked before `final` existed.
+ */
+export type SlackReplyMode = 'final' | 'stream';
+
+/** One agent's Slack presentation settings. */
+export interface AgentSlackConfig {
+  replies?: SlackReplyMode;
+}
+
+/**
+ * The `slack` block of ~/.stratus/config.json: how agents present
+ * themselves in Slack, with per-agent overrides. Tokens are not here —
+ * they are secrets, and live under `channels.slack` in credentials.json.
+ *
+ * Read only from a **trusted** config, like `principals`: how the daemon
+ * posts into the operator's workspace is not a cloned repository's call.
+ */
+export interface SlackConfig extends AgentSlackConfig {
+  /** Per-agent overrides, keyed by agent id. */
+  agents?: Record<string, AgentSlackConfig>;
+}
+
 /** The `principals` block of ~/.stratus/config.json. */
 export interface PrincipalsConfig extends AgentPrincipalsConfig {
   /** Per-agent overrides, keyed by agent id. */
@@ -204,6 +231,8 @@ export interface StratusConfigFile {
   approvals?: ApprovalsConfig;
   /** Which channel senders are each agent's operator. Trusted configs only. */
   principals?: PrincipalsConfig;
+  /** How agents present themselves in Slack. Trusted configs only. */
+  slack?: SlackConfig;
   /** Control API binding for `stratus serve`. */
   api?: ApiConfig;
   /** Plugins to load, keyed by package name. Trusted configs only. */
