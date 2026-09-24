@@ -1260,6 +1260,12 @@ const safeCutIndex = (text: string, index: number): number => {
   return code >= 0xd800 && code <= 0xdbff ? index - 1 : index;
 };
 
+/** `index` moved forward, never back, off the middle of a surrogate pair. */
+const pastCodePoint = (text: string, index: number): number => {
+  const code = text.charCodeAt(index - 1);
+  return code >= 0xd800 && code <= 0xdbff ? index + 1 : index;
+};
+
 const truncateForSlack = (text: string): string =>
   text.length <= SLACK_MAX_MESSAGE_CHARS
     ? text
@@ -1305,13 +1311,15 @@ const splitForSlack = (text: string): string[] => {
     // of a thousand backticks, an opening line that fills the window — is
     // cut raw, as before this existed. Reopening it would send a message
     // over the limit, and consume a character a message after that.
-    if (run === undefined || reopen === undefined || reopen.length + run.closer.length > SLACK_MAX_MESSAGE_CHARS / 4 || floor >= budget) {
+    // `floor + 2`: the first cut past the opener has to fit a whole code
+    // point, or the step that guarantees progress lands inside an emoji.
+    if (run === undefined || reopen === undefined || reopen.length + run.closer.length > SLACK_MAX_MESSAGE_CHARS / 4 || floor + 2 > budget) {
       chunks.push(rest.slice(0, cut));
       rest = rest.slice(cut).replace(/^\n+/, '');
       continue;
     }
     const inner = rest.lastIndexOf('\n', budget - 1);
-    const within = inner > Math.max(floor, SLACK_MAX_MESSAGE_CHARS / 2) ? inner : Math.max(safeCutIndex(rest, budget), floor + 1);
+    const within = inner > Math.max(floor, SLACK_MAX_MESSAGE_CHARS / 2) ? inner : Math.max(safeCutIndex(rest, budget), pastCodePoint(rest, floor + 1));
     chunks.push(`${rest.slice(0, within)}${run.closer}`);
     rest = `${reopen}${rest.slice(within).replace(/^\n/, '')}`;
   }
