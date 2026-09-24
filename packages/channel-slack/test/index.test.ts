@@ -479,6 +479,77 @@ test('a final reply waits for its loading status to reach Slack, so the post can
   assert.deepEqual(web.posts.map((post) => post.text), ['quick']);
 });
 
+test('a refused reply\'s status clear lands before the next queued turn shows its own', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let releaseClear!: () => void;
+  const clearGate = new Promise<void>((resolve) => {
+    releaseClear = resolve;
+  });
+  const applied: string[] = [];
+  web.assistant = {
+    threads: {
+      async setStatus({ status }) {
+        if (status === '') {
+          await clearGate;
+        }
+        applied.push(status);
+        return {};
+      },
+    },
+  };
+  const post = web.chat.postMessage.bind(web.chat);
+  let refused = false;
+  web.chat.postMessage = async (args) => {
+    if (!refused) {
+      refused = true;
+      throw new Error('rate_limited');
+    }
+    return post(args);
+  };
+  // The second turn is still running when the first renders, as behind a
+  // real gateway's per-session queue: that is when its status is re-shown.
+  let releaseSecond!: () => void;
+  const secondGate = new Promise<void>((resolve) => {
+    releaseSecond = resolve;
+  });
+  const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
+    if (/first/.test(userMessage)) {
+      return sessionWithReply(sessionId, 'lost');
+    }
+    await secondGate;
+    return sessionWithReply(sessionId, 'second answer');
+  });
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  const delivered = Promise.all([
+    socket.deliver('app_mention', mention('<@B-AVA> first', { ts: '100.1' })),
+    socket.deliver('app_mention', mention('<@B-AVA> second', { ts: '100.2', thread_ts: '100.1' })),
+  ]);
+  for (let tick = 0; tick < 50; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  releaseClear();
+  for (let tick = 0; tick < 50; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  releaseSecond();
+  await delivered;
+  await adapter.stop();
+
+  // The next turn's "is thinking…" comes after the clear, not before it
+  // where the clear would erase it.
+  assert.ok(applied.lastIndexOf('is thinking…') > applied.indexOf(''), JSON.stringify(applied));
+  assert.deepEqual(web.posts.map((entry) => entry.text), ['second answer']);
+});
+
 test('an agent on the stream reply mode still posts a placeholder and edits it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

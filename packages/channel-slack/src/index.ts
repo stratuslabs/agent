@@ -1039,6 +1039,10 @@ class ReplyRenderer {
     // leave "is thinking…" standing over a turn that has ended.
     if (hadStatus && !landed) {
       this.setStatus('');
+      // Awaited: the turn queued behind this one re-shows its own status
+      // once this renderer is done, and a clear that reached Slack after
+      // that would take the next turn's status down with it.
+      await this.statusChain;
     }
     return this.outcome(published, landed || this.edited || this.uploaded || stranded);
   }
