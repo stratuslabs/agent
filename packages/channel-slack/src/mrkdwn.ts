@@ -1024,7 +1024,7 @@ const plainCell = (cell: string): string => {
     // The one italic the converter leaves alone, because Slack already
     // reads `_x_` as italic outside code — inside the grid it would show.
     // Same hugging and word-boundary rule the converter applies to runs.
-    .replace(/(?<![\p{L}\p{N}_])_(?=[^\s_])([^_]*?[^\s_])_(?![\p{L}\p{N}_])/gu, '$1');
+    .replace(/(?<![\p{L}\p{N}_])_(?=[^\s_])(.*?[^\s_])_(?![\p{L}\p{N}_])/gu, '$1');
 };
 
 /**
@@ -1040,7 +1040,9 @@ const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 /** One displayed character's columns: what its first code point takes, or two for any emoji. */
 const clusterWidth = (cluster: string): number => {
-  if (/\p{Extended_Pictographic}/u.test(cluster)) {
+  // Flags (regional-indicator pairs), keycaps, and anything asking for
+  // emoji presentation are emoji too, though none of them is pictographic.
+  if (/[\p{Extended_Pictographic}\u{1f1e6}-\u{1f1ff}\u20e3\ufe0f]/u.test(cluster)) {
     return 2;
   }
   const code = cluster.codePointAt(0) ?? 0;
@@ -1095,6 +1097,16 @@ const pad = (text: string, width: number, alignment: Alignment): string => {
   return `${text}${' '.repeat(gap)}`;
 };
 
+/**
+ * A header as a label in the list and one-column forms, which mrkdwn reads
+ * like prose. Bold only when there is nothing in it to strip; otherwise the
+ * header goes as written, so its own markup is converted rather than
+ * unwrapped — a header showing ``` in a code span kept only the three
+ * backticks, and they opened a fence that ran to the end of the reply.
+ */
+const tableLabel = (header: string): string =>
+  header.length === 0 ? '' : plainCell(header) === header ? `**${header}**` : header;
+
 const renderTable = (header: string[], alignments: Alignment[], rows: string[][]): string => {
   const columns = header.length;
   const fit = (row: string[]): string[] => Array.from({ length: columns }, (_, index) => row[index] ?? '');
@@ -1102,9 +1114,9 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
   // It is also what keeps every grid recognisable when split: a grid always
   // has a `┼` in its rule, which a log's `────` underline never does.
   if (columns === 1) {
-    const label = plainCell(header[0] ?? '');
+    const label = tableLabel(header[0] ?? '');
     const items = rows.map((row) => row[0] ?? '').filter((cell) => cell.length > 0).map((cell) => `• ${cell}`);
-    return [...(label.length > 0 ? [`**${label}**`] : []), ...items].join('\n');
+    return [...(label.length > 0 ? [label] : []), ...items].join('\n');
   }
   const grid = [header, ...rows.map(fit)].map((row) => row.map(plainCell));
   const widths = Array.from({ length: columns }, (_, index) => Math.max(...grid.map((row) => displayWidth(row[index] ?? ''))));
@@ -1119,16 +1131,16 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
   }
   // The list form names each value by its header, so a table with no rows
   // has nothing to name; its header is what it says, and it stays said.
-  const headerOnly = header.map(plainCell).filter((label) => label.length > 0).map((label) => `**${label}**`).join(' · ');
+  const headerOnly = header.map(tableLabel).filter((label) => label.length > 0).join(' · ');
   if (rows.length === 0) {
     return headerOnly;
   }
   const listed = rows
     .map(fit)
     .map((row) => row
-      .map((cell, index) => ({ label: plainCell(header[index] ?? ''), cell }))
+      .map((cell, index) => ({ label: tableLabel(header[index] ?? ''), cell }))
       .filter(({ cell }) => cell.length > 0)
-      .map(({ label, cell }) => (label.length > 0 ? `**${label}**: ${cell}` : cell))
+      .map(({ label, cell }) => (label.length > 0 ? `${label}: ${cell}` : cell))
       .join(' · '))
     .filter((line) => line.length > 0);
   return listed.length > 0 ? listed.join('\n') : headerOnly;

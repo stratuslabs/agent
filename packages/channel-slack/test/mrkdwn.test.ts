@@ -624,3 +624,22 @@ test('a code span in a cell loses one space a side, not every space', () => {
   const table = ['| Pad | X |', '| --- | --- |', '| `  a  ` | y |'].join('\n');
   assert.equal(toSlackMrkdwn(table), ['```', 'Pad │ X', '────┼──', ' a  │ y', '```'].join('\n'));
 });
+
+test('an italic cell with an underscore inside it loses only its outer pair', () => {
+  const table = ['| Name | N |', '| --- | --- |', '| _foo_bar_ | 1 |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'Name    │ N', '────────┼──', 'foo_bar │ 1', '```'].join('\n'));
+});
+
+test('flags and keycaps take two columns', () => {
+  const table = ['| F | N |', '| --- | --- |', '| 🇺🇸 | 1 |', '| 1️⃣ | 2 |', '| ab | 3 |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'F  │ N', '───┼──', '🇺🇸 │ 1', '1️⃣ │ 2', 'ab │ 3', '```'].join('\n'));
+});
+
+test('a list-form label keeps a code span showing backticks as a code span', () => {
+  const long = 'a value long enough to push the grid well past sixty columns wide';
+  const reply = ['| ```` ``` ```` | B |', '| --- | --- |', `| ${long} | x |`, '', 'After the table.'].join('\n');
+  const converted = toSlackMrkdwn(reply);
+  // Unwrapped to a bare ```, the label opened a fence that swallowed the rest.
+  assert.ok(converted.startsWith('```` ``` ````: '), converted.slice(0, 40));
+  assert.ok(converted.endsWith('\n\nAfter the table.'));
+});
