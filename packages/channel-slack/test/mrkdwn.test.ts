@@ -507,3 +507,176 @@ test('no reply, however written, has a character taken out of its code', () => {
     }
   }
 });
+
+test('a pipe table becomes a code block whose columns line up', () => {
+  const table = [
+    '| Tool | Status | Runs |',
+    '| :--- | :----: | ---: |',
+    '| fs.read | **ok** | 12 |',
+    '| `web.fetch` | failing | 3 |',
+  ].join('\n');
+
+  // Slack has no table syntax: this used to arrive as literal pipes.
+  assert.equal(toSlackMrkdwn(table), [
+    '```',
+    'Tool      │ Status  │ Runs',
+    '──────────┼─────────┼─────',
+    'fs.read   │   ok    │   12',
+    'web.fetch │ failing │    3',
+    '```',
+  ].join('\n'));
+});
+
+test('an escaped pipe in a cell is a character, not a column', () => {
+  const table = ['| Pattern | Means |', '| --- | --- |', '| a\\|b | either |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'Pattern │ Means', '────────┼───────', 'a|b     │ either', '```'].join('\n'));
+});
+
+test('a table inside a code fence is left as written', () => {
+  const fenced = ['```', '| a | b |', '| - | - |', '| 1 | 2 |', '```'].join('\n');
+  assert.equal(toSlackMrkdwn(fenced), fenced);
+});
+
+test('prose after a table is converted as prose', () => {
+  const reply = ['| a | b |', '| - | - |', '| 1 | 2 |', '', 'That is **all**.'].join('\n');
+  assert.equal(toSlackMrkdwn(reply), ['```', 'a │ b', '──┼──', '1 │ 2', '```', '', 'That is *all*.'].join('\n'));
+});
+
+test('a table too wide for a phone becomes one line per row, each value named by its header', () => {
+  const long = 'a description long enough to push the grid past sixty columns';
+  const reply = ['| **Name** | Description |', '| --- | --- |', `| alpha | ${long} |`, '| beta | |'].join('\n');
+  assert.equal(toSlackMrkdwn(reply), [`*Name*: alpha · *Description*: ${long}`, '*Name*: beta'].join('\n'));
+});
+
+test('pipes without a delimiter row are not a table', () => {
+  const reply = 'Run `a | b` and then c | d.';
+  assert.equal(toSlackMrkdwn(reply), reply);
+});
+
+test('a wide table with no rows keeps its header', () => {
+  const label = 'A column heading long enough to push the grid well past sixty';
+  const reply = [`| ${label} | B |`, '| --- | --- |'].join('\n');
+  // The list form had no row to name a value in, and returned nothing at all.
+  assert.equal(toSlackMrkdwn(reply), `*${label}* · *B*`);
+});
+
+test('a pipe after an escaped backslash still separates columns', () => {
+  // The two backslashes escape each other, so the pipe is a separator.
+  const table = ['| Path | Kind |', '| --- | --- |', '| C:\\\\| drive |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'Path │ Kind', '─────┼──────', 'C:\\\\ │ drive', '```'].join('\n'));
+});
+
+test('a code span in a cell loses its whole delimiter, however many backticks', () => {
+  const table = ['| One | Two | Three |', '| --- | --- | --- |', '| `a` | ``b`` | ```c``` |'].join('\n');
+  // Only one tick came off each side, leaving `b` and ``c`` showing.
+  assert.equal(toSlackMrkdwn(table), ['```', 'One │ Two │ Three', '────┼─────┼──────', 'a   │ b   │ c', '```'].join('\n'));
+});
+
+test('double markers that are not emphasis stay in a cell', () => {
+  const table = ['| Expr | Name |', '| --- | --- |', '| 2 ** 3 ** 4 | snake__case__name |', '| **bold** | __under__ |'].join('\n');
+  // Unconditional stripping turned these into `2  3  4` and `snakecasename`.
+  assert.equal(toSlackMrkdwn(table), [
+    '```',
+    'Expr        │ Name',
+    '────────────┼──────────────────',
+    '2 ** 3 ** 4 │ snake__case__name',
+    'bold        │ under',
+    '```',
+  ].join('\n'));
+});
+
+test('prose whose only pipe is escaped is not a table, underline or not', () => {
+  const reply = 'Set the regex to a\\|b\n---';
+  assert.equal(toSlackMrkdwn(reply), reply);
+});
+
+test('a one-column table is a list under its header', () => {
+  const table = ['| Steps |', '| --- |', '| **build** |', '| test |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['*Steps*', '• *build*', '• test'].join('\n'));
+});
+
+test('a cell sheds every emphasis marker the converter reads, italics included', () => {
+  const table = ['| State | Note |', '| --- | --- |', '| *pending* | _soon_ |', '| ***both*** | 2 * 3 |'].join('\n');
+  // Only bold was stripped before, so single markers showed inside the code block.
+  assert.equal(toSlackMrkdwn(table), ['```', 'State   │ Note', '────────┼──────', 'pending │ soon', 'both    │ 2 * 3', '```'].join('\n'));
+});
+
+test('wide characters are padded by the columns they take', () => {
+  const table = ['| Word | Count |', '| --- | --- |', '| 漢字 | 1 |', '| abcd | 2 |'].join('\n');
+  // 漢字 is two characters wide on screen each; counted as two units, the
+  // separator after it drew two columns late.
+  assert.equal(toSlackMrkdwn(table), ['```', 'Word │ Count', '─────┼──────', '漢字 │ 1', 'abcd │ 2', '```'].join('\n'));
+});
+
+test('a wide table whose rows hold no values keeps its header', () => {
+  const label = 'A column heading long enough to push the grid well past sixty';
+  const reply = [`| ${label} | B |`, '| --- | --- |', '| | |'].join('\n');
+  assert.equal(toSlackMrkdwn(reply), `*${label}* · *B*`);
+});
+
+test('an emoji made of several code points is one wide glyph', () => {
+  const table = ['| Who | N |', '| --- | --- |', '| 👨‍👩‍👧‍👦 | 1 |', '| ab | 2 |'].join('\n');
+  // Counted per code point, the family was eight columns wide.
+  assert.equal(toSlackMrkdwn(table), ['```', 'Who │ N', '────┼──', '👨‍👩‍👧‍👦  │ 1', 'ab  │ 2', '```'].join('\n'));
+});
+
+test('a code span in a cell loses one space a side, not every space', () => {
+  const table = ['| Pad | X |', '| --- | --- |', '| `  a  ` | y |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'Pad │ X', '────┼──', ' a  │ y', '```'].join('\n'));
+});
+
+test('an italic cell with an underscore inside it loses only its outer pair', () => {
+  const table = ['| Name | N |', '| --- | --- |', '| _foo_bar_ | 1 |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'Name    │ N', '────────┼──', 'foo_bar │ 1', '```'].join('\n'));
+});
+
+test('flags and keycaps take two columns', () => {
+  const table = ['| F | N |', '| --- | --- |', '| 🇺🇸 | 1 |', '| 1️⃣ | 2 |', '| ab | 3 |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'F  │ N', '───┼──', '🇺🇸 │ 1', '1️⃣ │ 2', 'ab │ 3', '```'].join('\n'));
+});
+
+test('a list-form label keeps a code span showing backticks as a code span', () => {
+  const long = 'a value long enough to push the grid well past sixty columns wide';
+  const reply = ['| ```` ``` ```` | B |', '| --- | --- |', `| ${long} | x |`, '', 'After the table.'].join('\n');
+  const converted = toSlackMrkdwn(reply);
+  // Unwrapped to a bare ```, the label opened a fence that swallowed the rest.
+  assert.ok(converted.startsWith('```` ``` ````: '), converted.slice(0, 40));
+  assert.ok(converted.endsWith('\n\nAfter the table.'));
+});
+
+test('a label with a loose asterisk is not wrapped in bold', () => {
+  const table = ['| glob *.ts |', '| --- |', '| a.ts |'].join('\n');
+  // Wrapped, the new markers paired with the literal one and rewrote it.
+  assert.equal(toSlackMrkdwn(table), ['glob *.ts', '• a.ts'].join('\n'));
+});
+
+test('a table with a link in it keeps the link clickable', () => {
+  const table = ['| Doc | Status |', '| --- | --- |', '| [Guide](https://x.co) | ok |'].join('\n');
+  // Inside the grid's code block the link was its literal source.
+  assert.equal(toSlackMrkdwn(table), '*Doc*: <https://x.co|Guide> · *Status*: ok');
+});
+
+test('a table with a bare address in it keeps the address clickable', () => {
+  for (const address of ['https://x.co', 'mailto:a@x.co', '<https://x.co>']) {
+    const converted = toSlackMrkdwn(['| Where | N |', '| --- | --- |', `| ${address} | 1 |`].join('\n'));
+    // Slack does not link anything inside a code block.
+    assert.ok(!converted.startsWith('```'), `${address} went into the grid`);
+  }
+});
+
+test('a table indented four spaces is an indented code block, left as written', () => {
+  const block = ['    | a | b |', '    | - | - |', '    | 1 | 2 |'].join('\n');
+  assert.equal(toSlackMrkdwn(block), block);
+});
+
+test('an indented line after a table is code, not another row', () => {
+  const reply = ['| a | b |', '| - | - |', '| 1 | 2 |', '    | code | line |'].join('\n');
+  assert.equal(toSlackMrkdwn(reply), ['```', 'a │ b', '──┼──', '1 │ 2', '```', '    | code | line |'].join('\n'));
+});
+
+test('a table with a Slack mention in it keeps the mention live', () => {
+  for (const reference of ['<@U123>', '<#C123>', '<!here>']) {
+    const converted = toSlackMrkdwn(['| Who | N |', '| --- | --- |', `| ${reference} | 1 |`].join('\n'));
+    assert.ok(!converted.startsWith('```'), `${reference} went into the grid`);
+  }
+});

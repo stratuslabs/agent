@@ -4203,6 +4203,21 @@ test('a fence of absurdly many backticks is cut within the limit and makes progr
   }
 });
 
+test('a table longer than one message stays a grid in every part', async () => {
+  const rows = Array.from({ length: 700 }, (_, index) => `| row ${index} | ok |`);
+  const chunks = await replyInThread(['| Name | Status |', '| --- | --- |', ...rows].join('\n'));
+
+  // Slack reads each message on its own, so a part without its fence lost
+  // the monospace that makes the columns line up.
+  assert.ok(chunks.length >= 2);
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
+    assert.ok(chunk.startsWith('```\n') && chunk.endsWith('```'), `a part is not a code block: ${chunk.slice(0, 20)}…${chunk.slice(-20)}`);
+    // Every part names its columns, not only the first.
+    assert.ok(chunk.startsWith('```\nName    │ Status\n────────┼───────\n'), `a part lost its header: ${chunk.slice(0, 40)}`);
+  }
+});
+
 test('a cut forced just past a long fence opener never lands inside an emoji', async () => {
   // An opener 3,995 units long leaves room for one code point, and the first
   // one after it is an emoji: the progress step used to split its halves.
@@ -4224,6 +4239,28 @@ test('an inline code span too long for one message is never given delimiters of 
   assert.equal(chunks.join(''), reply, 'a span is cut as text, adding no backticks');
   for (const chunk of chunks) {
     assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
+  }
+});
+
+test('a long fenced log that opens with an underlined title is not mistaken for a table', async () => {
+  const lines = Array.from({ length: 400 }, (_, index) => `entry ${index}: something happened`);
+  const chunks = await replyInThread(`\`\`\`\nBuild log\n─────────\n${lines.join('\n')}\n\`\`\``);
+
+  // Only a grid's header repeats; this title and underline are text, and
+  // appear once.
+  assert.ok(chunks.length >= 3);
+  assert.equal(chunks.filter((chunk) => chunk.includes('Build log')).length, 1);
+});
+
+test('a table whose header holds an emoji still repeats it in every part', async () => {
+  const rows = Array.from({ length: 700 }, (_, index) => `| row ${index} | ok |`);
+  const chunks = await replyInThread(['| 😀 | Status |', '| --- | --- |', ...rows].join('\n'));
+
+  // Counted in different units, the emoji moved the separator and the
+  // header stopped being recognised as a grid's.
+  assert.ok(chunks.length >= 2);
+  for (const chunk of chunks) {
+    assert.ok(chunk.startsWith('```\n😀'), `a part lost its header: ${chunk.slice(0, 30)}`);
   }
 });
 

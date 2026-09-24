@@ -855,6 +855,38 @@ export interface CodeRun {
 }
 
 /**
+ * Whether two lines are the header and rule `renderTable` writes: a rule of
+ * `─` crossed by `┼`, and a header whose `│` separators stand in exactly
+ * those columns. The shape, not a single box-drawing line, because a log
+ * that opens with a title and a `────` underline is somebody's text, and
+ * repeating its first lines on every part would change it.
+ */
+const isGridHeader = (header: string, rule: string): boolean => {
+  if (!/^─[─┼]*─$/.test(rule) || !rule.includes('┼')) {
+    return false;
+  }
+  // In display columns, the unit the grid was padded in: counted any other
+  // way, an emoji or a CJK character before a separator moved it.
+  const crossings = columnsOf(rule, '┼');
+  const separators = columnsOf(header, '│');
+  return crossings.length === separators.length && crossings.every((column, index) => separators[index] === column);
+};
+
+/**
+ * A fence's first line — and, for a table grid, the header and rule after
+ * it, so a grid split across messages names its columns in every part
+ * rather than leaving the later ones as rows nobody can read. A grid always
+ * has two columns or more (see `renderTable`), so its rule always has a `┼`.
+ */
+const fenceOpener = (source: string, lineEnd: number): string => {
+  const headerEnd = source.indexOf('\n', lineEnd + 1);
+  const ruleEnd = headerEnd === -1 ? -1 : source.indexOf('\n', headerEnd + 1);
+  const rule = ruleEnd === -1 ? '' : source.slice(headerEnd + 1, ruleEnd);
+  const header = headerEnd === -1 ? '' : source.slice(lineEnd + 1, headerEnd);
+  return isGridHeader(header, rule) ? source.slice(0, ruleEnd + 1) : source.slice(0, lineEnd + 1);
+};
+
+/**
  * Where the code runs sit in already-converted text, read by the same scan
  * that converts it — so the splitter agrees with the converter about what
  * is code, rather than keeping a second idea of it that drifts. Conversion
@@ -874,7 +906,7 @@ export const codeRunsOf = (text: string): CodeRun[] => {
       const fence = '`'.repeat(ticks);
       const lineEnd = source.indexOf('\n');
       runs.push(ticks >= 3 && lineEnd !== -1
-        ? { start: at, end: at + source.length, opener: source.slice(0, lineEnd + 1), closer: `\n${fence}` }
+        ? { start: at, end: at + source.length, opener: fenceOpener(source, lineEnd), closer: `\n${fence}` }
         : { start: at, end: at + source.length, opener: fence, closer: fence });
     }
     at += source.length;
@@ -882,8 +914,308 @@ export const codeRunsOf = (text: string): CodeRun[] => {
   return runs;
 };
 
-export const toSlackMrkdwn = (text: string): string => {
-  const tokens = scan(text);
+/**
+ * Slack's mrkdwn has no tables, so a GFM pipe table reached a thread as rows
+ * of literal `|` and a `|---|---|` line (#217). A table becomes a code block
+ * with its columns padded to line up — monospace reads as a grid in every
+ * client — or, when that grid is wider than a phone shows without wrapping,
+ * one line per row naming each value by its header.
+ */
+const TABLE_MAX_WIDTH = 60;
+
+/**
+ * A row's cells: outer pipes dropped, split on the pipes that are not
+ * escaped. Read a character at a time, because escaping is a matter of
+ * parity: in `a\\|b` the backslashes escape each other and the pipe
+ * separates, which no single-character lookbehind can see.
+ */
+const readRow = (line: string): { cells: string[]; separated: boolean } => {
+  const row = line.trim();
+  const cells: string[] = [];
+  let cell = '';
+  let separated = false;
+  let endedOnSeparator = false;
+  for (let at = 0; at < row.length; at += 1) {
+    const char = row[at] ?? '';
+    endedOnSeparator = false;
+    if (char === '\\' && at + 1 < row.length) {
+      const next = row[at + 1] ?? '';
+      cell += next === '|' ? '|' : `${char}${next}`;
+      at += 1;
+      continue;
+    }
+    if (char === '|') {
+      cells.push(cell.trim());
+      cell = '';
+      separated = true;
+      endedOnSeparator = true;
+      continue;
+    }
+    cell += char;
+  }
+  if (!endedOnSeparator) {
+    cells.push(cell.trim());
+  }
+  if (row.startsWith('|')) {
+    cells.shift();
+  }
+  return { cells, separated };
+};
+
+const tableCells = (line: string): string[] => readRow(line).cells;
+
+/**
+ * Whether a line has a pipe the row reader splits on. A line whose only
+ * pipe is escaped is prose, whatever follows it: `a\|b` over a `---`
+ * underline is a sentence, not a one-column table.
+ */
+const isTableRow = (line: string): boolean => readRow(line).separated;
+
+type Alignment = 'left' | 'right' | 'center';
+
+/** The delimiter row's alignments, or nothing when the line is not one. */
+const tableAlignments = (line: string): Alignment[] | undefined => {
+  if (!line.includes('-')) {
+    return undefined;
+  }
+  const cells = tableCells(line);
+  if (!cells.every((cell) => /^:?-+:?$/.test(cell))) {
+    return undefined;
+  }
+  return cells.map((cell) => (cell.startsWith(':') && cell.endsWith(':') ? 'center' : cell.endsWith(':') ? 'right' : 'left'));
+};
+
+/**
+ * A cell as the grid shows it. Inside a code block Slack renders nothing,
+ * so the emphasis and code markers a model wraps a cell in would show as
+ * characters; they are dropped, and the words they marked stay. Which
+ * markers are emphasis is the converter's own reading (`readEmphasis`), not
+ * a second one: patterns written here missed italics and `***both***`, and
+ * then stripped `2 ** 3 ** 4`, each a rule the converter already had.
+ */
+const plainCell = (cell: string): string => {
+  const tokens = scan(cell);
+  const spent = new Map<number, number>();
+  for (const pairs of readEmphasis(tokens).pairs.values()) {
+    for (const pair of pairs) {
+      spent.set(pair.open, (spent.get(pair.open) ?? 0) + pair.use);
+      spent.set(pair.close, (spent.get(pair.close) ?? 0) + pair.use);
+    }
+  }
+  return tokens
+    .map((token, index) => {
+      if (token.kind === 'run') {
+        return token.char.repeat(token.length - (spent.get(index) ?? 0));
+      }
+      if (token.kind === 'code' && token.closed) {
+        let ticks = 0;
+        while (token.text[ticks] === '`') {
+          ticks += 1;
+        }
+        // CommonMark's rule, not a trim: one space comes off each side when
+        // both sides have one and the code is not all spaces, so `  a  `
+        // keeps the ` a ` it was written to show.
+        const code = token.text.slice(ticks, -ticks);
+        return code.startsWith(' ') && code.endsWith(' ') && code.trim().length > 0 ? code.slice(1, -1) : code;
+      }
+      return sourceOf(token);
+    })
+    .join('')
+    // The one italic the converter leaves alone, because Slack already
+    // reads `_x_` as italic outside code — inside the grid it would show.
+    // Same hugging and word-boundary rule the converter applies to runs.
+    .replace(/(?<![\p{L}\p{N}_])_(?=[^\s_])(.*?[^\s_])_(?![\p{L}\p{N}_])/gu, '$1');
+};
+
+/**
+ * How many monospace columns text takes, counted per displayed character
+ * (grapheme cluster): two for wide East Asian characters and any emoji —
+ * `👨‍👩‍👧‍👦` is one glyph, not four — none for a stray combining mark, one
+ * for the rest. A grid
+ * padded by UTF-16 length put `漢` in one column and drew two, and every
+ * separator after it moved. An approximation of Unicode's width tables,
+ * which Slack's own font does not follow exactly either.
+ */
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/** One displayed character's columns: what its first code point takes, or two for any emoji. */
+const clusterWidth = (cluster: string): number => {
+  // Flags (regional-indicator pairs), keycaps, and anything asking for
+  // emoji presentation are emoji too, though none of them is pictographic.
+  if (/[\p{Extended_Pictographic}\u{1f1e6}-\u{1f1ff}\u20e3\ufe0f]/u.test(cluster)) {
+    return 2;
+  }
+  const code = cluster.codePointAt(0) ?? 0;
+  if (/^[\p{Mn}\p{Me}\u200b-\u200f\ufe00-\ufe0f]/u.test(cluster)) {
+    return 0;
+  }
+  const wide = (code >= 0x1100 && code <= 0x115f)
+    || (code >= 0x2e80 && code <= 0x303e)
+    || (code >= 0x3041 && code <= 0x33ff)
+    || (code >= 0x3400 && code <= 0x4dbf)
+    || (code >= 0x4e00 && code <= 0x9fff)
+    || (code >= 0xa000 && code <= 0xa4cf)
+    || (code >= 0xac00 && code <= 0xd7a3)
+    || (code >= 0xf900 && code <= 0xfaff)
+    || (code >= 0xfe30 && code <= 0xfe4f)
+    || (code >= 0xff00 && code <= 0xff60)
+    || (code >= 0xffe0 && code <= 0xffe6)
+    || (code >= 0x20000 && code <= 0x3fffd);
+  return wide ? 2 : 1;
+};
+
+const displayWidth = (text: string): number => {
+  let width = 0;
+  for (const { segment } of graphemes.segment(text)) {
+    width += clusterWidth(segment);
+  }
+  return width;
+};
+
+/** The display columns at which `mark` stands in a line. */
+const columnsOf = (line: string, mark: string): number[] => {
+  const columns: number[] = [];
+  let column = 0;
+  for (const { segment } of graphemes.segment(line)) {
+    if (segment === mark) {
+      columns.push(column);
+    }
+    column += clusterWidth(segment);
+  }
+  return columns;
+};
+
+const pad = (text: string, width: number, alignment: Alignment): string => {
+  const gap = width - displayWidth(text);
+  if (alignment === 'right') {
+    return `${' '.repeat(gap)}${text}`;
+  }
+  if (alignment === 'center') {
+    const left = Math.floor(gap / 2);
+    return `${' '.repeat(left)}${text}${' '.repeat(gap - left)}`;
+  }
+  return `${text}${' '.repeat(gap)}`;
+};
+
+/**
+ * A header as a label in the list and one-column forms, which mrkdwn reads
+ * like prose. Bold only when it holds no marker character at all — the
+ * heading renderer's rule, since a loose `*` in `glob *.ts` pairs with the
+ * wrapper's own; otherwise the
+ * header goes as written, so its own markup is converted rather than
+ * unwrapped — a header showing ``` in a code span kept only the three
+ * backticks, and they opened a fence that ran to the end of the reply.
+ */
+const tableLabel = (header: string): string =>
+  header.length === 0 ? '' : /[*_~`]/.test(header) ? header : `**${header}**`;
+
+const renderTable = (header: string[], alignments: Alignment[], rows: string[][]): string => {
+  const columns = header.length;
+  const fit = (row: string[]): string[] => Array.from({ length: columns }, (_, index) => row[index] ?? '');
+  // One column has nothing to line up, so it is a list under its header.
+  // It is also what keeps every grid recognisable when split: a grid always
+  // has a `┼` in its rule, which a log's `────` underline never does.
+  if (columns === 1) {
+    const label = tableLabel(header[0] ?? '');
+    const items = rows.map((row) => row[0] ?? '').filter((cell) => cell.length > 0).map((cell) => `• ${cell}`);
+    return [...(label.length > 0 ? [label] : []), ...items].join('\n');
+  }
+  const grid = [header, ...rows.map(fit)].map((row) => row.map(plainCell));
+  const widths = Array.from({ length: columns }, (_, index) => Math.max(...grid.map((row) => displayWidth(row[index] ?? ''))));
+  const width = widths.reduce((sum, each) => sum + each, 0) + (columns - 1) * 3;
+  // A backtick run in a cell could close the fence early, and a link inside
+  // a code block is its source text rather than something to click — so a
+  // table with either takes the list form, where mrkdwn reads the cells as
+  // it reads prose. Links are found by the converter's own reader.
+  // A bare address counts too, and so does Slack's own markup — `<@U…>`,
+  // `<#C…>`, `<!here>`: Slack acts on all of them in prose and on none of
+  // them inside a code block.
+  const linked = [header, ...rows].some((row) => row.some((cell) =>
+    readEmphasis(scan(cell)).links.size > 0
+    || /\b(?:https?:\/\/|mailto:)\S|<[a-z][a-z0-9+.-]*:[^>\s]+>|<[@#!][^>\s]+>/i.test(cell)));
+  if (width <= TABLE_MAX_WIDTH && !linked && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
+    const line = (row: string[]): string =>
+      row.map((cell, index) => pad(cell, widths[index] ?? 0, alignments[index] ?? 'left')).join(' │ ').trimEnd();
+    const rule = widths.map((each) => '─'.repeat(each)).join('─┼─');
+    return ['```', line(grid[0] ?? []), rule, ...grid.slice(1).map(line), '```'].join('\n');
+  }
+  // The list form names each value by its header, so a table with no rows
+  // has nothing to name; its header is what it says, and it stays said.
+  const headerOnly = header.map(tableLabel).filter((label) => label.length > 0).join(' · ');
+  if (rows.length === 0) {
+    return headerOnly;
+  }
+  const listed = rows
+    .map(fit)
+    .map((row) => row
+      .map((cell, index) => ({ label: tableLabel(header[index] ?? ''), cell }))
+      .filter(({ cell }) => cell.length > 0)
+      .map(({ label, cell }) => (label.length > 0 ? `${label}: ${cell}` : cell))
+      .join(' · '))
+    .filter((line) => line.length > 0);
+  return listed.length > 0 ? listed.join('\n') : headerOnly;
+};
+
+/** Four spaces or a tab: an indented code block, which no table row may be. */
+const isIndentedCode = (line: string): boolean => /^(?: {4,}|\t)/.test(line);
+
+/**
+ * The reply with every pipe table outside code rendered for Slack. A table
+ * inside a fence is somebody's text and stays as written — found by the
+ * converter's own scan, so this agrees with it about what is code.
+ */
+const renderTables = (text: string): string => {
+  // Only a run that spans lines hides a table; an inline span in a cell is
+  // part of the row, the way GFM reads it.
+  const code = codeRunsOf(text).filter((run) => text.slice(run.start, run.end).includes('\n'));
+  const lines = text.split('\n');
+  // Runs and lines are both in order, so one pointer walks the runs: asking
+  // every run about every line was quadratic in a reply of many snippets.
+  const inCode: boolean[] = [];
+  let offset = 0;
+  let next = 0;
+  for (const line of lines) {
+    const start = offset;
+    const end = offset + line.length;
+    while (next < code.length && (code[next]?.end ?? 0) <= start) {
+      next += 1;
+    }
+    const run = code[next];
+    inCode.push(run !== undefined && run.start < end + 1 && start < run.end);
+    offset = end + 1;
+  }
+  const out: string[] = [];
+  let at = 0;
+  while (at < lines.length) {
+    const headerLine = lines[at] ?? '';
+    const alignments = inCode[at] || inCode[at + 1] ? undefined : tableAlignments(lines[at + 1] ?? '');
+    const header = tableCells(headerLine);
+    // Four spaces or a tab of indentation is an indented code block, not a
+    // table — GFM allows a table at most three.
+    const indented = isIndentedCode(headerLine) || isIndentedCode(lines[at + 1] ?? '');
+    if (alignments === undefined || indented || !isTableRow(headerLine) || header.length !== alignments.length) {
+      out.push(headerLine);
+      at += 1;
+      continue;
+    }
+    const rows: string[][] = [];
+    let next = at + 2;
+    while (next < lines.length && !inCode[next] && !isIndentedCode(lines[next] ?? '') && isTableRow(lines[next] ?? '')) {
+      rows.push(tableCells(lines[next] ?? ''));
+      next += 1;
+    }
+    out.push(renderTable(header, alignments, rows));
+    at = next;
+  }
+  return out.join('\n');
+};
+
+/**
+ * The links in a token stream and the emphasis pairs around them — the one
+ * reading of emphasis, shared by conversion and by a table cell shedding its
+ * markers, so the two cannot disagree about what a `*` is.
+ */
+const readEmphasis = (tokens: readonly Token[]): { links: Map<number, Link>; pairs: Map<number, Pair[]> } => {
   // Links are found before emphasis is paired, because what they turn out
   // to cover decides what is left for a delimiter to pair with: the
   // characters of a destination are the address, not markup.
@@ -902,7 +1234,13 @@ export const toSlackMrkdwn = (text: string): string => {
       labelled[at] = opener;
     }
   }
-  const context: Context = { tokens, pairs: pairEmphasis(tokens, inert, labelled), links, edits: new Map() };
+  return { links, pairs: pairEmphasis(tokens, inert, labelled) };
+};
+
+export const toSlackMrkdwn = (text: string): string => {
+  const tokens = scan(renderTables(text));
+  const { links, pairs } = readEmphasis(tokens);
+  const context: Context = { tokens, pairs, links, edits: new Map() };
 
   const lines: string[] = [];
   let start = 0;
