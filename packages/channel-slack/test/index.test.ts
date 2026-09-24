@@ -384,6 +384,101 @@ test('the loading status comes back once an approval asked mid-turn is answered'
   assert.deepEqual(statuses.slice(before).map((status) => status.status), ['is thinking…']);
 });
 
+test('a final reply waiting on a slow upload is not overtaken by the turn queued behind it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-final-order-'));
+  const shot = path.join(dir, 'build.log');
+  await writeFile(shot, 'log');
+  let releaseUpload!: () => void;
+  const uploadGate = new Promise<void>((resolve) => {
+    releaseUpload = resolve;
+  });
+  const upload = web.files.uploadV2.bind(web.files);
+  web.files.uploadV2 = async (args) => {
+    await uploadGate;
+    return upload(args);
+  };
+  const gateway: StubGateway = createStubGateway(async ({ sessionId, userMessage }) => {
+    if (/first/.test(userMessage)) {
+      await gateway.bus.emit({
+        type: 'tool.completed',
+        sessionId,
+        result: { callId: 'c1', toolName: 'shell.run', ok: true, output: { file: shot } },
+      });
+      return sessionWithReply(sessionId, 'first answer');
+    }
+    return sessionWithReply(sessionId, 'second answer');
+  });
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  // Both land before the first turn's upload does: the second turn is done
+  // while the first is still holding its reply for the file.
+  const delivered = Promise.all([
+    socket.deliver('app_mention', mention('<@B-AVA> first', { ts: '100.1' })),
+    socket.deliver('app_mention', mention('<@B-AVA> second', { ts: '100.2', thread_ts: '100.1' })),
+  ]);
+  for (let tick = 0; tick < 50; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  // With no placeholder to hold its place, the quick answer must wait.
+  assert.deepEqual(web.posts.map((post) => post.text), []);
+  releaseUpload();
+  await delivered;
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'second answer']);
+});
+
+test('a final reply waits for its loading status to reach Slack, so the post can clear it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let releaseStatus!: () => void;
+  const statusGate = new Promise<void>((resolve) => {
+    releaseStatus = resolve;
+  });
+  let sent!: () => void;
+  const statusSent = new Promise<void>((resolve) => {
+    sent = resolve;
+  });
+  web.assistant = {
+    threads: {
+      async setStatus() {
+        sent();
+        await statusGate;
+        return {};
+      },
+    },
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'quick'));
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  const delivered = socket.deliver('app_mention', mention('<@B-AVA> hi'));
+  await statusSent;
+  for (let tick = 0; tick < 50; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  // A status landing after the reply would stand over a finished turn:
+  // the post that clears it would already have happened.
+  assert.deepEqual(web.posts, []);
+  releaseStatus();
+  await delivered;
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['quick']);
+});
+
 test('an agent on the stream reply mode still posts a placeholder and edits it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

@@ -586,6 +586,26 @@ class ReplyRenderer {
   /** Shared by a connection's renderers, so a status Slack refuses is said once, not per message. */
   private readonly statusWarned: { value: boolean };
   private loading = false;
+  /**
+   * Status calls, in order, so the last one Slack applies is the last one
+   * sent — and so `finalize` can wait for them: a status that reached
+   * Slack after the reply would stand over a finished turn until Slack's
+   * own timeout, since the post that clears it came first.
+   */
+  private statusChain: Promise<void> = Promise.resolve();
+  /**
+   * The turn this one was queued behind has posted everything it will
+   * (see `posted`). A streaming turn holds its place with the placeholder
+   * it opened at intake; a `final` one has no placeholder, so it waits for
+   * this before putting text or files in the thread — or a quick answer
+   * would land above the slow one ahead of it.
+   */
+  private readonly after: Promise<unknown>;
+  private settle!: () => void;
+  /** Resolves once this turn has put in the thread everything it will. */
+  readonly posted: Promise<void> = new Promise<void>((resolve) => {
+    this.settle = resolve;
+  });
   private statusText: string | undefined;
   private statusTimer: NodeJS.Timeout | undefined;
   /** The tool the turn is running, for the status line; the streamed `toolLine` is the other mode's. */
@@ -609,6 +629,7 @@ class ReplyRenderer {
       streaming?: boolean;
       statusThread?: string;
       statusWarned?: { value: boolean };
+      after?: Promise<unknown>;
     } = {},
   ) {
     this.web = web;
@@ -621,6 +642,7 @@ class ReplyRenderer {
     this.streaming = options.streaming ?? true;
     this.statusThread = options.statusThread ?? threadTs;
     this.statusWarned = options.statusWarned ?? { value: false };
+    this.after = options.after ?? Promise.resolve();
   }
 
   /**
@@ -665,23 +687,23 @@ class ReplyRenderer {
       return;
     }
     this.statusText = text;
-    // Not awaited: a status is a courtesy, and the reply must never wait
-    // on one. A refusal — a workspace or plan without it, a token Slack
-    // will not honour for it — is said once and then left alone; the
-    // reply still arrives, just without the status ahead of it.
-    void setStatus.call(this.web.assistant?.threads, {
-      channel_id: this.channel,
-      thread_ts: this.statusThread,
-      status: text,
-    }).catch((error: unknown) => {
-      if (!this.statusWarned.value) {
-        this.statusWarned.value = true;
-        this.warn(
-          `slack: could not show a loading status (${error instanceof Error ? error.message : String(error)}); `
-          + 'replies still post when they are ready, without one',
-        );
-      }
-    });
+    const thread = this.statusThread;
+    // Not awaited by the caller: the turn never waits on a status. Only
+    // `finalize` does, for the ordering reason on `statusChain`. A refusal
+    // — a workspace or plan without it, a token Slack will not honour for
+    // it — is said once and then left alone; the reply still arrives,
+    // just without the status ahead of it.
+    this.statusChain = this.statusChain
+      .then(() => setStatus.call(this.web.assistant?.threads, { channel_id: this.channel, thread_ts: thread, status: text }))
+      .then(() => undefined, (error: unknown) => {
+        if (!this.statusWarned.value) {
+          this.statusWarned.value = true;
+          this.warn(
+            `slack: could not show a loading status (${error instanceof Error ? error.message : String(error)}); `
+            + 'replies still post when they are ready, without one',
+          );
+        }
+      });
   }
 
   /**
@@ -808,8 +830,10 @@ class ReplyRenderer {
     // it, and an upload that then waited for that handover would be a
     // cycle nothing breaks (see `queueEdit`).
     const handover = this.handover;
+    const after = this.streaming ? undefined : this.after;
     this.uploadChain = this.uploadChain
       .then(() => handover)
+      .then(() => after)
       // Read as file DATA inside the chain: the Web API takes contents,
       // not a path, and a missing file surfaces as this upload's own
       // failure instead of an unhandled stream error.
@@ -939,10 +963,22 @@ class ReplyRenderer {
    * refused sentence is still the last thing said, for the thread rule.
    */
   async finalize(reply: string): Promise<ReplyOutcome> {
+    try {
+      return await this.finalizeInOrder(reply);
+    } finally {
+      this.settle();
+    }
+  }
+
+  private async finalizeInOrder(reply: string): Promise<ReplyOutcome> {
     await this.handover;
     const hadStatus = this.loading;
     this.stopLoading();
     this.finalized = true;
+    if (!this.streaming) {
+      await this.after;
+      await this.statusChain;
+    }
     if (this.pendingEdit) {
       clearTimeout(this.pendingEdit);
       this.pendingEdit = undefined;
@@ -1738,6 +1774,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // to the FIRST registered renderer (the running turn), never a later
   // message's placeholder. Each handler removes exactly its own renderer.
   const renderers = new Map<string, ReplyRenderer[]>();
+  /**
+   * Per session, what the newest `final` reply has left to post. A `final`
+   * turn holds no place in the thread until it posts, so each waits for
+   * the one queued ahead of it — see `ReplyRenderer.after`.
+   */
+  const replyOrder = new Map<string, Promise<void>>();
   /**
    * Files a turn nobody here rendered produced — a recovery's screenshot,
    * say — keyed by session, waiting for the turn's outcome to be posted so
@@ -3466,13 +3508,23 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // reply mode does not stream opens none at all, and shows the
       // loading status instead — see `ReplyRenderer.streaming`.
       const streaming = connection.config.replies === 'stream';
+      const ahead = streaming ? undefined : replyOrder.get(sessionId);
       const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn, {
         lazy: judged,
         now,
         streaming,
         statusThread: thread ?? event.ts,
         statusWarned: connection.statusWarned,
+        ...(ahead ? { after: ahead } : {}),
       });
+      if (!streaming) {
+        replyOrder.set(sessionId, renderer.posted);
+        void renderer.posted.then(() => {
+          if (replyOrder.get(sessionId) === renderer.posted) {
+            replyOrder.delete(sessionId);
+          }
+        });
+      }
       if (!judged && streaming) {
         try {
           await renderer.open();
