@@ -1291,7 +1291,13 @@ const splitForSlack = (text: string): string[] => {
     const window = rest.slice(0, SLACK_MAX_MESSAGE_CHARS);
     const newline = window.lastIndexOf('\n');
     const cut = newline > SLACK_MAX_MESSAGE_CHARS / 2 ? newline : safeCutIndex(rest, SLACK_MAX_MESSAGE_CHARS);
-    const run = codeRunsOf(rest).find((candidate) => candidate.start < cut && cut < candidate.end);
+    // Scanned two messages deep, not to the end: rescanning the whole rest
+    // for every chunk made a megabyte reply quadratic on the event loop. A
+    // fence that closes past the window still reads as open to its end,
+    // which is what it is here; an inline span that does is longer than a
+    // message, and is cut as text either way.
+    const run = codeRunsOf(rest.slice(0, SLACK_MAX_MESSAGE_CHARS * 2))
+      .find((candidate) => candidate.start < cut && cut < candidate.end);
     if (run !== undefined && run.start > SLACK_MAX_MESSAGE_CHARS / 4) {
       chunks.push(rest.slice(0, run.start).replace(/\n+$/, ''));
       rest = rest.slice(run.start);
