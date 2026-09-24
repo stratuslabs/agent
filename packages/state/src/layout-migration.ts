@@ -398,13 +398,15 @@ export const agentDirectoryOrQuarantine = async (
   return directory;
 };
 
-const openDatabase = async (filePath: string): Promise<SqliteDatabase> => {
+const openDatabase = async (filePath: string, own = true): Promise<SqliteDatabase> => {
   const { DatabaseSync } = await loadSqlite();
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(filePath);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA busy_timeout = 5000');
-  await tighten(filePath);
+  if (own) {
+    await tighten(filePath);
+  }
   return db;
 };
 
@@ -1147,7 +1149,20 @@ export const applyPerAgentLayout = async (env: StateEnvironment): Promise<string
   const report = emptyReport(env);
   const legacyPath = legacySessionDbPath(env);
   if (await exists(legacyPath)) {
-    const legacyDb = await openDatabase(legacyPath);
+    // The one derived path this migration opens without insisting it is
+    // real, and the asymmetry is deliberate. `fleet.db` and each shard are
+    // files *this* build creates, so refusing a link there costs nothing;
+    // the legacy database is one an operator may already have relocated,
+    // under builds that had no such rule, and refusing it would strand that
+    // home on an upgrade it can never complete — with every session in the
+    // file it is being refused for.
+    //
+    // What the rule is actually about is not done to it: a link is read and
+    // then *renamed* (which renames the link, leaving their file where it
+    // is), and it is not tightened, so no mode of theirs is changed through
+    // it. Reading an operator's own data is what this migration is for.
+    const legacyIsLink = await linkedDerivedComponent(stratusHomePath(env), legacyPath) !== undefined;
+    const legacyDb = await openDatabase(legacyPath, !legacyIsLink);
     try {
       report.schedulesMoved = await moveSchedules(legacyDb, env);
       await shardSessions(legacyDb, env, report);

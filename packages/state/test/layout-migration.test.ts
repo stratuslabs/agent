@@ -755,6 +755,32 @@ test('retiring the shared file appends to an earlier archive rather than renamin
   assert.match(archived, /likes jazz/);
 });
 
+test('a legacy database an operator relocated is migrated, and its mode is left alone', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // The asymmetry against `fleet.db` above: this is a file that predates
+  // the rule, and refusing it would strand the home on an upgrade it can
+  // never complete — with every session in the file being refused for. So
+  // it is read and its link renamed, and the one thing the rule is actually
+  // about is not done to it: their file's mode is not changed through it.
+  const { rename } = await import('node:fs/promises');
+  const elsewhere = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-volume-')), 'sessions.db');
+  await seedSharedState(home);
+  await rename(legacySessionDbPath(env), elsewhere);
+  await chmod(elsewhere, 0o644);
+  await symlink(elsewhere, legacySessionDbPath(env));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  // The sessions arrived where the new build reads them.
+  const shard = new DatabaseSync(agentSessionDbPath(env, 'ava'));
+  const rows = shard.prepare('SELECT id FROM sessions ORDER BY id').all() as { id: string }[];
+  shard.close();
+  assert.deepEqual(rows.map((row) => row.id), ['a-1', 'a-2']);
+  // Their file, still theirs: not tightened through the link.
+  assert.equal((await stat(elsewhere)).mode & 0o777, 0o644);
+});
+
 test('a symlinked fleet.db stops the upgrade before the schedules are copied through it', async () => {
   const home = await newHome();
   const env = { homeDir: home };

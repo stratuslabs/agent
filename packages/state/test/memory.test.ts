@@ -317,7 +317,7 @@ test('the per-agent store forwards every method the file store has, optional one
   // forgotten in the facade without this failing.
   const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-memory-sharded-'));
   const single = createFileMemoryStore(path.join(dir, 'memory.jsonl'));
-  const sharded = createShardedFileMemoryStore((agentId) => path.join(dir, agentId, 'memory.jsonl'));
+  const sharded = createShardedFileMemoryStore((agentId) => path.join(dir, agentId, 'memory.jsonl'), dir);
   const methodsOf = (store: object): string[] =>
     Object.entries(store).filter(([, value]) => typeof value === 'function').map(([key]) => key).sort();
   assert.deepEqual(methodsOf(sharded), methodsOf(single));
