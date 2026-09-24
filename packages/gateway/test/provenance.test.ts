@@ -8,8 +8,10 @@ import {
   AgentRunner,
   InMemoryAgentMemoryStore,
   SENDER_TRUST_METADATA_KEY,
+  CONTEXT_FLOOR_METADATA_KEY,
   SESSION_TRUST_METADATA_KEY,
   ToolRegistry,
+  contextFloorOf,
   sessionTrustOf,
   sessionWriteTrust,
   type ModelProvider,
@@ -18,7 +20,7 @@ import {
   type ToolCall,
 } from '@stratusagent/core';
 import { createRememberTool, MEMORY_TOOL_NAME } from '@stratusagent/agents';
-import { STATE_SCHEMA_VERSION, stateFilePath } from '@stratusagent/state';
+import { agentMemoryFilePath, STATE_SCHEMA_VERSION, stateFilePath } from '@stratusagent/state';
 
 import {
   createGateway,
@@ -26,7 +28,7 @@ import {
   ROLLED_OVER_FROM_METADATA_KEY,
   ROLLED_OVER_SESSION_ID_MARKER,
   ROLLED_OVER_TO_METADATA_KEY,
-  SqliteSessionStore,
+  ShardedSessionStore,
 } from '../src/index.ts';
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-prov-'));
@@ -62,11 +64,11 @@ const pageRead: Tool = {
 
 test('taint survives a daemon restart mid-session: the session still writes external after it', async () => {
   const home = await newHome();
-  const dbPath = path.join(home, 'sessions.db');
+  const stateDir = path.join(home, 'state');
   const memory = new InMemoryAgentMemoryStore();
 
   // Daemon one: the session reads a page.
-  const firstStore = new SqliteSessionStore(dbPath);
+  const firstStore = new ShardedSessionStore({ stateDir });
   const tools = new ToolRegistry();
   tools.register(pageRead);
   tools.register(createRememberTool(memory));
@@ -82,7 +84,7 @@ test('taint survives a daemon restart mid-session: the session still writes exte
 
   // Daemon two: a new process, a new store over the same file, nothing in
   // memory. The next turn remembers.
-  const secondStore = new SqliteSessionStore(dbPath);
+  const secondStore = new ShardedSessionStore({ stateDir });
   const second = new AgentRunner({
     provider: scriptedProvider([[{ id: 'c2', toolName: MEMORY_TOOL_NAME, input: { fact: 'Funds get wired.' } }]]),
     tools,
@@ -161,7 +163,13 @@ test('a rollover archives the transcript and starts the same id over — the rem
         { id: 'u1', role: 'user', content: 'hello from before', createdAt: '2026-01-01T00:00:00.000Z' },
         { id: 'a1', role: 'assistant', content: 'hi', createdAt: '2026-01-01T00:00:01.000Z' },
       ],
-      metadata: { channel: 'slack', slackChannel: 'D07', anthropicRawTurns: { old: [] } },
+      metadata: {
+        channel: 'slack',
+        slackChannel: 'D07',
+        anthropicRawTurns: { old: [] },
+        // A conversation long enough to have been trimmed.
+        [CONTEXT_FLOOR_METADATA_KEY]: 2,
+      },
     });
     const legacy = await gateway.dispatch({ sessionId: 'dm-1', userMessage: 'still here' });
     assert.equal(sessionTrustOf(legacy), 'unknown');
@@ -189,6 +197,14 @@ test('a rollover archives the transcript and starts the same id over — the rem
     assert.equal(fresh.metadata?.channel, 'slack');
     assert.equal(fresh.metadata?.slackChannel, 'D07');
     assert.equal(fresh.metadata?.anthropicRawTurns, undefined);
+    // The context floor goes with the transcript it indexed. Left behind,
+    // it is an absolute index over no messages: the fresh conversation
+    // would grow past it and silently stop sending its own earliest turns,
+    // with no overflow and no trim event to say so.
+    assert.equal(contextFloorOf(fresh), 0);
+    assert.equal(fresh.metadata?.[CONTEXT_FLOOR_METADATA_KEY], undefined);
+    // The archived row keeps it, being the transcript it describes.
+    assert.equal(contextFloorOf(archived), 2);
     assert.equal(fresh.metadata?.[ROLLED_OVER_FROM_METADATA_KEY], archivedAs);
     assert.equal(sessionTrustOf(fresh), 'user');
 
@@ -230,9 +246,10 @@ test('a rollover over a store whose injected slice is still unknown is unknown o
     });
     // The store has a legacy entry the built-in agent injects.
     const { writeFile, mkdir } = await import('node:fs/promises');
-    await mkdir(path.join(home, '.stratus'), { recursive: true });
+    const memoryFile = agentMemoryFilePath(env, 'stratus');
+    await mkdir(path.dirname(memoryFile), { recursive: true });
     await writeFile(
-      path.join(home, '.stratus', 'memory.jsonl'),
+      memoryFile,
       `${JSON.stringify({ id: 'stratus:memory:legacy', agentId: 'stratus', content: 'an old note', createdAt: '2026-01-01T00:00:00.000Z' })}\n`,
     );
     await gateway.rolloverSession('dm-2');

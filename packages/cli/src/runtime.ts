@@ -34,20 +34,18 @@ import {
   BUILTIN_MEMORY_STORE_NAME,
   createDemoTool,
   createFileCredentialResolver,
-  createFileMemoryStore,
+  createHomeMemoryStore,
   createRuntimeProvider,
   defaultApiKeyEnvName,
   DEFAULT_STRATUS_AGENT,
   isSignedInRuntime,
   loadCredentials,
   loadOperatorSkills,
-  memoryFilePath,
   migrateLegacyMemory,
   readNonEmptyString,
   readProcessEnv,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
-  withLegacyDefaultMemories,
-  workspacesDirPath,
+  createAgentWorkspaces,
   type RuntimeSelection,
   type RuntimeConfig,
   type IgnoredUntrustedConfig,
@@ -214,7 +212,7 @@ export const createAgentRuntime = async (
   // plugins load (so a plugin cannot claim their names), and the store
   // they hold answers per call with whichever the trusted config selected
   // once the plugins are up.
-  const fileMemory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(runEnv)));
+  const fileMemory = createHomeMemoryStore(runEnv);
   let selectedMemory: AgentMemoryStore = fileMemory;
   const memory = createRoutedMemoryStore(() => selectedMemory);
 
@@ -283,7 +281,7 @@ export const createAgentRuntime = async (
       // nowhere, and its request for its secrets is refused with a message
       // that says so rather than answered with an empty roster.
       credentials: createFileCredentialResolver(runEnv),
-      workspaceRoot: workspacesDirPath(runEnv),
+      workspaces: createAgentWorkspaces(runEnv),
     });
     loadedPlugins.push(...result.loaded);
     for (const failure of result.failures) {

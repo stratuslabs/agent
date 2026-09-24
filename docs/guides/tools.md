@@ -182,7 +182,7 @@ risk levels. Four things are worth knowing here:
   MCP tool declare their output `external`; `shell.run` declares `unknown`,
   since `git status` and `curl` come back through the same stdout; `fs.read`
   labels a file the agent wrote while its session was tainted, from a
-  per-agent ledger under `~/.stratus/workspaces/<agent>/`. The session that read any of it only
+  per-agent ledger at `~/.stratus/agents/<agent>/workspace/fs-provenance.jsonl`. The session that read any of it only
   ever gets less trusted, and every fact it remembers carries the label.
   A third-party plugin whose output comes from outside declares
   `outputTrust: 'external'` on the tool, or marks a single call through

@@ -39,6 +39,8 @@ export interface ServiceEnvironment {
   execArgv?: string[];
   /** User id, for launchctl's `gui/<uid>` domain. */
   uid?: number;
+  /** The installing shell's PATH; `serviceEnvFor` reads it from the CLI's environment. */
+  path?: string;
   run?: ServiceRunner;
 }
 
@@ -73,6 +75,8 @@ export interface ServiceDefinition {
   workingDirectory: string;
   /** Start automatically when the user logs in. */
   runAtLogin: boolean;
+  /** PATH for the daemon and every command it runs; see `servicePath`. */
+  path?: string;
 }
 
 export interface ServiceInstallOptions {
@@ -105,7 +109,12 @@ ${definition.runAtLogin ? `  <key>KeepAlive</key>
   </dict>
 ` : ''}  <key>WorkingDirectory</key>
   <string>${xml(definition.workingDirectory)}</string>
-  <key>StandardOutPath</key>
+${definition.path !== undefined ? `  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${xml(definition.path)}</string>
+  </dict>
+` : ''}  <key>StandardOutPath</key>
   <string>${xml(path.join(definition.logDir, 'stratusd.out.log'))}</string>
   <key>StandardErrorPath</key>
   <string>${xml(path.join(definition.logDir, 'stratusd.err.log'))}</string>
@@ -139,7 +148,7 @@ After=network-online.target
 Type=simple
 ExecStart=${definition.argv.map((argument) => systemdArgument(JSON.stringify(argument))).join(' ')}
 WorkingDirectory=${systemdValue(definition.workingDirectory)}
-Restart=on-failure
+${definition.path !== undefined ? `Environment=${systemdValue(JSON.stringify(`PATH=${definition.path}`))}\n` : ''}Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
 TimeoutStopSec=30
@@ -147,6 +156,41 @@ TimeoutStopSec=30
 [Install]
 WantedBy=default.target
 `;
+
+/**
+ * The PATH a managed daemon runs with: node's own directory, then the
+ * installing shell's PATH, absolute entries only.
+ *
+ * A service manager does not load a shell profile, so without this the
+ * daemon got launchd's `/usr/bin:/bin:/usr/sbin:/sbin` — or systemd's
+ * user default — and so did every command an agent ran through it. On a
+ * Mac with Homebrew that is no node, no npm, no gh: an agent with a shell
+ * had to prepend `/opt/homebrew/bin` to every command, or an operator had
+ * to find out why and paste a PATH into `tool-shell`'s `env`.
+ *
+ * Node's directory first so the interpreter the unit names is also the one
+ * a command's `node` or `npx` resolves to — under nvm the shell's PATH may
+ * be pointing at a different version by the time anyone asks. Relative
+ * entries (`.`, `bin`) are dropped: under a service they would resolve
+ * against whatever directory the daemon runs a command from, which is a
+ * lookup path an agent's workspace could plant a binary in.
+ */
+export const servicePath = (env: ServiceEnvironment): string | undefined => {
+  const shell = (env.path ?? '').split(path.delimiter).filter((entry) => entry.length > 0 && path.isAbsolute(entry));
+  // No PATH to carry — an install run under `env -i`, or automation that
+  // strips it — writes no override at all. Node's directory alone would
+  // replace the manager's default rather than add to it, and an agent's
+  // shell would lose /usr/bin with it.
+  if (shell.length === 0) {
+    return undefined;
+  }
+  return [...new Set([path.dirname(env.execPath ?? process.execPath), ...shell])].join(path.delimiter);
+};
+
+const servicePathEntry = (env: ServiceEnvironment): { path?: string } => {
+  const daemonPath = servicePath(env);
+  return daemonPath !== undefined ? { path: daemonPath } : {};
+};
 
 export const serviceDefinition = (
   env: ServiceEnvironment,
@@ -183,6 +227,7 @@ export const serviceDefinition = (
   // project. Falls back to home when there is nothing better.
   workingDirectory: env.cwd ?? homeOf(env),
   runAtLogin,
+  ...servicePathEntry(env),
 });
 
 /** A service command that has not answered by now is not going to. */

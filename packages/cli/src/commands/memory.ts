@@ -9,10 +9,10 @@ import {
   type MemoryEntry,
 } from '@stratusagent/core';
 import {
-  createFileMemoryStore,
-  memoryFilePath,
+  agentMemoryFilePath,
+  agentsDirPath,
+  createHomeMemoryStore,
   migrateLegacyMemory,
-  withLegacyDefaultMemories,
 } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -64,7 +64,7 @@ export const runMemory = async (
   if (configured !== undefined && configured !== BUILTIN_MEMORY_STORE_NAME) {
     writeLine(
       streams.stderr,
-      `Error: this fleet's config selects memoryStore ${configured}, so its agents do not keep their memories in ${memoryFilePath(env)}. `
+      `Error: this fleet's config selects memoryStore ${configured}, so its agents do not keep their memories under ${agentsDirPath(env)}. `
       + `\`stratus memory\` reads and writes the built-in ${BUILTIN_MEMORY_STORE_NAME} store only — use that store's own tooling, or set memoryStore to ${BUILTIN_MEMORY_STORE_NAME}.`,
     );
     return 1;
@@ -75,7 +75,7 @@ export const runMemory = async (
   if (memoryCommandWritesState(command.action)) {
     await migrateLegacyMemory(env);
   }
-  const store = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+  const store = createHomeMemoryStore(env);
   const at = new Date();
   // Two ways an entry reads `unknown`, and only one is the upgrade case:
   // no label at all (written before labels existed, or added by hand), or a
@@ -156,7 +156,7 @@ export const runMemory = async (
       writeLine(
         streams.stdout,
         command.trust === undefined
-          ? `${command.agentId} has no live memory entries in ${memoryFilePath(env)}.`
+          ? `${command.agentId} has no live memory entries in ${agentMemoryFilePath(env, command.agentId)}.`
           : `${command.agentId} has no live memory entries at ${command.trust}.`,
       );
       return 0;
@@ -230,7 +230,7 @@ export const runMemory = async (
       return 0;
     }
     if (entries.length === 0) {
-      writeLine(streams.stdout, `${command.agentId} has never written to ${memoryFilePath(env)}.`);
+      writeLine(streams.stdout, `${command.agentId} has never written to ${agentMemoryFilePath(env, command.agentId)}.`);
       return 0;
     }
     const replacedBy = new Map<string, string[]>();

@@ -18,6 +18,7 @@ import {
   type HostedToolExecutor,
 } from '@stratusagent/providers';
 import { createAnthropicProvider, RAW_TURNS_METADATA_KEY } from '@stratusagent/provider-anthropic';
+import { ContextOverflowError } from '@stratusagent/core';
 import {
   createClaudeCodeProvider,
   SDK_SESSION_METADATA_KEY,
@@ -151,6 +152,16 @@ export const createFallbackWrappedProvider = (
           // must surface as-is, and the session must not be routed to the
           // fallback model for every later conversation turn.
           if (request.signal?.aborted) {
+            throw error;
+          }
+          // Nor is a transcript that outgrew the window. It is the one
+          // rejection the runner can act on — it trims and retries the
+          // SAME provider — and swallowing it here would spend a
+          // conversation's permanent switch to the fallback model on a
+          // request that never needed another model, only a shorter one.
+          // The fallback would then take the same too-long transcript and,
+          // where it has a smaller window, fail on it too.
+          if (error instanceof ContextOverflowError) {
             throw error;
           }
           fallbackSessions.add(request.session.id);
@@ -309,6 +320,7 @@ export const createRuntimeProvider = (
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
       ...(config.promptCache !== undefined ? { promptCache: config.promptCache } : {}),
       ...(config.promptCacheTtl ? { promptCacheTtl: config.promptCacheTtl } : {}),
+      ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
       ...(config.fetch ? { fetch: config.fetch } : {}),
     });
   }

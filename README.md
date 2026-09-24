@@ -36,7 +36,7 @@ line, 23.4+) — details in [Installation](docs/start/installation.md).
 | | Capability | |
 | --- | --- | --- |
 | 🕐 | **Always on** — the whole roster as a daemon that survives reboots, with durable sessions | [Always on](docs/guides/always-on.md) |
-| 💬 | **Live in Slack** — each agent its own app: avatar, presence, DMs, threads it keeps following without being re-tagged, streaming replies, screenshots it can look at | [Slack](docs/guides/slack.md) |
+| 💬 | **Live in Slack** — each agent its own app: avatar, presence, DMs, threads it keeps following without being re-tagged, replies that land finished behind Slack's own "is thinking…" status, screenshots it can look at | [Slack](docs/guides/slack.md) |
 | 🧠 | **Remember** — memory keyed to the agent: facts it pins, revises, and bounds by when they are true, an index of what it knows about, every fact labelled with where it came from | [Memory](docs/concepts/memory.md) |
 | 🛠 | **Use real tools** — files, a shell, the web, a browser; each an opt-in plugin, allowlisted per agent | [Tools](docs/guides/tools.md) |
 | 🔌 | **Mount MCP servers** — the whole MCP ecosystem under Stratus policy | [MCP](docs/guides/mcp.md) |
@@ -115,6 +115,7 @@ The trust model behind that is in
 | Run it as a service, read its logs, upgrade it | [Always on](docs/guides/always-on.md) · [Logs](docs/guides/logs.md) · [Updating](docs/guides/updating.md) |
 | Fix a surprise | [Troubleshooting](docs/guides/troubleshooting.md) |
 | Look up any command, flag, or config key | [CLI reference](docs/reference/cli.md) · [Configuration](docs/reference/config.md) |
+| Know what is on disk, and what belongs to one agent | [State layout](docs/reference/state-layout.md) |
 | Understand the ideas | [Agents](docs/concepts/agents.md) · [Memory](docs/concepts/memory.md) · [Plugins](docs/concepts/plugins.md) · [Security](docs/concepts/security.md) |
 | Build against it | [Control API](packages/control-api/README.md) · [Architecture](docs/architecture/stratus-v2.md) · [Roadmap](docs/roadmap/README.md) |
 

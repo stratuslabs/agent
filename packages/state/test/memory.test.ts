@@ -13,7 +13,7 @@ import {
   type AgentMemoryStore,
 } from '@stratusagent/core';
 
-import { createFileMemoryStore, withLegacyDefaultMemories } from '../src/index.ts';
+import { createFileMemoryStore, createShardedFileMemoryStore, withLegacyDefaultMemories } from '../src/index.ts';
 
 const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'stratus-memory-'));
 
@@ -300,4 +300,34 @@ test('the index file is owner-only, like the JSONL it derives from', async () =>
   const indexMode = (await stat(`${filePath}.index`)).mode & 0o777;
   assert.equal(jsonlMode, 0o600);
   assert.equal(indexMode, 0o600);
+});
+
+test('the per-agent store forwards every method the file store has, optional ones included', async () => {
+  // The optional half of `AgentMemoryStore` is the trap here. `pin`,
+  // `unpin`, `pinned`, `topics`, and `importEntries` are all `?`, so a
+  // facade that forgets one still satisfies the interface, still compiles,
+  // and still passes `pnpm typecheck` — while `withLegacyDefaultMemories`
+  // spreads those methods only when it finds them. On the per-agent layout
+  // that is the production path, so a dropped `pinned` or `topics` leaves
+  // two of the three injected blocks permanently empty with nothing
+  // failing anywhere.
+  //
+  // Asserted against the wrapped store's own surface rather than a list
+  // written here, so a method added to the file store later cannot be
+  // forgotten in the facade without this failing.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-memory-sharded-'));
+  const single = createFileMemoryStore(path.join(dir, 'memory.jsonl'));
+  const sharded = createShardedFileMemoryStore((agentId) => path.join(dir, agentId, 'memory.jsonl'));
+  const methodsOf = (store: object): string[] =>
+    Object.entries(store).filter(([, value]) => typeof value === 'function').map(([key]) => key).sort();
+  assert.deepEqual(methodsOf(sharded), methodsOf(single));
+
+  // And each one actually reaches that agent's own file rather than a
+  // shared one: the routing is the isolation.
+  const entry = await sharded.append('ava', 'the rookery survey is quarterly', { about: ['rookery'] });
+  assert.equal((await sharded.pin!('ava', entry.id)).pinned, true);
+  assert.deepEqual((await sharded.pinned!('ava')).map((held) => held.id), [entry.id]);
+  assert.deepEqual((await sharded.topics!('ava')).map((topic) => topic.name), ['rookery']);
+  assert.deepEqual((await sharded.list('juno')).entries, []);
+  assert.match(await readFile(path.join(dir, 'ava', 'memory.jsonl'), 'utf8'), /rookery survey/);
 });

@@ -1,5 +1,6 @@
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { isSymlinkedStatePath, symlinkedStateDirectoryMessage, symlinkedStateFileMessage } from './state-directory.ts';
 
 import { describeCommandScope, parseCommandScope, sameScope, type CommandScope } from './commands.ts';
 import { parseToolGrant, sameToolGrant, type ToolGrant } from './grants.ts';
@@ -130,9 +131,105 @@ const WHITELIST_VERSION = 1;
 /** What one agent's file grants, as this store holds it in memory. */
 type Grants = AgentGrants;
 
-/** `<id>.whitelist.json`, beside the agent's soul in ~/.stratus/agents. */
+/**
+ * `<agentsDirectory>/<id>/whitelist.json` — inside the agent's own state
+ * directory, beside its sessions and its memories, rather than the
+ * `<id>.whitelist.json` file it used to be in the shared one.
+ *
+ * Per-agent *directory* rather than a per-agent file in a shared one is
+ * what step 15's layer A is: a store is opened on one agent's path, so
+ * there is no read that could return another agent's grants. The soul
+ * stays a file in the parent directory — it is the operator's input, not
+ * the agent's state.
+ *
+ * The one implementation of the rule. `@stratusagent/state`'s layout
+ * migration imports it rather than re-deriving the join, which is how the
+ * file the daemon reads and the file the migration writes cannot drift
+ * apart.
+ */
 export const whitelistPathFor = (directory: string, agentId: string): string =>
-  path.join(directory, `${agentId}.whitelist.json`);
+  path.join(directory, agentId, 'whitelist.json');
+
+/**
+ * Where the same grants lived before the per-agent directory —
+ * `<agentsDirectory>/<id>.whitelist.json`.
+ *
+ * Kept because the move needs a bracket: it happens with the daemon
+ * stopped, since a serving daemon of the older build holds its grants
+ * cached and would write a later revocation back to this path, leaving the
+ * moved file claiming a grant the operator had taken away. Until that
+ * bracket comes, the file is still here and still authoritative — see
+ * {@link resolveWhitelistPath}.
+ */
+export const LEGACY_WHITELIST_SUFFIX = '.whitelist.json';
+
+export const legacyWhitelistPathFor = (directory: string, agentId: string): string =>
+  path.join(directory, `${agentId}${LEGACY_WHITELIST_SUFFIX}`);
+
+/**
+ * The file that actually holds this agent's grants right now.
+ *
+ * The agent's own directory once the layout migration has run, and the old
+ * `<id>.whitelist.json` while it is still pending — a read that looked only
+ * at the new path in that window would report an agent with no standing
+ * grants at all, which is a misleading answer about a security-relevant
+ * list and, worse, the answer a *revocation* made through the still-serving
+ * old daemon would be hidden behind.
+ *
+ * Reads resolve; writes never do — `save` always writes the new path, so
+ * the daemon that owns the file after the move is the one that decides
+ * where it lives.
+ */
+export const resolveWhitelistPath = async (directory: string, agentId: string): Promise<string> => {
+  const current = whitelistPathFor(directory, agentId);
+  // Before either `stat` below, because both follow links: an `agents/<id>`
+  // pointing at another agent's directory resolves to *that* agent's
+  // `whitelist.json`, and every read through here — `grantsFor`, the policy,
+  // the audit listing — would report its standing permissions as this
+  // agent's. Refused on the read path as well as the write, since inheriting
+  // another identity's grants is the failure, not just recording them there.
+  const own = path.dirname(current);
+  if (await isSymlinkedStatePath(own)) {
+    throw new Error(symlinkedStateDirectoryMessage(own));
+  }
+  // And the grant file itself: a real `agents/<id>/` can hold a linked
+  // `whitelist.json`, which the `stat` below would follow and make
+  // authoritative — the migration would then see the destination as
+  // populated and archive the real legacy file, after which this agent
+  // reads another's unattended grants and writes its revocations through
+  // the link.
+  if (await isSymlinkedStatePath(current)) {
+    throw new Error(symlinkedStateFileMessage(current));
+  }
+  try {
+    await stat(current);
+    return current;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  const legacy = legacyWhitelistPathFor(directory, agentId);
+  // The same rule as `current` above, and the asymmetry is what made this
+  // reachable: the migration discovers legacy files with `Dirent.isFile()`,
+  // which reports a link as a link, so a symlinked `<id>.whitelist.json`
+  // is never moved — while this `stat` follows it and makes its target
+  // authoritative. The home is then stamped as migrated with the link
+  // still in place, this resolver keeps answering from outside the home,
+  // and `writeLegacy` opens and truncates whatever it points at.
+  if (await isSymlinkedStatePath(legacy)) {
+    throw new Error(symlinkedStateFileMessage(legacy));
+  }
+  try {
+    await stat(legacy);
+    return legacy;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  return current;
+};
 
 /**
  * Thrown by `remember` for an agent whose whitelist exists but could not be
@@ -187,8 +284,13 @@ export const createFileCommandWhitelist = (options: {
    * different views of a file somebody edited between them.
    */
   const cache = new Map<string, Promise<Grants>>();
-  /** Files that exist and could not be read, by agent — never written over. */
-  const unreadable = new Map<string, string>();
+  /**
+   * Files that exist and could not be read, by agent — never written over.
+   * The path is kept beside the reason because the read resolves it (see
+   * `resolveWhitelistPath`), and the refusal must name the file that
+   * actually failed rather than the one a write would have gone to.
+   */
+  const unreadable = new Map<string, { file: string; reason: string }>();
 
   const read = (agentId: string): Promise<Grants> => {
     const cached = cache.get(agentId);
@@ -200,6 +302,22 @@ export const createFileCommandWhitelist = (options: {
     return reading;
   };
 
+  /**
+   * The file's bytes, or undefined when there is no such file. Anything
+   * else — a permission, a directory in the way — is the caller's to
+   * report, because it means the grants exist and could not be read.
+   */
+  const readAt = async (file: string): Promise<string | undefined> => {
+    try {
+      return await readFile(file, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+      throw error;
+    }
+  };
+
   const readFresh = async (agentId: string): Promise<Grants> => {
     let scopes: CommandScope[] = [];
     let origins: OriginScope[] = [];
@@ -207,38 +325,59 @@ export const createFileCommandWhitelist = (options: {
     // The agent id is a validated invariant by the time it reaches any
     // path join (see 03) — it is a single path segment or it was refused
     // at the parse boundary, so this does not re-check it.
-    const file = whitelistPathFor(options.directory, agentId);
+    let file = await resolveWhitelistPath(options.directory, agentId);
     try {
-      const raw = await readFile(file, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<WhitelistFile>;
-      scopes = Array.isArray(parsed.scopes)
-        ? parsed.scopes.map(parseCommandScope).filter((scope): scope is CommandScope => scope !== undefined)
-        : [];
-      origins = Array.isArray(parsed.origins)
-        ? parsed.origins.map(parseOriginScope).filter((scope): scope is OriginScope => scope !== undefined)
-        : [];
-      tools = Array.isArray(parsed.tools)
-        ? parsed.tools.map(parseToolGrant).filter((grant): grant is ToolGrant => grant !== undefined)
-        : [];
+      let raw = await readAt(file);
+      if (raw === undefined) {
+        // Resolved, then gone: the exclusive migration renames the legacy
+        // `<id>.whitelist.json` into the agent's own directory, and a read
+        // that resolved just before it finds nothing at the path it was
+        // handed. Taking that as "this agent has no grants" is the most
+        // expensive wrong answer this file can give — it is cached for the
+        // process, and the next "always" writes that emptiness plus one
+        // new scope to the current path, over every grant the migration
+        // had just moved there. So the question is asked again: the second
+        // resolve sees the world after the rename. A path that comes back
+        // unchanged really is absent, which is the ordinary case of an
+        // agent that has never been granted anything.
+        const moved = await resolveWhitelistPath(options.directory, agentId);
+        if (moved !== file) {
+          file = moved;
+          raw = await readAt(file);
+        }
+      }
+      if (raw !== undefined) {
+        const parsed = JSON.parse(raw) as Partial<WhitelistFile>;
+        scopes = Array.isArray(parsed.scopes)
+          ? parsed.scopes.map(parseCommandScope).filter((scope): scope is CommandScope => scope !== undefined)
+          : [];
+        origins = Array.isArray(parsed.origins)
+          ? parsed.origins.map(parseOriginScope).filter((scope): scope is OriginScope => scope !== undefined)
+          : [];
+        tools = Array.isArray(parsed.tools)
+          ? parsed.tools.map(parseToolGrant).filter((grant): grant is ToolGrant => grant !== undefined)
+          : [];
+      }
     } catch (error) {
       // No whitelist means no stored scopes, and is not worth failing a
       // turn over: the fallback is asking a human, which is where an agent
-      // with no whitelist starts anyway. A whitelist that exists and will
-      // not read is the same to this call and not the same to the file:
-      // one hand-edited comma made a grant list read as empty with no line
-      // about it, and the next "always" wrote a single new scope over
-      // every grant it held. So it is said once, and `remember` refuses.
+      // with no whitelist starts anyway — that case reaches here as an
+      // `undefined` above, not as a throw. A whitelist that exists and
+      // will not read is the same to this call and not the same to the
+      // file: one hand-edited comma made a grant list read as empty with
+      // no line about it, and the next "always" wrote a single new scope
+      // over every grant it held. So it is said once, and `remember`
+      // refuses. The path named is the one that actually failed, which is
+      // why `file` is read here rather than resolved again.
       scopes = [];
       origins = [];
       tools = [];
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        const reason = error instanceof Error ? error.message : String(error);
-        unreadable.set(agentId, reason);
-        options.warn?.(
-          `${file} could not be read (${reason}); its scopes are ignored and "always" answers for ${agentId} `
-            + 'are not saved over it until it is fixed and the daemon restarted.',
-        );
-      }
+      const reason = error instanceof Error ? error.message : String(error);
+      unreadable.set(agentId, { file, reason });
+      options.warn?.(
+        `${file} could not be read (${reason}); its scopes are ignored and "always" answers for ${agentId} `
+          + 'are not saved over it until it is fixed and the daemon restarted.',
+      );
     }
     return { scopes, origins, tools };
   };
@@ -250,16 +389,45 @@ export const createFileCommandWhitelist = (options: {
    * loss the unreadable-file guard above exists to prevent.
    */
   const save = async (agentId: string, grants: Grants): Promise<void> => {
-    await mkdir(options.directory, { recursive: true });
+    // Whichever file is the agent's right now — see `resolveWhitelistPath`.
+    // A write that always took the new path would fork the list while the
+    // move is still pending.
+    const target = await resolveWhitelistPath(options.directory, agentId);
     const file: WhitelistFile = {
       version: WHITELIST_VERSION,
       scopes: grants.scopes,
       ...(grants.origins.length > 0 ? { origins: grants.origins } : {}),
       ...(grants.tools.length > 0 ? { tools: grants.tools } : {}),
     };
-    const target = whitelistPathFor(options.directory, agentId);
-    await writeFile(target, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-    await chmod(target, 0o600);
+    const body = `${JSON.stringify(file, null, 2)}\n`;
+    const current = whitelistPathFor(options.directory, agentId);
+    if (target === current) {
+      // The agent's own directory, owner-only like every other per-agent
+      // resource: it holds what this agent may do unattended.
+      //
+      // Never a symlink — see `isSymlinkedStateDirectory`. This is the call
+      // site where following one is worst: a link into another agent's
+      // directory makes two identities resolve the same `whitelist.json`,
+      // so each inherits what the other was granted unattended and a
+      // revocation for one silently revokes for both.
+      const directory = path.dirname(target);
+      if (await isSymlinkedStatePath(directory)) {
+        throw new Error(symlinkedStateDirectoryMessage(directory));
+      }
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      // `mkdir`'s mode applies only to what it creates, so an `agents/<id>/`
+      // an older build or an operator already left is whatever it was — and
+      // this file is the one saying what the agent may do unattended, so a
+      // group- or world-writable directory lets another local account
+      // replace it wholesale and hand the agent grants nobody approved.
+      // The memory and session stores tighten on the same reasoning; this
+      // was the third site of that rule and the one it mattered most at.
+      await chmod(directory, 0o700);
+      await writeFile(target, body, { mode: 0o600 });
+      await chmod(target, 0o600);
+    } else {
+      await writeLegacy(target, current, body);
+    }
     // The cache is updated only once the file holds the same thing, and the
     // direction that matters is revocation. Updating it first meant a write
     // that failed — a read-only mount, a full disk — still dropped the grant
@@ -271,6 +439,46 @@ export const createFileCommandWhitelist = (options: {
     // leading it. Writes are serialized per agent, so a reader mid-write
     // sees the old grants, which is what the file still says.
     cache.set(agentId, Promise.resolve(grants));
+  };
+
+  /**
+   * Write the old file *without* being able to create it.
+   *
+   * There is a gap between resolving the path and writing it, and the
+   * exclusive migration can rename the file away inside it. A plain
+   * `writeFile` would then recreate the old name after the move had already
+   * copied and stamped — leaving the grants the daemon now reads missing
+   * this write, and a legacy file on disk that makes the next `start()`
+   * refuse the home as un-migrated, forever, because the migration is
+   * recorded as done.
+   *
+   * Opening without `O_CREAT` closes it, because a rename moves the inode
+   * rather than the bytes: either the open succeeds and the write lands in
+   * that file — following it to its new name if the move happens next — or
+   * it fails with ENOENT because the move already happened, and the write
+   * goes to where the grants now live. Neither outcome leaves a file behind
+   * that nothing will read again.
+   */
+  const writeLegacy = async (legacy: string, current: string, body: string): Promise<void> => {
+    let handle;
+    try {
+      handle = await open(legacy, 'r+');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+      await mkdir(path.dirname(current), { recursive: true, mode: 0o700 });
+      await writeFile(current, body, { mode: 0o600 });
+      await chmod(current, 0o600);
+      return;
+    }
+    try {
+      await handle.chmod(0o600);
+      await handle.truncate(0);
+      await handle.write(body, 0, 'utf8');
+    } finally {
+      await handle.close();
+    }
   };
 
   /**
@@ -301,9 +509,9 @@ export const createFileCommandWhitelist = (options: {
 
   /** Nothing is written over a grant list nobody could read. */
   const refuseIfUnreadable = (agentId: string): void => {
-    const reason = unreadable.get(agentId);
-    if (reason !== undefined) {
-      throw new WhitelistUnreadableError(whitelistPathFor(options.directory, agentId), reason);
+    const failed = unreadable.get(agentId);
+    if (failed !== undefined) {
+      throw new WhitelistUnreadableError(failed.file, failed.reason);
     }
   };
 

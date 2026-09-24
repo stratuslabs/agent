@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, chmod, mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { isSymlinkedStatePath, symlinkedStateDirectoryMessage, symlinkedStateFileMessage } from '@stratusagent/permissions';
 
 import {
   applyMemoryPinBudget,
@@ -206,20 +207,49 @@ const parseMemoryRecords = (raw: string, filePath: string): MemoryFileRecords =>
 };
 
 /**
- * The trust each re-asserted entry now carries: the last record in file
- * order wins, which is the one total order no later writer can insert
- * itself into. Scoped to the entry's own agent — a re-assertion naming
- * another agent's entry is inert, so the per-agent boundary the store rests
- * on is not breached by a record in a shared file.
+ * The trust each re-asserted entry now carries: the one it was given last,
+ * by `createdAt` rather than by position in the file.
+ *
+ * File order was the rule while one append-only file had one writer
+ * discipline — every append landed after every earlier one, so the last
+ * line was the latest intent. The per-agent move broke that: the drain
+ * copies lines from the shared file into an agent's own, so a re-assertion
+ * an operator made *after* the copy read the source can be followed by that
+ * older line landing on top of it. Entries and tombstones survive a
+ * duplicate because they are set membership; a re-assertion is a value, and
+ * last-one-wins over a reordered file answers with the label the operator
+ * replaced. Reading by recorded time makes a duplicate harmless again,
+ * which is what the drain's "copy until it converges" already assumes.
+ *
+ * Unparseable or equal timestamps fall back to file order, so a
+ * hand-written line with no real clock behaves exactly as it used to.
+ * Scoped to the entry's own agent — a re-assertion naming another agent's
+ * entry is inert, so the per-agent boundary the store rests on is not
+ * breached by a record in a shared file.
  */
+const recordedAt = (value: string): number | undefined => {
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : at;
+};
+
+const notOlderThan = (candidate: string, current: string): boolean => {
+  const at = recordedAt(candidate);
+  const against = recordedAt(current);
+  return at === undefined || against === undefined ? true : at >= against;
+};
+
 const reassertedTrustFor = (records: MemoryFileRecords, agentId: string): Map<string, TrustLevel> => {
-  const reasserted = new Map<string, TrustLevel>();
+  const latest = new Map<string, MemoryReassertion>();
   for (const record of records.reassertions) {
-    if (record.agentId === agentId) {
-      reasserted.set(record.reasserts, record.trust);
+    if (record.agentId !== agentId) {
+      continue;
+    }
+    const current = latest.get(record.reasserts);
+    if (current === undefined || notOlderThan(record.createdAt, current.createdAt)) {
+      latest.set(record.reasserts, record);
     }
   }
-  return reasserted;
+  return new Map([...latest].map(([id, record]) => [id, record.trust]));
 };
 
 /**
@@ -336,15 +366,18 @@ const pinBudgetFor = (
 // Bumped when the row shape changes: an index stamped with an older version
 // is rebuilt from the record, which is the only cost a derived file has.
 // '2' added `trust` and `origin` columns and the `reasserted` table.
-// '3' added the `about`/`kind`/validity columns, tokenized `about` into the
+// '3' added `recorded_at` to `reasserted`, so the label a re-assertion wins
+// is decided by recorded time rather than by position in a file the
+// per-agent drain can reorder.
+// '4' added the `about`/`kind`/validity columns, tokenized `about` into the
 // searchable column, agent-scoped `forgotten`, the `revisions` table
 // supersession is computed from, and the `usage` counters.
-// '4' keyed `revisions` by (successor, agent): import preserves entry ids
+// '5' keyed `revisions` by (successor, agent): import preserves entry ids
 // while re-keying them to the importing agent, so one corpus imported for
 // two agents legitimately produces the same successor id twice.
-// '5' keyed `usage` the same way, for the same reason, and '6' `reasserted`
+// '6' keyed `usage` the same way, for the same reason, and '7' `reasserted`
 // — the last of the three id-keyed tables the same import makes ambiguous.
-const INDEX_SCHEMA_VERSION = '6';
+const INDEX_SCHEMA_VERSION = '7';
 
 // Loaded on first `search`, never at module load: see the note at the top.
 type SqliteModule = typeof import('node:sqlite');
@@ -387,6 +420,7 @@ CREATE TABLE IF NOT EXISTS reasserted (
   id TEXT NOT NULL,
   agent_id TEXT NOT NULL,
   trust TEXT NOT NULL,
+  recorded_at INTEGER,
   PRIMARY KEY (id, agent_id)
 );
 CREATE TABLE IF NOT EXISTS revisions (
@@ -480,8 +514,24 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
     'INSERT INTO memory_fts (tokens, id, agent_id, content, created_at, trust, origin, fields) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   );
   const insertForgotten = db.prepare('INSERT OR IGNORE INTO forgotten (id, agent_id) VALUES (?, ?)');
+  // The rule `notOlderThan` reads the file by, applied here too because
+  // this index is incremental and cannot re-sort what it has already
+  // applied: a re-assertion *older* than the one recorded must not take the
+  // label back, however late in the file it arrives.
+  //
+  // The column holds `recordedAt`'s answer — the instant, already parsed by
+  // the same function the file reader uses — rather than the timestamp
+  // text. SQL date functions are a second parser with its own precision
+  // (`unixepoch` truncates to the second, so two re-assertions made in the
+  // same second compared equal and `list` disagreed with `search`), and one
+  // rule read two ways is the defect this pair keeps producing. A NULL is a
+  // timestamp neither reader can parse, which falls through to "the later
+  // record wins" — the file order this read by before.
   const upsertReasserted = db.prepare(
-    'INSERT INTO reasserted (id, agent_id, trust) VALUES (?, ?, ?) ON CONFLICT(id, agent_id) DO UPDATE SET trust = excluded.trust',
+    'INSERT INTO reasserted (id, agent_id, trust, recorded_at) VALUES (?, ?, ?, ?) '
+    + 'ON CONFLICT(id, agent_id) DO UPDATE SET trust = excluded.trust, recorded_at = excluded.recorded_at '
+    + 'WHERE excluded.recorded_at IS NULL OR reasserted.recorded_at IS NULL '
+    + 'OR excluded.recorded_at >= reasserted.recorded_at',
   );
   const relabelEntry = db.prepare('UPDATE memory_fts SET trust = ? WHERE id = ? AND agent_id = ?');
   const deleteEntry = db.prepare('DELETE FROM memory_fts WHERE id = ? AND agent_id = ?');
@@ -503,8 +553,14 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
       continue;
     }
     if (isReassertionRecord(record)) {
-      upsertReasserted.run(record.reasserts, record.agentId, record.trust);
-      relabelEntry.run(record.trust, record.reasserts, record.agentId);
+      upsertReasserted.run(record.reasserts, record.agentId, record.trust, recordedAt(record.createdAt) ?? null);
+      // The label that won, which is not always this record's — see the
+      // upsert above. Relabelling with this one unconditionally would let
+      // an older re-assertion overwrite the entry it just lost to.
+      const winner = reassertedFor.get(record.reasserts, record.agentId) as { trust: string } | undefined;
+      if (winner !== undefined) {
+        relabelEntry.run(winner.trust, record.reasserts, record.agentId);
+      }
       continue;
     }
     // Pins never reach the index: `pinned` reads the record directly, and a
@@ -558,7 +614,62 @@ export interface FileMemoryStoreOptions {
    * testable otherwise, and neither is a `createdAt` tie.
    */
   now?: () => Date;
+  /**
+   * Whether the file's directory is dedicated Stratus state and may be
+   * created and tightened to owner-only.
+   *
+   * Off by default, and for the reason the session store gives: a
+   * caller-supplied path can sit in a shared parent — a project directory,
+   * `/tmp` in a test — and a store must never chmod one of those out from
+   * under whoever else uses it. On for `agents/<id>/`, which is one agent's
+   * own directory and is `0700` by contract; without it the first write for
+   * an agent whose directory does not exist yet creates it under the umask,
+   * so a home where memory happened before sessions had its per-agent
+   * directory world-readable.
+   */
+  ownedDirectory?: boolean;
 }
+
+/**
+ * Whether an append to `filePath` has to start with a newline of its own.
+ *
+ * A JSONL file whose last byte is not a newline — a torn write, a
+ * hand-edit, a process killed mid-append — fuses the next appended record
+ * onto the last one and makes a line that is not JSON, which takes the
+ * agent's *whole* memory file out of every list, search and audit until
+ * someone repairs it. Prefixing a newline when the last byte needs one
+ * keeps the record parseable, and if a concurrent append lands in between,
+ * the false-positive prefix is only a blank line, which every reader skips.
+ *
+ * Exported because three writers append to these files and only one of them
+ * is the store: the layout migration places the shared file's records
+ * directly, and the cwd importer does the same for a project-local one.
+ * Both wrote a bare `\n`-joined block, so either could be the append that
+ * fuses — and a migration that corrupts the file it is rescuing is the
+ * worst version of this bug.
+ */
+export const memoryAppendNeedsNewline = async (filePath: string): Promise<boolean> => {
+  let handle;
+  try {
+    handle = await open(filePath, 'r');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+  try {
+    const { size } = await handle.stat();
+    if (size === 0) {
+      return false;
+    }
+    const lastByte = new Uint8Array(1);
+    await handle.read(lastByte, 0, 1, size - 1);
+    return lastByte[0] !== 0x0a;
+  } finally {
+    await handle.close();
+  }
+};
 
 export const createFileMemoryStore = (
   filePath: string,
@@ -566,6 +677,53 @@ export const createFileMemoryStore = (
 ): AgentMemoryStore => {
   const now = options.now ?? (() => new Date());
   const indexPath = `${filePath}.index`;
+  /**
+   * The directory and the two files under it are this agent's own, never
+   * links to somewhere else.
+   *
+   * Its own function rather than the opening of `ensureDirectory`, because
+   * the reads never go through that one: `list` and `audit` call
+   * `readRecords` directly. A guard on the write path alone is a store that
+   * refuses to *place* a memory through a link while answering happily with
+   * whatever is on the far side of one — another agent's memories, or a
+   * file outside the home entirely. Which paths are this agent's is the
+   * same question in both directions, so it is asked in both.
+   *
+   * Refused rather than quarantined, like the session store and for the
+   * same reason: a memory this agent was told it had remembered must not
+   * live through a link somewhere else, and the chmod in `ensureDirectory`
+   * would tighten whatever it points at. A real directory says nothing
+   * about the files in it — a linked `memory.jsonl` puts the whole history
+   * outside the home, and a linked `.index` hands SQLite an external
+   * database to open, write and chmod.
+   */
+  const assertOwnedPaths = async (): Promise<void> => {
+    if (!options.ownedDirectory) {
+      return;
+    }
+    // See `isSymlinkedStateDirectory`, which owns the rule itself.
+    const dir = path.dirname(filePath);
+    if (await isSymlinkedStatePath(dir)) {
+      throw new Error(symlinkedStateDirectoryMessage(dir));
+    }
+    for (const candidate of [filePath, indexPath]) {
+      if (await isSymlinkedStatePath(candidate)) {
+        throw new Error(symlinkedStateFileMessage(candidate));
+      }
+    }
+  };
+
+  /** The directory, made and held to the posture its owner asked for. */
+  const ensureDirectory = async (): Promise<void> => {
+    const dir = path.dirname(filePath);
+    await assertOwnedPaths();
+    await mkdir(dir, { recursive: true, ...(options.ownedDirectory ? { mode: 0o700 } : {}) });
+    if (options.ownedDirectory) {
+      // `mkdir` only applies its mode when it creates, so an upgrade over a
+      // directory an earlier build left at 0755 would keep it.
+      await chmod(dir, 0o700);
+    }
+  };
   let db: SqliteDatabase | undefined;
 
   // The IMMEDIATE transaction serializes catch-up across processes, but not
@@ -580,6 +738,7 @@ export const createFileMemoryStore = (
   };
 
   const readRecords = async (): Promise<MemoryFileRecords> => {
+    await assertOwnedPaths();
     let raw: string;
     try {
       raw = await readFile(filePath, 'utf8');
@@ -602,31 +761,10 @@ export const createFileMemoryStore = (
   // needs one keeps the record parseable — and if a concurrent append lands
   // in between, the false-positive prefix is only a blank line, which every
   // reader skips.
-  const needsLeadingNewline = async (): Promise<boolean> => {
-    let handle;
-    try {
-      handle = await open(filePath, 'r');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return false;
-      }
-      throw error;
-    }
-    try {
-      const { size } = await handle.stat();
-      if (size === 0) {
-        return false;
-      }
-      const lastByte = new Uint8Array(1);
-      await handle.read(lastByte, 0, 1, size - 1);
-      return lastByte[0] !== 0x0a;
-    } finally {
-      await handle.close();
-    }
-  };
+  const needsLeadingNewline = (): Promise<boolean> => memoryAppendNeedsNewline(filePath);
 
   const appendRecord = async (record: MemoryRecord): Promise<void> => {
-    await mkdir(path.dirname(filePath), { recursive: true });
+    await ensureDirectory();
     try {
       await chmod(filePath, 0o600);
     } catch (error) {
@@ -647,7 +785,7 @@ export const createFileMemoryStore = (
       return db;
     }
     const { DatabaseSync } = await loadSqlite();
-    await mkdir(path.dirname(indexPath), { recursive: true });
+    await ensureDirectory();
     const open = (): SqliteDatabase => {
       const opened = new DatabaseSync(indexPath);
       opened.exec('PRAGMA busy_timeout = 5000;');
@@ -668,6 +806,7 @@ export const createFileMemoryStore = (
         const columns = (name: string): Array<{ name: string; pk: number }> =>
           opened.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string; pk: number }>;
         return columns('memory_fts').some((column) => column.name === 'fields')
+          && columns('reasserted').some((column) => column.name === 'recorded_at')
           && columns('revisions').some((column) => column.name === 'agent_id' && column.pk > 0)
           && columns('usage').some((column) => column.name === 'agent_id' && column.pk > 0)
           && columns('reasserted').some((column) => column.name === 'agent_id' && column.pk > 0);
@@ -1176,4 +1315,66 @@ const noteRecalled = (
     }
   }
   return counted;
+};
+
+/**
+ * The same file store, one file per agent — `agents/<id>/memory.jsonl`
+ * rather than one `memory.jsonl` every agent's lines share.
+ *
+ * The routing is the isolation. Every method already takes the agent id, so
+ * the shared file was never how an agent's memories were *found*; it was
+ * only what made a mis-keyed read possible in the first place — a line whose
+ * `agentId` was wrong (a hand edit, a future bug) was another agent's
+ * memory sitting in the same file as yours. On its own path there is no
+ * such line to filter out.
+ *
+ * One store per agent, cached for the life of the process, because the
+ * store each one wraps holds a lazily-opened index connection: rebuilding
+ * it per call would re-open and re-verify the FTS index on every search.
+ * A roster is tens of agents, not thousands — and an id that never
+ * appears costs nothing, since the file store touches no disk until it is
+ * asked something.
+ *
+ * **Every method is forwarded, including the optional ones**, and a test
+ * asserts that against the wrapped store's own surface rather than against
+ * a list written here. The optional half is the trap: `pin`, `pinned`,
+ * `topics`, and `importEntries` are `?` on `AgentMemoryStore`, so a facade
+ * that omits one still satisfies the interface and still type-checks, and
+ * `withLegacyDefaultMemories` above spreads them only when it finds them.
+ * Omitting them here would leave the pinned core and the topic index
+ * permanently empty on the per-agent layout — two of the three injected
+ * blocks gone, with nothing failing.
+ */
+export const createShardedFileMemoryStore = (fileFor: (agentId: string) => string): AgentMemoryStore => {
+  const stores = new Map<string, AgentMemoryStore>();
+  const storeFor = (agentId: string): AgentMemoryStore => {
+    const existing = stores.get(agentId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    // `fileFor` is what asserts the id can key a path — see
+    // `assertPathSafeAgentId`. Throwing from here rather than returning an
+    // empty store is deliberate: an unsafe id must not read as "this agent
+    // remembers nothing".
+    // The agent's own directory, owner-only like every other per-agent
+    // resource — see `FileMemoryStoreOptions.ownedDirectory`.
+    const store = createFileMemoryStore(fileFor(agentId), { ownedDirectory: true });
+    stores.set(agentId, store);
+    return store;
+  };
+  return {
+    append: (agentId, content, options) => storeFor(agentId).append(agentId, content, options),
+    list: (agentId, options) => storeFor(agentId).list(agentId, options),
+    search: (agentId, query, options) => storeFor(agentId).search(agentId, query, options),
+    forget: (agentId, entryId) => storeFor(agentId).forget(agentId, entryId),
+    audit: (agentId) => storeFor(agentId).audit(agentId),
+    // The file store implements all of these unconditionally; the `!` is for
+    // the type, since each is optional on the interface.
+    reassertTrust: (agentId, entryId, trust) => storeFor(agentId).reassertTrust!(agentId, entryId, trust),
+    pin: (agentId, entryId) => storeFor(agentId).pin!(agentId, entryId),
+    unpin: (agentId, entryId) => storeFor(agentId).unpin!(agentId, entryId),
+    pinned: (agentId, options) => storeFor(agentId).pinned!(agentId, options),
+    topics: (agentId) => storeFor(agentId).topics!(agentId),
+    importEntries: (agentId, entries) => storeFor(agentId).importEntries!(agentId, entries),
+  };
 };

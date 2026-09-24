@@ -101,7 +101,7 @@ stratus dashboard                      # local browser dashboard
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |
 | `--approvals` | `run`/`chat`: tool approval mode — `always`, `ask` (a y/N on every call), `gated` (`safe` tools run, the rest ask), or `never`. Default: `gated` at a terminal; `always` when stdin is not one (a pipe, a script, `--stdin`), said once on stderr the first time a gated tool runs. `serve`: how the daemon reaches a human — `headless` (refuse gated calls) or `remote` (ask in Slack); overrides the config's `approvals.mode` |
-| `--max-turns` | Max provider turns per run (default 8) |
+| `--max-turns` | Max tool turns per run before it wraps up with a summary (default 40). `stratus serve` has no flag for it — the daemon reads [`maxTurns`](./config.md#how-many-turns-one-message-may-spend) from a trusted config |
 | `--format` | `text` or `json`; `agent new` also accepts `soul` — a ready-to-edit soul file |
 | `--name` | `agent new`: the agent's name (omit to have one generated) |
 | `--instructions` | `agent new`: the agent's persona/instructions |

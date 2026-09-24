@@ -8,6 +8,8 @@ import type {
   Tool as AnthropicTool,
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
+  ContextOverflowError,
+  transcriptOf,
   isUnaddressedTurn,
   droppedImageNote,
   imagesWithinReplayBudget,
@@ -26,7 +28,28 @@ import {
 } from '@stratusagent/core';
 
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5';
-const DEFAULT_MAX_TOKENS = 4096;
+/**
+ * The per-turn output cap the API requires, when nothing else names one.
+ *
+ * 16k rather than the 4k this was: 4096 is a Claude-3-era number, and the
+ * current models take up to 128k. It is not a budget — nothing is spent
+ * for being allowed — so the only thing a low cap buys is a reply cut off
+ * at the cap, which the check at the end of `generate` now refuses rather
+ * than delivering as an answer. The two have to move together: made loud
+ * against a 4k ceiling, an ordinary long answer would fail instead of
+ * being quietly clipped.
+ *
+ * Why not the 128k ceiling, or the 64k the vendor guidance suggests for a
+ * streaming request: `generate` serves both paths — it streams only when
+ * the caller attached `onDelta` — and the SDK *refuses* a non-streaming
+ * request whose cap puts its estimated duration past ten minutes, before
+ * anything is sent ("Streaming is required for operations that may take
+ * longer than 10 minutes"). A default that large would break every host
+ * that calls `generate` without a delta sink. 16k clears that check, and
+ * an operator who wants the model's full reach raises `maxTokens` — on a
+ * streaming path, which is what the daemon runs.
+ */
+const DEFAULT_MAX_TOKENS = 16_000;
 // Session metadata key holding raw assistant turns, keyed by tool_use id.
 export const RAW_TURNS_METADATA_KEY = 'anthropicRawTurns';
 
@@ -53,7 +76,7 @@ export interface AnthropicProviderConfig {
   /** Defaults to claude-opus-5, Anthropic's most capable generally available model. */
   model?: string;
   name?: string;
-  /** Response token cap per turn (Anthropic requires one). Default 4096. */
+  /** Response token cap per turn (Anthropic requires one). Default 16000. */
   maxTokens?: number;
   /** Extra system prompt, rendered before the agent's own persona. */
   systemPrompt?: string;
@@ -238,6 +261,21 @@ const rejectsSystemMessages = (error: unknown): boolean =>
   error instanceof Anthropic.BadRequestError && /role .?system.? is not supported/i.test(error.message);
 
 /**
+ * The 400 the API answers with when the request did not fit the model's
+ * context window — `prompt is too long: 1053721 tokens > 1000000 maximum`.
+ *
+ * Matched on the API's own wording, like `rejectsSystemMessages` above and
+ * for the same reason: the SDK gives no code for it, and
+ * `invalid_request_error` covers every other malformed request too. Kept
+ * narrow on purpose — reading an unrelated 400 as an overflow would have
+ * the kernel throw away conversation history to "fix" a request that was
+ * wrong in some other way.
+ */
+const overflowedContext = (error: unknown): boolean =>
+  error instanceof Anthropic.BadRequestError
+  && /prompt is too long|exceeds? the maximum.*context|context.*too (?:long|large)/i.test(error.message);
+
+/**
  * The image block a 400 names, when it names one. The API spells the
  * offending block's address into the message —
  * `messages.3.content.0.image.source.base64.data: Could not process image`
@@ -347,7 +385,7 @@ const createAnthropicMessages = (
   /** Every image block sent, oldest first, with where it sits so it can give way. */
   imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }>;
 } => {
-  const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudget);
+  const replayed = imagesWithinReplayBudget(transcriptOf(request), imageReplayBudget);
   // Which session image each image block came from, so a rejection that
   // names a block can be answered on the session.
   const imageOf = new WeakMap<ContentBlockParam, ImageAttachment>();
@@ -379,7 +417,8 @@ const createAnthropicMessages = (
   const alreadyEmitted = (calls: ToolCall[] | undefined): boolean =>
     (calls ?? []).some((call) => emittedCallIds.has(call.id));
 
-  const messages = request.session.messages;
+  // The window when the session has one, the whole transcript otherwise.
+  const messages = transcriptOf(request);
   // The newest user message is the one the turn ends on; an unaddressed
   // turn's note follows it and no other — see `PromptTextOptions`.
   const latest = messages.findLast((message) => message.role === 'user');
@@ -615,6 +654,7 @@ export const createAnthropicProvider = ({
           max_tokens: maxTokens,
           ...(prompt.system.length > 0 ? { system: prompt.system } : {}),
           ...(prompt.tools.length > 0 ? { tools: prompt.tools } : {}),
+          ...(prompt.tools.length > 0 && request.toolChoice === 'none' ? { tool_choice: { type: 'none' as const } } : {}),
           // Claude Opus 5 thinks adaptively when `thinking` is omitted.
           ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
           messages: prompt.memoryMessage === undefined
@@ -731,6 +771,19 @@ export const createAnthropicProvider = ({
           response = await send(params);
           break;
         } catch (error) {
+          // The transcript did not fit. Not recoverable here — this adapter
+          // is handed the messages and does not get to decide which of
+          // them to send — so it is reported as the one provider failure
+          // the kernel can act on, and the kernel retries with a shorter
+          // window. Ahead of the two recoveries below because it is about
+          // the request's size rather than its shape: an overflowing
+          // request would fail the same way with its system message moved
+          // or an image dropped.
+          if (overflowedContext(error)) {
+            throw new ContextOverflowError(
+              `The conversation no longer fits ${model}'s context window (${error instanceof Error ? error.message : String(error)}).`,
+            );
+          }
           // No reset delta on either recovery: the API rejects the request
           // before generating, so nothing has streamed for a consumer to
           // discard.
@@ -776,6 +829,43 @@ export const createAnthropicProvider = ({
         request.onUsage?.(usage);
       }
 
+      // The budget ran out before Claude finished, so whatever arrived is a
+      // fragment. Judged here, ahead of the parts, because the shape of the
+      // fragment does not change the answer: a sentence that stops
+      // mid-word, and a `tool_use` whose JSON input the cap cut off, are
+      // the same outcome — and the second is the dangerous one, since a
+      // truncated input can still rebuild into a well-formed object missing
+      // half its arguments, which is a call the executor would run.
+      //
+      // Only the empty case used to reach a check at all, so a reply cut
+      // off after saying anything was returned as the turn's answer: posted
+      // to whoever asked, mid-thought, with the session recorded
+      // `completed` and nothing anywhere saying it had been cut. A turn
+      // nobody asked for gets no exemption — saying nothing is a decision
+      // it is allowed to make, and running out of budget is not one.
+      if (response.stop_reason === 'max_tokens') {
+        throw new Error(
+          `Claude stopped at the ${maxTokens}-token output cap before finishing (stop_reason max_tokens), `
+          + 'so the reply is a fragment and was not delivered. Ask for a shorter answer, or raise '
+          + 'maxTokens for this provider.',
+        );
+      }
+      // The other way a limit rather than the model ends a turn: the
+      // context window filled *during* generation, so what arrived is a
+      // fragment for the same reason and needs the same refusal. A
+      // documented `StopReason` in the SDK this package installs, and
+      // easily missed because the two read as one case and are not — this
+      // one is not fixed by lowering the reply's length, so the remedy
+      // sentence differs.
+      if (response.stop_reason === 'model_context_window_exceeded') {
+        throw new Error(
+          'Claude ran out of context part-way through its answer '
+          + '(stop_reason model_context_window_exceeded), so the reply is a fragment and was not '
+          + 'delivered. The conversation, not the answer, is what is too long: start a new one with '
+          + '`stratus session rollover`, or move this agent to a model with a bigger context window.',
+        );
+      }
+
       const { text, calls } = extractParts(response.content, mapping);
 
       for (const call of calls) {
@@ -790,17 +880,14 @@ export const createAnthropicProvider = ({
       if (parts.length === 0) {
         // Nothing said is the answer a turn nobody asked for may give — see
         // `RunInput.addressed` in core — but only when the turn ended of
-        // its own accord. Thinking that consumed the output budget before
-        // any text or tool call surfaced ends with `max_tokens` and no
-        // parts, and that is the exhaustion the usage accounting above
-        // already treats as a failed outcome, not a decision.
+        // its own accord. Budget exhaustion is one way it does not, and it
+        // never reaches here: the check above refuses it whether or not
+        // anything surfaced. What is left is a stop reason that is neither
+        // an ending nor an exhaustion — a refusal, a pause — which is not
+        // a decision to stay quiet either.
         const ended = response.stop_reason === 'end_turn' || response.stop_reason === 'stop_sequence';
         if (!isUnaddressedTurn(request.session) || !ended) {
-          throw new Error(
-            response.stop_reason === 'max_tokens'
-              ? 'Claude returned an empty response: the output budget was exhausted before any text or tool call (stop_reason max_tokens).'
-              : 'Claude returned an empty response.',
-          );
+          throw new Error('Claude returned an empty response.');
         }
       }
 

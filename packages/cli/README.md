@@ -75,7 +75,7 @@ Full reference with every subcommand:
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |
 | `--approvals` | `run`/`chat`: `always`, `ask`, or `never`. `serve`: `headless` (refuse gated calls) or `remote` (ask in Slack) |
-| `--max-turns` | Max provider turns per run (default 8) |
+| `--max-turns` | Max tool turns per run before it wraps up (default 40) |
 | `--format` | `text` or `json` |
 | `--idle-timeout` | `serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |
@@ -99,6 +99,13 @@ Project-local `stratus.config.json` outranks the global
 `~/.stratus/config.json`; stored sign-ins are endpoint-bound and never sent
 to endpoints a project config selects. Details:
 [Configuration](https://github.com/stratuslabs/agent/blob/main/docs/reference/config.md).
+
+Each agent's own state — its conversations, its memories, and what it may
+do unattended — lives in `~/.stratus/agents/<id>/`, owner-only, so no read
+can reach another agent's. What is in a home directory, and what an upgrade
+from the older shared files moves:
+[State layout](https://github.com/stratuslabs/agent/blob/main/docs/reference/state-layout.md)
+· [Updating](https://github.com/stratuslabs/agent/blob/main/docs/guides/updating.md).
 
 ## Optional packages
 

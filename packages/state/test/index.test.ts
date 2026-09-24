@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { ContextOverflowError, type Session } from '@stratusagent/core';
 import { mkdir, mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,12 +10,17 @@ import {
   declaredAgentIds,
   createFileMemoryStore,
   DuplicateAgentIdError,
+  globalConfigPath,
   loadConfigFile,
   loadRosterSouls,
   loadSoulFile,
   MAX_APPROVAL_TIMEOUT_MS,
-  memoryFilePath,
+  agentMemoryFilePath,
+  FALLBACK_ACTIVE_METADATA_KEY,
+  readTrustedConfigBlock,
   resolveAgentApprovals,
+  resolveAgentSlack,
+  validateConfigFile,
   resolveRuntimeConfig,
   saveCredentials,
 } from '../src/index.ts';
@@ -22,7 +28,7 @@ import {
 const tempHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-state-'));
 
 test('file memory store appends and lists per agent with read-time dedupe', async () => {
-  const store = createFileMemoryStore(memoryFilePath({ homeDir: tempHome }));
+  const store = createFileMemoryStore(agentMemoryFilePath({ homeDir: tempHome }, 'ava'));
   await store.append('ava', 'likes short answers');
   await store.append('scout', 'reads everything');
   const { entries } = await store.list('ava');
@@ -112,6 +118,70 @@ test('fallback stickiness is per session, never per pooled provider', async () =
   // The flaky session itself stays switched for good.
   const flakyAgain = await wrapped.generate({ session: makeSession('flaky') } as never);
   assert.equal((flakyAgain.parts[0] as { text: string }).text, 'fallback');
+});
+
+test('an overflowing transcript reaches the runner instead of spending the fallback switch', async () => {
+  // The wrapper catches every provider failure and switches the session to
+  // the fallback model for good. A context overflow is the one rejection
+  // that must not go that way: the runner answers it by trimming and
+  // retrying the SAME provider, so swallowing it here would spend a
+  // permanent model switch on a request that never needed another model,
+  // only a shorter one — and hand the fallback the same too-long
+  // transcript, which fails again wherever its window is smaller.
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session: Session = {
+    id: 'long',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  let fallbackCalls = 0;
+  const primary = {
+    name: 'primary',
+    async generate() {
+      throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
+    },
+  };
+  const fallback = {
+    name: 'fallback',
+    async generate() {
+      fallbackCalls += 1;
+      return { parts: [{ type: 'text' as const, text: 'fallback' }] };
+    },
+  };
+
+  const switches: unknown[] = [];
+  const wrapped = createFallbackWrappedProvider(
+    primary as never,
+    fallback as never,
+    (error) => switches.push(error),
+  );
+
+  await assert.rejects(
+    () => wrapped.generate({ session } as never),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+  assert.equal(fallbackCalls, 0, 'the fallback was never reached');
+  assert.deepEqual(switches, [], 'no switch was announced');
+  assert.equal(
+    session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY],
+    undefined,
+    'and the session was not marked switched',
+  );
+
+  // An ordinary provider failure still switches, as it always did.
+  const flaky = {
+    name: 'primary',
+    async generate() {
+      throw new Error('primary down');
+    },
+  };
+  const ordinary = createFallbackWrappedProvider(flaky as never, fallback as never, () => {});
+  const served = await ordinary.generate({ session: { ...session, id: 'flaky' } } as never);
+  assert.equal((served.parts[0] as { text: string }).text, 'fallback');
 });
 
 test('fallback stickiness survives a wrapper rebuild via session metadata', async () => {
@@ -333,7 +403,7 @@ test('the fallback switch persists before the fallback attempt begins', async ()
 
 test('the memory file is owner-only, pre-existing files included', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-mem-'));
-  const filePath = memoryFilePath({ homeDir: home });
+  const filePath = agentMemoryFilePath({ homeDir: home }, 'ava');
 
   // Simulate a file created earlier under a loose umask.
   await mkdir(path.dirname(filePath), { recursive: true });
@@ -463,6 +533,71 @@ test('two souls claiming one id refuse the roster, naming both files', async () 
   // Both files, so the collision can actually be fixed.
   assert.match(failure.message, /a-first\.md/);
   assert.match(failure.message, /b-second\.md/);
+});
+
+test('two ids that differ only in case are one directory, so the roster refuses them', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-case-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'a-first.md'), '---\nname: First\nid: Ava\n---\n\nYou are First.\n');
+  await writeFile(path.join(dir, 'b-second.md'), '---\nname: Second\nid: ava\n---\n\nYou are Second.\n');
+
+  // `agents/Ava/` and `agents/ava/` are one directory on macOS and Windows,
+  // and that directory holds the sessions, the memories, and the grant file
+  // that says what may run unattended. Refused on every platform: a souls
+  // directory is copied between machines, and the answer must not depend on
+  // which one loaded it.
+  const failure = await loadRosterSouls({ homeDir: home }, () => {}).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof DuplicateAgentIdError, `expected a typed refusal, got ${String(failure)}`);
+  assert.equal(failure.agentId, 'Ava');
+  assert.equal(failure.conflictingId, 'ava');
+  assert.match(failure.message, /a-first\.md/);
+  assert.match(failure.message, /b-second\.md/);
+  // Named as the case collision it is, not as two files claiming one string.
+  assert.match(failure.message, /differ only in case/);
+});
+
+test('two ids that differ only by Unicode normalization are one directory too', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-nfc-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  // The same name written two ways: one code point, and `e` followed by a
+  // combining acute. Distinct strings in JavaScript, one directory on
+  // APFS, which folds normalization as well as case — so a check that only
+  // lowercased let this pair straight through to sharing a whitelist.
+  const composed = 'caf\u00e9';
+  const decomposed = 'cafe\u0301';
+  assert.notEqual(composed, decomposed, 'the two spellings are different strings');
+  await writeFile(path.join(dir, 'a-first.md'), `---\nname: First\nid: ${composed}\n---\n\nYou are First.\n`);
+  await writeFile(path.join(dir, 'b-second.md'), `---\nname: Second\nid: ${decomposed}\n---\n\nYou are Second.\n`);
+
+  const failure = await loadRosterSouls({ homeDir: home }, () => {}).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof DuplicateAgentIdError, `expected a typed refusal, got ${String(failure)}`);
+  assert.equal(failure.agentId, composed);
+  assert.equal(failure.conflictingId, decomposed);
+  assert.match(failure.message, /a-first\.md/);
+  assert.match(failure.message, /b-second\.md/);
+});
+
+test('a soul claiming the built-in id in another case is ignored, not served', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-reserved-case-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'impostor.md'), '---\nname: Impostor\nid: Stratus\n---\n\nYou are not Stratus.\n');
+
+  const warnings: string[] = [];
+  const roster = await loadRosterSouls({ homeDir: home }, (message) => warnings.push(message));
+
+  // `agents/Stratus/` is the built-in agent's own state directory wherever
+  // case folds, so this is the reserved id, spelled differently.
+  assert.deepEqual(roster, []);
+  assert.match(warnings.join(' '), /reserved/);
 });
 
 test('an unreadable soul still degrades to a warning, unlike a duplicate', async () => {
@@ -1304,6 +1439,115 @@ test('an untrusted project config cannot choose the soul or the system prompt', 
   assert.equal(trusted.ignoredFromUntrustedConfig, undefined);
 });
 
+test('maxTokens is configurable, so a model with a lower output ceiling is not stranded', async () => {
+  // The adapter takes arbitrary model names and a `baseUrl` that may point
+  // at a proxy, so no single default is right for every model an operator
+  // might name — and one whose ceiling is under the default would have
+  // every request refused before generating, with nothing to say otherwise.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-maxtokens-'));
+  await mkdir(path.dirname(globalConfigPath({ homeDir: home })), { recursive: true });
+  await writeFile(
+    globalConfigPath({ homeDir: home }),
+    JSON.stringify({ provider: 'anthropic', model: 'some-proxied-model', maxTokens: 4096 }),
+  );
+
+  const resolved = await resolveRuntimeConfig(
+    {},
+    { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-real' } },
+  );
+  assert.equal(resolved.provider, 'anthropic');
+  assert.equal(resolved.provider === 'anthropic' ? resolved.maxTokens : undefined, 4096);
+
+  // And it reaches the fallback, which is where it matters most: the
+  // setting exists for a model whose ceiling is under the default, and a
+  // fallback left on the default fails every request from the moment it
+  // takes over — the same compatibility problem, deferred to the worst
+  // moment to meet it.
+  await writeFile(
+    globalConfigPath({ homeDir: home }),
+    JSON.stringify({
+      provider: 'anthropic',
+      model: 'claude-opus-5',
+      maxTokens: 4096,
+      fallbackProvider: 'anthropic',
+      fallbackModel: 'some-proxied-model',
+    }),
+  );
+  const withFallback = await resolveRuntimeConfig(
+    {},
+    { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-real' } },
+  );
+  assert.equal(withFallback.provider === 'anthropic' ? withFallback.maxTokens : undefined, 4096);
+  assert.equal(
+    withFallback.provider === 'anthropic' ? withFallback.fallback?.maxTokens : undefined,
+    4096,
+    'the fallback runs under the same cap as the primary',
+  );
+
+  // Absent means the adapter's own default — the key exists to override
+  // it, not to have every install state it.
+  await writeFile(
+    globalConfigPath({ homeDir: home }),
+    JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5' }),
+  );
+  const defaulted = await resolveRuntimeConfig(
+    {},
+    { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-real' } },
+  );
+  assert.equal(defaulted.provider === 'anthropic' ? defaulted.maxTokens : 'wrong provider', undefined);
+
+  // Refused rather than clamped: the API rejects a cap that is not a
+  // positive integer, so a bad value fails every turn before generating.
+  for (const bad of [0, -1, 2.5, '4096', null] as const) {
+    await writeFile(globalConfigPath({ homeDir: home }), JSON.stringify({ maxTokens: bad }));
+    await assert.rejects(
+      () => loadConfigFile(globalConfigPath({ homeDir: home })),
+      /Invalid maxTokens in config .*Use a whole number of output tokens, 1 or more\./,
+      `maxTokens: ${JSON.stringify(bad)} should be refused`,
+    );
+  }
+});
+
+test('maxTurns is a trusted-config key, and a value that would wedge every turn is refused', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-turns-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-turns-project-'));
+  await mkdir(path.dirname(globalConfigPath({ homeDir: home })), { recursive: true });
+
+  // A runaway *and cost* guard, so both directions are the operator's to
+  // set: a clone that raised it would spend their tokens on however long a
+  // loop it asked for, and one that set it to 1 would fail every turn the
+  // daemon serves.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ maxTurns: 500 }));
+  const untrusted = await readTrustedConfigBlock('maxTurns', { homeDir: home, cwd: project });
+  assert.equal(untrusted.status, 'untrusted');
+
+  // And a project file that says nothing about it does not make the
+  // operator's own ceiling disappear — the global file is still the answer.
+  await writeFile(globalConfigPath({ homeDir: home }), JSON.stringify({ maxTurns: 24 }));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ model: 'gpt-4.1-mini' }));
+  const fellThrough = await readTrustedConfigBlock('maxTurns', { homeDir: home, cwd: project });
+  assert.deepEqual(
+    fellThrough.status === 'present' ? fellThrough.value : fellThrough.status,
+    24,
+  );
+
+  const trusted = await readTrustedConfigBlock('maxTurns', { homeDir: home, cwd: home });
+  assert.deepEqual(trusted.status === 'present' ? trusted.value : trusted.status, 24);
+
+  // Refused, not clamped or dropped. The ceiling is tested before the
+  // provider call, so 0 fails turn 1 of every dispatch — an install where
+  // no agent answers anything and the only clue is "exceeded the maximum
+  // of 0 provider turns".
+  for (const bad of [0, -1, 1.5, '8', null] as const) {
+    await writeFile(globalConfigPath({ homeDir: home }), JSON.stringify({ maxTurns: bad }));
+    await assert.rejects(
+      () => loadConfigFile(globalConfigPath({ homeDir: home })),
+      /Invalid maxTurns in config .*Use a whole number of provider turns, 1 or more\./,
+      `maxTurns: ${JSON.stringify(bad)} should be refused`,
+    );
+  }
+});
+
 test('a config that is simply not there leaves the id check with nothing to report', async () => {
   // `declaredAgentIds` pins the global config on purpose, and pinning is
   // what turns "no file" into a rejection. On a machine where `stratus
@@ -1315,7 +1559,10 @@ test('a config that is simply not there leaves the id check with nothing to repo
 
   const absent = await declaredAgentIds({ homeDir: home, cwd: home, processEnv: {} }, configPath);
   assert.deepEqual(absent.unread, []);
-  assert.ok(absent.ids.has('stratus'));
+  assert.ok(absent.holds('stratus'));
+  // And by the rule the filesystem uses, not by the exact string: an id
+  // is claimed against what would name the same directory.
+  assert.ok(absent.holds('Stratus'));
 
   // A config that exists and will not parse is the other case, and stays
   // reported: there the ids really are unchecked.
@@ -1328,4 +1575,26 @@ test('a config that is simply not there leaves the id check with nothing to repo
   await writeFile(configPath, JSON.stringify({ soul: path.join(home, 'missing.md') }));
   const dangling = await declaredAgentIds({ homeDir: home, cwd: home, processEnv: {} }, configPath);
   assert.deepEqual(dangling.unread, ['the configured default soul']);
+});
+
+test('the slack block sets each agent\'s reply mode, per agent over the default, and final when unset', () => {
+  const config = validateConfigFile({
+    slack: { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {} } },
+  }, 'test-config');
+  assert.deepEqual(config.slack, { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {} } });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'ava'), { replies: 'stream' });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'bea'), { replies: 'final' });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'cy'), { replies: 'stream' });
+  // No block at all: the default is the reply posted once, finished.
+  assert.deepEqual(resolveAgentSlack(undefined, 'ava'), { replies: 'final' });
+  // A misspelling is refused rather than read as the default, which would
+  // look like the setting silently did nothing.
+  assert.throws(
+    () => validateConfigFile({ slack: { replies: 'streaming' } }, 'test-config'),
+    /Invalid slack\.replies in config test-config: expected "final" or "stream", received "streaming"\./,
+  );
+  assert.throws(
+    () => validateConfigFile({ slack: { agents: { ava: { replies: 'live' } } } }, 'test-config'),
+    /Invalid slack\.agents\.ava\.replies/,
+  );
 });

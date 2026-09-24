@@ -1,9 +1,17 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import { originOf, type JsonObject, type JsonValue, type Plugin, type Session, type Tool } from '@stratusagent/core';
+import {
+  originOf,
+  type AgentWorkspaces,
+  type JsonObject,
+  type JsonValue,
+  type Plugin,
+  type Session,
+  type Tool,
+} from '@stratusagent/core';
 import { assertRequestAllowed, egressPolicyFrom, type EgressPolicy } from '@stratusagent/egress';
-import { resolvePluginAgentConfig, type OptionalModuleHost } from '@stratusagent/plugins';
+import { resolvePluginAgentConfig, workspacePreparer, type OptionalModuleHost } from '@stratusagent/plugins';
 
 import { createPlaywrightDriver, type BrowserDriver, type PageLike, type RouteLike } from './driver.ts';
 import { BrowserSessionPool } from './sessions.ts';
@@ -32,7 +40,11 @@ export interface BrowserPluginConfig extends JsonObject {
   maxContexts?: number;
   maxTextBytes?: number;
   navigationTimeoutMs?: number;
-  /** Supplied by the host: `~/.stratus/workspaces`, one directory per agent. */
+  /**
+   * A root this plugin appends the agent id to. Only an operator sets it
+   * now — the host answers per agent through the `workspaces` seam — and
+   * setting it still relocates where screenshots land.
+   */
   workspaceRoot?: string;
 }
 
@@ -43,14 +55,24 @@ const asNumber = (value: JsonValue | undefined, fallback: number): number =>
 // raise it — a cap the model can lift by naming a bigger number is not one.
 const narrowed = (requested: JsonValue | undefined, cap: number): number => Math.min(asNumber(requested, cap), cap);
 
-const settingsFor = (config: JsonObject, session: Session) => {
+const settingsFor = (config: JsonObject, session: Session, workspaces: AgentWorkspaces | undefined) => {
   const resolved = resolvePluginAgentConfig(config, session.agent.id);
   const policy = egressPolicyFrom(resolved);
+  const workspaceRoot = typeof resolved.workspaceRoot === 'string' ? resolved.workspaceRoot : undefined;
   return {
     policy,
     maxTextBytes: asNumber(resolved.maxTextBytes, DEFAULT_MAX_TEXT_BYTES),
     navigationTimeoutMs: asNumber(resolved.navigationTimeoutMs, DEFAULT_NAVIGATION_TIMEOUT_MS),
-    workspaceRoot: typeof resolved.workspaceRoot === 'string' ? resolved.workspaceRoot : undefined,
+    // The resolver, not its answer, and every tool here takes these
+    // settings: asking creates the workspace and settles its permissions,
+    // so resolving eagerly would let a workspace that cannot be made stop
+    // `browser.goto`, `browser.read`, a click or a keystroke — none of
+    // which writes a file. Only `browser.screenshot` asks.
+    //
+    // Resolved per call and through the shared rule: appending the agent id
+    // here is what made this plugin one of five copies of a layout that
+    // then moved. See `workspaceResolver`, whose preparing twin this is.
+    workspace: (): string | undefined => workspacePreparer(workspaces, workspaceRoot)?.(session.agent.id),
   };
 };
 
@@ -256,25 +278,28 @@ const navigate = async (
 };
 
 const screenshotPathFor = async (
-  workspaceRoot: string | undefined,
-  session: Session,
+  workspace: string | undefined,
   now: number,
 ): Promise<string> => {
-  if (!workspaceRoot) {
+  if (!workspace) {
     throw new Error(
       'browser.screenshot has nowhere to write. Set workspaceRoot for @stratusagent/tool-browser, '
       + 'or run through a daemon that supplies it.',
     );
   }
-  // One directory per agent, under the workspace root the host resolved:
-  // an agent's output is that agent's, and a shared scratch directory is
-  // two agents reading each other's screenshots.
-  const directory = path.join(workspaceRoot, session.agent.id, 'screenshots');
+  // Inside the agent's own workspace, which the host resolved: an agent's
+  // output is that agent's, and a shared scratch directory is two agents
+  // reading each other's screenshots.
+  const directory = path.join(workspace, 'screenshots');
   await mkdir(directory, { recursive: true });
   return path.join(directory, `${new Date(now).toISOString().replace(/[:.]/g, '-')}.png`);
 };
 
-const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
+const createTools = (
+  config: JsonObject,
+  runtime: BrowserRuntime,
+  workspaces: AgentWorkspaces | undefined,
+): Tool[] => {
   const goto: Tool = {
     name: 'browser.goto',
     description: 'Open a URL in this conversation’s browser page.',
@@ -290,7 +315,7 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       required: ['url'],
     },
     async execute(input, session) {
-      const settings = settingsFor(config, session);
+      const settings = settingsFor(config, session, workspaces);
       const page = await runtime.pageFor(session);
       const status = await navigate(page, String(input.url ?? ''), settings.policy, settings.navigationTimeoutMs);
       // Everything that can still fail first, and the drain last: the
@@ -318,7 +343,7 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       properties: { url: { type: 'string' }, maxBytes: { type: 'number' } },
     },
     async execute(input, session) {
-      const settings = settingsFor(config, session);
+      const settings = settingsFor(config, session, workspaces);
       const page = await runtime.pageFor(session);
       if (typeof input.url === 'string' && input.url.length > 0) {
         await navigate(page, input.url, settings.policy, settings.navigationTimeoutMs);
@@ -350,12 +375,12 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       properties: { url: { type: 'string' }, fullPage: { type: 'boolean' } },
     },
     async execute(input, session) {
-      const settings = settingsFor(config, session);
+      const settings = settingsFor(config, session, workspaces);
       const page = await runtime.pageFor(session);
       if (typeof input.url === 'string' && input.url.length > 0) {
         await navigate(page, input.url, settings.policy, settings.navigationTimeoutMs);
       }
-      const target = await screenshotPathFor(settings.workspaceRoot, session, Date.now());
+      const target = await screenshotPathFor(settings.workspace(), Date.now());
       await page.screenshot({ path: target, fullPage: input.fullPage === true });
       // `file`, because that is the key a channel already acts on: an ok
       // result carrying `file` (or `files`) is delivered as an attachment,
@@ -425,7 +450,7 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       return origin;
     },
     async execute(input, session) {
-      const settings = settingsFor(config, session);
+      const settings = settingsFor(config, session, workspaces);
       const judgedOn = runtime.reportedOrigins.get(session.id);
       runtime.reportedOrigins.delete(session.id);
       // Opening the page is not free: this may launch Chromium and build a
@@ -528,7 +553,9 @@ export const createBrowserPlugin = (
       );
     },
     async pageFor(session) {
-      const settings = settingsFor(config, session);
+      // No workspaces seam here on purpose: this path wants the agent's
+      // egress policy, and nothing under it writes a file.
+      const settings = settingsFor(config, session, undefined);
       // The agent's own policy decides which browser serves it: a proxy is
       // chosen when Chromium launches, so an agent whose config narrows the
       // address policy needs a browser launched under that policy rather
@@ -549,7 +576,7 @@ export const createBrowserPlugin = (
   return {
     name: '@stratusagent/tool-browser',
     setup(context) {
-      for (const tool of createTools(config, runtime)) {
+      for (const tool of createTools(config, runtime, context.workspaces)) {
         context.tools.register(tool);
       }
     },

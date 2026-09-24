@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-import { ToolRegistry, type JsonObject, type Session, type Tool } from '@stratusagent/core';
+import { ToolRegistry, type AgentWorkspaces, type JsonObject, type Session, type Tool } from '@stratusagent/core';
 
 import {
   createBrowserPlugin,
@@ -108,10 +108,14 @@ const sessionFor = (id: string, agentId = 'ava'): Session => ({
   updatedAt: new Date().toISOString(),
 });
 
-const pluginWith = async (config: JsonObject, recorder: Recorder) => {
+const pluginWith = async (config: JsonObject, recorder: Recorder, workspaces?: AgentWorkspaces) => {
   const tools = new ToolRegistry();
   const plugin = createBrowserPlugin(config, { driver: fakeDriver(recorder) });
-  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  await plugin.setup({
+    bus: { emit: async () => undefined, subscribe: () => () => undefined } as never,
+    tools,
+    ...(workspaces !== undefined ? { workspaces } : {}),
+  });
   return { plugin, tools, tool: (name: string) => tools.get(name) as Tool };
 };
 
@@ -339,6 +343,31 @@ test('every request the page makes faces the scheme policy, not only the navigat
   assert.match(String(result.text), /kettle is in the cupboard/);
 });
 
+test('a workspace that cannot be made stops screenshots and nothing else', async (t) => {
+  // Preparing the workspace is the half that can fail, and every browser
+  // tool takes the same settings — so asking for it eagerly would let an
+  // obstacle at `agents/<id>/workspace` take out navigation and reading,
+  // neither of which writes a file.
+  const refusing: AgentWorkspaces = {
+    forAgent: (agentId) => `/nowhere/agents/${agentId}/workspace`,
+    prepare: () => {
+      throw new Error('agents/ava/workspace cannot be made');
+    },
+    all: async () => [],
+  };
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, emptyRecorder(), refusing);
+  t.after(() => plugin.dispose());
+
+  const read = await tool('browser.read').execute({ url: 'https://example.com/' }, sessionFor('s', 'ava')) as JsonObject;
+  assert.match(String(read.text), /kettle/);
+
+  // Only the one that needs a file says so.
+  await assert.rejects(
+    () => tool('browser.screenshot').execute({ url: 'https://example.com/' }, sessionFor('s', 'ava')),
+    /cannot be made/,
+  );
+});
+
 test('a screenshot lands in the agent’s own workspace and comes back as a path', async (t) => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-shots-'));
   const recorder = emptyRecorder();
@@ -365,6 +394,21 @@ test('a screenshot lands in the agent’s own workspace and comes back as a path
     () => homeless.tool('browser.screenshot').execute({ url: 'https://example.com/' }, sessionFor('s')),
     /nowhere to write/,
   );
+
+  // And with no configured root, the host answers — through a layout that
+  // puts the id in the middle, which no join of a root and an id reaches.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shots-seam-'));
+  const hosted = await pluginWith({ allowedHosts: ['example.com'] }, emptyRecorder(), {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    all: async () => [],
+  });
+  t.after(() => hosted.plugin.dispose());
+  const seated = await hosted.tool('browser.screenshot').execute(
+    { url: 'https://example.com/' },
+    sessionFor('s', 'ava'),
+  ) as JsonObject;
+  assert.ok(String(seated.file).startsWith(path.join(home, 'agents', 'ava', 'workspace', 'screenshots') + path.sep), String(seated.file));
 });
 
 test('every tool carries the risk the manifest declares, acting included', async () => {

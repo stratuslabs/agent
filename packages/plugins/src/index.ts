@@ -79,3 +79,5 @@ export {
   type LedgerGuard,
   type TaintedWriteLedger,
 } from './provenance.ts';
+
+export { workspaceResolver, workspacePreparer, allAgentWorkspaces } from './workspace.ts';

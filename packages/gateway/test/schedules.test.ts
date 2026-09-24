@@ -11,6 +11,7 @@ import {
   type ScheduleRecord,
 } from '@stratusagent/agents';
 import { createPermissionPolicy } from '@stratusagent/permissions';
+import { fleetDbPath } from '@stratusagent/state';
 import {
   createGateway,
   createSchedulerRuntime,
@@ -954,8 +955,7 @@ test('an external message cannot ride a live firing\'s session to borrow the gra
   await gateway.start();
 
   // Create a schedule directly in the store, due now, with a destination.
-  const { SqliteScheduleStore, defaultSessionDbPath } = await import('../src/index.ts');
-  const store = new SqliteScheduleStore(defaultSessionDbPath({ homeDir: home }));
+  const store = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
   store.insert({
     id: 'sched-1',
     agentId: 'ava',
@@ -993,7 +993,7 @@ test('an external message cannot ride a live firing\'s session to borrow the gra
 
 test('cancelling from the operator surface stops the next firing', async () => {
   const home = await newHome();
-  const store = new SqliteScheduleStore(path.join(home, '.stratus', 'sessions.db'));
+  const store = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
   store.insert(record({ id: 'sched-1', nextFireAt: new Date(Date.now() + 60_000).toISOString() }));
   store.close();
 

@@ -29,12 +29,14 @@ import {
   warnOnUntrustedConfig,
   describePrincipals,
   loadServePrincipals,
+  loadServeSlack,
   currentLogPosition,
   describeApprovalCall,
   eventDetail,
   formatEvent,
   truncateRedirectLogs,
   installService,
+  readServiceCommand,
   readServiceStatus,
   serviceUnitPath,
   startService,
@@ -56,7 +58,7 @@ import {
   tailLog,
   npmNeedsShell,
 } from '../src/index.ts';
-import { memoryFilePath, stateFilePath } from '@stratusagent/state';
+import { agentMemoryFilePath, fleetDbPath, stateFilePath } from '@stratusagent/state';
 import type { Session, Tool } from '@stratusagent/core';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -1810,7 +1812,7 @@ test('runCli persists agent memory across runs through memory.remember', async (
   });
 
   assert.equal(firstRun, 0);
-  const stored = (await readFile(path.join(tempHome, '.stratus', 'memory.jsonl'), 'utf8'))
+  const stored = (await readFile(agentMemoryFilePath({ homeDir: tempHome }, 'stratus'), 'utf8'))
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line));
@@ -2517,6 +2519,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
     },
     api: { enabled: true, port: 4123 },
     principals: { slackUsers: ['U01DYLAN'], agents: { blair: { slackUsers: ['U01BLAIR'] } } },
+    slack: { replies: 'stream', agents: { blair: { replies: 'final' } } },
   };
   // The scalar preferences setup has no menu for either — same defect, and
   // an operator who turned caching off was silently put back on it.
@@ -2541,6 +2544,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
   assert.deepEqual(written.approvals, carried.approvals);
   assert.deepEqual(written.api, carried.api);
   assert.deepEqual(written.principals, carried.principals);
+  assert.deepEqual(written.slack, carried.slack);
   assert.equal(written.promptCache, false);
   assert.equal(written.promptCacheTtl, '1h');
   // The keys setup does own still get written, so this is a merge rather
@@ -3853,7 +3857,7 @@ test('discovery honors a secondary anthropic credential bound endpoint', async (
   assert.equal(anthropicUrls[0], 'https://ant-proxy.test/v1/models?limit=100');
 });
 
-test('legacy per-directory memories migrate into the global store on first run', async () => {
+test('legacy per-directory memories migrate into the agent\'s own store on first run', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const projectDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
   // Memories written by a pre-0.2.1 install, in the old per-directory spot.
@@ -3877,8 +3881,8 @@ test('legacy per-directory memories migrate into the global store on first run',
   });
   assert.equal(exitCode, 0);
 
-  // The fact now lives in the global store…
-  const migrated = (await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8'))
+  // The fact now lives in that agent's own store…
+  const migrated = (await readFile(agentMemoryFilePath({ homeDir: home }, 'demo-agent'), 'utf8'))
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line));
@@ -3896,7 +3900,7 @@ test('legacy per-directory memories migrate into the global store on first run',
     streams: createStreams().streams,
     env: { cwd: projectDir, homeDir: home, processEnv: {} },
   });
-  const after = (await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8'))
+  const after = (await readFile(agentMemoryFilePath({ homeDir: home }, 'demo-agent'), 'utf8'))
     .split('\n')
     .filter((line) => line.trim().length > 0);
   assert.equal(after.length, 1);
@@ -3912,11 +3916,12 @@ test('an interrupted memory migration finishes without duplicating facts', async
     createdAt: new Date().toISOString(),
   };
   // Simulate a crash between append and rename: the claimed file still
-  // exists AND the fact already reached the global store.
+  // exists AND the fact already reached the agent's own store.
   await mkdir(path.join(projectDir, '.stratus'), { recursive: true });
   await writeFile(path.join(projectDir, '.stratus', 'memory.jsonl.migrating'), `${JSON.stringify(entry)}\n`);
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), `${JSON.stringify(entry)}\n`);
+  const destination = agentMemoryFilePath({ homeDir: home }, 'demo-agent');
+  await mkdir(path.dirname(destination), { recursive: true });
+  await writeFile(destination, `${JSON.stringify(entry)}\n`);
 
   const exitCode = await runCli({
     argv: ['run', 'hello'],
@@ -3926,7 +3931,7 @@ test('an interrupted memory migration finishes without duplicating facts', async
   assert.equal(exitCode, 0);
 
   // Recovery completed the claim without re-importing the entry…
-  const globalLines = (await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8'))
+  const globalLines = (await readFile(destination, 'utf8'))
     .split('\n')
     .filter((line) => line.trim().length > 0);
   assert.equal(globalLines.length, 1);
@@ -4041,6 +4046,31 @@ test('serve names the agents no channel can ask for', async () => {
   // view.
   assert.match(output.stderr, /no channel can ask for /);
   assert.match(output.stderr, /wait out the \napproval timeout|wait out the approval timeout/);
+});
+
+test('serve warns at startup when a first-party package is older than the CLI', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-behind-'));
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      shutdownSignal: controller.signal,
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.6.0' : undefined,
+    },
+  });
+
+  assert.equal(code, 0);
+  // The daemon is where a stale adapter costs something, and the log is
+  // where someone asking "why does it ignore thread replies" looks.
+  assert.match(output.stderr, /Warning: @stratusagent\/channel-slack 0\.6\.0 is older than this CLI/);
 });
 
 test('serve keeps refusing gated calls when the approvals config cannot be read', async () => {
@@ -4519,6 +4549,48 @@ test('doctor --format json returns the same findings as data', async () => {
   assert.equal(report.provider.value, 'demo');
   assert.equal(report.slackPackageInstalled, true);
   assert.ok(report.problems.some((problem: string) => /offline demo model/.test(problem)));
+});
+
+test('doctor names a first-party package older than the CLI', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      // The reported shape: a CLI upgraded around `stratus update`, and the
+      // Slack adapter it loads left at the version setup first installed.
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.6.0' : undefined,
+    },
+  });
+
+  assert.match(output.stdout, /@stratusagent\/channel-slack 0\.6\.0 is older than this CLI/);
+  assert.match(output.stdout, /Run `stratus update` to bring it level/);
+});
+
+test('doctor says nothing about packages that match the CLI', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? CLI_VERSION : undefined,
+    },
+  });
+
+  assert.doesNotMatch(output.stdout, /older than this CLI/);
 });
 
 test('a run warns when an environment key overrides the subscription sign-in', async () => {
@@ -7751,6 +7823,74 @@ test('the unit runs where it was installed, so relative config paths still work'
   assert.match(unit, new RegExp(`WorkingDirectory=${project}`));
 });
 
+test('the unit carries the installing shell\'s PATH, so a Homebrew node and gh are found', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'darwin',
+    homeDir: home,
+    execPath: '/Users/ava/.nvm/versions/node/v22.14.0/bin/node',
+    scriptPath: '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    uid: 501,
+    // A relative entry, a duplicate, and an empty segment, as real shells have.
+    path: '/opt/homebrew/bin:.:/usr/bin::/opt/homebrew/bin:/bin',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  // The reported shape: launchd's default PATH has no /opt/homebrew/bin, so
+  // an agent's shell could not see node, npm, or gh on any Mac.
+  // Node's own directory first, relative entries gone, each entry once.
+  assert.match(
+    plist,
+    /<key>EnvironmentVariables<\/key>\s*<dict>\s*<key>PATH<\/key>\s*<string>\/Users\/ava\/\.nvm\/versions\/node\/v22\.14\.0\/bin:\/opt\/homebrew\/bin:\/usr\/bin:\/bin<\/string>/,
+  );
+  // Still read back the way `stratus update` and doctor read it.
+  const command = await readServiceCommand({ platform: 'darwin', homeDir: home });
+  assert.equal(command?.execPath, '/Users/ava/.nvm/versions/node/v22.14.0/bin/node');
+  assert.equal(command?.scriptPath, '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js');
+});
+
+test('a unit installed with no PATH keeps the service manager\'s default', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'darwin',
+    homeDir: home,
+    execPath: '/Users/ava/.nvm/versions/node/v22.14.0/bin/node',
+    scriptPath: '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    uid: 501,
+    // Only relative entries, as good as none.
+    path: '.:bin',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  // Node's directory alone would replace launchd's /usr/bin:/bin:/usr/sbin:/sbin
+  // rather than add to it, and a command could no longer find `ls`.
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  assert.doesNotMatch(plist, /EnvironmentVariables/);
+});
+
+test('service install writes the PATH of the shell it was run from into the systemd unit', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await runCli({
+    argv: ['service', 'install'],
+    streams: createStreams().streams,
+    env: {
+      cwd: home,
+      homeDir: home,
+      processEnv: { PATH: '/home/ava/.local/bin:/home/ava/100%/bin:/usr/bin' },
+      serviceRunner: stubServiceRunner,
+      servicePlatform: 'linux',
+    },
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  const line = /^Environment=(.*)$/m.exec(unit)?.[1];
+  // Quoted, and `%` doubled so systemd does not read it as a specifier.
+  assert.equal(line, JSON.stringify(`PATH=${path.dirname(process.execPath)}:/home/ava/.local/bin:/home/ava/100%%/bin:/usr/bin`));
+  const command = await readServiceCommand({ platform: 'linux', homeDir: home });
+  assert.equal(command?.argv.at(-2), 'serve');
+});
+
 test('a failed disable stops --no-login claiming the login trigger is gone', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const result = await installService(
@@ -8994,9 +9134,9 @@ test('parseCommand reads the schedules command and its cancel form', () => {
 
 test('stratus schedules lists the daemon database and cancel revokes a row', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-cli-'));
-  const { SqliteScheduleStore, defaultSessionDbPath } = await import('@stratusagent/gateway');
+  const { SqliteScheduleStore } = await import('@stratusagent/gateway');
   const env = { cwd: home, homeDir: home, processEnv: {} };
-  const store = new SqliteScheduleStore(defaultSessionDbPath({ homeDir: home }));
+  const store = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
   store.insert({
     id: 'sched-1',
     agentId: 'ava',
@@ -9032,6 +9172,26 @@ test('stratus schedules lists the daemon database and cancel revokes a row', asy
   const empty = createStreams();
   assert.equal(await runCli({ argv: ['schedules'], streams: empty.streams, env }), 0);
   assert.match(empty.output.stdout, /No schedules set/);
+  await rm(home, { recursive: true, force: true });
+});
+
+test('a schedule database that will not answer is reported, not read as empty', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-broken-'));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // `~/.stratus` as a regular file, so the `stat` on each schedule
+  // database fails with ENOTDIR rather than ENOENT. Swallowing that would
+  // print "No schedules set" over a fleet this command cannot see — and,
+  // worse, let `schedules cancel` report a missing id while the schedule
+  // and its standing destination grant stay live.
+  await writeFile(path.join(home, '.stratus'), 'not a directory');
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['schedules'], streams: listing.streams, env }), 1);
+  assert.doesNotMatch(listing.output.stdout, /No schedules set/);
+
+  const cancel = createStreams();
+  assert.equal(await runCli({ argv: ['schedules', 'cancel', 'sched-1'], streams: cancel.streams, env }), 1);
+  assert.doesNotMatch(cancel.output.stderr, /No schedule with id sched-1/);
   await rm(home, { recursive: true, force: true });
 });
 
@@ -9088,7 +9248,7 @@ test('parseCommand reads the grants command and its revoke form', () => {
   assert.throws(() => parseCommand(['grants', 'ava', '--tool', 'a']), /Unknown option: --tool/);
   assert.throws(() => parseCommand(['grants', 'ava', 'juno']), /Unexpected argument: juno/);
 
-  // The id is joined into `<id>.whitelist.json`, and the grant store takes it
+  // The id is joined into `<id>/whitelist.json`, and the grant store takes it
   // as an already-validated single segment. Refused here, at the boundary, so
   // no traversal reaches a file read — or, on a revoke, a file write.
   for (const escape of ['../../other', '../peer', 'a/b', '.hidden', '__proto__']) {
@@ -9120,7 +9280,7 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   assert.equal(parsed.agentId, 'ava');
   assert.deepEqual(parsed.scopes.map((row) => row.description), ['git push']);
   assert.deepEqual(parsed.tools.map((row) => row.tool), ['web.fetch']);
-  assert.match(parsed.source, /ava\.whitelist\.json$/);
+  assert.match(parsed.source, /ava[/\\]whitelist\.json$/);
 
   const revoke = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: revoke.streams, env }), 0);
@@ -9139,6 +9299,33 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   const empty = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'ava'], streams: empty.streams, env }), 0);
   assert.match(empty.output.stdout, /ava has no standing grants beyond the built-in safe list/);
+  await rm(home, { recursive: true, force: true });
+});
+
+test('stratus grants names the grant file it actually read while the move is pending', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-legacy-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const agents = path.join(home, '.stratus', 'agents');
+  await mkdir(agents, { recursive: true });
+  // The upgrade window: the older daemon still serving, so the grants are
+  // still under the old name and that is the file the store reads and
+  // writes. Reporting the new path here would name a source this command
+  // did not consult — and which does not exist — in the one output whose
+  // job is to say where an agent's standing grants come from.
+  await writeFile(
+    path.join(agents, 'ava.whitelist.json'),
+    `${JSON.stringify({ version: 1, scopes: [{ command: 'git', args: ['push'] }] })}\n`,
+  );
+
+  const asJson = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava', '--format', 'json'], streams: asJson.streams, env }), 0);
+  const parsed = JSON.parse(asJson.output.stdout) as { source: string; scopes: Array<{ description: string }> };
+  assert.deepEqual(parsed.scopes.map((row) => row.description), ['git push']);
+  assert.match(parsed.source, /ava\.whitelist\.json$/);
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: listing.streams, env }), 0);
+  assert.match(listing.output.stdout, /ava\.whitelist\.json/);
   await rm(home, { recursive: true, force: true });
 });
 
@@ -10946,12 +11133,150 @@ test('stratus memory export tightens an existing file before the corpus lands in
   assert.match(await readFile(dump, 'utf8'), /Likes jazz/);
 });
 
+test('stratus schedules reads where the rows are, not which database files exist', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-where-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const { SqliteScheduleStore } = await import('@stratusagent/gateway');
+  const { legacySessionDbPath, fleetDbPath: fleetPath } = await import('@stratusagent/state');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+
+  // An un-migrated home whose `fleet.db` exists anyway: a host that started
+  // the gateway itself opens the fleet stores before `start()` refuses the
+  // home, leaving that file with nothing in it. Reading "fleet.db exists"
+  // as "the move has happened" reports an empty fleet while every schedule
+  // is still live in the old database.
+  const legacy = new SqliteScheduleStore(legacySessionDbPath(env));
+  legacy.insert({
+    id: 'sched-1',
+    agentId: 'ava',
+    cadence: { kind: 'every', intervalMs: 3_600_000 },
+    prompt: 'check the repo',
+    createdAt: '2026-08-29T00:00:00.000Z',
+    nextFireAt: '2026-08-30T07:00:00.000Z',
+  });
+  legacy.close();
+  new SqliteScheduleStore(fleetPath(env)).close();
+
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['schedules'], streams: listed.streams, env }), 0, listed.output.stderr);
+  assert.match(listed.output.stdout, /sched-1 {2}\[ava\]/);
+});
+
+test('schedules lists what is in both databases, so a move in flight hides nothing', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-list-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const { SqliteScheduleStore } = await import('@stratusagent/gateway');
+  const { legacySessionDbPath, fleetDbPath: fleetPath } = await import('@stratusagent/state');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+
+  const row = (id: string, agentId: string) => ({
+    id,
+    agentId,
+    cadence: { kind: 'every', intervalMs: 3_600_000 },
+    prompt: 'check the repo',
+    createdAt: '2026-08-29T00:00:00.000Z',
+    nextFireAt: '2026-08-30T07:00:00.000Z',
+  }) as const;
+
+  // Mid-move: one row already copied into the fleet database and still in
+  // the legacy one, plus a row only the legacy file has. Resolving to a
+  // single file reports whichever it picked — and if the rename lands in
+  // the gap between resolving and opening, it reports an empty fleet while
+  // every row is safe in the other file.
+  const legacy = new SqliteScheduleStore(legacySessionDbPath(env));
+  legacy.insert(row('sched-both', 'ava'));
+  legacy.insert(row('sched-legacy', 'bea'));
+  legacy.close();
+  const fleet = new SqliteScheduleStore(fleetPath(env));
+  fleet.insert(row('sched-both', 'ava'));
+  fleet.insert(row('sched-fleet', 'cid'));
+  fleet.close();
+
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['schedules', '--format', 'json'], streams: listed.streams, env }), 0, listed.output.stderr);
+  const parsed = JSON.parse(listed.output.stdout) as { schedules: Array<{ id: string }> };
+  // Every id, each once: the migration copies by id, so a row caught
+  // mid-move is the same row in both places.
+  assert.deepEqual(parsed.schedules.map((record) => record.id).sort(), ['sched-both', 'sched-fleet', 'sched-legacy']);
+  await rm(home, { recursive: true, force: true });
+});
+
+test('cancelling a schedule the move has since copied takes the row out of both databases', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-race-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const { SqliteScheduleStore } = await import('@stratusagent/gateway');
+  const { legacySessionDbPath, fleetDbPath: fleetPath } = await import('@stratusagent/state');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+
+  const row = {
+    id: 'sched-1',
+    agentId: 'ava',
+    cadence: { kind: 'every', intervalMs: 3_600_000 },
+    prompt: 'check the repo',
+    destination: { channel: 'slack', to: 'C-ENG' },
+    createdAt: '2026-08-29T00:00:00.000Z',
+    nextFireAt: '2026-08-30T07:00:00.000Z',
+  } as const;
+  // The state a migration that has already copied leaves for a moment: the
+  // row in both files, because the legacy database is archived only after.
+  const legacy = new SqliteScheduleStore(legacySessionDbPath(env));
+  legacy.insert(row);
+  legacy.close();
+  const fleet = new SqliteScheduleStore(fleetPath(env));
+  fleet.insert(row);
+  fleet.close();
+
+  const cancelled = createStreams();
+  assert.equal(await runCli({ argv: ['schedules', 'cancel', 'sched-1'], streams: cancelled.streams, env }), 0, cancelled.output.stderr);
+  assert.match(cancelled.output.stdout, /Cancelled sched-1/);
+  assert.match(cancelled.output.stdout, /destination slack:C-ENG is revoked/);
+
+  // A row left in either database is a schedule that fires after the
+  // operator was told it was cancelled, carrying the standing destination
+  // grant the cancel was supposed to revoke.
+  for (const dbPath of [fleetPath(env), legacySessionDbPath(env)]) {
+    const after = new SqliteScheduleStore(dbPath);
+    const survivors = after.list();
+    after.close();
+    assert.deepEqual(survivors.map((record) => record.id), [], dbPath);
+  }
+});
+
+test('a shared memory file a pre-15a daemon leaves behind is folded in by any command, not once', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-drain-cli-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const shared = path.join(home, '.stratus', 'memory.jsonl');
+  const line = (id: string, content: string): string =>
+    `${JSON.stringify({ id, agentId: 'ava', content, createdAt: '2026-01-01T00:00:00.000Z' })}\n`;
+
+  // The upgrade: a shared file from before the per-agent layout. Any
+  // command folds it into the agent's own store.
+  await writeFile(shared, line('ava:memory:1', 'likes jazz'));
+  const first = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: first.streams, env }), 0, first.output.stderr);
+  assert.match(first.output.stdout, /likes jazz/);
+
+  // And again, because the daemon of the older build is still serving and
+  // appends by pathname: it recreates the file this just drained. A
+  // one-shot recorded as applied would leave that fact where nothing looks.
+  await writeFile(shared, line('ava:memory:2', 'written by the old daemon'));
+  const second = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: second.streams, env }), 0, second.output.stderr);
+  assert.match(second.output.stdout, /written by the old daemon/);
+  assert.match(second.output.stdout, /likes jazz/);
+  // The file is still there, because that old daemon is still reading it —
+  // retiring it belongs to the exclusive half, once it has stopped.
+  assert.equal(await readFile(shared, 'utf8'), line('ava:memory:2', 'written by the old daemon'));});
+
 test('a state migration that cannot stamp the home refuses commands that write state, and only those', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-stamp-'));
   // A stamp that cannot be written: `state.json` is a directory, so the
   // rename that lands the stamp fails while every other file stays writable.
   await mkdir(path.join(home, '.stratus', 'state.json'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
+  const record = agentMemoryFilePath({ homeDir: home }, 'ava');
+  await mkdir(path.dirname(record), { recursive: true });
+  await writeFile(record, `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
   const env = { cwd: home, homeDir: home, processEnv: {} };
 
   const refused = createStreams();
@@ -10959,7 +11284,7 @@ test('a state migration that cannot stamp the home refuses commands that write s
   assert.match(refused.output.stderr, /State migration failed/);
   assert.match(refused.output.stderr, /Refusing `stratus memory`/);
   // Nothing was re-asserted: the record is exactly the one line it was.
-  assert.equal((await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8')).trim().split('\n').length, 1);
+  assert.equal((await readFile(record, 'utf8')).trim().split('\n').length, 1);
 
   // A rollover rewrites a session in this build's shape — a write — and is
   // refused here before it ever looks for a daemon.
@@ -10980,7 +11305,7 @@ test('a state migration that cannot stamp the home refuses commands that write s
     assert.equal(await runCli({ argv, streams: writer.streams, env }), 1, argv.join(' '));
     assert.match(writer.output.stderr, /Refusing `stratus memory`/, argv.join(' '));
   }
-  assert.equal((await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8')).trim().split('\n').length, 1);
+  assert.equal((await readFile(record, 'utf8')).trim().split('\n').length, 1);
 
   // And the reads still work, because reading is how someone diagnoses
   // their way out of this state.
@@ -12852,6 +13177,25 @@ test('a global config that cannot be read behind a project config closes the doo
   );
 });
 
+test('the slack block is read from the operator\'s config, never a cloned repository\'s', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ slack: { replies: 'stream' } }));
+  const warnings: string[] = [];
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo', slack: { replies: 'final' } }));
+
+  assert.deepEqual(
+    await loadServeSlack({ homeDir: home, cwd: project, processEnv: {} }, undefined, (line) => warnings.push(line)),
+    { replies: 'stream' },
+  );
+  assert.match(warnings[0] ?? '', /ignoring the slack config in .*stratus\.config\.json.*Using ~\/\.stratus\/config\.json instead/);
+  // No block anywhere is the defaults, which resolve to `final`.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(await loadServeSlack({ homeDir: home, cwd: project, processEnv: {} }, undefined, () => {}), {});
+});
+
 test('a project config that shadows the global one does not suppress the global principals policy', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-project-'));
@@ -13135,6 +13479,36 @@ test('re-running setup keeps the executor and memoryStore selections it has no m
   assert.equal(config.memoryStore, 'vector');
 });
 
+test('re-running setup keeps the output and turn bounds it has no menu for', async () => {
+  // Same hazard as the executor and memoryStore above, and sharper for
+  // these two: a `maxTokens` set because the endpoint's ceiling is under
+  // the default would silently return to the default and fail every
+  // request, and a raised `maxTurns` would return to 8 — both without a
+  // word, from a re-run the operator did for some unrelated reason.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ provider: 'demo', maxTokens: 4096, maxTurns: 24 })}\n`,
+  );
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => true,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) as Record<string, unknown>;
+  assert.equal(config.maxTokens, 4096);
+  assert.equal(config.maxTurns, 24);
+});
+
 test('a provider nobody registered is refused by name, with what is registered', async () => {
   const home = await seamHome({ plugins: { 'stratus-plugin-fixture-provider': {} } });
   const { streams, output } = createStreams();
@@ -13183,7 +13557,7 @@ test('a plugin memory store selected by a trusted config backs remember and reca
   assert.doesNotMatch(juno.output.stdout, /ava likes/);
 
   // The built-in store was never written to.
-  const fileStore = await readFile(memoryFilePath({ homeDir: home }), 'utf8').catch(() => '');
+  const fileStore = await readFile(agentMemoryFilePath({ homeDir: home }, 'juno'), 'utf8').catch(() => '');
   assert.ok(!fileStore.includes('likes'), fileStore);
 });
 
@@ -13282,7 +13656,7 @@ test('the SQLite memory store plugin backs a run end to end, selected by a trust
   assert.match(output.stdout, /kept; recalled .*ava likes tea/);
   // The file is where the config said, and owner-only.
   assert.equal((await stat(path.join(home, 'memories.sqlite'))).mode & 0o777, 0o600);
-  const fileStore = await readFile(memoryFilePath({ homeDir: home }), 'utf8').catch(() => '');
+  const fileStore = await readFile(agentMemoryFilePath({ homeDir: home }, 'juno'), 'utf8').catch(() => '');
   assert.ok(!fileStore.includes('likes'), fileStore);
 });
 

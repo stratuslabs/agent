@@ -1060,7 +1060,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     }
     // The agents package's own rule, the same one the control API route and
     // `credential --agent` apply — and the reason is sharper here: this id is
-    // joined into a path (`<id>.whitelist.json`), and the grant store
+    // joined into a path (`<id>/whitelist.json`), and the grant store
     // documents it as an already-validated single segment by the time it
     // reaches that join. Unchecked, `../../other` reads — and on a revoke
     // rewrites — a grant file outside ~/.stratus/agents.

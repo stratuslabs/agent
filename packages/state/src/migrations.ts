@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { constants, readFileSync } from 'node:fs';
 import {
+  access,
   appendFile,
   chmod,
+  lstat,
   mkdir,
   readdir,
   readFile,
@@ -13,28 +15,40 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import type { MemoryEntry } from '@stratusagent/core';
+import { isValidAgentId } from '@stratusagent/agents';
+import { isSymlinkedStatePath } from '@stratusagent/permissions';
 import { type StateEnvironment, readWorkingDirectory } from './environment.ts';
+import { memoryAppendNeedsNewline } from './memory.ts';
+import {
+  applyPerAgentLayout,
+  createStateDirectoryNames,
+  hasBracketedLegacyState,
+  makeAgentStateDirectory,
+} from './layout-migration.ts';
+import { applyPerAgentWorkspaces } from './workspace-migration.ts';
 import {
   MEMORY_FILENAME,
   stratusHomePath,
   logsDirPath,
   credentialsPath,
-  memoryFilePath,
+  agentMemoryFilePath,
+  legacyMemoryFilePath,
   gatewayTokenPath,
   gatewayInfoPath,
 } from './paths.ts';
 
 // Memory used to live under the working directory. Fold any such file into
-// the global store the first time a run happens from that directory, then
-// archive it — an upgrade must never look like the agent forgot.
+// the agents' own stores the first time a run happens from that directory,
+// then archive it — an upgrade must never look like the agent forgot.
 //
 // Every import first takes exclusive ownership by atomically renaming its
 // source to a unique claim file: of any competing processes, exactly one
 // wins the rename and the rest see ENOENT. A crash mid-import leaves the
 // claim file behind; later runs re-claim it the same way and finish the
-// job, with entries deduped against the global store by id. Only records
-// that parse as real memory entries are imported — malformed lines stay in
-// the archive instead of poisoning the global store for every agent.
+// job, with entries deduped against the destination by id. Only records
+// that parse as real memory entries are imported, and only for an agent id
+// that can key a directory — malformed lines and an id that is not a path
+// segment stay in the archive instead of poisoning somebody's store.
 const isMemoryEntryLine = (line: string): boolean => {
   try {
     const parsed = JSON.parse(line) as Partial<MemoryEntry> | null;
@@ -49,11 +63,12 @@ const isMemoryEntryLine = (line: string): boolean => {
 
 export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> => {
   const legacyPath = path.join(readWorkingDirectory(env), '.stratus', MEMORY_FILENAME);
-  const globalPath = memoryFilePath(env);
-  if (legacyPath === globalPath) {
+  const legacyDir = path.dirname(legacyPath);
+  // A run whose working directory *is* the home has nothing to fold in: the
+  // source and the per-agent destinations are the same tree.
+  if (legacyDir === stratusHomePath(env)) {
     return;
   }
-  const legacyDir = path.dirname(legacyPath);
   const archivePath = `${legacyPath}.migrated`;
 
   const claimAndImport = async (sourcePath: string): Promise<void> => {
@@ -69,26 +84,73 @@ export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> 
 
     const claimed = await readFile(claimPath, 'utf8');
 
-    let existingIds: Set<string>;
-    try {
-      existingIds = new Set(
-        (await readFile(globalPath, 'utf8'))
-          .split('\n')
-          .filter(isMemoryEntryLine)
-          .map((line) => (JSON.parse(line) as MemoryEntry).id),
-      );
-    } catch {
-      existingIds = new Set();
+    // Grouped by agent, because the destination is per agent now: one read
+    // of each agent's file for its existing ids, one append for its lines.
+    const byAgent = new Map<string, string[]>();
+    for (const line of claimed.split('\n')) {
+      if (line.trim().length === 0 || !isMemoryEntryLine(line)) {
+        continue;
+      }
+      const entry = JSON.parse(line) as MemoryEntry;
+      if (!isValidAgentId(entry.agentId)) {
+        // An id that cannot key a directory has no store to land in. Left
+        // in the archive, like a malformed line — never written to a path
+        // derived from it.
+        continue;
+      }
+      const lines = byAgent.get(entry.agentId) ?? [];
+      lines.push(line);
+      byAgent.set(entry.agentId, lines);
     }
 
-    const entries = claimed
-      .split('\n')
-      .filter((line) => line.trim().length > 0)
-      .filter(isMemoryEntryLine)
-      .filter((line) => !existingIds.has((JSON.parse(line) as MemoryEntry).id));
-    if (entries.length > 0) {
-      await mkdir(path.dirname(globalPath), { recursive: true });
-      await appendFile(globalPath, `${entries.join('\n')}\n`);
+    // Two ids that differ only in case are one directory on macOS and
+    // Windows, and the second would append its memories to the first
+    // agent's file — see `StateDirectoryNames`, which owns that rule.
+    const directoryNames = createStateDirectoryNames(env);
+    for (const [agentId, lines] of byAgent) {
+      if (await directoryNames.heldBy(agentId) !== undefined) {
+        continue;
+      }
+      // The directory before anything reads a path *under* it, and never
+      // by throwing: an id whose directory name is already taken by its own
+      // soul file (`id: ava.md` beside `agents/ava.md`) makes `mkdir` fail
+      // with EEXIST, and this runs from `createAgentRuntime` and
+      // `gateway.start()` — after the source has been renamed to a claim,
+      // so the throw would come back on every later run and block the whole
+      // fleet over one agent's name. Skipped instead: the lines stay in the
+      // archive written below, which is where a quarantined record belongs.
+      if (await makeAgentStateDirectory(env, agentId) === undefined) {
+        continue;
+      }
+      directoryNames.hold(agentId);
+      const destination = agentMemoryFilePath(env, agentId);
+      // A real directory says nothing about the file in it, and this
+      // importer appends directly rather than through the store's guarded
+      // open — see `usableStateFile` in the layout migration, which is the
+      // same rule. Skipped rather than thrown: the lines stay in the
+      // archive, and this runs before every command.
+      if (await isSymlinkedStatePath(destination)) {
+        continue;
+      }
+      let existingIds: Set<string>;
+      try {
+        existingIds = new Set(
+          (await readFile(destination, 'utf8'))
+            .split('\n')
+            .filter(isMemoryEntryLine)
+            .map((line) => (JSON.parse(line) as MemoryEntry).id),
+        );
+      } catch {
+        existingIds = new Set();
+      }
+      const fresh = lines.filter((line) => !existingIds.has((JSON.parse(line) as MemoryEntry).id));
+      if (fresh.length === 0) {
+        continue;
+      }
+      // Same rule as the layout migration's placement, same home for it.
+      const prefix = (await memoryAppendNeedsNewline(destination)) ? '\n' : '';
+      await appendFile(destination, `${prefix}${fresh.join('\n')}\n`, { mode: 0o600 });
+      await chmod(destination, 0o600);
     }
 
     // Archive by appending (never overwriting an earlier archive), then
@@ -139,11 +201,27 @@ export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> 
 const STATE_FILENAME = 'state.json';
 
 /**
- * The schema version this build writes. Bump it when a migration lands
- * whose absence a newer build must be able to detect — the daemon refuses
- * to run against a HIGHER version than it understands.
+ * The schema version a *fully migrated* home is stamped with. Bump it when
+ * a migration lands whose absence a newer build must be able to detect —
+ * the daemon refuses to run against a HIGHER version than it understands.
+ *
+ * Fully migrated is the load-bearing word: a home with a deferred
+ * migration still pending keeps its old version, because the version is
+ * what an older build is refused on, and refusing one over a move that has
+ * not happened yet would lock an operator out of the state they still have.
+ *
+ * 3 is the per-agent layout. An older build against a migrated home would
+ * open the shared `sessions.db` that is no longer there, find no history,
+ * and start a second one beside the real stores — two divergent
+ * populations, which is exactly what the stamp exists to stop.
+ *
+ * 4 moves each agent's workspace inside its state directory. An older build
+ * writes `workspaces/<id>` by pathname on every tool call, so against a
+ * migrated home it would rebuild that tree and append the provenance
+ * records for it to a ledger the new path never reads — the files it
+ * fetched would then read back as the agent's own words.
  */
-export const STATE_SCHEMA_VERSION = 2;
+export const STATE_SCHEMA_VERSION = 4;
 
 export const stateFilePath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), STATE_FILENAME);
@@ -160,20 +238,35 @@ export interface StateMigration {
   /** What applying it does, present tense, for reports. */
   description: string;
   /**
+   * Whether applying it to *this* home needs exclusive access to state a
+   * serving daemon holds open — the SQLite session database above all.
+   *
+   * Migrations run automatically on the first command of a newer build,
+   * and that path does not stop the managed service: it is the wrong place
+   * for a migration that would move a file a daemon of the *older* build
+   * is still writing. A migration that says yes is deferred there, and run
+   * by the two callers that hold the home to themselves — `stratus
+   * update`, which brackets with a stop and a restart, and `stratus
+   * serve`, which has the home claim in hand and is about to open the
+   * stores itself.
+   *
+   * A predicate rather than a flag, because most homes have nothing for it
+   * to do: a fresh install has no shared database to move, needs no
+   * bracket, and must not be left with its schema stamp held back waiting
+   * for a daemon start it may not get for days. Answer from what is on
+   * disk, not from what the migration would like.
+   *
+   * Where the answer is yes, the deferral is visible rather than silent:
+   * while one is pending the stamp keeps its old schema version, so
+   * nothing reads the home as fully migrated, and `stratus update` reports
+   * it as pending.
+   */
+  requiresExclusive?(env: StateEnvironment): Promise<boolean>;
+  /**
    * Idempotent: applying twice must equal applying once, because two
    * processes can race the stamp and a crash can lose the record of a
    * completed run. Returns a line describing what actually changed, or
    * undefined when there was nothing to do.
-   *
-   * Must also be safe to run while a daemon is serving: migrations run
-   * automatically on the first command of a newer build, and that path
-   * does not stop the managed service — only `stratus update` brackets
-   * with a stop/restart. A migration needing exclusive access to shared
-   * state (the SQLite session database, above all) must NOT be registered
-   * until this registry grows a way to require that bracket — a
-   * `requiresExclusive` marker the automatic path defers on — because a
-   * migration that is only safe under `update` is unsafe under every
-   * other install path.
    */
   apply(env: StateEnvironment): Promise<string | undefined>;
 }
@@ -206,8 +299,8 @@ const OWNER_ONLY_STATE_FILES_MIGRATION: StateMigration = {
       tightened.push(path.basename(filePath));
     };
     await tightenFile(credentialsPath(env));
-    await tightenFile(memoryFilePath(env));
-    await tightenFile(`${memoryFilePath(env)}.index`);
+    await tightenFile(legacyMemoryFilePath(env));
+    await tightenFile(`${legacyMemoryFilePath(env)}.index`);
     await tightenFile(gatewayTokenPath(env));
     await tightenFile(gatewayInfoPath(env));
     await tightenFile(path.join(logsDirPath(env), 'stratusd.jsonl'));
@@ -243,9 +336,76 @@ const PROVENANCE_LABELS_MIGRATION: StateMigration = {
   },
 };
 
+/**
+ * Step 15's layer A: the sessions shard into `agents/<id>/sessions.db`, the
+ * schedule rows that shared their database move to `fleet.db`, and each
+ * agent's grant file moves into its own directory.
+ *
+ * Exclusive wherever any of that is still in its old place, because a
+ * daemon of the older build is writing it: moving a session database out
+ * from under one loses every turn saved after the split, and moving a grant
+ * file leaves a later revocation on the old path while the moved file still
+ * grants. An agent's memories are the one resource that needs no bracket
+ * and so are not here at all — `drainSharedMemory` converges on them
+ * instead, and says why.
+ */
+const PER_AGENT_LAYOUT_MIGRATION: StateMigration = {
+  id: '0003-per-agent-state-layout',
+  description: "shard the session database into agents/<id>/sessions.db, move the grants beside it, and the schedules into fleet.db",
+  /**
+   * Always, rather than only when the old state is there to see.
+   *
+   * Asking `hasBracketedLegacyState` looked right — a home with nothing in
+   * the old place has nothing to move, so why wait for a claim — and it is
+   * wrong for the reason a check of the present tense usually is. On a fresh
+   * home an ordinary command sees no legacy database because a pre-layout
+   * `stratus serve` has not created it *yet*: the command then applies and
+   * stamps 0003 unclaimed, that daemon passes its own schema check in the
+   * window before the stamp lands, and it goes on to write sessions and
+   * grants through the legacy paths. The home is then recorded as migrated
+   * while filling up with state nothing will move — and 0003, being stamped,
+   * never runs again.
+   *
+   * The question is not "is there legacy state now" but "can a build that
+   * predates this layout still write some", and nothing that does not hold
+   * the home can answer that. So the answer is the honest one: this
+   * migration belongs to a caller that has the home to itself. A run that
+   * defers it records nothing at all (see `runStateMigrations`), so a fresh
+   * install simply reads as schema 0 until its first `stratus serve` or
+   * `stratus update`, which is what it is.
+   */
+  requiresExclusive: async () => true,
+  apply: applyPerAgentLayout,
+};
+
+/**
+ * Step 15's layer A, finished: each agent's workspace moves from
+ * `workspaces/<id>` into `agents/<id>/workspace`, so that `agents/<id>/` is
+ * the one path everything an agent owns lives under. The move, and the two
+ * things it does about the provenance ledger that are the whole reason it
+ * is not a bare rename, are in `applyPerAgentWorkspaces`.
+ *
+ * Exclusive for the reason 0003 is, and one of its own. A daemon of the
+ * older build resolves `workspaces/<id>` by pathname on every tool call
+ * that writes a file, so it does not notice the move: it recreates the old
+ * tree and goes on appending provenance records there, and a record the
+ * ledger at the new path never sees is a fetched file that reads back as
+ * the agent's own text. Unlike a session row, that is not state left
+ * behind — it is a label silently removed from state that moved.
+ */
+const PER_AGENT_WORKSPACES_MIGRATION: StateMigration = {
+  id: '0004-per-agent-workspaces',
+  description: "move each agent's workspace into agents/<id>/workspace",
+  /** Always, for the reason 0003 gives: see `PER_AGENT_LAYOUT_MIGRATION`. */
+  requiresExclusive: async () => true,
+  apply: applyPerAgentWorkspaces,
+};
+
 export const STATE_MIGRATIONS: readonly StateMigration[] = [
   OWNER_ONLY_STATE_FILES_MIGRATION,
   PROVENANCE_LABELS_MIGRATION,
+  PER_AGENT_LAYOUT_MIGRATION,
+  PER_AGENT_WORKSPACES_MIGRATION,
 ];
 
 const unversionedStamp = (): StateStamp => ({ schemaVersion: 0, applied: [] });
@@ -321,15 +481,151 @@ const readStateStampSync = (env: StateEnvironment): StateStamp => {
   return parseStateStamp(raw);
 };
 
+/**
+ * The stamp to write, given what is on disk now and what this run means to
+ * record.
+ *
+ * Merged rather than replaced, because two processes reach here with
+ * snapshots taken at different moments and only one of them holds anything.
+ * An ordinary command and an exclusive `serve` or `update` both read the
+ * stamp at start; the ordinary one runs no claim and defers 0003, so a
+ * write of *its* snapshot after the exclusive process recorded 0003 would
+ * take the home back to a schema that omits it — and the downgrade guard
+ * would then wave an older build into an already-sharded home, where it
+ * recreates exactly the legacy state the move just retired.
+ *
+ * Both writers only ever *add* ids, so a union converges whichever order
+ * they land in. The version is derived from that union and floored at
+ * whatever is already recorded, so it can only move forward: a stamp is a
+ * claim about what has happened to this home, and nothing that has happened
+ * un-happens.
+ */
+export const mergeStateStamp = (latest: StateStamp, next: StateStamp): StateStamp => {
+  const applied = [...latest.applied];
+  for (const id of next.applied) {
+    if (!applied.includes(id)) {
+      applied.push(id);
+    }
+  }
+  const complete = STATE_MIGRATIONS.every((migration) => applied.includes(migration.id));
+  return {
+    schemaVersion: Math.max(latest.schemaVersion, complete ? STATE_SCHEMA_VERSION : next.schemaVersion),
+    applied,
+  };
+};
+
+
+/**
+ * Refuse a home whose stamp could never be written, without writing it.
+ *
+ * A run that defers an exclusive migration records nothing (see
+ * `runStateMigrations`), so it no longer discovers an unwritable stamp by
+ * failing to write one — and a command that goes on to write state into a
+ * home that cannot record what it is is the case this guard exists for.
+ * Asking about the shape of the path is what is left: a `state.json` that is
+ * a directory, or anything else that is not a regular file, is a home no
+ * stamp will ever land in.
+ */
+const assertStampWritable = async (env: StateEnvironment): Promise<void> => {
+  const target = stateFilePath(env);
+  let found;
+  try {
+    found = await lstat(target);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // ENOTDIR is the same answer as ENOENT for this purpose and reaches
+    // here when `~/.stratus` is a regular file: there is no stamp, and the
+    // reason is one the check below names properly.
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      throw error;
+    }
+    // No stamp yet, so the question moves to the directory that would have
+    // to hold one: `writeStateStamp` writes a temporary file and renames
+    // it, and both need the directory itself to be writable. Asked with
+    // `access` rather than by writing a probe file, because this runs
+    // before *every* command — a throwaway file created and unlinked in
+    // `~/.stratus` on each one is real work, visible to anything watching
+    // the directory, and racing every other Stratus process doing the
+    // same. A home that does not exist yet is not a problem: the first
+    // write creates it.
+    await assertStampDirectoryWritable(env);
+    return;
+  }
+  if (!found.isFile()) {
+    throw new Error(
+      `${target} is not a regular file, so this build cannot record what it has done to ${stratusHomePath(env)}. `
+      + 'Move or remove it and run the command again.',
+    );
+  }
+};
+
+/**
+ * The directory a first stamp would be created in, when there is no stamp
+ * yet to judge by.
+ *
+ * Neither half of this is a guarantee, and it is not meant to be one: a
+ * directory writable now can be full a moment later, and the write itself
+ * is still the thing that finds that out. What it catches is the state
+ * that does not change under you — a `~/.stratus` that is a regular file
+ * or a link to one, or one whose permissions mean no command will ever
+ * record a schema version there — so the command that found it says so,
+ * instead of every later command quietly changing state nothing can stamp.
+ *
+ * Followed, not `lstat`ed, and the difference is the whole symlink rule
+ * here: `~/.stratus` is a path the *operator* chose, and a home that is a
+ * link to a directory somewhere else is a supported layout. It is the
+ * paths Stratus itself derives — `agents/<id>/` and the files under it —
+ * that may never be links, because a link there is not a layout decision
+ * anyone made. Checking this one with `lstat` refused every linked home on
+ * its first command, before it could write a stamp at all.
+ */
+const assertStampDirectoryWritable = async (env: StateEnvironment): Promise<void> => {
+  const home = stratusHomePath(env);
+  let found;
+  try {
+    found = await stat(home);
+  } catch (error) {
+    // A dangling link answers ENOENT here, the same as no home at all. The
+    // write is what reports that, with the errno naming the link.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  if (!found.isDirectory()) {
+    throw new Error(
+      `${home} is not a directory, so this build has nowhere to record what it has done to your state. `
+      + 'Move or remove it and run the command again.',
+    );
+  }
+  try {
+    await access(home, constants.W_OK);
+  } catch {
+    throw new Error(
+      `${home} cannot be written to, so this build cannot record what it has done to your state. `
+      + 'Fix its permissions and run the command again.',
+    );
+  }
+};
+
 const writeStateStamp = async (env: StateEnvironment, stamp: StateStamp): Promise<void> => {
   await mkdir(stratusHomePath(env), { recursive: true });
+  // Against the stamp as it is *now*, not as this run found it — see
+  // `mergeStateStamp`. An unreadable one is what this write repairs, so it
+  // merges with nothing rather than refusing.
+  let merged = stamp;
+  try {
+    merged = mergeStateStamp(await readStateStamp(env), stamp);
+  } catch {
+    merged = stamp;
+  }
   // Atomically, via rename: `writeFile` truncates before it writes, so a
   // crash in between would leave partial JSON — which reads as schema 0,
   // exactly the state that lets an older binary past the newer-schema
   // refusal. A rename either lands the whole stamp or leaves the old one.
   const target = stateFilePath(env);
   const temp = `${target}.tmp-${randomUUID()}`;
-  await writeFile(temp, `${JSON.stringify(stamp, null, 2)}\n`);
+  await writeFile(temp, `${JSON.stringify(merged, null, 2)}\n`);
   await rename(temp, target);
 };
 
@@ -350,6 +646,22 @@ export const assertStateCompatible = (env: StateEnvironment): void => {
   }
 };
 
+/**
+ * Who is asking to migrate, which decides whether the exclusive ones run.
+ *
+ * `exclusive: true` is a claim about the caller, not a preference: it says
+ * no other process is serving this home. `stratus serve` holds the home
+ * claim; `stratus update` has stopped the service. Every other path —
+ * every ordinary command, on any install — leaves it false and the marked
+ * migrations pending.
+ */
+export interface StateMigrationRunOptions {
+  exclusive?: boolean;
+}
+
+const runnableNow = async (migration: StateMigration, env: StateEnvironment, options: StateMigrationRunOptions): Promise<boolean> =>
+  options.exclusive === true || migration.requiresExclusive === undefined || !(await migration.requiresExclusive(env));
+
 /** Migrations not yet recorded as applied, in the order they would run. */
 export const pendingStateMigrations = async (env: StateEnvironment): Promise<StateMigration[]> => {
   const stamp = await readStateStamp(env);
@@ -367,30 +679,99 @@ export interface AppliedStateMigration {
 /**
  * Run every pending migration in order and stamp the result. Refuses a
  * stamp from a newer schema outright — migrating state this build does not
- * understand is the corruption path versioning exists to close. The stamp
- * is rewritten after each migration, not once at the end, so a crash
- * between two migrations re-runs only the one that never recorded itself.
+ * understand is the corruption path versioning exists to close.
+ *
+ * **One stamp write per run, at the end, and only for a run that applied
+ * everything.** Both halves of that are load-bearing, and both are about
+ * the same thing: two processes reach this with snapshots taken at
+ * different moments, and the stamp is what arms the downgrade guard, so a
+ * write that records *less* than has actually happened hands an older build
+ * a home it will recreate legacy state in.
+ *
+ * A *partial* write is the vehicle. Rewriting after each migration — which
+ * this used to do, to make a crash re-run only the migration that never
+ * recorded itself — means a run is briefly claiming a truthful but
+ * incomplete set, and a concurrent run that has already recorded the
+ * complete one is the loser. Writing once, at the end, with everything,
+ * means every writer writes the same bytes: whichever order they land in,
+ * the home ends up with the same stamp, and the interleaving stops
+ * mattering rather than being narrowed.
+ *
+ * A run that has to *defer* an exclusive migration writes nothing at all,
+ * for the same reason turned around: it can only ever have a subset, so
+ * there is no moment at which its write is the truth. The home stays
+ * reading as un-migrated until a run that holds the claim finishes the job,
+ * which is exactly what it is — and an older build reading it then is
+ * reading it correctly.
+ *
+ * What this gives up is the incremental record: a crash mid-sequence
+ * re-runs every migration rather than resuming after the last one that
+ * stamped. That is affordable because migrations are required to be
+ * idempotent and are written that way — 0001 re-stats a handful of files
+ * and changes nothing once they are owner-only, 0002 does nothing at all,
+ * and 0003 finds its sources already renamed and returns.
  */
-export const runStateMigrations = async (env: StateEnvironment): Promise<AppliedStateMigration[]> => {
+export const runStateMigrations = async (
+  env: StateEnvironment,
+  options: StateMigrationRunOptions = {},
+): Promise<AppliedStateMigration[]> => {
   const stamp = await readStateStamp(env);
   if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {
     throw new Error(newerStateMessage(stamp.schemaVersion));
   }
+  // Before any migration runs, not after them all. A home that can never
+  // record what was done to it is one to refuse *before* doing anything,
+  // and the order also decides who gets to describe the problem: 0001
+  // walks the state files, so on a `~/.stratus` that is a regular file it
+  // would otherwise die first, on a raw ENOTDIR naming a path the operator
+  // never chose.
+  await assertStampWritable(env);
   const results: AppliedStateMigration[] = [];
   const applied = new Set(stamp.applied);
+  // Asked once, before anything runs, rather than per migration inside the
+  // loop: `requiresExclusive` is a filesystem question, and 0003 is the
+  // migration that changes its own answer — asking after it has run would
+  // report a home as un-deferred because the deferral already happened.
+  const runnable = new Map<string, boolean>();
   for (const migration of STATE_MIGRATIONS) {
-    if (applied.has(migration.id)) {
+    runnable.set(migration.id, applied.has(migration.id) || await runnableNow(migration, env, options));
+  }
+  const deferring = STATE_MIGRATIONS.some((migration) => runnable.get(migration.id) !== true);
+  for (const migration of STATE_MIGRATIONS) {
+    if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
       continue;
     }
     const detail = await migration.apply(env);
     stamp.applied.push(migration.id);
     applied.add(migration.id);
-    await writeStateStamp(env, { schemaVersion: STATE_SCHEMA_VERSION, applied: stamp.applied });
     results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
   }
-  if (results.length === 0 && stamp.schemaVersion !== STATE_SCHEMA_VERSION) {
-    // Nothing to run but the stamp is old (or missing): record the version
-    // so the next build can tell this home directory has been looked at.
+  // One write, at the end, and none at all from a run that deferred
+  // something.
+  //
+  // Recording the prefix it did finish reads as the better answer — the home
+  // really is at that schema — and it is not, because a partial stamp can
+  // *under*-report. Two runs overlap, the ordinary one reads the stamp
+  // before the exclusive one records 0003, and its rename lands last: the
+  // home is then marked as not having had the per-agent move it has just
+  // had, and the downgrade guard waves an older build into a sharded home.
+  // Over-reporting and under-reporting are not symmetric, and this is the
+  // direction that loses data.
+  //
+  // A run that finishes everything writes the same bytes as any other run
+  // that finishes everything, so those cannot disagree. A run that deferred
+  // one **writes nothing at all**, and the two attempts before this to keep
+  // it writing were both wrong in the same way: `mergeStateStamp` reads at the
+  // write, but there is still a gap between that read and the rename, so a
+  // floor computed from what this run read is no compare-and-swap. An
+  // exclusive run's stamp landing in that gap is replaced by a schema-0 one,
+  // and the downgrade guard is off over already-sharded state.
+  //
+  // What that costs is the unwritable-stamp guard on ordinary commands,
+  // which only fired because something tried to write. `assertStampWritable`
+  // keeps the part that matters without writing anything, and runs at the
+  // top of this function rather than here.
+  if (!deferring && (results.length > 0 || stamp.schemaVersion !== STATE_SCHEMA_VERSION)) {
     await writeStateStamp(env, { schemaVersion: STATE_SCHEMA_VERSION, applied: stamp.applied });
   }
   return results;

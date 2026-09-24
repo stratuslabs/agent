@@ -102,14 +102,14 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/agents` | Create an agent: writes a soul file and reloads the roster |
 | GET | `/agents/:id` | One agent in full: complete instructions, the raw soul markdown, its pins |
 | PUT | `/agents/:id` | Edit a soul, by field (`name`, `instructions`, `tools`, `skills`, `credentials`, `provider`, `model`, `listens` — one of `mentions`, `thread`, `judge`, an empty string clearing it; anything else answers `400 invalid_listens`) or as raw markdown |
-| GET | `/agents/:id/grants` | What this agent may do unattended beyond the built-in safe list — its command scopes, origins, and standing tool grants, from `~/.stratus/agents/<id>.whitelist.json`. A tool grant the engine would not honour carries `stale` saying why (the tool is now contributed by another package, or nothing loads it). The id is validated but not looked up: a grant can outlive its agent, and this is how it is found. `501 grants_unavailable` from a daemon started without a grant store |
+| GET | `/agents/:id/grants` | What this agent may do unattended beyond the built-in safe list — its command scopes, origins, and standing tool grants, from `~/.stratus/agents/<id>/whitelist.json`. A tool grant the engine would not honour carries `stale` saying why (the tool is now contributed by another package, or nothing loads it). The id is validated but not looked up: a grant can outlive its agent, and this is how it is found. `501 grants_unavailable` from a daemon started without a grant store |
 | POST | `/agents/:id/grants/revoke` | Take one back: exactly one of `{ tool }`, `{ scope }` (the listed `description`, such as `git push`), or `{ origin }` → `{ revoked: true }`. Through the daemon's own store, so the next call is judged without it — no restart. `404 grant_not_found` when nothing matched; `400 invalid_grant` for none or several; `409 grants_unreadable` when the agent's whitelist file exists but will not parse, since nothing is written over a grant list nobody can read |
 | POST | `/roster/reload` | Re-read the agents directory and the configured default soul |
 | POST | `/skills/reload` | Re-read `~/.stratus/skills` and serve it, no restart — the `skills` half of `/catalog/tools` as the response. A skill that will not load answers `422 skills_reload_refused` naming the file, and the previous set keeps serving |
 | POST | `/restart` | Announce a restart: `{ reason?, drainTimeoutMs? }` → `202 { restarting, reason?, drainTimeoutMs, inflight }`. New turns are refused from here, in-flight ones get the window, and the daemon comes back. `501 restart_unsupported` from a host that cannot bring it back; `409 not_restartable` while the daemon is still starting or already stopping |
 | GET | `/sessions?agent=&limit=` | Durable sessions, newest first. `limit` bounds the result — the table grows for the life of an install |
 | GET | `/sessions/:id` | One session, provider replay state stripped — including `usage`, the token records of every provider call it has made |
-| POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }`. A `schedule:`-prefixed id answers `400 session_id_reserved` — those belong to scheduled firings. An optional `metadata` object is attached to a new session as given, except the keys the daemon writes for itself (`pendingApproval`, `fallbackActive`, `delegatedBy`, `rootSessionId`, `delegationDepth`, `scheduled`, `scheduleId`, `sessionTrust`, `sessionTaintedBy`, `rolledOverFrom`, `rolledOverTo`, `executor`), which answer `400 metadata_reserved`. `senderTrust` may be set to `unknown` to say the message is from someone the operator has not vouched for; it is read for the turn and never stored. Omitted, the sender is the operator; present with any value but a trust label, the sender reads `unknown` — a misspelled authorization is not one. An existing session whose agent has since left the roster answers `404 agent_not_found` |
+| POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }`. A `schedule:`-prefixed id answers `400 session_id_reserved` — those belong to scheduled firings. An optional `metadata` object is attached to a new session as given, except the keys the daemon writes for itself (`pendingApproval`, `fallbackActive`, `delegatedBy`, `rootSessionId`, `delegationDepth`, `scheduled`, `scheduleId`, `sessionTrust`, `sessionTaintedBy`, `rolledOverFrom`, `rolledOverTo`, `executor`, `contextFloor`), which answer `400 metadata_reserved`. `senderTrust` may be set to `unknown` to say the message is from someone the operator has not vouched for; it is read for the turn and never stored. Omitted, the sender is the operator; present with any value but a trust label, the sender reads `unknown` — a misspelled authorization is not one. An existing session whose agent has since left the roster answers `404 agent_not_found` |
 | POST | `/sessions/:id/rollover` | Start the conversation over under the same id: the transcript so far is saved as a new session (`<id>:rolledover:<time>-<suffix>`) and the live row is emptied, keeping only the routing metadata a channel needs → `200 { sessionId, archivedAs }`. The remedy for a session from before trust labels existed, which reads `unknown` for as long as it lasts. `409 session_busy` while a turn is running or parked, `409 session_archived` for an archive, `404` for an unknown id |
 | GET | `/approvals` | Calls parked on a human right now |
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }`, where `answer` is `once`, `always`, or `deny` — see [below](#always-means-one-thing-and-the-request-says-which) |
@@ -541,7 +541,17 @@ the session's new trust label and the name of what lowered it, never the
 content. `session.observed` joined it with overhearing: a message entered
 the session with no turn run on it — its own event rather than a
 `session.updated`, because a client that takes `running` as "a reply is
-coming" would wait on a turn that never speaks. Session and agent ids only.) The **turn id lives on the envelope** because `StratusEvent`
+coming" would wait on a turn that never speaks. Session and agent ids only.
+`session.context-trimmed` joined it with context management: the
+conversation outgrew the model's window, so its oldest messages are no
+longer sent — `droppedMessages` is what this trim gave up and `floor` is
+the total now held back. Counts only, and worth surfacing rather than
+swallowing: nothing else tells a client that the agent it is showing has
+stopped being able to see the start of the thread. It can arrive more than
+once in a turn, since the window is narrowed by halving until the request
+fits, and it is not replaced by a model switch — a configured fallback
+rethrows an overflow so the conversation is trimmed rather than moved to
+another model for good.) The **turn id lives on the envelope** because `StratusEvent`
 carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own
 deltas from the next caller's. The id is assigned at dispatch and returned by

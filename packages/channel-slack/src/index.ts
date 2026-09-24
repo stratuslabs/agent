@@ -33,6 +33,8 @@ import {
   type SessionRouting,
 } from '@stratusagent/channels';
 
+import { toSlackMrkdwn } from './mrkdwn.ts';
+
 /**
  * The longest display name the model is shown. Slack caps profile names
  * well under this; the bound is for a profile that is not a name.
@@ -82,6 +84,17 @@ const THREAD_HANDOVER_DEPTH = 32;
 const MAX_UNRENDERED_FILES = 20;
 
 const PLACEHOLDER_TEXT = '…';
+
+/** What the loading status says while a turn works, and while it runs a tool. */
+const THINKING_STATUS = 'is thinking…';
+const toolStatus = (toolName: string): string => `is running ${toolName}…`;
+
+/**
+ * How often a loading status is set again while its turn runs. Slack drops
+ * one after two minutes with no message, and a long turn — a tool, an
+ * approval wait — is exactly the one whose status must not vanish.
+ */
+const STATUS_REFRESH_MS = 60_000;
 
 /**
  * How long an agent that judges stays attentive after it last answered a
@@ -147,6 +160,12 @@ export interface SlackAgentConfig {
    * out. The label above is provenance; this is authorization.
    */
   admit?: 'anyone' | 'principals';
+  /**
+   * How replies appear. `final` (the default) shows Slack's loading status
+   * while the turn runs and posts the reply once, finished; `stream` posts
+   * a `…` placeholder at once and edits it as the reply is written.
+   */
+  replies?: 'final' | 'stream';
 }
 
 // The thin surfaces of the Slack SDKs the adapter touches — injectable so
@@ -285,6 +304,17 @@ export interface SlackWebLike {
      * who clicked without announcing to the channel that they tried.
      */
     postEphemeral(args: { channel: string; user: string; text: string; thread_ts?: string }): Promise<unknown>;
+  };
+  /**
+   * Slack's loading status for a thread — "is thinking…" under the agent's
+   * name until it replies. Optional: an older SDK, or a fake, without it
+   * leaves a `final` reply with no status, never without the reply.
+   * `chat:write` is enough for it in channels since March 2026.
+   */
+  assistant?: {
+    threads: {
+      setStatus(args: { channel_id: string; thread_ts: string; status: string }): Promise<unknown>;
+    };
   };
   files: {
     // The real SDK takes file DATA (a buffer or stream), never a path
@@ -467,10 +497,13 @@ const uploadPlace = (result: SlackUploadResult, channel: string): string | undef
 };
 
 /**
- * Renders one turn's reply into Slack with the placeholder-then-edit
- * pattern: post `…` immediately, fold streaming deltas and tool status
- * lines into throttled edits, and finalize with the authoritative reply
- * (split across messages when it outgrows one).
+ * Renders one turn's reply into Slack, one of two ways. Streaming (the
+ * `stream` reply mode): post `…` immediately, fold streaming deltas and
+ * tool status lines into throttled edits, and finalize with the
+ * authoritative reply. Otherwise (`final`, the default): no placeholder —
+ * Slack's loading status says the agent is working, and the finished reply
+ * is posted once, so the notification carries the answer rather than a
+ * `…`. Either way a reply that outgrows one message is split.
  */
 class ReplyRenderer {
   /**
@@ -536,6 +569,47 @@ class ReplyRenderer {
    * had nothing to add is a message the decision cannot take back.
    */
   readonly lazy: boolean;
+  /**
+   * Whether this turn streams into a placeholder. When it does not, there
+   * is never a placeholder: `finalize` finds none and posts the reply as
+   * messages of its own, and a handover has nothing to hand over and says
+   * so (`untaken`), so the recovery's reply is posted ahead of this one
+   * the ordinary way — both already the paths for a placeholder that
+   * could not be opened.
+   */
+  readonly streaming: boolean;
+  /**
+   * The thread the loading status belongs to: the reply's thread, or the
+   * message itself in a DM, whose reply has no thread to key one on.
+   */
+  private readonly statusThread: string | undefined;
+  /** Shared by a connection's renderers, so a status Slack refuses is said once, not per message. */
+  private readonly statusWarned: { value: boolean };
+  private loading = false;
+  /**
+   * Status calls, in order, so the last one Slack applies is the last one
+   * sent — and so `finalize` can wait for them: a status that reached
+   * Slack after the reply would stand over a finished turn until Slack's
+   * own timeout, since the post that clears it came first.
+   */
+  private statusChain: Promise<void> = Promise.resolve();
+  /**
+   * The turn this one was queued behind has posted everything it will
+   * (see `posted`). A streaming turn holds its place with the placeholder
+   * it opened at intake; a `final` one has no placeholder, so it waits for
+   * this before putting text or files in the thread — or a quick answer
+   * would land above the slow one ahead of it.
+   */
+  private readonly after: Promise<unknown>;
+  private settle!: () => void;
+  /** Resolves once this turn has put in the thread everything it will. */
+  readonly posted: Promise<void> = new Promise<void>((resolve) => {
+    this.settle = resolve;
+  });
+  private statusText: string | undefined;
+  private statusTimer: NodeJS.Timeout | undefined;
+  /** The tool the turn is running, for the status line; the streamed `toolLine` is the other mode's. */
+  private runningTool: string | undefined;
   private readonly web: SlackWebLike;
   private readonly channel: string;
   private readonly threadTs: string | undefined;
@@ -549,7 +623,14 @@ class ReplyRenderer {
     threadTs: string | undefined,
     editIntervalMs: number,
     warn: (line: string) => void,
-    options: { lazy?: boolean; now?: () => number } = {},
+    options: {
+      lazy?: boolean;
+      now?: () => number;
+      streaming?: boolean;
+      statusThread?: string;
+      statusWarned?: { value: boolean };
+      after?: Promise<unknown>;
+    } = {},
   ) {
     this.web = web;
     this.channel = channel;
@@ -558,6 +639,90 @@ class ReplyRenderer {
     this.warn = warn;
     this.lazy = options.lazy ?? false;
     this.now = options.now ?? Date.now;
+    this.streaming = options.streaming ?? true;
+    this.statusThread = options.statusThread ?? threadTs;
+    this.statusWarned = options.statusWarned ?? { value: false };
+    this.after = options.after ?? Promise.resolve();
+  }
+
+  /**
+   * Show Slack's loading status for this turn, and keep it up until the
+   * turn is finalized. Not for a streaming turn, which has its placeholder,
+   * nor for one nobody asked for: "is thinking…" over a turn that may
+   * decide to say nothing is the interruption silence exists to avoid.
+   */
+  showLoading(head: boolean): void {
+    if (this.streaming || this.lazy || this.loading || this.finalized) {
+      return;
+    }
+    this.loading = true;
+    // A thread has one status per app, so a turn queued behind another
+    // must not publish its own: it would overwrite what the running turn
+    // says it is doing. It publishes when it reaches the head (`beginTurn`,
+    // or `refreshLoading` once the turn ahead has posted).
+    if (head) {
+      this.publishLoading();
+    }
+  }
+
+  private publishLoading(): void {
+    if (this.statusTimer || this.finalized) {
+      return;
+    }
+    this.setStatus(this.statusText ?? THINKING_STATUS);
+    this.statusTimer = setInterval(() => this.refreshLoading(), STATUS_REFRESH_MS);
+    this.statusTimer.unref?.();
+  }
+
+  /**
+   * Set the status again. Slack clears a thread's status whenever the app
+   * posts in it, so a reply or file from the turn ahead of this one — or
+   * this turn's own upload — takes it down while this turn is still
+   * working; the adapter calls this once that post has landed.
+   */
+  refreshLoading(): void {
+    if (!this.loading || this.finalized) {
+      return;
+    }
+    if (!this.statusTimer) {
+      // Queued until now: this is the renderer at the head at last.
+      this.publishLoading();
+      return;
+    }
+    this.setStatus(this.statusText ?? THINKING_STATUS);
+  }
+
+  private stopLoading(): void {
+    if (this.statusTimer) {
+      clearInterval(this.statusTimer);
+      this.statusTimer = undefined;
+    }
+    this.loading = false;
+  }
+
+  private setStatus(text: string): void {
+    const setStatus = this.web.assistant?.threads.setStatus;
+    if (!setStatus || this.statusThread === undefined) {
+      return;
+    }
+    this.statusText = text;
+    const thread = this.statusThread;
+    // Not awaited by the caller: the turn never waits on a status. Only
+    // `finalize` does, for the ordering reason on `statusChain`. A refusal
+    // — a workspace or plan without it, a token Slack will not honour for
+    // it — is said once and then left alone; the reply still arrives,
+    // just without the status ahead of it.
+    this.statusChain = this.statusChain
+      .then(() => setStatus.call(this.web.assistant?.threads, { channel_id: this.channel, thread_ts: thread, status: text }))
+      .then(() => undefined, (error: unknown) => {
+        if (!this.statusWarned.value) {
+          this.statusWarned.value = true;
+          this.warn(
+            `slack: could not show a loading status (${error instanceof Error ? error.message : String(error)}); `
+            + 'replies still post when they are ready, without one',
+          );
+        }
+      });
   }
 
   /**
@@ -575,8 +740,16 @@ class ReplyRenderer {
     }
     this.buffer = '';
     this.toolLine = undefined;
+    this.runningTool = undefined;
     this.turnBreakPending = false;
     this.generation += 1;
+    // Queued until now, this turn publishes its status as it starts; one
+    // already showing may be showing a tool the turn ahead of it ran.
+    if (this.loading && !this.statusTimer) {
+      this.publishLoading();
+    } else if (this.loading && this.statusText !== THINKING_STATUS) {
+      this.setStatus(THINKING_STATUS);
+    }
   }
 
   async open(): Promise<void> {
@@ -627,6 +800,7 @@ class ReplyRenderer {
       // the text after it — without it they fuse in the live message.
       this.turnBreakPending = true;
       this.toolLine = `⚙ ${event.call.toolName}…`;
+      this.runningTool = event.call.toolName;
       this.scheduleEdit();
       return;
     }
@@ -636,12 +810,14 @@ class ReplyRenderer {
       // message would keep claiming a refused tool is running, and the
       // model's follow-up would fuse with the text before the attempt.
       this.toolLine = undefined;
+      this.runningTool = undefined;
       this.turnBreakPending = true;
       this.scheduleEdit();
       return;
     }
     if (event.type === 'tool.completed') {
       this.toolLine = undefined;
+      this.runningTool = undefined;
       // Also a boundary, and not only for symmetry: a call rejected before
       // execution settles as tool.completed without ever having emitted
       // tool.called, so this is the only mark that attempt leaves.
@@ -676,8 +852,10 @@ class ReplyRenderer {
     // it, and an upload that then waited for that handover would be a
     // cycle nothing breaks (see `queueEdit`).
     const handover = this.handover;
+    const after = this.streaming ? undefined : this.after;
     this.uploadChain = this.uploadChain
       .then(() => handover)
+      .then(() => after)
       // Read as file DATA inside the chain: the Web API takes contents,
       // not a path, and a missing file surfaces as this upload's own
       // failure instead of an unhandled stream error.
@@ -700,6 +878,9 @@ class ReplyRenderer {
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
         });
         this.uploaded = true;
+        // The upload is a post of the app's in this thread, which takes
+        // the status down with it while the turn is still working.
+        this.refreshLoading();
         const placed = uploadPlace(result, this.channel) ?? before;
         if (this.uploadedAt === undefined || placed > this.uploadedAt) {
           this.uploadedAt = placed;
@@ -714,6 +895,15 @@ class ReplyRenderer {
   }
 
   private scheduleEdit(): void {
+    if (!this.streaming) {
+      // Nothing to edit: what the turn is doing goes into the status line,
+      // and only once the turn is this renderer's own (see `beginTurn`).
+      const status = this.runningTool !== undefined ? toolStatus(this.runningTool) : THINKING_STATUS;
+      if (this.loading && this.statusTimer && this.turnStarted && !this.finalized && status !== this.statusText) {
+        this.setStatus(status);
+      }
+      return;
+    }
     // Not gated on having a placeholder: during a handover there is none
     // for a moment, and the edit reads the fresh one when its turn comes.
     if (this.pendingEdit) {
@@ -795,8 +985,25 @@ class ReplyRenderer {
    * refused sentence is still the last thing said, for the thread rule.
    */
   async finalize(reply: string): Promise<ReplyOutcome> {
+    try {
+      return await this.finalizeInOrder(reply);
+    } finally {
+      this.settle();
+    }
+  }
+
+  private async finalizeInOrder(reply: string): Promise<ReplyOutcome> {
     await this.handover;
+    // Shown, not merely wanted: a turn still queued behind another never
+    // published one, and a clear from it would take down the running
+    // turn's status instead.
+    const hadStatus = this.statusTimer !== undefined;
+    this.stopLoading();
     this.finalized = true;
+    if (!this.streaming) {
+      await this.after;
+      await this.statusChain;
+    }
     if (this.pendingEdit) {
       clearTimeout(this.pendingEdit);
       this.pendingEdit = undefined;
@@ -852,6 +1059,15 @@ class ReplyRenderer {
       if (stranded) {
         this.placeText(this.ref?.ts);
       }
+    }
+    // A reply posted clears the status itself; one Slack refused would
+    // leave "is thinking…" standing over a turn that has ended.
+    if (hadStatus && !landed) {
+      this.setStatus('');
+      // Awaited: the turn queued behind this one re-shows its own status
+      // once this renderer is done, and a clear that reached Slack after
+      // that would take the next turn's status down with it.
+      await this.statusChain;
     }
     return this.outcome(published, landed || this.edited || this.uploaded || stranded);
   }
@@ -1048,354 +1264,6 @@ const truncateForSlack = (text: string): string =>
   text.length <= SLACK_MAX_MESSAGE_CHARS
     ? text
     : `${text.slice(0, safeCutIndex(text, SLACK_MAX_MESSAGE_CHARS - 1))}…`;
-
-/**
- * Where the run of exactly `length` backticks that closes an open one
- * begins, or -1. Exactly: a longer run is not a closer, which is the whole
- * point of writing a span as ``code with a ` in it`` and a fence as ````
- * when the block itself contains ```.
- */
-const closingBacktickRun = (text: string, from: number, length: number, limit: number): number => {
-  const run = '`'.repeat(length);
-  for (let at = text.indexOf(run, from); at !== -1 && at + length <= limit; at = text.indexOf(run, at + 1)) {
-    if (text[at - 1] !== '`' && text[at + length] !== '`') {
-      return at;
-    }
-  }
-  return -1;
-};
-
-/**
- * The text as alternating prose and code — even indices prose, odd code.
- *
- * Code is the one place a reader means the characters themselves: `**` in a
- * shell snippet is the snippet, so nothing below rewrites it. A run of N
- * backticks opens code and the next run of exactly N closes it, which is
- * the same rule for a span and for a fence and is why a longer delimiter
- * can carry a shorter one inside it.
- *
- * A span may close on a later line, and is protected the whole way. That
- * looks wasteful — two stray backticks paragraphs apart become one long
- * "span" whose contents are left unconverted — and it was briefly changed
- * to end a span at its line for exactly that reason. That was wrong, and
- * the reason is the rule this whole file answers to: what Slack does with
- * the message decides, not what Markdown says. Slack pairs those backticks
- * too, so the text between them is what it renders as code, and rewriting
- * a `**bold**` in there would alter the contents of somebody's snippet.
- * Leaving prose unconverted is a cosmetic loss; changing what a reader is
- * told is code is not, so the doubt resolves toward protecting more.
- *
- * A fence with no closer runs to the end on purpose: a model that forgets
- * to close one, and every partially streamed block on its way to being
- * closed, would otherwise have its contents rewritten as prose. One or two
- * unmatched backticks are the opposite case — literal text, since "use the
- * ` character" must not swallow what follows.
- */
-const proseAndCode = (text: string): string[] => {
-  const segments: string[] = [];
-  let prose = 0;
-  let cursor = 0;
-  while (cursor < text.length) {
-    const open = text.indexOf('`', cursor);
-    if (open === -1) {
-      break;
-    }
-    let length = 1;
-    while (text[open + length] === '`') {
-      length += 1;
-    }
-    const close = closingBacktickRun(text, open + length, length, text.length);
-    if (close === -1) {
-      if (length < 3) {
-        cursor = open + length;
-        continue;
-      }
-      segments.push(text.slice(prose, open), text.slice(open));
-      return segments;
-    }
-    segments.push(text.slice(prose, open), text.slice(open, close + length));
-    prose = close + length;
-    cursor = prose;
-  }
-  segments.push(text.slice(prose));
-  return segments;
-};
-
-/**
- * The spellings that differ, applied to prose only, in an order that matters.
- *
- * Single-asterisk emphasis goes first and is barred from crossing a `*`, so
- * `**bold**` cannot be read as an italic run that happens to begin with one.
- * Bold then rewrites what is left, and its output is never rescanned.
- *
- * Each delimiter has to hug its content — `3 * 4 * 5` is arithmetic, not
- * emphasis — and none may span a line, so one stray marker cannot italicize
- * the rest of a message.
- */
-const MRKDWN_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
-  // Both at once, before either rule can take half of it and leave the
-  // other half as literal asterisks. Its output is why the italic rule
-  // below refuses content that already opens with an underscore.
-  [/\*\*\*([^\s*][^*\n]*[^\s*]|[^\s*])\*\*\*/g, '*_$1_*'],
-  [/(^|[^*])\*([^\s*_][^*\n]*[^\s*]|[^\s*_])\*(?!\*)/g, '$1_$2_'],
-  [/\*\*([^\s*][^*\n]*[^\s*]|[^\s*])\*\*/g, '*$1*'],
-  [/(^|[^_])__([^\s_][^_\n]*[^\s_]|[^\s_])__(?!_)/g, '$1*$2*'],
-  [/~~([^\s~][^~\n]*[^\s~]|[^\s~])~~/g, '~$1~'],
-  // The one construct Slack spells backwards. A scheme is required: a
-  // bare `[1](2)` in prose is not a link anybody meant to follow.
-  [/\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^()\s]+)\)/g, '<$2|$1>'],
-];
-
-/**
- * `## Heading`, which mrkdwn has no spelling for at all.
- *
- * The optional closing hashes have to be spaced off the text, as Markdown
- * requires: without that, `# C#` is a heading whose name loses its last
- * character.
- *
- * What they and any trailing spaces cover is captured rather than dropped,
- * because dropping is only right when they are the heading's own syntax. A
- * heading that opens a code span reaches its end inside one, and there the
- * same characters are the snippet: `` # show `value # `` has a hash that
- * belongs to whoever wrote the code.
- */
-const MARKDOWN_HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)((?:[ \t]+#+)?[ \t]*)$/gm;
-
-const convertInline = (segment: string): string => {
-  let converted = segment;
-  for (const [pattern, replacement] of MRKDWN_REWRITES) {
-    converted = converted.replace(pattern, replacement);
-  }
-  return converted;
-};
-
-/**
- * Headings, found on the text's own lines rather than inside each prose
- * fragment.
- *
- * A fragment is not a line: inline code cuts one in two, and the halves
- * begin wherever the code ended. Matched per fragment, `^` then lied in
- * both directions — the tail of `` `status` # not a heading `` looked like a
- * line of its own and lost its hash, and ``## Run `npm test` now`` was only
- * ever half a line, so only the half before the code was wrapped.
- *
- * So the whole text is matched instead, with the code spans it now contains
- * passed in: a `#` whose line begins inside one is a comment in somebody's
- * snippet, not a heading. A heading that merely *contains* code is a
- * heading, and its code goes along untouched.
- *
- * Emphasis inside is already converted by here, so the line is only wrapped
- * when nothing in it can pair with the wrapper. Slack has one bold
- * delimiter and no way to nest it: wrapping `*Run* the thing` again yields
- * `**Run* the thing*`, which it renders as literal asterisks rather than as
- * anything bold. A heading that already carries emphasis therefore keeps
- * exactly the emphasis it has — `## **Title**` is bold by now and needs
- * nothing more, and `# glob *.ts` keeps an asterisk that was never a marker
- * at all. An unbolded heading reads fine; a heading full of stray asterisks
- * does not, and one with characters removed to make room is worse than both.
- *
- * An asterisk inside a code span is not one of those: Slack does not read
- * markup there, so it cannot pair with anything, and ``## Match `*.ts` files``
- * is bolded like any other heading.
- *
- * Both walks are cursors rather than searches: `replace` reports matches in
- * increasing offset, and the spans were collected in that order too, so
- * neither has to be looked at twice. The same work as a scan per heading,
- * without its quadratic on a reply that is mostly headings and snippets.
- */
-/** What could pair with a heading's wrapper, or with something out of sight. */
-const PAIRABLE_MARKER = /[*`]/g;
-
-const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, number]>): string => {
-  let span = 0;
-  const startsInside = (position: number, from: number): boolean =>
-    position >= (code[from]?.[0] ?? Number.POSITIVE_INFINITY);
-
-  return text.replace(MARKDOWN_HEADING, (line, body: string, tail: string, offset: number) => {
-    while (span < code.length && (code[span]?.[1] ?? 0) <= offset) {
-      span += 1;
-    }
-    // A `#` whose line begins inside a span is a comment in somebody's code.
-    if (startsInside(offset, span)) {
-      return line;
-    }
-    const heading = body.trim();
-    if (heading.length === 0) {
-      return line;
-    }
-    // Where everything this would drop from the line's end begins: the
-    // closing hashes and spaces the pattern captured, and whatever else
-    // `trimEnd` would take with them. The two are not the same set — the
-    // pattern knows only spaces and tabs, while trimming also takes a
-    // no-break space, an ideographic space, and the rest of what
-    // ECMAScript counts as whitespace — and the difference is exactly
-    // where a character goes missing.
-    //
-    // Dropping any of it is the heading's own syntax being removed, but
-    // only while it is the heading's: a line that opens a span reaches its
-    // end inside one, and there the same characters are somebody's
-    // snippet. Nothing on this line is safe to strip then, so it is left
-    // exactly as written. (The front needs no such care: the body starts
-    // where the hashes stop, which this line has already been shown to
-    // reach in prose.)
-    const dropped = tail.length + (body.length - body.trimEnd().length);
-    if (dropped > 0) {
-      const droppedAt = offset + line.length - dropped;
-      let over = span;
-      while (over < code.length && (code[over]?.[1] ?? 0) <= droppedAt) {
-        over += 1;
-      }
-      if (startsInside(droppedAt, over)) {
-        return line;
-      }
-    }
-    // Anything left on the line that a delimiter could pair with, walked
-    // from where the heading cursor already stands rather than from the
-    // beginning. An asterisk is the obvious one — it would pair with the
-    // wrapper. A backtick counts too: one this side found no partner for is
-    // a literal character here, but Slack parses the message itself and may
-    // pair it with a backtick further down, and the wrapper's closing `*`
-    // would then be written inside what Slack reads as code, where it is
-    // ignored — leaving the opening one with nothing to close it. Both are
-    // spent characters inside a span, which is why the ranges are consulted
-    // rather than the text alone.
-    let within = span;
-    for (const marker of line.matchAll(PAIRABLE_MARKER)) {
-      const position = offset + (marker.index ?? 0);
-      while (within < code.length && (code[within]?.[1] ?? 0) <= position) {
-        within += 1;
-      }
-      if (!startsInside(position, within)) {
-        return heading;
-      }
-    }
-    // Both markers have to land in prose, not just the opening one. A fence
-    // opened on this line — by a model mid-answer, or by a block still being
-    // streamed — runs past its end, so the closing `*` would be written
-    // inside the code and ignored there, leaving the opening one unpaired.
-    // The line began in prose or this never ran, so it is the end that is
-    // in question: where the marker would go, one past the line's last
-    // character, and not that character itself — a span that closes exactly
-    // at the line's end leaves the marker just outside it, which is fine.
-    const closer = offset + line.length;
-    while (within < code.length && (code[within]?.[1] ?? 0) <= closer) {
-      within += 1;
-    }
-    return startsInside(closer, within) ? heading : `*${heading}*`;
-  });
-};
-
-/**
- * A stand-in for one code segment while the prose around it is rewritten.
- *
- * Emphasis was converted one prose fragment at a time until this existed,
- * and a fragment is not a run: inline code cuts one in two, so the `**`
- * opening a bold run and the `**` closing it land in different fragments
- * whenever a snippet sits between them, and neither half ever finds its
- * partner. ``**the `fs.read` tool**`` reached a reader as four literal
- * asterisks around a snippet, and so did every link, italic and
- * strikethrough written the same way. It is the defect #142 found in
- * headings, in the rule right next to it, and it has the same answer:
- * rewrite the whole text, with code held out of the rewrite rather than
- * cut out of the text.
- *
- * A mask names its segment rather than merely standing in for one, because
- * a rewrite is allowed to move it: the link rule writes its two captures
- * back in the other order, so `[use `a`](https://host/`b`)` hands the URL's
- * snippet to the label and the label's to the URL, and a snippet that
- * arrives somewhere else is the same defect as one that is rewritten. Named,
- * it comes back to the place holding its own name. No rewrite can damage
- * the name itself: none of the delimiters they look for appear in it, and
- * every rule copies what it matched through to its replacement.
- *
- * A mask also carries whether its segment holds whitespace, because three
- * rules refuse to cross it — a destination is `[^()\s]+`, a label and an
- * emphasis run stop at a newline — and a name alone has none to stop them.
- * `[label](https://host/`a b`)` is not a destination and was never meant to
- * convert; masked shapelessly it did, and came back rearranged into a link
- * Slack cannot render. Only whitespace is carried, and only ever so a rule
- * refuses: a `*` in a snippet must still not act like one. Both ends of a
- * mask stay the mask character, so a run that has to hug its content still
- * hugs it — a segment opens and closes with a backtick, so that is not a
- * lie about its ends.
- *
- * The character is chosen against the text rather than fixed, because a
- * reply that already contained it would have a snippet spliced in where
- * the writer's own character stood — the one thing this conversion must
- * never do. A reply holding all 6400 of the private-use characters has no
- * mask to be given and is left in Markdown instead: prose that reads as it
- * was written is a cosmetic loss, and a snippet spliced somewhere else is
- * not.
- */
-const maskFor = (text: string): string | undefined => {
-  for (let point = 0xe000; point <= 0xf8ff; point += 1) {
-    const candidate = String.fromCharCode(point);
-    if (!text.includes(candidate)) {
-      return candidate;
-    }
-  }
-  return undefined;
-};
-
-/**
- * Markdown as a model writes it, in the spelling Slack actually renders.
- *
- * Slack's mrkdwn is not Markdown, and the gap is not cosmetic: `**bold**`
- * reaches a reader as four literal asterisks, and `## Heading` as a line
- * that starts with two hashes. Models write Markdown because that is what
- * every other surface here renders, and a soul should not have to know
- * which channel is carrying it, so the translation happens at the edge that
- * does know.
- *
- * Only what differs is touched. Lists, block quotes, and inline code
- * already mean in mrkdwn what they mean in Markdown; rewriting them would
- * add ways to be wrong and fix nothing.
- */
-const toSlackMrkdwn = (text: string): string => {
-  const mask = maskFor(text);
-  if (mask === undefined) {
-    return text;
-  }
-  const segments = proseAndCode(text);
-  const code: string[] = [];
-  let masked = '';
-  for (const [index, segment] of segments.entries()) {
-    if (index % 2 === 1) {
-      const shape = /\n/.test(segment) ? '\n' : /\s/.test(segment) ? ' ' : '';
-      masked += `${mask}${code.length}${shape}${mask}`;
-      code.push(segment);
-      continue;
-    }
-    masked += segment;
-  }
-  // A code segment that ends the text is the unterminated fence: every
-  // closed run is followed by a prose slice, even an empty one, so only an
-  // unclosed one leaves the segments ending on a code index. Named, not
-  // last: a rewrite may have moved it, and it is the segment that ran to
-  // the text's end when it was cut, wherever it now sits.
-  const unterminated = segments.length % 2 === 0 ? code.length - 1 : -1;
-  // Where each code segment ends up in the converted text, which is not
-  // where it started: the prose around it changes length as it is
-  // rewritten, and the masks are the only record of where it went. Split
-  // on the names, so the pieces alternate prose and the name of the
-  // segment that follows it.
-  const pieces = convertInline(masked).split(new RegExp(`${mask}(\\d+)[ \\n]?${mask}`));
-  const spans: Array<readonly [number, number]> = [];
-  let converted = pieces[0] ?? '';
-  for (let piece = 1; piece < pieces.length; piece += 2) {
-    const named = Number(pieces[piece]);
-    const segment = code[named] ?? '';
-    // The unterminated fence has no end to be past, so nothing may be
-    // appended after it either — recording the end as it looks would say a
-    // marker placed at the text's end was safely outside.
-    const ends = named === unterminated
-      ? Number.POSITIVE_INFINITY
-      : converted.length + segment.length;
-    spans.push([converted.length, ends]);
-    converted += `${segment}${pieces[piece + 1] ?? ''}`;
-  }
-  return convertHeadings(converted, spans);
-};
 
 const splitForSlack = (text: string): string[] => {
   if (text.length <= SLACK_MAX_MESSAGE_CHARS) {
@@ -1891,6 +1759,8 @@ interface AgentConnection {
   socket: SlackSocketLike;
   botUserId: string;
   teamId: string;
+  /** Whether a refused loading status has been said for this app yet; see `ReplyRenderer.setStatus`. */
+  statusWarned: { value: boolean };
 }
 
 /**
@@ -1902,7 +1772,9 @@ interface AgentConnection {
  * Session keys are `slack:<agent>:<team>:<channel>:<thread_ts ?? ts>`
  * (DMs: the DM channel id alone), so threads are resumable conversations
  * and two agents sharing a thread keep fully separate sessions. Replies
- * stream via placeholder-then-edit, throttled for chat.update limits.
+ * post once, finished, behind Slack's loading status — or, in the `stream`
+ * reply mode, stream via placeholder-then-edit, throttled for chat.update
+ * limits.
  *
  * A mention starts a thread conversation; inside one, the agent keeps
  * listening without being tagged again — see `couldBeFollowUp` and
@@ -1931,6 +1803,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // to the FIRST registered renderer (the running turn), never a later
   // message's placeholder. Each handler removes exactly its own renderer.
   const renderers = new Map<string, ReplyRenderer[]>();
+  /**
+   * Per session, what the newest `final` reply has left to post. A `final`
+   * turn holds no place in the thread until it posts, so each waits for
+   * the one queued ahead of it — see `ReplyRenderer.after`.
+   */
+  const replyOrder = new Map<string, Promise<void>>();
   /**
    * Files a turn nobody here rendered produced — a recovery's screenshot,
    * say — keyed by session, waiting for the turn's outcome to be posted so
@@ -3655,9 +3533,28 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
 
       // A turn nobody asked for opens its placeholder on its first text,
-      // if it ever has any — see `ReplyRenderer.lazy`.
-      const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn, { lazy: judged, now });
-      if (!judged) {
+      // if it ever has any — see `ReplyRenderer.lazy`. One the agent's
+      // reply mode does not stream opens none at all, and shows the
+      // loading status instead — see `ReplyRenderer.streaming`.
+      const streaming = connection.config.replies === 'stream';
+      const ahead = streaming ? undefined : replyOrder.get(sessionId);
+      const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn, {
+        lazy: judged,
+        now,
+        streaming,
+        statusThread: thread ?? event.ts,
+        statusWarned: connection.statusWarned,
+        ...(ahead ? { after: ahead } : {}),
+      });
+      if (!streaming) {
+        replyOrder.set(sessionId, renderer.posted);
+        void renderer.posted.then(() => {
+          if (replyOrder.get(sessionId) === renderer.posted) {
+            replyOrder.delete(sessionId);
+          }
+        });
+      }
+      if (!judged && streaming) {
         try {
           await renderer.open();
         } catch (error) {
@@ -3672,6 +3569,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const queue = renderers.get(sessionId) ?? [];
       queue.push(renderer);
       renderers.set(sessionId, queue);
+      renderer.showLoading(queue.length === 1);
       const turn = gateway.dispatch({
         sessionId,
         agentId: connection.config.agentId,
@@ -3754,6 +3652,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // running, which the other may therefore still take.
         rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);
       }
+      // The reply just posted took the thread's status down with it, and a
+      // turn queued behind this one is still working.
+      renderers.get(sessionId)?.[0]?.refreshLoading();
       await heard;
     } else {
       const { spoke, spokeAt } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
@@ -3761,6 +3662,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // A file it posted before breaking is still the last thing said.
         rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);
       }
+      renderers.get(sessionId)?.[0]?.refreshLoading();
     }
   };
 
@@ -3779,7 +3681,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           return;
         }
         if (event.type === 'tool.approval-resolved') {
-          track(retractApprovalRequest(event));
+          // The question was posted into the turn's thread, which took the
+          // loading status down with it; the turn works on once answered.
+          track(retractApprovalRequest(event).finally(() => renderers.get(event.sessionId)?.[0]?.refreshLoading()));
           return;
         }
         // A turn ends here in one of two hands. One this adapter started
@@ -3850,12 +3754,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // connection — never leaves the queued reply stalled behind it.
         if (event.type === 'session.failed' && !rendered) {
           const claim = head?.reserveHandover();
-          track(reportUnrenderedFailure(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => claim?.release()));
+          track(reportUnrenderedFailure(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => {
+            claim?.release();
+            head?.refreshLoading();
+          }));
           return;
         }
         if (event.type === 'session.completed' && !rendered) {
           const claim = head?.reserveHandover();
-          track(reportUnrenderedReply(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => claim?.release()));
+          track(reportUnrenderedReply(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => {
+            claim?.release();
+            head?.refreshLoading();
+          }));
           return;
         }
         if ('sessionId' in event) {
@@ -3891,6 +3801,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
             socket: createSocket(config.appToken),
             botUserId,
             teamId,
+            statusWarned: { value: false },
           });
         } catch (error) {
           // One broken app must not take the rest of the fleet down.

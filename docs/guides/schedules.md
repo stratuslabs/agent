@@ -60,7 +60,9 @@ destination, because that is what is being approved. See
   be able to see the conversation and be a member of it — so a schedule
   that could never report is refused while somebody is present to hear why,
   not at 6am. The same membership check runs on every send: no cold-DMing.
-- **Schedules survive restarts** (they live in the daemon's own database),
+- **Schedules survive restarts** (they live in the fleet's own database,
+  `~/.stratus/fleet.db` — fleet-wide on purpose, so the tick, this list, and
+  a cancel by bare id all see every agent's rows),
   a slot is consumed *before* its firing dispatches so a crash mid-firing
   never double-runs it, and a missed window gets at most one late
   catch-up — windows that passed entirely are skipped with a log line.

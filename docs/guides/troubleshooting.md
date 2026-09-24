@@ -58,8 +58,9 @@ subscription sign-in to per-token billing.
 - **Slack replies arrive full of `**` and `##`, or some other companion
   behaves like an older build** — the optional packages are global installs
   of their own, so one can lag the CLI loading it. `stratus update --check`
-  names any that are behind and `stratus update` brings them up; note that
-  `stratus doctor` reports a stale package as `installed`, because it is.
+  names any that are behind, and so do `stratus doctor` and the warnings
+  `stratus serve` prints when it starts. `stratus update` brings them up, and
+  then restart the daemon: a running daemon keeps the version it loaded.
 - **`stratus logs` shows nothing, but the daemon won't start** — a daemon
   that fails before it starts serving never opens the structured log. See
   [When the log is empty](./logs.md#when-the-log-is-empty) for where those
@@ -67,6 +68,12 @@ subscription sign-in to per-token billing.
 - **A Slack app is silent** — the daemon isn't running
   ([Always on](./always-on.md)), or the channel package isn't installed
   (`stratus serve` names it at startup).
+- **An agent's shell cannot find `node`, `npm`, `gh`, or another tool you
+  have installed** — the always-on service runs with the `PATH` of the
+  shell `stratus service install` was run from, and a unit written before
+  that existed has the service manager's minimal default. Run `stratus
+  service install` (or `stratus update`) from a terminal where `which node`
+  works. See [Always on](./always-on.md).
 - **It answers mentions but not replies in its own thread** — the app was
   installed before the channel history scopes were in the manifest, so
   Slack tells it about mentions only. Add `channels:history` /
@@ -84,3 +91,68 @@ subscription sign-in to per-token billing.
 - **A gated tool call was refused overnight** — that is the daemon's
   honest default. [Approvals](./approvals.md) covers asking a human in
   Slack instead.
+- **An agent stops to say it is out of steps** — the task used every tool
+  turn one message allows (`maxTurns`, default 40). Reply "continue" to
+  carry on; raise `maxTurns` for agents that do long work. The error
+  **"Session exceeded the maximum of N provider turns"** means the model
+  called a tool on the wrap-up call it was told not to, and is fixed the
+  same way.
+  See [how many turns one message may
+  spend](./always-on.md#how-many-turns-one-message-may-spend).
+- **"ran out of context part-way through its answer"** — different from
+  the cap below, and not fixed by asking for less: the *conversation* is
+  what no longer fits. A daemon narrows the history and retries rather
+  than failing, so seeing this means one turn is too large on its own —
+  see below.
+- **"stopped at the … output cap before finishing"** — the model ran out
+  of room mid-answer, so the reply was a fragment and was not delivered.
+  The turn is failed rather than answered on purpose: a cut-off reply
+  reads exactly like a complete one, which is worse than an error. Ask for
+  a shorter answer, or change
+  [`maxTokens`](../reference/config.md#how-long-an-answer-may-be). If the
+  message says the cap itself was rejected, the model or proxy you named
+  has a lower ceiling than the default — set `maxTokens` under it. On an
+  OpenAI-compatible endpoint the cap is the endpoint's own default, so the
+  fix is on that side.
+- **A bridged MCP tool's output ends in `truncated by stratus`** — the
+  server returned more than one result may put into the transcript, which
+  every later turn of that conversation would then replay. The marker
+  names the size the server sent; raise that server's `maxResultChars` if
+  it is legitimately that large, or narrow the call. See
+  [MCP](./mcp.md#the-posture).
+- **An agent has forgotten the start of a long conversation** — see below.
+
+## A conversation that outgrows the model
+
+A session is durable and a Slack DM is one session for the life of the
+install, so a busy thread's transcript grows without limit. Every turn
+replays the whole thing to the model, and eventually it no longer fits.
+
+When that happens the conversation **narrows rather than stopping**. The
+request is refused for length, the daemon halves how much history it sends
+and tries again until it fits, and it remembers the window it landed on so
+the next turn does not pay for the discovery again. The agent is told, in
+the request, that earlier messages are not being shown.
+
+What this costs is real and worth knowing:
+
+- **The agent cannot see the messages that fell out of the window.** It
+  knows how many there were and nothing about them, so it will answer
+  questions about the start of the conversation as though it had just
+  joined. Summarizing what leaves is
+  [planned, not shipped](../roadmap/32-context-management.md).
+- **Nothing is deleted.** The window bounds what is *sent*; the transcript
+  on disk is whole, and `stratus logs` shows every trim as
+  `session.context-trimmed`.
+- **The window only ever narrows.** A conversation that trimmed once will
+  trim again as it grows.
+
+`stratus session rollover <id>` starts the same id over with an empty
+transcript when you would rather begin again than keep narrowing — the old
+conversation is archived, not lost.
+
+One case this cannot rescue: a **single turn** too large for the model, for
+example a tool result of several megabytes. There is no earlier history to
+give up, so the turn fails saying exactly that. Cut what the call returns — `maxBytes` on
+`fs.read`, `maxOutputBytes` on `shell.run`, see [Tools](./tools.md) — or
+move that agent to a model with a bigger context window.

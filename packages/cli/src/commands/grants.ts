@@ -2,7 +2,7 @@ import {
   createFileCommandWhitelist,
   describeAgentGrants,
   describeToolGrant,
-  whitelistPathFor,
+  resolveWhitelistPath,
   type AgentGrantsListing,
   type ToolGrant,
 } from '@stratusagent/permissions';
@@ -67,7 +67,12 @@ export const runGrants = async (
       return reportRevocation(revoked);
     }
     const listing: GrantsListing = { agentId, ...describeAgentGrants(await store.grantsFor(agentId)) };
-    return render(listing, `${whitelistPathFor(agentsDirPath(env), agentId)}`);
+    // The file that was actually read, which during an upgrade is the old
+    // `<id>.whitelist.json` — see `resolveWhitelistPath`. Naming the new
+    // path here would report a source this command did not consult and
+    // which may not exist yet, in the one output whose whole job is to say
+    // where an agent's standing grants come from.
+    return render(listing, await resolveWhitelistPath(agentsDirPath(env), agentId));
   };
 
   const reportRevocation = (revoked: boolean): number => {
@@ -136,7 +141,7 @@ export const runGrants = async (
       streams.stderr,
       `Warning: ${gatewayInfoPath(env)} names a daemon at ${base}, but it did not answer `
       + `(${error instanceof Error ? error.message : String(error)}). `
-      + `${revocation ? 'Revoking in' : 'Reading'} ${whitelistPathFor(agentsDirPath(env), agentId)} instead; `
+      + `${revocation ? 'Revoking in' : 'Reading'} ${await resolveWhitelistPath(agentsDirPath(env), agentId)} instead; `
       + 'a daemon that is running will not notice until it restarts.',
     );
     return fromFiles();

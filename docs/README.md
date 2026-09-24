@@ -32,6 +32,7 @@ tree is where the depth lives.
 | Use the web dashboard, or reach a daemon from another machine | [Remote access](./guides/remote-access.md) |
 | Look up a command or flag | [CLI reference](./reference/cli.md) |
 | Look up a config key, or understand precedence | [Configuration](./reference/config.md) |
+| Know what is in `~/.stratus`, and what belongs to one agent | [State layout](./reference/state-layout.md) |
 | Understand souls, ids, and agent identity | [Agents](./concepts/agents.md) |
 | Understand what an agent remembers | [Memory](./concepts/memory.md) |
 | See where an agent's facts came from, and vouch for the ones that are yours | [Memory](./concepts/memory.md#where-a-fact-came-from) |

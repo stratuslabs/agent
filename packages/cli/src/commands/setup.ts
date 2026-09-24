@@ -38,11 +38,11 @@ import {
   saveCredentials,
   CREDENTIAL_PROVIDER_NAMES,
   verifyProviderKey,
-  workspacesDirPath,
   type ApiConfig,
   type ApprovalsConfig,
   type CatalogModel,
   type PrincipalsConfig,
+  type SlackConfig,
   type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
@@ -110,6 +110,12 @@ interface SetupState {
   promptCache?: boolean;
   promptCacheTtl?: '5m' | '1h';
   /**
+   * Settings setup has no menu for, held so a save does not drop them —
+   * see the round-trip below.
+   */
+  maxTokens?: number;
+  maxTurns?: number;
+  /**
    * The four blocks an operator writes by hand, carried for the same reason
    * `vision` is — with more at stake, because each one is a decision about
    * what the daemon may do rather than a preference. `save` rebuilds the
@@ -131,6 +137,7 @@ interface SetupState {
   approvals?: ApprovalsConfig;
   api?: ApiConfig;
   principals?: PrincipalsConfig;
+  slack?: SlackConfig;
   /** Trusted-only selections with no menu here; carried through a save. */
   executor?: string;
   memoryStore?: string;
@@ -229,11 +236,17 @@ export const runSetup = async (
     ...(existing.approvals !== undefined ? { approvals: existing.approvals } : {}),
     ...(existing.api !== undefined ? { api: existing.api } : {}),
     ...(existing.principals !== undefined ? { principals: existing.principals } : {}),
-    // Trusted-only selections setup has no menu for, carried through a
-    // save untouched: a re-run that dropped them would put the operator's
-    // agents back on the host and the file store without a word.
+    ...(existing.slack !== undefined ? { slack: existing.slack } : {}),
+    // Settings setup has no menu for, carried through a save untouched: a
+    // re-run that dropped them would put the operator's agents back on the
+    // host and the file store without a word — and, for the two bounds,
+    // back on defaults their model cannot serve. A `maxTokens` set because
+    // a proxy's ceiling is under 16000 would silently return to 16000 and
+    // fail every request; a raised `maxTurns` would return to 8.
     ...(existing.executor !== undefined ? { executor: existing.executor } : {}),
     ...(existing.memoryStore !== undefined ? { memoryStore: existing.memoryStore } : {}),
+    ...(existing.maxTokens !== undefined ? { maxTokens: existing.maxTokens } : {}),
+    ...(existing.maxTurns !== undefined ? { maxTurns: existing.maxTurns } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
@@ -1308,7 +1321,7 @@ export const runSetup = async (
       const { manifest, directory } = await readPluginManifest(name, {
         resolve: (target) => import.meta.resolve(target),
       });
-      await preflightPlugin(manifest, directory, block as JsonObject, workspacesDirPath(env));
+      await preflightPlugin(manifest, directory, block as JsonObject);
       return undefined;
     } catch (error) {
       // A package that will not *resolve* is not a verdict about the block —
@@ -2554,8 +2567,8 @@ export const runSetup = async (
     if (state.promptCacheTtl !== undefined) {
       config.promptCacheTtl = state.promptCacheTtl;
     }
-    // `plugins` and `approvals` have menus above; `api` and `principals`
-    // do not and are written back exactly as they were read. Both cases
+    // `plugins` and `approvals` have menus above; `api`, `principals`, and
+    // `slack` do not and are written back exactly as they were read. Both cases
     // land here the same way, because the menus edit this state rather
     // than the file — so there is nothing to merge, only to not lose.
     if (state.plugins !== undefined) {
@@ -2570,11 +2583,20 @@ export const runSetup = async (
     if (state.principals !== undefined) {
       config.principals = state.principals;
     }
+    if (state.slack !== undefined) {
+      config.slack = state.slack;
+    }
     if (state.executor !== undefined) {
       config.executor = state.executor;
     }
     if (state.memoryStore !== undefined) {
       config.memoryStore = state.memoryStore;
+    }
+    if (state.maxTokens !== undefined) {
+      config.maxTokens = state.maxTokens;
+    }
+    if (state.maxTurns !== undefined) {
+      config.maxTurns = state.maxTurns;
     }
 
     await saveConfigFile(configPath, config);

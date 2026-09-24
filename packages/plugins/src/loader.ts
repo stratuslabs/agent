@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type {
+  AgentWorkspaces,
   CredentialResolver,
   EventBus,
   JsonObject,
@@ -267,13 +268,17 @@ export interface LoadPluginsOptions {
    */
   credentials?: CredentialResolver;
   /**
-   * Where tool output belongs on this machine. Supplied to any plugin whose
-   * schema declares `workspaceRoot` and whose operator did not set one —
-   * the host knows the platform's answer (`~/.stratus/workspaces`) and a
-   * plugin that had to derive it would be re-deriving a path this
-   * repository owns.
+   * Where each agent's tool output belongs on this machine, handed to every
+   * plugin's `setup` as `PluginContext.workspaces`.
+   *
+   * This replaced a single `workspaceRoot` the loader filled in for any
+   * plugin whose schema declared it. That worked while the workspace was
+   * `~/.stratus/workspaces/<id>` — a root plus the agent id — and stopped
+   * working the moment it moved inside the agent's own directory, because
+   * the id was no longer the last segment and five plugins had each written
+   * that shape down. The host answers the whole question now.
    */
-  workspaceRoot?: string;
+  workspaces?: AgentWorkspaces;
   /** Overrides the trusted set. See `isFirstPartyPackage`. */
   trusted?: (packageName: string) => boolean;
   /** Handed to every plugin's `setup` as `PluginContext.log` / `.warn`. */
@@ -286,54 +291,47 @@ export interface LoadPluginsResult {
   failures: PluginLoadFailure[];
 }
 
-const WORKSPACE_ROOT_KEY = 'workspaceRoot';
 /**
- * Where the filesystem provenance ledger lives — always the host's
- * workspace root, whatever a plugin's own `workspaceRoot` says. Two plugins
- * write into the ledger (`tool-fs`, `plugin-mcp`), and an operator who
- * points one of them at a different workspace must not thereby give it a
- * different ledger: `fs.read` consults one, so a file recorded in another
- * reads back unlabelled. Overwritten rather than defaulted, for that reason.
+ * Where the filesystem provenance ledger lives, for a host that has no
+ * layout of its own. **Stripped** for everyone the loader serves, the way
+ * `toolRisks` is, and the reason is the same one that used to make it
+ * overwritten: two plugins write the ledger (`tool-fs`, `plugin-mcp`), and
+ * an operator who points one of them at a different workspace must not
+ * thereby give it a different ledger — `fs.read` consults one, so a file
+ * recorded in another reads back unlabelled.
+ *
+ * It was forced to the host's workspace root while that root was a single
+ * path. It is not one any more: the workspace is per agent and the host
+ * answers for it through the `workspaces` seam, which both writers use for
+ * the ledger and neither can override. One ledger by construction rather
+ * than by the loader holding a key down.
  */
 const LEDGER_ROOT_KEY = 'ledgerRoot';
 
-const declares = (manifest: PluginManifest, key: string): boolean => Boolean(
-  manifest.config
-  && typeof manifest.config.properties === 'object'
-  && manifest.config.properties !== null
-  && !Array.isArray(manifest.config.properties)
-  && key in (manifest.config.properties as JsonObject),
-);
-
 /**
  * The configuration a plugin will actually be handed: its own block, minus
- * the keys the host owns, plus the host defaults its manifest declares.
+ * the keys the host owns.
  *
  * Exported because validating a block against a manifest is only right on
- * *this* object — `validatePluginConfig` on the raw block would refuse a
- * manifest that declares `workspaceRoot` required for missing the very
- * setting the host supplies. `stratus plugins` has to answer whether a
- * daemon would accept a plugin's settings, and answering it from a
- * different object than the loader uses is how a diagnostic ends up
- * disagreeing with the thing it diagnoses.
+ * *this* object — the raw block still carries the keys the host strips, and
+ * `stratus plugins` has to answer whether a daemon would accept a plugin's
+ * settings. Answering it from a different object than the loader uses is
+ * how a diagnostic ends up disagreeing with the thing it diagnoses.
  */
 export const pluginConfigWithHostDefaults = (
   block: JsonObject,
   manifest: PluginManifest,
-  workspaceRoot: string | undefined,
 ): JsonObject => {
   // `toolRisks` is the host's key, applied by the view at registration —
   // stripped here so the plugin's code never sees, and so can never
   // second-guess, the operator's risk word.
-  const { enabled: _enabled, toolRisks: _toolRisks, ...rest } = block;
-  let config = rest;
-  if (declares(manifest, WORKSPACE_ROOT_KEY) && workspaceRoot !== undefined && config[WORKSPACE_ROOT_KEY] === undefined) {
-    config = { ...config, [WORKSPACE_ROOT_KEY]: workspaceRoot };
-  }
-  if (declares(manifest, LEDGER_ROOT_KEY) && workspaceRoot !== undefined) {
-    config = { ...config, [LEDGER_ROOT_KEY]: workspaceRoot };
-  }
-  return config;
+  const { enabled: _enabled, toolRisks: _toolRisks, [LEDGER_ROOT_KEY]: _ledgerRoot, ...rest } = block;
+  // `workspaceRoot` is no longer filled with the host's answer. It was,
+  // while there was a single root to fill it with; the host now answers per
+  // agent through the `workspaces` seam, so a value here is one an operator
+  // wrote, and `workspaceResolver` lets it win — relocating a workspace by
+  // writing it down is a thing they are documented to be able to do.
+  return rest;
 };
 
 /** A declared skill, read and validated but not yet in any registry. */
@@ -429,12 +427,11 @@ export const preflightPlugin = async (
   manifest: PluginManifest,
   directory: string,
   block: JsonObject,
-  workspaceRoot: string | undefined,
 ): Promise<void> => {
   // The loader's order, kept: a block whose settings are wrong should say
   // so before its overrides are read, since the overrides are the narrower
   // mistake and the schema error is the one more likely to explain it.
-  validatePluginConfig(manifest, pluginConfigWithHostDefaults(block, manifest, workspaceRoot));
+  validatePluginConfig(manifest, pluginConfigWithHostDefaults(block, manifest));
   parseToolRiskOverrides(manifest, block);
   await stageManifestSkills(manifest, directory);
 };
@@ -484,11 +481,10 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
     try {
       const { manifest, directory } = await readPluginManifest(specifier, options.host);
       const isTrusted = trusted(manifest.packageName);
-      // Validated *after* the host's defaults are folded in, because that
-      // is the configuration the plugin will actually be handed: a manifest
-      // that declares `workspaceRoot` required would otherwise be refused
-      // for missing the very setting the host supplies.
-      const config = pluginConfigWithHostDefaults(block, manifest, options.workspaceRoot);
+      // Validated on the object the plugin will actually be handed, not on
+      // the raw block: the block still carries the keys the host strips, and
+      // a schema that forbids extra properties would refuse it for them.
+      const config = pluginConfigWithHostDefaults(block, manifest);
       validatePluginConfig(manifest, config);
       const riskOverrides = parseToolRiskOverrides(manifest, block);
 
@@ -533,6 +529,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         ...(options.credentials !== undefined
           ? { credentials: createManifestBoundCredentialResolver(manifest, options.credentials) }
           : {}),
+        ...(options.workspaces !== undefined ? { workspaces: options.workspaces } : {}),
         ...(options.log !== undefined ? { log: options.log } : {}),
         ...(options.warn !== undefined ? { warn: options.warn } : {}),
       });
