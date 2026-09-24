@@ -2519,6 +2519,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
     },
     api: { enabled: true, port: 4123 },
     principals: { slackUsers: ['U01DYLAN'], agents: { blair: { slackUsers: ['U01BLAIR'] } } },
+    slack: { replies: 'stream', agents: { blair: { replies: 'final' } } },
   };
   // The scalar preferences setup has no menu for either — same defect, and
   // an operator who turned caching off was silently put back on it.
@@ -2543,6 +2544,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
   assert.deepEqual(written.approvals, carried.approvals);
   assert.deepEqual(written.api, carried.api);
   assert.deepEqual(written.principals, carried.principals);
+  assert.deepEqual(written.slack, carried.slack);
   assert.equal(written.promptCache, false);
   assert.equal(written.promptCacheTtl, '1h');
   // The keys setup does own still get written, so this is a merge rather
