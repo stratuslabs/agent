@@ -4213,6 +4213,8 @@ test('a table longer than one message stays a grid in every part', async () => {
   for (const chunk of chunks) {
     assert.ok(chunk.length <= 4000, `chunk is ${chunk.length} characters`);
     assert.ok(chunk.startsWith('```\n') && chunk.endsWith('```'), `a part is not a code block: ${chunk.slice(0, 20)}…${chunk.slice(-20)}`);
+    // Every part names its columns, not only the first.
+    assert.ok(chunk.startsWith('```\nName    │ Status\n────────┼───────\n'), `a part lost its header: ${chunk.slice(0, 40)}`);
   }
 });
 

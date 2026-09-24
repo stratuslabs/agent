@@ -855,6 +855,18 @@ export interface CodeRun {
 }
 
 /**
+ * A fence's first line — and, for a table grid, the header and rule after
+ * it, so a grid split across messages names its columns in every part
+ * rather than leaving the later ones as rows nobody can read.
+ */
+const fenceOpener = (source: string, lineEnd: number): string => {
+  const headerEnd = source.indexOf('\n', lineEnd + 1);
+  const ruleEnd = headerEnd === -1 ? -1 : source.indexOf('\n', headerEnd + 1);
+  const rule = ruleEnd === -1 ? '' : source.slice(headerEnd + 1, ruleEnd);
+  return /^─[─┼]*$/.test(rule) ? source.slice(0, ruleEnd + 1) : source.slice(0, lineEnd + 1);
+};
+
+/**
  * Where the code runs sit in already-converted text, read by the same scan
  * that converts it — so the splitter agrees with the converter about what
  * is code, rather than keeping a second idea of it that drifts. Conversion
@@ -874,7 +886,7 @@ export const codeRunsOf = (text: string): CodeRun[] => {
       const fence = '`'.repeat(ticks);
       const lineEnd = source.indexOf('\n');
       runs.push(ticks >= 3 && lineEnd !== -1
-        ? { start: at, end: at + source.length, opener: source.slice(0, lineEnd + 1), closer: `\n${fence}` }
+        ? { start: at, end: at + source.length, opener: fenceOpener(source, lineEnd), closer: `\n${fence}` }
         : { start: at, end: at + source.length, opener: fence, closer: fence });
     }
     at += source.length;
