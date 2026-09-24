@@ -7811,6 +7811,25 @@ test('the unit carries the installing shell\'s PATH, so a Homebrew node and gh a
   assert.equal(command?.scriptPath, '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js');
 });
 
+test('a unit installed with no PATH keeps the service manager\'s default', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'darwin',
+    homeDir: home,
+    execPath: '/Users/ava/.nvm/versions/node/v22.14.0/bin/node',
+    scriptPath: '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    uid: 501,
+    // Only relative entries, as good as none.
+    path: '.:bin',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  // Node's directory alone would replace launchd's /usr/bin:/bin:/usr/sbin:/sbin
+  // rather than add to it, and a command could no longer find `ls`.
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  assert.doesNotMatch(plist, /EnvironmentVariables/);
+});
+
 test('service install writes the PATH of the shell it was run from into the systemd unit', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await runCli({

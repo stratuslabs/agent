@@ -176,12 +176,15 @@ WantedBy=default.target
  * lookup path an agent's workspace could plant a binary in.
  */
 export const servicePath = (env: ServiceEnvironment): string | undefined => {
-  const entries = [
-    path.dirname(env.execPath ?? process.execPath),
-    ...(env.path ?? '').split(path.delimiter),
-  ].filter((entry) => entry.length > 0 && path.isAbsolute(entry));
-  const unique = [...new Set(entries)];
-  return unique.length > 0 ? unique.join(path.delimiter) : undefined;
+  const shell = (env.path ?? '').split(path.delimiter).filter((entry) => entry.length > 0 && path.isAbsolute(entry));
+  // No PATH to carry — an install run under `env -i`, or automation that
+  // strips it — writes no override at all. Node's directory alone would
+  // replace the manager's default rather than add to it, and an agent's
+  // shell would lose /usr/bin with it.
+  if (shell.length === 0) {
+    return undefined;
+  }
+  return [...new Set([path.dirname(env.execPath ?? process.execPath), ...shell])].join(path.delimiter);
 };
 
 const servicePathEntry = (env: ServiceEnvironment): { path?: string } => {
