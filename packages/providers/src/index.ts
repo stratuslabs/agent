@@ -455,6 +455,7 @@ export const createOpenAICompatibleProvider = ({
               model,
               messages,
               ...(tools.length > 0 ? { tools } : {}),
+              ...(tools.length > 0 && request.toolChoice === 'none' ? { tool_choice: 'none' } : {}),
             }),
             ...(signal ? { signal } : {}),
           });

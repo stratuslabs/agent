@@ -180,26 +180,23 @@ bounds.
 
 A turn calls the provider, runs the tools it asked for, and calls the
 provider again with the results. `maxTurns` in the config file is the
-ceiling on that loop, and the default is **8** — the whole budget for one
+ceiling on that loop, and the default is **40** — the budget for one
 Slack message, one scheduled firing, or one control-API dispatch.
 
-A task that needs a ninth round fails on the ninth:
-
-```
-Session exceeded the maximum of 8 provider turns.
-```
-
-The ceiling is checked *before* the provider call rather than after it, so
-the agent never gets a last turn to sum up what it found — the work of the
-first eight is in the transcript, unanswered. Sending the message again
-resumes the session with a fresh allowance, which is how to recover;
-raising `maxTurns` is how to stop it happening.
+A task that uses all of them is not failed. The agent is told it is out of
+steps, gets one last call with no tools it may use, and answers with what it
+did and what is left; replying "continue" carries on from there with a
+fresh allowance. Raise `maxTurns` for agents that do long work, so they
+check in less often — see [how many turns one message may
+spend](../reference/config.md#how-many-turns-one-message-may-spend).
 
 That is how the ceiling reads under a provider the kernel drives one call
 at a time. The `codex` and `claude-code` runtimes hold their own loop
 inside one call and take the number as an inner budget instead: codex
 refuses the call past the budget as a tool error and answers with what it
-has, while Claude Code's own limit fails the run (`error_max_turns`). See
+has, and when Claude Code reaches its own limit (`error_max_turns`) the
+provider resumes that session once, with no tools it may run, for the same
+summary. See
 [Configuration](../reference/config.md#how-many-turns-one-message-may-spend).
 
 There is no flag for it on

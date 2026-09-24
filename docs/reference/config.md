@@ -58,7 +58,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `plugins` | Plugins to load, keyed by package name — trusted configs only, see below |
 | `executor` | Which executor runs tool calls: `local` (the default) or the name a [plugin executor](../guides/extending.md#executors) registers — trusted configs only, see below |
 | `memoryStore` | Which store backs agent memory: `file` (the default) or the name a [plugin memory store](../guides/extending.md#memory-stores) registers — trusted configs only, see below |
-| `maxTurns` | How many provider turns one message may spend before the turn is failed as a runaway. Default `8` — trusted configs only, see below |
+| `maxTurns` | How many tool turns one message may take before the agent stops and reports where it got to. Default `40` — trusted configs only, see below |
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
@@ -123,37 +123,43 @@ ceiling is the endpoint's own default.
 
 A dispatched turn calls the provider, runs whatever tools it asked for,
 calls the provider again with the results, and repeats. `maxTurns` is the
-ceiling on that loop — the point at which the turn is failed rather than
-allowed to keep going.
+ceiling on that loop — the point where one message stops working and
+reports.
 
 ```json
 {
-  "maxTurns": 24
+  "maxTurns": 100
 }
 ```
 
-The default is 8, which is the whole budget for one Slack message: a task
-that needs nine rounds of tool calls fails on the ninth. It fails *before*
-the ninth provider call rather than after it, so there is no partial
-answer — the error is `Session exceeded the maximum of 8 provider turns`,
-and the work of the first eight turns is in the transcript but was never
-summed up. Sending the message again resumes the session with the ceiling
-reset, which is the recovery; raising `maxTurns` is the fix.
+The default is 40. A message that uses all of them is not failed: the
+agent gets one more call with its tools declared but not callable
+(`tool_choice: none`) and a note saying it is out of steps, and answers
+with what it did, what it found, and what is left. The session keeps every
+step, so replying "continue" carries on with a fresh allowance. The note
+is sent for that one call and never saved — it is the runtime speaking,
+not the person.
 
-Raise it for agents that do multi-step work — reading several files,
-walking a set of issues, anything with a fan-out. Leave it low for a fleet
-that answers questions.
+A provider that ignores the no-tools request and calls a tool anyway on
+that last call fails the turn with `Session exceeded the maximum of N
+provider turns`, and the call is not run. The first-party providers all
+honour it.
+
+Raise it for agents that do long multi-step work — a shell, a migration,
+walking a set of issues. Lower it for a fleet that answers questions, where
+a long loop is more likely a mistake than a task.
 
 It is a **spending** limit as much as a safety one, which is why it is
 trusted-config only: a turn that loops 500 times costs 500 provider calls.
 That cuts both ways, so a project-local config cannot lower it either. The
-floor is 1, and 1 does not stop the daemon answering: the ceiling is
-tested before each provider call, so the first one is always allowed and a
-question the agent can answer outright still gets answered. What it stops
-is the *second* call — under a provider the kernel drives one call at a
-time (`anthropic`, `openai`, and plugin providers of that shape), an agent
-that reads a file, searches, or calls any tool at all fails the moment it
-tries to use the result.
+floor is 1, and 1 does not stop the daemon answering: the first provider
+call is always allowed, so a question the agent can answer outright still
+gets answered. Under a provider the kernel drives one call at a time
+(`anthropic`, `openai`, and plugin providers of that shape), `maxTurns: 1`
+means one round of tools: the tools the first call asks for run, and the
+second call is the wrap-up, which reads their results but may not call
+another. So an agent at 1 can read one file and answer from it, but not
+read a second one on the strength of the first.
 
 **The harness runtimes spend the ceiling differently.** `codex` and
 `claude-code` hold their own loop inside a single provider call, so the
@@ -167,11 +173,12 @@ exhausted: ...`), which ends the run with whatever it has rather than
 failing it. That is the case to watch: a ceiling too low shortens the work
 into an answer that reads like a complete one.
 
-For `claude-code` it is the Agent SDK's own turn cap, and running out is a
-failure rather than a short answer — the SDK ends the run with
-`error_max_turns`, and the provider refuses any non-success result. So the
-turn fails as it would under a kernel-driven provider, just from inside a
-single provider call and with the SDK's wording.
+For `claude-code` it is the Agent SDK's own turn cap. When the SDK ends a
+run with `error_max_turns`, the provider resumes that SDK session once
+with the same out-of-steps note and `maxTurns: 1`, and a tool called there
+is refused without running — so the message ends with a summary, as under
+a kernel-driven provider. Only a run that ran out with no session to
+resume, or whose summary itself failed, fails the turn.
 
 A delegated sub-session gets its own allowance rather than a share of its
 parent's: `agent.delegate` starts a separate dispatch, and each dispatch is

@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 
 import {
+  DEFAULT_MAX_TURNS,
   markPromptDelivered,
   isUnaddressedTurn,
   renderSystemPromptSections,
@@ -43,9 +44,6 @@ export const MCP_TOKEN_ENV_VAR = 'STRATUS_CODEX_MCP_TOKEN';
 export type CodexToolExecutor = HostedToolExecutor;
 
 const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
-
-/** Hosted tool calls per generate when the host sets no explicit budget. */
-const DEFAULT_TOOL_MAX_TURNS = 8;
 
 // ---------------------------------------------------------------------------
 // The kernel-tool MCP endpoint
@@ -597,7 +595,7 @@ export const createCodexProvider = ({
     };
 
     let hostedToolRuns = 0;
-    const toolBudget = maxTurns ?? DEFAULT_TOOL_MAX_TURNS;
+    const toolBudget = maxTurns ?? DEFAULT_MAX_TURNS;
     const countedExecute: CodexToolExecutor | undefined = executeTool
       ? async (session, call, context) => {
           // The budget is the kernel's max-turns limit, enforced at the one

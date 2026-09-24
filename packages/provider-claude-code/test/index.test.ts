@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { promptWasDelivered } from '@stratusagent/core';
+import { DEFAULT_MAX_TURNS, promptWasDelivered, TURN_LIMIT_NOTE } from '@stratusagent/core';
 import { test } from 'node:test';
 import type {
   MemoryEntry,
@@ -123,10 +123,9 @@ test('multi-turn sessions are rendered as a transcript', async () => {
   assert.match(prompt, /replying to the latest user message/);
 });
 
-// `error_max_turns` is the SDK hitting the `maxTurns` this provider passes
-// it, and it fails the turn here rather than returning what the run had —
-// the half of the asymmetry docs/reference/config.md documents that codex
-// does not share, where the same ceiling only shortens the answer.
+// `error_max_turns` with no session to resume has nothing to wrap up, so
+// it fails the turn; with one, the provider asks for a summary instead (see
+// the wrap-up tests below).
 test('error results and empty responses surface as errors', async () => {
   const failed = createClaudeCodeProvider({
     queryFn: createFakeQuery([
@@ -215,7 +214,72 @@ test('kernel tools bridge into the loop as an in-process MCP server', async () =
   assert.ok(options.mcpServers?.stratus);
   assert.deepEqual(options.allowedTools, ['mcp__stratus__memory_remember', 'mcp__stratus__demo_echo']);
   // Tool runs need a real loop, not a single turn.
-  assert.equal(options.maxTurns, 8);
+  assert.equal(options.maxTurns, DEFAULT_MAX_TURNS);
+});
+
+test('a run that uses every turn resumes once to say where it got to', async () => {
+  const calls: Array<{ prompt: string; options?: Record<string, unknown> }> = [];
+  const runs: ClaudeCodeStreamMessage[][] = [
+    [{ type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-1' }],
+    [{ type: 'result', subtype: 'success', is_error: false, result: 'Ran three commands; the build still fails. Reply "continue".', session_id: 'sdk-1' }],
+  ];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    calls.push(params as { prompt: string; options?: Record<string, unknown> });
+    const messages = runs[calls.length - 1] ?? [];
+    return (async function* () {
+      for (const message of messages) {
+        yield message;
+      }
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn, maxTurns: 3 });
+
+  const response = await provider.generate({ session: createSession() });
+
+  // The reported shape: `Claude Code run failed (error_max_turns)` in a
+  // Slack thread, after eight approved commands and nothing said.
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Ran three commands; the build still fails. Reply "continue".' }]);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]!.prompt, TURN_LIMIT_NOTE);
+  assert.equal(calls[1]!.options?.resume, 'sdk-1');
+  assert.equal(calls[1]!.options?.maxTurns, 1);
+});
+
+test('a tool called while wrapping up is refused and never runs', async () => {
+  const executed: ToolCall[] = [];
+  let run = 0;
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    run += 1;
+    const current = run;
+    const options = params.options as {
+      mcpServers?: Record<string, { instance?: { _registeredTools?: Record<string, { handler: (a: unknown, b: unknown) => Promise<unknown> }> } }>;
+    };
+    return (async function* () {
+      if (current === 1) {
+        yield { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-2' } as ClaudeCodeStreamMessage;
+        return;
+      }
+      // The model reaches for a tool on the turn that may not act.
+      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.demo_echo?.handler;
+      const refused = await handler!({ text: 'again' }, {});
+      yield { type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(refused), session_id: 'sdk-2' } as ClaudeCodeStreamMessage;
+    })();
+  };
+  const provider = createClaudeCodeProvider({
+    queryFn,
+    executeTool: async (_session, toolCall) => {
+      executed.push(toolCall);
+      return { callId: toolCall.id, toolName: toolCall.toolName, ok: true, output: null };
+    },
+  });
+
+  const response = await provider.generate({
+    session: createSession(),
+    tools: [{ name: 'demo.echo', parameters: { type: 'object', properties: { text: { type: 'string' } } } }],
+  });
+
+  assert.deepEqual(executed, []);
+  assert.match(JSON.stringify(response.parts), /No steps are left on this message/);
 });
 
 test('bridged tool handlers execute through the host and report failures', async () => {

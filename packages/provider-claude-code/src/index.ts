@@ -9,8 +9,10 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import {
+  DEFAULT_MAX_TURNS,
   markPromptDelivered,
   isUnaddressedTurn,
+  TURN_LIMIT_NOTE,
   renderSystemPromptSections,
   type JsonObject,
   type ModelProvider,
@@ -36,8 +38,6 @@ export { bridgedToolNames, hasHostedToolSideEffects, markHostedToolSideEffects }
 
 export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5';
 
-/** Provider turns per generate call once kernel tools are bridged in. */
-const DEFAULT_TOOL_MAX_TURNS = 8;
 
 const MCP_SERVER_NAME = 'stratus';
 
@@ -416,8 +416,21 @@ export const createClaudeCodeProvider = ({
     };
 
     let hostedToolRuns = 0;
+    // Set for the wrap-up query only, which may not act: a call made there
+    // is answered with a refusal and nothing runs — the same shape codex
+    // gives a call past its budget.
+    let refuseTools = false;
     const countedExecute: ClaudeCodeToolExecutor | undefined = executeTool
       ? async (session, call, context) => {
+          if (refuseTools) {
+            return {
+              callId: call.id,
+              toolName: call.toolName,
+              ok: false,
+              output: null,
+              error: 'No steps are left on this message, so nothing was run. Answer with what you have.',
+            };
+          }
           hostedToolRuns += 1;
           activeHostedTools += 1;
           suspendIdleTimer();
@@ -450,7 +463,7 @@ export const createClaudeCodeProvider = ({
       systemPrompt: createSystemPrompt(request, systemPrompt),
       // No built-in Claude Code tools: Stratus owns the tool surface.
       tools: [],
-      maxTurns: maxTurns ?? (bridgedTools ? DEFAULT_TOOL_MAX_TURNS : 1),
+      maxTurns: maxTurns ?? (bridgedTools ? DEFAULT_MAX_TURNS : 1),
       // Only when someone is listening: partial messages are pure overhead
       // for a caller that discards them, and the kernel only supplies a
       // sink when a consumer wants deltas.
@@ -486,6 +499,9 @@ export const createClaudeCodeProvider = ({
     };
 
     let resultText: string | undefined;
+    // The SDK session a run that used up its turns belongs to, so the
+    // wrap-up can resume it; see TURN_LIMIT_NOTE in core.
+    let outOfTurns: string | undefined;
     // Whether the SDK reported the turn finished: a stream that closes
     // without a `result` is a run that did not complete, whatever it
     // yielded on the way, and is never silence.
@@ -603,6 +619,13 @@ export const createClaudeCodeProvider = ({
             resultText = message.result;
             continue;
           }
+          // Out of turns is where a long task checks in, not a failure —
+          // when there is a session to resume for the summary. Without one
+          // there is nothing to wrap up, and it fails as before.
+          if (message.subtype === 'error_max_turns' && message.session_id && !refuseTools) {
+            outOfTurns = message.session_id;
+            continue;
+          }
           throw new Error(
             `Claude Code run failed (${message.subtype ?? 'unknown error'})${message.result ? `: ${message.result}` : ''}`,
           );
@@ -612,6 +635,46 @@ export const createClaudeCodeProvider = ({
         // counts on the error result, and a failed harness turn that
         // reported nothing would leave the run unreconcilable against
         // Anthropic's own numbers — the only external check this has.
+        reportUsage(attemptUsage);
+      }
+    };
+
+    const wrapUp = async (sdkSessionId: string): Promise<void> => {
+      refuseTools = true;
+      let attemptUsage: Record<string, ClaudeCodeModelUsage> | undefined;
+      resetIdleTimer();
+      try {
+        for await (const message of queryFn({
+          prompt: TURN_LIMIT_NOTE,
+          options: { ...options, resume: sdkSessionId, maxTurns: 1 },
+        })) {
+          resetIdleTimer();
+          if (message.type === 'stream_event') {
+            suspendIdleTimer();
+            try {
+              await forwardDelta(message, request.onDelta, toolNamesByIndex, kernelNameFor);
+            } finally {
+              resetIdleTimer();
+            }
+            continue;
+          }
+          if (message.type !== 'result') {
+            continue;
+          }
+          if (message.modelUsage) {
+            attemptUsage = message.modelUsage;
+          }
+          if (message.subtype === 'success' && !message.is_error) {
+            completed = true;
+            resultText = message.result;
+            continue;
+          }
+          throw new Error(
+            `Claude Code used all ${options.maxTurns ?? DEFAULT_MAX_TURNS} turns this message allows and could not summarize its progress (${message.subtype ?? 'unknown error'}). `
+            + 'Raise maxTurns in ~/.stratus/config.json for agents that do long multi-step work, or reply to carry on from here.',
+          );
+        }
+      } finally {
         reportUsage(attemptUsage);
       }
     };
@@ -652,6 +715,9 @@ export const createClaudeCodeProvider = ({
         }
         toolNamesByIndex.clear();
         await attempt(undefined);
+      }
+      if (outOfTurns !== undefined && resultText === undefined) {
+        await wrapUp(outOfTurns);
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
