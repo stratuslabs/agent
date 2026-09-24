@@ -14,8 +14,10 @@ import {
   PluginRegistry,
   readPendingApproval,
   ToolRegistry,
+  TURN_LIMIT_NOTE,
   type Executor,
   type ModelProvider,
+  type ProviderRequest,
   type Session,
   type StratusEvent,
   type Tool,
@@ -386,10 +388,12 @@ test('sessions fail when the provider never stops requesting tools', async () =>
   });
 
   let calls = 0;
+  const choices: Array<string | undefined> = [];
   const provider: ModelProvider = {
     name: 'looping-provider',
-    async generate() {
+    async generate(request) {
       calls += 1;
+      choices.push(request.toolChoice);
       return {
         parts: [
           { type: 'tool-call', call: { id: `call-${calls}`, toolName: 'loop', input: {} } },
@@ -409,10 +413,61 @@ test('sessions fail when the provider never stops requesting tools', async () =>
     /maximum of 3 provider turns/,
   );
 
-  assert.equal(calls, 3);
+  // Three tool turns, then the wrap-up: a provider that ignores `toolChoice`
+  // and calls a tool anyway fails the turn, and the call is never run.
+  assert.equal(calls, 4);
+  assert.deepEqual(choices, [undefined, undefined, undefined, 'none']);
   const session = await runner.store.get('session-5');
   assert.equal(session?.status, 'failed');
   assert.match(session?.lastError ?? '', /maximum of 3 provider turns/);
+  assert.equal(session?.messages.some((message) => message.toolCalls?.[0]?.id === 'call-4'), false);
+});
+
+test('a message that uses every turn wraps up with where it got to instead of failing', async () => {
+  const tools = new ToolRegistry();
+  const ran: string[] = [];
+  tools.register({
+    name: 'step',
+    async execute(input) {
+      ran.push(String((input as { n?: number }).n));
+      return { done: true };
+    },
+  });
+
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    name: 'long-task',
+    async generate(request) {
+      requests.push(request);
+      // Would keep working forever; only the wrap-up's `toolChoice` stops it.
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'Did three steps; two are left. Reply "continue" to carry on.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `s${requests.length}`, toolName: 'step', input: { n: requests.length } } }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools, maxTurns: 3 });
+  const session = await runner.run({
+    sessionId: 'wrap-up',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'Do the whole migration',
+  });
+
+  // The reported shape: an agent that used its budget used to fail with
+  // "exceeded the maximum", every step it took left unsummarized.
+  assert.equal(session.status, 'completed');
+  assert.deepEqual(ran, ['1', '2', '3']);
+  assert.equal(session.messages.at(-1)?.content, 'Did three steps; two are left. Reply "continue" to carry on.');
+
+  const wrapUp = requests.at(-1);
+  assert.equal(requests.length, 4);
+  // Still declared — history holds calls to them — but not to be called.
+  assert.equal(wrapUp?.tools?.some((tool) => tool.name === 'step'), true);
+  assert.equal(wrapUp?.toolChoice, 'none');
+  assert.equal(transcriptOf(wrapUp!).at(-1)?.content, TURN_LIMIT_NOTE);
+  // The runtime's note for one call, never something the person said.
+  assert.equal(session.messages.some((message) => message.content === TURN_LIMIT_NOTE), false);
 });
 
 test('resume continues an existing session with new user input', async () => {
@@ -1750,6 +1805,7 @@ test('a recovered turn spends the provider budget it was already on', async () =
   });
 
   let generates = 0;
+  const choices: Array<string | undefined> = [];
   const now = new Date().toISOString();
   const call = { id: 'c1', toolName: 'gated', input: {} };
   await store.create({
@@ -1767,8 +1823,9 @@ test('a recovered turn spends the provider budget it was already on', async () =
   const runner = new AgentRunner({
     provider: {
       name: 'fake',
-      async generate() {
+      async generate(request) {
         generates += 1;
+        choices.push(request.toolChoice);
         // Always asks for another tool, so only the budget can stop it.
         return { parts: [{ type: 'tool-call' as const, call: { id: `c${generates + 1}`, toolName: 'gated', input: {} } }] };
       },
@@ -1784,8 +1841,9 @@ test('a recovered turn spends the provider budget it was already on', async () =
     /maximum of 3 provider turns/,
   );
   // The recovered calls drain, then the loop is out of budget immediately —
-  // it does not get turns 1 through 3 over again.
-  assert.equal(generates, 0, `expected no further provider turns, saw ${generates}`);
+  // it does not get turns 1 through 3 over again. The one call it makes is
+  // the wrap-up, which may not use a tool.
+  assert.deepEqual(choices, ['none'], `expected only the wrap-up turn, saw ${generates}`);
 });
 
 test('resuming a parked session retires its checkpoint along with the interrupted call', async () => {

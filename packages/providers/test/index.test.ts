@@ -1063,6 +1063,26 @@ test('createOpenAICompatibleProvider sends a user message\'s images as data-URL 
   assert.equal(bodies[1]!.messages.at(-1).content, 'Say hello');
 });
 
+test('createOpenAICompatibleProvider sends tool_choice none on a wrap-up turn only', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Done so far.' }, finish_reason: 'stop' }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl });
+  const tools = [{ name: 'demo.echo', parameters: { type: 'object', properties: {} } }];
+
+  await provider.generate({ ...createRequest(), tools, toolChoice: 'none' });
+  await provider.generate({ ...createRequest(), tools });
+
+  assert.equal(bodies[0]!.tools.length, 1);
+  assert.equal(bodies[0]!.tool_choice, 'none');
+  assert.equal(bodies[1]!.tool_choice, undefined);
+});
+
 test('createOpenAICompatibleProvider replaces images past the replay budget with a note', async () => {
   const bodies: Array<Record<string, any>> = [];
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {

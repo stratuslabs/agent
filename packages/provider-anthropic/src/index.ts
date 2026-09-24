@@ -654,6 +654,7 @@ export const createAnthropicProvider = ({
           max_tokens: maxTokens,
           ...(prompt.system.length > 0 ? { system: prompt.system } : {}),
           ...(prompt.tools.length > 0 ? { tools: prompt.tools } : {}),
+          ...(prompt.tools.length > 0 && request.toolChoice === 'none' ? { tool_choice: { type: 'none' as const } } : {}),
           // Claude Opus 5 thinks adaptively when `thinking` is omitted.
           ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
           messages: prompt.memoryMessage === undefined

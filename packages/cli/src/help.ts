@@ -212,7 +212,7 @@ Options:
                    serve: how the daemon reaches a human — headless (refuse every
                    gated call) or remote (ask in Slack). Default headless, or
                    the config file's "approvals.mode"
-  --max-turns      Maximum provider turns per run (default: 8)
+  --max-turns      Maximum tool turns per run before it wraps up (default: 40)
   --port           dashboard: port for a daemon it starts (default: 4123)
   --host           dashboard: host for a daemon it starts (default: 127.0.0.1)
   --no-open        Do not open the browser automatically

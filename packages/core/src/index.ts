@@ -1638,6 +1638,18 @@ export interface ProviderRequest {
    */
   messages?: readonly Message[];
   tools?: ToolDescriptor[];
+  /**
+   * `none` asks for an answer in words: the tools stay declared, because
+   * the history holds calls to them and an API that is sent tool calls
+   * with no tools to match refuses the request, but the model may not
+   * call one. Sent on the turn that wraps up a message which has used its
+   * `maxTurns` (see `TURN_LIMIT_NOTE`).
+   *
+   * Optional to honour. A provider that ignores it sends a request the
+   * model may still answer with a call, and the runner then fails the turn
+   * the way it did before wrap-up existed, rather than run the call.
+   */
+  toolChoice?: 'none';
   /** Agent-scoped long-term memory, newest last. */
   memory?: MemoryEntry[];
   /**
@@ -2064,6 +2076,41 @@ export interface PromptTextOptions {
  */
 export const UNADDRESSED_TURN_NOTE =
   'Nobody said that to you, and nobody is waiting on you. Reply only if you have something these people would want from you and do not have — an answer to a question left open, a correction to something wrong, a thing you were asked to watch for. Otherwise reply with nothing at all: no acknowledgement, no summary, no offer to help. Saying nothing is usually the right answer here.';
+
+/**
+ * What the last turn of a message is told, once the message has used every
+ * tool turn `maxTurns` allows it.
+ *
+ * The alternative is what this replaced: the turn failed with "exceeded the
+ * maximum of 8 provider turns", every step it had taken sat in the
+ * transcript unsummarized, and the person got an error for work that had
+ * mostly succeeded. A limit on how far one message may run is a check-in
+ * point, not a failure, so the agent says where it got to and the next
+ * message carries on — the session keeps everything the turns did.
+ *
+ * Sent as the newest message of the request's window, never saved: it is
+ * the runtime speaking for one call, and a transcript that kept it would
+ * read to every later turn as something the person said.
+ */
+export const TURN_LIMIT_NOTE =
+  'You have used every step this message allows, so you cannot call any more tools on it. Reply now, in words: say what you did, what you found, and what is left. If the work is unfinished, end by saying that replying "continue" picks it up from here.';
+
+/** The wrap-up note as a message, for the request's window only. */
+const turnLimitNoteFor = (session: Session): Message => ({
+  id: `${session.id}:turn-limit`,
+  role: 'user',
+  content: TURN_LIMIT_NOTE,
+  createdAt: new Date().toISOString(),
+});
+
+/**
+ * What a turn that could not wrap up fails with. Names the setting because
+ * the person reading it is the one who can raise it, and "exceeded the
+ * maximum" alone left them to find it in the docs.
+ */
+const turnLimitMessage = (maxTurns: number): string =>
+  `Session exceeded the maximum of ${maxTurns} provider turns. `
+  + 'Raise maxTurns in ~/.stratus/config.json for agents that do long multi-step work, or reply to carry on from here.';
 
 /** Reads the checkpoint off a session, if it is parked. */
 export const readPendingApproval = (session: Session): PendingApprovalRecord | undefined => {
@@ -3671,7 +3718,18 @@ export interface AgentRunnerOptions {
   streaming?: boolean;
 }
 
-const DEFAULT_MAX_TURNS = 8;
+/**
+ * Tool turns one message may take before it wraps up. The harness providers
+ * spend the same number as their own inner budget, so they import it rather
+ * than keep a copy.
+ *
+ * 8 until the wrap-up turn existed, and 8 was the whole budget for one Slack
+ * message: an agent with a shell spent it on a handful of commands and
+ * failed with nothing said. With a wrap-up turn the ceiling is where a long
+ * task checks in rather than where it dies, and 40 is enough for real
+ * multi-step work while still bounding what a runaway loop can spend.
+ */
+export const DEFAULT_MAX_TURNS = 40;
 
 export class AgentRunner {
   readonly bus: EventBus;
@@ -4080,8 +4138,12 @@ export class AgentRunner {
       // permitted turn buy the whole allowance again.
       for (let turn = resumeFrom?.turn ?? 1; ; turn += 1) {
         throwIfAborted(signal);
-        if (turn > this.maxTurns) {
-          throw new Error(`Session exceeded the maximum of ${this.maxTurns} provider turns.`);
+        // One turn past the ceiling, and only one: the wrap-up, which may
+        // not call a tool, so a turn that reaches `maxTurns + 2` is a
+        // provider that ignored `toolChoice` and was already failed below.
+        const wrappingUp = turn > this.maxTurns;
+        if (turn > this.maxTurns + 1) {
+          throw new Error(turnLimitMessage(this.maxTurns));
         }
 
         if (pendingEntry) {
@@ -4152,6 +4214,9 @@ export class AgentRunner {
         let response: ProviderResponse | undefined;
         for (;;) {
           const floored = messagesWithinContextFloor(session);
+          // The note rides in the window only, so the session never holds
+          // it; see `TURN_LIMIT_NOTE`.
+          const window = wrappingUp ? [...floored, turnLimitNoteFor(session)] : floored;
           // Sink-reported usage is exclusive for the call: an adapter that
           // reports its internal attempts through the sink has already
           // counted the last one, and reading the response's field as well
@@ -4175,8 +4240,9 @@ export class AgentRunner {
               // The real session, always: providers persist it. The window
               // rides beside it.
               session,
-              ...(floored.length === session.messages.length ? {} : { messages: floored }),
+              ...(window === floored && floored.length === session.messages.length ? {} : { messages: window }),
               ...(tools.length > 0 ? { tools } : {}),
+              ...(wrappingUp && tools.length > 0 ? { toolChoice: 'none' as const } : {}),
               ...(memory.length > 0 ? { memory } : {}),
               ...(enabledSkills.length > 0 ? { skills: enabledSkills } : {}),
               ...(this.streaming ? { onDelta } : {}),
@@ -4229,6 +4295,12 @@ export class AgentRunner {
         }
         throwIfAborted(signal);
         await deltaChain;
+        // Checked before anything of the response is saved: a call made on
+        // the turn that may not make one is never run, and recording it
+        // would leave a call in the transcript with no result to answer it.
+        if (wrappingUp && response.parts.some((part) => part.type === 'tool-call')) {
+          throw new Error(turnLimitMessage(this.maxTurns));
+        }
 
         // Record and SAVE the entire response — text and every tool call —
         // before anything else happens with it. Two consumers depend on

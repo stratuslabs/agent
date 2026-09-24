@@ -494,8 +494,8 @@ export interface GatewayOptions {
    */
   approvalTimeoutMs?: number;
   /**
-   * How many provider turns one dispatched turn may take before the runner
-   * fails it as a runaway. Default 8 (`DEFAULT_MAX_TURNS` in core).
+   * How many tool turns one dispatched turn may take before the runner
+   * wraps it up with a summary. Default 40 (`DEFAULT_MAX_TURNS` in core).
    *
    * Applies to every runner this gateway builds, so a delegated
    * sub-session is held to the same ceiling as the turn that delegated it

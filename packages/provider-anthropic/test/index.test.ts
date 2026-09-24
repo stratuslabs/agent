@@ -168,6 +168,24 @@ test('generate advertises tools with sanitized wire names and maps calls back', 
   ]);
 });
 
+test('a wrap-up turn keeps its tools declared and asks for no calls', async () => {
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage([{ type: 'text', text: 'Here is where I got to.' }], 'end_turn'),
+    apiMessage([{ type: 'text', text: 'Hi.' }], 'end_turn'),
+  ]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const tools = [{ name: 'demo.echo', parameters: { type: 'object', properties: {} } }];
+
+  await provider.generate({ session: createSession(), tools, toolChoice: 'none' });
+  await provider.generate({ session: createSession(), tools });
+
+  // Declared, because a history holding tool calls with no tools to match
+  // is a request the API refuses; `none` is what keeps the model to words.
+  assert.equal(requests[0]!.body.tools.length, 1);
+  assert.deepEqual(requests[0]!.body.tool_choice, { type: 'none' });
+  assert.equal(requests[1]!.body.tool_choice, undefined);
+});
+
 test('history replay merges runner messages into API turns and keeps thinking blocks', async () => {
   const thinkingTurn = [
     { type: 'thinking', thinking: 'The user wants the echo tool.', signature: 'sig_abc' },

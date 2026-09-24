@@ -221,8 +221,8 @@ export interface StratusConfigFile {
    */
   memoryStore?: string;
   /**
-   * How many provider turns one dispatched turn may take before it is
-   * failed as a runaway. Default 8 (`DEFAULT_MAX_TURNS` in core).
+   * How many tool turns one dispatched turn may take before it wraps up
+   * with a summary. Default 40 (`DEFAULT_MAX_TURNS` in core).
    *
    * The daemon had no way to say this: `--max-turns` reaches `stratus
    * run` only, so every Slack message, scheduled firing, and control-API

@@ -85,9 +85,12 @@ subscription sign-in to per-token billing.
 - **A gated tool call was refused overnight** — that is the daemon's
   honest default. [Approvals](./approvals.md) covers asking a human in
   Slack instead.
-- **"Session exceeded the maximum of 8 provider turns"** — the task needed
-  more rounds of tool calls than one message may spend. Send it again to
-  resume with a fresh allowance; raise `maxTurns` so it stops happening.
+- **An agent stops to say it is out of steps** — the task used every tool
+  turn one message allows (`maxTurns`, default 40). Reply "continue" to
+  carry on; raise `maxTurns` for agents that do long work. The error
+  **"Session exceeded the maximum of N provider turns"** means the model
+  called a tool on the wrap-up call it was told not to, and is fixed the
+  same way.
   See [how many turns one message may
   spend](./always-on.md#how-many-turns-one-message-may-spend).
 - **"ran out of context part-way through its answer"** — different from
