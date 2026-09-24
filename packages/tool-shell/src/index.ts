@@ -8,7 +8,7 @@ import {
   type LocalCommandInvocation,
   type LocalCommandTool,
 } from '@stratusagent/executor-local';
-import { resolvePluginAgentConfig } from '@stratusagent/plugins';
+import { expandHome, resolvePluginAgentConfig } from '@stratusagent/plugins';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 100_000;
@@ -50,10 +50,16 @@ const truncate = (value: string, maxBytes: number, dropped: boolean): { text: st
   return { text: `${value.slice(0, maxBytes)}\n… output truncated at ${maxBytes} bytes`, truncated: true };
 };
 
-const settingsFor = (config: JsonObject, session: Session, env: NodeJS.ProcessEnv) => {
+const settingsFor = (config: JsonObject, session: Session, env: NodeJS.ProcessEnv, home: string | undefined) => {
   const resolved = resolvePluginAgentConfig(config, session.agent.id);
   const workspaceRoot = typeof resolved.workspaceRoot === 'string' ? resolved.workspaceRoot : undefined;
-  const configuredCwd = typeof resolved.cwd === 'string' && resolved.cwd.length > 0 ? resolved.cwd : undefined;
+  // Expanded here because nothing upstream does: this README's own example
+  // is `"cwd": "~/work/ava"`, and unexpanded that is a relative path whose
+  // first segment is a directory literally named `~`, so every command
+  // failed as a missing working directory.
+  const configuredCwd = typeof resolved.cwd === 'string' && resolved.cwd.length > 0
+    ? expandHome(resolved.cwd, home)
+    : undefined;
   const cwd = configuredCwd ?? (workspaceRoot ? path.join(workspaceRoot, session.agent.id) : undefined);
 
   const granted: NodeJS.ProcessEnv = {};
@@ -88,6 +94,8 @@ const settingsFor = (config: JsonObject, session: Session, env: NodeJS.ProcessEn
 export interface ShellToolOptions {
   /** The environment to grant *from*. Defaults to the daemon's. */
   processEnv?: NodeJS.ProcessEnv;
+  /** What `~` in `cwd` expands to. Defaults to the daemon user's home. */
+  home?: string;
 }
 
 export const createShellTool = (config: JsonObject = {}, options: ShellToolOptions = {}): LocalCommandTool => {
@@ -123,7 +131,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       if (!command) {
         throw new Error('command is required.');
       }
-      const settings = settingsFor(config, session, options.processEnv ?? process.env);
+      const settings = settingsFor(config, session, options.processEnv ?? process.env, options.home);
       if (settings.cwd) {
         // `spawn` fails with a bare `ENOENT` naming the *shell* when its
         // working directory does not exist — which on a fresh install is
@@ -160,7 +168,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       };
     },
     parseResult(result: LocalCommandExecution, context): JsonValue {
-      const settings = settingsFor(config, context.session, options.processEnv ?? process.env);
+      const settings = settingsFor(config, context.session, options.processEnv ?? process.env, options.home);
       const stdout = truncate(result.stdout, settings.maxOutputBytes, result.stdoutTruncated);
       const stderr = truncate(result.stderr, settings.maxOutputBytes, result.stderrTruncated);
       return {
