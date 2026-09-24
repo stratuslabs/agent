@@ -148,10 +148,13 @@ would take a single message's images past 20 MB together — reaches the agent b
 that it cannot be opened, so it answers honestly rather than as if it had
 read the file.
 
-Which runtimes can actually look: agents on the **Anthropic API** or an
-**OpenAI-compatible** provider receive the image itself. The **Claude Code**
-and **Codex** harnesses take a text prompt, so an agent on either is told an
-image was attached, and what it was called, and that it cannot see it. An
+Which runtimes can actually look: agents on the **Anthropic API**, an
+**OpenAI-compatible** provider, or a **Claude subscription** (the Claude Code
+runtime) receive the image itself. On Claude Code that is the newest
+message's images: a conversation replayed after the runtime lost its own
+session names older ones rather than sending them again. The **Codex**
+harness takes a text prompt, so an agent on it is told an image was attached,
+and what it was called, and that it cannot see it. An
 OpenAI-compatible model that takes only text — most local runtimes — needs
 `"vision": false` in [config](../reference/config.md), which gives it that
 same note; without it the endpoint rejects the request, and keeps rejecting

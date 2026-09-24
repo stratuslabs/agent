@@ -45,6 +45,7 @@ import {
 import {
   createDelegateTool,
   createForgetTool,
+  createPinTool,
   createMessageSendTool,
   createRecallTool,
   createRememberTool,
@@ -1725,6 +1726,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   tools.register(createRememberTool(memory));
   tools.register(createRecallTool(memory));
   tools.register(createForgetTool(memory));
+  tools.register(createPinTool(memory));
   // Registered here rather than left to the first runner, so `tools()`
   // lists the reader before anything dispatches. The allowlist resolver
   // mirrors the runner's own sourcing — the definition travelling with the

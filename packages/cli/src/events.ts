@@ -1,5 +1,5 @@
 import type { StratusEvent } from '@stratusagent/core';
-import { FORGET_TOOL_NAME, MEMORY_TOOL_NAME } from '@stratusagent/agents';
+import { FORGET_TOOL_NAME, MEMORY_TOOL_NAME, PIN_TOOL_NAME } from '@stratusagent/agents';
 
 export const formatEvent = (event: StratusEvent): string | null => {
   switch (event.type) {
@@ -57,17 +57,29 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
     case 'tool.denied':
       return { tool: event.call.toolName };
     case 'tool.completed': {
-      // A memory write or retirement names the entry it touched — the id
-      // is a reference, not content, and "when did the agent learn/drop
-      // this" is unanswerable later without it. The fact itself stays out
-      // of the trace, like every other tool input and output.
+      // A memory write, retirement, supersession, or pin names the entry it
+      // touched — the id is a reference, not content, and "when did the
+      // agent learn, drop, replace, or pin this" is unanswerable later
+      // without it. The fact itself stays out of the trace, like every
+      // other tool input and output.
       const output = event.result.output;
-      const entry = (event.result.toolName === MEMORY_TOOL_NAME || event.result.toolName === FORGET_TOOL_NAME)
+      const fields = (event.result.toolName === MEMORY_TOOL_NAME || event.result.toolName === FORGET_TOOL_NAME
+        || event.result.toolName === PIN_TOOL_NAME)
         && event.result.ok && typeof output === 'object' && output !== null && !Array.isArray(output)
-        && typeof output.id === 'string'
-        ? output.id
+        ? output
         : undefined;
-      return { tool: event.result.toolName, ok: event.result.ok, ...(entry !== undefined ? { entry } : {}) };
+      const entry = typeof fields?.id === 'string' ? fields.id : undefined;
+      const supersedes = typeof fields?.supersedes === 'string' ? fields.supersedes : undefined;
+      const pinned = event.result.toolName === PIN_TOOL_NAME && typeof fields?.pinned === 'boolean'
+        ? fields.pinned
+        : undefined;
+      return {
+        tool: event.result.toolName,
+        ok: event.result.ok,
+        ...(entry !== undefined ? { entry } : {}),
+        ...(supersedes !== undefined ? { supersedes } : {}),
+        ...(pinned !== undefined ? { pinned } : {}),
+      };
     }
     case 'tool.approval-requested':
       return { tool: event.call.toolName, risk: event.risk, requestId: event.requestId };

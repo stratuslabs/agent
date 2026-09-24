@@ -25,6 +25,7 @@ import {
 import {
   GATEWAY_ONLY_TOOL_NAMES,
   FORGET_TOOL_NAME,
+  PIN_TOOL_NAME,
   RECALL_TOOL_NAME,
   MEMORY_TOOL_NAME,
 } from '@stratusagent/agents';
@@ -4401,6 +4402,7 @@ test('GATEWAY_ONLY_TOOL_NAMES is exactly what a gateway adds over a plain host',
     assert.deepEqual(shared.sort(), [
       'demo.echo',
       FORGET_TOOL_NAME,
+      PIN_TOOL_NAME,
       RECALL_TOOL_NAME,
       MEMORY_TOOL_NAME,
       SKILL_READ_TOOL_NAME,

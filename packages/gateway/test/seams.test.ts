@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 
 import {
   InMemoryAgentMemoryStore,
+  MEMORY_STORE_CONTRACT_VERSION,
   type AgentDefinition,
   type ModelProvider,
   type PluginContext,
@@ -88,9 +89,9 @@ test('a plugin provider serves a run a soul selected, and a plugin memory store 
   const appends: string[] = [];
   const store = new InMemoryAgentMemoryStore();
   const originalAppend = store.append.bind(store);
-  store.append = async (agentId, content, metadata, provenance) => {
+  store.append = async (agentId, content, options) => {
     appends.push(`${agentId}: ${content}`);
-    return originalAppend(agentId, content, metadata, provenance);
+    return originalAppend(agentId, content, options);
   };
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: fixture\nmodel: tiny\ntools: [memory.remember, memory.recall]\n---\n\nYou are Ava.\n');
   await writeSoul(home, 'juno.md', '---\nname: Juno\nid: juno\nprovider: fixture\ntools: [memory.remember, memory.recall]\n---\n\nYou are Juno.\n');
@@ -106,7 +107,7 @@ test('a plugin provider serves a run a soul selected, and a plugin memory store 
             return rememberingProvider('fixture', selection.model);
           },
         });
-        context.memory?.register({ name: 'fixture', store });
+        context.memory?.register({ name: 'fixture', store, contract: MEMORY_STORE_CONTRACT_VERSION });
       }),
     },
   });

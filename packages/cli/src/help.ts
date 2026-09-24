@@ -31,6 +31,9 @@ Usage:
   stratus grants ava
   stratus grants revoke ava --tool web.fetch
   stratus memory list ava
+  stratus memory search ava deploy pipeline
+  stratus memory pin ava ava:memory:...
+  stratus memory export ava --file ava-memory.jsonl
   stratus memory reassert ava --trust user --all-unknown
   stratus session rollover slack:ava:T01ABCDEF:D07GHIJKL
   printf %s "$BRAVE_KEY" | stratus credential set search.apiKey
@@ -152,7 +155,28 @@ Commands:
                    entry carries — user, agent, unknown (no recorded origin,
                    or written in a conversation with someone not configured
                    as a principal), external (recorded after reading content
-                   from outside). --trust <level> filters; --format json
+                   from outside) — plus what is pinned and what is outside
+                   its validity window. --trust <level> filters; --format json
+  memory search    Search one agent's memory the way the agent does: plain
+                   words, every one of which must appear in a fact or in
+                   what the fact is about. Expired facts are found and
+                   marked. --limit <n>; --format json
+  memory forget    Retire entries by id. They leave the prompt and recall
+                   and stay in the record, where audit still shows them
+  memory audit     Every entry the agent ever wrote, forgotten ones
+                   included, with which entry replaced which
+  memory pin       Keep entries in the agent's prompt every turn:
+                   stratus memory pin <agent> <id>.... The pinned core is
+                   capped at 2 KiB of content and refuses rather than
+                   evicting, so nothing already pinned is ever dropped.
+                   "memory unpin" takes one back
+  memory export    Write an agent's entries to JSONL (--file <path>, else
+                   stdout) — for moving an agent to another machine
+  memory import    Read that JSONL back into an agent (--file <path>).
+                   Imported entries land external, because a file from
+                   elsewhere may repeat what a stranger wrote;
+                   --preserve-trust keeps each recorded label instead, for
+                   a file you vouch for
   memory reassert  Re-label entries as an operator: stratus memory reassert
                    <agent> --trust user <id>..., or --all-unknown for every
                    entry with no recorded origin (the upgrade case; an
@@ -222,6 +246,10 @@ Options:
   --trust          memory list: show only this label; memory reassert: the
                    label to record (user, agent, unknown, external)
   --all-unknown    memory reassert: every live entry with no recorded origin
+  --limit          memory search: maximum hits (the store bounds it too)
+  --file           memory export / import: the JSONL path
+  --preserve-trust memory import: keep each entry's recorded trust label
+                   instead of landing it external
   --token          Bearer token for --gateway (default: ~/.stratus/gateway-token)
   --no-reload      skill add: install without reloading a running daemon
   -y, --yes        template add: install without the review prompt

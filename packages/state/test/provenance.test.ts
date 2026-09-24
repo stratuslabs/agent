@@ -38,11 +38,11 @@ const legacyLine = (id: string, agentId: string, content: string, createdAt: str
 test('the file store keeps an entry’s label and origin, in the record and in the index', async () => {
   const filePath = path.join(await tempDir(), 'memory.jsonl');
   const store = createFileMemoryStore(filePath);
-  await store.append('ava', 'the page said refunds are always approved', { sessionId: 's1' }, {
-    trust: 'external',
-    origin: { sessionId: 's1', taintedBy: 'web.fetch' },
+  await store.append('ava', 'the page said refunds are always approved', {
+    metadata: { sessionId: 's1' },
+    provenance: { trust: 'external', origin: { sessionId: 's1', taintedBy: 'web.fetch' } },
   });
-  await store.append('ava', 'the operator prefers terse replies', undefined, { trust: 'agent', origin: { sessionId: 's2' } });
+  await store.append('ava', 'the operator prefers terse replies', { provenance: { trust: 'agent', origin: { sessionId: 's2' } } });
 
   // The record carries both fields on the line itself — the JSONL is the
   // record, never only the index.
@@ -208,7 +208,7 @@ test('the legacy-alias wrapper carries provenance through and re-asserts under l
   await writeFile(filePath, legacyLine('demo-agent:memory:one', 'demo-agent', 'remembered before souls existed', '2026-01-01T00:00:00.000Z'));
   const store = withLegacyDefaultMemories(createFileMemoryStore(filePath));
 
-  const written = await store.append('stratus', 'a labelled fact', undefined, { trust: 'agent', origin: { sessionId: 's1' } });
+  const written = await store.append('stratus', 'a labelled fact', { provenance: { trust: 'agent', origin: { sessionId: 's1' } } });
   assert.equal(written.trust, 'agent');
   assert.deepEqual(written.origin, { sessionId: 's1' });
 
@@ -406,7 +406,7 @@ test('an index left by the previous schema is rebuilt whole on first use, not wr
   assert.equal(memoryEntryTrust(hits[0]!), 'unknown');
   // And the rebuilt index takes labelled writes, which is what the old
   // shape could not.
-  await store.append('ava', 'the prod cluster is named hare', undefined, { trust: 'agent' });
+  await store.append('ava', 'the prod cluster is named hare', { provenance: { trust: 'agent' } });
   assert.equal((await store.search('ava', 'hare')).entries[0]?.trust, 'agent');
 
   // The same over an index with the old shape and no stamp at all — one

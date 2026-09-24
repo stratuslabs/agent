@@ -11,6 +11,7 @@ import {
   InMemoryAgentMemoryStore,
   MEMORY_ENTRY_MAX_BYTES,
   ToolRegistry,
+  type AgentMemoryStore,
   type MemoryStoreContribution,
 } from '@stratusagent/core';
 import { loadPlugins } from '@stratusagent/plugins';
@@ -29,7 +30,7 @@ test('a fact remembered is recalled by whole-token AND matching, newest first, a
   const first = createSqliteMemoryStore(file, { now });
   await first.append('ava', 'Postgres 16 runs on the staging box');
   await first.append('ava', 'The postgresql migration guide is bookmarked');
-  await first.append('ava', 'staging box reboots on Sundays', { source: 'ops' }, { trust: 'user', origin: { sessionId: 's1' } });
+  await first.append('ava', 'staging box reboots on Sundays', { metadata: { source: 'ops' }, provenance: { trust: 'user', origin: { sessionId: 's1' } } });
   first.close();
 
   const reopened = createSqliteMemoryStore(file);
@@ -79,8 +80,8 @@ test('bounded reads and the byte budget agree with the kernel\'s in-memory store
     await sqlite.append('ava', content);
     await reference.append('ava', content);
   }
-  const fromSqlite = await sqlite.search('ava', 'release', 50);
-  const fromReference = await reference.search('ava', 'release', 50);
+  const fromSqlite = await sqlite.search('ava', 'release', { limit: 50 });
+  const fromReference = await reference.search('ava', 'release', { limit: 50 });
   assert.deepEqual(fromSqlite.entries.map((entry) => entry.content), fromReference.entries.map((entry) => entry.content));
   assert.equal(fromSqlite.truncated, fromReference.truncated);
   const listed = await sqlite.list('ava', { limit: 5 });
@@ -95,7 +96,7 @@ test('bounded reads and the byte budget agree with the kernel\'s in-memory store
   for (let index = 0; index < 12; index += 1) {
     await tied.append('ava', `tied fact ${index}`);
   }
-  const recalled = await tied.search('ava', 'tied fact', 12);
+  const recalled = await tied.search('ava', 'tied fact', { limit: 12 });
   assert.deepEqual(recalled.entries.map((entry) => entry.content), Array.from({ length: 12 }, (_, index) => `tied fact ${index}`));
   tied.close();
 });
@@ -149,4 +150,189 @@ test('the plugin registers the store at the configured path through the real loa
     () => noPath.setup({ bus: new EventBus(), tools: new ToolRegistry(), memory: { register() {} } }),
     /needs a path/,
   );
+});
+
+test('the wider entry shape behaves the same here as in the kernel store: validity, supersession, pinning, topics', async () => {
+  const at = new Date('2026-06-01T00:00:00.000Z');
+  const sqlite = createSqliteMemoryStore(await newFile(), { now: () => at });
+  const reference = new InMemoryAgentMemoryStore({ now: () => at });
+  const seed = async (store: AgentMemoryStore): Promise<void> => {
+    const old = await store.append('ava', 'the deploy runs on MySQL', { about: ['deploy'], kind: 'semantic' });
+    await store.append('ava', 'the deploy runs on Postgres', { about: ['deploy'], supersedes: old.id });
+    await store.append('ava', 'the hide is closed in winter', { about: ['hide'], validUntil: '2026-03-01T00:00:00.000Z' });
+    await store.append('ava', 'Ada joins in September', { about: ['Ada'], validFrom: '2026-09-01T00:00:00.000Z' });
+    await store.append('juno', 'Juno keeps the vault code', { about: ['vault'] });
+  };
+  await seed(sqlite);
+  await seed(reference);
+
+  for (const [label, store] of [['sqlite', sqlite], ['in-memory', reference]] as const) {
+    // Superseded leaves everything; out of window leaves only what is true now.
+    assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.content), ['the deploy runs on Postgres'], label);
+    assert.equal((await store.search('ava', 'MySQL')).entries.length, 0, label);
+    assert.equal((await store.search('ava', 'winter')).entries.length, 1, label);
+    assert.equal((await store.search('ava', 'September')).entries.length, 1, label);
+    // `about` participates in matching in every store.
+    assert.deepEqual((await store.search('ava', 'deploy')).entries.map((entry) => entry.content), ['the deploy runs on Postgres'], label);
+    assert.deepEqual((await store.topics!('ava')).map((topic) => topic.name), ['deploy'], label);
+    assert.equal((await store.search('ava', 'deploy')).strategy, 'recency', label);
+    // The per-agent boundary holds across every new field.
+    const junos = (await store.list('juno')).entries[0]!;
+    await assert.rejects(
+      () => store.append('ava', 'not mine to replace', { supersedes: junos.id }),
+      /belongs to this agent/,
+      label,
+    );
+    assert.deepEqual((await store.list('juno')).entries.map((entry) => entry.content), ['Juno keeps the vault code'], label);
+  }
+
+  // Pinning: a record, capped, refusing rather than evicting, and an
+  // out-of-window pin does not reach the core.
+  const live = (await sqlite.list('ava')).entries[0]!;
+  assert.equal((await sqlite.pin!('ava', live.id)).pinned, true);
+  const future = (await sqlite.search('ava', 'September')).entries[0]!;
+  assert.equal((await sqlite.pin!('ava', future.id)).pinned, true);
+  assert.deepEqual((await sqlite.pinned!('ava')).map((entry) => entry.id), [live.id]);
+  assert.equal(await sqlite.unpin!('ava', live.id), true);
+  assert.deepEqual(await sqlite.pinned!('ava'), []);
+  sqlite.close();
+});
+
+test('usage counters live beside the record here, and never in it', async () => {
+  const store = createSqliteMemoryStore(await newFile());
+  const written = await store.append('ava', 'the heron rookery is on the north bank');
+  assert.equal(written.usage, undefined);
+  assert.equal((await store.list('ava')).entries[0]?.usage, undefined);
+  assert.equal((await store.search('ava', 'heron')).entries[0]?.usage?.recallCount, 1);
+  assert.equal((await store.search('ava', 'heron')).entries[0]?.usage?.recallCount, 2);
+  assert.equal((await store.audit('ava'))[0]?.usage, undefined);
+  store.close();
+});
+
+test('an import lands entries verbatim under the importing agent, and re-running one is a no-op', async () => {
+  const store = createSqliteMemoryStore(await newFile());
+  const entries = [
+    { id: 'from-elsewhere:1', agentId: 'somewhere', content: 'the survey is quarterly', createdAt: '2026-01-01T00:00:00.000Z', about: ['rookery'], trust: 'external' as const },
+    { id: 'from-elsewhere:2', agentId: 'somewhere', content: 'the hide needs repainting', createdAt: '2026-01-02T00:00:00.000Z', trust: 'external' as const },
+  ];
+  assert.deepEqual(await store.importEntries!('ava', entries), { imported: 2, skipped: [] });
+  const back = (await store.list('ava')).entries;
+  assert.deepEqual(back.map((entry) => entry.id), ['from-elsewhere:1', 'from-elsewhere:2']);
+  // Re-keyed to the importing agent — the id is opaque, the ownership is not.
+  assert.deepEqual(back.map((entry) => entry.agentId), ['ava', 'ava']);
+  assert.deepEqual(back[0]?.about, ['rookery']);
+  assert.deepEqual(await store.importEntries!('ava', entries), { imported: 0, skipped: ['from-elsewhere:1', 'from-elsewhere:2'] });
+  assert.equal((await store.list('ava')).entries.length, 2);
+  store.close();
+});
+
+test('one exported corpus imports for two agents, and an older file is rebuilt to allow it', async () => {
+  const file = await newFile();
+  const entries = [
+    { id: 'shared:1', agentId: 'somewhere', content: 'the survey is quarterly', createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'shared:2', agentId: 'somewhere', content: 'the hide needs repainting', createdAt: '2026-01-02T00:00:00.000Z' },
+  ];
+  const store = createSqliteMemoryStore(file);
+  // An id lives inside its agent's namespace, and import preserves ids
+  // while re-keying entries — so the same dump landing for two agents is
+  // the ordinary case, not a collision.
+  assert.deepEqual(await store.importEntries!('ava', entries), { imported: 2, skipped: [] });
+  assert.deepEqual(await store.importEntries!('juno', entries), { imported: 2, skipped: [] });
+  assert.equal((await store.list('ava')).entries.length, 2);
+  assert.equal((await store.list('juno')).entries.length, 2);
+  // And neither agent can reach the other's copy by id.
+  assert.equal(await store.forget('ava', 'shared:1'), true);
+  assert.equal((await store.list('juno')).entries.length, 2);
+  store.close();
+
+  // A file written before the constraint was scoped is rebuilt on open,
+  // rows intact — the one migration here that touches the record.
+  const legacyFile = await newFile();
+  const { DatabaseSync } = await import('node:sqlite');
+  const legacy = new DatabaseSync(legacyFile);
+  legacy.exec(`
+    CREATE TABLE entries (
+      seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, agent_id TEXT NOT NULL, content TEXT NOT NULL,
+      created_at TEXT NOT NULL, metadata TEXT, trust TEXT, origin TEXT, forgotten_at TEXT
+    )
+  `);
+  legacy.exec("INSERT INTO entries (seq, id, agent_id, content, created_at) VALUES (1, 'shared:1', 'ava', 'kept through the rebuild', '2026-01-01T00:00:00.000Z')");
+  legacy.close();
+
+  const upgraded = createSqliteMemoryStore(legacyFile);
+  assert.deepEqual((await upgraded.list('ava')).entries.map((entry) => entry.content), ['kept through the rebuild']);
+  assert.deepEqual(await upgraded.importEntries!('juno', entries), { imported: 2, skipped: [] });
+  assert.equal((await upgraded.list('juno')).entries.length, 2);
+  upgraded.close();
+});
+
+test('usage counts per agent, and a superseded entry is not the agent’s to forget', async () => {
+  const at = new Date('2026-06-01T00:00:00.000Z');
+  const store = createSqliteMemoryStore(await newFile(), { now: () => at });
+  const shared = { id: 'shared:1', agentId: 'somewhere', content: 'the survey is quarterly', createdAt: '2026-01-01T00:00:00.000Z' };
+  await store.importEntries!('ava', [shared]);
+  await store.importEntries!('juno', [shared]);
+
+  // Import lets two agents hold one id, so a counter keyed by the id alone
+  // would report one agent's reads on the other's entry.
+  assert.equal((await store.search('juno', 'survey')).entries[0]?.usage?.recallCount, 1);
+  assert.equal((await store.search('juno', 'survey')).entries[0]?.usage?.recallCount, 2);
+  assert.equal((await store.search('ava', 'survey')).entries[0]?.usage?.recallCount, 1);
+
+  // And a mutation resolves against the live view, like the file store:
+  // forgetting a superseded predecessor would stick and silently prevent
+  // the documented release when its successor is forgotten.
+  const old = await store.append('ava', 'the deploy runs on MySQL');
+  const next = await store.append('ava', 'the deploy runs on Postgres', { supersedes: old.id });
+  assert.equal(await store.forget('ava', old.id), false);
+  assert.equal(await store.reassertTrust!('ava', old.id, 'user'), false);
+  assert.equal(await store.forget('ava', next.id), true);
+  assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.content).sort(), [
+    'the deploy runs on MySQL',
+    'the survey is quarterly',
+  ]);
+  store.close();
+});
+
+test('a generated id never collides with one an import preserved', async () => {
+  const store = createSqliteMemoryStore(await newFile());
+  // An export drops forgotten entries, so a corpus can arrive with gaps —
+  // and the sequence this store mints from would walk straight into one.
+  // Before the skip, the insert failed the uniqueness constraint, the
+  // transaction rolled back without advancing the maximum, and every later
+  // write for that agent minted the same doomed id again.
+  await store.importEntries!('ava', [1, 2, 4].map((n) => ({
+    id: `ava:memory:${String(n).padStart(12, '0')}`,
+    agentId: 'somewhere',
+    content: `imported ${n}`,
+    createdAt: `2026-01-0${n}T00:00:00.000Z`,
+  })));
+  const first = await store.append('ava', 'a new fact');
+  const second = await store.append('ava', 'and another');
+  assert.equal(new Set([...(await store.audit('ava')).map((entry) => entry.id), first.id, second.id]).size, 5);
+  assert.equal((await store.list('ava')).entries.length, 5);
+  store.close();
+});
+
+test('the agent index survives the rebuild an older file needs', async () => {
+  const file = await newFile();
+  const { DatabaseSync } = await import('node:sqlite');
+  const legacy = new DatabaseSync(file);
+  legacy.exec(`
+    CREATE TABLE entries (
+      seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, agent_id TEXT NOT NULL, content TEXT NOT NULL,
+      created_at TEXT NOT NULL, metadata TEXT, trust TEXT, origin TEXT, forgotten_at TEXT
+    )
+  `);
+  legacy.exec('CREATE INDEX entries_by_agent ON entries (agent_id, forgotten_at)');
+  legacy.close();
+
+  // `ALTER TABLE ... RENAME` carries the index to the renamed table and
+  // `DROP TABLE` takes it away, so an index created before the rebuild
+  // leaves every upgraded database doing full scans for exactly the
+  // agent-scoped reads it exists to serve.
+  const store = createSqliteMemoryStore(file);
+  const indexes = new DatabaseSync(file).prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'entries'").all() as Array<{ name: string }>;
+  assert.ok(indexes.some((index) => index.name === 'entries_by_agent'), `indexes were ${JSON.stringify(indexes)}`);
+  store.close();
 });

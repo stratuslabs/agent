@@ -10,6 +10,7 @@ import {
   defineScriptedProvider,
   defineStaticProvider,
   latestUserMessagePrompt,
+  promptImagesOf,
   normalizeProviderParts,
   normalizeProviderResponse,
   renderTranscriptPrompt,
@@ -1034,6 +1035,44 @@ test('a text-only transcript prompt names the images it cannot show', () => {
   );
   // A transcript with no images reads exactly as it did before they existed.
   assert.equal(renderTranscriptPrompt(createRequest()), 'Say hello');
+});
+
+test('a harness that sends images beside the prompt leaves only the ones it cannot send named', () => {
+  const longer = requestWithImage();
+  longer.session.messages.push(
+    { id: 'session-1:assistant:2', role: 'assistant', content: 'A trace.', createdAt: new Date().toISOString() },
+    {
+      id: 'session-1:user:3',
+      role: 'user',
+      content: 'and this one?',
+      createdAt: new Date().toISOString(),
+      images: [
+        { mediaType: 'image/jpeg', data: '/9j/4AAQ', name: 'new.jpg' },
+        { mediaType: 'image/png', data: '', omitted: true, name: 'gone.png' },
+      ],
+    },
+  );
+  const note = (names: string) => `\n[Attached: ${names}. This runtime cannot see images — say so rather than guessing at them.]`;
+
+  // The newest message's images travel, so the text does not claim they
+  // cannot be seen — except one past the replay window, which has no bytes
+  // to send. An older message's image is named as before: a replay sends
+  // only the newest message's.
+  assert.equal(
+    renderTranscriptPrompt(longer, { inlineImages: true }),
+    [
+      'Conversation so far:',
+      `[user] what is this?${note('shot.png')}`,
+      '[assistant] A trace.',
+      `[user] and this one?${note('gone.png')}`,
+      '',
+      'Continue the conversation by replying to the latest user message.',
+    ].join('\n'),
+  );
+  assert.equal(latestUserMessagePrompt(longer, { inlineImages: true }), `and this one?${note('gone.png')}`);
+  assert.deepEqual(promptImagesOf(longer), [{ mediaType: 'image/jpeg', data: '/9j/4AAQ', name: 'new.jpg' }]);
+  // Without the option nothing changes for a text-only harness.
+  assert.equal(latestUserMessagePrompt(longer), `and this one?${note('new.jpg, gone.png')}`);
 });
 
 test('createOpenAICompatibleProvider sends a user message\'s images as data-URL image parts', async () => {
