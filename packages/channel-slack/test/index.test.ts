@@ -550,6 +550,55 @@ test('a refused reply\'s status clear lands before the next queued turn shows it
   assert.deepEqual(web.posts.map((entry) => entry.text), ['second answer']);
 });
 
+test('a turn queued behind a running one does not overwrite its status', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let releaseSecond!: () => void;
+  const secondGate = new Promise<void>((resolve) => {
+    releaseSecond = resolve;
+  });
+  const gateway: StubGateway = createStubGateway(async ({ sessionId, userMessage }) => {
+    if (/first/.test(userMessage)) {
+      await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
+      await firstGate;
+      return sessionWithReply(sessionId, 'first answer');
+    }
+    await secondGate;
+    return sessionWithReply(sessionId, 'second answer');
+  });
+  const ticks = async (): Promise<void> => {
+    for (let tick = 0; tick < 50; tick += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  const first = socket.deliver('app_mention', mention('<@B-AVA> first', { ts: '100.1' }));
+  await ticks();
+  const second = socket.deliver('app_mention', mention('<@B-AVA> second', { ts: '100.2', thread_ts: '100.1' }));
+  await ticks();
+
+  // The thread says what the running turn is doing, not what the queued one would.
+  assert.equal(statuses.at(-1)?.status, 'is running shell.run…');
+  releaseFirst();
+  await ticks();
+  releaseSecond();
+  await Promise.all([first, second]);
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'second answer']);
+});
+
 test('an agent on the stream reply mode still posts a placeholder and edits it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

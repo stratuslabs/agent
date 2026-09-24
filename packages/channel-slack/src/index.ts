@@ -651,12 +651,25 @@ class ReplyRenderer {
    * nor for one nobody asked for: "is thinking…" over a turn that may
    * decide to say nothing is the interruption silence exists to avoid.
    */
-  showLoading(): void {
+  showLoading(head: boolean): void {
     if (this.streaming || this.lazy || this.loading || this.finalized) {
       return;
     }
     this.loading = true;
-    this.setStatus(THINKING_STATUS);
+    // A thread has one status per app, so a turn queued behind another
+    // must not publish its own: it would overwrite what the running turn
+    // says it is doing. It publishes when it reaches the head (`beginTurn`,
+    // or `refreshLoading` once the turn ahead has posted).
+    if (head) {
+      this.publishLoading();
+    }
+  }
+
+  private publishLoading(): void {
+    if (this.statusTimer || this.finalized) {
+      return;
+    }
+    this.setStatus(this.statusText ?? THINKING_STATUS);
     this.statusTimer = setInterval(() => this.refreshLoading(), STATUS_REFRESH_MS);
     this.statusTimer.unref?.();
   }
@@ -668,9 +681,15 @@ class ReplyRenderer {
    * working; the adapter calls this once that post has landed.
    */
   refreshLoading(): void {
-    if (this.loading && !this.finalized) {
-      this.setStatus(this.statusText ?? THINKING_STATUS);
+    if (!this.loading || this.finalized) {
+      return;
     }
+    if (!this.statusTimer) {
+      // Queued until now: this is the renderer at the head at last.
+      this.publishLoading();
+      return;
+    }
+    this.setStatus(this.statusText ?? THINKING_STATUS);
   }
 
   private stopLoading(): void {
@@ -724,8 +743,11 @@ class ReplyRenderer {
     this.runningTool = undefined;
     this.turnBreakPending = false;
     this.generation += 1;
-    // The status may be showing a tool the turn ahead of this one ran.
-    if (this.loading && this.statusText !== THINKING_STATUS) {
+    // Queued until now, this turn publishes its status as it starts; one
+    // already showing may be showing a tool the turn ahead of it ran.
+    if (this.loading && !this.statusTimer) {
+      this.publishLoading();
+    } else if (this.loading && this.statusText !== THINKING_STATUS) {
       this.setStatus(THINKING_STATUS);
     }
   }
@@ -877,7 +899,7 @@ class ReplyRenderer {
       // Nothing to edit: what the turn is doing goes into the status line,
       // and only once the turn is this renderer's own (see `beginTurn`).
       const status = this.runningTool !== undefined ? toolStatus(this.runningTool) : THINKING_STATUS;
-      if (this.loading && this.turnStarted && !this.finalized && status !== this.statusText) {
+      if (this.loading && this.statusTimer && this.turnStarted && !this.finalized && status !== this.statusText) {
         this.setStatus(status);
       }
       return;
@@ -972,7 +994,10 @@ class ReplyRenderer {
 
   private async finalizeInOrder(reply: string): Promise<ReplyOutcome> {
     await this.handover;
-    const hadStatus = this.loading;
+    // Shown, not merely wanted: a turn still queued behind another never
+    // published one, and a clear from it would take down the running
+    // turn's status instead.
+    const hadStatus = this.statusTimer !== undefined;
     this.stopLoading();
     this.finalized = true;
     if (!this.streaming) {
@@ -3537,7 +3562,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           return undefined;
         }
       }
-      renderer.showLoading();
 
       // The push and the dispatch happen in the same microtask, so queue
       // order matches the gateway's single-flight turn order for this
@@ -3545,6 +3569,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const queue = renderers.get(sessionId) ?? [];
       queue.push(renderer);
       renderers.set(sessionId, queue);
+      renderer.showLoading(queue.length === 1);
       const turn = gateway.dispatch({
         sessionId,
         agentId: connection.config.agentId,
