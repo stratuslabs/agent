@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -97,6 +97,22 @@ test('commands start in the pinned working directory', async () => {
 
   const result = await runCommand(tools, 'ls');
   assert.match(String(result.stdout), /marker\.txt/);
+});
+
+test('a working directory under ~ starts in the home it names', async () => {
+  // The README's own example, `"cwd": "~/work/ava"`: read literally it is a
+  // relative path under a directory named `~`, and every command failed as
+  // a missing working directory.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-home-'));
+  await mkdir(path.join(home, 'work', 'ava'), { recursive: true });
+  const tools = new ToolRegistry();
+  await createShellPlugin({ cwd: '~/work/ava' }, { home }).setup({
+    bus: { emit: async () => undefined, subscribe: () => () => undefined } as never,
+    tools,
+  });
+
+  const result = await runCommand(tools, 'pwd');
+  assert.equal(await realpath(String(result.stdout).trim()), await realpath(path.join(home, 'work', 'ava')));
 });
 
 test('the cap is handed to the executor, so a flood is dropped as it is read', async () => {
