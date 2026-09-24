@@ -4242,6 +4242,16 @@ test('an inline code span too long for one message is never given delimiters of 
   }
 });
 
+test('a long fenced log that opens with an underlined title is not mistaken for a table', async () => {
+  const lines = Array.from({ length: 400 }, (_, index) => `entry ${index}: something happened`);
+  const chunks = await replyInThread(`\`\`\`\nBuild log\n─────────\n${lines.join('\n')}\n\`\`\``);
+
+  // Only a grid's header repeats; this title and underline are text, and
+  // appear once.
+  assert.ok(chunks.length >= 3);
+  assert.equal(chunks.filter((chunk) => chunk.includes('Build log')).length, 1);
+});
+
 test('long replies never split an emoji across the message boundary', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

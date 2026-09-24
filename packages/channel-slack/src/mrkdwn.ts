@@ -855,6 +855,22 @@ export interface CodeRun {
 }
 
 /**
+ * Whether two lines are the header and rule `renderTable` writes: a rule of
+ * `─` crossed by `┼`, and a header whose `│` separators stand in exactly
+ * those columns. The shape, not a single box-drawing line, because a log
+ * that opens with a title and a `────` underline is somebody's text, and
+ * repeating its first lines on every part would change it.
+ */
+const isGridHeader = (header: string, rule: string): boolean => {
+  if (!/^─[─┼]*─$/.test(rule) || !rule.includes('┼')) {
+    return false;
+  }
+  const crossings = [...rule].flatMap((char, index) => (char === '┼' ? [index] : []));
+  const separators = [...header].flatMap((char, index) => (char === '│' ? [index] : []));
+  return crossings.length === separators.length && crossings.every((column, index) => separators[index] === column);
+};
+
+/**
  * A fence's first line — and, for a table grid, the header and rule after
  * it, so a grid split across messages names its columns in every part
  * rather than leaving the later ones as rows nobody can read.
@@ -863,7 +879,8 @@ const fenceOpener = (source: string, lineEnd: number): string => {
   const headerEnd = source.indexOf('\n', lineEnd + 1);
   const ruleEnd = headerEnd === -1 ? -1 : source.indexOf('\n', headerEnd + 1);
   const rule = ruleEnd === -1 ? '' : source.slice(headerEnd + 1, ruleEnd);
-  return /^─[─┼]*$/.test(rule) ? source.slice(0, ruleEnd + 1) : source.slice(0, lineEnd + 1);
+  const header = headerEnd === -1 ? '' : source.slice(lineEnd + 1, headerEnd);
+  return isGridHeader(header, rule) ? source.slice(0, ruleEnd + 1) : source.slice(0, lineEnd + 1);
 };
 
 /**
@@ -961,7 +978,11 @@ const tableAlignments = (line: string): Alignment[] | undefined => {
  */
 const plainCell = (cell: string): string =>
   cell
-    .replace(/(\*\*|__)(.+?)\1/g, '$2')
+    // Emphasis by the converter's own rules: a delimiter hugs what it
+    // marks, and an underscore stands clear of a word — so `2 ** 3 ** 4`
+    // and `snake__case__name` keep every character.
+    .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '$1')
+    .replace(/(?<![\p{L}\p{N}_])__(?=\S)(.+?)(?<=\S)__(?![\p{L}\p{N}_])/gu, '$1')
     // A code span's whole delimiter, however many backticks: a run opens and
     // only a run of the same length closes, as the scan above reads it.
     .replace(/(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)/g, (_, _ticks: string, code: string) => code.trim());

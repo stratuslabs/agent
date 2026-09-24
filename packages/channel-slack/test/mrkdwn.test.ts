@@ -571,3 +571,16 @@ test('a code span in a cell loses its whole delimiter, however many backticks', 
   // Only one tick came off each side, leaving `b` and ``c`` showing.
   assert.equal(toSlackMrkdwn(table), ['```', 'One │ Two │ Three', '────┼─────┼──────', 'a   │ b   │ c', '```'].join('\n'));
 });
+
+test('double markers that are not emphasis stay in a cell', () => {
+  const table = ['| Expr | Name |', '| --- | --- |', '| 2 ** 3 ** 4 | snake__case__name |', '| **bold** | __under__ |'].join('\n');
+  // Unconditional stripping turned these into `2  3  4` and `snakecasename`.
+  assert.equal(toSlackMrkdwn(table), [
+    '```',
+    'Expr        │ Name',
+    '────────────┼──────────────────',
+    '2 ** 3 ** 4 │ snake__case__name',
+    'bold        │ under',
+    '```',
+  ].join('\n'));
+});
