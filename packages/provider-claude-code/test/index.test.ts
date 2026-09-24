@@ -91,6 +91,92 @@ test('generate runs a turn through the Agent SDK and returns the result text', a
   assert.equal(options.env?.ANTHROPIC_API_KEY, undefined);
 });
 
+test('an image on the newest message reaches Claude Code as an image, not a note', async () => {
+  const prompts: unknown[] = [];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    prompts.push(params.prompt);
+    return (async function* () {
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'Three items: eggs, milk, bread.' } as ClaudeCodeStreamMessage;
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn });
+  const session = createSession({
+    messages: [{
+      id: 'session-1:user:1',
+      role: 'user',
+      content: 'can you read the list off this image?',
+      createdAt: new Date().toISOString(),
+      images: [{ mediaType: 'image/jpeg', data: '/9j/4AAQ', name: 'IMG_3612.jpg' }],
+    }],
+  });
+
+  const response = await provider.generate({ session });
+
+  // The reported shape: an agent on a Claude subscription answered "the
+  // attachment didn't reach me", because this runtime was only ever told an
+  // image's name. The SDK takes images through its message stream.
+  const prompt = prompts[0];
+  assert.equal(typeof prompt, 'object');
+  const sent: unknown[] = [];
+  for await (const message of prompt as AsyncIterable<unknown>) {
+    sent.push(message);
+  }
+  assert.deepEqual(sent, [{
+    type: 'user',
+    parent_tool_use_id: null,
+    message: {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'can you read the list off this image?' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/4AAQ' } },
+      ],
+    },
+  }]);
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Three items: eggs, milk, bread.' }]);
+});
+
+test('an image sent with no words reaches Claude Code without an empty text block', async () => {
+  const prompts: unknown[] = [];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    prompts.push(params.prompt);
+    return (async function* () {
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'A receipt.' } as ClaudeCodeStreamMessage;
+    })();
+  };
+  const session = createSession({
+    messages: [{
+      id: 'session-1:user:1',
+      role: 'user',
+      content: '',
+      createdAt: new Date().toISOString(),
+      images: [{ mediaType: 'image/png', data: 'iVBORw0K', name: 'screenshot.png' }],
+    }],
+  });
+
+  await createClaudeCodeProvider({ queryFn }).generate({ session });
+
+  // Slack hands a screenshot-only message over with empty text, and the API
+  // rejects `{ type: 'text', text: '' }` outright.
+  const sent: unknown[] = [];
+  for await (const message of prompts[0] as AsyncIterable<unknown>) {
+    sent.push(message);
+  }
+  assert.deepEqual(sent, [{
+    type: 'user',
+    parent_tool_use_id: null,
+    message: {
+      role: 'user',
+      content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' } }],
+    },
+  }]);
+});
+
+test('a message with no image still reaches Claude Code as a plain prompt string', async () => {
+  const { queryFn, calls } = createFakeQuery([{ type: 'result', subtype: 'success', is_error: false, result: 'Hi.' }]);
+  await createClaudeCodeProvider({ queryFn }).generate({ session: createSession() });
+  assert.equal(calls[0]!.prompt, 'Hello there');
+});
+
 test('multi-turn sessions are rendered as a transcript', async () => {
   const { queryFn, calls } = createFakeQuery([
     { type: 'result', subtype: 'success', is_error: false, result: 'Continuing!' },
@@ -478,7 +564,8 @@ test('transcripts replay hosted tool calls alongside their results', async () =>
   const prompts: string[] = [];
   const provider = createClaudeCodeProvider({
     queryFn: ({ prompt }) => {
-      prompts.push(prompt);
+      // A text-only run: always the plain string.
+      prompts.push(String(prompt));
       return (async function* () {
         yield { type: 'result', subtype: 'success', result: 'ok' } as never;
       })();
@@ -551,7 +638,7 @@ test('an SDK session that no longer exists replays history into a fresh one', as
   const attempts: Array<{ resume: string | undefined; prompt: string }> = [];
   const queryFn: ClaudeCodeQueryFn = (params) => {
     const resume = (params.options as { resume?: string }).resume;
-    attempts.push({ resume, prompt: params.prompt });
+    attempts.push({ resume, prompt: String(params.prompt) });
     return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
       if (resume) {
         throw new Error(`No conversation found with session ID: ${resume}`);
@@ -585,6 +672,69 @@ test('an SDK session that no longer exists replays history into a fresh one', as
   assert.equal(failures.length, 1);
   // And the session now points at the session that answered.
   assert.equal(session.metadata?.[SDK_SESSION_METADATA_KEY], 'sdk-new');
+});
+
+test('an image the API refuses is dropped, and the turn replays into a fresh session without it', async () => {
+  const attempts: Array<{ resume: string | undefined; prompt: unknown }> = [];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const resume = (params.options as { resume?: string }).resume;
+    attempts.push({ resume, prompt: params.prompt });
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      if (typeof params.prompt !== 'string') {
+        yield {
+          type: 'result',
+          subtype: 'success',
+          is_error: true,
+          result: 'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.2.content.1.image.source.base64.data: Could not process image"}}',
+          session_id: 'sdk-old',
+        };
+        return;
+      }
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'That image did not come through.', session_id: 'sdk-new' };
+    })();
+  };
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+  const image = { mediaType: 'image/png' as const, data: 'iVBORw0K', name: 'broken.png' };
+  const session = createSession({ metadata: { [SDK_SESSION_METADATA_KEY]: 'sdk-old' } });
+  session.messages.push(
+    { id: 'session-1:assistant:2', role: 'assistant', content: 'Hi.', createdAt: new Date().toISOString() },
+    { id: 'session-1:user:3', role: 'user', content: 'what is this?', createdAt: new Date().toISOString(), images: [image] },
+  );
+
+  const response = await provider.generate({ session, memory: [] });
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'That image did not come through.' }]);
+  // Emptied on the session itself: it is stored, and left alone it would
+  // fail every later turn the same way.
+  assert.equal(image.data, '');
+  assert.equal((image as { omitted?: boolean }).omitted, true);
+  assert.equal(attempts.length, 2);
+  // Not resumed: the SDK recorded the refused message in its own session,
+  // so resuming would send the image again.
+  assert.equal(attempts[0]?.resume, 'sdk-old');
+  assert.equal(attempts[1]?.resume, undefined);
+  assert.match(String(attempts[1]?.prompt), /Conversation so far:/);
+  assert.match(String(attempts[1]?.prompt), /broken\.png/);
+  assert.equal(session.metadata?.[SDK_SESSION_METADATA_KEY], 'sdk-new');
+});
+
+test('an image refusal is recovered once, and a second refusal fails the turn', async () => {
+  let calls = 0;
+  const queryFn: ClaudeCodeQueryFn = () => {
+    calls += 1;
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      yield { type: 'result', subtype: 'success', is_error: true, result: 'API Error: 400 messages.0.content.1.image.source.base64.data: Could not process image' };
+    })();
+  };
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+  const session = createSession({
+    messages: [{ id: 'session-1:user:1', role: 'user', content: 'look', createdAt: new Date().toISOString(), images: [{ mediaType: 'image/png', data: 'iVBORw0K' }] }],
+  });
+
+  // The retry sends no image, so a refusal naming one is not this turn's
+  // image any more: it fails rather than looping.
+  await assert.rejects(provider.generate({ session, memory: [] }));
+  assert.equal(calls, 2);
 });
 
 test('a failed resume is not replayed once a hosted tool has run', async () => {

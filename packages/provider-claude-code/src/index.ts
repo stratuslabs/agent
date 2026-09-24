@@ -5,6 +5,7 @@ import {
   query as sdkQuery,
   tool as sdkTool,
   type Options,
+  type SDKUserMessage,
   type SdkMcpToolDefinition,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
@@ -13,6 +14,7 @@ import {
   markPromptDelivered,
   isUnaddressedTurn,
   TURN_LIMIT_NOTE,
+  omitImage,
   renderSystemPromptSections,
   type JsonObject,
   type ModelProvider,
@@ -20,11 +22,13 @@ import {
   type Session,
   type ToolDescriptor,
   type ExecutionContext,
+  type ImageAttachment,
 } from '@stratusagent/core';
 import {
   bridgedToolNames,
   hasHostedToolSideEffects,
   latestUserMessagePrompt,
+  promptImagesOf,
   markHostedToolSideEffects,
   renderTranscriptPrompt,
   type HostedToolExecutor,
@@ -208,9 +212,57 @@ export interface ClaudeCodeStreamMessage {
 }
 
 export type ClaudeCodeQueryFn = (params: {
-  prompt: string;
+  /** A string, or — when the message carries images — one user message with its image blocks. */
+  prompt: string | AsyncIterable<SDKUserMessage>;
   options?: Options;
 }) => AsyncIterable<ClaudeCodeStreamMessage>;
+
+/**
+ * The prompt for one run: the rendered text, and beside it the newest
+ * message's images as image blocks.
+ *
+ * The Agent SDK takes images only through its message-stream input, never
+ * in a prompt string, so this runtime used to be told an image was attached
+ * and that it could not see it — an agent on a Claude subscription was
+ * shown a screenshot's name and nothing else. A message with no image keeps
+ * the plain string, exactly as before: the stream input is only for what a
+ * string cannot carry. The SDK holds its input open until the first result
+ * while in-process MCP tools are attached, so a stream of one message still
+ * runs the whole tool loop.
+ */
+const runPrompt = (text: string, images: readonly ImageAttachment[]): string | AsyncIterable<SDKUserMessage> => {
+  if (images.length === 0) {
+    return text;
+  }
+  const message: SDKUserMessage = {
+    type: 'user',
+    parent_tool_use_id: null,
+    message: {
+      role: 'user',
+      content: [
+        // A screenshot sent with no words leaves the text empty, and the API
+        // refuses an empty text block — the direct provider omits it too.
+        ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
+        ...images.map((image) => ({
+          type: 'image' as const,
+          source: { type: 'base64' as const, media_type: image.mediaType, data: image.data },
+        })),
+      ],
+    },
+  };
+  return (async function* () {
+    yield message;
+  })();
+};
+
+/**
+ * Whether a failed run is the API refusing an image this turn sent. The
+ * SDK passes the API's error text through, and the API names the refused
+ * block's address — `messages.0.content.1.image.source.base64.data: Could
+ * not process image` — the same wording provider-anthropic reads.
+ */
+const refusedImage = (error: unknown): boolean =>
+  /content\.\d+\.image\b|could not process image/i.test(error instanceof Error ? error.message : String(error));
 
 export interface ClaudeCodeProviderConfig {
   /**
@@ -577,7 +629,12 @@ export const createClaudeCodeProvider = ({
       let attemptUsage: Record<string, ClaudeCodeModelUsage> | undefined;
       try {
         for await (const message of queryFn({
-          prompt: resume ? latestUserMessagePrompt(request) : renderTranscriptPrompt(request),
+          prompt: runPrompt(
+            resume
+              ? latestUserMessagePrompt(request, { inlineImages: true })
+              : renderTranscriptPrompt(request, { inlineImages: true }),
+            promptImagesOf(request),
+          ),
           options: attemptOptions,
         })) {
           resetIdleTimer();
@@ -679,42 +736,77 @@ export const createClaudeCodeProvider = ({
       }
     };
 
+    // The images this turn sends beside its prompt, held so a refusal can
+    // drop exactly these. Emptied once they are dropped, so a second
+    // refusal is not mistaken for theirs.
+    let sentImages = promptImagesOf(request);
+    const dropRefusedImages = (error: unknown): boolean => {
+      if (sentImages.length === 0 || hostedToolRuns > 0 || controller.signal.aborted || !refusedImage(error)) {
+        return false;
+      }
+      sentImages.forEach(omitImage);
+      sentImages = [];
+      return true;
+    };
+    const freshAttempt = async (): Promise<void> => {
+      // The abandoned attempt may already have streamed fragments, and
+      // the replay is a different answer to the same question — without
+      // a reset an aggregator concatenates the two into one garbled
+      // reply. This is precisely what reset is for: a partial attempt
+      // the provider gave up on.
+      //
+      // Clock stopped around it for the same reason every other awaited
+      // sink is: it is the consumer's time, and billing it to the SDK
+      // would turn a recoverable failure into an idle timeout before the
+      // replacement attempt even starts.
+      suspendIdleTimer();
+      try {
+        await request.onDelta?.({ type: 'reset', reason: 'retry' });
+      } finally {
+        resetIdleTimer();
+      }
+      toolNamesByIndex.clear();
+      try {
+        await attempt(undefined);
+      } catch (error) {
+        if (!dropRefusedImages(error)) {
+          throw error;
+        }
+        await freshAttempt();
+      }
+    };
+
     try {
       try {
         await attempt(resumeId);
       } catch (error) {
-        // A stored id the SDK no longer has — the transcript was cleared,
-        // or the session was made on another machine — must not strand the
-        // conversation. Start a fresh SDK session and replay the kernel's
-        // history into it, which is what this provider did before resume
-        // existed and is still correct, just costlier.
-        //
-        // Only when nothing has run yet. Once a hosted tool has executed,
-        // its side effects are real and already recorded, so replaying the
-        // turn would do them twice — the same rule the fallback provider
-        // follows, for the same reason.
-        if (resumeId === undefined || hostedToolRuns > 0 || controller.signal.aborted) {
-          throw error;
+        // An image the API could not process. The channel checked its
+        // header and trailer, but that is not a decode. It is emptied on
+        // the session itself — stored already, and left alone it would
+        // fail every later turn the same way — and the turn goes on with
+        // a note in its place, the recovery provider-anthropic makes.
+        // Fresh rather than resumed: the SDK wrote the refused message into
+        // its own session before calling the API, so resuming would send
+        // the image again.
+        if (dropRefusedImages(error)) {
+          await freshAttempt();
+        } else {
+          // A stored id the SDK no longer has — the transcript was cleared,
+          // or the session was made on another machine — must not strand the
+          // conversation. Start a fresh SDK session and replay the kernel's
+          // history into it, which is what this provider did before resume
+          // existed and is still correct, just costlier.
+          //
+          // Only when nothing has run yet. Once a hosted tool has executed,
+          // its side effects are real and already recorded, so replaying the
+          // turn would do them twice — the same rule the fallback provider
+          // follows, for the same reason.
+          if (resumeId === undefined || hostedToolRuns > 0 || controller.signal.aborted) {
+            throw error;
+          }
+          onResumeFailed?.(error);
+          await freshAttempt();
         }
-        onResumeFailed?.(error);
-        // The abandoned attempt may already have streamed fragments, and
-        // the replay is a different answer to the same question — without
-        // a reset an aggregator concatenates the two into one garbled
-        // reply. This is precisely what reset is for: a partial attempt
-        // the provider gave up on.
-        //
-        // Clock stopped around it for the same reason every other awaited
-        // sink is: it is the consumer's time, and billing it to the SDK
-        // would turn a recoverable resume failure into an idle timeout
-        // before the replacement attempt even starts.
-        suspendIdleTimer();
-        try {
-          await request.onDelta?.({ type: 'reset', reason: 'retry' });
-        } finally {
-          resetIdleTimer();
-        }
-        toolNamesByIndex.clear();
-        await attempt(undefined);
       }
       if (outOfTurns !== undefined && resultText === undefined) {
         await wrapUp(outOfTurns);
