@@ -27,7 +27,7 @@ A fact is more than its text. Beyond the four fields every line must have —
 | --- | --- |
 | `kind` | `semantic` (about the world), `episodic` (something that happened), `procedural` (how something is done), or `preference`. These have different useful lifetimes, and one flat bucket is how a store goes noisy. |
 | `about` | The entities the fact concerns — people, systems, projects. This is what the prompt's topic index is built from, and it **participates in search**: a fact reading "it now runs on Postgres" with `about: ["deploy pipeline"]` is found by a search for the pipeline. |
-| `validFrom`, `validUntil` | When the fact starts and stops being true. A different axis from `createdAt`, which is when it was written — conflating the two is why assistants confidently report where someone used to work. ISO-8601; a date alone is UTC midnight, and a *time* must carry `Z` or an offset, or the same bound would mean a different instant on every machine. |
+| `validFrom`, `validUntil` | When the fact starts and stops being true. A different axis from `createdAt`, which is when it was written — conflating the two is why assistants confidently report where someone used to work. ISO-8601; a date alone is UTC midnight, and a *time* must carry `Z` or an offset, or the same bound would mean a different instant on every machine. A day that does not exist is refused rather than rolled forward — `2026-02-30` would otherwise be stored as March 2nd, moving the bound two days with nothing on record to say so. |
 | `supersedes` | The id of a fact this one replaces. |
 
 Every one of them is optional and additive. A line carrying only the four
@@ -258,6 +258,17 @@ ones included, because the successor carries its own retirement and the
 revision travels with it. Forgotten entries stay behind: a tombstone is a
 record, and a file of entries has nowhere to put one, so exporting them
 would resurrect facts the agent dropped.
+
+**Export refuses when one entry id is held twice.** The built-in `stratus`
+agent inherits the memories older builds wrote under `demo-agent`,
+`anthropic-agent`, and `openai-agent`, and a hand edit — or one corpus
+imported for both — can put the same id under its own id and under an
+inherited one. Every read shows the current copy and hides the inherited
+one; import keeps the first copy of an id it sees and skips the rest. Since
+the inherited copy is usually the older of the two, writing both would
+migrate the copy that was hidden and drop the one you have been reading. So
+export stops and names the ids: `stratus memory audit <agent>` shows both,
+and forgetting the copy you do not want makes the export unambiguous.
 
 **An imported entry lands `external`.** Import is the laundering problem
 with a human in the middle: a file from elsewhere may repeat what a stranger

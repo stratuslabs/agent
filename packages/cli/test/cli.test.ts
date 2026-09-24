@@ -13691,3 +13691,36 @@ test('a new soul on a plugin provider pins no model unless one was chosen', () =
   assert.deepEqual(soulPinForNewAgent({}, { STRATUS_PROVIDER: 'ollama', STRATUS_MODEL: 'llama3' }), { provider: 'plugin:ollama', model: 'llama3' });
   assert.deepEqual(soulPinForNewAgent({ provider: 'anthropic' }, {}), { provider: 'anthropic', model: 'claude-opus-5' });
 });
+
+test('stratus memory export refuses a corpus holding one id twice rather than migrating the shadowed copy', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-dup-'));
+  const record = agentMemoryFilePath({ homeDir: home }, 'stratus');
+  const legacy = agentMemoryFilePath({ homeDir: home }, 'demo-agent');
+  for (const file of [record, legacy]) {
+    await mkdir(path.dirname(file), { recursive: true });
+  }
+  // The default agent inherits `demo-agent`, and a hand edit or a corpus
+  // imported for both puts one id under each. Every read hides the legacy
+  // copy; `audit` deliberately shows both, and it is chronological, so the
+  // alias that owns the id is not recoverable from its output.
+  await writeFile(record, `${JSON.stringify({ id: 'shared:1', agentId: 'stratus', content: 'The office moved to Southwark.', createdAt: '2026-02-01T00:00:00.000Z' })}\n`);
+  await writeFile(legacy, `${JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'The office is in Shoreditch.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  // The read shows the copy that wins.
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'stratus'], streams: listed.streams, env }), 0, listed.output.stderr);
+  assert.match(listed.output.stdout, /Southwark/);
+  assert.doesNotMatch(listed.output.stdout, /Shoreditch/);
+
+  // Export refuses instead of writing both — import keeps the first id it
+  // sees and the legacy copy is the older one, so the migration would have
+  // replaced Southwark with Shoreditch and said nothing.
+  const dump = path.join(home, 'stratus.jsonl');
+  const exported = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'export', 'stratus', '--file', dump], streams: exported.streams, env }), 1);
+  assert.match(exported.output.stderr, /holds 1 entry id twice/);
+  assert.match(exported.output.stderr, /shared:1/);
+  assert.match(exported.output.stderr, /stratus memory audit stratus/);
+  await assert.rejects(() => readFile(dump, 'utf8'), /ENOENT/);
+});

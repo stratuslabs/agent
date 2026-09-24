@@ -50,13 +50,39 @@ const optionalString = (value: unknown): string | undefined => {
 // whenever a time is given.
 const ISO_8601_INSTANT = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}))?$/;
 
+/**
+ * Whether the `YYYY-MM-DD` a bound opens with is a day that exists.
+ *
+ * `Date.parse` normalizes rather than refusing: `2026-02-30` parses fine and
+ * becomes March 2nd, and `2026-02-29` becomes March 1st in a non-leap year.
+ * The regex cannot see it either — both are ISO-*shaped*. A validity window
+ * is the field where that matters most and shows least: the fact starts or
+ * stops being true days from where the writer asked, and the record says
+ * only what it was normalized to.
+ *
+ * Checked on the calendar components as written, never by comparing the
+ * normalized instant back to the string — that was the first attempt at
+ * this and it rejected `2026-04-01T23:00:00-05:00`, whose UTC date is
+ * legitimately the 2nd. An offset is allowed to move the day; February 30th
+ * is not a day.
+ *
+ * `setUTCFullYear` rather than `Date.UTC`, which maps a two-digit year into
+ * the 1900s — the regex admits `0026-02-28`, and that is a real date.
+ */
+const isRealCalendarDate = (raw: string): boolean => {
+  const [year, month, day] = raw.slice(0, 10).split('-').map(Number) as [number, number, number];
+  const probe = new Date(0);
+  probe.setUTCFullYear(year, month - 1, day);
+  return probe.getUTCFullYear() === year && probe.getUTCMonth() === month - 1 && probe.getUTCDate() === day;
+};
+
 const validityBound = (value: unknown, field: string): string | undefined => {
   const raw = optionalString(value);
   if (raw === undefined) {
     return undefined;
   }
   const parsed = Date.parse(raw);
-  if (!ISO_8601_INSTANT.test(raw) || Number.isNaN(parsed)) {
+  if (!ISO_8601_INSTANT.test(raw) || Number.isNaN(parsed) || !isRealCalendarDate(raw)) {
     throw new Error(`${field} must be an ISO-8601 instant such as 2026-04-01 or 2026-04-01T00:00:00Z — a time needs Z or an offset, `
       + `or it means something different on every machine. ${raw} is not one, and nothing was stored.`);
   }

@@ -260,6 +260,29 @@ export const runMemory = async (
     const entries = (await store.audit(command.agentId))
       .filter((entry) => entry.forgottenAt === undefined)
       .map(({ forgottenAt: _forgotten, ...entry }) => entry);
+    // Refused rather than deduplicated, because there is no honest way to
+    // choose here. `audit` is the one read that deliberately returns both
+    // copies of an id the default agent holds under a legacy alias as well
+    // — saying what the record holds is its whole job — and it returns them
+    // in chronological order, so which alias *owns* the id is not in this
+    // list to recover. Import then keeps the first copy of an id and skips
+    // the rest, and the legacy copy is usually the older one, so writing
+    // both would migrate the copy every read hides and drop the canonical
+    // one: an export/import that silently replaces a fact with the version
+    // it was shadowing. A refusal naming the ids is recoverable; a swapped
+    // corpus is discovered months later, if ever.
+    const seen = new Set<string>();
+    const collisions = [...new Set(entries.filter((entry) => seen.size === seen.add(entry.id).size).map((entry) => entry.id))];
+    if (collisions.length > 0) {
+      writeLine(
+        streams.stderr,
+        `Error: ${command.agentId} holds ${collisions.length} entr${collisions.length === 1 ? 'y id' : 'y ids'} twice `
+        + `— ${collisions.slice(0, 5).join(', ')}${collisions.length > 5 ? ', …' : ''} — once under its own id and once under a legacy `
+        + 'alias it inherits. Export cannot tell which copy should travel, and importing the file would keep whichever came '
+        + `first. Nothing was written: run \`stratus memory audit ${command.agentId}\` to see both, forget the copy you do not want, and export again.`,
+      );
+      return 1;
+    }
     const jsonl = entries.map((entry) => JSON.stringify(entry)).join('\n');
     if (command.file !== undefined) {
       // Owner-only, like everything else holding conversation content —

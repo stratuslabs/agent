@@ -896,3 +896,29 @@ test('a legacy alias alone in the topic index is not evidence that it owns the i
   assert.deepEqual(await store.topics!(DEFAULT_STRATUS_AGENT.id), []);
   assert.ok(!(await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id)).includes('scraped-page'));
 });
+
+test('a pin is current by its owning copy, not by whichever alias holds one', async () => {
+  const filePath = await newFile();
+  // `merged` correctly picks the `stratus` copy of `shared:1`, which is
+  // expired. The question "is this pin current" is then asked of an id-only
+  // set pooled across the aliases — so the legacy copy, which is current,
+  // answered for it and the expired content reached the pinned core.
+  await writeFile(filePath, [
+    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the current copy of the rota', createdAt: '2026-01-01T00:00:00.000Z', validUntil: '2026-03-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'the inherited copy of the rota', createdAt: '2026-01-02T00:00:00.000Z' }),
+    JSON.stringify({ pins: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, pinned: true, createdAt: '2026-01-03T00:00:00.000Z' }),
+    JSON.stringify({ pins: 'shared:1', agentId: 'demo-agent', pinned: true, createdAt: '2026-01-04T00:00:00.000Z' }),
+    '',
+  ].join('\n'));
+  const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
+
+  // Expired on the copy that owns the id, so nothing renders — one rule,
+  // both bounds, the pinned core included.
+  assert.deepEqual(await store.pinned!(DEFAULT_STRATUS_AGENT.id), []);
+  // It still holds its budget, which is a property of the record.
+  assert.deepEqual(
+    (await store.pinned!(DEFAULT_STRATUS_AGENT.id, { include: 'allocated' })).map((entry) => entry.content),
+    ['the current copy of the rota'],
+  );
+  assert.ok(!(await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id)).includes('inherited copy'));
+});

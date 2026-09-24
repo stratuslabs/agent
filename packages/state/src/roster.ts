@@ -198,9 +198,19 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
     // let a retired fact through.
     let visible = budget.effective;
     if (pinnedOptions?.include !== 'allocated') {
-      const current = new Set(
-        (await Promise.all(ids.map((id) => store.pinned!(id)))).flat().map((entry) => entry.id),
+      // Settled the same way the allocated batches were, and for a reason
+      // the id-only set hid: "is this pin current" is a question about the
+      // *entry*, and pooling ids across aliases lets the copy precedence
+      // rejected answer it. An expired `stratus` copy beside a current
+      // legacy one would be admitted here — `merged` having correctly
+      // picked the expired one — and the pinned core would carry a fact
+      // that is not true now, which is the whole point of the filter.
+      const settledCurrent = await settleAliasPrecedence(
+        ids,
+        (await Promise.all(ids.map((id) => store.pinned!(id)))).map((entries) => ({ entries, truncated: false })),
+        async (id) => (await store.list(id, { validity: 'all' })).entries,
       );
+      const current = new Set(settledCurrent.entries.map((entry) => entry.id));
       visible = budget.effective.filter((id) => current.has(id));
     }
     return {

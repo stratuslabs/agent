@@ -145,6 +145,14 @@ test('memory.remember carries the wider shape, and refuses a supersession that i
     // UTC and the fact would activate at a deployment-dependent hour.
     '2026-04-01T00:00',
     '2026-04-01T00:00:00',
+    // ISO-shaped days that do not exist. `Date.parse` normalizes rather
+    // than refusing — these become March 2nd and March 1st — so the shape
+    // check and a successful parse together still let a window land days
+    // from where the model asked, with only the normalized value on record.
+    '2026-02-30',
+    '2026-02-29',
+    '2026-04-31',
+    '2026-13-01T00:00:00Z',
   ]) {
     await assert.rejects(
       () => remember.execute({ fact: 'x', validUntil: bound }, sessionFor('ava')),
@@ -155,7 +163,17 @@ test('memory.remember carries the wider shape, and refuses a supersession that i
   // The shapes ISO-8601 actually names are taken, date-only included.
   // A date alone is UTC midnight by specification, so it is unambiguous
   // wherever the daemon runs; the rest carry their offset.
-  for (const bound of ['2026-04-01', '2026-04-01T09:30Z', '2026-04-01T09:30:00.000Z', '2026-04-01T09:30:00+01:00']) {
+  for (const bound of [
+    '2026-04-01',
+    '2026-04-01T09:30Z',
+    '2026-04-01T09:30:00.000Z',
+    '2026-04-01T09:30:00+01:00',
+    // A real leap day, and an offset that legitimately carries the instant
+    // into the next UTC day — which is why the calendar check reads the
+    // components as written instead of comparing the normalized date back.
+    '2024-02-29',
+    '2026-04-01T23:00:00-05:00',
+  ]) {
     await remember.execute({ fact: `valid until ${bound}`, validUntil: bound }, sessionFor('ava'));
   }
   await assert.rejects(() => remember.execute({ fact: 'x', kind: 'trivia' }, sessionFor('ava')), /"kind" must be one of/);
