@@ -649,3 +649,9 @@ test('a label with a loose asterisk is not wrapped in bold', () => {
   // Wrapped, the new markers paired with the literal one and rewrote it.
   assert.equal(toSlackMrkdwn(table), ['glob *.ts', '• a.ts'].join('\n'));
 });
+
+test('a table with a link in it keeps the link clickable', () => {
+  const table = ['| Doc | Status |', '| --- | --- |', '| [Guide](https://x.co) | ok |'].join('\n');
+  // Inside the grid's code block the link was its literal source.
+  assert.equal(toSlackMrkdwn(table), '*Doc*: <https://x.co|Guide> · *Status*: ok');
+});

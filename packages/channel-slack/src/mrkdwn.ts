@@ -1123,9 +1123,12 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
   const grid = [header, ...rows.map(fit)].map((row) => row.map(plainCell));
   const widths = Array.from({ length: columns }, (_, index) => Math.max(...grid.map((row) => displayWidth(row[index] ?? ''))));
   const width = widths.reduce((sum, each) => sum + each, 0) + (columns - 1) * 3;
-  // A backtick run in a cell could close the fence early, so such a table
-  // takes the list form, where mrkdwn reads the cells as it reads prose.
-  if (width <= TABLE_MAX_WIDTH && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
+  // A backtick run in a cell could close the fence early, and a link inside
+  // a code block is its source text rather than something to click — so a
+  // table with either takes the list form, where mrkdwn reads the cells as
+  // it reads prose. Links are found by the converter's own reader.
+  const linked = [header, ...rows].some((row) => row.some((cell) => readEmphasis(scan(cell)).links.size > 0));
+  if (width <= TABLE_MAX_WIDTH && !linked && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
     const line = (row: string[]): string =>
       row.map((cell, index) => pad(cell, widths[index] ?? 0, alignments[index] ?? 'left')).join(' │ ').trimEnd();
     const rule = widths.map((each) => '─'.repeat(each)).join('─┼─');
