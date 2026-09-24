@@ -152,13 +152,14 @@ a long loop is more likely a mistake than a task.
 It is a **spending** limit as much as a safety one, which is why it is
 trusted-config only: a turn that loops 500 times costs 500 provider calls.
 That cuts both ways, so a project-local config cannot lower it either. The
-floor is 1, and 1 does not stop the daemon answering: the ceiling is
-tested before each provider call, so the first one is always allowed and a
-question the agent can answer outright still gets answered. What it stops
-is the *second* call — under a provider the kernel drives one call at a
-time (`anthropic`, `openai`, and plugin providers of that shape), an agent
-that reads a file, searches, or calls any tool at all fails the moment it
-tries to use the result.
+floor is 1, and 1 does not stop the daemon answering: the first provider
+call is always allowed, so a question the agent can answer outright still
+gets answered. Under a provider the kernel drives one call at a time
+(`anthropic`, `openai`, and plugin providers of that shape), `maxTurns: 1`
+means one round of tools: the tools the first call asks for run, and the
+second call is the wrap-up, which reads their results but may not call
+another. So an agent at 1 can read one file and answer from it, but not
+read a second one on the strength of the first.
 
 **The harness runtimes spend the ceiling differently.** `codex` and
 `claude-code` hold their own loop inside a single provider call, so the
