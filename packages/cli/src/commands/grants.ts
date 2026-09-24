@@ -6,7 +6,7 @@ import {
   type AgentGrantsListing,
   type ToolGrant,
 } from '@stratusagent/permissions';
-import { agentsDirPath, gatewayInfoPath } from '@stratusagent/state';
+import { agentsDirPath, gatewayInfoPath, stratusHomePath } from '@stratusagent/state';
 import { callRunningGateway, gatewayErrorMessage, readGatewayInfo } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -56,6 +56,7 @@ export const runGrants = async (
   const fromFiles = async (): Promise<number> => {
     const store = createFileCommandWhitelist({
       directory: agentsDirPath(env),
+      stateHome: stratusHomePath(env),
       warn: (line) => writeLine(streams.stderr, `Warning: ${line}`),
     });
     if (revocation) {
@@ -72,7 +73,7 @@ export const runGrants = async (
     // path here would report a source this command did not consult and
     // which may not exist yet, in the one output whose whole job is to say
     // where an agent's standing grants come from.
-    return render(listing, await resolveWhitelistPath(agentsDirPath(env), agentId));
+    return render(listing, await resolveWhitelistPath(stratusHomePath(env), agentsDirPath(env), agentId));
   };
 
   const reportRevocation = (revoked: boolean): number => {
@@ -141,7 +142,7 @@ export const runGrants = async (
       streams.stderr,
       `Warning: ${gatewayInfoPath(env)} names a daemon at ${base}, but it did not answer `
       + `(${error instanceof Error ? error.message : String(error)}). `
-      + `${revocation ? 'Revoking in' : 'Reading'} ${await resolveWhitelistPath(agentsDirPath(env), agentId)} instead; `
+      + `${revocation ? 'Revoking in' : 'Reading'} ${await resolveWhitelistPath(stratusHomePath(env), agentsDirPath(env), agentId)} instead; `
       + 'a daemon that is running will not notice until it restarts.',
     );
     return fromFiles();

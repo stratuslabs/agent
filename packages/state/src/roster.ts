@@ -22,7 +22,7 @@ import {
   readWorkingDirectory,
   readNonEmptyString,
 } from './environment.ts';
-import { agentMemoryFilePath, agentsDirPath, foldedAgentId } from './paths.ts';
+import { agentMemoryFilePath, agentsDirPath, foldedAgentId, stratusHomePath } from './paths.ts';
 import {
   isRegisteredProviderName,
   DEFAULT_OPENAI_MODEL,
@@ -120,7 +120,10 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
  * remember" differently from the next.
  */
 export const createHomeMemoryStore = (env: StateEnvironment): AgentMemoryStore =>
-  withLegacyDefaultMemories(createShardedFileMemoryStore((agentId) => agentMemoryFilePath(env, agentId)));
+  withLegacyDefaultMemories(createShardedFileMemoryStore(
+    (agentId) => agentMemoryFilePath(env, agentId),
+    stratusHomePath(env),
+  ));
 
 // ---------------------------------------------------------------------------
 // Creating a soul under an id nothing else holds

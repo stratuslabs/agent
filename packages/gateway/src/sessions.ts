@@ -8,11 +8,9 @@ import {
   agentSessionDbIn,
   agentStateDirIn,
   agentsDirIn,
+  assertDerivedStatePathSync,
   assertPathSafeAgentId,
   fleetDbIn,
-  isSymlinkedStatePathSync,
-  symlinkedStateDirectoryMessage,
-  symlinkedStateFileMessage,
 } from '@stratusagent/state';
 
 /**
@@ -98,25 +96,39 @@ export const tightenSqliteFile = (filePath: string): void => {
  */
 export interface SqliteSessionStoreOptions {
   /**
-   * The database's parent directory is dedicated Stratus state (e.g. the
-   * default ~/.stratus): tighten it to owner-only even when it already
-   * exists, since mkdir's mode only applies to directories it creates and
-   * an upgrade over a looser install must not stay world-readable. Leave
-   * false for caller-supplied paths — a shared parent like /tmp or a
-   * project directory must never be chmodded implicitly.
-   */
-  ownedDirectory?: boolean;
-  /**
-   * Whether this file is one agent's own state, under a directory Stratus
-   * creates — `agents/<id>/sessions.db`. Implies `ownedDirectory`.
+   * The state home this file sits under, when it is one Stratus derived —
+   * `~/.stratus`, or whatever `--state-dir` made the home. Given it, the
+   * parent directory is tightened to owner-only even when it already exists
+   * (mkdir's mode only applies to what it creates, and an upgrade over a
+   * looser install must not stay world-readable) and every component below
+   * the home is required to be real, through `assertDerivedStatePath`.
    *
-   * Separate from it because the two are different claims, and conflating
-   * them broke a supported setup: Stratus tightens `~/.stratus`, but the
-   * *operator* chose that path and may have linked it to another disk,
-   * while `agents/<id>` is a path Stratus picks, where nothing legitimate
-   * is a link. Only the second may refuse one.
+   * Left out for a caller-supplied path: a shared parent like `/tmp` or a
+   * project directory must never be chmodded implicitly, and its layout is
+   * not ours to have opinions about.
+   *
+   * Replaces `perAgent`, which approximated "did Stratus derive this path"
+   * and got the split wrong: the home is the *operator's* path and may be a
+   * link to another disk, so it is followed, while everything below it is a
+   * name Stratus chose, where nothing legitimate is a link. Naming the home
+   * says which is which, and says it about every component rather than the
+   * last one — so `fleet.db`, which lives directly in the home and was
+   * checked by neither boolean, is covered like any other derived name.
    */
-  perAgent?: boolean;
+  stateHome?: string;
+  /**
+   * Whether `stateHome` is itself Stratus's to tighten — true for the
+   * default `~/.stratus`, false for a state directory a caller supplied,
+   * which may sit in a shared parent that must not be chmodded from under
+   * whoever else uses it.
+   *
+   * Only about that one directory. Everything *below* the home is a
+   * directory Stratus created and is tightened either way, which is why
+   * this is not the same question as `stateHome` and cannot be folded into
+   * it: a caller-supplied state directory still gets `agents/<id>/` at
+   * `0700`, and still refuses a link there.
+   */
+  ownedHome?: boolean;
 }
 
 /**
@@ -151,28 +163,24 @@ const shardFileExists = async (filePath: string): Promise<boolean> => {
  */
 const openStratusDatabase = (filePath: string, options: SqliteSessionStoreOptions = {}): DatabaseSync => {
   const dir = path.dirname(filePath);
-  if (options.perAgent) {
-    // Never a symlink — see `isSymlinkedStatePath`, which owns that rule.
-    // Refused rather than quarantined, unlike the migration: at runtime
-    // there is no report to name it in, and a turn that cannot be stored
-    // must not read as stored.
+  if (options.stateHome !== undefined) {
+    // Never through a symlink, at any component below the home — see
+    // `assertDerivedStatePath`, which owns that rule. Refused rather than
+    // quarantined, unlike the migration: at runtime there is no report to
+    // name it in, and a turn that cannot be stored must not read as stored.
     //
-    // Under `perAgent` and not `ownedDirectory`, which is the distinction
-    // this comment used to describe while the code ignored it: `~/.stratus`
-    // is a symlink on plenty of real installs (a home on another disk), and
-    // the fleet index and the schedule store live directly in it.
-    if (isSymlinkedStatePathSync(dir)) {
-      throw new Error(symlinkedStateDirectoryMessage(dir));
-    }
-    // And the database itself. A link here is followed just as readily:
-    // the table is created, the rows indexed and the mode tightened in
-    // whatever it points at.
-    if (isSymlinkedStatePathSync(filePath)) {
-      throw new Error(symlinkedStateFileMessage(filePath));
-    }
+    // The file as well as its directory, and `fleet.db` as well as a shard:
+    // a link at either is followed just as readily — the table is created,
+    // the rows indexed and the mode tightened in whatever it points at, and
+    // for the index that is the session ids and the schedule rows leaving
+    // the home entirely.
+    assertDerivedStatePathSync(options.stateHome, filePath, 'file');
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (options.ownedDirectory === true || options.perAgent === true) {
+  // `mkdir`'s mode applies only to what it creates, so a directory an
+  // earlier build left at `0755` keeps it without this. The home itself only
+  // when it is ours; anything below it is a name we chose.
+  if (options.stateHome !== undefined && (dir !== options.stateHome || options.ownedHome === true)) {
     chmodSync(dir, 0o700);
   }
   const db = new DatabaseSync(filePath);
@@ -486,10 +494,10 @@ export class ShardedSessionStore implements SessionStore {
   constructor(options: ShardedSessionStoreOptions) {
     this.stateDir = options.stateDir;
     this.ownedDirectory = options.ownedDirectory ?? false;
-    this.index = new FleetSessionIndex(
-      fleetDbIn(options.stateDir),
-      this.ownedDirectory ? { ownedDirectory: true } : {},
-    );
+    this.index = new FleetSessionIndex(fleetDbIn(options.stateDir), {
+      stateHome: options.stateDir,
+      ...(this.ownedDirectory ? { ownedHome: true } : {}),
+    });
   }
 
   /**
@@ -506,7 +514,10 @@ export class ShardedSessionStore implements SessionStore {
     }
     // Always owner-only: a per-agent directory is state this repository
     // creates, never a path an embedder pointed at something shared.
-    const shard = new SqliteSessionStore(agentSessionDbIn(this.stateDir, agentId), { perAgent: true });
+    const shard = new SqliteSessionStore(
+      agentSessionDbIn(this.stateDir, agentId),
+      { stateHome: this.stateDir },
+    );
     this.shards.set(agentId, shard);
     return shard;
   }
@@ -615,7 +626,10 @@ export class ShardedSessionStore implements SessionStore {
       // store on disk, and holding one descriptor per agent from start-up
       // would make a big roster pay at rest for a sweep that runs once.
       const cached = this.shards.get(agentId);
-      const shard = cached ?? new SqliteSessionStore(agentSessionDbIn(this.stateDir, agentId), { perAgent: true });
+      const shard = cached ?? new SqliteSessionStore(
+        agentSessionDbIn(this.stateDir, agentId),
+        { stateHome: this.stateDir },
+      );
       try {
         for (const row of shard.rows()) {
           const seen = owners.get(row.id);

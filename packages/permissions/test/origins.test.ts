@@ -186,7 +186,7 @@ test('a page with no origin is refused unattended, and says why', async () => {
 
 test('origin grants persist beside command scopes in one whitelist file', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-origins-'));
-  const whitelist = createFileCommandWhitelist({ directory });
+  const whitelist = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
 
   const shell: Tool = {
     name: 'shell.run',
@@ -230,8 +230,8 @@ test('origin grants persist beside command scopes in one whitelist file', async 
   // A restarted daemon, headless, with no session memory at all.
   const second = createPermissionPolicy({
     mode: 'headless',
-    commands: { whitelist: createFileCommandWhitelist({ directory }) },
-    origins: { whitelist: createFileCommandWhitelist({ directory }) },
+    commands: { whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
+    origins: { whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
   });
   assert.equal(await second.approve(actOn(() => 'https://app.example.com/other')), true);
   assert.equal(await second.approve(actOn(() => 'https://app.example.com/other', 'juno')), false);
@@ -275,7 +275,7 @@ test('an unreadable whitelist holds an origin for the process and says it was no
     mode: 'interactive',
     ask: async () => 'always',
     onDecision: (decision) => decisions.push(decision),
-    origins: { whitelist: createFileCommandWhitelist({ directory }) },
+    origins: { whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
   });
 
   assert.equal(await policy.approve(actOn(() => 'https://app.example.com/')), true);
@@ -361,7 +361,7 @@ test('a tool offering more than one scope hook is judged by none of them', async
 
 test('two grants for one agent settling together both survive', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-race-'));
-  const whitelist = createFileCommandWhitelist({ directory });
+  const whitelist = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
 
   // Every grant is read-add-write, and the read yields — so two answers
   // resolved in the same moment both saw the file before either changed
@@ -386,7 +386,7 @@ test('two grants for one agent settling together both survive', async () => {
 
   // And a fresh store — a restarted daemon — reads back everything that
   // was granted, rather than whichever write happened to land last.
-  const reread = createFileCommandWhitelist({ directory });
+  const reread = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   assert.equal((await reread.scopesFor('ava')).length, 1);
   assert.equal((await reread.originsFor('ava')).length, 2);
 });

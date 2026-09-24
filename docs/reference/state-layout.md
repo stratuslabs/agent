@@ -62,22 +62,30 @@ that are worth knowing:
   *siblings* of that directory rather than descendants, and no path inside
   it reaches them. Were the workspace `agents/<id>/` itself, that same
   choice would hand the agent its own grant file.
-- **Nothing in `agents/<id>/` may be a symlink** — not the directory, not
-  `sessions.db`, `memory.jsonl`, `memory.jsonl.index` or `whitelist.json`.
-  `workspace/` is the exception: it may be a link, because where an agent's
+- **No path Stratus derives may pass through a symlink**, at any component
+  below the home — not `agents/`, not `agents/<id>/`, not `sessions.db`,
+  `memory.jsonl`, `memory.jsonl.index` or `whitelist.json`, and not
+  `fleet.db` beside them. Stratus chose these names, so a link at one is not
+  a layout decision somebody made, it is this agent's state pointing at
+  another agent's file or outside the home; and the `0700`/`0600` tightening
+  would be applied to whatever it points at. A link at `agents/` redirects
+  the whole fleet at once, which is why the rule is about the walk rather
+  than the last name in it.
+  `workspace/` is the one exception, and it is an exception to the *leaf*
+  rather than to the walk: it may itself be a link, because where an agent's
   *output* lives is a layout decision an operator can legitimately make
   (another volume, a larger disk), and the upgrade move carries an existing
-  one across as a link rather than copying through it.
-  Stratus chose these paths, so a link there is not a layout decision
-  somebody made, it is this agent's state pointing at another agent's file
-  or outside the home; and the `0700`/`0600` tightening would be applied to
-  whatever it points at. Reads are refused as well as writes, because a
+  one across as a link rather than copying through it — but it is still
+  reached through `agents/<id>/`, which may not be.
+  Reads are refused as well as writes, because a
   store that will not *place* a memory through a link but answers happily
   with what is on the far side of one has only moved the leak. A daemon
-  refuses; the upgrade move quarantines and says which file. This is about
-  Stratus's own paths only — `~/.stratus` itself may be a symlink to a
+  refuses; the upgrade move quarantines and says which component. This is
+  about Stratus's own paths only — `~/.stratus` itself may be a symlink to a
   directory elsewhere (another volume, a synced folder), and is followed
-  wherever it is checked; a soul file in `agents/` may be one too (see
+  wherever it is checked, which is the asymmetry the whole rule turns on:
+  the home is the operator's path, everything below it is ours. A soul file
+  in `agents/` may be a link too (see
   [Templates](../guides/templates.md)).
 - **Two ids a filesystem reads as one name are one directory**, because
   macOS and Windows fold `agents/Ava/` and `agents/ava/` onto the same name

@@ -276,11 +276,11 @@ test('a grant file the move has not reached yet is still the one that is read', 
   // standing grants — and would hide a revocation the still-serving daemon
   // had just written there.
   await runStateMigrations(env);
-  const store = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const store = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   assert.deepEqual((await store.scopesFor('ava')).map((scope) => scope.command), ['git']);
 
   await runStateMigrations(env, { exclusive: true });
-  const after = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const after = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   assert.deepEqual((await after.scopesFor('ava')).map((scope) => scope.command), ['git']);
 });
 
@@ -421,7 +421,7 @@ test('a grant written before the move lands in the file the move will carry', as
   // fork the list — the migration would find its destination occupied,
   // leave the old file aside as it must, and lose every revocation the old
   // daemon wrote to it afterwards.
-  const store = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const store = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   await store.rememberTool('ava', { tool: 'web.fetch', grantedAt: '2026-03-01T00:00:00.000Z' });
   await assert.rejects(() => stat(whitelistPathFor(agentsDirPath(env), 'ava')));
   const legacy = JSON.parse(await readFile(path.join(agentsDirPath(env), 'ava.whitelist.json'), 'utf8')) as {
@@ -433,7 +433,7 @@ test('a grant written before the move lands in the file the move will carry', as
 
   // And the move then carries the one file, with both grants in it.
   await runStateMigrations(env, { exclusive: true });
-  const moved = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const moved = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   assert.deepEqual((await moved.toolGrantsFor('ava')).map((grant) => grant.tool), ['web.fetch']);
   assert.deepEqual((await moved.scopesFor('ava')).map((scope) => scope.command), ['git']);
 });
@@ -450,7 +450,7 @@ test('a grant write never recreates the old file the move has already taken', as
   // copied and stamped — the grants the daemon now reads would be missing
   // this write, and the legacy file left behind would make every later
   // `start()` refuse the home as un-migrated, with no migration left to run.
-  const store = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const store = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   await store.scopesFor('ava'); // resolve and cache, as a revoke does first
   await runStateMigrations(env, { exclusive: true });
   await store.rememberTool('ava', { tool: 'web.fetch', grantedAt: '2026-03-01T00:00:00.000Z' });
@@ -1086,7 +1086,7 @@ test('a grant write tightens an agent directory an older build left loose', asyn
   await mkdir(directory, { recursive: true });
   await chmod(directory, 0o755);
 
-  const whitelist = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const whitelist = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   await whitelist.remember('ava', { command: 'git', args: ['push'] });
 
   assert.equal((await stat(directory)).mode & 0o777, 0o700);
@@ -1156,7 +1156,7 @@ test('a legacy grant file that is a symlink is refused, like the current one', a
   // truncate whatever it points at.
   await symlink(elsewhere, path.join(agentsDirPath(env), 'ava.whitelist.json'));
 
-  const whitelist = createFileCommandWhitelist({ directory: agentsDirPath(env) });
+  const whitelist = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env) });
   await assert.rejects(
     () => whitelist.grantsFor('ava'),
     (error: unknown) => error instanceof Error && /symlink/.test(error.message),

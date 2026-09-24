@@ -2304,7 +2304,10 @@ test('grants are listable and revocable over the API, through the daemon\'s own 
     }),
   );
   const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
-  const store = createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents') });
+  const store = createFileCommandWhitelist({
+    directory: path.join(home, '.stratus', 'agents'),
+    stateHome: path.join(home, '.stratus'),
+  });
   await store.remember('stratus', { command: 'git', args: ['push'], denyRefspecForms: true });
   await store.rememberOrigin('stratus', { origin: 'https://app.example.com' });
   await store.rememberTool('stratus', { tool: 'notes.write', package: 'stratus-plugin-notes', grantedAt: '2026-09-07T00:00:00.000Z', grantedBy: 'U1' });
@@ -2384,7 +2387,7 @@ test('a whitelist that will not parse refuses a revoke with the fix, rather than
   const file = whitelistPathFor(directory, 'stratus');
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, '{ not json');
-  const store = createFileCommandWhitelist({ directory });
+  const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   const harness = await startApi({ home, options: { grants: store } });
   try {
     // Unreadable reads as empty, said once in the daemon's log — the same

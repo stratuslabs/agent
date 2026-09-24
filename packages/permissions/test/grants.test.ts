@@ -64,7 +64,7 @@ const writeByHand = async (file: string, contents: string): Promise<void> => {
 
 test('always allow on a gated tool is a standing grant: per agent, past a restart, and never for allow once', async () => {
   const directory = await newDirectory();
-  const store = createFileCommandWhitelist({ directory });
+  const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   const granted: ToolGrant[] = [];
   const answers = ['y', 'always'];
   let asks = 0;
@@ -102,7 +102,7 @@ test('always allow on a gated tool is a standing grant: per agent, past a restar
   const restarted = createPermissionPolicy({
     mode: 'headless',
     onDecision: (decision) => decisions.push(decision),
-    grants: { store: createFileCommandWhitelist({ directory }) },
+    grants: { store: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
   });
   assert.equal(await restarted.approve(contextFor(plainTool('web.fetch', 'gated'))), true);
   assert.equal(await restarted.approve(contextFor(plainTool('fs.write', 'gated'))), false, 'an ungranted gated tool is still refused');
@@ -120,7 +120,7 @@ test('always allow on a gated tool is a standing grant: per agent, past a restar
 
 test('a revoked grant stops working on the next call, with no restart', async () => {
   const directory = await newDirectory();
-  const store = createFileCommandWhitelist({ directory });
+  const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   let asks = 0;
   const policy = createPermissionPolicy({
     mode: 'interactive',
@@ -148,7 +148,7 @@ test('a revoked grant stops working on the next call, with no restart', async ()
 
 test('a tool that names a command scope can never receive a tool grant, even by hand', async () => {
   const directory = await newDirectory();
-  const store = createFileCommandWhitelist({ directory });
+  const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   const policy = createPermissionPolicy({
     mode: 'interactive',
     ask: async () => 'always',
@@ -174,8 +174,8 @@ test('a tool that names a command scope can never receive a tool grant, even by 
   const headless = createPermissionPolicy({
     mode: 'headless',
     onDecision: (decision) => decisions.push(decision),
-    commands: { whitelist: createFileCommandWhitelist({ directory }) },
-    grants: { store: createFileCommandWhitelist({ directory }) },
+    commands: { whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
+    grants: { store: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
   });
   assert.equal(await headless.approve(contextFor(shellTool(), 'ava', { command: 'rm -rf build' })), false);
   assert.match(decisions[0]!.reason, /nobody is available to approve it/);
@@ -183,7 +183,7 @@ test('a tool that names a command scope can never receive a tool grant, even by 
 
 test('a dangerous tool cannot receive a standing grant', async () => {
   const directory = await newDirectory();
-  const store = createFileCommandWhitelist({ directory });
+  const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   let asks = 0;
   const policy = createPermissionPolicy({
     mode: 'interactive',
@@ -204,13 +204,13 @@ test('a dangerous tool cannot receive a standing grant', async () => {
     whitelistPathFor(directory, 'ava'),
     JSON.stringify({ version: 1, scopes: [], tools: [{ tool: 'fs.delete', grantedAt: '2026-09-07T00:00:00.000Z' }] }),
   );
-  const headless = createPermissionPolicy({ mode: 'headless', grants: { store: createFileCommandWhitelist({ directory }) } });
+  const headless = createPermissionPolicy({ mode: 'headless', grants: { store: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) } });
   assert.equal(await headless.approve(contextFor(plainTool('fs.delete', 'dangerous'))), false);
 });
 
 test('a grant follows the tool as contributed when granted, not a later tool of the same name', async () => {
   const directory = await newDirectory();
-  const store = createFileCommandWhitelist({ directory });
+  const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   let contributor: string | undefined = 'stratus-plugin-github';
   let asks = 0;
   const decisions: PermissionDecision[] = [];
@@ -247,7 +247,7 @@ test('a grant follows the tool as contributed when granted, not a later tool of 
 
 test('a remote always records who answered, and the request says what always would grant', async () => {
   const directory = await newDirectory();
-  const store = createFileCommandWhitelist({ directory });
+  const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   const seen: Array<{ tool: string; always: string | undefined; oneShot: boolean | undefined }> = [];
   const policy = createPermissionPolicy({
     mode: 'remote',
@@ -299,7 +299,7 @@ test('without a store, a standing grant still holds for the process and for the 
 
 test('a revoke whose write fails leaves the grant standing, rather than dropping it until the next restart', async () => {
   const directory = await newDirectory();
-  const store = createFileCommandWhitelist({ directory });
+  const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   await store.rememberTool('ava', { tool: 'web.fetch', grantedAt: '2026-09-07T00:00:00.000Z' });
 
   // The grant is readable and cached; the *write* is what fails — a
@@ -327,7 +327,7 @@ test('a revoke whose write fails leaves the grant standing, rather than dropping
   await rm(file, { recursive: true });
   await writeFile(file, saved);
   assert.deepEqual(
-    (await createFileCommandWhitelist({ directory }).toolGrantsFor('ava')).map((grant) => grant.tool),
+    (await createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }).toolGrantsFor('ava')).map((grant) => grant.tool),
     ['web.fetch'],
   );
 });
@@ -343,7 +343,7 @@ test('grant rows are read leniently and written back whole, beside the scopes th
       tools: [{ tool: 'web.fetch' }, { tool: '' }, 'nonsense', { tool: 'fs.write', package: 'x', grantedAt: 't', grantedBy: 'U1' }],
     }),
   );
-  const store = createFileCommandWhitelist({ directory });
+  const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   const grants = await store.grantsFor('ava');
   assert.equal(grants.scopes.length, 1);
   assert.equal(grants.origins.length, 1);
@@ -373,12 +373,12 @@ test('a grant is never written through a symlinked agent directory', async () =>
   await symlink(bea, path.join(agents, 'ava'));
 
   // Bea has grants of her own, which are what Ava would inherit.
-  await createFileCommandWhitelist({ directory: agents }).rememberTool('bea', {
+  await createFileCommandWhitelist({ directory: agents, stateHome: path.dirname(agents) }).rememberTool('bea', {
     tool: 'web.fetch',
     grantedAt: '2026-03-01T00:00:00.000Z',
   });
 
-  const store = createFileCommandWhitelist({ directory: agents });
+  const store = createFileCommandWhitelist({ directory: agents, stateHome: path.dirname(agents) });
   await assert.rejects(
     () => store.rememberTool('ava', { tool: 'shell.run', grantedAt: '2026-03-01T00:00:00.000Z' }),
     (error: unknown) => error instanceof Error && /symlink/.test(error.message),
@@ -389,7 +389,7 @@ test('a grant is never written through a symlinked agent directory', async () =>
     () => store.grantsFor('ava'),
     (error: unknown) => error instanceof Error && /symlink/.test(error.message),
   );
-  assert.deepEqual((await createFileCommandWhitelist({ directory: agents }).grantsFor('bea')).tools.map((grant) => grant.tool), ['web.fetch']);
+  assert.deepEqual((await createFileCommandWhitelist({ directory: agents, stateHome: path.dirname(agents) }).grantsFor('bea')).tools.map((grant) => grant.tool), ['web.fetch']);
   await rm(home, { recursive: true, force: true });
 });
 
@@ -399,7 +399,7 @@ test('a whitelist.json that is a symlink is refused, even inside a real director
   await mkdir(path.join(agents, 'ava'), { recursive: true });
   await mkdir(path.join(agents, 'bea'), { recursive: true });
   const beas = whitelistPathFor(agents, 'bea');
-  await createFileCommandWhitelist({ directory: agents }).rememberTool('bea', {
+  await createFileCommandWhitelist({ directory: agents, stateHome: path.dirname(agents) }).rememberTool('bea', {
     tool: 'web.fetch',
     grantedAt: '2026-03-01T00:00:00.000Z',
   });
@@ -408,7 +408,7 @@ test('a whitelist.json that is a symlink is refused, even inside a real director
   // destination as populated and archive Ava's real legacy grants.
   await symlink(beas, whitelistPathFor(agents, 'ava'));
 
-  const store = createFileCommandWhitelist({ directory: agents });
+  const store = createFileCommandWhitelist({ directory: agents, stateHome: path.dirname(agents) });
   await assert.rejects(
     () => store.grantsFor('ava'),
     (error: unknown) => error instanceof Error && /symlink/.test(error.message),
@@ -418,7 +418,7 @@ test('a whitelist.json that is a symlink is refused, even inside a real director
     (error: unknown) => error instanceof Error && /symlink/.test(error.message),
   );
   assert.deepEqual(
-    (await createFileCommandWhitelist({ directory: agents }).grantsFor('bea')).tools.map((grant) => grant.tool),
+    (await createFileCommandWhitelist({ directory: agents, stateHome: path.dirname(agents) }).grantsFor('bea')).tools.map((grant) => grant.tool),
     ['web.fetch'],
   );
   await rm(home, { recursive: true, force: true });

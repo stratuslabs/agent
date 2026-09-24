@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, chmod, mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { isSymlinkedStatePath, symlinkedStateDirectoryMessage, symlinkedStateFileMessage } from '@stratusagent/permissions';
+import { assertDerivedStatePath } from '@stratusagent/permissions';
 
 import {
   assertMemoryContentWithinCap,
@@ -402,16 +402,19 @@ export interface FileMemoryStoreOptions {
    * Whether the file's directory is dedicated Stratus state and may be
    * created and tightened to owner-only.
    *
-   * Off by default, and for the reason the session store gives: a
+   * Left out by default, and for the reason the session store gives: a
    * caller-supplied path can sit in a shared parent — a project directory,
    * `/tmp` in a test — and a store must never chmod one of those out from
-   * under whoever else uses it. On for `agents/<id>/`, which is one agent's
-   * own directory and is `0700` by contract; without it the first write for
-   * an agent whose directory does not exist yet creates it under the umask,
-   * so a home where memory happened before sessions had its per-agent
-   * directory world-readable.
+   * under whoever else uses it. Given for `agents/<id>/`, which is one
+   * agent's own directory and is `0700` by contract; without it the first
+   * write for an agent whose directory does not exist yet creates it under
+   * the umask, so a home where memory happened before sessions had its
+   * per-agent directory world-readable.
+   *
+   * The home rather than a boolean, so the same value says which components
+   * are Stratus's to insist are real — see `assertDerivedStatePath`.
    */
-  ownedDirectory?: boolean;
+  stateHome?: string;
 }
 
 /**
@@ -481,18 +484,15 @@ export const createFileMemoryStore = (
    * database to open, write and chmod.
    */
   const assertOwnedPaths = async (): Promise<void> => {
-    if (!options.ownedDirectory) {
+    const home = options.stateHome;
+    if (home === undefined) {
       return;
     }
-    // See `isSymlinkedStateDirectory`, which owns the rule itself.
-    const dir = path.dirname(filePath);
-    if (await isSymlinkedStatePath(dir)) {
-      throw new Error(symlinkedStateDirectoryMessage(dir));
-    }
+    // See `assertDerivedStatePath`, which owns the rule itself — including
+    // the components above these two, which a link at any one of redirects
+    // just as completely as a link at the file.
     for (const candidate of [filePath, indexPath]) {
-      if (await isSymlinkedStatePath(candidate)) {
-        throw new Error(symlinkedStateFileMessage(candidate));
-      }
+      await assertDerivedStatePath(home, candidate, 'file');
     }
   };
 
@@ -500,8 +500,8 @@ export const createFileMemoryStore = (
   const ensureDirectory = async (): Promise<void> => {
     const dir = path.dirname(filePath);
     await assertOwnedPaths();
-    await mkdir(dir, { recursive: true, ...(options.ownedDirectory ? { mode: 0o700 } : {}) });
-    if (options.ownedDirectory) {
+    await mkdir(dir, { recursive: true, ...(options.stateHome !== undefined ? { mode: 0o700 } : {}) });
+    if (options.stateHome !== undefined) {
       // `mkdir` only applies its mode when it creates, so an upgrade over a
       // directory an earlier build left at 0755 would keep it.
       await chmod(dir, 0o700);
@@ -909,7 +909,10 @@ export const createFileMemoryStore = (
  * appears costs nothing, since the file store touches no disk until it is
  * asked something.
  */
-export const createShardedFileMemoryStore = (fileFor: (agentId: string) => string): AgentMemoryStore => {
+export const createShardedFileMemoryStore = (
+  fileFor: (agentId: string) => string,
+  stateHome: string,
+): AgentMemoryStore => {
   const stores = new Map<string, AgentMemoryStore>();
   const storeFor = (agentId: string): AgentMemoryStore => {
     const existing = stores.get(agentId);
@@ -921,8 +924,8 @@ export const createShardedFileMemoryStore = (fileFor: (agentId: string) => strin
     // empty store is deliberate: an unsafe id must not read as "this agent
     // remembers nothing".
     // The agent's own directory, owner-only like every other per-agent
-    // resource — see `FileMemoryStoreOptions.ownedDirectory`.
-    const store = createFileMemoryStore(fileFor(agentId), { ownedDirectory: true });
+    // resource — see `FileMemoryStoreOptions.stateHome`.
+    const store = createFileMemoryStore(fileFor(agentId), { stateHome });
     stores.set(agentId, store);
     return store;
   };

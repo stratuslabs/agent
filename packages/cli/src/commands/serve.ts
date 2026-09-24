@@ -18,6 +18,7 @@ import {
 } from '@stratusagent/permissions';
 import {
   agentsDirPath,
+  stratusHomePath,
   loadChannelCredentials,
   readProcessEnv,
   logsDirPath,
@@ -201,7 +202,7 @@ const serveHeldHome = async (
   // restart. A whitelist that exists and will not read is said here, once,
   // and never written over — the daemon's log is where a grant list going
   // quiet would otherwise go unnoticed.
-  const grantStore = createFileCommandWhitelist({ directory: agentsDirPath(env), warn });
+  const grantStore = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env), warn });
 
   // The control API is a channel adapter like any other: started after the
   // roster loads, stopped before the store drains. It is optional because

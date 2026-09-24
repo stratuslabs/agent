@@ -238,6 +238,11 @@ export {
  * what the one home exists to prevent.
  */
 export {
+  assertDerivedStatePath,
+  assertDerivedStatePathSync,
+  linkedDerivedComponent,
+  linkedDerivedComponentMessage,
+  linkedDerivedComponentSync,
   isSymlinkedStatePath,
   isSymlinkedStatePathSync,
   symlinkedStateDirectoryMessage,

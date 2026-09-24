@@ -1,6 +1,6 @@
 import { chmod, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { isSymlinkedStatePath, symlinkedStateDirectoryMessage, symlinkedStateFileMessage } from './state-directory.ts';
+import { assertDerivedStatePath } from './state-directory.ts';
 
 import { describeCommandScope, parseCommandScope, sameScope, type CommandScope } from './commands.ts';
 import { parseToolGrant, sameToolGrant, type ToolGrant } from './grants.ts';
@@ -180,7 +180,11 @@ export const legacyWhitelistPathFor = (directory: string, agentId: string): stri
  * the daemon that owns the file after the move is the one that decides
  * where it lives.
  */
-export const resolveWhitelistPath = async (directory: string, agentId: string): Promise<string> => {
+export const resolveWhitelistPath = async (
+  home: string,
+  directory: string,
+  agentId: string,
+): Promise<string> => {
   const current = whitelistPathFor(directory, agentId);
   // Before either `stat` below, because both follow links: an `agents/<id>`
   // pointing at another agent's directory resolves to *that* agent's
@@ -188,19 +192,17 @@ export const resolveWhitelistPath = async (directory: string, agentId: string): 
   // the audit listing — would report its standing permissions as this
   // agent's. Refused on the read path as well as the write, since inheriting
   // another identity's grants is the failure, not just recording them there.
-  const own = path.dirname(current);
-  if (await isSymlinkedStatePath(own)) {
-    throw new Error(symlinkedStateDirectoryMessage(own));
-  }
+  // Every component below the home, not just this one: a linked `agents/`
+  // redirects the whole fleet's grants and answered "not a symlink" here
+  // while the check looked only at `agents/<id>`.
+  await assertDerivedStatePath(home, path.dirname(current), 'directory');
   // And the grant file itself: a real `agents/<id>/` can hold a linked
   // `whitelist.json`, which the `stat` below would follow and make
   // authoritative — the migration would then see the destination as
   // populated and archive the real legacy file, after which this agent
   // reads another's unattended grants and writes its revocations through
   // the link.
-  if (await isSymlinkedStatePath(current)) {
-    throw new Error(symlinkedStateFileMessage(current));
-  }
+  await assertDerivedStatePath(home, current, 'file');
   try {
     await stat(current);
     return current;
@@ -217,9 +219,7 @@ export const resolveWhitelistPath = async (directory: string, agentId: string): 
   // authoritative. The home is then stamped as migrated with the link
   // still in place, this resolver keeps answering from outside the home,
   // and `writeLegacy` opens and truncates whatever it points at.
-  if (await isSymlinkedStatePath(legacy)) {
-    throw new Error(symlinkedStateFileMessage(legacy));
-  }
+  await assertDerivedStatePath(home, legacy, 'file');
   try {
     await stat(legacy);
     return legacy;
@@ -266,6 +266,13 @@ export class WhitelistUnreadableError extends Error {
  */
 export const createFileCommandWhitelist = (options: {
   directory: string;
+  /**
+   * The state home `directory` sits under, so the invariant can be asked
+   * about every component rather than the last one — see
+   * `assertDerivedStatePath`. `directory` is `<home>/agents`, and a link at
+   * *it* redirects every agent's grants at once.
+   */
+  stateHome: string;
   /**
    * Where to say that a whitelist exists but could not be read. Once per
    * agent per process; a host that omits it gets the same behavior with
@@ -325,7 +332,7 @@ export const createFileCommandWhitelist = (options: {
     // The agent id is a validated invariant by the time it reaches any
     // path join (see 03) — it is a single path segment or it was refused
     // at the parse boundary, so this does not re-check it.
-    let file = await resolveWhitelistPath(options.directory, agentId);
+    let file = await resolveWhitelistPath(options.stateHome, options.directory, agentId);
     try {
       let raw = await readAt(file);
       if (raw === undefined) {
@@ -340,7 +347,7 @@ export const createFileCommandWhitelist = (options: {
         // resolve sees the world after the rename. A path that comes back
         // unchanged really is absent, which is the ordinary case of an
         // agent that has never been granted anything.
-        const moved = await resolveWhitelistPath(options.directory, agentId);
+        const moved = await resolveWhitelistPath(options.stateHome, options.directory, agentId);
         if (moved !== file) {
           file = moved;
           raw = await readAt(file);
@@ -392,7 +399,7 @@ export const createFileCommandWhitelist = (options: {
     // Whichever file is the agent's right now — see `resolveWhitelistPath`.
     // A write that always took the new path would fork the list while the
     // move is still pending.
-    const target = await resolveWhitelistPath(options.directory, agentId);
+    const target = await resolveWhitelistPath(options.stateHome, options.directory, agentId);
     const file: WhitelistFile = {
       version: WHITELIST_VERSION,
       scopes: grants.scopes,
@@ -411,9 +418,7 @@ export const createFileCommandWhitelist = (options: {
       // so each inherits what the other was granted unattended and a
       // revocation for one silently revokes for both.
       const directory = path.dirname(target);
-      if (await isSymlinkedStatePath(directory)) {
-        throw new Error(symlinkedStateDirectoryMessage(directory));
-      }
+      await assertDerivedStatePath(options.stateHome, directory, 'directory');
       await mkdir(directory, { recursive: true, mode: 0o700 });
       // `mkdir`'s mode applies only to what it creates, so an `agents/<id>/`
       // an older build or an operator already left is whatever it was — and

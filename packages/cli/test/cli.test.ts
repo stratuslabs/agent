@@ -9225,7 +9225,10 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-cli-'));
   const env = { cwd: home, homeDir: home, processEnv: {} };
   const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
-  const store = createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents') });
+  const store = createFileCommandWhitelist({
+    directory: path.join(home, '.stratus', 'agents'),
+    stateHome: path.join(home, '.stratus'),
+  });
   await store.remember('ava', { command: 'git', args: ['push'], denyRefspecForms: true });
   await store.rememberOrigin('ava', { origin: 'https://app.example.com' });
   await store.rememberTool('ava', { tool: 'web.fetch', package: 'stratus-plugin-web', grantedAt: '2026-09-07T01:00:00.000Z', grantedBy: 'U1' });
@@ -9257,7 +9260,10 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   assert.match(missing.output.stderr, /ava has no such grant/);
 
   // Gone from the file, not just from a cache: a fresh store reads it back empty.
-  const after = await createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents') }).grantsFor('ava');
+  const after = await createFileCommandWhitelist({
+    directory: path.join(home, '.stratus', 'agents'),
+    stateHome: path.join(home, '.stratus'),
+  }).grantsFor('ava');
   assert.deepEqual(after, { scopes: [], origins: [], tools: [] });
 
   const empty = createStreams();

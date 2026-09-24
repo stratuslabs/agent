@@ -638,7 +638,7 @@ test('a pre-existing loose session directory is tightened to owner-only', async 
   const dir = path.join(home, 'state');
   await mkdir(dir, { recursive: true, mode: 0o755 });
   const dbPath = path.join(dir, 'sessions.db');
-  const store = new SqliteSessionStore(dbPath, { ownedDirectory: true });
+  const store = new SqliteSessionStore(dbPath, { stateHome: dir, ownedHome: true });
   store.close();
 
   assert.equal(((await stat(dir)).mode & 0o777), 0o700);

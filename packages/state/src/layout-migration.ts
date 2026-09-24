@@ -4,7 +4,7 @@ import { appendFile, chmod, mkdir, readdir, readFile, realpath, rename, rm, stat
 import path from 'node:path';
 
 import { isValidAgentId } from '@stratusagent/agents';
-import { LEGACY_WHITELIST_SUFFIX, isSymlinkedStatePath, whitelistPathFor } from '@stratusagent/permissions';
+import { LEGACY_WHITELIST_SUFFIX, linkedDerivedComponent, whitelistPathFor } from '@stratusagent/permissions';
 import { type StateEnvironment } from './environment.ts';
 import { memoryAppendNeedsNewline } from './memory.ts';
 import { DEFAULT_STRATUS_AGENT } from './souls.ts';
@@ -177,11 +177,11 @@ export const makeAgentStateDirectory = async (
   onUnusable?: (code: string) => void,
 ): Promise<string | undefined> => {
   const directory = agentStateDirPath(env, agentId);
-  // Never a symlink — see `isSymlinkedStateDirectory`, which owns that rule.
-  // Quarantined rather than thrown here: this runs inside a migration that
-  // has a report to name the agent in, and the rest of the fleet should
-  // still move.
-  if (await isSymlinkedStatePath(directory)) {
+  // Never through a symlink, at any component below the home — see
+  // `linkedDerivedComponent`, which owns that rule. Quarantined rather than
+  // thrown here: this runs inside a migration that has a report to name the
+  // agent in, and the rest of the fleet should still move.
+  if (await linkedDerivedComponent(stratusHomePath(env), directory) !== undefined) {
     onUnusable?.('ELOOP');
     return undefined;
   }
@@ -326,16 +326,19 @@ export const createStateDirectoryNames = (env: StateEnvironment): StateDirectory
  * outside the home.
  */
 const usableStateFile = async (
+  home: string,
   filePath: string,
   agentId: string,
   what: string,
   report: LayoutMigrationReport,
 ): Promise<string | undefined> => {
-  if (!(await isSymlinkedStatePath(filePath))) {
+  const linked = await linkedDerivedComponent(home, filePath);
+  if (linked === undefined) {
     return filePath;
   }
   report.quarantined.push(
-    `${JSON.stringify(agentId)} (${what}) — ${path.basename(filePath)} is a symlink, which is never this agent's file`,
+    `${JSON.stringify(agentId)} (${what}) — ${path.relative(home, linked)} is a symlink, `
+    + 'which is never a path this agent\'s state is written through',
   );
   return undefined;
 };
@@ -512,6 +515,7 @@ const shardSessions = async (
       continue;
     }
     const shardPath = await usableStateFile(
+      stratusHomePath(env),
       agentSessionDbPath(env, owner.agent_id),
       owner.agent_id,
       `${owner.total} session(s)`,
@@ -636,6 +640,7 @@ const placeRecords = async (
       continue;
     }
     const destination = await usableStateFile(
+      stratusHomePath(env),
       agentMemoryFilePath(env, agentId),
       agentId,
       `${lines.length} memory record(s)`,
