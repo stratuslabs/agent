@@ -54,6 +54,7 @@
     "typescript": "^5.9.3"
   },
   "license": "MIT",
+  "homepage": "https://stratuslabs.com/agent",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
