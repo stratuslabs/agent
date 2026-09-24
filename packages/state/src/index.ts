@@ -81,6 +81,9 @@ export {
   type AgentPrincipalsConfig,
   type PrincipalsAdmit,
   type PrincipalsConfig,
+  type AgentSlackConfig,
+  type SlackConfig,
+  type SlackReplyMode,
   type ApiConfig,
   type PluginConfigBlock,
   type PluginsConfig,
@@ -142,6 +145,7 @@ export {
   validateConfigFile,
   resolveAgentApprovals,
   resolveAgentPrincipals,
+  resolveAgentSlack,
   saveConfigFile,
 } from './config-file.ts';
 

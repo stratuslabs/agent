@@ -10,7 +10,9 @@ import {
   MAX_APPROVAL_TIMEOUT_MS,
   type ApprovalsConfig,
   type AgentPrincipalsConfig,
+  type AgentSlackConfig,
   type PrincipalsConfig,
+  type SlackConfig,
   type ApiConfig,
   type PluginConfigBlock,
   type PluginsConfig,
@@ -121,9 +123,44 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   if (config.promptCacheTtl === '5m' || config.promptCacheTtl === '1h') {
     resolved.promptCacheTtl = config.promptCacheTtl;
   }
+  if (config.maxTokens !== undefined) {
+    // Refused rather than clamped, like every other bound here: the API
+    // rejects a request whose cap is not a positive integer, so a bad value
+    // does not degrade, it fails every turn before generating.
+    if (
+      typeof config.maxTokens !== 'number'
+      || !Number.isInteger(config.maxTokens)
+      || config.maxTokens < 1
+    ) {
+      throw new Error(
+        `Invalid maxTokens in config ${configPath}: ${JSON.stringify(config.maxTokens)}. `
+        + 'Use a whole number of output tokens, 1 or more.',
+      );
+    }
+    resolved.maxTokens = config.maxTokens;
+  }
   // `false` is the whole point of this key too.
   if (typeof config.vision === 'boolean') {
     resolved.vision = config.vision;
+  }
+  if (config.maxTurns !== undefined) {
+    // Refused rather than clamped, like `approvals.timeoutMs`: every value
+    // this rejects breaks the daemon in a way nothing downstream reports.
+    // The ceiling is tested as `turn > maxTurns` before the provider call,
+    // so 0 or a negative fails turn 1 of every dispatch — an install where
+    // no agent can answer anything, with "exceeded the maximum of 0
+    // provider turns" as the only clue.
+    if (
+      typeof config.maxTurns !== 'number'
+      || !Number.isInteger(config.maxTurns)
+      || config.maxTurns < 1
+    ) {
+      throw new Error(
+        `Invalid maxTurns in config ${configPath}: ${JSON.stringify(config.maxTurns)}. `
+        + 'Use a whole number of provider turns, 1 or more.',
+      );
+    }
+    resolved.maxTurns = config.maxTurns;
   }
   const approvals = parseApprovalsConfig(config.approvals, configPath);
   if (approvals) {
@@ -132,6 +169,10 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   const principals = parsePrincipalsConfig(config.principals, configPath);
   if (principals) {
     resolved.principals = principals;
+  }
+  const slack = parseSlackConfig(config.slack, configPath);
+  if (slack) {
+    resolved.slack = slack;
   }
   const api = parseApiConfig(config.api, configPath);
   if (api) {
@@ -427,6 +468,68 @@ export const resolveAgentPrincipals = (
   const admit = agent?.admit ?? principals?.admit;
   return { ...(slackUsers ? { slackUsers } : {}), ...(admit ? { admit } : {}) };
 };
+
+const parseSlackEntry = (raw: unknown, configPath: string, where: string): AgentSlackConfig | undefined => {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid ${where} in config ${configPath}: expected an object, received ${JSON.stringify(raw)}.`);
+  }
+  const source = raw as Record<string, unknown>;
+  const entry: AgentSlackConfig = {};
+  if (source.replies !== undefined) {
+    // Refused rather than defaulted: a misspelt "streem" that quietly meant
+    // `final` would look like the setting did nothing.
+    if (source.replies !== 'final' && source.replies !== 'stream') {
+      throw new Error(
+        `Invalid ${where}.replies in config ${configPath}: expected "final" or "stream", received ${JSON.stringify(source.replies)}.`,
+      );
+    }
+    entry.replies = source.replies;
+  }
+  return entry;
+};
+
+const parseSlackConfig = (raw: unknown, configPath: string): SlackConfig | undefined => {
+  const shared = parseSlackEntry(raw, configPath, 'slack');
+  if (!shared) {
+    return undefined;
+  }
+  const slack: SlackConfig = { ...shared };
+  const source = raw as Record<string, unknown>;
+  if (source.agents !== undefined) {
+    if (typeof source.agents !== 'object' || source.agents === null || Array.isArray(source.agents)) {
+      throw new Error(
+        `Invalid slack.agents in config ${configPath}: expected an object keyed by agent id, received ${JSON.stringify(source.agents)}.`,
+      );
+    }
+    const agents: Record<string, AgentSlackConfig> = {};
+    for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
+      const parsed = parseSlackEntry(entry, configPath, `slack.agents.${agentId}`);
+      if (parsed) {
+        agents[agentId] = parsed;
+      }
+    }
+    if (Object.keys(agents).length > 0) {
+      slack.agents = agents;
+    }
+  }
+  return slack;
+};
+
+/**
+ * One agent's Slack presentation: its own entry where it has one, the
+ * top-level block otherwise — per key, the precedence `resolveAgentPrincipals`
+ * uses. `replies` defaults to `final` here, the one place, so nothing
+ * downstream has to know what an absent key means.
+ */
+export const resolveAgentSlack = (
+  slack: SlackConfig | undefined,
+  agentId: string,
+): Required<AgentSlackConfig> => ({
+  replies: slack?.agents?.[agentId]?.replies ?? slack?.replies ?? 'final',
+});
 
 // ---------------------------------------------------------------------------
 // Writing the config file

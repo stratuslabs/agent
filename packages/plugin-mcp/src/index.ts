@@ -20,15 +20,19 @@ import {
 import { createFileLedger, workspacePreparer, workspaceResolver, type TaintedWriteLedger } from '@stratusagent/plugins';
 
 import {
+  boundServerText,
   bridgedToolName,
   normalizeCallResult,
   sanitizeToolSegment,
   SERVER_NAME_PATTERN,
   bridgedDescription,
   bridgedSchema,
+  BRIDGED_RESULT_MAX_LENGTH,
+  BRIDGED_RESULT_MIN_LENGTH,
   BRIDGED_SCHEMA_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_DEPTH,
   BRIDGED_SEGMENT_MAX_LENGTH,
+  boundedResultLimit,
 } from './normalize.ts';
 
 /**
@@ -45,9 +49,13 @@ export const PLUGIN_MCP_VERSION = '0.11.4';
 
 export {
   BRIDGED_DESCRIPTION_MAX_LENGTH,
+  BRIDGED_RESULT_MAX_LENGTH,
+  BRIDGED_RESULT_MIN_LENGTH,
   BRIDGED_SCHEMA_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_DEPTH,
   BRIDGED_SEGMENT_MAX_LENGTH,
+  boundedResultLimit,
+  boundServerText,
   bridgedDescription,
   bridgedSchema,
   bridgedToolName,
@@ -109,6 +117,14 @@ export interface McpServerSpec {
   headers: Record<string, string>;
   connectTimeoutMs: number;
   callTimeoutMs: number;
+  /**
+   * The cap on one result's text, in characters — see
+   * `BRIDGED_RESULT_MAX_LENGTH` in `./normalize.ts` for the number and the
+   * reason. Per server because that is where the operator already tunes a
+   * server's behavior, and because one verbose server should not force the
+   * cap up for the rest.
+   */
+  maxResultChars: number;
 }
 
 export interface McpPluginOptions {
@@ -168,8 +184,25 @@ const asStringRecord = (value: unknown, where: string): Record<string, string> =
   return record;
 };
 
-const asTimeout = (value: unknown, fallback: number): number =>
+/**
+ * A positive number from a config block, or the default. Shared by the two
+ * timeouts and by `maxResultChars`: all three mean "a bound the operator
+ * may move", and for all three a `0`, a negative, or a non-number is a
+ * value that would remove the bound rather than set it — which is never
+ * what a config key on somebody else's server should be able to say.
+ */
+const asPositiveNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+
+/**
+ * The same, for a bound that is counted rather than measured. A fractional
+ * millisecond is a harmless way to say a timeout, but a fractional
+ * character is not a number of characters — and it reaches code that
+ * counts up to it one character at a time, where "400.5" is a target no
+ * integer ever hits.
+ */
+const asPositiveInteger = (value: unknown, fallback: number): number =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback;
 
 const asStringArray = (value: unknown, where: string): string[] | undefined => {
   if (value === undefined) {
@@ -311,8 +344,16 @@ const resolveServerSpec = (
     env,
     ...(url !== undefined ? { url } : {}),
     headers: asStringRecord(block.headers, `${where}.headers`),
-    connectTimeoutMs: asTimeout(block.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS),
-    callTimeoutMs: asTimeout(block.callTimeoutMs, DEFAULT_CALL_TIMEOUT_MS),
+    connectTimeoutMs: asPositiveNumber(block.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS),
+    callTimeoutMs: asPositiveNumber(block.callTimeoutMs, DEFAULT_CALL_TIMEOUT_MS),
+    // A `0`, a negative, or a fraction is not "no cap" — see
+    // `asPositiveInteger`. The one thing this must not be is switchable off
+    // from a config key, since a server that wanted the cap gone is the
+    // server it exists for.
+    // Through `boundedResultLimit` so the floor reaches everything this
+    // spec feeds, the protocol-error path included — that one bounds its
+    // message directly and never passes through `normalizeCallResult`.
+    maxResultChars: boundedResultLimit(asPositiveInteger(block.maxResultChars, BRIDGED_RESULT_MAX_LENGTH)),
   };
 };
 
@@ -817,12 +858,22 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         // "Connection closed" is all the SDK says about a request the
         // transport died under. When the transport said why, say so here,
         // where the agent reads it.
+        //
+        // Bounded on the way out, both of them. A `tools/call` that fails
+        // at the protocol level never produces a result for
+        // `normalizeCallResult` to cap: a JSON-RPC error arrives as an
+        // `McpError` whose message the server wrote, and a transport
+        // failure can carry an HTTP body. Both reach the agent as a thrown
+        // message, which `DefaultExecutor` copies into `ToolResult.error`
+        // — persisted on the session and replayed to the provider on every
+        // later turn, exactly like output. Failing must not be a wider
+        // channel into the transcript than answering.
+        const described = error instanceof Error ? error.message : String(error);
+        const limit = state.spec.maxResultChars;
         if (isConnectionFailure(error) && state.closeCause !== undefined) {
-          throw new Error(
-            `${error instanceof Error ? error.message : String(error)} — ${state.closeCause}`,
-          );
+          throw new Error(boundServerText(`${described} — ${state.closeCause}`, limit, 'error message'));
         }
-        throw error;
+        throw new Error(boundServerText(described, limit, 'error message'));
       }
       // The resolver, not its answer: resolving creates the workspace and
       // settles its permissions, and a text-only result must not be
@@ -833,6 +884,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         server: state.spec.name,
         tool: info.mcpName,
         agentId: session.agent.id,
+        maxResultChars: state.spec.maxResultChars,
         ...(resolve !== undefined ? { workspace: () => resolve(session.agent.id) } : {}),
         ...(ledger !== undefined ? { ledger } : {}),
       });

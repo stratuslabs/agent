@@ -27,7 +27,7 @@ adapter and the Claude Agent SDK runtime.
   `tool-call` — with wire names translated back to the kernel's own naming.
 - Aborts a wedged subprocess on an inactivity timeout (default 10 minutes),
   suspended while a hosted tool or approval wait is legitimately silent.
-- Enforces the kernel's `maxTurns` as a hosted-tool budget (default 8):
+- Enforces the kernel's `maxTurns` as a hosted-tool budget (default 40):
   codex has no native turn cap, so a call past the budget is refused at the
   tool endpoint — a tool error, nothing executed — and the loop finishes
   with what it has.

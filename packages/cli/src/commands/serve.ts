@@ -23,6 +23,7 @@ import {
   logsDirPath,
   resolveAgentApprovals,
   resolveAgentPrincipals,
+  resolveAgentSlack,
   runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
@@ -34,6 +35,8 @@ import type { CliStreams, CliEnvironment, DashboardSession } from '../environmen
 import { formatEvent, eventDetail } from '../events.ts';
 import { writeLine } from '../io.ts';
 import { loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
+import { companionsBehindMessage, readCompanions } from '../companions.ts';
+import { CLI_VERSION } from '../npm.ts';
 import type { ParsedServeCommand } from '../parse.ts';
 import { warnOnCredentialOverride, warnOnUntrustedConfig, warnOnIgnoredConfig } from '../runtime.ts';
 import {
@@ -47,9 +50,11 @@ import {
 import {
   loadServeApprovals,
   loadServePrincipals,
+  loadServeSlack,
   loadServeApi,
   loadServePlugins,
   loadServeRuntimeSelection,
+  loadServeMaxTurns,
 } from '../trusted-config.ts';
 
 export const runServe = async (
@@ -170,6 +175,7 @@ const serveHeldHome = async (
   const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
   const approvalMode = command.approvals ?? approvalsConfig.mode ?? 'headless';
   const principalsConfig = await loadServePrincipals(env, command.configPath, warn);
+  const slackConfig = await loadServeSlack(env, command.configPath, warn);
 
   // Read here rather than inside the gateway for the same reason as the two
   // blocks above: the trust boundary is a property of *which file* said it,
@@ -180,6 +186,11 @@ const serveHeldHome = async (
   // at start when the name is nobody's.
   const executorName = await loadServeRuntimeSelection('executor', env, command.configPath, warn);
   const memoryStoreName = await loadServeRuntimeSelection('memoryStore', env, command.configPath, warn);
+  // How long a loop one message may buy. Same trust rule, and the last
+  // thing the daemon could not say for itself — `--max-turns` is a
+  // `stratus run` flag, so a served fleet was held to the kernel default
+  // with no override.
+  const maxTurns = await loadServeMaxTurns(env, command.configPath, warn);
 
   // Every kind of grant an agent holds — command scopes, origins, standing
   // tool grants — in one file per agent beside its soul, through one store
@@ -255,6 +266,15 @@ const serveHeldHome = async (
     });
   }
 
+  // Every start, not only `stratus update`: an upgrade that went around it
+  // leaves the adapters this daemon is about to load at their old version,
+  // and a Slack adapter from before thread follow-through answers mentions
+  // and nothing else, with no error anywhere to say why.
+  const behind = (await readCompanions(CLI_VERSION, env)).filter((entry) => entry.stale);
+  if (behind.length > 0) {
+    warn(companionsBehindMessage(behind));
+  }
+
   const channelCredentials = await loadChannelCredentials(env);
   const slackAgents = Object.entries(channelCredentials.slack ?? {});
   const channels = [...controlApiChannels];
@@ -285,6 +305,7 @@ const serveHeldHome = async (
             ...(route.slackChannel ? { approvalChannel: route.slackChannel } : {}),
             ...(principals.slackUsers ? { principals: principals.slackUsers } : {}),
             ...(principals.admit ? { admit: principals.admit } : {}),
+            replies: resolveAgentSlack(slackConfig, agentId).replies,
           };
         }),
         log,
@@ -476,6 +497,7 @@ const serveHeldHome = async (
     ...(approvalsConfig.timeoutMs !== undefined ? { approvalTimeoutMs: approvalsConfig.timeoutMs } : {}),
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(channels.length > 0 ? { channels } : {}),
     // The Slack adapter is host-wired, so its (agent, kind) claims are
     // declared here; a plugin channel claiming one of them is refused at

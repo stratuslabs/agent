@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { UNADDRESSED_TURN_NOTE, type ProviderCallUsage, type ProviderRequest } from '@stratusagent/core';
+import { ContextOverflowError, UNADDRESSED_TURN_NOTE, type ProviderCallUsage, type ProviderRequest } from '@stratusagent/core';
 import {
   createOpenAICompatibleProvider,
   createProviderRegistry,
@@ -639,6 +639,196 @@ test('createOpenAICompatibleProvider rejects malformed tool call arguments', asy
   );
 });
 
+test('a transcript past the context window is reported as recoverable, not as a dead turn', async () => {
+  const rejectWith = (body: Record<string, unknown>) => async () => ({
+    ok: false,
+    status: 400,
+    text: async () => JSON.stringify(body),
+  }) as Response;
+
+  // The first-party API sets a code, and a code needs no pattern.
+  const coded = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: rejectWith({ error: { message: 'This model\'s maximum context length is 128000 tokens.', code: 'context_length_exceeded' } }),
+  });
+  await assert.rejects(
+    () => coded.generate(createRequest()),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+
+  // Everything else implementing this wire format says it in prose, and
+  // differently — a local runtime has no code to read.
+  const prose = createOpenAICompatibleProvider({
+    model: 'local-llama',
+    apiKey: 'test-key',
+    fetch: rejectWith({ error: { message: 'the request exceeds the available context size. Try to lower the number of tokens.' } }),
+  });
+  await assert.rejects(
+    () => prose.generate(createRequest()),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+
+  // Narrow on purpose: an unrelated 400 read as an overflow would have the
+  // kernel throw conversation history away over a request that was
+  // malformed in some other way.
+  const unrelated = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: rejectWith({ error: { message: 'Unrecognized request argument supplied: tool_choce' } }),
+  });
+  await assert.rejects(
+    () => unrelated.generate(createRequest()),
+    (error: unknown) => error instanceof Error && !(error instanceof ContextOverflowError),
+  );
+
+  // And narrow on STATUS as well as wording. A 5xx is transient, whatever
+  // it says: read as an overflow, it would have the kernel permanently
+  // raise the floor — giving up conversation history for good — over a
+  // proxy that was briefly unwell, and rob the fallback of its turn.
+  const transient = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: (async () => ({
+      ok: false,
+      status: 503,
+      text: async () => JSON.stringify({ error: { message: 'failed to determine model context length' } }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => transient.generate(createRequest()),
+    (error: unknown) => error instanceof Error && !(error instanceof ContextOverflowError),
+  );
+});
+
+test('an overflow that names an image is not answered by throwing the images away', async () => {
+  // The image recovery is the destructive one: `omitImage` empties
+  // attachments on the live session and cannot be undone. An overflow
+  // message can name an image — "maximum context length is 8192 tokens;
+  // your messages including 1 image resulted in …" — so the two branches
+  // overlap, and order decides which runs. Taken as an image rejection,
+  // the turn loses the pictures it was about and retries, when what the
+  // request needed was less history.
+  const request = requestWithImage();
+  let attempts = 0;
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: (async () => {
+      attempts += 1;
+      return {
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({
+          error: {
+            message: "This model's maximum context length is 8192 tokens; your messages including 1 image resulted in 10000 tokens.",
+          },
+        }),
+      };
+    }) as unknown as typeof fetch,
+  });
+
+  await assert.rejects(
+    () => provider.generate(request),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+  assert.equal(attempts, 1, 'did not retry without the images');
+  // The attachment is intact, so the kernel's shorter retry still has it.
+  const image = request.session.messages[0]?.images?.[0];
+  assert.ok(image);
+  assert.notEqual(image.data, '', 'the image was not emptied on the session');
+
+  // A 400 that really is about an image still takes the image path.
+  const badImage = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: (async () => ({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({ error: { message: 'Could not process image: unsupported format' } }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => badImage.generate(requestWithImage()),
+    (error: unknown) => error instanceof Error && !(error instanceof ContextOverflowError),
+  );
+});
+
+test('a reply cut off at the endpoint\'s output cap is refused, not delivered as the answer', async () => {
+  // `finish_reason: length` with content is the case nothing used to
+  // check: the empty-response branch reads the finish reason, but only
+  // ever ran when no part surfaced, so a paragraph that stopped mid-word
+  // came back as a finished turn — posted as the agent's reply, session
+  // recorded `completed`.
+  const truncatedText = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: 'The three options are: first,' }, finish_reason: 'length' }],
+      }),
+    }) as Response,
+  });
+  await assert.rejects(
+    () => truncatedText.generate(createRequest()),
+    /stopped at its output cap before finishing \(finish_reason: length\)/,
+  );
+
+  // And the sharper half: `arguments` cut off mid-JSON that happens to
+  // land somewhere parseable rebuilds into an object missing keys, which
+  // reads as a perfectly good call.
+  const truncatedCall = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                { id: 'call-1', type: 'function', function: { name: 'demo.echo', arguments: '{"path":"/etc"}' } },
+              ],
+            },
+            finish_reason: 'length',
+          },
+        ],
+      }),
+    }) as Response,
+  });
+  await assert.rejects(
+    () => truncatedCall.generate(createRequest()),
+    /stopped at its output cap before finishing/,
+  );
+
+  // The tokens are still reported: the call completed and was billed, and
+  // a throw returns no response for the count to ride on.
+  const reported: ProviderCallUsage[] = [];
+  const billed = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: 'half an answ' }, finish_reason: 'length' }],
+        usage: { prompt_tokens: 40, completion_tokens: 900 },
+      }),
+    }) as Response,
+  });
+  await assert.rejects(
+    () => billed.generate({ ...createRequest(), onUsage: (usage) => reported.push(usage) }),
+    /output cap/,
+  );
+  assert.deepEqual(reported, [
+    { provider: 'openai', model: 'gpt-4.1-mini', inputTokens: 40, outputTokens: 900 },
+  ]);
+});
+
 test('createOpenAICompatibleProvider preserves non-json HTTP error bodies', async () => {
   const provider = createOpenAICompatibleProvider({
     model: 'gpt-4.1-mini',
@@ -871,6 +1061,26 @@ test('createOpenAICompatibleProvider sends a user message\'s images as data-URL 
   // server accepts.
   await provider.generate(createRequest());
   assert.equal(bodies[1]!.messages.at(-1).content, 'Say hello');
+});
+
+test('createOpenAICompatibleProvider sends tool_choice none on a wrap-up turn only', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Done so far.' }, finish_reason: 'stop' }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl });
+  const tools = [{ name: 'demo.echo', parameters: { type: 'object', properties: {} } }];
+
+  await provider.generate({ ...createRequest(), tools, toolChoice: 'none' });
+  await provider.generate({ ...createRequest(), tools });
+
+  assert.equal(bodies[0]!.tools.length, 1);
+  assert.equal(bodies[0]!.tool_choice, 'none');
+  assert.equal(bodies[1]!.tool_choice, undefined);
 });
 
 test('createOpenAICompatibleProvider replaces images past the replay budget with a note', async () => {

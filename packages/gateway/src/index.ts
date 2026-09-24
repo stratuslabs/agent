@@ -19,6 +19,7 @@ import {
   missingSkillRequirements,
   describeToolAllowlistFinding,
   unmatchedToolAllowlist,
+  CONTEXT_FLOOR_METADATA_KEY,
   PENDING_APPROVAL_METADATA_KEY,
   SESSION_TAINTED_BY_METADATA_KEY,
   SESSION_TRUST_METADATA_KEY,
@@ -492,6 +493,16 @@ export interface GatewayOptions {
    * which is only ever right in a test. Default 15 minutes.
    */
   approvalTimeoutMs?: number;
+  /**
+   * How many tool turns one dispatched turn may take before the runner
+   * wraps it up with a summary. Default 40 (`DEFAULT_MAX_TURNS` in core).
+   *
+   * Applies to every runner this gateway builds, so a delegated
+   * sub-session is held to the same ceiling as the turn that delegated it
+   * — they are separate dispatches and each gets its own allowance, not a
+   * share of one. `stratus serve` fills it from the trusted config's
+   * `maxTurns`.
+   */
   maxTurns?: number;
   /**
    * The activity watchdog: abort a turn when no event for its session has
@@ -874,6 +885,13 @@ export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
   // where a command ran, and the one audit question a caller must not be
   // able to answer for it.
   EXECUTOR_METADATA_KEY,
+  // The context floor is an index into a specific transcript, so it means
+  // nothing next to a different one. Reserved for both halves of that: a
+  // caller cannot seed it, and a rollover drops it with the transcript it
+  // indexed — otherwise the fresh session inherits an absolute floor over
+  // no messages and, once it grows past that index, silently stops sending
+  // its own earliest turns, with no overflow and no trim event to say so.
+  CONTEXT_FLOOR_METADATA_KEY,
 ];
 
 /**

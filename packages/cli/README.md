@@ -72,7 +72,7 @@ Full reference with every subcommand:
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |
 | `--approvals` | `run`/`chat`: `always`, `ask`, or `never`. `serve`: `headless` (refuse gated calls) or `remote` (ask in Slack) |
-| `--max-turns` | Max provider turns per run (default 8) |
+| `--max-turns` | Max tool turns per run before it wraps up (default 40) |
 | `--format` | `text` or `json` |
 | `--idle-timeout` | `serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |

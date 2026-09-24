@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { UNADDRESSED_TURN_NOTE, type ImageAttachment, type MemoryEntry, type ProviderCallUsage, type ProviderRequest, type Session } from '@stratusagent/core';
+import { ContextOverflowError, UNADDRESSED_TURN_NOTE, type ImageAttachment, type MemoryEntry, type ProviderCallUsage, type ProviderRequest, type Session } from '@stratusagent/core';
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
@@ -168,6 +168,24 @@ test('generate advertises tools with sanitized wire names and maps calls back', 
   ]);
 });
 
+test('a wrap-up turn keeps its tools declared and asks for no calls', async () => {
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage([{ type: 'text', text: 'Here is where I got to.' }], 'end_turn'),
+    apiMessage([{ type: 'text', text: 'Hi.' }], 'end_turn'),
+  ]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const tools = [{ name: 'demo.echo', parameters: { type: 'object', properties: {} } }];
+
+  await provider.generate({ session: createSession(), tools, toolChoice: 'none' });
+  await provider.generate({ session: createSession(), tools });
+
+  // Declared, because a history holding tool calls with no tools to match
+  // is a request the API refuses; `none` is what keeps the model to words.
+  assert.equal(requests[0]!.body.tools.length, 1);
+  assert.deepEqual(requests[0]!.body.tool_choice, { type: 'none' });
+  assert.equal(requests[1]!.body.tool_choice, undefined);
+});
+
 test('history replay merges runner messages into API turns and keeps thinking blocks', async () => {
   const thinkingTurn = [
     { type: 'thinking', thinking: 'The user wants the echo tool.', signature: 'sig_abc' },
@@ -302,6 +320,126 @@ test('a turn nobody asked for reaches the API with the note after its newest mes
     fetch: createMockFetch([apiMessage([], 'max_tokens')]).fetchImpl,
   });
   await assert.rejects(() => exhausted.generate({ session }), /stop_reason max_tokens/);
+});
+
+test('a transcript past the context window is reported as recoverable, not as a dead turn', async () => {
+  // The kernel can act on exactly one provider failure: this one. It
+  // answers by sending less history, so the adapter's whole job is to name
+  // the rejection rather than treat it as final — which is what left a
+  // long conversation permanently unanswerable, since the transcript is
+  // durable and every later message replayed the same refused request.
+  const rejectWith = (message: string): typeof fetch => (async () => new Response(
+    JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message } }),
+    { status: 400, headers: { 'content-type': 'application/json' } },
+  )) as typeof fetch;
+
+  const overflowing = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: rejectWith('prompt is too long: 1053721 tokens > 1000000 maximum'),
+  });
+  await assert.rejects(
+    () => overflowing.generate({ session: createSession() }),
+    (error: unknown) => error instanceof ContextOverflowError && /no longer fits/.test(error.message),
+  );
+
+  // Narrow on purpose: an unrelated 400 read as an overflow would have the
+  // kernel throw conversation history away to "fix" a request that was
+  // malformed in some other way.
+  const otherRejection = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: rejectWith('tools.0.custom.name: invalid value'),
+  });
+  await assert.rejects(
+    () => otherRejection.generate({ session: createSession() }),
+    (error: unknown) => !(error instanceof ContextOverflowError),
+  );
+});
+
+test('a reply cut off at the output cap is refused, not delivered as the answer', async () => {
+  const session = createSession();
+  // `stop_reason: max_tokens` with text is the case that used to pass. The
+  // check lived inside the empty-parts branch, so a reply that had said
+  // anything at all came back as the turn's answer: posted to whoever
+  // asked, mid-sentence, session recorded `completed`, nothing anywhere
+  // saying it had been cut.
+  const truncatedText = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: createMockFetch([
+      apiMessage([{ type: 'text', text: 'The three options are: first,' }], 'max_tokens'),
+    ]).fetchImpl,
+  });
+  await assert.rejects(
+    () => truncatedText.generate({ session }),
+    /stopped at the 16000-token output cap before finishing \(stop_reason max_tokens\)/,
+  );
+
+  // A truncated `tool_use` is the sharper half: the cap cuts the JSON
+  // input, and what rebuilds can be a well-formed object missing half its
+  // arguments — a call the executor would happily run.
+  const truncatedCall = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: createMockFetch([
+      apiMessage(
+        [{ type: 'tool_use', id: 'call-1', name: 'fs_read', input: { path: '/etc' } }],
+        'max_tokens',
+      ),
+    ]).fetchImpl,
+  });
+  await assert.rejects(() => truncatedCall.generate({ session }), /output cap before finishing/);
+
+  // A turn nobody asked for gets no exemption: saying nothing is a
+  // decision it may make, and running out of budget is not one.
+  const unasked = createSession();
+  unasked.messages.push({
+    id: 'session-1:user:2',
+    role: 'user',
+    content: 'Dylan: Bea, thoughts?',
+    createdAt: new Date().toISOString(),
+    overheard: true,
+  });
+  const truncatedUnasked = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: createMockFetch([apiMessage([{ type: 'text', text: 'Well, I think' }], 'max_tokens')]).fetchImpl,
+  });
+  await assert.rejects(() => truncatedUnasked.generate({ session: unasked }), /output cap before finishing/);
+
+  // The other way a limit rather than the model ends a turn: the context
+  // window filled during generation. A documented `StopReason` in the SDK
+  // this package installs, and a fragment for the same reason — easy to
+  // miss because the two read as one case, and they need different advice:
+  // this one is not fixed by asking for a shorter reply.
+  const outOfContext = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: createMockFetch([
+      apiMessage([{ type: 'text', text: 'Looking at the first file,' }], 'model_context_window_exceeded'),
+    ]).fetchImpl,
+  });
+  await assert.rejects(
+    () => outOfContext.generate({ session }),
+    /ran out of context part-way through its answer .*model_context_window_exceeded/,
+  );
+  // And on a turn nobody asked for, where silence would otherwise be a
+  // valid answer.
+  await assert.rejects(() => outOfContext.generate({ session: unasked }), /ran out of context/);
+
+  // And the cap the message names is the one that was actually sent, so
+  // the remedy it suggests is measured against the real ceiling.
+  const lowered = createAnthropicProvider({
+    apiKey: 'test-key',
+    maxTokens: 2048,
+    fetch: createMockFetch([apiMessage([{ type: 'text', text: 'a long answer that' }], 'max_tokens')]).fetchImpl,
+  });
+  await assert.rejects(() => lowered.generate({ session }), /stopped at the 2048-token output cap/);
+});
+
+test('the default output cap leaves room for an ordinary long answer', async () => {
+  // 4096 was a Claude-3-era number, and with truncation now refused rather
+  // than quietly delivered, a cap that low would turn an ordinary long
+  // reply into a failed turn.
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hello.' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  await provider.generate({ session: createSession() });
+  assert.equal(requests[0]!.body.max_tokens, 16_000);
 });
 
 test('failed tool results replay as is_error tool_result blocks', async () => {

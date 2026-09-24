@@ -36,6 +36,15 @@ puts `stratus` on your `PATH`. It stops with SIGTERM, so the gateway's
 drain actually runs. (Upgrading node moves those absolute paths — see
 [Updating](./updating.md) for why `stratus update` rewrites the unit.)
 
+For the same reason the unit carries a **`PATH`**: the one in the shell
+you installed from, with node's own directory first and relative entries
+(`.`) dropped. Without it the daemon gets the service manager's default —
+`/usr/bin:/bin:/usr/sbin:/sbin` under launchd — and so does every command
+an agent runs through the [shell tool](./shell.md), which on a Mac with
+Homebrew means no `node`, `npm`, or `gh`. Installed a tool somewhere new
+since? Run `stratus service install` (or `stratus update`) from a shell that
+finds it, and the unit picks up that shell's `PATH`.
+
 ## Crash restarts, and the `--no-login` asymmetry
 
 A default install restarts the daemon if it crashes, but not after a clean
@@ -67,7 +76,7 @@ The question every operator asks on their second day:
 | A skill installed, edited, or removed | No | `stratus skill add` reloads the daemon it finds; `stratus skill reload` after a hand edit. See [Skills](./skills.md#installing-while-the-daemon-runs) |
 | Tools from an MCP server that reconnects | No | Discovered on reconnect |
 | A plugin enabled, disabled, upgraded, or reconfigured | **Yes** | `stratus restart` |
-| Credentials, or the `api` and `approvals` blocks | **Yes** | `stratus restart` — they come from a trusted config and decide who may approve and what the daemon binds, so they are not re-read live |
+| Credentials, or the `api`, `approvals`, and `maxTurns` settings | **Yes** | `stratus restart` — they come from a trusted config and decide who may approve, what the daemon binds, and how much one message may spend, so they are not re-read live |
 | The `stratus` package itself | **Yes** | `stratus update`, which stops and starts the service around the upgrade |
 
 ### `stratus restart`: announced, drained, and back
@@ -175,3 +184,33 @@ bounds.
   turn's session comes back `failed` with a reason that says so — `Run
   aborted: no activity for 120000ms` — so it reads differently from a turn
   a person cancelled, whose reason is the bare `Run aborted`.
+
+## How many turns one message may spend
+
+A turn calls the provider, runs the tools it asked for, and calls the
+provider again with the results. `maxTurns` in the config file is the
+ceiling on that loop, and the default is **40** — the budget for one
+Slack message, one scheduled firing, or one control-API dispatch.
+
+A task that uses all of them is not failed. The agent is told it is out of
+steps, gets one last call with no tools it may use, and answers with what it
+did and what is left; replying "continue" carries on from there with a
+fresh allowance. Raise `maxTurns` for agents that do long work, so they
+check in less often — see [how many turns one message may
+spend](../reference/config.md#how-many-turns-one-message-may-spend).
+
+That is how the ceiling reads under a provider the kernel drives one call
+at a time. The `codex` and `claude-code` runtimes hold their own loop
+inside one call and take the number as an inner budget instead: codex
+refuses the call past the budget as a tool error and answers with what it
+has, and when Claude Code reaches its own limit (`error_max_turns`) the
+provider resumes that session once, with no tools it may run, for the same
+summary. See
+[Configuration](../reference/config.md#how-many-turns-one-message-may-spend).
+
+There is no flag for it on
+`stratus serve`: it is a trusted-config key, because a turn that loops 500
+times costs 500 provider calls. See
+[Configuration](../reference/config.md#how-many-turns-one-message-may-spend).
+
+`--max-turns` on `stratus run` is the same ceiling for a one-shot run.

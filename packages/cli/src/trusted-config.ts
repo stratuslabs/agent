@@ -5,6 +5,7 @@ import {
   type ApprovalsConfig,
   type PrincipalsConfig,
   type PluginsConfig,
+  type SlackConfig,
 } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 
@@ -110,6 +111,33 @@ export const loadServePrincipals = async (
 };
 
 /**
+ * The `slack` block — how agents present themselves in Slack — under the
+ * `principals` rule: a project-local config is refused with a warning and
+ * the operator's global one read instead, so a cloned repository neither
+ * sets it nor makes it disappear. A block that will not read is a warning
+ * and the defaults, since nothing here is a boundary.
+ */
+export const loadServeSlack = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<SlackConfig> => {
+  let block = await readTrustedConfigBlock('slack', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring the slack config in ${block.path}: a project-local config cannot decide how this daemon's agents `
+      + 'post in Slack. Using ~/.stratus/config.json instead.',
+    );
+    block = await readGlobalConfigBlock('slack', env);
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring the slack config (${block.error instanceof Error ? block.error.message : String(block.error)}); using the defaults`);
+    return {};
+  }
+  return block.status === 'present' ? block.value : {};
+};
+
+/**
  * The daemon's `api` block, from the config file the daemon itself would
  * load — and only from a trusted location.
  *
@@ -162,6 +190,46 @@ export const loadServePlugins = async (
     return {};
   }
   return block.status === 'present' ? block.value : {};
+};
+
+/**
+ * The daemon's `maxTurns` ceiling — how many provider turns one dispatched
+ * turn may take before it is failed as a runaway.
+ *
+ * Under the same trust rule as the blocks above, and it needs both
+ * directions of it. Raising the ceiling spends the operator's tokens on
+ * however long a loop a cloned repository asks for; lowering it to 1
+ * leaves an agent on a kernel-driven provider unable to use a tool at
+ * all, since the ceiling is tested before each provider call and the
+ * second one is what reads the tool's result. The harness runtimes take
+ * the same number as an inner budget — codex spends it on hosted tool
+ * calls — so there a low ceiling truncates the work instead of failing
+ * the turn, which is quieter and no less a decision. So an untrusted
+ * config naming it falls through to
+ * the global file rather than to the built-in — the fall-through
+ * `principals` and `executor` use, for the same reason they use it.
+ *
+ * Absent, or ignored, means the kernel's own default; the caller leaves
+ * the option off and the runner supplies it.
+ */
+export const loadServeMaxTurns = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<number | undefined> => {
+  let block = await readTrustedConfigBlock('maxTurns', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring maxTurns in ${block.path}: a project-local config cannot decide how many provider turns `
+      + 'this daemon spends on one message. Using ~/.stratus/config.json instead.',
+    );
+    block = await readGlobalConfigBlock('maxTurns', env);
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring maxTurns (${block.error instanceof Error ? block.error.message : String(block.error)}); using the default`);
+    return undefined;
+  }
+  return block.status === 'present' ? block.value : undefined;
 };
 
 /**

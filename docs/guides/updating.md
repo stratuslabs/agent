@@ -262,6 +262,13 @@ used to leave each of them at whatever version was installed the day
 `installed`, which was equally true of a Slack adapter two releases behind
 the daemon loading it.
 
+The update is run by the CLI you already have, so a `stratus update` from
+a build older than 0.11.3 — which predates this — still upgrades the CLI
+alone, and so does `npm install -g @stratusagent/cli`. To catch those,
+`stratus doctor` lists any companion older than the CLI as a problem, and
+`stratus serve` warns about it at every start (the warning goes to the
+[log](./logs.md) too). Run `stratus update` once more to bring it level.
+
 A companion left behind is actionable on its own, so it is reported and
 exits 1 even when the CLI itself is current:
 

@@ -177,6 +177,28 @@ test('failed turns and empty responses surface as errors', async () => {
   });
   await assert.rejects(() => cutOff.generate({ session: unasked }), /ended without completing the turn/);
 
+  // And the same when the run got some of an answer out first. Whatever
+  // Codex had finished saying when the pipe closed is a fragment: returned
+  // as a reply it reaches a person as the agent's answer, cut mid-thought,
+  // with the session recorded `completed`. Addressed or not — an overheard
+  // turn may decide to say nothing, but it does not get to have a cut-off
+  // run counted as that decision.
+  const cutOffMidReply = createCodexProvider({
+    runTurn: createFakeRunTurn([
+      { type: 'thread.started', thread_id: 't1' },
+      { type: 'turn.started' },
+      { type: 'item.completed', item: { id: 'msg-1', type: 'agent_message', text: 'The three options are: first,' } },
+    ]).runTurn,
+  });
+  await assert.rejects(
+    () => cutOffMidReply.generate({ session: createSession() }),
+    /ended without completing the turn/,
+  );
+  await assert.rejects(
+    () => cutOffMidReply.generate({ session: unasked }),
+    /ended without completing the turn/,
+  );
+
   // A failure after Codex sent anything says the prompt was delivered —
   // the thread has it — and one before it does not.
   await assert.rejects(
@@ -192,6 +214,42 @@ test('failed turns and empty responses surface as errors', async () => {
     () => unstarted.generate({ session: createSession() }),
     (error: unknown) => !promptWasDelivered(error),
   );
+});
+
+test('a replayed turn does not inherit the abandoned attempt\'s completion', async () => {
+  // A resume that emits `turn.completed` and THEN throws — the stream
+  // closing after the event — leaves the run completed as far as the flag
+  // is concerned. The replay clears the messages and the emitted ids; if
+  // it does not clear this too, a fresh attempt that ends without
+  // completing reads the old attempt's `true` and hands back its partial
+  // text as a finished answer. Which is the failure the guard exists to
+  // refuse, reached from inside the recovery.
+  let attempts = 0;
+  const runTurn: CodexRunTurn = () => {
+    attempts += 1;
+    const first = attempts === 1;
+    return (async function* () {
+      yield { type: 'thread.started', thread_id: 't1' } as CodexThreadEvent;
+      yield { type: 'turn.started' } as CodexThreadEvent;
+      if (first) {
+        yield { type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: 'from the abandoned attempt' } } as CodexThreadEvent;
+        yield { type: 'turn.completed' } as CodexThreadEvent;
+        throw new Error('stream closed after the turn completed');
+      }
+      // The replay says something and is then cut off — no turn.completed.
+      yield { type: 'item.completed', item: { id: 'm2', type: 'agent_message', text: 'half of a second answer' } } as CodexThreadEvent;
+    })();
+  };
+
+  const session = createSession();
+  session.metadata = { [CODEX_THREAD_METADATA_KEY]: 'stale-thread' };
+  const provider = createCodexProvider({ runTurn });
+
+  await assert.rejects(
+    () => provider.generate({ session }),
+    /ended without completing the turn/,
+  );
+  assert.equal(attempts, 2, 'the resume failed and was replayed');
 });
 
 test('a signed-out codex maps to sign-in guidance', async () => {
@@ -283,7 +341,9 @@ test('kernel tools are served over a loopback MCP endpoint the codex process can
 test('maxTurns bounds the inner loop: calls past the budget are refused, not executed', async () => {
   // Codex has no native turn cap, so the kernel's limit is enforced at the
   // tool endpoint — a call past the budget comes back as a tool error with
-  // nothing executed, and the loop finishes with what it has.
+  // nothing executed, and the loop finishes with what it has. This is the
+  // asymmetry docs/reference/config.md documents: the same ceiling that
+  // fails a kernel-driven provider's turn only shortens a codex one.
   const executed: string[] = [];
   const runTurn: CodexRunTurn = (params) => (async function* (): AsyncGenerator<CodexThreadEvent> {
     const config = params.clientOptions.config as CapturedConfig;

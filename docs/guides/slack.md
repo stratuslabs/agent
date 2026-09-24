@@ -2,7 +2,7 @@
 
 Talk to your agents in Slack — **each agent as its own Slack app**, with its
 own avatar, presence, and DMs. Threads are resumable conversations that
-survive daemon restarts (a turn parked on an approval when the daemon died is re-asked afterwards and its reply still lands in the thread), and replies stream via message edits. Socket Mode
+survive daemon restarts (a turn parked on an approval when the daemon died is re-asked afterwards and its reply still lands in the thread), and a reply arrives once it is finished, with Slack's own "is thinking…" status while the agent works. Socket Mode
 means no public ingress: a Mac Mini behind NAT is fine.
 
 ## Install the channel
@@ -100,6 +100,40 @@ An app installed before this shipped needs the `channels:history` /
 once (the manifest `stratus setup` prints already has them) — until then it
 answers mentions and DMs and nothing else, which is also how you keep an
 agent mention-only on purpose.
+
+## How replies appear
+
+By default an agent posts **once**, when its reply is finished. While it
+works, Slack shows its own loading status under the agent's name — "is
+thinking…", or "is running shell.run…" while a tool runs — so the
+notification you get carries the answer, not a `…` that is then rewritten
+in front of you. A turn nobody asked for (an agent that
+[judges](#how-an-agent-listens)) shows no status, since it may decide to
+say nothing.
+
+If you would rather watch the reply being written, set `stream`: the agent
+posts a `…` placeholder at once, edits it as the reply arrives, shows
+`⚙ tool…` lines while tools run, and finalizes it — how every reply looked
+before `final` existed.
+
+```jsonc
+// ~/.stratus/config.json — trusted configs only
+{
+  "slack": {
+    "replies": "final",              // the default; or "stream"
+    "agents": {
+      "ava": { "replies": "stream" }  // per agent, over the default
+    }
+  }
+}
+```
+
+Restart the daemon to apply it. The loading status needs nothing new from
+your Slack app: `chat:write`, which every Stratus app already has, is enough
+for it in channels. A workspace where Slack refuses the status gets one
+warning in the daemon log, and replies still post — just without the status
+ahead of them. Slack drops a status after two minutes with no message, so
+the daemon sets it again while a long turn runs.
 
 ## Sending an image
 

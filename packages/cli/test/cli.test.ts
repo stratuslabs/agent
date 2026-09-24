@@ -29,12 +29,14 @@ import {
   warnOnUntrustedConfig,
   describePrincipals,
   loadServePrincipals,
+  loadServeSlack,
   currentLogPosition,
   describeApprovalCall,
   eventDetail,
   formatEvent,
   truncateRedirectLogs,
   installService,
+  readServiceCommand,
   readServiceStatus,
   serviceUnitPath,
   startService,
@@ -2517,6 +2519,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
     },
     api: { enabled: true, port: 4123 },
     principals: { slackUsers: ['U01DYLAN'], agents: { blair: { slackUsers: ['U01BLAIR'] } } },
+    slack: { replies: 'stream', agents: { blair: { replies: 'final' } } },
   };
   // The scalar preferences setup has no menu for either — same defect, and
   // an operator who turned caching off was silently put back on it.
@@ -2541,6 +2544,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
   assert.deepEqual(written.approvals, carried.approvals);
   assert.deepEqual(written.api, carried.api);
   assert.deepEqual(written.principals, carried.principals);
+  assert.deepEqual(written.slack, carried.slack);
   assert.equal(written.promptCache, false);
   assert.equal(written.promptCacheTtl, '1h');
   // The keys setup does own still get written, so this is a merge rather
@@ -4044,6 +4048,31 @@ test('serve names the agents no channel can ask for', async () => {
   assert.match(output.stderr, /wait out the \napproval timeout|wait out the approval timeout/);
 });
 
+test('serve warns at startup when a first-party package is older than the CLI', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-behind-'));
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      shutdownSignal: controller.signal,
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.6.0' : undefined,
+    },
+  });
+
+  assert.equal(code, 0);
+  // The daemon is where a stale adapter costs something, and the log is
+  // where someone asking "why does it ignore thread replies" looks.
+  assert.match(output.stderr, /Warning: @stratusagent\/channel-slack 0\.6\.0 is older than this CLI/);
+});
+
 test('serve keeps refusing gated calls when the approvals config cannot be read', async () => {
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-badconfig-'));
   await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
@@ -4520,6 +4549,48 @@ test('doctor --format json returns the same findings as data', async () => {
   assert.equal(report.provider.value, 'demo');
   assert.equal(report.slackPackageInstalled, true);
   assert.ok(report.problems.some((problem: string) => /offline demo model/.test(problem)));
+});
+
+test('doctor names a first-party package older than the CLI', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      // The reported shape: a CLI upgraded around `stratus update`, and the
+      // Slack adapter it loads left at the version setup first installed.
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? '0.6.0' : undefined,
+    },
+  });
+
+  assert.match(output.stdout, /@stratusagent\/channel-slack 0\.6\.0 is older than this CLI/);
+  assert.match(output.stdout, /Run `stratus update` to bring it level/);
+});
+
+test('doctor says nothing about packages that match the CLI', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? CLI_VERSION : undefined,
+    },
+  });
+
+  assert.doesNotMatch(output.stdout, /older than this CLI/);
 });
 
 test('a run warns when an environment key overrides the subscription sign-in', async () => {
@@ -7714,6 +7785,74 @@ test('the unit runs where it was installed, so relative config paths still work'
   // or missing — soul than `stratus serve` does from the same project.
   const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
   assert.match(unit, new RegExp(`WorkingDirectory=${project}`));
+});
+
+test('the unit carries the installing shell\'s PATH, so a Homebrew node and gh are found', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'darwin',
+    homeDir: home,
+    execPath: '/Users/ava/.nvm/versions/node/v22.14.0/bin/node',
+    scriptPath: '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    uid: 501,
+    // A relative entry, a duplicate, and an empty segment, as real shells have.
+    path: '/opt/homebrew/bin:.:/usr/bin::/opt/homebrew/bin:/bin',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  // The reported shape: launchd's default PATH has no /opt/homebrew/bin, so
+  // an agent's shell could not see node, npm, or gh on any Mac.
+  // Node's own directory first, relative entries gone, each entry once.
+  assert.match(
+    plist,
+    /<key>EnvironmentVariables<\/key>\s*<dict>\s*<key>PATH<\/key>\s*<string>\/Users\/ava\/\.nvm\/versions\/node\/v22\.14\.0\/bin:\/opt\/homebrew\/bin:\/usr\/bin:\/bin<\/string>/,
+  );
+  // Still read back the way `stratus update` and doctor read it.
+  const command = await readServiceCommand({ platform: 'darwin', homeDir: home });
+  assert.equal(command?.execPath, '/Users/ava/.nvm/versions/node/v22.14.0/bin/node');
+  assert.equal(command?.scriptPath, '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js');
+});
+
+test('a unit installed with no PATH keeps the service manager\'s default', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'darwin',
+    homeDir: home,
+    execPath: '/Users/ava/.nvm/versions/node/v22.14.0/bin/node',
+    scriptPath: '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    uid: 501,
+    // Only relative entries, as good as none.
+    path: '.:bin',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  // Node's directory alone would replace launchd's /usr/bin:/bin:/usr/sbin:/sbin
+  // rather than add to it, and a command could no longer find `ls`.
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  assert.doesNotMatch(plist, /EnvironmentVariables/);
+});
+
+test('service install writes the PATH of the shell it was run from into the systemd unit', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await runCli({
+    argv: ['service', 'install'],
+    streams: createStreams().streams,
+    env: {
+      cwd: home,
+      homeDir: home,
+      processEnv: { PATH: '/home/ava/.local/bin:/home/ava/100%/bin:/usr/bin' },
+      serviceRunner: stubServiceRunner,
+      servicePlatform: 'linux',
+    },
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  const line = /^Environment=(.*)$/m.exec(unit)?.[1];
+  // Quoted, and `%` doubled so systemd does not read it as a specifier.
+  assert.equal(line, JSON.stringify(`PATH=${path.dirname(process.execPath)}:/home/ava/.local/bin:/home/ava/100%%/bin:/usr/bin`));
+  const command = await readServiceCommand({ platform: 'linux', homeDir: home });
+  assert.equal(command?.argv.at(-2), 'serve');
 });
 
 test('a failed disable stops --no-login claiming the login trigger is gone', async () => {
@@ -12774,6 +12913,25 @@ test('a global config that cannot be read behind a project config closes the doo
   );
 });
 
+test('the slack block is read from the operator\'s config, never a cloned repository\'s', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ slack: { replies: 'stream' } }));
+  const warnings: string[] = [];
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo', slack: { replies: 'final' } }));
+
+  assert.deepEqual(
+    await loadServeSlack({ homeDir: home, cwd: project, processEnv: {} }, undefined, (line) => warnings.push(line)),
+    { replies: 'stream' },
+  );
+  assert.match(warnings[0] ?? '', /ignoring the slack config in .*stratus\.config\.json.*Using ~\/\.stratus\/config\.json instead/);
+  // No block anywhere is the defaults, which resolve to `final`.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(await loadServeSlack({ homeDir: home, cwd: project, processEnv: {} }, undefined, () => {}), {});
+});
+
 test('a project config that shadows the global one does not suppress the global principals policy', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-project-'));
@@ -13055,6 +13213,36 @@ test('re-running setup keeps the executor and memoryStore selections it has no m
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) as Record<string, unknown>;
   assert.equal(config.executor, 'sandbox');
   assert.equal(config.memoryStore, 'vector');
+});
+
+test('re-running setup keeps the output and turn bounds it has no menu for', async () => {
+  // Same hazard as the executor and memoryStore above, and sharper for
+  // these two: a `maxTokens` set because the endpoint's ceiling is under
+  // the default would silently return to the default and fail every
+  // request, and a raised `maxTurns` would return to 8 — both without a
+  // word, from a re-run the operator did for some unrelated reason.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ provider: 'demo', maxTokens: 4096, maxTurns: 24 })}\n`,
+  );
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => true,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) as Record<string, unknown>;
+  assert.equal(config.maxTokens, 4096);
+  assert.equal(config.maxTurns, 24);
 });
 
 test('a provider nobody registered is refused by name, with what is registered', async () => {

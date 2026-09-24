@@ -87,6 +87,33 @@ export interface AgentPrincipalsConfig {
 
 export type PrincipalsAdmit = 'anyone' | 'principals';
 
+/**
+ * How an agent's replies appear in Slack. `final`, the default, shows
+ * Slack's own loading status while the turn runs and posts the reply once,
+ * finished — so the notification carries the answer, not a `…`. `stream`
+ * posts a placeholder at once and edits it as the reply is written, which
+ * is how every reply looked before `final` existed.
+ */
+export type SlackReplyMode = 'final' | 'stream';
+
+/** One agent's Slack presentation settings. */
+export interface AgentSlackConfig {
+  replies?: SlackReplyMode;
+}
+
+/**
+ * The `slack` block of ~/.stratus/config.json: how agents present
+ * themselves in Slack, with per-agent overrides. Tokens are not here —
+ * they are secrets, and live under `channels.slack` in credentials.json.
+ *
+ * Read only from a **trusted** config, like `principals`: how the daemon
+ * posts into the operator's workspace is not a cloned repository's call.
+ */
+export interface SlackConfig extends AgentSlackConfig {
+  /** Per-agent overrides, keyed by agent id. */
+  agents?: Record<string, AgentSlackConfig>;
+}
+
 /** The `principals` block of ~/.stratus/config.json. */
 export interface PrincipalsConfig extends AgentPrincipalsConfig {
   /** Per-agent overrides, keyed by agent id. */
@@ -179,6 +206,22 @@ export interface StratusConfigFile {
   /** Cache entry lifetime: '5m' (default) or '1h'. */
   promptCacheTtl?: '5m' | '1h';
   /**
+   * The per-turn output cap sent to Anthropic. Default 16000.
+   *
+   * The API requires one, and it is not a budget — nothing is spent for
+   * being allowed. It exists here because the provider takes arbitrary
+   * model names and a `baseUrl` that may point at a proxy, so the
+   * daemon-wide default cannot be right for every model an operator might
+   * name: one whose ceiling is below the default would have every request
+   * refused before generating, with no way to say otherwise.
+   *
+   * Raising it past roughly 20000 only works where the request streams —
+   * the SDK refuses a non-streaming call whose cap puts its estimated
+   * duration past ten minutes. `stratus serve` streams; `stratus run` does
+   * not always.
+   */
+  maxTokens?: number;
+  /**
    * Whether an OpenAI-compatible model takes images. Default true; set
    * false for a text-only model (a local runtime, usually), which would
    * otherwise reject every turn of a session an image was sent to.
@@ -188,6 +231,8 @@ export interface StratusConfigFile {
   approvals?: ApprovalsConfig;
   /** Which channel senders are each agent's operator. Trusted configs only. */
   principals?: PrincipalsConfig;
+  /** How agents present themselves in Slack. Trusted configs only. */
+  slack?: SlackConfig;
   /** Control API binding for `stratus serve`. */
   api?: ApiConfig;
   /** Plugins to load, keyed by package name. Trusted configs only. */
@@ -204,6 +249,29 @@ export interface StratusConfigFile {
    * plugin registered. Trusted configs only, for the same reason.
    */
   memoryStore?: string;
+  /**
+   * How many tool turns one dispatched turn may take before it wraps up
+   * with a summary. Default 40 (`DEFAULT_MAX_TURNS` in core).
+   *
+   * The daemon had no way to say this: `--max-turns` reaches `stratus
+   * run` only, so every Slack message, scheduled firing, and control-API
+   * turn was held to the built-in 8 with no override anywhere. A task
+   * needing nine tool calls failed on the ninth — after doing the work of
+   * the first eight, and with no partial answer, because the ceiling is
+   * checked before the provider call rather than after it.
+   *
+   * **Trusted configs only.** This is a runaway *and cost* guard, so both
+   * directions are a decision a cloned repository must not get to make:
+   * raising it spends the operator's tokens, and lowering it to 1 leaves
+   * an agent on a kernel-driven provider unable to use a tool at all —
+   * the first provider call is allowed, the one that would read the
+   * tool's result is not. The harness runtimes (`codex`, `claude-code`)
+   * take the same number as their own inner budget, so there a low
+   * ceiling truncates the work rather than failing the turn. An
+   * untrusted config naming it falls through to the global file, as
+   * `executor` and `principals` do.
+   */
+  maxTurns?: number;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */
@@ -243,6 +311,16 @@ export interface FallbackRuntime {
    */
   promptCache?: boolean;
   promptCacheTtl?: '5m' | '1h';
+  /**
+   * The daemon's `maxTokens`, carried for the same reason as the caching
+   * settings and more sharply: the setting exists because a model or proxy
+   * may have a ceiling below the default, and a fallback is just another
+   * model that might. Left behind, an Anthropic fallback is built on the
+   * default and fails every request the moment it takes over — the exact
+   * compatibility problem the option was added to solve, deferred to the
+   * worst moment to meet it.
+   */
+  maxTokens?: number;
   /**
    * The daemon's `vision` setting, carried to an OpenAI-compatible fallback
    * for the same reason as the caching settings above: a session that has
@@ -292,6 +370,8 @@ type RuntimeConfigVariant =
       apiKey?: string;
       /** Claude subscription auth (Claude Code setup token). */
       authToken?: string;
+      /** See StratusConfigFile.maxTokens. Absent means the adapter's default. */
+      maxTokens?: number;
       systemPrompt?: string;
       fetch?: typeof fetch;
       /**

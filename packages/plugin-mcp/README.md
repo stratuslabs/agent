@@ -110,11 +110,22 @@ this package's code:
 | `headers` | HTTP | Headers sent with every request — where a bearer token goes. |
 | `connectTimeoutMs` | both | One budget for the connect handshake *and* the whole tool-discovery walk (default 15000), so a server can stall startup neither by being unreachable nor by paginating slowly. |
 | `callTimeoutMs` | both | Per-call budget (default 60000). |
+| `maxResultChars` | both | One allowance for a whole result, in characters (default 100000, minimum 512 — a smaller one is raised, since a cap that cannot hold an account of what it cut can only be approximated), spent in order across the joined text blocks, the JSON of `structuredContent`, and the `resource_link` list — not a separate cap per field, since the transcript pays their sum. Cuts are announced with the original size named. A `structuredContent` that does not fit arrives as `structuredText`, because a truncated object is not an object; resource links that do not fit are dropped whole and counted in `resourcesTruncated`, because half a URI is no use. A failing call's message is bounded by the same number, including a JSON-RPC or transport error that never produces a result. Binary blocks' bytes go to the workspace, but the path each returns is counted like any other string, and blocks past the allowance are not written — `filesTruncated` says how many. Everything is charged as the transcript carries it: lists pay for their separators and envelope, text pays for the JSON escaping it will get (a NUL costs six characters, a quote two), an attachment's path is measured rather than reserved for, and stratus's own truncation markers and notes come out of the allowance before a server spends any of it — so the number bounds the whole result, not just the parts a server wrote. |
 
 A setting on the wrong transport kind — `headers` on a stdio server, `env`
 on an HTTP one — is refused at load rather than silently ignored, and so is
 a `passEnv` that is not an array of names: a grant an operator believes is
 in effect must never quietly be nothing.
+
+**Results are capped because they are durable.** A tool result is written
+into the session and replayed to the provider on every later turn of that
+conversation, so an unbounded one does not cost a turn — it costs every
+turn until the conversation ends, and it survives restarts along with the
+transcript. The stdio transport bounds a single message at its reader's
+buffer (10 MB) and the HTTP transports bound nothing, so the transport was
+never the cap. `maxResultChars` is the operator's; a server cannot raise
+it, and `0` or a negative reads as "use the default" rather than "no cap",
+since a server that wanted the cap gone is the server it exists for.
 
 **The stdio environment is replaced, not extended.** A subprocess MCP
 server is a subprocess, and gets the same treatment `tool-shell`'s commands

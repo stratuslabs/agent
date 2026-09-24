@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 
 import {
+  DEFAULT_MAX_TURNS,
   markPromptDelivered,
   isUnaddressedTurn,
   renderSystemPromptSections,
@@ -43,9 +44,6 @@ export const MCP_TOKEN_ENV_VAR = 'STRATUS_CODEX_MCP_TOKEN';
 export type CodexToolExecutor = HostedToolExecutor;
 
 const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
-
-/** Hosted tool calls per generate when the host sets no explicit budget. */
-const DEFAULT_TOOL_MAX_TURNS = 8;
 
 // ---------------------------------------------------------------------------
 // The kernel-tool MCP endpoint
@@ -597,7 +595,7 @@ export const createCodexProvider = ({
     };
 
     let hostedToolRuns = 0;
-    const toolBudget = maxTurns ?? DEFAULT_TOOL_MAX_TURNS;
+    const toolBudget = maxTurns ?? DEFAULT_MAX_TURNS;
     const countedExecute: CodexToolExecutor | undefined = executeTool
       ? async (session, call, context) => {
           // The budget is the kernel's max-turns limit, enforced at the one
@@ -845,6 +843,14 @@ export const createCodexProvider = ({
         }
         completedMessages.length = 0;
         emittedByItemId.clear();
+        // Including whether a turn finished. The abandoned attempt can have
+        // emitted `turn.completed` and then thrown — the stream closing
+        // after the event, say — and the flag left standing would answer
+        // for the replay: a fresh attempt that ended without completing
+        // would read the old attempt's `true` and hand back its partial
+        // text as a finished answer, which is the exact failure the guard
+        // at the end of this function exists to refuse.
+        turnCompleted = false;
         await attempt(undefined);
       }
     } catch (error) {
@@ -881,17 +887,30 @@ export const createCodexProvider = ({
     }
 
     const resultText = completedMessages.filter((text) => text.length > 0).join('\n\n');
+    // Judged before the text is, because the text is not the question. A
+    // stream that ends after `thread.started` with neither `turn.completed`
+    // nor `turn.failed` is a run that did not complete — the subprocess
+    // died, the pipe closed — and the agent messages it had finished by
+    // then are a fragment of an answer rather than an answer. Returned as
+    // one, that fragment is delivered as the agent's reply and the session
+    // is recorded `completed`, which is the single outcome nothing
+    // downstream can tell apart from a real one.
+    //
+    // Above the empty check rather than inside it, which is where this
+    // lived: the guard only ever ran when the run produced no text at all,
+    // so a cut-off run with nothing to say failed and a cut-off run with
+    // half a paragraph passed as finished.
+    if (!turnCompleted) {
+      throw markIfDelivered(markIfSideEffects(new Error('Codex ended without completing the turn.')));
+    }
     if (resultText.length === 0) {
       // Silence is the answer a turn nobody asked for may give — see
       // `RunInput.addressed` in core — when Codex said the turn finished
-      // with nothing to say. A stream that ended without `turn.completed`
-      // is a run that did not complete, and on any turn is an error.
-      if (turnCompleted && isUnaddressedTurn(request.session)) {
+      // with nothing to say.
+      if (isUnaddressedTurn(request.session)) {
         return { parts: [] };
       }
-      throw markIfDelivered(markIfSideEffects(new Error(
-        turnCompleted ? 'Codex returned an empty response.' : 'Codex ended without completing the turn.',
-      )));
+      throw markIfDelivered(markIfSideEffects(new Error('Codex returned an empty response.')));
     }
 
     return { parts: [{ type: 'text' as const, text: resultText }] };

@@ -15,7 +15,7 @@ import {
   type LocalCommandInvocation,
   type LocalCommandTool,
 } from '@stratusagent/executor-local';
-import { resolvePluginAgentConfig, workspacePreparer } from '@stratusagent/plugins';
+import { expandHome, resolvePluginAgentConfig, workspacePreparer } from '@stratusagent/plugins';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 100_000;
@@ -77,10 +77,17 @@ const settingsFor = (
   session: Session,
   env: NodeJS.ProcessEnv,
   workspaces: AgentWorkspaces | undefined,
+  home: string | undefined,
 ) => {
   const resolved = resolvePluginAgentConfig(config, session.agent.id);
   const workspaceRoot = typeof resolved.workspaceRoot === 'string' ? resolved.workspaceRoot : undefined;
-  const configuredCwd = typeof resolved.cwd === 'string' && resolved.cwd.length > 0 ? resolved.cwd : undefined;
+  // Expanded here because nothing upstream does: this README's own example
+  // is `"cwd": "~/work/ava"`, and unexpanded that is a relative path whose
+  // first segment is a directory literally named `~`, so every command
+  // failed as a missing working directory.
+  const configuredCwd = typeof resolved.cwd === 'string' && resolved.cwd.length > 0
+    ? expandHome(resolved.cwd, home)
+    : undefined;
   // Resolved per call, and through the shared rule rather than a join of
   // this plugin's own: where an agent's workspace is is the host's to say,
   // and appending the id here is what made this plugin one of five copies
@@ -128,6 +135,8 @@ export interface ShellToolOptions {
    * supplies one or leaves the cwd to `workspaceRoot`.
    */
   workspaces?: AgentWorkspaces;
+  /** What `~` in `cwd` expands to. Defaults to the daemon user's home. */
+  home?: string;
 }
 
 export const createShellTool = (config: JsonObject = {}, options: ShellToolOptions = {}): LocalCommandTool => {
@@ -163,7 +172,13 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       if (!command) {
         throw new Error('command is required.');
       }
-      const settings = settingsFor(config, session, options.processEnv ?? process.env, options.workspaces);
+      const settings = settingsFor(
+        config,
+        session,
+        options.processEnv ?? process.env,
+        options.workspaces,
+        options.home,
+      );
       if (settings.cwd) {
         // `spawn` fails with a bare `ENOENT` naming the *shell* when its
         // working directory does not exist — which on a fresh install is

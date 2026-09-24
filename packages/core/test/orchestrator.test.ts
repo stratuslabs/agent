@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  CONTEXT_FLOOR_METADATA_KEY,
+  ContextOverflowError,
+  contextFloorOf,
+  transcriptOf,
   RunAbortedError,
   EventBus,
   InMemorySessionStore,
@@ -10,8 +14,10 @@ import {
   PluginRegistry,
   readPendingApproval,
   ToolRegistry,
+  TURN_LIMIT_NOTE,
   type Executor,
   type ModelProvider,
+  type ProviderRequest,
   type Session,
   type StratusEvent,
   type Tool,
@@ -326,6 +332,52 @@ test('unknown tools produce a failure result the provider can react to', async (
   assert.equal(session.messages.at(-1)?.content, 'That tool does not exist.');
 });
 
+test('the smallest maxTurns still answers a turn that needs no tool call', async () => {
+  // The ceiling is tested before each provider call, so `maxTurns: 1`
+  // permits the first one and refuses the second. That makes 1 a real
+  // setting — an agent that can answer outright still answers — rather
+  // than an off switch, which is what the config reference used to say it
+  // was. Pinned here because the claim is documented, and prose drifts.
+  const provider: ModelProvider = {
+    name: 'plain-provider',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'answered outright' }] };
+    },
+  };
+
+  const answered = await new AgentRunner({ provider, maxTurns: 1 }).run({
+    sessionId: 'session-max-turns-1',
+    agent: { id: 'agent-max-turns-1', name: 'Terse Agent' },
+    userMessage: 'Something I can answer without tools',
+  });
+  assert.equal(answered.status, 'completed');
+  assert.equal(answered.messages.at(-1)?.content, 'answered outright');
+
+  // What 1 does stop is the turn that would read a tool's result.
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'loop',
+    async execute() {
+      return { again: true };
+    },
+  });
+  const calling: ModelProvider = {
+    name: 'calling-provider',
+    async generate() {
+      return { parts: [{ type: 'tool-call', call: { id: 'call-1', toolName: 'loop', input: {} } }] };
+    },
+  };
+
+  await assert.rejects(
+    () => new AgentRunner({ provider: calling, tools, maxTurns: 1 }).run({
+      sessionId: 'session-max-turns-1-tool',
+      agent: { id: 'agent-max-turns-1-tool', name: 'Tool Agent' },
+      userMessage: 'Something that needs a tool',
+    }),
+    /maximum of 1 provider turns/,
+  );
+});
+
 test('sessions fail when the provider never stops requesting tools', async () => {
   const tools = new ToolRegistry();
   tools.register({
@@ -336,10 +388,12 @@ test('sessions fail when the provider never stops requesting tools', async () =>
   });
 
   let calls = 0;
+  const choices: Array<string | undefined> = [];
   const provider: ModelProvider = {
     name: 'looping-provider',
-    async generate() {
+    async generate(request) {
       calls += 1;
+      choices.push(request.toolChoice);
       return {
         parts: [
           { type: 'tool-call', call: { id: `call-${calls}`, toolName: 'loop', input: {} } },
@@ -359,10 +413,61 @@ test('sessions fail when the provider never stops requesting tools', async () =>
     /maximum of 3 provider turns/,
   );
 
-  assert.equal(calls, 3);
+  // Three tool turns, then the wrap-up: a provider that ignores `toolChoice`
+  // and calls a tool anyway fails the turn, and the call is never run.
+  assert.equal(calls, 4);
+  assert.deepEqual(choices, [undefined, undefined, undefined, 'none']);
   const session = await runner.store.get('session-5');
   assert.equal(session?.status, 'failed');
   assert.match(session?.lastError ?? '', /maximum of 3 provider turns/);
+  assert.equal(session?.messages.some((message) => message.toolCalls?.[0]?.id === 'call-4'), false);
+});
+
+test('a message that uses every turn wraps up with where it got to instead of failing', async () => {
+  const tools = new ToolRegistry();
+  const ran: string[] = [];
+  tools.register({
+    name: 'step',
+    async execute(input) {
+      ran.push(String((input as { n?: number }).n));
+      return { done: true };
+    },
+  });
+
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    name: 'long-task',
+    async generate(request) {
+      requests.push(request);
+      // Would keep working forever; only the wrap-up's `toolChoice` stops it.
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'Did three steps; two are left. Reply "continue" to carry on.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `s${requests.length}`, toolName: 'step', input: { n: requests.length } } }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools, maxTurns: 3 });
+  const session = await runner.run({
+    sessionId: 'wrap-up',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'Do the whole migration',
+  });
+
+  // The reported shape: an agent that used its budget used to fail with
+  // "exceeded the maximum", every step it took left unsummarized.
+  assert.equal(session.status, 'completed');
+  assert.deepEqual(ran, ['1', '2', '3']);
+  assert.equal(session.messages.at(-1)?.content, 'Did three steps; two are left. Reply "continue" to carry on.');
+
+  const wrapUp = requests.at(-1);
+  assert.equal(requests.length, 4);
+  // Still declared — history holds calls to them — but not to be called.
+  assert.equal(wrapUp?.tools?.some((tool) => tool.name === 'step'), true);
+  assert.equal(wrapUp?.toolChoice, 'none');
+  assert.equal(transcriptOf(wrapUp!).at(-1)?.content, TURN_LIMIT_NOTE);
+  // The runtime's note for one call, never something the person said.
+  assert.equal(session.messages.some((message) => message.content === TURN_LIMIT_NOTE), false);
 });
 
 test('resume continues an existing session with new user input', async () => {
@@ -1685,6 +1790,46 @@ test('recovery holds the checkpoint until the wait is re-established or answered
   assert.ok(done!.messages.some((message) => message.toolResult?.callId === 'c1'));
 });
 
+test('a call parked past a lowered ceiling is refused, not run on the wrap-up turn', async () => {
+  // Parked on turn 4 of what was a larger allowance; the daemon came back
+  // with maxTurns 3. Turn 4 is now the wrap-up, which may not act.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  const executed: string[] = [];
+  tools.register({
+    name: 'gated',
+    risk: 'gated',
+    async execute() {
+      executed.push('gated');
+      return { ok: true };
+    },
+  });
+  const now = new Date().toISOString();
+  const call = { id: 'c1', toolName: 'gated', input: {} };
+  await store.create({
+    id: 'lowered',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [call] },
+    ],
+    metadata: { [PENDING_APPROVAL_METADATA_KEY]: { call, remaining: [], turn: 4, parkedAt: now } },
+  });
+  let generates = 0;
+  const runner = new AgentRunner({
+    provider: { name: 'fake', async generate() { generates += 1; return { parts: [{ type: 'text' as const, text: 'x' }] }; } },
+    tools,
+    store,
+    maxTurns: 3,
+    approvals: { async approve() { return true; } },
+  });
+
+  await assert.rejects(runner.recoverPendingApproval('lowered'), /maximum of 3 provider turns/);
+  assert.deepEqual(executed, []);
+  assert.equal(generates, 0);
+});
+
 test('a recovered turn spends the provider budget it was already on', async () => {
   // maxTurns is a runaway and cost guard. Restarting the counter would let
   // a call parked on the last permitted turn buy the whole allowance again,
@@ -1700,6 +1845,7 @@ test('a recovered turn spends the provider budget it was already on', async () =
   });
 
   let generates = 0;
+  const choices: Array<string | undefined> = [];
   const now = new Date().toISOString();
   const call = { id: 'c1', toolName: 'gated', input: {} };
   await store.create({
@@ -1717,8 +1863,9 @@ test('a recovered turn spends the provider budget it was already on', async () =
   const runner = new AgentRunner({
     provider: {
       name: 'fake',
-      async generate() {
+      async generate(request) {
         generates += 1;
+        choices.push(request.toolChoice);
         // Always asks for another tool, so only the budget can stop it.
         return { parts: [{ type: 'tool-call' as const, call: { id: `c${generates + 1}`, toolName: 'gated', input: {} } }] };
       },
@@ -1734,8 +1881,9 @@ test('a recovered turn spends the provider budget it was already on', async () =
     /maximum of 3 provider turns/,
   );
   // The recovered calls drain, then the loop is out of budget immediately —
-  // it does not get turns 1 through 3 over again.
-  assert.equal(generates, 0, `expected no further provider turns, saw ${generates}`);
+  // it does not get turns 1 through 3 over again. The one call it makes is
+  // the wrap-up, which may not use a tool.
+  assert.deepEqual(choices, ['none'], `expected only the wrap-up turn, saw ${generates}`);
 });
 
 test('resuming a parked session retires its checkpoint along with the interrupted call', async () => {
@@ -1879,4 +2027,317 @@ test('the first stored turn is held to the replay window too', async () => {
   ]);
   const stored = await store.get('session-first-window');
   assert.equal(stored?.messages[0]?.images?.[0]?.omitted, true);
+});
+
+
+/**
+ * A provider that refuses any request carrying more than `fits` messages,
+ * the way an API refuses a transcript past the context window, and
+ * otherwise answers. Records what it was actually sent each time.
+ */
+const createOverflowingProvider = (fits: number) => {
+  const sent: number[] = [];
+  const firstMessages: string[] = [];
+  // Reads the transcript the way an adapter must: `transcriptOf`, never
+  // `session.messages`. The session is the live, persistable one and is
+  // always whole — an adapter that read it directly would ignore the floor
+  // and re-send the request that was just refused.
+  const sessionSizes: number[] = [];
+  const provider: ModelProvider = {
+    name: 'overflowing-provider',
+    async generate(request) {
+      const transcript = transcriptOf(request);
+      sent.push(transcript.length);
+      sessionSizes.push(request.session.messages.length);
+      if (transcript.length > fits) {
+        throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
+      }
+      firstMessages.push(transcript[0]?.content ?? '');
+      return { parts: [{ type: 'text' as const, text: 'answered' }] };
+    },
+  };
+  return { provider, sent, firstMessages, sessionSizes };
+};
+
+/** A session whose transcript is `turns` complete user/assistant pairs. */
+const seedTranscript = async (runner: AgentRunner, sessionId: string, turns: number): Promise<Session> => {
+  const now = new Date().toISOString();
+  const messages = [];
+  for (let turn = 1; turn <= turns; turn += 1) {
+    messages.push({ id: `${sessionId}:user:${turn}`, role: 'user' as const, content: `question ${turn}`, createdAt: now });
+    messages.push({ id: `${sessionId}:assistant:${turn}`, role: 'assistant' as const, content: `answer ${turn}`, createdAt: now });
+  }
+  return runner.store.create({
+    id: sessionId,
+    agent: { id: 'agent-ctx', name: 'Context Agent' },
+    status: 'idle',
+    messages,
+  });
+};
+
+test('a conversation that outgrew the context window keeps going on a shorter window', async () => {
+  // The bug this closes: the transcript is durable, so a request the model
+  // refuses for length is refused identically on every later message. The
+  // session is dead under an id its channel still routes to, and a Slack
+  // DM is one session for the life of the install — "start a new one" is
+  // not something the person typing has.
+  const { provider, sent, firstMessages } = createOverflowingProvider(6);
+  const events: StratusEvent[] = [];
+  const bus = new EventBus();
+  bus.subscribe((event) => {
+    events.push(event);
+  });
+  const runner = new AgentRunner({ provider, bus });
+  await seedTranscript(runner, 'session-ctx', 10);
+
+  const session = await runner.resume({ sessionId: 'session-ctx', userMessage: 'and now?' });
+
+  assert.equal(session.status, 'completed');
+  // Halved until it fit rather than crept down one turn at a time: an
+  // overflow says "too big", never "too big by this much", so each
+  // rejected request has to buy a real reduction.
+  assert.ok(sent.length >= 2 && sent.length <= 5, `converged in a few attempts: ${JSON.stringify(sent)}`);
+  assert.ok(sent[sent.length - 1]! <= 6, `the attempt that succeeded fit: ${JSON.stringify(sent)}`);
+  assert.ok(sent[0]! > sent[sent.length - 1]!, 'each attempt sent less than the last');
+
+  // The model is told, rather than left to answer as though the earlier
+  // turns never happened.
+  assert.match(firstMessages[0]!, /earlier messages in this conversation are not shown/);
+
+  // And it is on the bus, counts only — the log is a trace, not a second
+  // transcript.
+  const trimmed = events.filter((event) => event.type === 'session.context-trimmed');
+  assert.ok(trimmed.length >= 1, 'announced the trim');
+  assert.ok(trimmed.every((event) => 'floor' in event && event.floor > 0));
+});
+
+test('the shorter window is remembered, so the next turn does not buy it again', async () => {
+  const { provider, sent } = createOverflowingProvider(6);
+  const runner = new AgentRunner({ provider });
+  await seedTranscript(runner, 'session-ctx-2', 10);
+
+  await runner.resume({ sessionId: 'session-ctx-2', userMessage: 'first' });
+  const attemptsToLearn = sent.length;
+  assert.ok(attemptsToLearn > 1, 'the first turn paid rejected requests to find the window');
+
+  // Durable on the session, and monotonic: a transcript only grows, so a
+  // floor that had to rise once would have to rise again, and rediscovering
+  // it costs a rejected request every turn.
+  const stored = await runner.store.get('session-ctx-2');
+  assert.ok(contextFloorOf(stored!) > 0);
+  assert.equal(stored!.metadata?.[CONTEXT_FLOOR_METADATA_KEY], contextFloorOf(stored!));
+
+  const floor = contextFloorOf(stored!);
+  sent.length = 0;
+  await runner.resume({ sessionId: 'session-ctx-2', userMessage: 'second' });
+
+  // The next turn starts from the remembered floor rather than from the
+  // whole transcript: its first attempt is the tail above that floor, not
+  // the twenty-odd messages the first turn opened with.
+  assert.ok(
+    sent[0]! <= stored!.messages.length - floor + 2,
+    `opened at the remembered window, not the whole transcript: ${JSON.stringify(sent)}`,
+  );
+  assert.ok(sent.length < attemptsToLearn, `fewer rejected requests than the first turn: ${JSON.stringify(sent)}`);
+
+  // The floor is absolute, so it has to keep rising as the conversation
+  // grows — holding back the same old messages while new ones pile on top
+  // would drift back over the line. It only ever rises.
+  const after = await runner.store.get('session-ctx-2');
+  assert.ok(contextFloorOf(after!) >= floor, 'the floor never goes back down');
+});
+
+test('the transcript is only windowed on the way out, never shortened on disk', async () => {
+  const { provider } = createOverflowingProvider(6);
+  const runner = new AgentRunner({ provider });
+  await seedTranscript(runner, 'session-ctx-3', 10);
+
+  await runner.resume({ sessionId: 'session-ctx-3', userMessage: 'and now?' });
+
+  // The record of what happened stays whole: this is a window onto the
+  // tail, not a deletion. `stratus session rollover` is still the only
+  // thing that leaves a conversation behind.
+  const stored = await runner.store.get('session-ctx-3');
+  assert.equal(stored!.messages[0]?.content, 'question 1');
+  assert.ok(stored!.messages.length > 20, 'every message is still stored');
+  // And the note lives only in the view — it is not written into history.
+  assert.ok(
+    stored!.messages.every((message) => !message.content.includes('are not shown')),
+    'the note never lands in the transcript',
+  );
+});
+
+test('a single turn too large for the model fails saying so, rather than retrying forever', async () => {
+  // Nothing is left to drop once the window is the newest turn, and the
+  // remedy is a different one — so the error says which problem this is.
+  const provider: ModelProvider = {
+    name: 'always-overflowing',
+    async generate() {
+      throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
+    },
+  };
+  const runner = new AgentRunner({ provider });
+  await seedTranscript(runner, 'session-ctx-4', 3);
+
+  await assert.rejects(
+    () => runner.resume({ sessionId: 'session-ctx-4', userMessage: 'one enormous message' }),
+    /newest turn on its own is already larger than this model can read/,
+  );
+  const stored = await runner.store.get('session-ctx-4');
+  assert.equal(stored?.status, 'failed');
+});
+
+test('a provider failure that is not an overflow is never answered by dropping history', async () => {
+  let calls = 0;
+  const provider: ModelProvider = {
+    name: 'failing-provider',
+    async generate() {
+      calls += 1;
+      throw new Error('invalid_request_error: tools.0.name is not valid');
+    },
+  };
+  const runner = new AgentRunner({ provider });
+  await seedTranscript(runner, 'session-ctx-5', 10);
+
+  await assert.rejects(
+    () => runner.resume({ sessionId: 'session-ctx-5', userMessage: 'hello' }),
+    /tools\.0\.name is not valid/,
+  );
+  assert.equal(calls, 1, 'tried once and stopped');
+  const stored = await runner.store.get('session-ctx-5');
+  assert.equal(contextFloorOf(stored!), 0, 'gave up no history over an unrelated rejection');
+});
+
+test('the session a provider is handed is always the whole one, because providers persist it', async () => {
+  // The window rides beside the session, never replaces it. The harness
+  // providers pass `request.session` to `executeHostedToolCall`, which
+  // appends tool records and saves it, and the fallback wrapper saves it
+  // to make its switch durable — so a session-shaped view would be written
+  // back over the real transcript and lose everything below the floor.
+  const { provider, sent, sessionSizes } = createOverflowingProvider(6);
+  const runner = new AgentRunner({ provider });
+  const seeded = await seedTranscript(runner, 'session-ctx-6', 10);
+  const storedCount = seeded.messages.length + 1;
+
+  await runner.resume({ sessionId: 'session-ctx-6', userMessage: 'and now?' });
+
+  // Every attempt saw the whole session, including the ones that were
+  // handed a shortened transcript.
+  assert.ok(
+    sessionSizes.every((size) => size === storedCount),
+    `the session stayed whole on every attempt: ${JSON.stringify(sessionSizes)}`,
+  );
+  assert.ok(sent.some((size) => size < storedCount), 'and at least one attempt was windowed');
+
+  // A provider that saved what it was handed would have saved the whole
+  // transcript, which is what the store still holds.
+  const stored = await runner.store.get('session-ctx-6');
+  assert.equal(stored!.messages[0]?.content, 'question 1');
+});
+
+test('narrowing falls back to the newest boundary when the midpoint has none after it', async () => {
+  // Reachable only on a provider turn AFTER tool calls have run: `resume`
+  // appends a user message, so until tool results pile up behind it the
+  // midpoint always has a boundary after it. Once they have, half of what
+  // is left lands inside the turn in flight, and searching forward finds
+  // nothing — so giving up there reports "the newest turn is too large"
+  // without ever having tried dropping the turn before it.
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'look',
+    async execute() {
+      return { seen: true };
+    },
+  });
+
+  const sent: number[] = [];
+  let turn = 0;
+  const provider: ModelProvider = {
+    name: 'overflow-after-tools',
+    async generate(request) {
+      turn += 1;
+      const transcript = transcriptOf(request);
+      sent.push(transcript.length);
+      if (turn === 1) {
+        return {
+          parts: [
+            { type: 'tool-call' as const, call: { id: 'c1', toolName: 'look', input: {} } },
+            { type: 'tool-call' as const, call: { id: 'c2', toolName: 'look', input: {} } },
+          ],
+        };
+      }
+      if (transcript.length > 6) {
+        throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
+      }
+      return { parts: [{ type: 'text' as const, text: 'answered' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools });
+  const now = new Date().toISOString();
+  await runner.store.create({
+    id: 'session-ctx-7',
+    agent: { id: 'agent-ctx', name: 'Context Agent' },
+    status: 'idle',
+    messages: [
+      { id: 'm1', role: 'user', content: 'an older question', createdAt: now },
+      { id: 'm2', role: 'assistant', content: 'an older answer', createdAt: now },
+    ],
+  });
+
+  const session = await runner.resume({ sessionId: 'session-ctx-7', userMessage: 'and now?' });
+
+  assert.equal(session.status, 'completed', `narrowed instead of giving up: ${JSON.stringify(sent)}`);
+  assert.ok(sent[sent.length - 1]! <= 6, `the attempt that succeeded fit: ${JSON.stringify(sent)}`);
+  // It dropped the older turn, which is the history the forward search
+  // could not see.
+  const stored = await runner.store.get('session-ctx-7');
+  assert.equal(contextFloorOf(stored!), 2);
+});
+
+test('a retry after an overflow records the call that answered, not only the one that failed', async () => {
+  // The usage sink's exclusivity is scoped to one `generate`, and a retry
+  // is another one. Shared across attempts, a failed attempt that reported
+  // its billed tokens through the sink would suppress the response field
+  // of the shorter attempt that then succeeded — so the session would
+  // record the call that failed and not the one that answered.
+  const seen: string[] = [];
+  let attempt = 0;
+  const provider: ModelProvider = {
+    name: 'billing-provider',
+    async generate(request) {
+      attempt += 1;
+      if (attempt === 1) {
+        // A billed attempt that reports on its way out, the way the
+        // Anthropic adapter does when a stream dies after message_start.
+        request.onUsage?.({ inputTokens: 900, outputTokens: 0 });
+        throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
+      }
+      seen.push(`attempt ${attempt}`);
+      // And a one-call provider that answers with usage on the response
+      // only — a documented, valid mode.
+      return {
+        parts: [{ type: 'text' as const, text: 'answered' }],
+        usage: { inputTokens: 400, outputTokens: 25 },
+      };
+    },
+  };
+
+  const runner = new AgentRunner({ provider });
+  await seedTranscript(runner, 'session-ctx-8', 10);
+  await runner.resume({ sessionId: 'session-ctx-8', userMessage: 'and now?' });
+
+  const stored = await runner.store.get('session-ctx-8');
+  const usage = stored?.usage ?? [];
+  assert.deepEqual(seen, ['attempt 2']);
+  // Both are real spend and both are recorded: the refused request was
+  // billed, and so was the one that answered.
+  assert.equal(usage.length, 2, `both calls recorded: ${JSON.stringify(usage)}`);
+  assert.deepEqual(
+    usage.map((record) => record.inputTokens),
+    [900, 400],
+  );
+  // Under one turn id — one Stratus turn, however many provider calls it
+  // took to fit.
+  assert.equal(new Set(usage.map((record) => record.turnId)).size, 1);
 });
