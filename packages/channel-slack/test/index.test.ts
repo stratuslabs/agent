@@ -472,7 +472,7 @@ test('a final reply waits for its loading status to reach Slack, so the post can
   }
   // A status landing after the reply would stand over a finished turn:
   // the post that clears it would already have happened.
-  assert.deepEqual(web.posts, []);
+  assert.equal(web.posts.length, 0);
   releaseStatus();
   await delivered;
   await adapter.stop();
