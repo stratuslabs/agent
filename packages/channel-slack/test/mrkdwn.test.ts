@@ -584,3 +584,13 @@ test('double markers that are not emphasis stay in a cell', () => {
     '```',
   ].join('\n'));
 });
+
+test('prose whose only pipe is escaped is not a table, underline or not', () => {
+  const reply = 'Set the regex to a\\|b\n---';
+  assert.equal(toSlackMrkdwn(reply), reply);
+});
+
+test('a one-column table is a list under its header', () => {
+  const table = ['| Steps |', '| --- |', '| **build** |', '| test |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['*Steps*', '• *build*', '• test'].join('\n'));
+});

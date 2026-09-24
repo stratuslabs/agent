@@ -873,7 +873,8 @@ const isGridHeader = (header: string, rule: string): boolean => {
 /**
  * A fence's first line — and, for a table grid, the header and rule after
  * it, so a grid split across messages names its columns in every part
- * rather than leaving the later ones as rows nobody can read.
+ * rather than leaving the later ones as rows nobody can read. A grid always
+ * has two columns or more (see `renderTable`), so its rule always has a `┼`.
  */
 const fenceOpener = (source: string, lineEnd: number): string => {
   const headerEnd = source.indexOf('\n', lineEnd + 1);
@@ -926,10 +927,11 @@ const TABLE_MAX_WIDTH = 60;
  * parity: in `a\\|b` the backslashes escape each other and the pipe
  * separates, which no single-character lookbehind can see.
  */
-const tableCells = (line: string): string[] => {
+const readRow = (line: string): { cells: string[]; separated: boolean } => {
   const row = line.trim();
   const cells: string[] = [];
   let cell = '';
+  let separated = false;
   let endedOnSeparator = false;
   for (let at = 0; at < row.length; at += 1) {
     const char = row[at] ?? '';
@@ -943,6 +945,7 @@ const tableCells = (line: string): string[] => {
     if (char === '|') {
       cells.push(cell.trim());
       cell = '';
+      separated = true;
       endedOnSeparator = true;
       continue;
     }
@@ -954,8 +957,17 @@ const tableCells = (line: string): string[] => {
   if (row.startsWith('|')) {
     cells.shift();
   }
-  return cells;
+  return { cells, separated };
 };
+
+const tableCells = (line: string): string[] => readRow(line).cells;
+
+/**
+ * Whether a line has a pipe the row reader splits on. A line whose only
+ * pipe is escaped is prose, whatever follows it: `a\|b` over a `---`
+ * underline is a sentence, not a one-column table.
+ */
+const isTableRow = (line: string): boolean => readRow(line).separated;
 
 type Alignment = 'left' | 'right' | 'center';
 
@@ -1002,6 +1014,14 @@ const pad = (text: string, width: number, alignment: Alignment): string => {
 const renderTable = (header: string[], alignments: Alignment[], rows: string[][]): string => {
   const columns = header.length;
   const fit = (row: string[]): string[] => Array.from({ length: columns }, (_, index) => row[index] ?? '');
+  // One column has nothing to line up, so it is a list under its header.
+  // It is also what keeps every grid recognisable when split: a grid always
+  // has a `┼` in its rule, which a log's `────` underline never does.
+  if (columns === 1) {
+    const label = plainCell(header[0] ?? '');
+    const items = rows.map((row) => row[0] ?? '').filter((cell) => cell.length > 0).map((cell) => `• ${cell}`);
+    return [...(label.length > 0 ? [`**${label}**`] : []), ...items].join('\n');
+  }
   const grid = [header, ...rows.map(fit)].map((row) => row.map(plainCell));
   const widths = Array.from({ length: columns }, (_, index) => Math.max(...grid.map((row) => row[index]?.length ?? 0)));
   const width = widths.reduce((sum, each) => sum + each, 0) + (columns - 1) * 3;
@@ -1052,14 +1072,14 @@ const renderTables = (text: string): string => {
     const headerLine = lines[at] ?? '';
     const alignments = inCode[at] || inCode[at + 1] ? undefined : tableAlignments(lines[at + 1] ?? '');
     const header = tableCells(headerLine);
-    if (alignments === undefined || !headerLine.includes('|') || header.length !== alignments.length) {
+    if (alignments === undefined || !isTableRow(headerLine) || header.length !== alignments.length) {
       out.push(headerLine);
       at += 1;
       continue;
     }
     const rows: string[][] = [];
     let next = at + 2;
-    while (next < lines.length && !inCode[next] && (lines[next] ?? '').includes('|') && (lines[next] ?? '').trim().length > 0) {
+    while (next < lines.length && !inCode[next] && isTableRow(lines[next] ?? '')) {
       rows.push(tableCells(lines[next] ?? ''));
       next += 1;
     }
