@@ -29,7 +29,7 @@ import type { CliStreams, CliEnvironment } from './environment.ts';
 import { HELP_TEXT } from './help.ts';
 import { writeLine, readPromptFromStdin } from './io.ts';
 import { CLI_VERSION } from './npm.ts';
-import { parseCommand, defaultApprovalMode } from './parse.ts';
+import { parseCommand, defaultApprovalMode, memoryCommandWritesState } from './parse.ts';
 import {
   resolveRuntimeConfig,
   warnOnCredentialOverride,
@@ -86,7 +86,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         || command.command === 'dashboard'
         || (command.command === 'credential' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
-        || (command.command === 'memory' && command.action === 'reassert')
+        || (command.command === 'memory' && memoryCommandWritesState(command.action))
         || command.command === 'session'
         || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
       if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {

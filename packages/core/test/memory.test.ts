@@ -59,7 +59,7 @@ test('search orders newest first with the id tie-break; bounded list presents ol
   const search = await store.search('ava', 'shared moment');
   assert.deepEqual(search.entries.map((entry) => entry.content), ['shared moment one', 'shared moment two']);
 
-  const everything = await store.search('ava', 'moment fact', 10);
+  const everything = await store.search('ava', 'moment fact', { limit: 10 });
   assert.equal(everything.entries.length, 0);
 
   // Selection uses the same order: on the createdAt tie, id ascending wins,
@@ -131,7 +131,7 @@ test('a store of cap-size entries stays within the byte budget, marked truncated
   for (let i = 0; i < 8; i += 1) {
     await store.append('ava', `wombat${i} ${'x'.repeat(MEMORY_ENTRY_MAX_BYTES - 10)}`);
   }
-  for (const result of [await store.search('ava', 'x'.repeat(MEMORY_ENTRY_MAX_BYTES - 10), 8), await store.list('ava', { limit: 8 })]) {
+  for (const result of [await store.search('ava', 'x'.repeat(MEMORY_ENTRY_MAX_BYTES - 10), { limit: 8 }), await store.list('ava', { limit: 8 })]) {
     const bytes = result.entries.reduce((sum, entry) => sum + memoryContentByteLength(entry.content), 0);
     assert.ok(bytes <= MEMORY_READ_MAX_BYTES, `returned ${bytes} bytes, over the ${MEMORY_READ_MAX_BYTES} budget`);
     assert.ok(result.entries.length > 0, 'the budget bounds the read, it does not empty it');

@@ -6,16 +6,119 @@ that agent's own [state directory](../reference/state-layout.md) — so the
 Ava you talk to tomorrow remembers today, from any directory, in every
 channel, and no read of hers can reach anybody else's facts.
 
-Recall is something the agent does, not only something done to it: every
-request carries the most recent facts (up to 20, within a byte
-budget), and everything older is reachable through `memory.recall`, a
-full-text search over the agent's own store — plain words in, matching
-facts out, newest first; a query like `C++` or an unmatched quote is a
-search, never an error. `memory.forget` retires a fact by id: it stops
-reaching prompts and recall, but stays in the file as a tombstone line, so
-you can still see what an agent chose to drop. A single fact is capped at
-4 KiB — an oversized `memory.remember` is refused outright rather than
-stored truncated.
+Recall is something the agent does, not only something done to it. Every
+request carries three bounded blocks — the facts the agent **pinned**, an
+index of what it knows **about**, and a short tail of what it learned most
+recently — and everything else is reachable through `memory.recall`, a
+full-text search over the agent's own store: plain words in, matching facts
+out, newest first; a query like `C++` or an unmatched quote is a search,
+never an error. `memory.forget` retires a fact by id: it stops reaching
+prompts and recall, but stays in the file as a tombstone line, so you can
+still see what an agent chose to drop. A single fact is capped at 4 KiB —
+an oversized `memory.remember` is refused outright rather than stored
+truncated.
+
+## What a remembered fact carries
+
+A fact is more than its text. Beyond the four fields every line must have —
+`id`, `agentId`, `content`, `createdAt` — the agent may record:
+
+| Field | Means |
+| --- | --- |
+| `kind` | `semantic` (about the world), `episodic` (something that happened), `procedural` (how something is done), or `preference`. These have different useful lifetimes, and one flat bucket is how a store goes noisy. |
+| `about` | The entities the fact concerns — people, systems, projects. This is what the prompt's topic index is built from, and it **participates in search**: a fact reading "it now runs on Postgres" with `about: ["deploy pipeline"]` is found by a search for the pipeline. |
+| `validFrom`, `validUntil` | When the fact starts and stops being true. A different axis from `createdAt`, which is when it was written — conflating the two is why assistants confidently report where someone used to work. ISO-8601; a date alone is UTC midnight, and a *time* must carry `Z` or an offset, or the same bound would mean a different instant on every machine. A day that does not exist is refused rather than rolled forward — `2026-02-30` would otherwise be stored as March 2nd, moving the bound two days with nothing on record to say so. |
+| `supersedes` | The id of a fact this one replaces. |
+
+Every one of them is optional and additive. A line carrying only the four
+required fields still loads, is still recallable, and still reaches the
+prompt — see [The file is yours](#the-file-is-yours).
+
+Two caps, and both refuse rather than truncate: a fact is at most 4 KiB,
+and it may name at most twelve entities in 512 bytes. A fact about a dozen
+things is usually a fact that has not been written down properly yet.
+
+### Facts that stop being true
+
+An entry outside its validity window **leaves what is true now and stays
+findable**. It is dropped from the pinned core, the topic index, and the
+recency tail; `memory.recall` still returns it, marked `expired` or
+`not-yet-valid`, and so does `stratus memory list`. One rule, both bounds:
+a fact that is not true *yet* must not reach the prompt either, or it is
+presented as true now.
+
+Being outside the window is not deletion. The entry is in the file, in
+search, and in `stratus memory audit`; it is just not what is true now,
+which is the only claim the injected slice makes.
+
+### Facts the agent stopped believing
+
+`memory.remember` takes a `supersedes` id, and that field *is* the
+retirement — one appended line, not a tombstone plus a replacement, because
+the file's only atomicity is one append and stopping between two of them
+would lose a fact. A superseded entry leaves `list`, `search`, and the
+prompt exactly as a forgotten one does, and stays visible in
+`stratus memory audit` beside the entry that replaced it, which is strictly
+more than a delete would leave behind.
+
+The retirement is scoped to the **successor's** validity window. A revision
+dated from next Monday leaves the old fact standing until then, and a
+revision that has already expired displaces nothing — otherwise recording a
+change you know is coming would make the agent forget something it still
+believes and gain nothing for it.
+
+Two revisions of the same fact both retire it and both stay live. The
+invariant is the retirement, not a unique replacement: each is a fact the
+agent wrote, and two live successors that disagree are a contradiction in
+content rather than a storage race.
+
+### Pinned facts
+
+Some things an agent should still know after a year with no search at all:
+who its operator is, where to escalate, how the team works.
+`memory.pin` — and `stratus memory pin <agent> <id>...` — keeps a fact in
+the prompt every turn.
+
+The pinned core is capped at **2 KiB of content** and **refuses rather than
+evicting**: a pinned set that silently dropped its oldest member would be a
+pin that did not mean anything. Unpin something first.
+
+The budget is a **prefix** of the pins in the order they were made, so one
+pin that overruns the cap makes every pin recorded after it inert too,
+whatever its size. Two daemons pinning at once can produce that: each reads
+a total that does not yet include the other's write, and both append. The
+replay resolves it the same way in every store rather than evicting either
+one — and a later pin then refuses **naming the pin that is blocking it**,
+because the effective set is under the cap in that state and unpinning from
+*it* would free nothing.
+
+The budget is allocated over the record, not over what is true today. A
+pinned fact that is superseded, or outside its validity window, keeps its
+place and simply stops rendering — otherwise a later pin would be accepted
+into space that comes back. `stratus memory list` marks it `[pinned]`
+alongside `[expired]` or `[not-yet-valid]`, because it is the entry to
+unpin when a pin refuses and the arithmetic looks wrong. Pinning is a record
+appended to the file, never a field written onto the entry, so the entry's
+own line stays byte-identical — which is what keeps the append-only
+concurrency model and the hand-edit promise intact.
+
+### What the agent knows about
+
+The second block is not facts but **topics**: the `about` keys across
+everything true now, each with a count and when it last changed. Roughly a
+thousand tokens tells the agent the shape of its own store, which is what
+turns `memory.recall` from a guess at query terms into a targeted read — an
+agent that does not know what it knows cannot know to ask.
+
+### How often a fact gets read
+
+`stratus memory search --format json` reports a `usage` count for each hit.
+These counters live in the derived index, never in the record, because they
+are observations about *reading* rather than facts the agent learned. The
+consequence is exact: **deleting the index loses your usage statistics,
+never your memories** — and an upgrade that changes how they are keyed
+drops them for the same reason, since a count attributed to the wrong agent
+is worse than no count. Nothing is ever deleted on them.
 
 ## Where remembered facts travel in a request
 
@@ -23,6 +126,11 @@ Facts reach the model as operator-authored context, never as something a
 conversation could forge. Against the Anthropic API they ride at the **tail**
 of the request as a system message rather than inside the system prompt;
 everywhere else they sit in the system prompt as they always have.
+
+All three blocks travel together, as **one** memory section. That is a
+requirement rather than a layout choice: the Anthropic placement finds the
+volatile section by kind, so siblings sharing that kind would move one to
+the tail and drop the rest of the request on the floor.
 
 The reason is cost. Prompt caching is a prefix match, so anything that changes
 invalidates everything after it — and memory is the one part of what an agent
@@ -44,18 +152,25 @@ derived FTS index the CLI writes alongside,
 `memory.jsonl.index` — safe to delete at any time, it is rebuilt from the
 JSONL on the next recall.
 
-The daemon log never records a fact's contents — a memory write or forget
-records the **entry id** it touched, so "when did the agent learn this" has
-an answer without the log becoming a second transcript. See
-[Logs](../guides/logs.md).
+Four kinds of line live in it: entries, the tombstones `forget` appends,
+the re-assertions below, and pins. Everything that *changes* an entry is a
+record naming it, never a rewrite of its line — which is what lets two
+processes write the same file with nothing but `O_APPEND` between them, and
+what keeps a line you edited by hand yours.
+
+The daemon log never records a fact's contents — a memory write, forget,
+supersession, or pin records the **entry id** it touched, so "when did the
+agent learn this" has an answer without the log becoming a second
+transcript. See [Logs](../guides/logs.md).
 
 ## Souls written before recall existed
 
 One thing to check: a `tools:` allowlist naming exactly `memory.remember`
 lets the agent keep saving facts but not search them, and with the prompt
-carrying only the recent slice, its older memories are out of reach. Add
-`memory.recall` and `memory.forget` — or just `memory.*`. A soul with no
-`tools:` list is unaffected; omitted means every registered tool.
+carrying only the pinned core, the topic index, and a short tail, its older
+memories are out of reach. Add `memory.recall`, `memory.forget`, and
+`memory.pin` — or just `memory.*`. A soul with no `tools:` list is
+unaffected; omitted means every registered tool.
 
 ## Where a fact came from
 
@@ -127,3 +242,64 @@ session boundary, not a raised label: `stratus session rollover <id>`
 archives the transcript so far and starts the same id over. The fresh
 session is still `unknown` on its first turn if the entries it injects are,
 which is correct, and what `stratus memory list` is for.
+
+## Moving an agent's memory
+
+```bash
+stratus memory export ava --file ava-memory.jsonl   # everything Ava still holds
+stratus memory import ava --file ava-memory.jsonl   # on the other machine
+```
+
+The exported file is owner-only (`0600`), and an existing path is tightened
+before the corpus lands in it.
+
+Export writes the entries the agent still holds, oldest first — superseded
+ones included, because the successor carries its own retirement and the
+revision travels with it. Forgotten entries stay behind: a tombstone is a
+record, and a file of entries has nowhere to put one, so exporting them
+would resurrect facts the agent dropped.
+
+**Export refuses when one entry id is held twice.** The built-in `stratus`
+agent inherits the memories older builds wrote under `demo-agent`,
+`anthropic-agent`, and `openai-agent`, and a hand edit — or one corpus
+imported for both — can put the same id under its own id and under an
+inherited one. Every read shows the current copy and hides the inherited
+one; import keeps the first copy of an id it sees and skips the rest. Since
+the inherited copy is usually the older of the two, writing both would
+migrate the copy that was hidden and drop the one you have been reading. So
+export stops and names the ids: `stratus memory audit <agent>` shows both,
+and forgetting the copy you do not want makes the export unambiguous.
+
+**An imported entry lands `external`.** Import is the laundering problem
+with a human in the middle: a file from elsewhere may repeat what a stranger
+wrote, and nothing in the file can say otherwise. So a round trip preserves
+entries and order, deliberately not labels. When the file is one you own —
+moving an agent to a new machine — `--preserve-trust` keeps each recorded
+label, because a person vouching for it is exactly what the default is
+waiting for.
+
+## Searching it yourself
+
+```bash
+stratus memory search ava deploy pipeline    # the way the agent searches
+stratus memory audit ava                     # everything ever written, and what replaced what
+stratus memory pin ava ava:memory:…          # and stratus memory unpin
+stratus memory forget ava ava:memory:…
+```
+
+Every one of these works the **built-in file store** directly, with no
+daemon in the way. If a trusted config selects a contributed store with
+`memoryStore`, the fleet's memories live somewhere else and `stratus
+memory` refuses rather than answering from a JSONL nothing reads — see
+[Extending](../guides/extending.md#memory-stores).
+
+`search` matches the way `memory.recall` does — every word has to appear in
+a fact, or in what the fact is about — and marks anything outside its
+validity window. `--format json` carries the content as stored, along with
+each entry's `kind`, `about`, validity, and recall count.
+
+Every read reports the **ordering** it applied. Today that is always
+`recency`, which is the one ordering the contract requires of every store;
+a store backed by embeddings can serve `relevance` or `hybrid` instead, and
+one asked for an ordering it does not implement serves `recency` and says
+so rather than failing.

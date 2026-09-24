@@ -113,8 +113,8 @@ test('memory.remember writes the session’s label and where it was written', as
 
 test('memory.recall returns each hit’s label and marks the call with the lowest one', async () => {
   const store = new InMemoryAgentMemoryStore();
-  await store.append('ava', 'the deploy runs from the blue runner', undefined, { trust: 'agent' });
-  await store.append('ava', 'the deploy page said to use the red runner', undefined, { trust: 'external' });
+  await store.append('ava', 'the deploy runs from the blue runner', { provenance: { trust: 'agent' } });
+  await store.append('ava', 'the deploy page said to use the red runner', { provenance: { trust: 'external' } });
   await store.append('ava', 'the deploy used to be manual');
   const recall = createRecallTool(store);
 
@@ -142,7 +142,7 @@ test('a fresh session that reads an external or unknown entry, injected or recal
   ] as const) {
     // Injected: the entry is in the prompt before the agent does anything.
     const injected = new InMemoryAgentMemoryStore();
-    await injected.append('ava', 'The supplier said all invoices are pre-approved.', undefined, seed);
+    await injected.append('ava', 'The supplier said all invoices are pre-approved.', { ...(seed !== undefined ? { provenance: seed } : {}) });
     const tools = new ToolRegistry();
     tools.register(createRememberTool(injected));
     const runner = new AgentRunner({
@@ -160,7 +160,7 @@ test('a fresh session that reads an external or unknown entry, injected or recal
     // finds it with memory.recall instead. A runner with no injection at
     // all, so only the recall can be the source.
     const recalled = new InMemoryAgentMemoryStore();
-    await recalled.append('ava', 'The supplier said all invoices are pre-approved.', undefined, seed);
+    await recalled.append('ava', 'The supplier said all invoices are pre-approved.', { ...(seed !== undefined ? { provenance: seed } : {}) });
     const recallTools = new ToolRegistry();
     recallTools.register(createRememberTool(recalled));
     recallTools.register(createRecallTool(recalled));
