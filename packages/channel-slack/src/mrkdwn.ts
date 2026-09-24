@@ -1127,7 +1127,10 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
   // a code block is its source text rather than something to click — so a
   // table with either takes the list form, where mrkdwn reads the cells as
   // it reads prose. Links are found by the converter's own reader.
-  const linked = [header, ...rows].some((row) => row.some((cell) => readEmphasis(scan(cell)).links.size > 0));
+  // A bare address counts too: Slack links `https://…`, `mailto:` and
+  // `<…>` in prose, and does nothing with them inside a code block.
+  const linked = [header, ...rows].some((row) => row.some((cell) =>
+    readEmphasis(scan(cell)).links.size > 0 || /\b(?:https?:\/\/|mailto:)\S|<[a-z][a-z0-9+.-]*:[^>\s]+>/i.test(cell)));
   if (width <= TABLE_MAX_WIDTH && !linked && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
     const line = (row: string[]): string =>
       row.map((cell, index) => pad(cell, widths[index] ?? 0, alignments[index] ?? 'left')).join(' │ ').trimEnd();
@@ -1182,7 +1185,10 @@ const renderTables = (text: string): string => {
     const headerLine = lines[at] ?? '';
     const alignments = inCode[at] || inCode[at + 1] ? undefined : tableAlignments(lines[at + 1] ?? '');
     const header = tableCells(headerLine);
-    if (alignments === undefined || !isTableRow(headerLine) || header.length !== alignments.length) {
+    // Four spaces or a tab of indentation is an indented code block, not a
+    // table — GFM allows a table at most three.
+    const indented = /^(?: {4,}|\t)/.test(headerLine) || /^(?: {4,}|\t)/.test(lines[at + 1] ?? '');
+    if (alignments === undefined || indented || !isTableRow(headerLine) || header.length !== alignments.length) {
       out.push(headerLine);
       at += 1;
       continue;

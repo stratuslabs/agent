@@ -655,3 +655,16 @@ test('a table with a link in it keeps the link clickable', () => {
   // Inside the grid's code block the link was its literal source.
   assert.equal(toSlackMrkdwn(table), '*Doc*: <https://x.co|Guide> · *Status*: ok');
 });
+
+test('a table with a bare address in it keeps the address clickable', () => {
+  for (const address of ['https://x.co', 'mailto:a@x.co', '<https://x.co>']) {
+    const converted = toSlackMrkdwn(['| Where | N |', '| --- | --- |', `| ${address} | 1 |`].join('\n'));
+    // Slack does not link anything inside a code block.
+    assert.ok(!converted.startsWith('```'), `${address} went into the grid`);
+  }
+});
+
+test('a table indented four spaces is an indented code block, left as written', () => {
+  const block = ['    | a | b |', '    | - | - |', '    | 1 | 2 |'].join('\n');
+  assert.equal(toSlackMrkdwn(block), block);
+});
