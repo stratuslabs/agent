@@ -842,6 +842,46 @@ const renderLine = (context: Context, from: number, to: number): string => {
   return plain ? `*${heading.text}*` : heading.text;
 };
 
+/**
+ * A code run in text as Slack will read it, and what it takes to cut one in
+ * two: `opener` starts a continuation (a fence's whole first line, info
+ * string included) and `closer` ends the part before the cut.
+ */
+export interface CodeRun {
+  start: number;
+  end: number;
+  opener: string;
+  closer: string;
+}
+
+/**
+ * Where the code runs sit in already-converted text, read by the same scan
+ * that converts it — so the splitter agrees with the converter about what
+ * is code, rather than keeping a second idea of it that drifts. Conversion
+ * never touches a code token, so the runs of its output are the runs of its
+ * input, and scanning it again finds them where they are.
+ */
+export const codeRunsOf = (text: string): CodeRun[] => {
+  const runs: CodeRun[] = [];
+  let at = 0;
+  for (const token of scan(text)) {
+    const source = sourceOf(token);
+    if (token.kind === 'code') {
+      let ticks = 0;
+      while (source[ticks] === '`') {
+        ticks += 1;
+      }
+      const fence = '`'.repeat(ticks);
+      const lineEnd = source.indexOf('\n');
+      runs.push(ticks >= 3 && lineEnd !== -1
+        ? { start: at, end: at + source.length, opener: source.slice(0, lineEnd + 1), closer: `\n${fence}` }
+        : { start: at, end: at + source.length, opener: fence, closer: fence });
+    }
+    at += source.length;
+  }
+  return runs;
+};
+
 export const toSlackMrkdwn = (text: string): string => {
   const tokens = scan(text);
   // Links are found before emphasis is paired, because what they turn out

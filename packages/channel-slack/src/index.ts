@@ -33,7 +33,7 @@ import {
   type SessionRouting,
 } from '@stratusagent/channels';
 
-import { toSlackMrkdwn } from './mrkdwn.ts';
+import { codeRunsOf, toSlackMrkdwn } from './mrkdwn.ts';
 
 /**
  * The longest display name the model is shown. Slack caps profile names
@@ -1265,6 +1265,15 @@ const truncateForSlack = (text: string): string =>
     ? text
     : `${text.slice(0, safeCutIndex(text, SLACK_MAX_MESSAGE_CHARS - 1))}…`;
 
+/**
+ * Text as however many messages Slack's limit makes it, never leaving a
+ * code block broken across the cut. A cut blind to fences ended one
+ * message on an unterminated block and started the next mid-block, where
+ * Slack read the rest of somebody's log as prose — every `*` and `_` in it
+ * formatting. So a cut that would land inside a code run moves in front of
+ * it when that still leaves a message worth sending, and otherwise closes
+ * the run at the cut and reopens it, info string and all, in the next.
+ */
 const splitForSlack = (text: string): string[] => {
   if (text.length <= SLACK_MAX_MESSAGE_CHARS) {
     return [text];
@@ -1274,11 +1283,28 @@ const splitForSlack = (text: string): string[] => {
   while (rest.length > SLACK_MAX_MESSAGE_CHARS) {
     // Prefer a newline break inside the window; fall back to a hard cut.
     const window = rest.slice(0, SLACK_MAX_MESSAGE_CHARS);
-    const breakAt = window.lastIndexOf('\n') > SLACK_MAX_MESSAGE_CHARS / 2
-      ? window.lastIndexOf('\n')
-      : safeCutIndex(rest, SLACK_MAX_MESSAGE_CHARS);
-    chunks.push(rest.slice(0, breakAt));
-    rest = rest.slice(breakAt).replace(/^\n+/, '');
+    const newline = window.lastIndexOf('\n');
+    const cut = newline > SLACK_MAX_MESSAGE_CHARS / 2 ? newline : safeCutIndex(rest, SLACK_MAX_MESSAGE_CHARS);
+    const run = codeRunsOf(rest).find((candidate) => candidate.start < cut && cut < candidate.end);
+    if (run === undefined || run.opener.length > SLACK_MAX_MESSAGE_CHARS / 2) {
+      chunks.push(rest.slice(0, cut));
+      rest = rest.slice(cut).replace(/^\n+/, '');
+      continue;
+    }
+    if (run.start > SLACK_MAX_MESSAGE_CHARS / 4) {
+      chunks.push(rest.slice(0, run.start).replace(/\n+$/, ''));
+      rest = rest.slice(run.start);
+      continue;
+    }
+    // The run is most of the message, so it is cut itself — at its last
+    // newline that leaves room for the closer, and past its opener so the
+    // continuation always makes progress.
+    const budget = SLACK_MAX_MESSAGE_CHARS - run.closer.length;
+    const inner = rest.lastIndexOf('\n', budget - 1);
+    const floor = run.start + run.opener.length;
+    const within = inner > Math.max(floor, SLACK_MAX_MESSAGE_CHARS / 2) ? inner : Math.max(safeCutIndex(rest, budget), floor + 1);
+    chunks.push(`${rest.slice(0, within)}${run.closer}`);
+    rest = `${run.opener}${rest.slice(within).replace(/^\n/, '')}`;
   }
   if (rest.length > 0) {
     chunks.push(rest);
