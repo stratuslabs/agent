@@ -34,6 +34,8 @@ import type { CliStreams, CliEnvironment, DashboardSession } from '../environmen
 import { formatEvent, eventDetail } from '../events.ts';
 import { writeLine } from '../io.ts';
 import { loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
+import { companionsBehindMessage, readCompanions } from '../companions.ts';
+import { CLI_VERSION } from '../npm.ts';
 import type { ParsedServeCommand } from '../parse.ts';
 import { warnOnCredentialOverride, warnOnUntrustedConfig, warnOnIgnoredConfig } from '../runtime.ts';
 import {
@@ -259,6 +261,15 @@ const serveHeldHome = async (
         boundApi?.adoptSessions(message.sessions);
       }
     });
+  }
+
+  // Every start, not only `stratus update`: an upgrade that went around it
+  // leaves the adapters this daemon is about to load at their old version,
+  // and a Slack adapter from before thread follow-through answers mentions
+  // and nothing else, with no error anywhere to say why.
+  const behind = (await readCompanions(CLI_VERSION, env)).filter((entry) => entry.stale);
+  if (behind.length > 0) {
+    warn(companionsBehindMessage(behind));
   }
 
   const channelCredentials = await loadChannelCredentials(env);

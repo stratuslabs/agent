@@ -30,6 +30,8 @@ import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
 import { ignoredConfigRemedy } from '../runtime.ts';
 import { loadSlackAdapter } from '../loaders.ts';
+import { companionsBehindMessage, readCompanions } from '../companions.ts';
+import { CLI_VERSION } from '../npm.ts';
 import type { ParsedDoctorCommand } from '../parse.ts';
 
 /** One resolved setting, with the thing that decided it. */
@@ -324,6 +326,13 @@ export const collectDoctorReport = async (
       `Slack tokens are stored for ${slackAgents.length} agent(s) but @stratusagent/channel-slack is not installed, so \`stratus serve\` skips them. `
       + 'Install it with: npm install -g @stratusagent/channel-slack',
     );
+  }
+
+  // "Installed" is true of a Slack adapter releases behind the daemon
+  // loading it, and that was the whole report — see companionsBehindMessage.
+  const behind = (await readCompanions(CLI_VERSION, env)).filter((entry) => entry.stale);
+  if (behind.length > 0) {
+    problems.push(companionsBehindMessage(behind));
   }
 
   let rosterCount = 0;

@@ -1837,6 +1837,72 @@ test('a result that fits is not cut to make room for saying it was cut', async (
   );
 });
 
+test('a failure on the way out is capped like the result it replaces', async () => {
+  // A thrown message is not a smaller channel than a returned result: the
+  // executor copies it into `ToolResult.error`, the session persists it,
+  // and every later turn replays it — with none of the field-by-field
+  // accounting a returned result gets. So both ways a server can put text
+  // there without going through the budget are bounded on the way out.
+  //
+  // A save that fails, quoting the path it could not write. The MIME
+  // subtype is the server's own string and becomes the file's extension,
+  // so a long one makes a name the filesystem refuses (the 255-byte
+  // component limit) and Node quotes the whole path back.
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-longname-'));
+  // Long enough that the name is refused, and long enough that the cap
+  // computed from it clears `BRIDGED_RESULT_MIN_LENGTH` — below the floor
+  // the configured number is not the one in force, and the assertions
+  // would be measuring against a cap nothing applied.
+  const extension = 'a'.repeat(430);
+  // The cap has to sit in the window where the attachment is affordable
+  // and the failure is not: an entry costs `"files":["<path>"],`, and the
+  // error quoting the same path costs about 35 more, plus its own
+  // envelope. Anything under the entry cost would have the block refused
+  // before a syscall, and the test would pass without ever reaching the
+  // code it is here for. The serial in the name is the only part that is
+  // not fixed, and it moves by a character or two inside a window 30 wide.
+  const written = path.join(workspaceRoot, 'ava', 'mcp', 'linear', `shot-1700000000000-000.${extension}`);
+  const cap = written.length + 25;
+  assert.ok(cap >= BRIDGED_RESULT_MIN_LENGTH, 'the configured cap is the one in force');
+  await assert.rejects(
+    () => normalizeCallResult(
+      { content: [{ type: 'image', data: Buffer.from('shot').toString('base64'), mimeType: `image/${extension}` }] },
+      {
+        server: 'linear',
+        tool: 'shot',
+        agentId: 'ava',
+        workspaceRoot,
+        maxResultChars: cap,
+        now: () => 1_700_000_000_000,
+      },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /name too long/, 'the save is what failed, not the budget');
+      const weighed = JSON.stringify({ error: error.message }).length;
+      assert.ok(weighed <= cap, `the replayed error weighed ${weighed}`);
+      assert.match(error.message, /truncated by stratus/);
+      return true;
+    },
+  );
+
+  // And the message synthesized for an `isError` result that carried no
+  // text at all, which is built after the budget has been spent. The
+  // server key is operator-chosen and has no maximum length of its own.
+  await assert.rejects(
+    () => normalizeCallResult(
+      { isError: true, content: [] },
+      { server: 'l'.repeat(1_000), tool: 'get_issue', agentId: 'ava', maxResultChars: 512 },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      const weighed = JSON.stringify({ error: error.message }).length;
+      assert.ok(weighed <= 512, `the synthesized error weighed ${weighed}`);
+      return true;
+    },
+  );
+});
+
 test('a list that fits whole is not dropped to hold room for saying it was dropped', async () => {
   // The same mistake as cutting a text that fitted, on the collection
   // paths. A links-only result was charged for a text marker it could

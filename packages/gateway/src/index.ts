@@ -19,6 +19,7 @@ import {
   missingSkillRequirements,
   describeToolAllowlistFinding,
   unmatchedToolAllowlist,
+  CONTEXT_FLOOR_METADATA_KEY,
   PENDING_APPROVAL_METADATA_KEY,
   SESSION_TAINTED_BY_METADATA_KEY,
   SESSION_TRUST_METADATA_KEY,
@@ -884,6 +885,13 @@ export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
   // where a command ran, and the one audit question a caller must not be
   // able to answer for it.
   EXECUTOR_METADATA_KEY,
+  // The context floor is an index into a specific transcript, so it means
+  // nothing next to a different one. Reserved for both halves of that: a
+  // caller cannot seed it, and a rollover drops it with the transcript it
+  // indexed — otherwise the fresh session inherits an absolute floor over
+  // no messages and, once it grows past that index, silently stops sending
+  // its own earliest turns, with no overflow and no trim event to say so.
+  CONTEXT_FLOOR_METADATA_KEY,
 ];
 
 /**

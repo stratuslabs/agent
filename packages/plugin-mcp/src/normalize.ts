@@ -759,6 +759,41 @@ export const normalizeCallResult = async (
   result: unknown,
   options: NormalizeOptions,
 ): Promise<JsonValue> => {
+  // Bounded here as well as at the config boundary, so that a host
+  // embedding the normalizer directly gets the same floor an operator
+  // does — `NormalizeOptions.maxResultChars` is reachable without going
+  // through `mcpPlugin`'s validation at all.
+  const resultLimit = boundedResultLimit(options.maxResultChars);
+  try {
+    return await normalizeAdmittedResult(result, options, resultLimit);
+  } catch (error) {
+    // Every way out of this function lands in the same place. A returned
+    // result is spent against the budget field by field, but a *thrown*
+    // one is copied into `ToolResult.error`, persisted on the session and
+    // replayed on every later turn — the same durable channel, with none
+    // of the accounting. So the cap is applied once more on the way out,
+    // where it covers the paths the budget never saw: a failed save
+    // quoting the path it could not write (a server naming
+    // `image/<430 chars>` produced a 544-character error against a
+    // 512-character cap), and the synthesized message for an `isError`
+    // result that carried no text at all.
+    //
+    // A no-op for the `isError` throw below, which already spent its
+    // message against the budget at `THROWN_MESSAGE_ENVELOPE - 1` over
+    // the brace the budget starts holding: that leaves it at exactly the
+    // allowance this bound measures against, so it is never cut twice or
+    // marked twice.
+    throw error instanceof Error
+      ? new Error(boundServerText(error.message, resultLimit, 'error message'), { cause: error })
+      : error;
+  }
+};
+
+const normalizeAdmittedResult = async (
+  result: unknown,
+  options: NormalizeOptions,
+  resultLimit: number,
+): Promise<JsonValue> => {
   const shaped = isObject(result) ? result : {};
   const content = Array.isArray(shaped.content) ? shaped.content : [];
   const texts: string[] = [];
@@ -774,11 +809,6 @@ export const normalizeCallResult = async (
   // block's *bytes* go to disk, but the path it returns is a string in the
   // durable result like any other, and a thousand tiny images is a
   // thousand paths replayed on every later turn.
-  // Bounded here as well as at the config boundary, so that a host
-  // embedding the normalizer directly gets the same floor an operator
-  // does — `NormalizeOptions.maxResultChars` is reachable without going
-  // through `mcpPlugin`'s validation at all.
-  const resultLimit = boundedResultLimit(options.maxResultChars);
   const reserve = noteReserveFor(
     content,
     isObject(shaped.structuredContent),
