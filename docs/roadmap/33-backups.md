@@ -584,11 +584,15 @@ prevents, and the spec says so.
    list. So a header rotated by editing `config.json` stays redacted
    just like a credential rotated through `credential set`. A value
    that lives in config only between two runs is still seen, by the
-   runtime rather than by `now`. When a run consumes a config-derived
-   credential (a header sent, an `env` entry passed, a URL used), it
-   adds the value to the retired list, the same `0600` list that is
-   never committed. A header added for an afternoon and removed before
-   nightfall is therefore still redacted. Tracking
+   runtime rather than by `now`. When a run consumes a credential from
+   any source, it adds the value to the retired list, the same `0600`
+   list that is never committed. That covers a config-derived credential
+   (a header sent, an `env` entry passed, a URL used) and a value read
+   from `credentials.json` through the `CredentialResolver` or a
+   provider sign-in. It also covers a gateway token presented to the
+   API. A header added for an afternoon and removed before nightfall is
+   therefore still redacted. So is a token pasted into
+   `credentials.json` by hand, used once, and deleted by hand. Tracking
    follows the configured target, not the timer: `disable` stops the
    nightly run but not the retiring, and tracking ends only when the
    target itself is removed. A value rotated *before* `init` is
@@ -1208,6 +1212,9 @@ Two things follow for the design:
 - A workspace file rewritten continuously during `now` is never
   committed torn. Its previous copy is kept, or, when it has none, it
   is skipped and named in the report.
+- A named credential added to `credentials.json` by hand, used by one
+  run, and removed by hand before the next `now` is still redacted
+  from the memory it was echoed into.
 - A token pasted into `credentials.json` by hand during `now` restarts
   the run, and one pasted during the push triggers the post-push
   rescan.
