@@ -741,7 +741,14 @@ The package holds no credential of its own. It pushes with whatever git
 already uses. The recommended setup is a **deploy key with write access
 to the one backup repository**, so a stolen key reaches that repository
 and nothing else. A personal access token in a credential helper works,
-but it usually reaches every repository its owner has.
+but it usually reaches every repository its owner has. So its storage
+has to be as far from agents as the deploy key is. `init` accepts the
+OS keychain helpers (`osxkeychain`, `libsecret`, `manager`), which no
+file read reaches. It also accepts a `store --file` whose file is
+inside `~/.stratus/backup/`. It refuses any other file-backed helper,
+such as the default `~/.git-credentials` or a `--file` elsewhere,
+and names the fix, because a token in a plain file is one `fs.read`
+away from an agent whose root covers it.
 
 **Whatever it is, it has to work with nobody there.** An SSH agent
 socket, a passphrase prompt, or an interactive credential helper
@@ -1259,6 +1266,8 @@ Two things follow for the design:
 - `init` against an SSH remote refuses unless the key is pinned with
   `IdentitiesOnly=yes`, and `~/.ssh/id_ed25519` never authenticates a
   backup push.
+- `init` with `credential.helper='store --file /srv/shared/git-creds'`
+  refuses and names the fix.
 - With `user.signingkey` at `~/.ssh/backup_ed25519` and a deploy key
   at `~/.ssh/stratus_deploy`, `fs.read` of either file under a
   `tool-fs` root of `~/.ssh` is refused.
