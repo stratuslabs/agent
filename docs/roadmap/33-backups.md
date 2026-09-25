@@ -6,8 +6,10 @@ An operator can name a private git repository once, and every night the
 parts of `~/.stratus` worth keeping (souls, skills, memory, schedules, and
 optionally conversations) are committed and pushed there. A script does
 the work, not a model. No value the home knows to be secret is pushed in
-any form the scan recognizes. Anything a scan cannot vouch for goes up
-only as ciphertext or not at all (see
+any form the scan recognizes. Conversations and workspace files, where
+arbitrary tool output lands, go up only as ciphertext. Plaintext memory
+carries the scan's guarantee and no more: a secret an agent rewrote into
+a form nothing recognizes is not caught (see
 [Secrets](#secrets-three-layers-because-one-is-not-enough) for exactly
 where that line is). A lost machine can be restored from the repository
 with one command. The feature is off by
