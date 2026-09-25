@@ -52,6 +52,15 @@ subscription sign-in to per-token billing.
   file or env var outranks what you set. The
   [precedence chain](../reference/config.md) is: flags → `STRATUS_*` env
   vars → soul file hints → config file.
+- **A file an agent produced is not where the docs say it should be** — run
+  `stratus doctor`; it names any workspace still at the pre-0.11.5
+  `~/.stratus/workspaces/<id>` path, which this build does not read. A
+  command of an older build running during the upgrade is what leaves one.
+  Starting the daemon or running `stratus update` folds its provenance
+  labels into the agent's live ledger; the files move too unless the agent's
+  own workspace already holds files of its own, in which case they stay put
+  rather than overwriting newer ones. [Updating](./updating.md) says which
+  is which.
 - **The agents stopped answering after a node upgrade** — the service unit
   points at an interpreter that no longer exists. `stratus update` repairs
   it; [Updating](./updating.md) explains why.

@@ -4430,6 +4430,87 @@ test('the Channels menu follows STRATUS_SOUL over the configured soul', async ()
   assert.match(output.stderr, /STRATUS_SOUL points at .*override\.md/);
 });
 
+test('doctor says a workspace kept on purpose is kept, and offers no remedy that cannot work', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  const soulPath = path.join(agentsDir, 'ava.md');
+  await writeFile(soulPath, '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5', soul: soulPath }),
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+  // A collision already folded: the agent is writing at the new path, and
+  // the legacy files were kept rather than overwriting newer ones. No start
+  // will ever move them, so telling somebody to restart is advice that can
+  // never clear the warning.
+  await mkdir(path.join(home, '.stratus', 'agents', 'ava', 'workspace'), { recursive: true });
+  await mkdir(path.join(home, '.stratus', 'workspaces', 'ava'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'workspaces', 'ava', 'fetched.md'), 'from a page');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(output.stdout, /left there on purpose/);
+  assert.match(output.stdout, /Nothing further will move them/);
+  assert.doesNotMatch(output.stdout, /Start the daemon/);
+});
+
+test('doctor names a workspace left at the pre-schema-4 path, and says a restart folds it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  const soulPath = path.join(agentsDir, 'ava.md');
+  await writeFile(soulPath, '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5', soul: soulPath }),
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+  // What an older build's command leaves behind: an agent's output, and the
+  // ledger saying which of it a model did not write, at a path this build
+  // does not read. Nothing else in the CLI would mention it.
+  await mkdir(path.join(home, '.stratus', 'workspaces', 'ava'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'workspaces', 'ava', 'fetched.md'), 'from a page');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1, 'a home with state at a dead path is a problem, not a note');
+  assert.match(output.stdout, /ava still has a workspace at the old workspaces\/ path/);
+  // Not the sentence for state that is retained on purpose: that one has no
+  // remedy a start can perform, and mixing them is what would leave this
+  // check red for good on an ordinary home.
+  assert.doesNotMatch(output.stdout, /left there on purpose/);
+  // The remedy has to work on the home this is printed for, which may have
+  // no daemon at all: `stratus restart` exits 1 when nothing is serving, so
+  // it is the wrong advice for exactly the person reading this.
+  assert.match(output.stdout, /stratus serve/);
+  assert.match(output.stdout, /stratus update/);
+  assert.doesNotMatch(output.stdout, /stratus restart/);
+  // And it does not promise the files move: where the agent is already
+  // writing at the new path they stay, which is the case somebody hunting a
+  // file most needs to know.
+  assert.match(output.stdout, /provenance labels are folded/);
+  assert.match(output.stdout, /they stay where they are/);
+});
+
 test('doctor reports the resolved provider and where it came from', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');

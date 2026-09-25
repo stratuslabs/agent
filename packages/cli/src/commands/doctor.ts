@@ -23,6 +23,9 @@ import {
   type RuntimeConfig,
   type StratusConfigFile,
   ignoredUntrustedConfigKeys,
+  legacyWorkspacesDirPath,
+  surveyLegacyWorkspaces,
+  type LegacyWorkspaceState,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
 import { serviceEnvFor } from '../daemon.ts';
@@ -388,6 +391,42 @@ export const collectDoctorReport = async (
     problems.push(
       `The service unit points at a CLI entrypoint that no longer exists (${unitCommand.scriptPath}), so stratusd cannot start. `
       + 'Run `stratus update` (or `stratus service install`) to rewrite it with current paths.',
+    );
+  }
+
+  // Workspaces at the pre-schema-4 path. Their files are an agent's own
+  // output and their ledger is what says which of them a model did not
+  // write, so this is the state somebody stares at when a file has "gone
+  // missing" — but only two of the three things that can be sitting there
+  // are worth saying, and they need different sentences.
+  //
+  // Nothing is said about one the new path resolves to through a link: that
+  // workspace is read on every call, and calling it unread would be false.
+  const legacyName = path.basename(legacyWorkspacesDirPath(env));
+  const survey = await surveyLegacyWorkspaces(env);
+  const grouped = (state: LegacyWorkspaceState): string[] =>
+    [...survey.entries].filter(([, value]) => value === state).map(([name]) => name).sort();
+  const repairable = grouped('repairable');
+  if (repairable.length > 0) {
+    problems.push(
+      `${repairable.join(', ')} still ${repairable.length === 1 ? 'has a workspace' : 'have workspaces'} at the `
+      + `old ${legacyName}/ path, which this build does not read — most likely left by a command of an older `
+      + 'build running during the upgrade. Start the daemon (`stratus serve`, or `stratus service start`) or run '
+      + "`stratus update`, and the provenance labels are folded into the agent's live ledger. The files move too "
+      + "unless the agent's own workspace already holds files of its own, in which case they stay where they are "
+      + 'rather than overwriting newer ones, and the start says so.',
+    );
+  }
+  // Said separately, and without a remedy that would not work: nothing a
+  // restart does will move these. Reporting them with the advice above is
+  // what would make this check red for good on an ordinary home.
+  const retained = grouped('retained');
+  if (retained.length > 0) {
+    problems.push(
+      `${legacyName}/ still holds ${retained.join(', ')}, left there on purpose — either the provenance records `
+      + "were already folded into the agent's ledger and the files kept rather than overwriting newer ones, or "
+      + 'the name is not an agent\'s. Nothing further will move them: read them where they are, and move or '
+      + 'delete them yourself once you are done with them.',
     );
   }
 

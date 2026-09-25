@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { type Dirent } from 'node:fs';
+import { createReadStream, type Dirent } from 'node:fs';
 import {
   appendFile,
   chmod,
@@ -16,6 +16,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 
 import { isValidAgentId } from '@stratusagent/agents';
 import { LEDGER_FILENAME } from '@stratusagent/plugins';
@@ -275,6 +276,65 @@ const reparented = (absolutePath: string, from: readonly string[], to: string): 
 };
 
 /**
+ * Every record a ledger holds, streamed, or `false` if there is no ledger
+ * there at all.
+ *
+ * Streamed rather than read whole because of who calls it: `remapLedger`
+ * runs for every agent on every start of a home that still has a
+ * `workspaces/` directory, and a provenance ledger is append-only with no
+ * bound — a fleet that has been up for months has one per agent. Holding
+ * each file, plus a parsed record and a key per line, is the cost that made
+ * an unconditional repair look unaffordable; a visitor that keeps nothing
+ * costs a sequential read and no memory at all on the agents that have
+ * nothing to repair, which is all of them after the first pass.
+ *
+ * Absence answers, for the reason `remapLedger` gives: an agent that never
+ * wrote a fetched file has no ledger and nothing to move, and neither has one
+ * whose workspace is a dangling link. Every other failure propagates.
+ */
+const eachLedgerRecord = async (
+  at: string,
+  visit: (record: { path: string; trust?: unknown }) => void,
+): Promise<boolean> => {
+  const input = createReadStream(at, { encoding: 'utf8' });
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (line.trim().length === 0) {
+        continue;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (typeof parsed !== 'object' || parsed === null) {
+        continue;
+      }
+      const record = parsed as { path?: unknown; trust?: unknown };
+      if (typeof record.path !== 'string') {
+        continue;
+      }
+      visit(record as { path: string; trust?: unknown });
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return false;
+    }
+    throw error;
+  } finally {
+    // Both, and in this order: closing the interface does not close what it
+    // was reading, and a visitor that throws would otherwise leave the
+    // descriptor open for the rest of the pass.
+    lines.close();
+    input.destroy();
+  }
+  return true;
+};
+
+/**
  * Re-record, at the workspace's new path, everything the ledger had recorded
  * at its old one.
  *
@@ -314,53 +374,32 @@ const reparented = (absolutePath: string, from: readonly string[], to: string): 
  */
 const remapLedger = async (workspace: string, from: readonly string[], to: string): Promise<number> => {
   const ledgerPath = ledgerIn(workspace);
-  let raw: string;
-  try {
-    raw = await readFile(ledgerPath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return 0;
-    }
-    throw error;
-  }
-  const moved: string[] = [];
-  // What the ledger already says, as `path` and label together. A repair
-  // that is derived rather than remembered can run more than once — the
-  // migration is retried whenever a run fails before stamping — and without
-  // this each pass would append the same re-recordings again. Appending a
-  // record whose label is *new* is still right, so the pair is the key
-  // rather than the path.
-  const already = new Set<string>();
-  const records: Array<{ path: string; [key: string]: unknown }> = [];
-  for (const line of raw.split('\n')) {
-    if (line.trim().length === 0) {
-      continue;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (typeof parsed !== 'object' || parsed === null) {
-      continue;
-    }
-    const record = parsed as { path?: unknown; trust?: unknown };
-    if (typeof record.path !== 'string') {
-      continue;
-    }
-    already.add(`${record.path}\u0000${String(record.trust)}`);
-    records.push(record as { path: string });
-  }
-  for (const record of records) {
+  // What this ledger would gain, keyed as a record is keyed — a path and its
+  // label together. A repair that is derived rather than remembered runs
+  // again whenever the conditions still hold, and without the key each pass
+  // would append the same re-recordings. Appending a record whose *label* is
+  // new is still right, so the pair is the key rather than the path.
+  const moving = new Map<string, string>();
+  const present = await eachLedgerRecord(ledgerPath, (record) => {
     const at = reparented(record.path, from, to);
-    if (at === undefined || already.has(`${at}\u0000${String(record.trust)}`)) {
-      continue;
+    if (at === undefined) {
+      return;
     }
     // Spread first, so every other field a record carries — the label, the
     // timestamp, anything a newer build writes — comes along with the path.
-    moved.push(JSON.stringify({ ...record, path: at }));
+    moving.set(`${at}\u0000${String(record.trust)}`, JSON.stringify({ ...record, path: at }));
+  });
+  if (!present || moving.size === 0) {
+    return 0;
   }
+  // Only now a second pass, and only about the keys above: which of them the
+  // ledger already carries, from an earlier run of this same repair. Asked
+  // this way round rather than by remembering every key in the file, so the
+  // memory is what would move — nothing, for an agent that never did.
+  await eachLedgerRecord(ledgerPath, (record) => {
+    moving.delete(`${record.path}\u0000${String(record.trust)}`);
+  });
+  const moved = [...moving.values()];
   if (moved.length === 0) {
     return 0;
   }
@@ -443,35 +482,45 @@ const appendRecords = async (destination: string, body: string): Promise<void> =
  */
 const recordedKeys = async (ledgerPath: string): Promise<Set<string>> => {
   const keys = new Set<string>();
-  let raw: string;
-  try {
-    raw = await readFile(ledgerPath, 'utf8');
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') {
-      return keys;
-    }
-    throw error;
-  }
-  for (const line of raw.split('\n')) {
-    if (line.trim().length === 0) {
-      continue;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (typeof parsed !== 'object' || parsed === null) {
-      continue;
-    }
-    const record = parsed as { path?: unknown; trust?: unknown };
-    if (typeof record.path === 'string') {
-      keys.add(`${record.path}\u0000${String(record.trust)}`);
-    }
-  }
+  await eachLedgerRecord(ledgerPath, (record) => {
+    keys.add(`${record.path}\u0000${String(record.trust)}`);
+  });
   return keys;
+};
+
+/**
+ * The lines of a fold the destination does not already carry, marking what it
+ * keeps so one fold cannot append the same record twice.
+ *
+ * Every fold needs this, and for two different reasons. An archive is drained
+ * again on every pass, deliberately — see {@link foldArchivesInto}. And a
+ * source that stays *live*, because another workspace still reads it, is
+ * never retired, so it is still sitting there with the same records on the
+ * next pass; since the pass now runs on every `serve`, a shared ledger
+ * without this grows the destination by the whole of itself at every daemon
+ * start.
+ *
+ * Keyed as `recordWrite` keys a record — path and label together — so a
+ * label that has since gone *down* is still folded. Lines are parsed
+ * knowing `foldableLines` has already dropped whatever would not.
+ */
+const withoutRecorded = (body: string, already: Set<string>): string => {
+  const lines = body.split('\n').filter((line) => {
+    if (line.length === 0) {
+      return false;
+    }
+    const record = JSON.parse(line) as { path?: unknown; trust?: unknown };
+    if (typeof record.path !== 'string') {
+      return true;
+    }
+    const key = `${record.path}\u0000${String(record.trust)}`;
+    if (already.has(key)) {
+      return false;
+    }
+    already.add(key);
+    return true;
+  });
+  return lines.length > 0 ? `${lines.join('\n')}\n` : '';
 };
 
 /**
@@ -493,14 +542,17 @@ const recordedKeys = async (ledgerPath: string): Promise<Set<string>> => {
  * on every fold, which is what makes the leftover from a crashed run
  * recoverable at all.
  */
-const foldArchivesInto = async (from: string, destination: string): Promise<number> => {
+const foldArchivesInto = async (
+  from: string,
+  destination: string,
+): Promise<{ appended: boolean; dropped: number }> => {
   let entries: Dirent[];
   try {
     entries = await readdir(from, { withFileTypes: true });
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') {
-      return 0;
+      return { appended: false, dropped: 0 };
     }
     throw error;
   }
@@ -509,33 +561,25 @@ const foldArchivesInto = async (from: string, destination: string): Promise<numb
     .map((entry) => entry.name)
     .sort();
   if (archives.length === 0) {
-    return 0;
+    return { appended: false, dropped: 0 };
   }
+  let appended = false;
   let dropped = 0;
   const already = await recordedKeys(destination);
   for (const name of archives) {
     const { body, dropped: lost } = foldableLines(await readFile(path.join(from, name), 'utf8'));
     dropped += lost;
-    const lines = body.split('\n').filter((line) => {
-      if (line.length === 0) {
-        return false;
-      }
-      const record = JSON.parse(line) as { path?: unknown; trust?: unknown };
-      if (typeof record.path !== 'string') {
-        return true;
-      }
-      const key = `${record.path}\u0000${String(record.trust)}`;
-      if (already.has(key)) {
-        return false;
-      }
-      already.add(key);
-      return true;
-    });
+    const lines = withoutRecorded(body, already);
     if (lines.length > 0) {
-      await appendRecords(destination, `${lines.join('\n')}\n`);
+      appended = true;
+      await appendRecords(destination, lines);
     }
   }
-  return dropped;
+  // Whether anything was *appended*, not whether anything was torn: a torn
+  // line was the old proxy for "an archive was folded", and an archive of
+  // clean records — the ordinary shape of a run that died between a retire
+  // and its last read — went uncounted.
+  return { appended, dropped };
 };
 
 /**
@@ -595,20 +639,30 @@ const foldLedgerInto = async (
       // No ledger of its own, and the archives are now over there: a run
       // that died between a retire and its last read is finished, not read
       // as nothing to do.
-      return fromArchives > 0
-        ? { outcome: 'folded', dropped: fromArchives }
-        : { outcome: 'none', dropped: 0 };
+      return fromArchives.appended
+        ? { outcome: 'folded', dropped: fromArchives.dropped }
+        : { outcome: 'none', dropped: fromArchives.dropped };
     }
     throw error;
   }
   // Bytes, not characters: this offset indexes back into a file on disk.
   const complete = raw.lastIndexOf(0x0a) + 1;
-  let dropped = fromArchives;
+  let dropped = fromArchives.dropped;
+  // What the destination already carries, for a source that is *not* being
+  // retired: it will still be here next start with the same records in it —
+  // see `withoutRecorded`. A retired source is appended once and renamed out
+  // of the way, so it needs no filter and pays no read of the destination.
+  const already = retire ? undefined : await recordedKeys(destination);
+  let appended = fromArchives.appended;
+  const unrecorded = (body: string): string =>
+    already === undefined ? body : withoutRecorded(body, already);
   const first = foldableLines(raw.subarray(0, complete).toString('utf8'));
   dropped += first.dropped;
-  if (first.body.length > 0) {
+  const firstBody = unrecorded(first.body);
+  if (firstBody.length > 0) {
+    appended = true;
     try {
-      await appendRecords(destination, first.body);
+      await appendRecords(destination, firstBody);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       // Something is at the destination — `pathIsFree` said so — but it is
@@ -642,8 +696,10 @@ const foldLedgerInto = async (
     }
     const rest = foldableLines(late.subarray(complete).toString('utf8'));
     dropped += rest.dropped;
-    if (rest.body.length > 0) {
-      await appendRecords(destination, rest.body);
+    const body = unrecorded(rest.body);
+    if (body.length > 0) {
+      appended = true;
+      await appendRecords(destination, body);
     }
   };
   if (!retire) {
@@ -652,7 +708,10 @@ const foldLedgerInto = async (
     // same labels wherever they are read, and the alternative is taking an
     // agent's whole ledger away to migrate a different agent.
     await foldRest(source);
-    return { outcome: 'folded', dropped };
+    // A live source whose records are all over there already is a fold that
+    // has nothing to do, not one it did: this runs on every start, and
+    // counting it would report a fold in every log line for good.
+    return appended ? { outcome: 'folded', dropped } : { outcome: 'none', dropped };
   }
   // Never over an archive already there: a run killed between the append
   // and this rename leaves one, and the retry must not bury it.
@@ -801,8 +860,10 @@ const finishMove = async (
  * new path, its legacy entry is gone, and the ledger still holds records
  * naming that legacy path. Re-recording them is what the repair *is*, so
  * running it whenever those conditions hold needs no memory of having
- * started. It costs one ledger read per agent on the one run this migration
- * gets.
+ * started. What it costs is one sequential ledger read per agent that has a
+ * ledger, on every start of a home that still has a `workspaces/` directory
+ * — see `workspaceRepairPending` for why nothing finer can gate it, and
+ * `eachLedgerRecord` for why the read holds nothing in memory.
  *
  * Unconditionally safe to repeat, and safe when it is not a move at all: a
  * fresh agent's ledger holds no record under `workspaces/<id>` and the pass
@@ -894,11 +955,195 @@ const anyWorkspaceNamesLegacy = async (env: StateEnvironment, legacy: string): P
 };
 
 /**
+ * What a repair pass would do with one entry in `workspaces/`.
+ *
+ * Three answers, because the migration has three end states for a legacy
+ * entry and only one of them is a thing to act on. Conflating them is what
+ * made the first version of this gate stay true forever on an ordinary home,
+ * and `stratus doctor` red forever with advice that could never clear it.
+ *
+ * - `live` — the new path *is* this directory, reached through a link the
+ *   operator wrote. It is read on every call; there is nothing to move.
+ * - `retained` — deliberately left. Its records were folded into the ledger
+ *   at the new path and its files were kept rather than overwriting newer
+ *   ones, or the name is not an agent's at all. No pass will move it, so
+ *   nothing a restart does will change it.
+ * - `repairable` — a pass would still move or fold something: the new path
+ *   is free, so the whole directory goes, or a live ledger here has records
+ *   that have not been folded yet.
+ */
+export type LegacyWorkspaceState = 'live' | 'retained' | 'repairable';
+
+/** Whether a legacy workspace still has a ledger of its own to fold. */
+const hasLiveLedger = async (workspace: string): Promise<boolean> => {
+  try {
+    await lstat(ledgerIn(workspace));
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return false;
+    }
+    throw error;
+  }
+};
+
+/**
+ * The pre-schema-4 directory as it stands: whether it is there, and what a
+ * pass would do with each thing in it.
+ *
+ * One read for both callers that need to know — the repair's gate and the
+ * diagnostic — so "would this do anything" and "what should someone be told"
+ * cannot drift into two answers.
+ *
+ * Absence answers, and so does a regular file left at the name. Every other
+ * failure propagates: a survey that cannot ask must not answer "nothing to
+ * do" about state nothing else is looking at.
+ */
+export const surveyLegacyWorkspaces = async (
+  env: StateEnvironment,
+): Promise<{ present: boolean; entries: ReadonlyMap<string, LegacyWorkspaceState> }> => {
+  const legacy = legacyWorkspacesDirPath(env);
+  let listing: Dirent[];
+  try {
+    listing = await readdir(legacy, { withFileTypes: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return { present: false, entries: new Map() };
+    }
+    throw error;
+  }
+  const entries = new Map<string, LegacyWorkspaceState>();
+  for (const entry of listing) {
+    if (!isWorkspaceEntry(entry)) {
+      continue;
+    }
+    // A name no per-agent path helper will answer for — a `.cache` somebody
+    // dropped in here. The migration leaves it and says so once; nothing
+    // will ever move it, so it is retained rather than pending.
+    if (!isValidAgentId(entry.name)) {
+      entries.set(entry.name, 'retained');
+      continue;
+    }
+    const from = path.join(legacy, entry.name);
+    const target = agentWorkspacePath(env, entry.name);
+    // Identity, not spelling: `agents/<id>/workspace -> workspaces/<id>` is
+    // one live workspace under two names, and the old one is read on every
+    // call. Reporting it as unread state would be false.
+    if (await sameEntry(from, target)) {
+      entries.set(entry.name, 'live');
+      continue;
+    }
+    entries.set(
+      entry.name,
+      await pathIsFree(target) || await hasLiveLedger(from) ? 'repairable' : 'retained',
+    );
+  }
+  return { present: true, entries };
+};
+
+/**
+ * Whether the pass has anything left to look at — the gate its callers ask
+ * before paying for it.
+ *
+ * **The directory's existence, and nothing finer.** Four review rounds were
+ * spent on a gate that tried to predict what the pass would do, and each
+ * version was wrong about a different home: contents, then mere presence,
+ * then presence with the collision case excluded. The last one skipped the
+ * repair this pass exists for. An interrupted move leaves *nothing* in
+ * `workspaces/` naming the agent it broke — the rename already happened, so
+ * the evidence is a record inside that agent's own ledger — and a second
+ * agent's retained collision keeps the directory non-empty while every
+ * classified entry reads "no pass will touch this". The moved agent's
+ * records then name a path nothing is at, for good, which is a fetched file
+ * reading back as the agent's own words.
+ *
+ * Reading each agent's ledger is the only sound answer to "is a move half
+ * done", and a gate that costs what it gates is not a gate. So the question
+ * asked here is the cheap one that cannot be wrong in that direction: the
+ * pass sweeps this directory as its last act, so while it is there something
+ * may be pending, and once it is gone nothing is. What that trades away is
+ * the start cost on a home that keeps the directory for good — a collision's
+ * retained files, an operator's own `workspaces/README` — which pays one
+ * sequential ledger read per agent on every start. {@link remapLedger} is
+ * written so that read holds nothing in memory when there is nothing to
+ * repair, and the cost goes away entirely for the home that empties the
+ * directory. Making it cheap in *every* home means recording the new paths
+ * before the rename rather than after, so an unfinished move is visible in
+ * `workspaces/` again; that reorders the migration's core and is #234.
+ *
+ * The classification {@link surveyLegacyWorkspaces} makes is still what
+ * `stratus doctor` reports, where being wrong costs a confusing sentence
+ * rather than a lost label.
+ */
+export const workspaceRepairPending = async (env: StateEnvironment): Promise<boolean> =>
+  (await surveyLegacyWorkspaces(env)).present;
+
+/**
+ * The names still sitting in `workspaces/` that a repair would fold, or an
+ * empty list once the layout has finished moving.
+ *
+ * For the readers that must not *act* — `stratus doctor` says what is wrong
+ * with a home and fixes nothing, and this is a thing worth saying: a
+ * workspace here is an agent's output, and its provenance labels, at a path
+ * no build reads any more. It is repaired by the next `serve`, so the remedy
+ * is a restart rather than anything by hand, and that is what doctor can
+ * tell someone who is looking at a home wondering where a file went.
+ *
+ * Deliberately not the pass itself. Absence answers — a home that finished
+ * upgrading has no such directory — and every other failure propagates, for
+ * the reason the pass gives: a check that cannot ask must not answer "all
+ * clear" about state nothing else is looking at.
+ */
+export const strayWorkspaceNames = async (env: StateEnvironment): Promise<readonly string[]> => {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(legacyWorkspacesDirPath(env), { withFileTypes: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return [];
+    }
+    throw error;
+  }
+  return entries.filter((entry) => isWorkspaceEntry(entry)).map((entry) => entry.name).sort();
+};
+
+/**
  * Move each `workspaces/<id>` into `agents/<id>/workspace`.
  *
  * Idempotent and restartable at every agent: one rename each, a ledger
  * rewrite after it, and an agent whose directory cannot be made is named
  * and skipped rather than aborting the fleet.
+ *
+ * **Run by the migration, and by every `serve` after it.** Registered as
+ * `0004`, and called again — unconditionally, under the home claim, before
+ * any store is opened — for as long as the layout exists. That is not
+ * belt-and-braces; it is what makes this safe at all.
+ *
+ * The migration holds the home against other *migrations*, never against
+ * ordinary commands, which take no home lock by design (see
+ * `layout-migration.ts`). An older build's command resolves
+ * `workspaces/<id>` by pathname on every tainted write, so it can create one
+ * at any moment during this pass — or after it. Four rounds of review
+ * narrowed that window and none of them closed it, because nothing in Node
+ * can: what made each window *destructive* was the stamp. Once the schema
+ * read 4, nothing looked at `workspaces/` again, and a directory that
+ * appeared was stranded where no build would find it, with every provenance
+ * label in it, silently.
+ *
+ * Running on every start is what retires that. A stray `workspaces/<id>` is
+ * always foldable, so a race that used to cost an agent its labels now costs
+ * one start's delay.
+ *
+ * And it is one `readdir` on a home that has finished moving, which is the
+ * state every home reaches. Everything expensive here — reading every
+ * agent's ledger to finish an interrupted move — happens *after* that
+ * directory is found, because nothing it repairs can be outstanding while
+ * the directory is gone. Ledgers are append-only and a fleet runs for
+ * months; parsing all of them on every start would be a real cost to pay
+ * for a state that no longer exists.
  */
 export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<string | undefined> => {
   // Before anything else: a previous run may have moved a workspace and
@@ -1484,17 +1729,17 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   const appeared = remaining
     .filter((entry) => isWorkspaceEntry(entry) && (emptied.has(entry.name) || !snapshot.has(entry.name)))
     .map((entry) => entry.name);
-  if (appeared.length > 0) {
-    // Nothing is stamped, so the next run does 0004 again from what it
-    // finds — re-enterable by construction, and a workspace at both paths
-    // is the fold this migration already knows how to do. Refusing here
-    // costs a start that says why; the alternative costs the files.
-    throw new Error(
-      `${appeared.map((name) => JSON.stringify(name)).join(', ')} appeared in `
-      + `${path.relative(stratusHomePath(env), legacy)}/ while it was being migrated, so the upgrade was `
-      + 'stopped rather than leaving them where nothing will read them — a command of an older build is '
-      + 'most likely still running. Nothing was lost. Stop it and run `stratus update` again, and they '
-      + 'will be merged.',
+  // Reported and left, not refused. This pass runs again on every start —
+  // see the note on this function — so a workspace that appeared under it is
+  // folded by the next one, and the stamp is no longer the door closing. It
+  // used to throw, because it had to: with nothing looking at `workspaces/`
+  // after the stamp, carrying on meant those files and their provenance
+  // labels stranded silently, so a start that said why was the cheaper of
+  // two bad answers. Now there is a third.
+  for (const name of appeared) {
+    report.quarantined.push(
+      `${JSON.stringify(name)} — appeared while this ran, most likely a command of an older build; `
+      + 'left where it is and folded on the next start',
     );
   }
   try {
@@ -1515,10 +1760,9 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // and the files are at a path the new build never reads — so it is the
     // one leftover that cannot be swallowed.
     if (remaining.length === 0 && (error as NodeJS.ErrnoException).code === 'ENOTEMPTY') {
-      throw new Error(
-        `Something appeared in ${path.relative(stratusHomePath(env), legacy)}/ as it was being removed, so `
-        + 'the upgrade was stopped rather than leaving it where nothing will read it — a command of an older '
-        + 'build is most likely still running. Nothing was lost. Stop it and run `stratus update` again.',
+      report.quarantined.push(
+        'something appeared as the directory was being removed, most likely a command of an older build; '
+        + 'left where it is and folded on the next start',
       );
     }
   }

@@ -9,6 +9,9 @@ import { createFileLedger, LEDGER_FILENAME } from '@stratusagent/plugins';
 
 import {
   STATE_SCHEMA_VERSION,
+  applyPerAgentWorkspaces,
+  surveyLegacyWorkspaces,
+  workspaceRepairPending,
   agentStateDirPath,
   agentWorkspacePath,
   agentsDirPath,
@@ -509,6 +512,212 @@ test('what this run left behind on purpose is not read as a workspace that appea
   assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'note.md'), 'utf8'), 'moves');
   assert.equal(await readFile(path.join(legacyWorkspacesDirPath(env), 'bea', 'note.md'), 'utf8'), 'stays');
   assert.deepEqual((await readdir(legacyWorkspacesDirPath(env))).sort(), ['README', 'bea']);
+});
+
+test('a workspace that appears after the stamp is moved by the next pass, not stranded by it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'own.md': 'from the upgrade' });
+
+  await runStateMigrations(env, { exclusive: true });
+  assert.equal((await readStateStamp(env))?.schemaVersion, STATE_SCHEMA_VERSION);
+  // Nothing is pending any more, and that used to be the door closing:
+  // whatever appeared here afterwards sat at a path no build reads, with its
+  // provenance labels, and nothing was ever going to look again.
+  assert.deepEqual((await pendingStateMigrations(env)).map((migration) => migration.id), []);
+
+  // An older build's command, resolving `workspaces/<id>` by pathname — for
+  // an agent whose new path does not exist yet, which is the whole-directory
+  // case.
+  const legacy = path.join(legacyWorkspacesDirPath(env), 'bea');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'fetched.md'), 'from a page');
+  await writeFile(path.join(legacy, LEDGER_FILENAME), ledgerLine(path.join(legacy, 'fetched.md')));
+  assert.deepEqual([...(await surveyLegacyWorkspaces(env)).entries], [['bea', 'repairable']]);
+
+  // What `serve` does on its next start, whatever the stamp says.
+  const summary = await applyPerAgentWorkspaces(env);
+
+  assert.match(summary ?? '', /moved 1 workspace/);
+  const workspace = agentWorkspacePath(env, 'bea');
+  assert.equal(await readFile(path.join(workspace, 'fetched.md'), 'utf8'), 'from a page');
+  // And the label followed the file, which is the half that goes missing
+  // silently: the records are absolute paths, so a move without a rewrite
+  // leaves them naming nothing.
+  assert.deepEqual(await recordedIn(path.join(workspace, LEDGER_FILENAME)), [
+    path.join(legacy, 'fetched.md'),
+    path.join(workspace, 'fetched.md'),
+  ]);
+  assert.deepEqual([...(await surveyLegacyWorkspaces(env)).entries], []);
+});
+
+test('a stray whose new path is already in use has its labels folded and its files named', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'own.md': 'from the upgrade' });
+  await runStateMigrations(env, { exclusive: true });
+
+  // The other half of the promise, and the limit of it. The agent is already
+  // writing at the new path, so its files are not overwritten with older
+  // ones: the labels are folded — losing those is the silent failure — and
+  // where the files still sit is said out loud instead.
+  const legacy = path.join(legacyWorkspacesDirPath(env), 'ava');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'fetched.md'), 'from a page');
+  await writeFile(path.join(legacy, LEDGER_FILENAME), ledgerLine(path.join(legacy, 'fetched.md')));
+
+  const summary = await applyPerAgentWorkspaces(env);
+
+  assert.match(summary ?? '', /folded 1 provenance ledger/);
+  assert.match(summary ?? '', /the files they name have not moved/);
+  // The label is live where the agent's reads look for it.
+  assert.ok((await recordedIn(path.join(agentWorkspacePath(env, 'ava'), LEDGER_FILENAME)))
+    .includes(path.join(legacy, 'fetched.md')));
+  // The file is where it was, not silently gone and not overwriting anything.
+  assert.equal(await readFile(path.join(legacy, 'fetched.md'), 'utf8'), 'from a page');
+});
+
+test('a collision leaves files behind for good, and that is kept rather than pending', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'own.md': 'from the upgrade' });
+  await runStateMigrations(env, { exclusive: true });
+
+  // The ordinary collision, which #190 calls out as not exotic: an agent
+  // writing at the new path while a legacy workspace is still there. Its
+  // records fold, its files stay — so `workspaces/` stays too, for good.
+  const legacy = path.join(legacyWorkspacesDirPath(env), 'ava');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'fetched.md'), 'from a page');
+  await writeFile(path.join(legacy, LEDGER_FILENAME), ledgerLine(path.join(legacy, 'fetched.md')));
+  await applyPerAgentWorkspaces(env);
+
+  // Retained, which is what doctor reports and what tells someone where the
+  // files went: nothing a start does will change it, so it carries no remedy.
+  assert.deepEqual([...(await surveyLegacyWorkspaces(env)).entries], [['ava', 'retained']]);
+  // The *gate* still says pending, deliberately, and this is the one thing
+  // the classification must not decide: a second agent's interrupted move
+  // leaves nothing here to classify, so a gate that trusted this map would
+  // skip the repair. See `workspaceRepairPending`.
+  assert.equal(await workspaceRepairPending(env), true);
+  // And nothing was lost by stopping: the label is live at the new path.
+  assert.ok((await recordedIn(path.join(agentWorkspacePath(env, 'ava'), LEDGER_FILENAME)))
+    .includes(path.join(legacy, 'fetched.md')));
+});
+
+test('a workspace the new path resolves to is live, not something to report as unread', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // An operator's own layout: the agent's workspace *is* the legacy
+  // directory, reached through a link. The migration recognises both as one
+  // workspace and leaves them — so it is read on every call, and calling it
+  // state this build cannot see would be false.
+  const legacy = path.join(legacyWorkspacesDirPath(env), 'ava');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'own.md'), 'mine');
+  await mkdir(agentStateDirPath(env, 'ava'), { recursive: true });
+  await symlink(legacy, agentWorkspacePath(env, 'ava'));
+
+  await applyPerAgentWorkspaces(env);
+
+  assert.deepEqual([...(await surveyLegacyWorkspaces(env)).entries], [['ava', 'live']]);
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'own.md'), 'utf8'), 'mine');
+});
+
+test('a retained collision beside another agent’s interrupted move does not hide it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'own.md': 'from the upgrade' });
+  await runStateMigrations(env, { exclusive: true });
+
+  // One agent with an ordinary collision, folded and retained: `workspaces/`
+  // is now here for good, and nothing in it will ever be repairable again.
+  const legacy = path.join(legacyWorkspacesDirPath(env), 'ava');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'fetched.md'), 'from a page');
+  await writeFile(path.join(legacy, LEDGER_FILENAME), ledgerLine(path.join(legacy, 'fetched.md')));
+  await applyPerAgentWorkspaces(env);
+  assert.deepEqual([...(await surveyLegacyWorkspaces(env)).entries], [['ava', 'retained']]);
+
+  // And another whose move was interrupted between its rename and its record
+  // rewrite: the workspace is at the new path, nothing is left in
+  // `workspaces/` naming it, and its ledger still says where it used to be.
+  // That is the state the repair exists for, and it is invisible in the
+  // survey above — which is why the gate cannot be the survey's verdict.
+  const moved = agentWorkspacePath(env, 'bea');
+  await mkdir(moved, { recursive: true });
+  await writeFile(path.join(moved, 'fetched.md'), 'from a page');
+  const before = path.join(legacyWorkspacesDirPath(env), 'bea', 'fetched.md');
+  await writeFile(path.join(moved, LEDGER_FILENAME), ledgerLine(before));
+
+  // Exactly what `serve` does on its next start.
+  assert.equal(await workspaceRepairPending(env), true);
+  await applyPerAgentWorkspaces(env);
+
+  // The label followed the file. Without the repair this record names a path
+  // nothing is at, and the file it was fetched into reads back as the
+  // agent’s own words for good.
+  assert.deepEqual(await recordedIn(path.join(moved, LEDGER_FILENAME)), [
+    before,
+    path.join(moved, 'fetched.md'),
+  ]);
+});
+
+test('a shared ledger folded on every start is folded once, not appended again', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // The collision, with the twist that retiring the source would rob another
+  // agent: `bea` reads `ava`’s ledger file through a link, so the fold copies
+  // rather than moves and the source stays live. It is therefore still here,
+  // with the same records in it, on every start from now on.
+  const legacy = path.join(legacyWorkspacesDirPath(env), 'ava');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'fetched.md'), 'from a page');
+  await writeFile(path.join(legacy, LEDGER_FILENAME), ledgerLine(path.join(legacy, 'fetched.md')));
+  const target = agentWorkspacePath(env, 'ava');
+  await mkdir(target, { recursive: true });
+  await writeFile(path.join(target, 'own.md'), 'mine');
+  const sharer = agentWorkspacePath(env, 'bea');
+  await mkdir(sharer, { recursive: true });
+  await symlink(path.join(legacy, LEDGER_FILENAME), path.join(sharer, LEDGER_FILENAME));
+
+  const first = await applyPerAgentWorkspaces(env);
+  assert.match(first ?? '', /its own ledger was left live/);
+  const record = path.join(legacy, 'fetched.md');
+  assert.deepEqual(await recordedIn(path.join(target, LEDGER_FILENAME)), [record]);
+
+  // The second start, and the fiftieth. The records are already live where a
+  // read will look, so there is nothing left to fold — and a ledger that grew
+  // by the whole of the shared one at every daemon start is its own defect.
+  const second = await applyPerAgentWorkspaces(env);
+  assert.doesNotMatch(second ?? '', /folded 1 provenance ledger/);
+  const settled = await recordedIn(path.join(target, LEDGER_FILENAME));
+  await applyPerAgentWorkspaces(env);
+  assert.deepEqual(await recordedIn(path.join(target, LEDGER_FILENAME)), settled);
+  // The folded record is here once, however many starts the home has had.
+  assert.deepEqual(settled.filter((at) => at === record), [record]);
+  // And the other agent still has the ledger it was reading.
+  assert.deepEqual(await recordedIn(path.join(sharer, LEDGER_FILENAME)), [record]);
+});
+
+test('a home that has finished moving has nothing stray and nothing to say', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'own.md': 'mine' });
+  await runStateMigrations(env, { exclusive: true });
+
+  // The steady state every home reaches, and what its starts cost: the
+  // directory is swept, so the gate says no and the pass — which would read
+  // every agent's ledger to finish an interrupted move — is never entered.
+  assert.equal(await workspaceRepairPending(env), false);
+  assert.equal((await surveyLegacyWorkspaces(env)).present, false);
+  assert.equal(await applyPerAgentWorkspaces(env), undefined);
+
+  // And the directory coming back is the gate, whatever is in it: a run
+  // killed between a rename and its ledger rewrite leaves nothing here to
+  // classify, so nothing finer than "it exists" can be trusted to say no.
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  assert.equal(await workspaceRepairPending(env), true);
 });
 
 test('the workspace move is idempotent, and a second run has nothing to say', async () => {

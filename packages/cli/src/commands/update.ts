@@ -3,6 +3,8 @@ import {
   newerStateMessage,
   pendingStateMigrations,
   readStateStamp,
+  applyPerAgentWorkspaces,
+  workspaceRepairPending,
   runStateMigrations,
   STATE_SCHEMA_VERSION,
   type AppliedStateMigration,
@@ -271,6 +273,18 @@ export const runUpdate = async (
       );
     }
     applied = await runStateMigrations(env, claim.held ? { exclusive: true } : {});
+    // And the workspace pass again, for the same reason `serve` runs it:
+    // the schema stamp is not what makes that move safe, so a workspace an
+    // older build left at the legacy path is folded whenever something
+    // holding the home comes past. This is the remedy for a home that has
+    // no daemon at all — `stratus run` takes no claim, so it cannot do this,
+    // and `stratus doctor` names it and points here.
+    if (claim.held && await workspaceRepairPending(env)) {
+      const repaired = await applyPerAgentWorkspaces(env);
+      if (repaired !== undefined) {
+        writeLine(streams.stdout, `workspace layout: ${repaired}`);
+      }
+    }
   } catch (error) {
     claim?.release();
     // A daemon stopped for an update that then failed must not stay down:
