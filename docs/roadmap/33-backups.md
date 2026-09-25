@@ -143,8 +143,11 @@ run rather than something to write.
     enumerates every resolved `(plugin, agent)` root through the same
     resolver the plugins use, rather than by reading the settings. It
     canonicalizes the roots, together with every other external resource
-    (an external soul, a `memory-sqlite` database), and keeps the
-    relationships between them.
+    (an external soul, a `memory-sqlite` database, and the trusted
+    config file itself when `--config` names one), and keeps the
+    relationships between them. A config inside a workspace is stored
+    once, in its redacted form, and restore points both the daemon and
+    the workspace at that one file.
     Roots that coincide are one tree. A root nested inside another is
     not copied twice: it is recorded as a subpath of the outer tree.
     Restore rewrites each setting to its tree plus that subpath, so a
@@ -1094,6 +1097,9 @@ Two things follow for the design:
 - An MCP header named `X-APIKEY` is treated as a credential.
 - A config-only soul reached through a symlink backs up as a regular
   file.
+- A `--config` file inside a workspace root is stored once, and after
+  restore an edit through the workspace changes the config the daemon
+  reads.
 - A default soul that lives inside a workspace root is stored once, and
   after restore the daemon still serves the file the workspace holds.
 - `stratus backup now` run by hand from another directory, with a
