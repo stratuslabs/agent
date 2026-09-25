@@ -310,10 +310,16 @@ set`, or the runtime recording a late environment credential, can land
 after `now` collected its set but before it committed. Every change to
 the secret set increments a **generation number**, kept beside the
 credential store: credential writes, the recorder, and a retired value
-(below). `now` reads the generation when it starts and again
-immediately before it commits. If the number has moved, it discards the
-staging tree and starts over instead of committing text redacted
-against a stale set.
+(below). `now` reads the generation when it starts. For the final
+step, it then takes the **secret-set lock** that every one of those
+writers also takes: re-read the generation, commit, push. So no
+credential can become known between that check and the moment the
+commit is published. A writer that arrives during the push waits a few
+seconds. If the generation moved before the lock was taken, `now`
+releases the lock, discards the staging tree, and starts over instead
+of committing text redacted against a stale set. A credential first
+learned after a push finishes was never known to any run, and is
+the pattern scan's to catch or no one's.
 
 ### Secrets: three layers, because one is not enough
 
@@ -820,7 +826,8 @@ Two things follow for the design:
 - A credential rotated after its old value was written into memory:
   the old value is still replaced in every later snapshot.
 - A `credential set` that lands between collection and commit makes the
-  run start over, and the new value is redacted in what it commits.
+  run start over, and the new value is redacted in what it commits. One
+  issued during the push waits for it to finish.
 - A skill with `alias -> shared` beside `shared/` backs up. One with
   `loop -> .` fails.
 - A signed snapshot in which only a file's git mode was changed is
