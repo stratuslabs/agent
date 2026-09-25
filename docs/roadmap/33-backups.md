@@ -319,7 +319,15 @@ one JSONL file per table, rows ordered by primary key, so that:
 
 The local clone lives at `~/.stratus/backup/`. It must never live under
 `agents/`, because the startup sweep treats any validly named directory
-there that holds a `sessions.db` as an agent.
+there that holds a `sessions.db` as an agent. Everything else the
+backup keeps also lives in that directory: the ciphertext map, the
+retired list, the late-credential record, the signing key, the saved
+working directory, and the lock. So **no traversal ever enters it.**
+A workspace root that contains it (for example `~/.stratus` itself, or
+the home directory) is refused by `now` with the reason, rather than
+quietly pruned. Pruning alone would leave the next ancestor-rooted
+tool a way to read the signing key. Every traversal also skips that
+directory by device and inode, as defence in depth.
 
 **One run at a time.** A manual `now` can overlap the timer's run, and
 both would work on the same clone, index, and ciphertext-reuse map.
@@ -969,6 +977,8 @@ Two things follow for the design:
 - An `--unverified` restore brings back no command scope, origin, or
   tool grant. It succeeds on a machine lacking a plugin that it
   restores disabled anyway.
+- A `workspaceRoot` set to `~/.stratus` or `~` makes `now` fail with
+  the reason, and no file from the backup directory is ever staged.
 - `stratus backup now` run by hand from another directory, with a
   config holding a relative `soul`, backs up the same soul the daemon
   serves.
