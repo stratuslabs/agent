@@ -431,7 +431,7 @@ rewrites. On top of that:
 
 ### Restore
 
-`stratus backup restore <remote|path> --into <dir> [--identity <file>]`
+`stratus backup restore <remote|path> --into <dir> --verify-key <file> [--identity <file>]`
 refuses any directory that is not empty. When the snapshot holds
 ciphertext, the age identity comes from `--identity`, or from
 `STRATUS_BACKUP_IDENTITY` naming a file. It is never taken from the
@@ -451,8 +451,16 @@ file, and `now` signs the manifest with a key held outside the
 repository: an SSH signing key, the same kind git itself signs with.
 `init` asks for it, defaulting to git's own `user.signingkey` when that
 is an SSH key, and refuses to set up a target without one.
-Restore verifies that signature against the operator's public key
-before writing anything, and refuses a snapshot it cannot verify.
+Restore verifies that signature before writing anything, and refuses a
+snapshot it cannot verify. **The key it verifies against never comes
+from the repository**, because someone who can replace the snapshot
+can replace a key stored beside it. Nor does it come from the signature
+itself, which names whatever key made it. It comes from
+`--verify-key <file>` (a public key or an `allowed_signers` file) or
+from `STRATUS_BACKUP_VERIFY_KEY`. `init` prints the public key and says
+to keep it with the age identity. For an operator who signs git commits
+with the same SSH key, there is also a source that survives losing the
+machine entirely: the key already published on their GitHub account.
 `--unverified` exists for an operator who has lost the signing key and
 accepts the risk. It restores, and marks the home by leaving every
 schedule paused and every standing grant out. Those are the two ways
@@ -613,7 +621,8 @@ Two things follow for the design:
 - A restore of a snapshot with encrypted content refuses before writing
   anything when no identity is given, and again when the wrong one is.
 - A snapshot with one soul edited after signing is refused before
-  anything is written. With `--unverified`, it restores with schedules
+  anything is written. So is a snapshot validly signed by a different
+  key than `--verify-key` names, and restore with no verify key at all. With `--unverified`, it restores with schedules
   paused and no standing grants.
 - An MCP server URL carrying `?access_token=…` backs up with the token
   replaced and listed for re-entry.
