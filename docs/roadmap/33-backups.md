@@ -560,6 +560,12 @@ prevents, and the spec says so.
      keychain token is collected the same way as a file-backed one. A
      value `now` itself resolves is a credential like any other, and it
      is retired when it changes.
+   - the private deploy key and the private signing key. The value set is
+     each key file's whole contents plus its base64 body, meaning the
+     key material without the PEM or OpenSSH wrapper, since a pasted key
+     often loses its wrapper. Both go through the same encoded forms as
+     every other value. A key replaced by `init --rotate-signing-key` or
+     a new deploy key is retired.
    - the control API's bearer token: the contents of `gateway-token`,
      and `STRATUS_GATEWAY_TOKEN` when the environment sets it. Leaving
      the file out of the tree does not keep out a copy that someone pasted
@@ -1356,6 +1362,8 @@ Two things follow for the design:
   pushes without that header.
 - A home with an agent workspace at `agents/<id>/workspace/` backs up;
   the overlap guard does not treat it as inside a plaintext tree.
+- The body of the deploy key, pasted into a memory without its
+  `BEGIN` and `END` lines, is redacted.
 - With `user.signingkey` at `~/.ssh/backup_ed25519` and a deploy key
   at `~/.ssh/stratus_deploy`, `fs.read` of either file under a
   `tool-fs` root of `~/.ssh` is refused.
