@@ -138,8 +138,12 @@ run rather than something to write.
     root and MCP output under another. With `workspaces` opted in, `now`
     enumerates every resolved `(plugin, agent)` root through the same
     resolver the plugins use, rather than by reading the settings. It
-    deduplicates roots that coincide and snapshots each one under
-    `external/`. Restore rewrites every setting that pointed at one. The directories an agent is merely allowed to work in
+    canonicalizes the roots and keeps the relationship between them.
+    Roots that coincide are one tree. A root nested inside another is
+    not copied twice: it is recorded as a subpath of the outer tree.
+    Restore rewrites each setting to its tree plus that subpath, so a
+    file written through one plugin stays visible through the other,
+    as it was. The directories an agent is merely allowed to work in
     (`tool-fs` roots) are the operator's own files, not agent state, and
     stay out.
 
@@ -427,7 +431,12 @@ prevents, and the spec says so.
    **A retired value stays in the set.** Rotating or removing a
    credential does not remove the old value from memories and
    transcripts that already hold it, and the next rebuild of the staging
-   tree would copy it through unredacted. So from `init` on, a value
+   tree would copy it through unredacted. So from `init` on, the
+   retiring happens inside the shared credential-store writer in
+   `state`, the same place as the lock. Every save diffs the old store
+   against the new one, whichever caller made it (`credential set`,
+   `credential remove`, a provider sign-in, or a channel's transport
+   secrets). Concretely, a value
    that `stratus credential set` overwrites or `credential
    remove` deletes is moved to a retired list rather than dropped. The
    list is `0600` beside the clone, with the same protection as the
@@ -470,7 +479,8 @@ prevents, and the spec says so.
    whole component, splitting on `_`, `-`, and case changes. So
    `GITHUB_TOKEN`, `apiKey`, and `X-Api-Key` match, and `MONKEY` and
    `KEYBOARD_LAYOUT` do not. A structured value is split into the parts
-   a tool would actually repeat. An `Authorization` header contributes
+   a tool would actually repeat. An `Authorization` or
+   `Proxy-Authorization` header contributes
    its token after the scheme (`Bearer`, `Token`, and so on). For
    `Basic` it also contributes the decoded `user:password` and each
    half of it, because an API key is as often sent as the username with
@@ -844,7 +854,12 @@ Two things follow for the design:
 - With `workspaces` opted in and a `workspaceRoot` configured, the files
   under that root are the ones backed up and restored. An agent with
   different roots for `tool-shell` and `plugin-mcp` has both backed up,
-  and both settings are rewritten on restore.
+  and both settings are rewritten on restore. When one root is nested
+  in the other, the nested files are stored once and stay shared after
+  restore.
+- A channel token replaced through a provider or channel sign-in
+  between two runs stays redacted afterwards. So does the token from a
+  `Proxy-Authorization: Bearer …` header.
 - A workspace file named `research-journal` is backed up.
 - A config credential removed after `init` but before the first `now`
   is still redacted.
