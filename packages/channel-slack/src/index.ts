@@ -1501,6 +1501,7 @@ const readImageAttachments = async (
   fetchFile: SlackFileFetcher,
   timeoutMs: number,
   warn: (line: string) => void,
+  deadline: AbortSignal = AbortSignal.timeout(timeoutMs),
 ): Promise<{ images: ImageAttachment[]; unread: SlackInboundFile[] }> => {
   // Decided from the last file back, the way the replay window is spent:
   // when a message's images do not all fit, the ones kept are the ones it
@@ -1508,8 +1509,6 @@ const readImageAttachments = async (
   // in the message's own order, because that is how the person sees them.
   const kept = new Map<number, ImageAttachment>();
   const dropped = new Set<number>();
-  // The message's one deadline, shared by every download in it.
-  const deadline = AbortSignal.timeout(timeoutMs);
   // Decoded bytes accepted so far. Checked against Slack's reported size
   // before a download and the real length after it, because the message
   // as a whole has a budget the per-image cap alone cannot keep.
@@ -1630,6 +1629,125 @@ const readImageAttachments = async (
   });
   return { images, unread };
 };
+
+/** The most one text attachment may weigh to be read into the message. */
+const TEXT_ATTACHMENT_MAX_BYTES = 100 * 1024;
+/**
+ * The most one message's text attachments may weigh together. Read text
+ * joins the transcript and is sent again on every later turn, so the cap
+ * is a cost decision as much as a context one.
+ */
+const TEXT_ATTACHMENTS_MAX_TOTAL_BYTES = 200 * 1024;
+
+const TEXT_APPLICATION_TYPES = new Set([
+  'application/json',
+  'application/xml',
+  'application/yaml',
+  'application/x-yaml',
+  'application/toml',
+  'application/javascript',
+  'application/x-sh',
+  'application/sql',
+]);
+const TEXT_EXTENSIONS = /\.(md|markdown|txt|text|csv|tsv|json|ya?ml|toml|xml|log|ini|conf)$/i;
+
+/**
+ * Whether a file is text the model can be handed as it is. Slack's
+ * mimetype comes from the uploader's client and a Markdown file can arrive
+ * as `text/markdown`, `text/plain`, or an octet stream, so an unhelpful
+ * type falls back to the name. HTML is left out: a sign-in page is HTML
+ * too, and a file of it could not be told apart from Slack refusing one.
+ */
+const isTextAttachment = (file: SlackInboundFile): boolean => {
+  const mimetype = file.mimetype?.toLowerCase();
+  if (mimetype === 'text/html') {
+    return false;
+  }
+  if (mimetype !== undefined && (mimetype.startsWith('text/') || TEXT_APPLICATION_TYPES.has(mimetype))) {
+    return true;
+  }
+  const name = file.name ?? file.title;
+  return (mimetype === undefined || mimetype === 'application/octet-stream') && name !== undefined && TEXT_EXTENSIONS.test(name);
+};
+
+/**
+ * The text files among a message's attachments, read so the turn gets
+ * their contents rather than their names. A Markdown plan attached in a
+ * DM reached the agent as a filename, and it told the person it had no
+ * way to read Slack at all. Anything that is not UTF-8 text, is over the
+ * caps, or comes back as a page stays in `unread` and is named in the
+ * note, exactly as before; the warning says why.
+ */
+const readTextAttachments = async (
+  files: readonly SlackInboundFile[],
+  botToken: string,
+  fetchFile: SlackFileFetcher,
+  timeoutMs: number,
+  deadline: AbortSignal,
+  warn: (line: string) => void,
+): Promise<{ texts: Array<{ name: string; text: string }>; unread: SlackInboundFile[] }> => {
+  const texts: Array<{ name: string; text: string }> = [];
+  const unread: SlackInboundFile[] = [];
+  let total = 0;
+  for (const file of files) {
+    const url = file.url_private_download ?? file.url_private;
+    if (!isTextAttachment(file) || url === undefined) {
+      unread.push(file);
+      continue;
+    }
+    const maxBytes = Math.min(TEXT_ATTACHMENT_MAX_BYTES, TEXT_ATTACHMENTS_MAX_TOTAL_BYTES - total);
+    if (file.size !== undefined && file.size > maxBytes) {
+      warn(`slack: ${fileLabel(file)} is ${file.size} bytes, over the ${maxBytes} bytes of text this message could still take; the turn is told it cannot be read. Paste the part that matters, or split the file.`);
+      unread.push(file);
+      continue;
+    }
+    if (deadline.aborted) {
+      warn(`slack: ${fileLabel(file)} was not downloaded: this message's downloads had already taken longer than ${timeoutMs}ms. The turn is told it cannot be read.`);
+      unread.push(file);
+      continue;
+    }
+    let download: SlackFileDownload;
+    try {
+      download = await fetchFile(url, botToken, deadline, maxBytes);
+    } catch (error) {
+      const reason = error instanceof Error && error.name === 'TimeoutError'
+        ? `this message's downloads took longer than ${timeoutMs}ms`
+        : (error instanceof Error ? error.message : String(error));
+      warn(`slack: could not download ${fileLabel(file)}: ${reason}. The turn is told it cannot be read.`);
+      unread.push(file);
+      continue;
+    }
+    // HTML is never a file read here (see isTextAttachment), so an HTML
+    // body is Slack's sign-in page: what a token without files:read gets.
+    const contentType = download.contentType?.split(';')[0]?.trim().toLowerCase() ?? '';
+    const head = download.body.subarray(0, 64).toString('utf8').trimStart().toLowerCase();
+    if (download.status !== 200 || contentType === 'text/html' || head.startsWith('<!doctype html') || head.startsWith('<html')) {
+      warn(`slack: ${fileLabel(file)} came back as ${contentType || 'no content type'} (HTTP ${download.status}) rather than the file. This is what a bot token without the files:read scope gets — add the scope under OAuth & Permissions and reinstall the app.`);
+      unread.push(file);
+      continue;
+    }
+    if (download.truncated === true || download.body.length > maxBytes) {
+      warn(`slack: ${fileLabel(file)} is larger than the ${maxBytes} bytes of text this message could still take; the download was abandoned and the turn is told it cannot be read.`);
+      unread.push(file);
+      continue;
+    }
+    let text: string;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(download.body);
+    } catch {
+      warn(`slack: ${fileLabel(file)} is not UTF-8 text; the turn is told it cannot be read.`);
+      unread.push(file);
+      continue;
+    }
+    total += download.body.length;
+    texts.push({ name: fileLabel(file), text });
+  }
+  return { texts, unread };
+};
+
+/** Read text attachments, set into the message after what was said. */
+const textAttachmentBlocks = (texts: ReadonlyArray<{ name: string; text: string }>): string =>
+  texts.map(({ name, text }) => `\n[Attached: ${name}. Its contents follow.]\n${text.replace(/\s+$/, '')}\n[End of ${name}]`).join('');
 
 /**
  * Whether `text` addresses a bot user by name. Slack writes a mention as
@@ -3526,7 +3644,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // nobody asked for, since they reach the model ahead of the frame
       // that marks the message as somebody else's, and a judged message
       // names its attachments the way an overheard one does.
-      const { images, unread } = overhear || judged
+      // Images and text files share the message's one download deadline.
+      const deadline = AbortSignal.timeout(fileDownloadTimeoutMs);
+      const { images, unread: notImages } = overhear || judged
         ? { images: [] as ImageAttachment[], unread: event.files ?? [] }
         : await readImageAttachments(
           event.files ?? [],
@@ -3534,18 +3654,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           fetchFile,
           fileDownloadTimeoutMs,
           warn,
+          deadline,
         );
-      // An image with nothing said is still a question ("what's this?"); a
-      // file the turn could not open with nothing said is not one, and gets
-      // no reply.
-      if (cleaned.length === 0 && images.length === 0) {
+      const { texts, unread } = overhear || judged
+        ? { texts: [], unread: notImages }
+        : await readTextAttachments(notImages, connection.config.botToken, fetchFile, fileDownloadTimeoutMs, deadline, warn);
+      // An image or a document with nothing said is still a question
+      // ("what's this?"); a file the turn could not open with nothing said
+      // is not one, and gets no reply.
+      if (cleaned.length === 0 && images.length === 0 && texts.length === 0) {
         return undefined;
       }
       const author = await authorFor(connection, userId);
       // In shared channels the model should know who is speaking; a DM is
       // unambiguous. A bare image in a channel still says who sent it.
       const spoken = isDm ? cleaned : (cleaned.length > 0 ? `${author}: ${cleaned}` : `${author}:`);
-      const userMessage = `${spoken}${attachmentNote(unread)}`;
+      const userMessage = `${spoken}${textAttachmentBlocks(texts)}${attachmentNote(unread)}`;
       // Who sent this, judged against the operator's list — per message,
       // never remembered from the first one in the thread. A DM proves
       // nothing about who is typing, so a DM from an unlisted member is

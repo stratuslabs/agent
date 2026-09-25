@@ -4294,6 +4294,26 @@ const REPLY_SECTION = [
   'Where your own instructions below, or the person you are talking to, ask for something else, that wins.',
 ].join(' ');
 
+/**
+ * Where the conversation is happening, for a session a channel started.
+ *
+ * A channel adapter records itself as `metadata.channel` on the sessions it
+ * dispatches (`slack` today). Without this the agent could not tell: an
+ * agent with no Slack tool, asked about an attachment in a Slack DM, told
+ * the person it had "no Slack connection at all" and argued the point.
+ * Rendered from the session rather than handed in per turn so sessions
+ * opened before this existed get it too. The name must look like a channel
+ * id, since it is interpolated into the prompt.
+ */
+export const renderChannelSection = (session: Pick<Session, 'metadata'>): string | undefined => {
+  const channel = session.metadata?.channel;
+  if (typeof channel !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(channel)) {
+    return undefined;
+  }
+  const name = `${channel.charAt(0).toUpperCase()}${channel.slice(1)}`;
+  return `Where you are: this conversation is happening in ${name}. The people in it are writing to you there and your replies are posted back to them there, so you are talking in ${name} whether or not you have any ${name} tools. What they attach reaches you with their message.`;
+};
+
 export interface SystemPromptOptions {
   /** Host-level preamble, rendered before the agent's own persona. */
   preamble?: string;
@@ -4305,12 +4325,12 @@ export interface SystemPromptOptions {
  * Which part of what an agent is told a section is.
  *
  * The distinction a caller actually needs is stable versus volatile:
- * `preamble`, `replies`, `persona`, and `skills` are byte-identical across every turn of
+ * `preamble`, `replies`, `persona`, `channel`, and `skills` are byte-identical across every turn of
  * an agent's life, while `memory` is rewritten whenever the agent remembers
  * anything. A provider that caches its request prefix has to place those two
  * groups differently, and it cannot tell them apart from rendered strings.
  */
-export type SystemPromptSectionKind = 'preamble' | 'replies' | 'persona' | 'memory' | 'skills';
+export type SystemPromptSectionKind = 'preamble' | 'replies' | 'persona' | 'channel' | 'memory' | 'skills';
 
 export interface SystemPromptSection {
   kind: SystemPromptSectionKind;
@@ -4339,6 +4359,7 @@ export const renderSystemPromptParts = (
     { kind: 'preamble', text: options.preamble },
     { kind: 'replies', text: REPLY_SECTION },
     { kind: 'persona', text: renderPersonaSection(request.session.agent, { fallback: options.fallbackPersona ?? false }) },
+    { kind: 'channel', text: renderChannelSection(request.session) },
     { kind: 'memory', text: renderMemorySection(request.memory) },
     { kind: 'skills', text: renderSkillsSection(request.skills) },
   ];

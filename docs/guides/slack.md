@@ -148,11 +148,15 @@ into the thread on its own, and the agent is shown it. That takes the
 `files:read` scope, which the manifest `stratus setup` prints includes; an
 app installed before it needs the scope added under **OAuth & Permissions**
 and a reinstall, and until then `stratus serve` warns, naming the scope,
-whenever an image arrives. Anything that is not an image the model can
-take — a log, a PDF, an image over 5 MB or 8000 pixels a side, or one that
-would take a single message's images past 20 MB together — reaches the agent by name, told
-that it cannot be opened, so it answers honestly rather than as if it had
-read the file.
+whenever an image arrives.
+
+Text files are read too. Attach a Markdown plan, a CSV, a JSON file, or a
+log, and its contents reach the agent with your message, up to 100 KB a
+file and 200 KB a message. Anything else — a PDF, a Word file, an image
+over 5 MB or 8000 pixels a side, one that would take a single message's
+images past 20 MB together, or a text file over those caps — reaches the
+agent by name, told that it cannot be opened, so it answers honestly
+rather than as if it had read the file.
 
 Which runtimes can actually look: agents on the **Anthropic API**, an
 **OpenAI-compatible** provider, or a **Claude subscription** (the Claude Code

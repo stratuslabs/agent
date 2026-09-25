@@ -87,7 +87,11 @@ always said; and a long deliverable is shared as a real link the reader can
 open, never a path on the daemon's disk. It carries on with work it was
 already asked to do instead of asking permission for each step.
 
-The persona comes after that, and it — or the person in the conversation —
+A conversation a channel started also tells the agent where it is
+happening ("this conversation is happening in Slack"), after its persona,
+so an agent with no Slack tools still knows its replies reach people there.
+
+The persona comes after the reply rules, and it — or the person in the conversation —
 wins where they disagree, so a soul written for long-form work just says so:
 
 ```markdown
