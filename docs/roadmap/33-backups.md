@@ -224,8 +224,11 @@ snapshot's business to interpret:
   checked with `lstat` before it is opened. A FIFO would block the read
   forever, a socket cannot be read at all, and a device file is not
   state. So sockets, FIFOs, and devices (a development server's
-  leftovers, usually) are skipped, and the manifest lists them rather
-  than letting one stop or hang the night's run.
+  leftovers, usually) are skipped rather than letting one stop or hang
+  the night's run. The skipped paths are recorded where the other paths
+  of their tree are. A skipped path in a skill goes in the manifest. A
+  skipped path in an encrypted workspace goes in the encrypted index,
+  because its name is tool output like any other.
 - **Nothing in the tree gets to change how git stores it.** A skill or
   workspace can carry a `.gitignore` that would hide durable files, or a
   `.gitattributes` whose clean filter (Git LFS, say, if the user has it
@@ -270,7 +273,11 @@ one JSONL file per table, rows ordered by primary key, so that:
 
 - a night where nothing changed makes **no commit at all**;
 - a night where one conversation grew adds one diff, not a new copy of a
-  multi-megabyte blob;
+  multi-megabyte blob. For encrypted content this depends on the
+  export's granularity, because any change to a file's plaintext means
+  a whole new ciphertext for that file. So the session store is
+  exported one file per session, not one file per table. A night that
+  touched one conversation re-encrypts one conversation;
 - a table can be left out or redacted by name.
 
 The local clone lives at `~/.stratus/backup/`. It must never live under
@@ -328,8 +335,13 @@ failing silently.
    every run can read it. A gap can also open after `enable`, when a
    variable is exported later for a single `stratus run`. The timer
    never sees that shell, so while backups are enabled, the runtime
-   records the *name* (never the value) of any declared credential it
-   resolved from the environment alone. The record goes in a `0600` file
+   records the *name* (never the value) of any credential-classed
+   variable it read from the environment alone. That covers declared
+   credentials resolved through the `CredentialResolver`, and also each
+   credential-named variable a `passEnv` list copies straight from
+   `process.env` in `tool-shell` or `plugin-mcp`. Both go through one
+   shared recording helper that `state` exports, and the two plugins
+   call it. The record goes in a `0600` file
    beside the clone. The next `now` finds a recorded name it cannot
    resolve and fails before committing, with the same fix. A value it
    cannot see is a value it cannot redact, so it does not push past it.
@@ -697,6 +709,11 @@ Two things follow for the design:
   standing grants, and lists the schedules for re-creation.
 - A credential exported for one `stratus run` after `enable` makes the
   next `now` fail before committing.
+- A value copied by `tool-shell`'s `passEnv` from a variable exported
+  after `enable` makes the next `now` fail before committing.
+- A workspace FIFO's name does not appear in the pushed tree.
+- With `sessions` enabled, a night that changed one of a hundred
+  sessions commits one new ciphertext blob, not a hundred.
 - A skill with `alias -> shared` beside `shared/` backs up. One with
   `loop -> .` fails.
 - A signed snapshot in which only a file's git mode was changed is
