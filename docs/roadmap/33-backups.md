@@ -122,26 +122,27 @@ run rather than something to write.
     (a `soul`, a database, a workspace root) and those resolve against
     the process's working directory, which the service definition sets
     on purpose. The manifest records every such path as it resolved, so
-    a snapshot says exactly which files it came from. `init` records the
-    service's working directory next to the clone, and **every** `now`
-    runs its resolution from there, including one typed by hand in
-    some other directory. `STRATUS_SOUL` is recorded the same way. The
-    service definition does not carry it, and the timer never sees the
-    environment of a daemon started by hand. So when the daemon's soul
-    came from `STRATUS_SOUL`, the recording is made by the daemon
-    itself. At every start it writes the selector it used and the path
-    it resolved into the backup directory, and every `now` uses the
-    latest record. A start without `STRATUS_SOUL` writes a record that
-    says so, and the config selection applies again. A daemon restarted
-    with a different `STRATUS_SOUL`, or without one, is followed from
-    its next start. A daemon that was already running when `init` ran
-    has written no record yet. So `init` asks a running daemon for its
-    selector over the control API, and without the API it refuses until
-    the daemon restarts, saying so. The first night never falls back to
-    the config's soul by mistake. A soul the config selects is never recorded. It
-    is resolved from the current config on every run, so an edit to
-    `soul` is followed the same night. A manual run and the nightly one
-    therefore snapshot the same tree.
+    a snapshot says exactly which files it came from.
+
+    **The daemon records its own resolution context, at every start.**
+    That context is the working directory, which config was selected
+    and by what (`--config`, `STRATUS_CONFIG`, or the default), and which
+    soul was selected and by what (`STRATUS_SOUL` or the config). None of
+    it can be read back later from outside. The service definition does
+    not carry `STRATUS_SOUL`, and a daemon started by hand, or
+    reinstalled with another `--config`, has an environment the timer
+    never sees. So every daemon start writes that record into the
+    backup directory, and every `now` resolves from the latest one,
+    including a `now` typed by hand in some other directory. A restart
+    with a different config, working directory, or `STRATUS_SOUL`, or
+    without one, is followed from that start. A daemon that was already
+    running when `init` ran has written no record yet. So `init` asks a
+    running daemon for its context over the control API, and without
+    the API it refuses until the daemon restarts, saying so. What the
+    record does not pin is the *content* of the config: a soul or root
+    the config names is re-read from the current file on every run, so
+    an edit to `soul` is followed the same night. A manual run and the
+    nightly one therefore snapshot the same tree.
   - **The selected memory store.** With `@stratusagent/memory-sqlite`
     selected, the memories live in one database at the path its config
     names, and the per-agent `memory.jsonl` files are unused. `now`
@@ -1487,7 +1488,8 @@ Two things follow for the design:
   at `~/.ssh/stratus_deploy`, `fs.read` of either file under a
   `tool-fs` root of `~/.ssh` is refused.
 - Changing `soul` in the config after `init` backs up the new soul the
-  same night.
+  same night. Reinstalling the service with a different `--config` or
+  working directory changes what the next `now` backs up.
 - Two agents whose workspaces link to one directory restore sharing one
   directory and one ledger.
 - A daemon whose default soul comes from `STRATUS_SOUL` backs that soul
