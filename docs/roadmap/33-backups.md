@@ -446,8 +446,9 @@ keeps a hostile repository from writing *outside* `<dir>`. None of them
 stops it from writing a runnable home *inside* it: a changed soul, an
 edited skill script, a new schedule with the grant that lets it run
 unattended. Git's hashes do not help, because anyone who can push can
-make a new commit. So each snapshot's manifest lists a hash of every
-file, and `now` signs the manifest with a key held outside the
+make a new commit. So each snapshot's manifest lists every file's
+path, a hash of its content, and its normalized mode (executable or
+not), and `now` signs the manifest with a key held outside the
 repository: an SSH signing key, the same kind git itself signs with.
 `init` asks for it, defaulting to git's own `user.signingkey` when that
 is an SSH key, and refuses to set up a target without one.
@@ -472,7 +473,12 @@ the package that owns its schema, and serving the restored config needs
 every plugin it enables. On a fresh machine with only the CLI and this
 package, `memory-sqlite` or any other optional plugin may simply be
 absent. So the manifest records each enabled plugin package, the
-selected memory store, and their versions. Restore checks them first.
+selected memory store, and every companion package the config turns on
+(`control-api` for an enabled `api` block, `dashboard`, and
+`channel-slack` for a configured Slack channel), each with its version.
+Companions never appear in a `plugins` block. Without that record, a
+daemon would start with only a warning, missing a surface its config
+asks for. Restore checks them first.
 If one is missing or incompatible, restore writes nothing and prints
 the install command, instead of producing a home the daemon will refuse
 to start.
@@ -508,7 +514,10 @@ workspace. The one bit kept from the source is execute. A skill's
 `scripts/` or a workspace's tooling has to run after recovery, so the
 snapshot records which files were executable (the git mode for
 plaintext, the encrypted file's metadata for ciphertext). Those files
-are restored `0700`, still owner-only.
+are restored `0700`, still owner-only. The bit restore applies is the
+one in the signed manifest, and a git mode that disagrees with it fails
+verification. Otherwise a commit that only flips a mode would pass a
+content-only signature.
 
 **Every write lands inside `<dir>`.** An external soul, a `memory-sqlite`
 database, and a configured workspace root are restored under
@@ -624,6 +633,10 @@ Two things follow for the design:
   anything is written. So is a snapshot validly signed by a different
   key than `--verify-key` names, and restore with no verify key at all. With `--unverified`, it restores with schedules
   paused and no standing grants.
+- A signed snapshot in which only a file's git mode was changed is
+  refused.
+- Restoring a home with `api.enabled` on a machine without
+  `control-api` writes nothing and prints the install command.
 - An MCP server URL carrying `?access_token=…` backs up with the token
   replaced and listed for re-entry.
 - `env: { NODE_ENV: "production" }` and a `Content-Type` header back up
