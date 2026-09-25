@@ -328,9 +328,14 @@ protocol. Every config write the CLI makes (`stratus setup`, `plugins`,
 A hand edit cannot take a lock. So under the lock, `now` also compares
 a hash of every config file it read against the hash it took at
 collection. A change starts the run over, exactly like a generation
-change. What remains is a hand edit that lands during the few seconds
-of the push itself. That is the same edge as a credential first learned
-after a push, and the spec does not pretend otherwise.
+change. A hand edit during the few seconds of the push itself cannot
+be locked out, because nothing makes an editor wait. So it is detected
+immediately afterwards instead. Once the push returns, `now` re-hashes
+the config. If the config changed, it rescans the commit it just
+published against the new secret set. A hit is reported at once and
+loudly, naming the credential to rotate, because a pushed commit is
+not taken back. This is the one place the design detects rather than
+prevents, and the spec says so.
 
 ### Secrets: three layers, because one is not enough
 
@@ -415,8 +420,12 @@ after a push, and the spec does not pretend otherwise.
    credentials. Any value that has dropped out goes onto the retired
    list. So a header rotated by editing `config.json` stays redacted
    just like a credential rotated through `credential set`. A value
-   that was added and removed entirely between two runs is one no run
-   ever saw, the same limit as a rotation before `init`. Tracking
+   that lives in config only between two runs is still seen, by the
+   runtime rather than by `now`. When a run consumes a config-derived
+   credential (a header sent, an `env` entry passed, a URL used), it
+   adds the value to the retired list, the same `0600` list that is
+   never committed. A header added for an afternoon and removed before
+   nightfall is therefore still redacted. Tracking
    follows the configured target, not the timer: `disable` stops the
    nightly run but not the retiring, and tracking ends only when the
    target itself is removed. A value rotated *before* `init` is
@@ -442,7 +451,9 @@ after a push, and the spec does not pretend otherwise.
    its token after the scheme (`Bearer`, `Token`, and so on). For
    `Basic` it also contributes the decoded `user:password` and each
    half of it, because an API key is as often sent as the username with
-   an empty password. A `Cookie` contributes each
+   an empty password. Empty parts are dropped before the length floor
+   applies, so `key:` contributes `key` and `key:` and nothing empty.
+   A `Cookie` contributes each
    cookie's value. The whole header value is added as well. The same holds for each variable a `passEnv` list
    names. So does any property a manifest marks `writeOnly` (below).
    **So does a credential carried in a URL.** An HTTP MCP server can
@@ -853,8 +864,12 @@ Two things follow for the design:
   the old value is still replaced in every later snapshot. This holds
   when the rotation happened while backups were disabled too.
 - A `credential set`, or a hand edit to `config.json` adding a header,
-  that lands between collection and commit makes the run start over, and the new value is redacted in what it commits. One
-  issued during the push waits for it to finish.
+  that lands between collection and commit makes the run start over, and the new value is redacted in what it commits. A
+  `credential set` issued during the push waits for it to finish. A hand
+  edit during the push is reported immediately afterwards, naming the
+  credential to rotate.
+- A header added to config, used in one run, and removed before the
+  next `now` is still redacted.
 - A skill with `alias -> shared` beside `shared/` backs up. One with
   `loop -> .` fails.
 - A signed snapshot in which only a file's git mode was changed is
