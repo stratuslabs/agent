@@ -150,6 +150,30 @@ Adding a model-free job kind to the daemon's scheduler is the alternative
 local clone, and pushes. Files that are already text (souls, skills,
 `memory.jsonl`, `whitelist.json`, config) are copied after redaction.
 
+The staging tree holds **plain files only**, and the git target commits
+all of them, because what the source directories contain is not the
+snapshot's business to interpret:
+
+- **Nested repository metadata is dropped.** A skill installed by
+  `stratus skill add` from a repository, or a workspace that is itself a
+  repository, carries a `.git` directory. Copied as-is, the outer
+  `git add` records it as an embedded repository (a gitlink), and a clone
+  of the backup holds none of its files. So `.git` is never copied. The
+  files are staged as ordinary files, and the manifest records where the
+  skill came from.
+- **Nested ignore rules are not honoured.** A skill or workspace with its
+  own `.gitignore` would otherwise hide durable files from the commit.
+  Staging adds everything with ignore rules switched off (`git add -f`
+  with no exclude files). The backup's own "Never" list is the only
+  exclusion.
+- **The one supported link is materialized.** `agents/<id>/workspace/`
+  may be a symlink, because the state layout lets an operator put an
+  agent's output on another volume. With `workspaces` opted in, `now`
+  copies what that link points at into the snapshot as a real directory.
+  No link is ever committed, so restore's refusal of every link (below)
+  never rejects a snapshot `now` made. Any other link in the source is
+  not followed: it fails the run and names the path.
+
 Databases are never copied as files: a live WAL-mode database copied
 byte for byte can be torn. Each one is snapshotted with `VACUUM INTO` a
 temporary path, which is consistent while the daemon is writing, and then
@@ -397,6 +421,10 @@ Two things follow for the design:
   restores without executing it and writes nothing outside `<dir>`.
 - A repository in which `agents/` or `external/` is a symlink is refused
   before anything is written.
+- A skill installed from a repository (with `.git`) and a workspace
+  holding a `.gitignore` are restored with every file. A workspace that
+  is a symlink to another volume is backed up and restored as a real
+  directory.
 - An unnamed soul in `agents/` restored under a different home directory
   keeps its agent id and its memory.
 - A value `tool-shell` passes through `env` or `passEnv`, echoed into a
