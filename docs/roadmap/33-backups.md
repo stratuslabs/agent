@@ -61,7 +61,13 @@ run rather than something to write.
   arbitrary transformation, so the promise for this content is
   ciphertext. `sessions` and `workspaces` are committed as per-file age
   ciphertext under a key the operator holds outside the backup, and
-  `init` refuses either opt-in without one. Unchanged files keep their
+  `init` refuses either opt-in without one. **Names are encrypted along
+  with contents.** A workspace filename is tool output too, and git
+  publishes it in the tree. So each encrypted file is committed under an
+  opaque name (a keyed hash of its path), and the real paths live in an
+  encrypted index beside them. Without that, a secret written into a
+  filename in a form no scan recognizes would be published even though
+  the file's contents are ciphertext. Unchanged files keep their
   previous ciphertext. age output is randomized, so re-encrypting an
   unchanged file would rewrite every blob every night, defeating
   "no change, no commit" and growing the repository without bound. `now`
@@ -226,8 +232,11 @@ snapshot's business to interpret:
   files and directories. For skill links it uses the same containment
   check `skill add` runs (`findEscapingSymlink`, which is private to
   `state` today and gets exported for its second consumer) rather than
-  a second copy of it. A link that reaches outside its own skill or workspace fails the
-  run and names the path. Because nothing committed is a link, restore's
+  a second copy of it. A link that reaches outside its own skill or
+  workspace fails the run and names the path. So does a cycle: a
+  contained link such as `loop -> .` passes containment but has no
+  finite copy. The copy tracks the real directories it has entered and
+  fails when it would enter one again. Because nothing committed is a link, restore's
   refusal of every link (below) never rejects a snapshot `now` made.
 
 Databases are never copied as files: a live WAL-mode database copied
@@ -529,7 +538,11 @@ Two things follow for the design:
 - Under a `022` umask, a restored home has the same `0700` and `0600`
   modes a fresh one has, and a skill script that was executable still is.
 - A value in a `plugin-mcp` server's `env` or `headers`, echoed into
-  memory, is not in the pushed tree. A workspace that
+  memory, is not in the pushed tree.
+- With `workspaces` enabled on the git target, no workspace filename
+  appears in the pushed tree.
+- A skill containing a link cycle fails the run promptly and names the
+  link, rather than running without end. A workspace that
   is a symlink to another volume is backed up and restored as a real
   directory.
 - An unnamed soul in `agents/` restored under a different home directory
