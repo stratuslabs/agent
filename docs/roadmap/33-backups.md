@@ -53,7 +53,14 @@ run rather than something to write.
   Workspaces are opt-in because they hold binaries that git stores badly.
 - **Everything the trusted config points at, not only what sits under
   `~/.stratus`.** A snapshot that restores a config referring to a file
-  it never saved is a broken restore. Two cases exist today:
+  it never saved is a broken restore. Three cases exist today:
+  - **The trusted config itself.** `--config` and `STRATUS_CONFIG` both
+    move it out of `~/.stratus`, so the snapshot takes the file
+    `resolveConfigLocation` resolves, never `config.json` by assumption,
+    and saves it as the snapshot's `config.json`. The manifest records
+    where it came from. `enable` writes the timer with the same
+    `--config` or `STRATUS_CONFIG` the service runs with, so the run
+    resolves the same file the daemon does.
   - **The selected memory store.** With `@stratusagent/memory-sqlite`
     selected, the memories live in one database at the path its config
     names, and the per-agent `memory.jsonl` files are unused. `now`
@@ -68,8 +75,8 @@ run rather than something to write.
     file outside `agents/`. It is copied into the snapshot under
     `external/`, and the snapshot's manifest records the original path.
 
-  Restore puts each one back at its original path, or refuses and names
-  the path when something is already there.
+  Restore never writes outside the directory it was given (see
+  [Restore](#restore)).
 - **Secret replacement before every commit** (design sketch). This is the
   part that must be right the first time, because git history is forever.
 - **A scheduled run every night**, installed next to the service unit
@@ -199,6 +206,13 @@ auto-discovered `stratus.config.json` must not be able to point your
 backups at its own remote. That would turn this feature into a way to
 exfiltrate your fleet.
 
+**The remote carries no credential.** `init` refuses a URL with userinfo
+(`https://user:token@host/…`), and `now` refuses to run if a hand-edited
+config has one. That config is committed with every snapshot, and a
+password in a URL is neither a value the credential store knows nor
+reliably key-shaped, so neither redaction layer is guaranteed to catch
+it.
+
 ### Authentication
 
 The package holds no credential of its own. It pushes with whatever git
@@ -233,8 +247,19 @@ rewrites. On top of that:
 `stratus backup restore <remote|path> --into <dir>` refuses any directory
 that is not empty. It rebuilds each database from its `schema.sql` and
 JSONL, rebuilds `memory.jsonl.index` on first use (which already happens),
-and prints the list of credentials to re-enter. The operator then moves
-the directory into place with the daemon stopped. Restoring is
+and prints the list of credentials to re-enter.
+
+**Every write lands inside `<dir>`.** An external soul and a
+`memory-sqlite` database are restored under `<dir>/external/`, and the
+restored config is rewritten to point at them there, with each rewrite
+printed beside the path it replaced. A path recorded in the manifest is
+information for the operator, never a place restore writes to: the
+repository is input that someone other than the operator may have
+changed, and following its paths would let a modified backup create
+files anywhere the operator can write. Putting a file back at its
+original location, or pointing `--config` at the restored config, is the
+operator's move, the same as moving the directory into place with the
+daemon stopped. Restoring is
 deliberately not an in-place operation: it winds approvals, grants, and
 schedules back to last night, and that is a decision to make with the
 daemon off.
@@ -294,14 +319,21 @@ Two things follow for the design:
   known key.
 - With `memory-sqlite` selected, a restore brings back its memories. With
   a third-party memory store that has no export, `now` fails and names it.
-- A config-only `soul` outside `agents/` is in the snapshot, and restore
-  puts it back where the config expects it.
+- A config-only `soul` outside `agents/` is in the snapshot. Restore puts
+  it under `<dir>/external/` and rewrites the restored config to match.
 - A planted key-shaped string that no credential store knows about fails
   the run before anything is committed.
 - A backup taken while the daemon is mid-turn restores to a database that
   opens and passes `PRAGMA integrity_check`.
 - A project-local `stratus.config.json` carrying a `backup` block has no
   effect.
+- A daemon run with `--config` pointing outside `~/.stratus` is backed up
+  from that file, and the restored home runs the same roster and memory
+  store.
+- `init` with a remote URL that carries userinfo is refused, and so is
+  `now` with one in the config.
+- A restore from a repository whose manifest names paths outside `<dir>`
+  writes nothing outside `<dir>`.
 - Deleting half of an agent's memory and running `now` commits, exits
   non-zero, and names what shrank.
 - `restore --into` a non-empty directory refuses. Into an empty one it
