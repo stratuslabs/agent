@@ -343,14 +343,17 @@ the pattern scan's to catch or no one's.
 Configuration is a source of secrets too (`env`, `headers`, URL
 parameters, `writeOnly` properties), so it takes part in the same
 protocol. The lock and the generation live inside the shared writers
-in `state` (the config-file save and the credential-store save), not
+in `state` (the config-file save, the credential-store save, and the
+soul save that `PUT /agents/:id` and `stratus agent` use, since a
+soul's `credentials:` list is a secret-set input too), not
 in each caller. So every cooperative writer takes part without being
 listed: `stratus setup`, `plugins`, `template add`, and the control
 API's `PUT /v1/config`. A new writer can only bypass it by skipping
 `state`, and the "Do not re-derive rules" convention already forbids
 that.
 A hand edit cannot take a lock. So under the lock, `now` also compares
-a hash of every config file it read against the hash it took at
+a hash of every input it read (config files, souls, and the plugin
+manifests whose `credentials` it collected) against the hash it took at
 collection. A change starts the run over, exactly like a generation
 change. A hand edit during the few seconds of the push itself cannot
 be locked out, because nothing makes an editor wait. So it is detected
@@ -691,8 +694,10 @@ to keep it with the age identity. For an operator who signs git commits
 with the same SSH key, there is also a source that survives losing the
 machine entirely: the key already published on their GitHub account.
 `--unverified` exists for an operator who has lost the signing key and
-accepts the risk. It restores, but leaves out every schedule and every
-standing grant. A schedule has no paused state: an empty next-fire
+accepts the risk. It restores, but leaves out every schedule and the
+**whole** `whitelist.json` of every agent: command scopes and approved
+origins as well as standing tool grants, since all three let a later
+call skip its prompt. A schedule has no paused state: an empty next-fire
 time is how a spent one-shot looks, and nothing resumes it. So the
 schedules are written as a readable list in the restored directory
 (agent, cadence, prompt, destination) for the operator to re-create
@@ -724,7 +729,11 @@ daemon would start with only a warning, missing a surface its config
 asks for. Restore checks them first.
 If one is missing or incompatible, restore writes nothing and prints
 the install command, instead of producing a home the daemon will refuse
-to start.
+to start. In `--unverified` mode, where every plugin comes back
+disabled, restore requires only the packages the rewritten home
+actually needs: those that own a store to rebuild, such as
+`memory-sqlite`, and the companions its config still turns on. A
+missing MCP plugin that will restore disabled blocks nothing.
 
 **The repository's SQL is never executed.** Each database is created
 from the schema the owning store ships for the snapshot's recorded
@@ -945,6 +954,11 @@ Two things follow for the design:
   `--unverified` restore of a `memory-sqlite` home starts, on the
   built-in store, with the original selection listed.
 - An MCP header named `X-Auth` is treated as a credential.
+- An `--unverified` restore brings back no command scope, origin, or
+  tool grant. It succeeds on a machine lacking a plugin that it
+  restores disabled anyway.
+- A `PUT /agents/:id` that adds a credential to a soul between
+  collection and commit makes the run start over.
 - A skill with an empty `out/` directory restores with that directory.
 - A workspace file labelled `external` before the backup still reads
   back as `external` after a restore into a different home, and after
