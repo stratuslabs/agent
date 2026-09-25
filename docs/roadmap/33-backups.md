@@ -133,8 +133,14 @@ run rather than something to write.
     omits it cannot be backed up, and says so) rather than having the
     backup guess at its storage.
   - **A config-only default `soul`.** The trusted config may name a soul
-    file outside `agents/`. It is copied into the snapshot under
-    `external/`, and the snapshot's manifest records the original path.
+    file outside `agents/`, and so may `STRATUS_SOUL`, which outranks
+    it. `now` takes the one `resolveConfiguredSoul` resolves in the
+    service's environment, whichever selector chose it. It is copied
+    into the snapshot under `external/`, and the snapshot's manifest
+    records the original path and the selector. Restore rewrites a
+    config selection in place. An environment variable is not
+    something restore can write, so for one chosen by `STRATUS_SOUL`
+    it prints the new path to export.
     An external resource that lies inside a tree the snapshot already
     copies in plaintext, such as a soul at `skills/example/SOUL.md`, is
     not copied a second time. It is recorded as a subpath of that tree,
@@ -408,9 +414,12 @@ call; that approval is the operator's decision, and the spec says so.
 The signing key need not live in the backup directory. When `init`
 takes git's own `user.signingkey`, it is usually under `~/.ssh`. So
 the protected set is the backup directory **plus the resolved private
-signing key, wherever it is**. `init` records that key's path, device,
-and inode beside the clone. `tool-fs` refuses a read of that file
-exactly as it refuses the backup directory. `now` refuses a root that
+signing key and the private deploy key, wherever they are**. The
+deploy key is the one the pinned `core.sshCommand` names. It cannot
+forge a snapshot, but it reads and writes the whole repository, plain
+memory and soul history included. `init` records each key's path,
+device, and inode beside the clone. `tool-fs` refuses a read of either
+file exactly as it refuses the backup directory. `now` refuses a root that
 contains it, and reports the refusal.
 
 **The backup directory is owner-only, whatever the home's mode is.**
@@ -1228,8 +1237,11 @@ Two things follow for the design:
   rescan.
 - A default soul at `skills/example/SOUL.md` is stored once, and after
   restore an edit through the skill changes the soul the daemon serves.
-- With `user.signingkey` at `~/.ssh/backup_ed25519`, `fs.read` of that
-  file under a `tool-fs` root of `~/.ssh` is refused.
+- With `user.signingkey` at `~/.ssh/backup_ed25519` and a deploy key
+  at `~/.ssh/stratus_deploy`, `fs.read` of either file under a
+  `tool-fs` root of `~/.ssh` is refused.
+- A daemon whose default soul comes from `STRATUS_SOUL` backs that soul
+  up, and restore prints the new path to export.
 - A `tool-fs` root of `~/.stratus/skills` makes `now` fail with the
   reason.
 - After a restore without the old private signing key,
