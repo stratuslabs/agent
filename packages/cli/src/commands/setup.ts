@@ -1015,7 +1015,7 @@ export const runSetup = async (
     writeLine(streams.stdout);
     writeLine(streams.stdout, `Create a Slack app for ${agentName}:`);
     writeLine(streams.stdout, '  1. Open https://api.slack.com/apps → Create New App → From a manifest');
-    writeLine(streams.stdout, '  2. Pick your workspace, then paste this manifest:');
+    writeLine(streams.stdout, '  2. Pick your workspace → Next, then paste this manifest:');
     writeLine(streams.stdout);
     for (const line of slackAppManifest(agentName).split('\n')) {
       writeLine(streams.stdout, `    ${line}`);
@@ -1023,14 +1023,9 @@ export const runSetup = async (
     writeLine(streams.stdout);
     // The app-level token is the step people got lost on: it lives on
     // Basic Information rather than OAuth & Permissions, where the other
-    // token is, and Slack creates it without a scope unless one is added
-    // in the same dialog. Spelled out click by click for that reason.
-    writeLine(streams.stdout, '  3. Click Create. You land on Basic Information — scroll down to');
-    writeLine(streams.stdout, '     App-Level Tokens and click Generate Token and Scopes:');
-    writeLine(streams.stdout, '       • Token Name: anything, e.g. socket');
-    writeLine(streams.stdout, '       • Add Scope → connections:write');
-    writeLine(streams.stdout, '       • Generate, then copy the token — it starts with xapp-');
-    writeLine(streams.stdout, '     That is the app-level token, and setup asks for it first.');
+    // token is, and needs a scope added in the dialog that generates it.
+    writeLine(streams.stdout, '  3. Click Next, then Create. You land on Basic Information — scroll down to');
+    writeLine(streams.stdout, '     App-Level Tokens and click Generate Token and Scopes (scope: connections:write)');
     writeLine(streams.stdout, '  4. Sidebar → Install App → Install to your workspace → Allow, then copy');
     writeLine(streams.stdout, '     the Bot User OAuth Token — it starts with xoxb-');
     writeLine(streams.stdout, `  5. Basic Information → Display Information → upload ${agentName}'s avatar`);

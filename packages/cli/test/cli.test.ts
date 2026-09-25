@@ -4167,10 +4167,8 @@ test('setup connects an agent to Slack without touching any file by hand', async
   // is refused by Slack before the adapter sees it.
   assert.match(output.stdout, /"messages_tab_enabled": true/);
   assert.match(output.stdout, /"messages_tab_read_only_enabled": false/);
-  // The app-level token is walked through click by click: where it lives,
-  // and the scope Slack does not add unless asked.
-  assert.match(output.stdout, /App-Level Tokens and click Generate Token and Scopes/);
-  assert.match(output.stdout, /Add Scope → connections:write/);
+  // The app-level token step names where it lives and the scope it needs.
+  assert.match(output.stdout, /scroll down to\n\s+App-Level Tokens and click Generate Token and Scopes \(scope: connections:write\)/);
 
   const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
   assert.deepEqual(credentials.channels, { slack: { ava: { appToken: 'xapp-tok', botToken: 'xoxb-tok' } } });
