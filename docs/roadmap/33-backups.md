@@ -895,8 +895,16 @@ under `tool-fs` roots, which are the operator's own directories and
 are deliberately not copied. Those files usually survive the lost
 machine on their own mount, and without the ledger they would come
 back unlabelled. The records are split by where their files live.
-Records for files inside an encrypted workspace travel in that
-workspace's encrypted index. The rest are plaintext, and their paths
+Any record for a file inside an agent workspace is never plaintext,
+whether or not `workspaces` is opted in, because those filenames are
+arbitrary tool output. With an age recipient configured, the record
+travels encrypted: in that workspace's index when the workspace is
+backed up, or in an encrypted ledger unit when it is not. Without a
+recipient, the record is omitted. That loses nothing for a workspace
+inside the home, since its files do not survive the lost machine
+either. It would lose labels for a workspace root outside the home,
+whose files do survive, so `now` refuses to run with such a root and
+no recipient, and names the fix. The rest are plaintext, and their paths
 go through the same secret and pattern scan as every other staged
 path. As with a filename, a hit **fails the run**; it is never
 redacted. A ledger is looked up by exact path, so a rewritten path
@@ -1054,6 +1062,8 @@ Two things follow for the design:
 - An `--unverified` restore brings back no command scope, origin, or
   tool grant. It succeeds on a machine lacking a plugin that it
   restores disabled anyway.
+- With `workspaces` off, no provenance record for a file inside any
+  agent workspace appears in plaintext in the repository.
 - A `tool-fs` root of `~` for any agent makes `now` fail with the
   reason, and `fs.read` of the signing key under that root is refused
   before any `now` runs.
