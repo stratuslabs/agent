@@ -53,7 +53,7 @@ run rather than something to write.
   Workspaces are opt-in because they hold binaries that git stores badly.
 - **Everything the trusted config points at, not only what sits under
   `~/.stratus`.** A snapshot that restores a config referring to a file
-  it never saved is a broken restore. Three cases exist today:
+  it never saved is a broken restore. Four cases exist today:
   - **The trusted config itself.** `--config` and `STRATUS_CONFIG` both
     move it out of `~/.stratus`, so the snapshot takes the file
     `resolveConfigLocation` resolves, never `config.json` by assumption,
@@ -73,7 +73,21 @@ run rather than something to write.
     backup guess at its storage.
   - **A config-only default `soul`.** The trusted config may name a soul
     file outside `agents/`. It is copied into the snapshot under
-    `external/`, and the snapshot's manifest records the original path.
+    `external/`, and the snapshot's manifest records the original path
+    and the agent id it resolved to. An unnamed soul's generated identity
+    is seeded from its resolved path, and memory, sessions, grants, and
+    schedules are all keyed by that id, so a relocated copy would come
+    back as a stranger to its own state. Restore therefore writes the
+    recorded id into the relocated copy's frontmatter and prints that it
+    did.
+  - **A configured `workspaceRoot`.** `tool-fs`, `tool-shell`,
+    `tool-browser`, and `plugin-mcp` accept one, and it wins over
+    `agents/<id>/workspace/`. With `workspaces` opted in, `now` snapshots
+    the root each agent actually resolves to, through the same resolver
+    the plugins use rather than by reading the setting, under
+    `external/`. The directories an agent is merely allowed to work in
+    (`tool-fs` roots) are the operator's own files, not agent state, and
+    stay out.
 
   Restore never writes outside the directory it was given (see
   [Restore](#restore)).
@@ -179,6 +193,16 @@ there that holds a `sessions.db` as an agent.
    short exactly where it matters. So `enable` writes the timer with the
    same environment the service definition carries, and a declared name
    that resolves to nothing at backup time is reported in `status`.
+   **Replacement works on values, not on bytes.** A credential can hold
+   a quote, a backslash, or a newline, and once it is inside a JSONL line
+   or a session row (a JSON body inside a table exported as JSON) it is
+   stored escaped, once or twice, and a byte-level search for the raw
+   value misses it. So every record is decoded before it is staged:
+   JSONL lines and database rows are parsed, embedded JSON strings are
+   parsed in turn, and replacement runs on each string value before the
+   record is serialized again. The byte-level scan still runs afterwards,
+   for the raw value and its JSON-escaped forms, as a backstop over
+   everything the decoder did not cover, such as souls and skills.
    Exact-match replacement is deterministic, needs no model, and cannot
    miss a key it knows about. It cannot know about a key nothing
    declares, which is what the next layer is for.
@@ -245,12 +269,22 @@ rewrites. On top of that:
 ### Restore
 
 `stratus backup restore <remote|path> --into <dir>` refuses any directory
-that is not empty. It rebuilds each database from its `schema.sql` and
-JSONL, rebuilds `memory.jsonl.index` on first use (which already happens),
+that is not empty. It rebuilds each database from its JSONL, rebuilds `memory.jsonl.index` on first use (which already happens),
 and prints the list of credentials to re-enter.
 
-**Every write lands inside `<dir>`.** An external soul and a
-`memory-sqlite` database are restored under `<dir>/external/`, and the
+**The repository's SQL is never executed.** Each database is created
+from the schema the owning store ships for the snapshot's recorded
+schema version (the same statements a fresh home runs), and rows are
+inserted with bound parameters only. A table or column the known
+schema does not have is refused rather than created, because an
+identifier cannot be a bound parameter. The snapshot's `schema.sql` exists
+for a person reading the repository and for a check that it matches.
+Executing it would hand the repository `ATTACH` and `VACUUM INTO`, which
+are file writes anywhere, and it would bypass everything below.
+
+**Every write lands inside `<dir>`.** An external soul, a `memory-sqlite`
+database, and a configured workspace root are restored under
+`<dir>/external/`, and the
 restored config is rewritten to point at them there, with each rewrite
 printed beside the path it replaced. A path recorded in the manifest is
 information for the operator, never a place restore writes to: the
@@ -320,7 +354,15 @@ Two things follow for the design:
 - With `memory-sqlite` selected, a restore brings back its memories. With
   a third-party memory store that has no export, `now` fails and names it.
 - A config-only `soul` outside `agents/` is in the snapshot. Restore puts
-  it under `<dir>/external/` and rewrites the restored config to match.
+  it under `<dir>/external/` and rewrites the restored config to match,
+  and an unnamed one comes back with the same agent id and its state.
+- With `workspaces` opted in and a `workspaceRoot` configured, the files
+  under that root are the ones backed up and restored.
+- A credential containing a quote, a backslash, and a newline, pasted
+  into memory and a session, appears in the pushed tree in no form, raw
+  or escaped.
+- A repository whose `schema.sql` carries an `ATTACH` or `VACUUM INTO`
+  restores without executing it and writes nothing outside `<dir>`.
 - A planted key-shaped string that no credential store knows about fails
   the run before anything is committed.
 - A backup taken while the daemon is mid-turn restores to a database that
