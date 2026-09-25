@@ -144,7 +144,8 @@ run rather than something to write.
     resolver the plugins use, rather than by reading the settings. It
     canonicalizes the roots, together with every other external resource
     (an external soul, a `memory-sqlite` database, and the trusted
-    config file itself when `--config` names one), and keeps the
+    config file itself wherever `resolveConfigLocation` found it, whether
+    through `--config` or `STRATUS_CONFIG`), and keeps the
     relationships between them. A config inside a workspace is stored
     once, in its redacted form, and restore points both the daemon and
     the workspace at that one file.
@@ -1097,7 +1098,8 @@ Two things follow for the design:
 - An MCP header named `X-APIKEY` is treated as a credential.
 - A config-only soul reached through a symlink backs up as a regular
   file.
-- A `--config` file inside a workspace root is stored once, and after
+- A config file inside a workspace root, selected by `--config` or by
+  `STRATUS_CONFIG`, is stored once, and after
   restore an edit through the workspace changes the config the daemon
   reads.
 - A default soul that lives inside a workspace root is stored once, and
