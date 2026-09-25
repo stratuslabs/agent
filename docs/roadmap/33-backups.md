@@ -321,6 +321,17 @@ of committing text redacted against a stale set. A credential first
 learned after a push finishes was never known to any run, and is
 the pattern scan's to catch or no one's.
 
+Configuration is a source of secrets too (`env`, `headers`, URL
+parameters, `writeOnly` properties), so it takes part in the same
+protocol. Every config write the CLI makes (`stratus setup`, `plugins`,
+`template add`) takes the secret-set lock and advances the generation.
+A hand edit cannot take a lock. So under the lock, `now` also compares
+a hash of every config file it read against the hash it took at
+collection. A change starts the run over, exactly like a generation
+change. What remains is a hand edit that lands during the few seconds
+of the push itself. That is the same edge as a credential first learned
+after a push, and the spec does not pretend otherwise.
+
 ### Secrets: three layers, because one is not enough
 
 1. **Files that are secrets never enter the staging tree** (the "Never"
@@ -841,8 +852,8 @@ Two things follow for the design:
 - A credential rotated after its old value was written into memory:
   the old value is still replaced in every later snapshot. This holds
   when the rotation happened while backups were disabled too.
-- A `credential set` that lands between collection and commit makes the
-  run start over, and the new value is redacted in what it commits. One
+- A `credential set`, or a hand edit to `config.json` adding a header,
+  that lands between collection and commit makes the run start over, and the new value is redacted in what it commits. One
   issued during the push waits for it to finish.
 - A skill with `alias -> shared` beside `shared/` backs up. One with
   `loop -> .` fails.
