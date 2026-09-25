@@ -14,6 +14,8 @@ import {
  * cannot call the models endpoint, and neither can an offline machine.
  */
 export const KNOWN_CLAUDE_MODELS = [
+  'claude-opus-5-5',
+  'claude-fable-5-1',
   'claude-opus-5',
   'claude-sonnet-5',
   'claude-haiku-4-5',
