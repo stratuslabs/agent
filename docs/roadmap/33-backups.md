@@ -229,7 +229,13 @@ run rather than something to write.
     writable-root guard below refuses that layout and says to move the
     file out. The directories an agent is merely allowed to work in
     (`tool-fs` roots) are the operator's own files, not agent state, and
-    stay out.
+    stay out. So does a `tool-shell` `cwd`, which bypasses
+    `workspaceResolver` when set. It is the directory the operator
+    pointed the shell at, usually a project checkout that has its own
+    history, not an output directory the host owns. Backing it up would
+    copy someone's repository into their agent backup. `status` lists
+    each configured `cwd` as not covered, so the gap is visible rather
+    than silent, and restore prints it beside the setting that names it.
 
   Restore never writes outside the directory it was given, apart from
   the staging directory it creates beside it (see
@@ -1360,6 +1366,8 @@ Two things follow for the design:
   restored home runs with the plugins the daemon had. The restored
   project file is never offered as `--config`, and a trusted-only block
   in it stays ignored.
+- A `tool-shell` `cwd` is not backed up, and `status` and restore both
+  name it as not covered.
 - An agent whose soul was deleted but whose `agents/<id>/` remains is
   still backed up, memories and workspace included.
 - A config-only `soul` outside `agents/` is in the snapshot. Restore puts
