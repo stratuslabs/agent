@@ -134,7 +134,11 @@ run rather than something to write.
     latest record. A start without `STRATUS_SOUL` writes a record that
     says so, and the config selection applies again. A daemon restarted
     with a different `STRATUS_SOUL`, or without one, is followed from
-    its next start. A soul the config selects is never recorded. It
+    its next start. A daemon that was already running when `init` ran
+    has written no record yet. So `init` asks a running daemon for its
+    selector over the control API, and without the API it refuses until
+    the daemon restarts, saying so. The first night never falls back to
+    the config's soul by mistake. A soul the config selects is never recorded. It
     is resolved from the current config on every run, so an edit to
     `soul` is followed the same night. A manual run and the nightly one
     therefore snapshot the same tree.
@@ -389,7 +393,9 @@ snapshot's business to interpret:
   for optional content only, meaning skill and workspace files, the
   same split the hard-link rule makes. A required state file that never
   holds still fails the run: the selected config, a soul, a
-  `memory.jsonl`, or a `whitelist.json`. An old copy of the config
+  `memory.jsonl`, a `whitelist.json`, or a workspace's
+  `fs-provenance.jsonl`. A stale ledger beside newer workspace files
+  would restore those files without their labels. An old copy of the config
   beside resources its new contents selected would be a snapshot of no
   moment that ever existed. A torn file is
   never signed as a good one. A link the snapshot
@@ -808,9 +814,11 @@ property `writeOnly`, which JSON Schema already defines. Then the rule
 lives with the package that knows, not in a list here. A block whose
 manifest cannot be read has no schema to consult. That happens with a
 disabled plugin left in the config after its package was removed,
-which the config accepts and the loader skips. Every leaf value in such
-a block is then treated as a credential: it is redacted, added to the
-secret set, and listed for re-entry on restore. `status` names the
+which the config accepts and the loader skips. Every plugin-owned leaf
+value in such a block is then treated as a credential. The host-owned
+structural fields, `enabled` and `agents`, keep their types, because a
+restored config must still parse. Each plugin-owned value is
+redacted, added to the secret set, and listed for re-entry on restore. `status` names the
 block and says to reinstall the package or delete the block. A block
 nobody can inspect is never copied through as if it were known to be
 harmless.
@@ -1398,8 +1406,14 @@ Two things follow for the design:
 - Moving a plugin's `workspaceRoot` from `/data/a` to `/data/b` keeps
   `/data/a/<id>` in the snapshot until `forget-root /data/a`, including
   after a restore onto a replacement machine.
-- A disabled plugin block whose package is uninstalled has every value
-  redacted and listed for re-entry, and `status` names it.
+- A disabled plugin block whose package is uninstalled has every
+  plugin-owned value redacted and listed for re-entry, keeps
+  `enabled: false` as a boolean, and restores into a config that
+  parses. `status` names it.
+- A ledger rewritten through every retry fails `now` rather than being
+  kept stale or skipped.
+- `init` run beside a daemon that is already serving a `STRATUS_SOUL`
+  soul backs that soul up on the first night.
 - A hard-linked `memory.jsonl` fails `now` with the path, rather than
   producing a snapshot without memories, and so does a `config.json`
   rewritten continuously through every retry.
