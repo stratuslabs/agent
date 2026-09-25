@@ -793,7 +793,15 @@ back unlabelled. The records are split by where their files live.
 Records for files inside an encrypted workspace travel in that
 workspace's encrypted index. The rest are plaintext, and their paths
 go through the same secret and pattern scan as every other staged
-path. On restore, a record whose root the restored config still
+path. As with a filename, a hit **fails the run**; it is never
+redacted. A ledger is looked up by exact path, so a rewritten path
+would silently strip the label from the real file.
+
+The ledger is **read last**, after every workspace file has been
+copied. `fs.write` records a label before it writes the bytes, so a
+file the traversal copied already has its label in the ledger by the
+time the ledger is read. A tainted write that overlaps the run can
+never land in the snapshot without its record. On restore, a record whose root the restored config still
 references is written back unchanged. A record for a relocated root is
 mapped. Only a record whose root the restored config no longer
 references is kept aside and listed. When in doubt the label errs
@@ -932,7 +940,10 @@ Two things follow for the design:
   back as `external` after a restore into a different home, and after
   a relocated `workspaceRoot`. With `workspaces` left off, a file
   under a surviving `tool-fs` root that was labelled `external` is
-  still `external` after restore.
+  still `external` after restore. So is a file whose tainted write
+  overlapped the backup run.
+- A `tool-fs` file whose path contains a credential value fails the run
+  and names the path.
 - `enable` with a `STRATUS_API_KEY` exported only in the operator's
   shell is refused.
 - A credential exported for one `stratus run` after `enable` makes the
