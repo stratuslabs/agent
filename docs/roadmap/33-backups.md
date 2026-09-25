@@ -132,7 +132,10 @@ run rather than something to write.
     not carry `STRATUS_SOUL`, and a daemon started by hand, or
     reinstalled with another `--config`, has an environment the timer
     never sees. So every daemon start writes that record into the
-    backup directory, and every `now` resolves from the latest one,
+    backup directory, through the same shared writer and under the same
+    secret-set lock and generation as a config save, since a new context
+    can bring new secrets with it. Every `now` resolves from the latest
+    record,
     including a `now` typed by hand in some other directory. A restart
     with a different config, working directory, or `STRATUS_SOUL`, or
     without one, is followed from that start. A daemon that was already
@@ -568,7 +571,8 @@ a hash of every file-backed input to the secret set against the hash
 it took at collection. That covers config files, souls, the plugin
 manifests whose `credentials` it collected, `credentials.json`, and
 `gateway-token`. Pasting a token straight into `credentials.json` is a
-documented setup path for a Slack channel. It also covers the backing
+documented setup path for a Slack channel. It also covers the daemon's
+recorded resolution context, and the backing
 file of an accepted `store --file` git helper, and the source files of
 the deploy key and the signing key. The run uses frozen copies of the
 keys, but a source replaced mid-run is still new secret material the
@@ -1489,7 +1493,9 @@ Two things follow for the design:
   `tool-fs` root of `~/.ssh` is refused.
 - Changing `soul` in the config after `init` backs up the new soul the
   same night. Reinstalling the service with a different `--config` or
-  working directory changes what the next `now` backs up.
+  working directory changes what the next `now` backs up, and a daemon
+  restarted onto another config in the middle of a run makes that run
+  start over.
 - Two agents whose workspaces link to one directory restore sharing one
   directory and one ledger.
 - A daemon whose default soul comes from `STRATUS_SOUL` backs that soul
