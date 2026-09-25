@@ -253,8 +253,11 @@ snapshot's business to interpret:
   a second copy of it. A link that reaches outside its own skill or
   workspace fails the run and names the path. So does a cycle: a
   contained link such as `loop -> .` passes containment but has no
-  finite copy. The copy tracks the real directories it has entered and
-  fails when it would enter one again. Because nothing committed is a link, restore's
+  finite copy. The copy tracks the real directories on its *current
+  path*, pushing each on the way down and popping it on the way back
+  up. It fails only when it would enter one of its own ancestors. An
+  alias such as `alias -> shared` beside `shared/` is finite and is
+  copied twice, not refused. Because nothing committed is a link, restore's
   refusal of every link (below) never rejects a snapshot `now` made.
 
 Databases are never copied as files: a live WAL-mode database copied
@@ -322,8 +325,14 @@ failing silently.
    once in the environment the timer will have. It refuses when a name
    resolves in the first and not in the second, and names the credential
    and the fix: `stratus credential set <name>`, which puts it where
-   every run can read it. `now` reports the same gap in `status` if it
-   appears later.
+   every run can read it. A gap can also open after `enable`, when a
+   variable is exported later for a single `stratus run`. The timer
+   never sees that shell, so while backups are enabled, the runtime
+   records the *name* (never the value) of any declared credential it
+   resolved from the environment alone. The record goes in a `0600` file
+   beside the clone. The next `now` finds a recorded name it cannot
+   resolve and fails before committing, with the same fix. A value it
+   cannot see is a value it cannot redact, so it does not push past it.
 
    Values that live in configuration rather than in a credential store
    join the same set, and **the entry's name decides, not the field it
@@ -511,8 +520,12 @@ to keep it with the age identity. For an operator who signs git commits
 with the same SSH key, there is also a source that survives losing the
 machine entirely: the key already published on their GitHub account.
 `--unverified` exists for an operator who has lost the signing key and
-accepts the risk. It restores, and marks the home by leaving every
-schedule paused and every standing grant out. Those are the two ways
+accepts the risk. It restores, but leaves out every schedule and every
+standing grant. A schedule has no paused state: an empty next-fire
+time is how a spent one-shot looks, and nothing resumes it. So the
+schedules are written as a readable list in the restored directory
+(agent, cadence, prompt, destination) for the operator to re-create
+deliberately. Those are the two ways
 restored state acts on its own. The printout says which ones it
 dropped.
 
@@ -679,8 +692,13 @@ Two things follow for the design:
   anything when no identity is given, and again when the wrong one is.
 - A snapshot with one soul edited after signing is refused before
   anything is written. So is a snapshot validly signed by a different
-  key than `--verify-key` names, and restore with no verify key at all. With `--unverified`, it restores with schedules
-  paused and no standing grants.
+  key than `--verify-key` names, and restore with no verify key at
+  all. With `--unverified`, it restores with no schedules and no
+  standing grants, and lists the schedules for re-creation.
+- A credential exported for one `stratus run` after `enable` makes the
+  next `now` fail before committing.
+- A skill with `alias -> shared` beside `shared/` backs up. One with
+  `loop -> .` fails.
 - A signed snapshot in which only a file's git mode was changed is
   refused.
 - Restoring a home with `api.enabled` on a machine without
