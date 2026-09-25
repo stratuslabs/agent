@@ -311,10 +311,16 @@ snapshot's business to interpret:
   materializes is resolved the same way, one component at a time. What
   this cannot close is a swap that is made and undone again inside a
   single open. The spec states that residual rather than claiming
-  `openat` semantics Node lacks. Its reach is also narrow. Agents write
-  into workspaces, and on the git target a workspace is only ever
-  committed as ciphertext, so a file pulled in by such a race lands
-  encrypted, never in plaintext. A native helper with real `openat`
+  `openat` semantics Node lacks. Its reach is also narrow, and made so
+  on purpose. `now` refuses any agent-writable root, meaning a `tool-fs`
+  root or a workspace root, that contains a tree it commits in
+  plaintext: `skills/`, `agents/`, or the config file. It uses the same
+  per-agent resolution as the backup-directory check. So the only trees
+  an agent can race are workspaces. On the git target those are only
+  ever committed as ciphertext, and a file pulled in by such a race
+  lands encrypted, never in plaintext. A process running as the same
+  user outside any agent can already read everything the backup can,
+  so it is out of scope. A native helper with real `openat`
   (and `openat2(RESOLVE_BENEATH)` on Linux) is the follow-up that
   would close the residual. It is listed under open questions, not
   assumed. A link that reaches outside its own skill or
@@ -805,6 +811,19 @@ from `STRATUS_BACKUP_VERIFY_KEY`. `init` prints the public key and says
 to keep it with the age identity. For an operator who signs git commits
 with the same SSH key, there is also a source that survives losing the
 machine entirely: the key already published on their GitHub account.
+
+**The signing key has to survive the machine too**, or backups cannot
+resume after the restore they exist for. A dedicated key lives in
+`~/.stratus/backup/`, which no snapshot contains. So `init` says to
+keep its *private* half with the age identity, in the same offline
+place. When it is lost anyway, `init --rotate-signing-key` on the
+restored machine starts a new chain. The first manifest under the new
+key records the last sequence number and manifest hash of the old
+chain, and its signature says it starts a new chain. Restore accepts
+that step only when `--verify-key` names both keys, and it verifies
+the earlier history with the old public key. Rotation never needs the
+lost private key. It needs only the operator's deliberate choice, and
+that choice is what the restore checkpoint already asks for.
 `--unverified` exists for an operator who has lost the signing key and
 accepts the risk. It restores, but leaves out every schedule and the
 **whole** `whitelist.json` of every agent: command scopes and approved
@@ -1125,6 +1144,12 @@ Two things follow for the design:
   never copied.
 - Restoring a snapshot written by a newer state schema on an older
   CLI writes nothing and prints the upgrade command.
+- A `tool-fs` root of `~/.stratus/skills` makes `now` fail with the
+  reason.
+- After a restore without the old private signing key,
+  `init --rotate-signing-key` lets `now` resume. A later restore that
+  names both public keys verifies across the rotation, and one that
+  names only the new key refuses the older history.
 - A `tool-fs` root of `~` for any agent makes `now` fail with the
   reason, and `fs.read` of the signing key under that root is refused
   before any `now` runs.
