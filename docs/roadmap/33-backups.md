@@ -155,28 +155,23 @@ run rather than something to write.
     the raw live file, so one blob cannot be both. A config or database
     inside a copied tree (`skills/`, say) makes `now` refuse and say to
     move it out.
-  - **A configured `workspaceRoot`.** `tool-fs`, `tool-shell`,
-    `tool-browser`, and `plugin-mcp` accept one, and it wins over
-    `agents/<id>/workspace/`. They are set independently, per plugin and
-    per agent, so one agent can have several: shell output under one
-    root and MCP output under another. With `workspaces` opted in, `now`
-    enumerates every resolved `(plugin, agent)` root through the same
-    resolver the plugins use, rather than by reading the settings. It
-    canonicalizes the roots and keeps the relationships between them.
-    A resource the snapshot commits in plaintext is never *inside* one.
-    That covers an external soul, a `memory-sqlite` database, and the
-    trusted config file wherever `resolveConfigLocation` found it,
-    through `--config` or `STRATUS_CONFIG`. The writable-root guard
-    below refuses that layout and says to move the file out. So there is
-    no overlap between a plaintext resource and an agent-written tree
-    to preserve.
-    Roots that coincide are one tree. A root nested inside another is
-    not copied twice: it is recorded as a subpath of the outer tree.
-    Restore rewrites each setting to its tree plus that subpath, so a
-    file written through one plugin stays visible through the other,
-    as it was. The directories an agent is merely allowed to work in
-    (`tool-fs` roots) are the operator's own files, not agent state, and
-    stay out.
+  - **Where the workspaces are.** A host that supplies
+    `PluginContext.workspaces`, which the daemon and `stratus run`
+    always do, sends every plugin's output for an agent to the one
+    directory `createAgentWorkspaces` resolves: `agents/<id>/workspace/`.
+    That directory may be a link to another volume, which is a supported
+    link (below). `tool-fs` and `plugin-mcp` write the same provenance
+    ledger there because of it. With `workspaces` opted in, `now`
+    enumerates workspaces through that same resolver, never through
+    plugin settings. A plugin's own `workspaceRoot` applies only to a
+    host that wires it by hand without the seam, which is not a home
+    this command backs up, so it is not read. A resource the snapshot
+    commits in plaintext is never inside a workspace. That covers an
+    external soul, a `memory-sqlite` database, and the trusted config
+    file wherever `resolveConfigLocation` found it. The writable-root
+    guard below refuses that layout and says to move the file out. The
+    directories an agent is merely allowed to work in (`tool-fs` roots)
+    are the operator's own files, not agent state, and stay out.
 
   Restore never writes outside the directory it was given, apart from
   the staging directory it creates beside it (see
@@ -928,6 +923,10 @@ real latest backup, so the anchor has to come from outside it:
   its parent's manifest, and the next sequence number. It refuses an
   unsigned or mis-chained commit, because building on one would leave
   every later tip unrestorable once the restore walk reached it.
+  A tip that is exactly this writer's own retained commit is not
+  foreign. That happens when a push landed but the connection dropped
+  before git reported success. The run recognizes the commit by its
+  hash, records it as pushed, and carries on.
 - **Restore always asks for a checkpoint.** A replacement machine does
   not have the sequence number `now` recorded, and yesterday's tip is
   as dangerous as last month's when a grant was revoked this morning.
@@ -1223,12 +1222,11 @@ Two things follow for the design:
   a third-party memory store that has no export, `now` fails and names it.
 - A config-only `soul` outside `agents/` is in the snapshot. Restore puts
   it under `<dir>/external/` and rewrites the restored config to match.
-- With `workspaces` opted in and a `workspaceRoot` configured, the files
-  under that root are the ones backed up and restored. An agent with
-  different roots for `tool-shell` and `plugin-mcp` has both backed up,
-  and both settings are rewritten on restore. When one root is nested
-  in the other, the nested files are stored once and stay shared after
-  restore.
+- With `workspaces` opted in, the workspace `createAgentWorkspaces`
+  resolves is the one backed up. When `agents/<id>/workspace` is a link
+  to another volume, the files on the far side are backed up and
+  restore a real directory. A plugin's hand-wiring `workspaceRoot` is
+  not read.
 - A channel token replaced through a provider or channel sign-in
   between two runs stays redacted afterwards. So does the token from a
   `Proxy-Authorization: Bearer …` header.
@@ -1362,8 +1360,9 @@ Two things follow for the design:
 - A restore of a force-pushed, day-old, correctly signed tip does not
   proceed without `--expect-after`, `--expect-sequence`, or a
   confirmation.
-- A `workspaceRoot` set to `~/.stratus` or `~` makes `now` fail with
-  the reason, and no file from the backup directory is ever staged.
+- An `agents/<id>/workspace` linked to `~/.stratus` or `~` makes `now`
+  fail with the reason, and no file from the backup directory is ever
+  staged.
 - Two `stratus run` invocations that export `GITHUB_TOKEN` with
   different values before one `now` leave both fingerprints, and `now`
   stays blocked until both are stored, retired, or acknowledged.
@@ -1392,7 +1391,7 @@ Two things follow for the design:
 - A skill with an empty `out/` directory restores with that directory.
 - A workspace file labelled `external` before the backup still reads
   back as `external` after a restore into a different home, and after
-  a relocated `workspaceRoot`. With `workspaces` left off, a file
+  a workspace link that pointed at another volume is restored. With `workspaces` left off, a file
   under a surviving `tool-fs` root that was labelled `external` is
   still `external` after restore. So is a file whose tainted write
   overlapped the backup run.
@@ -1438,6 +1437,8 @@ Two things follow for the design:
   sequence refuses to run. So does `now` against a tip that another
   writer advanced, until `--takeover`, and a takeover refuses a tip
   that advanced with an unsigned commit.
+- A push that the remote accepted but git reported as failed is
+  recognized on the next run as this writer's own, not a foreign tip.
 - `init` against a repository that has only a README commit creates the
   orphan `stratus-backup` branch, and restore verifies its first
   snapshot as the chain root.
