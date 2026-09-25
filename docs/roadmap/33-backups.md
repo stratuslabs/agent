@@ -187,7 +187,12 @@ run rather than something to write.
     well, even when every enabled plugin has a configured root. It is
     the agent's state-owned output directory, it holds the `tool-fs`
     ledger, and it keeps files written before a plugin was relocated or
-    disabled.
+    disabled. A root seen once stays in the set. Changing a plugin's
+    `workspaceRoot` does not delete what the old root holds, so `now`
+    records every root it has enumerated, beside the clone. It keeps
+    backing up each one that still exists until the operator retires it
+    with `stratus backup forget-root <path>`. `status` lists the roots
+    still carried only because of that record.
     Roots that coincide are one tree. A root nested inside another is
     recorded as a subpath of the outer tree rather than copied twice. A
     resource the snapshot commits in plaintext is never inside any of
@@ -550,9 +555,11 @@ gateway token included. The push's own credential cannot drift the same
 way, because it is frozen at collection. The HTTPS token `now` collected
 reaches git through a one-shot helper that returns exactly that value.
 The SSH key is read once into a private `0600` copy inside the backup
-directory, and `-i` names that copy. A keychain that rotates mid-run,
+directory, and `-i` names that copy. The signing key is frozen the same
+way, and the manifest is signed from its copy. A keychain that rotates mid-run,
 or a deploy key edited in place, cannot put a credential on the wire
-that the scan never saw. If any of them changed, it recollects the secret set from
+that the scan never saw. A signing key replaced mid-run cannot sign a
+tip that fails verification. If any of them changed, it recollects the secret set from
 all of them and rescans the commit it just published against it. A hit is reported at once and
 loudly, naming the credential to rotate, because a pushed commit is
 not taken back. This is the one place the design detects rather than
@@ -1376,7 +1383,9 @@ Two things follow for the design:
 - Two workspaces sharing one hard-linked `fs-provenance.jsonl` restore
   still sharing it, and every label survives.
 - A keychain token rotated between collection and push is not the one
-  the push uses.
+  the push uses, and a signing key replaced mid-run does not sign.
+- Moving a plugin's `workspaceRoot` from `/data/a` to `/data/b` keeps
+  `/data/a/<id>` in the snapshot until `forget-root /data/a`.
 - A hard-linked `memory.jsonl` fails `now` with the path, rather than
   producing a snapshot without memories, and so does a `config.json`
   rewritten continuously through every retry.
