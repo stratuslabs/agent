@@ -316,6 +316,12 @@ there that holds a `sessions.db` as an agent.
    name containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, or
    `CREDENTIAL`. The same holds for each variable a `passEnv` list
    names. So does any property a manifest marks `writeOnly` (below).
+   **So does a credential carried in a URL.** An HTTP MCP server can
+   authenticate as `https://host/mcp?access_token=…`, and the plugin
+   passes the URL to the transport as it is. Every URL-valued string in
+   the trusted config is parsed. Its userinfo, and any query parameter
+   whose name marks it as a credential by the same rule (`token`, `key`,
+   `secret`, `password`, `sig`, `access_token`, and so on), join the set.
    Inside `config.json`, those entries are replaced and listed for
    re-entry on restore, like any credential. Ordinary entries are copied
    verbatim. A tool can echo a secret entry into a session or a memory,
@@ -434,6 +440,24 @@ one, restore stops before writing anything and says which. A restore
 that silently left out the encrypted half would look complete and not
 be. It rebuilds each database from its JSONL, rebuilds `memory.jsonl.index` on first use (which already happens),
 and prints the list of credentials to re-enter.
+
+**A snapshot is verified before it is trusted.** Every check above
+keeps a hostile repository from writing *outside* `<dir>`. None of them
+stops it from writing a runnable home *inside* it: a changed soul, an
+edited skill script, a new schedule with the grant that lets it run
+unattended. Git's hashes do not help, because anyone who can push can
+make a new commit. So each snapshot's manifest lists a hash of every
+file, and `now` signs the manifest with a key held outside the
+repository: an SSH signing key, the same kind git itself signs with.
+`init` asks for it, defaulting to git's own `user.signingkey` when that
+is an SSH key, and refuses to set up a target without one.
+Restore verifies that signature against the operator's public key
+before writing anything, and refuses a snapshot it cannot verify.
+`--unverified` exists for an operator who has lost the signing key and
+accepts the risk. It restores, and marks the home by leaving every
+schedule paused and every standing grant out. Those are the two ways
+restored state acts on its own. The printout says which ones it
+dropped.
 
 **The packages the home ran on come first.** Rebuilding a store needs
 the package that owns its schema, and serving the restored config needs
@@ -588,6 +612,11 @@ Two things follow for the design:
   appears in the pushed tree.
 - A restore of a snapshot with encrypted content refuses before writing
   anything when no identity is given, and again when the wrong one is.
+- A snapshot with one soul edited after signing is refused before
+  anything is written. With `--unverified`, it restores with schedules
+  paused and no standing grants.
+- An MCP server URL carrying `?access_token=…` backs up with the token
+  replaced and listed for re-entry.
 - `env: { NODE_ENV: "production" }` and a `Content-Type` header back up
   verbatim. `env: { GITHUB_TOKEN: … }` and an `Authorization` header are
   replaced, and the restore lists them for re-entry.
