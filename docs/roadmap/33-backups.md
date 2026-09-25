@@ -5,8 +5,12 @@
 An operator can name a private git repository once, and every night the
 parts of `~/.stratus` worth keeping (souls, skills, memory, schedules, and
 optionally conversations) are committed and pushed there. A script does
-the work, not a model. No secret is ever pushed, and a lost machine can be
-restored from the repository with one command. The feature is off by
+the work, not a model. No value the home knows to be secret is pushed in
+any form the scan recognizes. Anything a scan cannot vouch for goes up
+only as ciphertext or not at all (see
+[Secrets](#secrets-three-layers-because-one-is-not-enough) for exactly
+where that line is). A lost machine can be restored from the repository
+with one command. The feature is off by
 default and ships as a package you have to add.
 
 ## Why now
@@ -46,7 +50,7 @@ run rather than something to write.
 
   | Default | Opt-in | Never |
   | --- | --- | --- |
-  | `agents/<id>.md` souls, `skills/`, `config.json` (sensitive values redacted, below), `state.json`, per-agent `memory.jsonl` and `whitelist.json`, the `schedules` table from `fleet.db` | `sessions.db` per agent and the session index (`sessions`), `workspace/` per agent (`workspaces`) | `credentials.json`, `gateway-token`, `gateway.json`, `stratusd.lock`, `logs/`, `memory.jsonl.index` (it is derived and can be rebuilt), any `-wal`, `-shm`, or `-journal` file |
+  | `agents/<id>.md` souls, `skills/`, `config.json` (sensitive values redacted, below), `state.json`, per-agent `memory.jsonl` and `whitelist.json`, the `schedules` table from `fleet.db` | `sessions.db` per agent and the session index (`sessions`), `workspace/` per agent (`workspaces`) | `credentials.json`, `gateway-token`, `gateway.json`, `stratusd.lock`, `logs/`, `memory.jsonl.index` (it is derived and can be rebuilt, except for its `usage` table, below), any `-wal`, `-shm`, or `-journal` file |
 
   Sessions are opt-in because they are the largest and most sensitive
   thing in a home: whole conversations, tool inputs, and command output.
@@ -136,6 +140,12 @@ run rather than something to write.
 
   Restore never writes outside the directory it was given (see
   [Restore](#restore)).
+- **The memory index's `usage` table.** The index is derived from
+  `memory.jsonl` in every table but one. `usage` holds recall counts and
+  last-recalled times, and nothing else records them. So `now` exports
+  that table as JSONL beside the memory it describes, and restore loads
+  it into the rebuilt index. Otherwise a restore would silently reset
+  what the agent had learned about which memories it uses.
 - **Every soul's resolved agent id.** A soul that declares no `name` or
   `id` gets a generated identity seeded from its **absolute path**, which
   is true of ordinary `agents/*.md` souls as well as a config-only one.
@@ -291,17 +301,27 @@ there that holds a `sessions.db` as an agent.
    that resolves to nothing at backup time is reported in `status`.
 
    Values that live in configuration rather than in a credential store
-   join the same set. That is every config property a manifest marks
-   `writeOnly` (below). It is also, by shape and at any depth of the
-   trusted config, every string under an `env` or `headers` object and
-   the value of every variable a `passEnv` list names. That covers
-   `provider-openai`'s headers, `tool-shell`'s environment, and each
-   `plugin-mcp` server's `env`, `headers`, and `passEnv`. The last sits
-   inside an opaque `servers` object that no manifest annotation reaches,
-   which is why the rule is structural rather than a list of packages.
-   A tool can echo any of these values into a session or a memory, where
-   it is no different from a stored key. Redacting them only inside
-   `config.json` would leave every other copy in place.
+   join the same set, and **the entry's name decides, not the field it
+   sits in**. An `env`, `headers`, or `passEnv` entry carries a
+   credential as often as a setting. `NODE_ENV=production` and
+   `Content-Type: application/json` are ordinary. Redacting them would
+   fail the short-value floor or break the restored config.
+   `Authorization` and `GITHUB_TOKEN` are not ordinary. So at any depth
+   of the trusted config, and including each `plugin-mcp` server inside
+   an opaque `servers` object no manifest annotation reaches, an entry
+   under `env` or `headers` joins the set when its name marks it as a
+   credential: `Authorization`, `Cookie`, `Proxy-Authorization`, or a
+   name containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, or
+   `CREDENTIAL`. The same holds for each variable a `passEnv` list
+   names. So does any property a manifest marks `writeOnly` (below).
+   Inside `config.json`, those entries are replaced and listed for
+   re-entry on restore, like any credential. Ordinary entries are copied
+   verbatim. A tool can echo a secret entry into a session or a memory,
+   where it is no different from a stored key, which is why it joins the
+   global set rather than being redacted in `config.json` alone. The
+   name list will miss a credential kept under an innocent name. That is
+   a known gap the pattern scan partly covers, and `writeOnly` is the
+   way to close it for good.
 
    **A secret too short to replace safely stops the run.** Named
    credentials accept any non-blank value, and replacing every occurrence
@@ -403,8 +423,14 @@ rewrites. On top of that:
 
 ### Restore
 
-`stratus backup restore <remote|path> --into <dir>` refuses any directory
-that is not empty. It rebuilds each database from its JSONL, rebuilds `memory.jsonl.index` on first use (which already happens),
+`stratus backup restore <remote|path> --into <dir> [--identity <file>]`
+refuses any directory that is not empty. When the snapshot holds
+ciphertext, the age identity comes from `--identity`, or from
+`STRATUS_BACKUP_IDENTITY` naming a file. It is never taken from the
+repository and never stored by restore. With no identity, or the wrong
+one, restore stops before writing anything and says which. A restore
+that silently left out the encrypted half would look complete and not
+be. It rebuilds each database from its JSONL, rebuilds `memory.jsonl.index` on first use (which already happens),
 and prints the list of credentials to re-enter.
 
 **The packages the home ran on come first.** Rebuilding a store needs
@@ -558,6 +584,13 @@ Two things follow for the design:
   memory, is not in the pushed tree.
 - With `workspaces` enabled on the git target, no workspace filename
   appears in the pushed tree.
+- A restore of a snapshot with encrypted content refuses before writing
+  anything when no identity is given, and again when the wrong one is.
+- `env: { NODE_ENV: "production" }` and a `Content-Type` header back up
+  verbatim. `env: { GITHUB_TOKEN: … }` and an `Authorization` header are
+  replaced, and the restore lists them for re-entry.
+- A memory recalled five times before the backup still has five recalls
+  after restore.
 - A home signed in to Codex backs up. The `chatgpt` marker is neither
   collected as a secret nor rewritten.
 - Restoring a `memory-sqlite` home on a machine without that package
