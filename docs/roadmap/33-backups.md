@@ -59,8 +59,12 @@ run rather than something to write.
     `resolveConfigLocation` resolves, never `config.json` by assumption,
     and saves it as the snapshot's `config.json`. The manifest records
     where it came from. `enable` writes the timer with the same
-    `--config` or `STRATUS_CONFIG` the service runs with, so the run
-    resolves the same file the daemon does.
+    `--config` or `STRATUS_CONFIG` the service runs with, **and the
+    same working directory**, because a config may hold relative paths
+    (a `soul`, a database, a workspace root) and those resolve against
+    the process's working directory, which the service definition sets
+    on purpose. The manifest records every such path as it resolved, so
+    a snapshot says exactly which files it came from.
   - **The selected memory store.** With `@stratusagent/memory-sqlite`
     selected, the memories live in one database at the path its config
     names, and the per-agent `memory.jsonl` files are unused. `now`
@@ -73,13 +77,7 @@ run rather than something to write.
     backup guess at its storage.
   - **A config-only default `soul`.** The trusted config may name a soul
     file outside `agents/`. It is copied into the snapshot under
-    `external/`, and the snapshot's manifest records the original path
-    and the agent id it resolved to. An unnamed soul's generated identity
-    is seeded from its resolved path, and memory, sessions, grants, and
-    schedules are all keyed by that id, so a relocated copy would come
-    back as a stranger to its own state. Restore therefore writes the
-    recorded id into the relocated copy's frontmatter and prints that it
-    did.
+    `external/`, and the snapshot's manifest records the original path.
   - **A configured `workspaceRoot`.** `tool-fs`, `tool-shell`,
     `tool-browser`, and `plugin-mcp` accept one, and it wins over
     `agents/<id>/workspace/`. With `workspaces` opted in, `now` snapshots
@@ -91,6 +89,15 @@ run rather than something to write.
 
   Restore never writes outside the directory it was given (see
   [Restore](#restore)).
+- **Every soul's resolved agent id.** A soul that declares no `name` or
+  `id` gets a generated identity seeded from its **absolute path**, which
+  is true of ordinary `agents/*.md` souls as well as a config-only one.
+  Memory, sessions, grants, and schedules are all keyed by that id, so
+  the same file restored under another home directory, another username,
+  or `<dir>` itself comes back as a stranger to its own state. The
+  manifest records the id every soul resolved to, and restore writes it
+  into the frontmatter of each soul that did not declare one, printing
+  each soul it changed.
 - **Secret replacement before every commit** (design sketch). This is the
   part that must be right the first time, because git history is forever.
 - **A scheduled run every night**, installed next to the service unit
@@ -193,6 +200,23 @@ there that holds a `sessions.db` as an agent.
    short exactly where it matters. So `enable` writes the timer with the
    same environment the service definition carries, and a declared name
    that resolves to nothing at backup time is reported in `status`.
+
+   Values that live in configuration rather than in a credential store
+   join the same set: every config property a manifest marks `writeOnly`
+   (below), the built-in secret-bearing ones (`provider-openai`'s
+   `headers`, `tool-shell`'s `env`), and the values of the variables
+   `tool-shell`'s `passEnv` hands to commands. A command can echo any of
+   them into a session or a memory, where they are no different from a
+   stored key. Redacting them only inside `config.json` would leave every
+   other copy in place.
+
+   **A secret too short to replace safely stops the run.** Named
+   credentials accept any non-blank value, and replacing every occurrence
+   of `a` or `test` across a home would corrupt the snapshot beyond use.
+   A value below a floor (on the order of 12 characters) fails the run
+   and names the credential, instead of silently rewriting common text or
+   silently skipping a secret.
+
    **Replacement works on values, not on bytes.** A credential can hold
    a quote, a backslash, or a newline, and once it is inside a JSONL line
    or a session row (a JSON body inside a table exported as JSON) it is
@@ -282,6 +306,15 @@ for a person reading the repository and for a check that it matches.
 Executing it would hand the repository `ATTACH` and `VACUUM INTO`, which
 are file writes anywhere, and it would bypass everything below.
 
+**No write passes through a link.** A git tree can carry symlinks, and a
+modified repository could make `agents/` or `external/` one, so that the
+next file restored beneath it lands outside `<dir>`. Restore refuses a
+snapshot containing any symlink entry, and it walks every target path
+with `lstat` so that no component it follows is a link. This is the
+[state layout](../reference/state-layout.md)'s rule that no path Stratus
+derives passes through a link, applied to the one command that builds a
+home from somebody else's input.
+
 **Every write lands inside `<dir>`.** An external soul, a `memory-sqlite`
 database, and a configured workspace root are restored under
 `<dir>/external/`, and the
@@ -354,8 +387,7 @@ Two things follow for the design:
 - With `memory-sqlite` selected, a restore brings back its memories. With
   a third-party memory store that has no export, `now` fails and names it.
 - A config-only `soul` outside `agents/` is in the snapshot. Restore puts
-  it under `<dir>/external/` and rewrites the restored config to match,
-  and an unnamed one comes back with the same agent id and its state.
+  it under `<dir>/external/` and rewrites the restored config to match.
 - With `workspaces` opted in and a `workspaceRoot` configured, the files
   under that root are the ones backed up and restored.
 - A credential containing a quote, a backslash, and a newline, pasted
@@ -363,6 +395,16 @@ Two things follow for the design:
   or escaped.
 - A repository whose `schema.sql` carries an `ATTACH` or `VACUUM INTO`
   restores without executing it and writes nothing outside `<dir>`.
+- A repository in which `agents/` or `external/` is a symlink is refused
+  before anything is written.
+- An unnamed soul in `agents/` restored under a different home directory
+  keeps its agent id and its memory.
+- A value `tool-shell` passes through `env` or `passEnv`, echoed into a
+  session, is not in the pushed tree.
+- A named credential shorter than the floor fails the run and names the
+  credential.
+- With the service's config holding a relative `soul` path, the timer's
+  run backs up the same soul the daemon serves.
 - A planted key-shaped string that no credential store knows about fails
   the run before anything is committed.
 - A backup taken while the daemon is mid-turn restores to a database that
