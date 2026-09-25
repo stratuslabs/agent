@@ -305,6 +305,16 @@ the push and the map update. A second run that finds the lock held
 exits with a distinct "already running" status rather than waiting or
 failing silently.
 
+The secret set can also change *during* a run: `stratus credential
+set`, or the runtime recording a late environment credential, can land
+after `now` collected its set but before it committed. Every change to
+the secret set increments a **generation number**, kept beside the
+credential store: credential writes, the recorder, and a retired value
+(below). `now` reads the generation when it starts and again
+immediately before it commits. If the number has moved, it discards the
+staging tree and starts over instead of committing text redacted
+against a stale set.
+
 ### Secrets: three layers, because one is not enough
 
 1. **Files that are secrets never enter the staging tree** (the "Never"
@@ -371,6 +381,17 @@ failing silently.
    It also lifts on an explicit `stratus backup acknowledge <name>`
    from an operator who has checked that nothing holds it. A value it
    cannot see is a value it cannot redact, so it does not push past it.
+
+   **A retired value stays in the set.** Rotating or removing a
+   credential does not remove the old value from memories and
+   transcripts that already hold it, and the next rebuild of the staging
+   tree would copy it through unredacted. So while backups are enabled,
+   a value that `stratus credential set` overwrites or `credential
+   remove` deletes is moved to a retired list rather than dropped. The
+   list is `0600` beside the clone, with the same protection as the
+   credential store, and is never committed. It serves only as
+   redaction input. `stratus backup forget-retired` clears it once the
+   operator has purged the content that held those values.
 
    Values that live in configuration rather than in a credential store
    join the same set, and **the entry's name decides, not the field it
@@ -796,6 +817,10 @@ Two things follow for the design:
 - A workspace FIFO's name does not appear in the pushed tree.
 - With `sessions` enabled, a night that changed one of a hundred
   sessions commits one new ciphertext blob, not a hundred.
+- A credential rotated after its old value was written into memory:
+  the old value is still replaced in every later snapshot.
+- A `credential set` that lands between collection and commit makes the
+  run start over, and the new value is redacted in what it commits.
 - A skill with `alias -> shared` beside `shared/` backs up. One with
   `loop -> .` fails.
 - A signed snapshot in which only a file's git mode was changed is
