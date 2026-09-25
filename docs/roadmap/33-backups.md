@@ -192,7 +192,10 @@ run rather than something to write.
     records every root it has enumerated, beside the clone. It keeps
     backing up each one that still exists until the operator retires it
     with `stratus backup forget-root <path>`. `status` lists the roots
-    still carried only because of that record.
+    still carried only because of that record. The record also travels
+    in each signed manifest, so losing the clone does not lose it.
+    Restore reseeds it on the new machine, and so does `init` when it
+    adopts an existing branch.
     Roots that coincide are one tree. A root nested inside another is
     recorded as a subpath of the outer tree rather than copied twice. A
     resource the snapshot commits in plaintext is never inside any of
@@ -802,7 +805,15 @@ secret-ish values (`provider-openai`'s `headers` and `tool-shell`'s `env`)
 that live in no credential store. Those keys are redacted by name. The
 general answer is for a plugin manifest's `config` schema to mark a
 property `writeOnly`, which JSON Schema already defines. Then the rule
-lives with the package that knows, not in a list here.
+lives with the package that knows, not in a list here. A block whose
+manifest cannot be read has no schema to consult. That happens with a
+disabled plugin left in the config after its package was removed,
+which the config accepts and the loader skips. Every leaf value in such
+a block is then treated as a credential: it is redacted, added to the
+secret set, and listed for re-entry on restore. `status` names the
+block and says to reinstall the package or delete the block. A block
+nobody can inspect is never copied through as if it were known to be
+harmless.
 
 The manifest committed with each snapshot records what was left out and
 what was redacted, so a snapshot is never mistaken for a complete copy.
@@ -1385,7 +1396,10 @@ Two things follow for the design:
 - A keychain token rotated between collection and push is not the one
   the push uses, and a signing key replaced mid-run does not sign.
 - Moving a plugin's `workspaceRoot` from `/data/a` to `/data/b` keeps
-  `/data/a/<id>` in the snapshot until `forget-root /data/a`.
+  `/data/a/<id>` in the snapshot until `forget-root /data/a`, including
+  after a restore onto a replacement machine.
+- A disabled plugin block whose package is uninstalled has every value
+  redacted and listed for re-entry, and `status` names it.
 - A hard-linked `memory.jsonl` fails `now` with the path, rather than
   producing a snapshot without memories, and so does a `config.json`
   rewritten continuously through every retry.
