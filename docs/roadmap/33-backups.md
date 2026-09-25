@@ -285,7 +285,12 @@ snapshot's business to interpret:
   descriptor reports `st_nlink > 1` is skipped and recorded like a
   FIFO, and `now` names it, when it is optional content: a file in a
   skill or a workspace. Links there are rare, and refusing all of them
-  costs less than proving where the other name lives. A *required*
+  costs less than proving where the other name lives. A workspace's
+  `fs-provenance.jsonl` is not optional content. Two workspaces may
+  share one ledger through a hard link, a layout the state code
+  recognises by inode. So a ledger is compared by device and inode,
+  stored once, and restored with the same sharing, from restore's own
+  record. A *required*
   state file with a second link fails the run instead, because a
   snapshot without it is not a usable backup. That covers the
   selected config, a soul, a `memory.jsonl`, and a `whitelist.json`.
@@ -519,7 +524,13 @@ change. A hand edit during the few seconds of the push itself cannot
 be locked out, because nothing makes an editor wait. So it is detected
 immediately afterwards instead. Once the push returns, `now` re-hashes
 every input the pre-push check hashed, the credential store and the
-gateway token included. If any of them changed, it recollects the secret set from
+gateway token included. The push's own credential cannot drift the same
+way, because it is frozen at collection. The HTTPS token `now` collected
+reaches git through a one-shot helper that returns exactly that value.
+The SSH key is read once into a private `0600` copy inside the backup
+directory, and `-i` names that copy. A keychain that rotates mid-run,
+or a deploy key edited in place, cannot put a credential on the wire
+that the scan never saw. If any of them changed, it recollects the secret set from
 all of them and rescans the commit it just published against it. A hit is reported at once and
 loudly, naming the credential to rotate, because a pushed commit is
 not taken back. This is the one place the design detects rather than
@@ -1080,7 +1091,10 @@ one. Otherwise it is only text written into a restored file, such as
 a ledger record for a file on the operator's own disk. A destination path
 must be relative and already normalized: no leading `/`, no empty, `.`, or `..` component, and no
 NUL. Anything else refuses the whole restore. A backslash is an
-ordinary character in a POSIX filename, so it is allowed. None of
+ordinary character in a POSIX filename, so it is allowed where restore
+runs on POSIX, which is every platform the service supports. On a
+platform where a backslash is a separator, a name containing one is
+refused like `..`. None of
 these forms can occur as a real filename, so an honest `now` never
 produces a snapshot this check refuses. Without
 this check, a modified repository restored with `--unverified` could name
@@ -1326,6 +1340,10 @@ Two things follow for the design:
 - A workspace directory swapped for a link between descent and the
   post-read recheck fails the run, and no byte from the far side is
   committed.
+- Two workspaces sharing one hard-linked `fs-provenance.jsonl` restore
+  still sharing it, and every label survives.
+- A keychain token rotated between collection and push is not the one
+  the push uses.
 - A hard-linked `memory.jsonl` fails `now` with the path, rather than
   producing a snapshot without memories, and so does a `config.json`
   rewritten continuously through every retry.
