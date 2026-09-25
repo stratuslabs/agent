@@ -61,9 +61,26 @@ run rather than something to write.
   arbitrary transformation, so the promise for this content is
   ciphertext. `sessions` and `workspaces` are committed as per-file age
   ciphertext under a key the operator holds outside the backup, and
-  `init` refuses either opt-in without one. Souls, skills, config, and
-  memory stay plaintext and diffable, and that is where the exact-value
-  guarantee is made.
+  `init` refuses either opt-in without one. Unchanged files keep their
+  previous ciphertext. age output is randomized, so re-encrypting an
+  unchanged file would rewrite every blob every night, defeating
+  "no change, no commit" and growing the repository without bound. `now`
+  keeps a local map from a keyed hash of each file's plaintext to the
+  ciphertext it last committed. The map lives beside the clone and is
+  never committed. A file whose hash has not changed is staged with its
+  old ciphertext.
+
+  Souls, skills, config, and memory stay plaintext and diffable, and the
+  guarantee there is stated as exactly what it is: **no value the home
+  knows to be secret, in any form the scan checks** (raw, JSON-escaped,
+  base64, hex, URL-encoded), and nothing shaped like a well-known key.
+  It is not "no secret, whatever an agent did with it". Memory is
+  model-authored text, and a model that stores a key ROT13'd or
+  paraphrased has moved it past any scanner. Encrypting memory by
+  default would close that and cost the main reason to back up to git,
+  readable history of what an agent believed. So `encrypt: "all"` is an
+  option for an operator who wants the stronger guarantee instead, and
+  the documentation says plainly which one the default makes.
 - **Only a fully migrated home is backed up.** An upgraded home whose
   exclusive migration has not run yet still keeps its grants at
   `agents/<id>.whitelist.json`, and its sessions and schedules in the
@@ -181,11 +198,16 @@ snapshot's business to interpret:
   of the backup holds none of its files. So `.git` is never copied. The
   files are staged as ordinary files, and the manifest records where the
   skill came from.
-- **Nested ignore rules are not honoured.** A skill or workspace with its
-  own `.gitignore` would otherwise hide durable files from the commit.
-  Staging adds everything with ignore rules switched off (`git add -f`
-  with no exclude files). The backup's own "Never" list is the only
-  exclusion.
+- **Nothing in the tree gets to change how git stores it.** A skill or
+  workspace can carry a `.gitignore` that would hide durable files, or a
+  `.gitattributes` whose clean filter (Git LFS, say, if the user has it
+  installed globally), encoding, or line-ending rule would commit
+  something other than the bytes on disk. So staging does not go through
+  `git add` at all. Each file is written with `git hash-object -w
+  --no-filters` and placed in the index directly, with the repository's
+  own `core.autocrlf` off and no exclude or attribute files consulted.
+  The backup's own "Never" list is the only exclusion. A check after
+  staging compares each indexed blob with the staged file byte for byte.
 - **Supported links are materialized; no link is ever committed.** Three
   kinds of link are legitimate in a home. A soul file in `agents/` may be
   one, which is how a template's soul stays edited in its own checkout.
@@ -476,8 +498,11 @@ Two things follow for the design:
 - A skill with a relative link between its own files backs up and
   restores (as a plain file). A skill link that reaches outside the skill
   fails the run.
-- A skill installed from a repository (with `.git`) and a workspace
-  holding a `.gitignore` are restored with every file. A workspace that
+- A skill installed from a repository (with `.git`), a workspace holding
+  a `.gitignore`, and a skill whose `.gitattributes` names an LFS filter
+  are all restored byte for byte.
+- Two runs with `sessions` enabled and nothing changed make one commit,
+  not two. A workspace that
   is a symlink to another volume is backed up and restored as a real
   directory.
 - An unnamed soul in `agents/` restored under a different home directory
