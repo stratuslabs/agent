@@ -574,7 +574,12 @@ prevents, and the spec says so.
    `KEYBOARD_LAYOUT` do not. Conventional fused spellings count too,
    because nobody splits them: a component equal to `APIKEY`,
    `ACCESSKEY`, `SECRETKEY`, `PRIVATEKEY`, `AUTHTOKEN`, `ACCESSTOKEN`,
-   `CLIENTSECRET`, or `PASSWD` matches, so `X-APIKEY` does. A structured value is split into the parts
+   `CLIENTSECRET`, or `PASSWD` matches, so `X-APIKEY` does. A list of
+   fused names never ends, so a component that *ends* in `PASSWORD`,
+   `PASSWD`, `TOKEN`, or `SECRET` also matches: `PGPASSWORD`,
+   `GHTOKEN`, `DBSECRET`. The suffix rule deliberately leaves out `KEY`,
+   because `MONKEY` and `TURKEY` are what it would catch. Fused `KEY`
+   names stay on the explicit list. A structured value is split into the parts
    a tool would actually repeat. An `Authorization` or
    `Proxy-Authorization` header contributes
    its token after the scheme (`Bearer`, `Token`, and so on). For
@@ -813,6 +818,12 @@ refuse to start on a selection nothing registers. A `memory-sqlite`
 home restored this way starts on the file store, with its database
 restored and waiting. Once the operator has reviewed and re-enabled
 the plugin, the original selection points at it again.
+**Parked turns do not resume.** With `sessions` restored, a session
+parked at `pending_approval` carries queued tool calls. On startup, the
+gateway's recovery denies the stale checkpoint and then runs the rest
+of the queue, including safe tools that need no grant. So an
+unverified restore marks every such session failed and drops its
+pending checkpoint and queue, and it lists each one it changed.
 Together these are every way restored state acts on its own. The
 printout says what it dropped or disabled.
 
@@ -1092,7 +1103,9 @@ Two things follow for the design:
   built-in store, with the original selection listed.
 - An MCP header named `X-Auth` is treated as a credential.
 - An `--unverified` restore brings back no command scope, origin, or
-  tool grant. It succeeds on a machine lacking a plugin that it
+  tool grant, and a session parked at `pending_approval` comes back
+  failed, with nothing queued, so the first `stratus serve` runs no
+  restored tool call. It succeeds on a machine lacking a plugin that it
   restores disabled anyway.
 - With `workspaces` off, no provenance record for a file inside any
   agent workspace appears in plaintext in the repository.
@@ -1113,7 +1126,8 @@ Two things follow for the design:
   confirmation.
 - A `workspaceRoot` set to `~/.stratus` or `~` makes `now` fail with
   the reason, and no file from the backup directory is ever staged.
-- An MCP header named `X-APIKEY` is treated as a credential.
+- An MCP header named `X-APIKEY` is treated as a credential, and so is
+  a `passEnv` entry named `PGPASSWORD`, while `MONKEY` still is not.
 - A config-only soul reached through a symlink backs up as a regular
   file.
 - A config file inside a workspace root, selected by `--config` or by
