@@ -128,8 +128,10 @@ run rather than something to write.
     some other directory. `STRATUS_SOUL` is recorded the same way. The
     service definition does not carry it, and the timer never sees the
     environment of a daemon started by hand. So when the daemon's soul
-    came from `STRATUS_SOUL`, `init` records that path, and every `now`
-    uses the recording. A soul the config selects is never recorded. It
+    came from `STRATUS_SOUL`, the recording is made by the daemon
+    itself: it writes the path it resolved into the backup directory at
+    every start, and every `now` uses the latest one. A daemon restarted
+    with a different `STRATUS_SOUL` is followed from its next start. A soul the config selects is never recorded. It
     is resolved from the current config on every run, so an edit to
     `soul` is followed the same night. A manual run and the nightly one
     therefore snapshot the same tree.
@@ -163,23 +165,27 @@ run rather than something to write.
     the raw live file, so one blob cannot be both. A config or database
     inside a copied tree (`skills/`, say) makes `now` refuse and say to
     move it out.
-  - **Where the workspaces are.** A host that supplies
-    `PluginContext.workspaces`, which the daemon and `stratus run`
-    always do, sends every plugin's output for an agent to the one
-    directory `createAgentWorkspaces` resolves: `agents/<id>/workspace/`.
-    That directory may be a link to another volume, which is a supported
-    link (below). `tool-fs` and `plugin-mcp` write the same provenance
-    ledger there because of it. With `workspaces` opted in, `now`
-    enumerates workspaces through that same resolver, never through
-    plugin settings. A plugin's own `workspaceRoot` applies only to a
-    host that wires it by hand without the seam, which is not a home
-    this command backs up, so it is not read. A resource the snapshot
-    commits in plaintext is never inside a workspace. That covers an
-    external soul, a `memory-sqlite` database, and the trusted config
-    file wherever `resolveConfigLocation` found it. The writable-root
-    guard below refuses that layout and says to move the file out. The
-    directories an agent is merely allowed to work in (`tool-fs` roots)
-    are the operator's own files, not agent state, and stay out.
+  - **Where the workspaces are.** Every plugin that writes files finds
+    an agent's workspace through `workspaceResolver` in
+    `@stratusagent/plugins`. An operator-configured `workspaceRoot`
+    wins, and relocating a workspace by writing one down is documented.
+    Otherwise the host's seam answers with `agents/<id>/workspace/`,
+    which may itself be a link to another volume (a supported link,
+    below). So under one daemon, `tool-shell` output can land under a
+    configured root while `plugin-mcp` output lands in the seam
+    workspace. `tool-fs`'s provenance ledger always follows the seam.
+    With `workspaces` opted in, `now` asks `workspaceResolver` for each
+    enabled plugin and each agent, with the same `(seam, workspaceRoot)`
+    pair the plugin receives. It never re-derives the precedence.
+    Roots that coincide are one tree. A root nested inside another is
+    recorded as a subpath of the outer tree rather than copied twice. A
+    resource the snapshot commits in plaintext is never inside any of
+    them: an external soul, a `memory-sqlite` database, or the trusted
+    config file wherever `resolveConfigLocation` found it. The
+    writable-root guard below refuses that layout and says to move the
+    file out. The directories an agent is merely allowed to work in
+    (`tool-fs` roots) are the operator's own files, not agent state, and
+    stay out.
 
   Restore never writes outside the directory it was given, apart from
   the staging directory it creates beside it (see
@@ -1196,10 +1202,11 @@ toward `external`, never toward trusted.
 **Every write lands inside `<dir>` or its own staging directory.** An external soul and a `memory-sqlite`
 database are restored under `<dir>/external/`, and the
 restored config is rewritten to point at them there, with each rewrite
-printed beside the path it replaced. A workspace is not one of them.
-It is restored where the host resolves it, at
-`agents/<id>/workspace/`, as a real directory, and there is no setting
-to rewrite. A path recorded in the manifest is
+printed beside the path it replaced. A configured `workspaceRoot` is
+restored the same way, under `<dir>/external/`, with the plugin's
+setting rewritten, and a root nested in another stays nested. A seam
+workspace needs no setting. It is restored where the host resolves it,
+at `agents/<id>/workspace/`, as a real directory. A path recorded in the manifest is
 information for the operator, never a place restore writes to: the
 repository is input that someone other than the operator may have
 changed, and following its paths would let a modified backup create
@@ -1269,11 +1276,13 @@ Two things follow for the design:
   a third-party memory store that has no export, `now` fails and names it.
 - A config-only `soul` outside `agents/` is in the snapshot. Restore puts
   it under `<dir>/external/` and rewrites the restored config to match.
-- With `workspaces` opted in, the workspace `createAgentWorkspaces`
-  resolves is the one backed up. When `agents/<id>/workspace` is a link
-  to another volume, the files on the far side are backed up and
-  restore a real directory. A plugin's hand-wiring `workspaceRoot` is
-  not read.
+- With `workspaces` opted in, every root `workspaceResolver` gives an
+  enabled plugin is backed up. A daemon whose `tool-shell` has a
+  `workspaceRoot` while `plugin-mcp` uses the seam backs up both, and
+  restore rewrites the shell setting. When one root is nested in the
+  other, the nested files are stored once and stay shared. When
+  `agents/<id>/workspace` is a link to another volume, the files on the
+  far side are backed up and restore a real directory.
 - A channel token replaced through a provider or channel sign-in
   between two runs stays redacted afterwards. So does the token from a
   `Proxy-Authorization: Bearer …` header.
@@ -1407,7 +1416,8 @@ Two things follow for the design:
   directory and one ledger.
 - A daemon whose default soul comes from `STRATUS_SOUL` backs that soul
   up, from the timer as well as by hand, and restore prints the new
-  path to export.
+  path to export. Restarting the daemon with a different `STRATUS_SOUL`
+  changes the soul the next `now` backs up.
 - A `tool-fs` root of `~/.stratus/skills`, or a workspace root at
   `~/.stratus/skills/example/output`, makes `now` fail with the
   reason.
