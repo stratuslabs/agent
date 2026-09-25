@@ -178,8 +178,11 @@ run rather than something to write.
     configured root while `plugin-mcp` output lands in the seam
     workspace. `tool-fs`'s provenance ledger always follows the seam.
     With `workspaces` opted in, `now` asks `workspaceResolver` for each
-    enabled plugin and each agent, with the same `(seam, workspaceRoot)`
-    pair the plugin receives. It never re-derives the precedence. The
+    plugin block in the config, enabled or disabled, and each agent. A
+    disabled plugin's output is still durable output, and turning the
+    plugin off does not delete it. It asks with the same `(seam, workspaceRoot)`
+    pair that plugin receives or would receive. It never re-derives the
+    precedence. The
     seam workspace, `agents/<id>/workspace/`, is always included as
     well, even when every enabled plugin has a configured root. It is
     the agent's state-owned output directory, it holds the `tool-fs`
@@ -1290,7 +1293,8 @@ Two things follow for the design:
   restore rewrites the shell setting. When one root is nested in the
   other, the nested files are stored once and stay shared. With every
   enabled plugin relocated, `agents/<id>/workspace/` is still backed
-  up. When
+  up. Disabling a plugin whose root is `/data/shell` still backs up
+  `/data/shell/<id>`. When
   `agents/<id>/workspace` is a link to another volume, the files on the
   far side are backed up and restore a real directory.
 - A channel token replaced through a provider or channel sign-in
