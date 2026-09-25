@@ -146,6 +146,10 @@ run rather than something to write.
     not copied a second time. It is recorded as a subpath of that tree,
     and restore points the config at the restored file inside it, so an
     edit through the skill still changes the soul the daemon serves.
+    The config file is the exception. It is committed *redacted*, and
+    the tree around it would carry the raw file, so one blob cannot be
+    both. A config selected inside a copied tree (`skills/`, say) makes
+    `now` refuse and say to move it out.
   - **A configured `workspaceRoot`.** `tool-fs`, `tool-shell`,
     `tool-browser`, and `plugin-mcp` accept one, and it wins over
     `agents/<id>/workspace/`. They are set independently, per plugin and
@@ -747,6 +751,10 @@ night. `init` and `enable` therefore run a real probe, `git push
 `GIT_TERMINAL_PROMPT=0` and SSH in batch mode. They refuse a setup that
 only works interactively. The deploy-key setup pins its key in the
 clone's own `core.sshCommand` so that it does not depend on an agent.
+The pin is exact: `-i <key> -o IdentitiesOnly=yes -F /dev/null`. So no
+default identity and no `IdentityFile` from the user's SSH config can
+authenticate in its place, and the key the protected set records is
+the only key that can. An SSH remote without that pin is refused.
 
 ### A backup that faithfully saves the damage
 
@@ -775,6 +783,14 @@ rewrites. On top of that:
   upgrade taught the scanner a new shape, every
   unpushed commit that holds ciphertext is dropped and rebuilt without
   inspection.
+- **Published history is rescanned when the secret set grows.** A value
+  can be committed in plaintext before anyone knows it is a secret:
+  pasted into a memory first, stored as a credential a week later.
+  Redaction only covers snapshots from then on, and published history
+  is never rewritten. So whenever the secret set gains a value, `now`
+  scans every plaintext blob already pushed for it. A hit fails the
+  run and names the credential to rotate, since rotation is the only
+  remedy for a published secret.
 - **A partial snapshot is a failure.** If one database could not be read,
   the run exits non-zero, so the timer never reports a half backup as
   success.
@@ -1237,6 +1253,12 @@ Two things follow for the design:
   rescan.
 - A default soul at `skills/example/SOUL.md` is stored once, and after
   restore an edit through the skill changes the soul the daemon serves.
+  A config selected at `skills/example/config.json` makes `now` refuse.
+- Adding a credential whose value an earlier, already-pushed snapshot
+  holds in plaintext makes the next `now` fail and name it for rotation.
+- `init` against an SSH remote refuses unless the key is pinned with
+  `IdentitiesOnly=yes`, and `~/.ssh/id_ed25519` never authenticates a
+  backup push.
 - With `user.signingkey` at `~/.ssh/backup_ed25519` and a deploy key
   at `~/.ssh/stratus_deploy`, `fs.read` of either file under a
   `tool-fs` root of `~/.ssh` is refused.
