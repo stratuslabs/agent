@@ -146,7 +146,9 @@ test('twenty enabled skills send twenty lines, never a body', () => {
     (total, entry) => total + entry.id.length + entry.name.length + entry.description.length + 16,
     0,
   );
-  const structuralOverhead = 600; // persona line, headers, joins
+  // The persona line, the reply-length section, headers, and joins: what
+  // the same agent is sent with no skills at all, plus the block's intro.
+  const structuralOverhead = (renderSystemPrompt({ session: { agent: { id: 'ava', name: 'Ava', instructions: 'Be sharp.' } } as Session })?.length ?? 0) + 600;
   assert.ok(
     prompt.length <= descriptionBudget + structuralOverhead,
     `prompt is ${prompt.length} chars for a ${descriptionBudget}-char description budget — a body leaked in`,

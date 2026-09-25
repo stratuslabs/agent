@@ -75,6 +75,17 @@ skills:
 You are a sharp, warm generalist assistant. Answer first, explain second...
 ```
 
+Every agent is also told, ahead of its persona, to keep replies the size
+of a text message — under six lines of plain prose, no headers or bullet
+lists, no preamble or closing offer, at most one follow-up question — and
+to go longer only when asked for depth or a document, or when a decision
+turns on detail the reader lacks. The persona comes after that and wins
+where they disagree, so a soul written for long-form work just says so:
+
+```markdown
+When asked for a report, write the full report — headings and all.
+```
+
 Run it directly, point your config at it, or generate one to start from:
 
 ```bash

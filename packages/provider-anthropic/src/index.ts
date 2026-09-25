@@ -238,11 +238,12 @@ const buildPrompt = (
   // definitions with it — one breakpoint, leaving three of the four the
   // request is allowed for whatever wants one later.
   //
-  // An agent with tools but nothing to say — no preamble, no instructions,
-  // no skills — has no system block to carry that marker, and its tool
-  // schemas are often the largest stable thing in the request. So the
-  // breakpoint falls back to the last tool. Never both: two markers on one
-  // contiguous prefix spend a slot to cache the same bytes twice.
+  // Every agent has a system block now — the reply-length section is always
+  // rendered — so the marker lands there even for an agent with no
+  // preamble, instructions, or skills, and still covers its tool schemas.
+  // The last tool is the fallback only for a renderer that returns nothing.
+  // Never both: two markers on one contiguous prefix spend a slot to cache
+  // the same bytes twice.
   //
   // Annotating a prefix below the model's cacheable minimum is a silent
   // no-op, not an error, so there is nothing to check for first.

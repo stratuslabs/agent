@@ -1075,11 +1075,11 @@ test('an unrelated 400 is not swallowed by the system-message fallback', async (
   );
 });
 
-test('an agent with tools but nothing to say caches its tool list', async () => {
-  // No preamble, no instructions, no skills — so there is no system block to
-  // carry the breakpoint, and the tool schemas are the largest stable thing
-  // in the request. Without the fallback below they would be re-sent at full
-  // price on every turn of the agent's life.
+test('an agent with tools but nothing to say still caches its tool list', async () => {
+  // No preamble, no instructions, no skills — only the reply-length section
+  // every agent is told. Its system block carries the one breakpoint, which
+  // covers the tool schemas ahead of it on the wire; without that they
+  // would be re-sent at full price on every turn of the agent's life.
   const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hi.' }])]);
   const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
 
@@ -1092,9 +1092,10 @@ test('an agent with tools but nothing to say caches its tool list', async () => 
   } as ProviderRequest);
 
   const body = requests[0]!.body;
-  assert.equal(body.system, undefined);
-  assert.equal(body.tools[0].cache_control, undefined);
-  assert.deepEqual(body.tools.at(-1).cache_control, { type: 'ephemeral', ttl: '5m' });
+  assert.equal(body.system.length, 1);
+  assert.match(body.system[0].text, /^How long to make a reply/);
+  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '5m' });
+  assert.equal(body.tools.at(-1).cache_control, undefined);
 });
 
 test('the breakpoint is never placed twice on one contiguous prefix', async () => {

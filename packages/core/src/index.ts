@@ -4268,6 +4268,25 @@ export const renderSkillsSection = (skills: readonly SkillDescriptor[] | undefin
   return `You have skills — procedures for doing particular tasks well. When one is relevant to the task at hand, load its full instructions with the ${SKILL_READ_TOOL_NAME} tool (pass the id) and follow them; the one-line descriptions here are pointers, not the procedures themselves:\n${lines.join('\n')}`;
 };
 
+/**
+ * How long a reply should be, told to every agent before its persona.
+ *
+ * Models default to the long, headed, bulleted answer, and an agent is read
+ * mostly in chat — often on a phone — where that is the wrong shape. Souls
+ * were each growing their own copy of this rule, so it lives here once.
+ * It sits ahead of the persona so a soul that wants long answers says so
+ * after it, and the closing sentence says the soul wins. It says nothing
+ * about files: an agent on Slack has nowhere to put one its reader can
+ * open.
+ */
+const REPLY_LENGTH_SECTION = [
+  'How long to make a reply: by default, like a text message — under six lines of plain prose, no headers, no bullet lists. That is the normal case, not the short end of a range.',
+  'Go longer only when you are asked for depth or for a document, or when a decision genuinely turns on detail the person does not have — and even then, answer first.',
+  'Before sending, ask whether this would be annoying to read on a phone; if it would, cut it.',
+  'No preamble, no restating the request, no closing offer of more help, and at most one follow-up question.',
+  'Where your own instructions below say otherwise, they win.',
+].join(' ');
+
 export interface SystemPromptOptions {
   /** Host-level preamble, rendered before the agent's own persona. */
   preamble?: string;
@@ -4279,12 +4298,12 @@ export interface SystemPromptOptions {
  * Which part of what an agent is told a section is.
  *
  * The distinction a caller actually needs is stable versus volatile:
- * `preamble`, `persona`, and `skills` are byte-identical across every turn of
+ * `preamble`, `replies`, `persona`, and `skills` are byte-identical across every turn of
  * an agent's life, while `memory` is rewritten whenever the agent remembers
  * anything. A provider that caches its request prefix has to place those two
  * groups differently, and it cannot tell them apart from rendered strings.
  */
-export type SystemPromptSectionKind = 'preamble' | 'persona' | 'memory' | 'skills';
+export type SystemPromptSectionKind = 'preamble' | 'replies' | 'persona' | 'memory' | 'skills';
 
 export interface SystemPromptSection {
   kind: SystemPromptSectionKind;
@@ -4311,6 +4330,7 @@ export const renderSystemPromptParts = (
 ): SystemPromptSection[] => {
   const sections: Array<{ kind: SystemPromptSectionKind; text: string | undefined }> = [
     { kind: 'preamble', text: options.preamble },
+    { kind: 'replies', text: REPLY_LENGTH_SECTION },
     { kind: 'persona', text: renderPersonaSection(request.session.agent, { fallback: options.fallbackPersona ?? false }) },
     { kind: 'memory', text: renderMemorySection(request.memory) },
     { kind: 'skills', text: renderSkillsSection(request.skills) },
