@@ -432,9 +432,11 @@ prevents, and the spec says so.
      the file out of the tree does not keep out a copy that someone pasted
      into a conversation. The token is random base64url, so no
      provider-key pattern would catch it. Deleting the file is how the
-     token is rotated, so every `now` compares against the previous run's
-     value like any other source, and the old token goes onto the
-     retired list.
+     token is rotated, and a run-to-run comparison would miss a token
+     that lived only between two nights. So `ensureGatewayToken` records
+     every token it generates in the retired list at the moment it
+     publishes it, the same way the shared credential writer does for
+     other credentials.
 
    The run has to see every value it is meant to redact, or the list is
    short exactly where it matters. The timer does not have the
@@ -803,8 +805,11 @@ home from somebody else's input.
 **No path climbs out.** Every path the snapshot names is checked as a
 string before any filesystem access at all. That covers the tree, the
 manifest, and the decrypted index. A path must be relative and already
-normalized: no leading `/`, no empty, `.`, or `..` component, no
-backslash, and no NUL. Anything else refuses the whole restore. Without
+normalized: no leading `/`, no empty, `.`, or `..` component, and no
+NUL. Anything else refuses the whole restore. A backslash is an
+ordinary character in a POSIX filename, so it is allowed. None of
+these forms can occur as a real filename, so an honest `now` never
+produces a snapshot this check refuses. Without
 this check, a modified repository restored with `--unverified` could name
 `../../victim`, and the staging build would write outside both `<dir>`
 and the staging directory before promotion ever ran. The `lstat` walk
@@ -994,7 +999,9 @@ Two things follow for the design:
 - With `~/.stratus` at `0755`, another local user can read nothing
   under `~/.stratus/backup/`, including after a run over a clone
   someone loosened.
-- A pasted gateway token, current or rotated, is redacted.
+- A pasted gateway token is redacted, whether it is current, rotated
+  once, or rotated twice between two nights.
+- A workspace file named `notes\draft` backs up and restores.
 - `restore --unverified` of a repository whose index names
   `../outside` refuses before writing anything.
 - Under a `022` umask, a restored home has the same `0700` and `0600`
