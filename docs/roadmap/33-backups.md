@@ -384,7 +384,11 @@ failing silently.
    name with `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, or `CREDENTIAL` as a
    whole component, splitting on `_`, `-`, and case changes. So
    `GITHUB_TOKEN`, `apiKey`, and `X-Api-Key` match, and `MONKEY` and
-   `KEYBOARD_LAYOUT` do not. The same holds for each variable a `passEnv` list
+   `KEYBOARD_LAYOUT` do not. A structured value is split into the parts
+   a tool would actually repeat. An `Authorization` header contributes
+   its token after the scheme (`Bearer`, `Token`, and so on), and for
+   `Basic` also the decoded password. A `Cookie` contributes each
+   cookie's value. The whole header value is added as well. The same holds for each variable a `passEnv` list
    names. So does any property a manifest marks `writeOnly` (below).
    **So does a credential carried in a URL.** An HTTP MCP server can
    authenticate as `https://host/mcp?access_token=…`, and the plugin
@@ -817,6 +821,9 @@ Two things follow for the design:
 - A `now` started while another is running exits with the
   "already running" status and changes nothing.
 - `env: { MONKEY: "banana" }` backs up verbatim.
+- The bare token from an `Authorization: Bearer …` header, and one
+  cookie value from a multi-cookie `Cookie` header, written into memory
+  are replaced.
 - An MCP server URL carrying `?access_token=…` backs up with the token
   replaced and listed for re-entry.
 - `env: { NODE_ENV: "production" }` and a `Content-Type` header back up
