@@ -336,6 +336,18 @@ same user. Pruning alone would leave the next ancestor-rooted
 tool a way to read the signing key. Every traversal also skips that
 directory by device and inode, as defence in depth.
 
+A check in `now` runs at night, though, and a config edited at noon
+would expose the key all afternoon. So the refusal is also enforced
+where the read happens. `tool-fs` already resolves its roots on every
+call. With this change it also refuses any path that resolves inside
+`~/.stratus/backup/`, whatever its roots say, and it compares by device
+and inode so that a link cannot route around the check. Refusing the
+path rather than the root keeps an honest `roots: ["~"]` working, and
+it holds from the moment the config changes, with no run in between. The
+check in `now` stays, as the early report. A gated tool such as
+`shell.run` can still read the key when the operator approves the
+call; that approval is the operator's decision, and the spec says so.
+
 **The backup directory is owner-only, whatever the home's mode is.**
 `~/.stratus` itself can be traversable on a multi-user host: it is
 created without an explicit mode, so a `022` umask leaves it `0755`.
@@ -720,11 +732,18 @@ real latest backup, so the anchor has to come from outside it:
 - **`now` notices a rewind.** Each run records the last sequence number
   it pushed, beside the clone. A remote tip older than that stops the
   run with a warning instead of building on it.
-- **Restore asks when the tip is old.** Restore shows the tip's
-  sequence number and signing time. If the tip is older than a few days
-  it requires `--expect-after <date>` or an explicit confirmation. The
-  operator's own knowledge, such as "my last backup was last night", is
-  the external checkpoint. and `now` signs the manifest with a key held outside the
+- **Restore always asks for a checkpoint.** A replacement machine does
+  not have the sequence number `now` recorded, and yesterday's tip is
+  as dangerous as last month's when a grant was revoked this morning.
+  So restore shows the tip's sequence number and signing time, and
+  every restore requires either `--expect-after <date>` /
+  `--expect-sequence <n>` or an interactive confirmation of those two
+  values. The operator's own knowledge, such as "my last backup was
+  last night", is the external checkpoint. Only the age of the tip
+  changes the wording of the prompt. It never decides whether the
+  prompt is shown.
+
+`now` signs the manifest with a key held outside the
 repository: an SSH signing key, the same kind git itself signs with.
 `init` asks for it, defaulting to git's own `user.signingkey` when that
 is an SSH key, and refuses to set up a target without one. **The key has
@@ -1036,7 +1055,11 @@ Two things follow for the design:
   tool grant. It succeeds on a machine lacking a plugin that it
   restores disabled anyway.
 - A `tool-fs` root of `~` for any agent makes `now` fail with the
-  reason.
+  reason, and `fs.read` of the signing key under that root is refused
+  before any `now` runs.
+- A restore of a force-pushed, day-old, correctly signed tip does not
+  proceed without `--expect-after`, `--expect-sequence`, or a
+  confirmation.
 - A `workspaceRoot` set to `~/.stratus` or `~` makes `now` fail with
   the reason, and no file from the backup directory is ever staged.
 - An MCP header named `X-APIKEY` is treated as a credential.
@@ -1101,8 +1124,7 @@ Two things follow for the design:
   policy, an unpushed commit holding ciphertext is rebuilt before the
   next push.
 - `now` against a remote whose tip was rewound below the last pushed
-  sequence refuses to run. Restore of a tip older than the threshold
-  requires `--expect-after` or confirmation.
+  sequence refuses to run.
 - Restoring a home with `api.enabled` on a machine without
   `control-api` writes nothing and prints the install command.
 - `init` with a passphrase-protected signing key is refused, with the
