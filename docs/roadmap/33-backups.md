@@ -129,9 +129,12 @@ run rather than something to write.
     service definition does not carry it, and the timer never sees the
     environment of a daemon started by hand. So when the daemon's soul
     came from `STRATUS_SOUL`, the recording is made by the daemon
-    itself: it writes the path it resolved into the backup directory at
-    every start, and every `now` uses the latest one. A daemon restarted
-    with a different `STRATUS_SOUL` is followed from its next start. A soul the config selects is never recorded. It
+    itself. At every start it writes the selector it used and the path
+    it resolved into the backup directory, and every `now` uses the
+    latest record. A start without `STRATUS_SOUL` writes a record that
+    says so, and the config selection applies again. A daemon restarted
+    with a different `STRATUS_SOUL`, or without one, is followed from
+    its next start. A soul the config selects is never recorded. It
     is resolved from the current config on every run, so an edit to
     `soul` is followed the same night. A manual run and the nightly one
     therefore snapshot the same tree.
@@ -176,7 +179,12 @@ run rather than something to write.
     workspace. `tool-fs`'s provenance ledger always follows the seam.
     With `workspaces` opted in, `now` asks `workspaceResolver` for each
     enabled plugin and each agent, with the same `(seam, workspaceRoot)`
-    pair the plugin receives. It never re-derives the precedence.
+    pair the plugin receives. It never re-derives the precedence. The
+    seam workspace, `agents/<id>/workspace/`, is always included as
+    well, even when every enabled plugin has a configured root. It is
+    the agent's state-owned output directory, it holds the `tool-fs`
+    ledger, and it keeps files written before a plugin was relocated or
+    disabled.
     Roots that coincide are one tree. A root nested inside another is
     recorded as a subpath of the outer tree rather than copied twice. A
     resource the snapshot commits in plaintext is never inside any of
@@ -1280,7 +1288,9 @@ Two things follow for the design:
   enabled plugin is backed up. A daemon whose `tool-shell` has a
   `workspaceRoot` while `plugin-mcp` uses the seam backs up both, and
   restore rewrites the shell setting. When one root is nested in the
-  other, the nested files are stored once and stay shared. When
+  other, the nested files are stored once and stay shared. With every
+  enabled plugin relocated, `agents/<id>/workspace/` is still backed
+  up. When
   `agents/<id>/workspace` is a link to another volume, the files on the
   far side are backed up and restore a real directory.
 - A channel token replaced through a provider or channel sign-in
@@ -1417,7 +1427,8 @@ Two things follow for the design:
 - A daemon whose default soul comes from `STRATUS_SOUL` backs that soul
   up, from the timer as well as by hand, and restore prints the new
   path to export. Restarting the daemon with a different `STRATUS_SOUL`
-  changes the soul the next `now` backs up.
+  changes the soul the next `now` backs up, and restarting it without
+  `STRATUS_SOUL` returns the next `now` to the config's soul.
 - A `tool-fs` root of `~/.stratus/skills`, or a workspace root at
   `~/.stratus/skills/example/output`, makes `now` fail with the
   reason.
