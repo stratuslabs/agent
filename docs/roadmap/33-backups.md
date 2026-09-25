@@ -475,8 +475,8 @@ prevents, and the spec says so.
    an opaque `servers` object no manifest annotation reaches, an entry
    under `env` or `headers` joins the set when its name marks it as a
    credential: `Authorization`, `Cookie`, `Proxy-Authorization`, or a
-   name with `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, or `CREDENTIAL` as a
-   whole component, splitting on `_`, `-`, and case changes. So
+   name with `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`,
+   or `AUTHENTICATION` as a whole component, splitting on `_`, `-`, and case changes. So
    `GITHUB_TOKEN`, `apiKey`, and `X-Api-Key` match, and `MONKEY` and
    `KEYBOARD_LAYOUT` do not. A structured value is split into the parts
    a tool would actually repeat. An `Authorization` or
@@ -700,7 +700,14 @@ deliberately. **Plugin configuration is left switched off too.** A
 restored `plugins` block can start code without any schedule or grant:
 an MCP server's stdio command runs as soon as the daemon loads the
 plugin. So every plugin entry is restored with `enabled: false`, and
-its original block is kept in the same readable list for review.
+its original block is kept in the same readable list for review. Every
+selection that names a plugin's contribution (the `memoryStore`, the
+`executor`, a plugin-contributed provider) is reset to the built-in
+default and listed with its original value. Otherwise the daemon would
+refuse to start on a selection nothing registers. A `memory-sqlite`
+home restored this way starts on the file store, with its database
+restored and waiting. Once the operator has reviewed and re-enabled
+the plugin, the original selection points at it again.
 Together these are every way restored state acts on its own. The
 printout says what it dropped or disabled.
 
@@ -934,7 +941,10 @@ Two things follow for the design:
   all. With `--unverified`, it restores with no schedules and no
   standing grants, and lists the schedules for re-creation.
 - An `--unverified` restore of a config with an MCP server enabled
-  restores it disabled, and the daemon starts no server process.
+  restores it disabled, and the daemon starts no server process. An
+  `--unverified` restore of a `memory-sqlite` home starts, on the
+  built-in store, with the original selection listed.
+- An MCP header named `X-Auth` is treated as a credential.
 - A skill with an empty `out/` directory restores with that directory.
 - A workspace file labelled `external` before the backup still reads
   back as `external` after a restore into a different home, and after
