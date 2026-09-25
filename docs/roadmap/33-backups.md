@@ -940,10 +940,16 @@ with `lstat` so that no component it follows is a link. This is the
 derives passes through a link, applied to the one command that builds a
 home from somebody else's input.
 
-**No path climbs out.** Every path the snapshot names is checked as a
-string before any filesystem access at all. That covers the tree, the
-manifest, and the decrypted index. A path must be relative and already
-normalized: no leading `/`, no empty, `.`, or `..` component, and no
+**No path climbs out.** Every *destination* path the snapshot names is
+checked as a string before any filesystem access at all. That means
+every path restore will write to or address a git object by, whether
+it comes from the tree, the manifest, or the decrypted index. Source
+paths are a different field. The original location of an external
+resource, and the absolute paths a provenance ledger is keyed by, are
+absolute on purpose. They are never used to write. Restore only maps
+them through the old-to-new table, and the result is itself a
+destination under `<dir>` and checked like one. A destination path
+must be relative and already normalized: no leading `/`, no empty, `.`, or `..` component, and no
 NUL. Anything else refuses the whole restore. A backslash is an
 ordinary character in a POSIX filename, so it is allowed. None of
 these forms can occur as a real filename, so an honest `now` never
@@ -1153,7 +1159,9 @@ Two things follow for the design:
   once, or rotated twice between two nights.
 - A workspace file named `notes\draft` backs up and restores.
 - `restore --unverified` of a repository whose index names
-  `../outside` refuses before writing anything.
+  `../outside` as a destination refuses before writing anything. A
+  snapshot with an external soul and provenance records, whose source
+  paths are absolute, restores.
 - Under a `022` umask, a restored home has the same `0700` and `0600`
   modes a fresh one has, and a skill script that was executable still is.
 - A value in a `plugin-mcp` server's `env` or `headers`, echoed into
