@@ -68,7 +68,11 @@ run rather than something to write.
   keeps a local map from a keyed hash of each file's plaintext to the
   ciphertext it last committed. The map lives beside the clone and is
   never committed. A file whose hash has not changed is staged with its
-  old ciphertext.
+  old ciphertext. The map's key also includes the recipient's
+  fingerprint and the encryption policy, so rotating the key or changing
+  `encrypt` re-encrypts everything on the next run. Otherwise, a
+  snapshot taken after a rotation could still hold blobs only the
+  retired key opens.
 
   Souls, skills, config, and memory stay plaintext and diffable, and the
   guarantee there is stated as exactly what it is: **no value the home
@@ -402,6 +406,16 @@ with `lstat` so that no component it follows is a link. This is the
 derives passes through a link, applied to the one command that builds a
 home from somebody else's input.
 
+**Modes are set, not inherited.** Git keeps no distinction between
+`0600` and `0644`, and a restore under an ordinary `022` umask would
+leave decrypted sessions, memory, and grants readable by other local
+users. The restored `state.json` also says the permission migration has
+already run, so startup will not fix it. Restore therefore creates every
+directory the state layout makes `0700` as `0700`, and every file it
+makes `0600` as `0600`. That includes `config.json`, the per-agent
+stores, `whitelist.json`, `memory.jsonl`, and everything under a
+workspace.
+
 **Every write lands inside `<dir>`.** An external soul, a `memory-sqlite`
 database, and a configured workspace root are restored under
 `<dir>/external/`, and the
@@ -502,7 +516,10 @@ Two things follow for the design:
   a `.gitignore`, and a skill whose `.gitattributes` names an LFS filter
   are all restored byte for byte.
 - Two runs with `sessions` enabled and nothing changed make one commit,
-  not two. A workspace that
+  not two. After the age recipient changes, the next run re-encrypts
+  every opted-in file for the new key.
+- Under a `022` umask, a restored home has the same `0700` and `0600`
+  modes a fresh one has. A workspace that
   is a symlink to another volume is backed up and restored as a real
   directory.
 - An unnamed soul in `agents/` restored under a different home directory
