@@ -4,7 +4,7 @@ import {
   pendingStateMigrations,
   readStateStamp,
   applyPerAgentWorkspaces,
-  legacyWorkspacesPresent,
+  workspaceRepairPending,
   runStateMigrations,
   STATE_SCHEMA_VERSION,
   type AppliedStateMigration,
@@ -279,7 +279,7 @@ export const runUpdate = async (
     // holding the home comes past. This is the remedy for a home that has
     // no daemon at all — `stratus run` takes no claim, so it cannot do this,
     // and `stratus doctor` names it and points here.
-    if (claim.held && await legacyWorkspacesPresent(env)) {
+    if (claim.held && await workspaceRepairPending(env)) {
       const repaired = await applyPerAgentWorkspaces(env);
       if (repaired !== undefined) {
         writeLine(streams.stdout, `workspace layout: ${repaired}`);

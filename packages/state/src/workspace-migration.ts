@@ -894,28 +894,30 @@ const anyWorkspaceNamesLegacy = async (env: StateEnvironment, legacy: string): P
 };
 
 /**
- * Whether the pre-schema-4 `workspaces/` directory is there at all.
+ * What a repair pass would do with one entry in `workspaces/`.
  *
- * The gate the repair callers ask before running the pass, and the reason
- * they can run it on every start. The pass itself opens by finishing any
- * interrupted move, which asks *every* agent and reads each provenance
- * ledger whole — append-only files on a fleet that has been up for months.
- * Paying that on every daemon start, for a state that no longer exists, is
- * not a cost worth carrying.
+ * Three answers, because the migration has three end states for a legacy
+ * entry and only one of them is a thing to act on. Conflating them is what
+ * made the first version of this gate stay true forever on an ordinary home,
+ * and `stratus doctor` red forever with advice that could never clear it.
  *
- * Presence rather than contents: a run killed between a rename and its
- * ledger rewrite leaves this directory behind — empty, since the `rmdir`
- * that removes it comes after every agent is done — and that is exactly the
- * case the interrupted-move repair exists for. Gating on whether it holds
- * anything would skip it.
- *
- * Absence answers, and so does a regular file somebody left at the name.
- * Every other failure propagates: a gate that cannot ask must not answer
- * "nothing to do" about state nothing else is looking at.
+ * - `live` — the new path *is* this directory, reached through a link the
+ *   operator wrote. It is read on every call; there is nothing to move.
+ * - `retained` — deliberately left. Its records were folded into the ledger
+ *   at the new path and its files were kept rather than overwriting newer
+ *   ones, or the name is not an agent's at all. No pass will move it, so
+ *   nothing a restart does will change it.
+ * - `repairable` — a pass would still move or fold something: the new path
+ *   is free, so the whole directory goes, or a live ledger here has records
+ *   that have not been folded yet.
  */
-export const legacyWorkspacesPresent = async (env: StateEnvironment): Promise<boolean> => {
+export type LegacyWorkspaceState = 'live' | 'retained' | 'repairable';
+
+/** Whether a legacy workspace still has a ledger of its own to fold. */
+const hasLiveLedger = async (workspace: string): Promise<boolean> => {
   try {
-    return (await stat(legacyWorkspacesDirPath(env))).isDirectory();
+    await lstat(ledgerIn(workspace));
+    return true;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') {
@@ -923,6 +925,85 @@ export const legacyWorkspacesPresent = async (env: StateEnvironment): Promise<bo
     }
     throw error;
   }
+};
+
+/**
+ * The pre-schema-4 directory as it stands: whether it is there, and what a
+ * pass would do with each thing in it.
+ *
+ * One read for both callers that need to know — the repair's gate and the
+ * diagnostic — so "would this do anything" and "what should someone be told"
+ * cannot drift into two answers.
+ *
+ * Absence answers, and so does a regular file left at the name. Every other
+ * failure propagates: a survey that cannot ask must not answer "nothing to
+ * do" about state nothing else is looking at.
+ */
+export const surveyLegacyWorkspaces = async (
+  env: StateEnvironment,
+): Promise<{ present: boolean; entries: ReadonlyMap<string, LegacyWorkspaceState> }> => {
+  const legacy = legacyWorkspacesDirPath(env);
+  let listing: Dirent[];
+  try {
+    listing = await readdir(legacy, { withFileTypes: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return { present: false, entries: new Map() };
+    }
+    throw error;
+  }
+  const entries = new Map<string, LegacyWorkspaceState>();
+  for (const entry of listing) {
+    if (!isWorkspaceEntry(entry)) {
+      continue;
+    }
+    // A name no per-agent path helper will answer for — a `.cache` somebody
+    // dropped in here. The migration leaves it and says so once; nothing
+    // will ever move it, so it is retained rather than pending.
+    if (!isValidAgentId(entry.name)) {
+      entries.set(entry.name, 'retained');
+      continue;
+    }
+    const from = path.join(legacy, entry.name);
+    const target = agentWorkspacePath(env, entry.name);
+    // Identity, not spelling: `agents/<id>/workspace -> workspaces/<id>` is
+    // one live workspace under two names, and the old one is read on every
+    // call. Reporting it as unread state would be false.
+    if (await sameEntry(from, target)) {
+      entries.set(entry.name, 'live');
+      continue;
+    }
+    entries.set(
+      entry.name,
+      await pathIsFree(target) || await hasLiveLedger(from) ? 'repairable' : 'retained',
+    );
+  }
+  return { present: true, entries };
+};
+
+/**
+ * Whether running the pass would do anything — the gate its callers ask
+ * before paying for it.
+ *
+ * The pass opens by finishing any interrupted move, which asks every agent
+ * and reads each provenance ledger whole. Append-only files on a fleet that
+ * has been up for months are not something to parse on every daemon start,
+ * and an ordinary home keeps this directory forever: the collision branch
+ * leaves a workspace's files in it by design, so mere presence stays true
+ * for good.
+ *
+ * An *empty* directory still counts. That is the shape a run killed between
+ * a rename and its ledger rewrite leaves behind — the `rmdir` that removes
+ * it comes after every agent is done — and finishing that move is the one
+ * repair with nothing in `workspaces/` left to point at it.
+ */
+export const workspaceRepairPending = async (env: StateEnvironment): Promise<boolean> => {
+  const { present, entries } = await surveyLegacyWorkspaces(env);
+  if (!present) {
+    return false;
+  }
+  return entries.size === 0 || [...entries.values()].some((state) => state === 'repairable');
 };
 
 /**

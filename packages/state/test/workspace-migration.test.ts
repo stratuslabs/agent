@@ -10,13 +10,13 @@ import { createFileLedger, LEDGER_FILENAME } from '@stratusagent/plugins';
 import {
   STATE_SCHEMA_VERSION,
   applyPerAgentWorkspaces,
-  strayWorkspaceNames,
+  surveyLegacyWorkspaces,
+  workspaceRepairPending,
   agentStateDirPath,
   agentWorkspacePath,
   agentsDirPath,
   createAgentWorkspaces,
   legacyWorkspacesDirPath,
-  legacyWorkspacesPresent,
   pendingStateMigrations,
   readStateStamp,
   runStateMigrations,
@@ -533,7 +533,7 @@ test('a workspace that appears after the stamp is moved by the next pass, not st
   await mkdir(legacy, { recursive: true });
   await writeFile(path.join(legacy, 'fetched.md'), 'from a page');
   await writeFile(path.join(legacy, LEDGER_FILENAME), ledgerLine(path.join(legacy, 'fetched.md')));
-  assert.deepEqual(await strayWorkspaceNames(env), ['bea']);
+  assert.deepEqual([...(await surveyLegacyWorkspaces(env)).entries], [['bea', 'repairable']]);
 
   // What `serve` does on its next start, whatever the stamp says.
   const summary = await applyPerAgentWorkspaces(env);
@@ -548,7 +548,7 @@ test('a workspace that appears after the stamp is moved by the next pass, not st
     path.join(legacy, 'fetched.md'),
     path.join(workspace, 'fetched.md'),
   ]);
-  assert.deepEqual(await strayWorkspaceNames(env), []);
+  assert.deepEqual([...(await surveyLegacyWorkspaces(env)).entries], []);
 });
 
 test('a stray whose new path is already in use has its labels folded and its files named', async () => {
@@ -577,6 +577,51 @@ test('a stray whose new path is already in use has its labels folded and its fil
   assert.equal(await readFile(path.join(legacy, 'fetched.md'), 'utf8'), 'from a page');
 });
 
+test('a collision leaves files behind for good, and that is not a repair pending on every start', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'own.md': 'from the upgrade' });
+  await runStateMigrations(env, { exclusive: true });
+
+  // The ordinary collision, which #190 calls out as not exotic: an agent
+  // writing at the new path while a legacy workspace is still there. Its
+  // records fold, its files stay — so `workspaces/` stays too, for good.
+  const legacy = path.join(legacyWorkspacesDirPath(env), 'ava');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'fetched.md'), 'from a page');
+  await writeFile(path.join(legacy, LEDGER_FILENAME), ledgerLine(path.join(legacy, 'fetched.md')));
+  await applyPerAgentWorkspaces(env);
+
+  // Retained, not pending. Mere presence of the directory would say pending
+  // here — on every start, for ever, paying a read of every agent's ledger
+  // for a state no pass will change.
+  assert.deepEqual([...(await surveyLegacyWorkspaces(env)).entries], [['ava', 'retained']]);
+  assert.equal(await workspaceRepairPending(env), false);
+  // And nothing was lost by stopping: the label is live at the new path.
+  assert.ok((await recordedIn(path.join(agentWorkspacePath(env, 'ava'), LEDGER_FILENAME)))
+    .includes(path.join(legacy, 'fetched.md')));
+});
+
+test('a workspace the new path resolves to is live, not something to report as unread', async () => {
+  const home = await newHome();
+  const env = { homeDir: home };
+  // An operator's own layout: the agent's workspace *is* the legacy
+  // directory, reached through a link. The migration recognises both as one
+  // workspace and leaves them — so it is read on every call, and calling it
+  // state this build cannot see would be false.
+  const legacy = path.join(legacyWorkspacesDirPath(env), 'ava');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'own.md'), 'mine');
+  await mkdir(agentStateDirPath(env, 'ava'), { recursive: true });
+  await symlink(legacy, agentWorkspacePath(env, 'ava'));
+
+  await applyPerAgentWorkspaces(env);
+
+  assert.deepEqual([...(await surveyLegacyWorkspaces(env)).entries], [['ava', 'live']]);
+  assert.equal(await workspaceRepairPending(env), false);
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'ava'), 'own.md'), 'utf8'), 'mine');
+});
+
 test('a home that has finished moving has nothing stray and nothing to say', async () => {
   const home = await newHome();
   const env = { homeDir: home };
@@ -586,17 +631,15 @@ test('a home that has finished moving has nothing stray and nothing to say', asy
   // The steady state every home reaches, and what its starts now cost: the
   // gate says no, so the pass — which would read every agent's ledger to
   // finish an interrupted move — is never entered.
-  assert.equal(await legacyWorkspacesPresent(env), false);
-  assert.deepEqual(await strayWorkspaceNames(env), []);
+  assert.equal(await workspaceRepairPending(env), false);
+  assert.equal((await surveyLegacyWorkspaces(env)).present, false);
   assert.equal(await applyPerAgentWorkspaces(env), undefined);
 
-  // And the gate is presence, not contents: a run killed between a rename
-  // and its ledger rewrite leaves this directory behind *empty*, which is
-  // exactly the state the interrupted-move repair exists for. Gating on
-  // whether it holds anything would skip it.
+  // An *empty* directory still counts: that is the shape a run killed
+  // between a rename and its ledger rewrite leaves, and finishing that move
+  // is the one repair with nothing in `workspaces/` left to point at it.
   await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
-  assert.equal(await legacyWorkspacesPresent(env), true);
-  assert.deepEqual(await strayWorkspaceNames(env), []);
+  assert.equal(await workspaceRepairPending(env), true);
 });
 
 test('the workspace move is idempotent, and a second run has nothing to say', async () => {

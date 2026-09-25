@@ -26,7 +26,7 @@ import {
   resolveAgentPrincipals,
   resolveAgentSlack,
   applyPerAgentWorkspaces,
-  legacyWorkspacesPresent,
+  workspaceRepairPending,
   runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
@@ -181,12 +181,13 @@ const serveHeldHome = async (
   // daemon is racing, and the stores are not open yet, so nothing is reading
   // a path this may still be populating. Costs one `readdir` on a home that
   // has finished moving, which is every home eventually.
-  // Gated on the directory being there at all, which is the one cheap
-  // question: the pass opens by finishing any interrupted move, and that
+  // Gated, because the pass opens by finishing any interrupted move — which
   // asks every agent and reads each provenance ledger whole. Append-only
   // files on a fleet that has been up for months are not something to parse
-  // on every start for a state that no longer exists.
-  if (await legacyWorkspacesPresent(env)) {
+  // on every start. The gate asks whether anything is actually pending
+  // rather than whether the directory exists: an ordinary home keeps it
+  // forever, since a collision leaves a workspace's files in it by design.
+  if (await workspaceRepairPending(env)) {
     const repaired = await applyPerAgentWorkspaces(env);
     if (repaired !== undefined) {
       log(`workspace layout: ${repaired}`);

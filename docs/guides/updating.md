@@ -172,14 +172,20 @@ by the stamp, and one appearing mid-move is reported and left rather than
 refused. `stratus update` matters for a home with no daemon at all:
 `stratus run` takes no claim, so it cannot do this safely.
 
-It costs a single `stat` on a home that has finished moving. Everything
+It costs one directory read on a home with nothing pending. Everything
 expensive — reading every agent's ledger, to finish a move interrupted
-between its rename and its record rewrite — happens only once
-`~/.stratus/workspaces/` is found to still be there.
+between its rename and its record rewrite — happens only when something in
+`~/.stratus/workspaces/` would actually move. Mere presence is not the test,
+because a home keeps that directory for good once a collision has left files
+in it.
 
-`stratus doctor` names any workspace still at the old path, since that is
-where someone looks when a file seems to have gone missing. The remedy is to
-start the daemon or run `stratus update` — not anything by hand.
+`stratus doctor` names what is still at the old path, in two groups,
+because they call for different things. One a start will fold: begin the
+daemon or run `stratus update`. The other is kept there on purpose — files
+a collision retained, or a name that is not an agent's — and nothing further
+will move it; read it where it is and clear it by hand when you are done.
+A workspace the new path resolves to through a link is not reported at all:
+it is live, and read on every call.
 
 Two halves to what the fold rescues, and the difference matters. Where the
 new path does **not** exist yet, the whole directory is moved and its
