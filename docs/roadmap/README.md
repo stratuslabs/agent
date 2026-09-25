@@ -49,6 +49,7 @@ Two consequences for what ranks first:
 | 21 | [Team knowledge: shared skills and roster-scoped memory](./21-team-knowledge.md) | Not started — **Next** | One agent learns a procedure, a human reviews it, the whole roster has it — and an explicit answer for what memory is shared and what stays private |
 | 20 | [Discord channel: the second adapter](./20-channel-discord.md) | Not started — **Next** | A second surface, and the proof that `@stratusagent/channels` is a contract rather than a Slack-shaped hole |
 | 22 | [Slack single-app mode: the whole roster on one app](./22-slack-single-app.md) | Not started — **Next** | A second identity mode in `channel-slack`, for workspaces where one app per agent is not something an admin will approve |
+| 33 | [Backups: a nightly, model-free copy of a home somewhere else](./33-backups.md) | Not started — **Next** | `stratus backup` pushing souls, skills, memory, and schedules to a private git repository every night, with every known secret replaced before commit |
 | 26 | [Fleet introspection: read-only tools for an agent watching the fleet](./26-fleet-introspection.md) | Not started — **Later** | `fleet.*` reads, so a fleet-watcher is a soul with a schedule rather than a subsystem |
 | 08 | [Deployment profiles: single-tenant VM, hosted multi-tenant, credential leases](./08-deployment-profiles.md) | Not started | Non-local deployments as configurations of the framework |
 
@@ -84,6 +85,7 @@ is why it waited.
 - **[21](./21-team-knowledge.md) — team knowledge.** A procedure one agent worked out is useful to the whole roster, and today there is no path from the first to the second that a human reviews. This is also where the shared-versus-private memory boundary gets decided, which [14](./14-memory.md) left open and every multi-agent deployment hits.
 - **[20](./20-channel-discord.md) — Discord.** In the monorepo first (see [Ground rules](#ground-rules)), landing through [19A](./19-registration-seams.md)'s seam and thereby completing 19B, and moved out only once the contract has stopped moving.
 - **[22](./22-slack-single-app.md) — Slack single-app mode.** One app per agent buys the best identity — own avatar, own presence, own DMs — at the highest setup cost in the product: a five-agent roster is five Slack apps, five admin approvals, five token pairs, and five socket connections. Plenty of workspaces will not approve that, and the answer belongs in the adapter as a second identity mode rather than in whatever is deploying it.
+- **[33](./33-backups.md) — backups.** A roster exists to accumulate memory, grants, schedules, and conversations, and all of it lives on one disk that nobody backs up on a schedule. Small and independent of every other step: an optional package, the OS timer calling a model-free `stratus backup now`, and a git target first, with a staging tree that a restic target can reuse later. The part that has to be right the first time is secrets, because git history is forever, so exact-value replacement of every known credential runs before any commit, and a scan that finds anything else stops the push.
 
 ### Later
 
