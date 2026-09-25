@@ -998,10 +998,12 @@ filename. The exact-value and pattern scans cannot catch a secret an
 agent transformed. With an age recipient configured, a record travels
 encrypted: in its workspace's index when that workspace is backed up,
 and otherwise in an encrypted ledger unit. Without a recipient, a
-record for a file inside the home is omitted, which loses nothing,
-because that file does not survive the lost machine either. A record
-for a file outside the home, whose file does survive, makes `now`
-refuse to run and name the fix, `init --recipient`. Records are never
+record is omitted only when its file does not come back either: a file
+inside the home that the snapshot leaves out. A record whose file
+survives makes `now` refuse to run and name the fix,
+`init --recipient`. A file survives when it lies outside the home, or
+when the snapshot itself carries it, such as a tainted file an old
+`tool-fs` root once wrote under `skills/`. Records are never
 redacted: a ledger is looked up by exact path, so a rewritten path
 would silently strip the label from the real file.
 
@@ -1161,6 +1163,8 @@ Two things follow for the design:
   restores disabled anyway.
 - With `workspaces` off, no provenance record for a file inside any
   agent workspace appears in plaintext in the repository.
+- A tainted file under `skills/` with no recipient configured makes
+  `now` refuse, even after the `tool-fs` root that wrote it is gone.
 - With a `tool-fs` root outside the home and no recipient, `now`
   refuses. With a recipient, no ledger path appears in plaintext.
 - A workspace directory swapped for a link between descent and the
