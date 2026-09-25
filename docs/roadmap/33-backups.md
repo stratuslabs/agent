@@ -220,6 +220,12 @@ snapshot's business to interpret:
   of the backup holds none of its files. So `.git` is never copied. The
   files are staged as ordinary files, and the manifest records where the
   skill came from.
+- **Only regular files and directories are copied.** Every entry is
+  checked with `lstat` before it is opened. A FIFO would block the read
+  forever, a socket cannot be read at all, and a device file is not
+  state. So sockets, FIFOs, and devices (a development server's
+  leftovers, usually) are skipped, and the manifest lists them rather
+  than letting one stop or hang the night's run.
 - **Nothing in the tree gets to change how git stores it.** A skill or
   workspace can carry a `.gitignore` that would hide durable files, or a
   `.gitattributes` whose clean filter (Git LFS, say, if the user has it
@@ -306,10 +312,18 @@ failing silently.
      resolver falls back to the environment, so a name a soul declares
      and a shell exports is a secret here even though nothing stores it.
 
-   The run has to see the environment the daemon sees, or the list is
-   short exactly where it matters. So `enable` writes the timer with the
-   same environment the service definition carries, and a declared name
-   that resolves to nothing at backup time is reported in `status`.
+   The run has to see every value it is meant to redact, or the list is
+   short exactly where it matters. The timer does not have the
+   operator's shell. The service definition passes on `PATH` and little
+   else, so a credential that exists only as an exported shell variable
+   is invisible to the nightly run, however visible it was to a
+   `stratus run` that echoed it into memory. So `enable` resolves every
+   declared credential name twice: once in the operator's shell, and
+   once in the environment the timer will have. It refuses when a name
+   resolves in the first and not in the second, and names the credential
+   and the fix: `stratus credential set <name>`, which puts it where
+   every run can read it. `now` reports the same gap in `status` if it
+   appears later.
 
    Values that live in configuration rather than in a credential store
    join the same set, and **the entry's name decides, not the field it
@@ -414,6 +428,15 @@ to the one backup repository**, so a stolen key reaches that repository
 and nothing else. A personal access token in a credential helper works,
 but it usually reaches every repository its owner has.
 
+**Whatever it is, it has to work with nobody there.** An SSH agent
+socket, a passphrase prompt, or an interactive credential helper
+authenticates `init` from the operator's shell and then fails every
+night. `init` and `enable` therefore run a real probe, `git push
+--dry-run` to the remote, from the timer's own environment with
+`GIT_TERMINAL_PROMPT=0` and SSH in batch mode. They refuse a setup that
+only works interactively. The deploy-key setup pins its key in the
+clone's own `core.sshCommand` so that it does not depend on an agent.
+
 ### A backup that faithfully saves the damage
 
 A nightly job will back up a wiped memory file as faithfully as a good
@@ -449,7 +472,13 @@ ciphertext, the age identity comes from `--identity`, or from
 repository and never stored by restore. With no identity, or the wrong
 one, restore stops before writing anything and says which. A restore
 that silently left out the encrypted half would look complete and not
-be. It rebuilds each database from its JSONL, rebuilds `memory.jsonl.index` on first use (which already happens),
+be. **It reads the snapshot from git's objects, never from a checkout.**
+A clone or checkout on the replacement machine runs whatever smudge
+filter or line-ending rule a committed `.gitattributes` names and that
+machine has installed. The bytes it wrote would then differ from the
+signed manifest, and a valid snapshot would fail to restore. Every blob
+is read with `git cat-file` and verified against the manifest before it
+is written. It rebuilds each database from its JSONL, rebuilds `memory.jsonl.index` on first use (which already happens),
 and prints the list of credentials to re-enter.
 
 **A snapshot is verified before it is trusted.** Every check above
@@ -657,7 +686,14 @@ Two things follow for the design:
 - Restoring a home with `api.enabled` on a machine without
   `control-api` writes nothing and prints the install command.
 - `init` with a passphrase-protected signing key is refused, with the
-  reason.
+  reason. So is a remote that authenticates only through an SSH agent
+  the timer will not have.
+- `enable` with a credential that exists only as a shell variable is
+  refused, and names `stratus credential set`.
+- A snapshot containing a `.gitattributes` with a smudge filter
+  restores byte for byte on a machine that has the filter installed.
+- A workspace containing a FIFO and a socket backs up without hanging,
+  and the manifest lists both as skipped.
 - A `now` started while another is running exits with the
   "already running" status and changes nothing.
 - `env: { MONKEY: "banana" }` backs up verbatim.
