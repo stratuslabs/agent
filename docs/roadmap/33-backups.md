@@ -323,7 +323,9 @@ snapshot's business to interpret:
   path the same. So the leaf's size, `mtime`, and `ctime` from `fstat`
   are compared before and after the read. On a change the read is
   retried a few times. If the file never holds still, the previous
-  snapshot's copy is kept and the file is reported. A torn file is
+  snapshot's copy is kept and the file is reported. A file with no
+  previous copy, because it is new or this is the first run, is skipped
+  and recorded like a FIFO, and the report names it. A torn file is
   never signed as a good one. A link the snapshot
   materializes is resolved the same way, one component at a time. What
   this cannot close is a swap that is made and undone again inside a
@@ -814,13 +816,15 @@ real latest backup, so the anchor has to come from outside it:
 - **`now` builds only on its own tip.** Each run records the last
   sequence number and commit it pushed, beside the clone. A remote tip
   older than that is a rewind, and stops the run with a warning. A
-  remote tip that has moved *forward* stops it too, unless the new
-  commits verify: each carries a valid signature from the configured
-  key, links to its parent's manifest, and has the next sequence
-  number. A second machine backing up to the same branch is the honest
-  case, and it verifies. An unsigned or mis-chained commit does not, and
-  building on it would leave every later tip unrestorable, because the
-  restore walk would reach it.
+  remote tip that has moved *forward* stops it too. A backup has one
+  writer, and snapshots replace rather than merge, so a foreign tip is
+  never adopted automatically: two machines alternating on one branch
+  would leave the latest tip showing whichever ran last. Taking over is
+  a deliberate `now --takeover`. The takeover verifies every new commit
+  first, meaning a valid signature from the configured key, a link to
+  its parent's manifest, and the next sequence number. It refuses an
+  unsigned or mis-chained commit, because building on one would leave
+  every later tip unrestorable once the restore walk reached it.
 - **Restore always asks for a checkpoint.** A replacement machine does
   not have the sequence number `now` recorded, and yesterday's tip is
   as dangerous as last month's when a grant was revoked this morning.
@@ -1202,7 +1206,8 @@ Two things follow for the design:
 - Restoring a snapshot written by a newer state schema on an older
   CLI writes nothing and prints the upgrade command.
 - A workspace file rewritten continuously during `now` is never
-  committed torn: its previous copy is kept and the file is reported.
+  committed torn. Its previous copy is kept, or, when it has none, it
+  is skipped and named in the report.
 - A token pasted into `credentials.json` by hand during `now` restarts
   the run, and one pasted during the push triggers the post-push
   rescan.
@@ -1293,8 +1298,9 @@ Two things follow for the design:
   policy, an unpushed commit holding ciphertext is rebuilt before the
   next push.
 - `now` against a remote whose tip was rewound below the last pushed
-  sequence refuses to run, and so does `now` against a tip that advanced
-  with an unsigned commit.
+  sequence refuses to run. So does `now` against a tip that another
+  writer advanced, until `--takeover`, and a takeover refuses a tip
+  that advanced with an unsigned commit.
 - `init` against a repository that has only a README commit creates the
   orphan `stratus-backup` branch, and restore verifies its first
   snapshot as the chain root.
