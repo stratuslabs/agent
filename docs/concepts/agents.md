@@ -78,7 +78,10 @@ You are a sharp, warm generalist assistant. Answer first, explain second...
 Every agent is also told, ahead of its persona, how to reply in chat: like
 a text message — usually one to four short sentences, the answer first, no
 preamble, recap, or closing offer, and headers or bullets only where they
-genuinely help. That is a default, not a cap. A draft, plan, or document
+genuinely help. It is told to write the way a person texts: avoiding
+em dashes, and none of the tells of machine-written text (filler openers and
+closers, "it's not X, it's Y" framing, words like *delve* or *seamless*,
+emoji you did not use first). That is a default, not a cap. A draft, plan, or document
 it is asked for arrives whole the first time; a blocker or uncertainty is
 always said; and a long deliverable is shared as a real link the reader can
 open, never a path on the daemon's disk. It carries on with work it was

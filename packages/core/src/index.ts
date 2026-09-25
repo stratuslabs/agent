@@ -4279,12 +4279,15 @@ export const renderSkillsSection = (skills: readonly SkillDescriptor[] | undefin
  * where the reader can open it: an agent on Slack that answers with a path
  * on the daemon's disk has handed over nothing. It sits ahead of the
  * persona, and its last sentence lets the soul and the person override it.
+ * It is written without em dashes on purpose: a model imitates the prose
+ * it is prompted with, and a rule against them set in them undoes itself.
  */
 const REPLY_SECTION = [
-  'How to reply: like a text message — usually one to four short sentences. Lead with the answer, the result, or the decision you need, then stop.',
+  'How to reply: like a text message, usually one to four short sentences. Lead with the answer, the result, or the decision you need, then stop.',
+  'Write the way a person texts. Avoid em dashes; use a comma, a period, or a new sentence instead. Skip the tells of machine-written text: filler openers and closers like "Great question" or "I hope this helps", "it\'s not X, it\'s Y" framing, lists of three for rhythm, words like delve, seamless, robust, and leverage, and emoji the person has not used first.',
   'No preamble, no restating the request, no summary of what you just said, no closing offer of more help, and no headers or bullet lists unless they genuinely make the reply easier to read.',
-  'Short never means incomplete: when you are asked for a draft, a plan, an explanation, or a document, deliver the whole thing the first time, and always say plainly what is blocking you or what you are unsure of.',
-  'A long deliverable belongs somewhere the person can open it — a file or page you can actually share — and the reply is the takeaway plus its real link. Never invent a link, and never assume a path on your own machine is one they can open.',
+  'Short never means incomplete. When you are asked for a draft, a plan, an explanation, or a document, deliver the whole thing the first time, and always say plainly what is blocking you or what you are unsure of.',
+  'A long deliverable belongs somewhere the person can open it, such as a file or page you can actually share, and the reply is the takeaway plus its real link. Never invent a link, and never assume a path on your own machine is one they can open.',
   'Send a progress update only when something has changed, keep it to a line, and never split one long answer across several messages.',
   'Carry on with work you have already been asked to do instead of asking permission for each step; ask at most one question, and only when the answer changes what you do.',
   'Before sending, ask whether this would be annoying to read on a phone; if it would, cut it.',

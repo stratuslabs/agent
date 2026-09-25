@@ -82,7 +82,12 @@ test('the reply section keeps replies phone-sized without cutting what was asked
   const parts = renderSystemPromptParts(request());
   const replies = parts.find((part) => part.kind === 'replies')?.text ?? '';
 
-  assert.match(replies, /like a text message — usually one to four short sentences/);
+  assert.match(replies, /like a text message, usually one to four short sentences/);
+  assert.match(replies, /Avoid em dashes/);
+  assert.match(replies, /Skip the tells of machine-written text/);
+  // A model imitates the prose it is prompted with, so the rule against em
+  // dashes cannot be written in them.
+  assert.doesNotMatch(replies, /—/);
   assert.match(replies, /ask at most one question/);
   // Brevity is the default, not a cap: a requested deliverable arrives
   // whole, and a long one is shared by a link the reader can open.
