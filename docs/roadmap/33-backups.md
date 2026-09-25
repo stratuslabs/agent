@@ -440,7 +440,15 @@ byte for byte can be torn. Each one is snapshotted with `VACUUM INTO` a
 temporary path, which is consistent while the daemon is writing, and then
 fsynced and renamed. `node:sqlite`'s `backup()` is not available across
 the supported range: it arrived in 22.16 and 23.8, and the floor is
-`>=22.13 <23 || >=23.4`. The snapshot is then written as `schema.sql` plus
+`>=22.13 <23 || >=23.4`. Each database is consistent on its own, but
+together they are not, so the order matters. Every agent's
+`sessions.db` is snapshotted first, and `fleet.db` last. The scheduler
+spends a slot in `fleet.db` (`claimSlot`) before it dispatches the
+firing's session, so any scheduled session the snapshot captured was
+claimed earlier still, and the later `fleet.db` snapshot shows that
+slot spent. A restored home can lose a firing that was in flight, but
+it can never hold a still-due slot beside its completed session, which
+would replay the action on the first tick. The snapshot is then written as `schema.sql` plus
 one JSONL file per table, rows ordered by primary key, so that:
 
 - a night where nothing changed makes **no commit at all**;
@@ -526,7 +534,9 @@ credential store: credential writes, the recorder, and a retired value
 step, it then takes the **secret-set lock** that every one of those
 writers also takes: re-read the generation, commit, push. The push
 under the lock is **bounded**, five minutes by default and
-configurable. A stalled remote or credential helper aborts the push,
+configurable, and so is every other git subprocess `now` starts,
+`git credential fill` included, since a locked keychain can block
+before the push begins. A stalled remote or credential helper aborts the push,
 releases the lock, keeps the local commit (rescanned before the next
 push, as above), and exits non-zero. A writer waiting on the lock
 therefore waits at most that long, not until the network recovers. So no
@@ -555,7 +565,10 @@ it took at collection. That covers config files, souls, the plugin
 manifests whose `credentials` it collected, `credentials.json`, and
 `gateway-token`. Pasting a token straight into `credentials.json` is a
 documented setup path for a Slack channel. It also covers the backing
-file of an accepted `store --file` git helper. A change starts the run over, exactly like a generation
+file of an accepted `store --file` git helper, and the source files of
+the deploy key and the signing key. The run uses frozen copies of the
+keys, but a source replaced mid-run is still new secret material the
+commit was never scanned against. A change starts the run over, exactly like a generation
 change. A hand edit during the few seconds of the push itself cannot
 be locked out, because nothing makes an editor wait. So it is detected
 immediately afterwards instead. Once the push returns, `now` re-hashes
@@ -1401,6 +1414,13 @@ Two things follow for the design:
   committed.
 - Two workspaces sharing one hard-linked `fs-provenance.jsonl` restore
   still sharing it, and every label survives.
+- A deploy key file replaced during the push triggers the post-push
+  rescan against the new key.
+- A keychain helper that blocks on a locked keychain times out, releases
+  the lock, and does not stop the next night's run.
+- A schedule that fires while `now` snapshots, with `sessions` on,
+  restores either not yet fired or fired and spent, never still due
+  beside its completed session.
 - A keychain token rotated between collection and push is not the one
   the push uses, and a signing key replaced mid-run does not sign.
 - Moving a plugin's `workspaceRoot` from `/data/a` to `/data/b` keeps
