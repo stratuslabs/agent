@@ -332,8 +332,13 @@ the pattern scan's to catch or no one's.
 
 Configuration is a source of secrets too (`env`, `headers`, URL
 parameters, `writeOnly` properties), so it takes part in the same
-protocol. Every config write the CLI makes (`stratus setup`, `plugins`,
-`template add`) takes the secret-set lock and advances the generation.
+protocol. The lock and the generation live inside the shared writers
+in `state` (the config-file save and the credential-store save), not
+in each caller. So every cooperative writer takes part without being
+listed: `stratus setup`, `plugins`, `template add`, and the control
+API's `PUT /v1/config`. A new writer can only bypass it by skipping
+`state`, and the "Do not re-derive rules" convention already forbids
+that.
 A hand edit cannot take a lock. So under the lock, `now` also compares
 a hash of every config file it read against the hash it took at
 collection. A change starts the run over, exactly like a generation
@@ -880,6 +885,7 @@ Two things follow for the design:
 - A credential rotated after its old value was written into memory:
   the old value is still replaced in every later snapshot. This holds
   when the rotation happened while backups were disabled too.
+- A `PUT /v1/config` that lands during the push waits for it to finish.
 - A `credential set`, or a hand edit to `config.json` adding a header,
   that lands between collection and commit makes the run start over, and the new value is redacted in what it commits. A
   `credential set` issued during the push waits for it to finish. A hand
