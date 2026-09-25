@@ -52,7 +52,7 @@ run rather than something to write.
 
   | Default | Opt-in | Never |
   | --- | --- | --- |
-  | `agents/<id>.md` souls, `skills/`, `config.json` (sensitive values redacted, below), `state.json`, per-agent `memory.jsonl` and `whitelist.json`, the `schedules` table from `fleet.db` | `sessions.db` per agent and the session index (`sessions`), `workspace/` per agent (`workspaces`) | `credentials.json`, `gateway-token`, `gateway.json`, `stratusd.lock`, `logs/`, `memory.jsonl.index` (it is derived and can be rebuilt, except for its `usage` table, below), any `-wal`, `-shm`, or `-journal` file |
+  | `agents/<id>.md` souls, `skills/`, `config.json` (sensitive values redacted, below), `state.json`, per-agent `memory.jsonl` and `whitelist.json`, the `schedules` table from `fleet.db` | `sessions.db` per agent and the session index (`sessions`), `workspace/` per agent (`workspaces`) | `credentials.json`, `gateway-token`, `gateway.json`, `stratusd.lock`, `logs/`, `memory.jsonl.index` (it is derived and can be rebuilt, except for its `usage` table, below), the `-wal`, `-shm`, and `-journal` sidecars of the databases it snapshots (only those: a workspace file that happens to be named `cache-wal` is copied like any other) |
 
   Sessions are opt-in because they are the largest and most sensitive
   thing in a home: whole conversations, tool inputs, and command output.
@@ -133,10 +133,13 @@ run rather than something to write.
     `external/`, and the snapshot's manifest records the original path.
   - **A configured `workspaceRoot`.** `tool-fs`, `tool-shell`,
     `tool-browser`, and `plugin-mcp` accept one, and it wins over
-    `agents/<id>/workspace/`. With `workspaces` opted in, `now` snapshots
-    the root each agent actually resolves to, through the same resolver
-    the plugins use rather than by reading the setting, under
-    `external/`. The directories an agent is merely allowed to work in
+    `agents/<id>/workspace/`. They are set independently, per plugin and
+    per agent, so one agent can have several: shell output under one
+    root and MCP output under another. With `workspaces` opted in, `now`
+    enumerates every resolved `(plugin, agent)` root through the same
+    resolver the plugins use, rather than by reading the settings. It
+    deduplicates roots that coincide and snapshots each one under
+    `external/`. Restore rewrites every setting that pointed at one. The directories an agent is merely allowed to work in
     (`tool-fs` roots) are the operator's own files, not agent state, and
     stay out.
 
@@ -262,7 +265,13 @@ snapshot's business to interpret:
   files and directories. For skill links it uses the same containment
   check `skill add` runs (`findEscapingSymlink`, which is private to
   `state` today and gets exported for its second consumer) rather than
-  a second copy of it. A link that reaches outside its own skill or
+  a second copy of it. That check is a preflight, and the copy does not
+  act on its answer by path. Following a link means reading it with
+  `readlinkat` on the already-open parent. The target is then resolved
+  one component at a time from the root descriptor with `O_NOFOLLOW`,
+  or with `openat2(RESOLVE_BENEATH)` where the kernel has it. An agent
+  that swaps a link between the check and the copy gets a refusal, not
+  a read outside its tree. A link that reaches outside its own skill or
   workspace fails the run and names the path. So does a cycle: a
   contained link such as `loop -> .` passes containment but has no
   finite copy. The copy tracks the real directories on its *current
@@ -414,7 +423,10 @@ prevents, and the spec says so.
    credential store, and is never committed. It serves only as
    redaction input. `stratus backup forget-retired` clears it once the
    operator has purged the content that held those values. Values from
-   configuration retire the same way. Each `now` compares its secret
+   configuration retire the same way. `init` records the first secret
+   set, from every source, as the baseline, so a value removed before
+   the first `now` has something to be compared with. Each `now`
+   compares its secret
    set with the previous run's, from every source: config `env`,
    `headers`, URL parameters, `writeOnly` properties, and stored
    credentials. Any value that has dropped out goes onto the retired
@@ -806,7 +818,12 @@ Two things follow for the design:
 - A config-only `soul` outside `agents/` is in the snapshot. Restore puts
   it under `<dir>/external/` and rewrites the restored config to match.
 - With `workspaces` opted in and a `workspaceRoot` configured, the files
-  under that root are the ones backed up and restored.
+  under that root are the ones backed up and restored. An agent with
+  different roots for `tool-shell` and `plugin-mcp` has both backed up,
+  and both settings are rewritten on restore.
+- A workspace file named `research-journal` is backed up.
+- A config credential removed after `init` but before the first `now`
+  is still redacted.
 - A credential containing a quote, a backslash, and a newline, pasted
   into memory and a session, appears in the pushed tree in no form, raw
   or escaped.
