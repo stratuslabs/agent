@@ -254,6 +254,15 @@ snapshot's business to interpret:
   of their tree are. A skipped path in a skill goes in the manifest. A
   skipped path in an encrypted workspace goes in the encrypted index,
   because its name is tool output like any other.
+- **A hard link is not containment.** `O_NOFOLLOW` stops a symlink, but
+  a hard link to a file outside the tree is an ordinary regular file to
+  every check above. It would copy an inode that is on neither the
+  Never list nor in the secret set. It would also let a swapped entry
+  point anywhere on the same filesystem. So a regular file whose
+  descriptor reports `st_nlink > 1` is skipped and recorded like a
+  FIFO, and `now` names it. Links inside the tree are rare in skills
+  and workspaces. Refusing all of them costs less than proving where
+  the other name lives.
 - **Nothing in the tree gets to change how git stores it.** A skill or
   workspace can carry a `.gitignore` that would hide durable files, or a
   `.gitattributes` whose clean filter (Git LFS, say, if the user has it
@@ -806,6 +815,12 @@ disabled, restore requires only the packages the rewritten home
 actually needs: those that own a store to rebuild, such as
 `memory-sqlite`, and the companions its config still turns on. A
 missing MCP plugin that will restore disabled blocks nothing.
+The same preflight covers Stratus itself. The manifest records the
+`state.json` schema version and the CLI version that wrote it. If that
+schema is newer than the `STATE_SCHEMA_VERSION` the restoring build
+exports, restore writes nothing and prints the upgrade command. It
+uses the same message `assertStateCompatible` gives, rather than
+building a home that startup would refuse on first contact.
 
 **The repository's SQL is never executed.** Each database is created
 from the schema the owning store ships for the snapshot's recorded
@@ -1064,6 +1079,10 @@ Two things follow for the design:
   restores disabled anyway.
 - With `workspaces` off, no provenance record for a file inside any
   agent workspace appears in plaintext in the repository.
+- A workspace file hard-linked to `~/.ssh/id_ed25519` is skipped,
+  never copied.
+- Restoring a snapshot written by a newer state schema on an older
+  CLI writes nothing and prints the upgrade command.
 - A `tool-fs` root of `~` for any agent makes `now` fail with the
   reason, and `fs.read` of the signing key under that root is refused
   before any `now` runs.
