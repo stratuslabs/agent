@@ -52,7 +52,7 @@ run rather than something to write.
 
   | Default | Opt-in | Never |
   | --- | --- | --- |
-  | `agents/<id>.md` souls, `skills/`, `config.json` (sensitive values redacted, below), `state.json`, per-agent `memory.jsonl` and `whitelist.json`, the `schedules` table from `fleet.db` | `sessions.db` per agent and the session index (`sessions`), `workspace/` per agent (`workspaces`) | `credentials.json`, `gateway-token`, `gateway.json`, `stratusd.lock`, `logs/`, `memory.jsonl.index` (it is derived and can be rebuilt, except for its `usage` table, below), the `-wal`, `-shm`, and `-journal` sidecars of the databases it snapshots (only those: a workspace file that happens to be named `cache-wal` is copied like any other) |
+  | `agents/<id>.md` souls, `skills/`, `config.json` (sensitive values redacted, below), `state.json`, per-agent `memory.jsonl` and `whitelist.json`, the provenance ledger (`fs-provenance.jsonl`, below), the `schedules` table from `fleet.db` | `sessions.db` per agent and the session index (`sessions`), `workspace/` per agent (`workspaces`) | `credentials.json`, `gateway-token`, `gateway.json`, `stratusd.lock`, `logs/`, `memory.jsonl.index` (it is derived and can be rebuilt, except for its `usage` table, below), the `-wal`, `-shm`, and `-journal` sidecars of the databases it snapshots (only those: a workspace file that happens to be named `cache-wal` is copied like any other) |
 
   Sessions are opt-in because they are the largest and most sensitive
   thing in a home: whole conversations, tool inputs, and command output.
@@ -784,9 +784,20 @@ no labels for its own files. Content that came from outside would then
 read back as the agent's own, which is the one thing
 [30](./30-provenance.md) exists to prevent. Restore rewrites every
 ledger record through the same old-to-new mapping it applies to the
-config. A record that maps to no restored root is kept aside and
-listed, not dropped. When in doubt the label errs toward `external`,
-never toward trusted.
+config. The ledger is backed up **by default, not only with
+`workspaces`**, because it also labels files outside any workspace:
+under `tool-fs` roots, which are the operator's own directories and
+are deliberately not copied. Those files usually survive the lost
+machine on their own mount, and without the ledger they would come
+back unlabelled. The records are split by where their files live.
+Records for files inside an encrypted workspace travel in that
+workspace's encrypted index. The rest are plaintext, and their paths
+go through the same secret and pattern scan as every other staged
+path. On restore, a record whose root the restored config still
+references is written back unchanged. A record for a relocated root is
+mapped. Only a record whose root the restored config no longer
+references is kept aside and listed. When in doubt the label errs
+toward `external`, never toward trusted.
 
 **Every write lands inside `<dir>` or its own staging directory.** An external soul, a `memory-sqlite`
 database, and a configured workspace root are restored under
@@ -919,7 +930,9 @@ Two things follow for the design:
 - A skill with an empty `out/` directory restores with that directory.
 - A workspace file labelled `external` before the backup still reads
   back as `external` after a restore into a different home, and after
-  a relocated `workspaceRoot`.
+  a relocated `workspaceRoot`. With `workspaces` left off, a file
+  under a surviving `tool-fs` root that was labelled `external` is
+  still `external` after restore.
 - `enable` with a `STRATUS_API_KEY` exported only in the operator's
   shell is refused.
 - A credential exported for one `stratus run` after `enable` makes the
