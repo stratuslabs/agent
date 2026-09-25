@@ -172,12 +172,18 @@ by the stamp, and one appearing mid-move is reported and left rather than
 refused. `stratus update` matters for a home with no daemon at all:
 `stratus run` takes no claim, so it cannot do this safely.
 
-It costs one directory read on a home with nothing pending. Everything
-expensive — reading every agent's ledger, to finish a move interrupted
-between its rename and its record rewrite — happens only when something in
-`~/.stratus/workspaces/` would actually move. Mere presence is not the test,
-because a home keeps that directory for good once a collision has left files
-in it.
+It costs one directory read on a home that has finished, which is every home
+once `~/.stratus/workspaces/` is gone — the move sweeps it as its last act.
+While that directory is still there, each start also reads the provenance
+ledger of every agent that has one, to finish a move interrupted between its
+rename and its record rewrite. Nothing finer is safe to test: such a move
+leaves *nothing* in `workspaces/` naming the agent it broke, so a home
+keeping that directory for another reason — a collision's retained files,
+your own `workspaces/README` — cannot be read as "nothing pending" without
+skipping the repair. The read holds nothing in memory, and the cost goes
+away for good once the directory does; making it cheap on a home that keeps
+the directory means recording the new paths before the move rather than after
+([#234](https://github.com/stratuslabs/agent/issues/234)).
 
 `stratus doctor` names what is still at the old path, in two groups,
 because they call for different things. One a start will fold: begin the
