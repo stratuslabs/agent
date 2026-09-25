@@ -220,8 +220,12 @@ snapshot's business to interpret:
   of the backup holds none of its files. So `.git` is never copied. The
   files are staged as ordinary files, and the manifest records where the
   skill came from.
-- **Only regular files and directories are copied.** Every entry is
-  checked with `lstat` before it is opened. A FIFO would block the read
+- **Only regular files and directories are copied.** A check made on a
+  path and then acted on through the path again is a race: an agent
+  still writing into its workspace can swap a checked file for a FIFO or
+  a link in between. So every entry is opened relative to its already
+  opened parent, with `O_NOFOLLOW` and `O_NONBLOCK`, and the *descriptor*
+  is checked with `fstat` before a byte is read. A FIFO would block the read
   forever, a socket cannot be read at all, and a device file is not
   state. So sockets, FIFOs, and devices (a development server's
   leftovers, usually) are skipped rather than letting one stop or hang
@@ -728,7 +732,8 @@ Two things follow for the design:
 - A snapshot containing a `.gitattributes` with a smudge filter
   restores byte for byte on a machine that has the filter installed.
 - A workspace containing a FIFO and a socket backs up without hanging,
-  and the manifest lists both as skipped.
+  and the encrypted index lists both as skipped. The plaintext manifest
+  names neither.
 - A `now` started while another is running exits with the
   "already running" status and changes nothing.
 - `env: { MONKEY: "banana" }` backs up verbatim.
