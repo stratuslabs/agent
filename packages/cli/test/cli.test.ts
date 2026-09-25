@@ -4163,6 +4163,14 @@ test('setup connects an agent to Slack without touching any file by hand', async
   // The manifest is printed for pasting, so app creation needs no file hunt.
   assert.match(output.stdout, /"always_online": true/);
   assert.match(output.stdout, /app_mentions:read/);
+  // Slack creates apps with the Messages tab off, and a DM to such an app
+  // is refused by Slack before the adapter sees it.
+  assert.match(output.stdout, /"messages_tab_enabled": true/);
+  assert.match(output.stdout, /"messages_tab_read_only_enabled": false/);
+  // The app-level token is walked through click by click: where it lives,
+  // and the scope Slack does not add unless asked.
+  assert.match(output.stdout, /App-Level Tokens and click Generate Token and Scopes/);
+  assert.match(output.stdout, /Add Scope → connections:write/);
 
   const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
   assert.deepEqual(credentials.channels, { slack: { ava: { appToken: 'xapp-tok', botToken: 'xoxb-tok' } } });

@@ -114,6 +114,15 @@ export const slackAppManifest = (agentName: string): string => JSON.stringify({
     background_color: '#1a1d21',
   },
   features: {
+    // Without the Messages tab, a DM to the app gets Slack's own "Sending
+    // messages to this app has been turned off" and never reaches the
+    // adapter, however the scopes and events are set. Slack creates apps
+    // with it off, so every early user had to find the App Home switch.
+    app_home: {
+      home_tab_enabled: false,
+      messages_tab_enabled: true,
+      messages_tab_read_only_enabled: false,
+    },
     bot_user: { display_name: agentName, always_online: true },
   },
   oauth_config: { scopes: { bot: SLACK_BOT_SCOPES } },

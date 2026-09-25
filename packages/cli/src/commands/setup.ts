@@ -1021,22 +1021,31 @@ export const runSetup = async (
       writeLine(streams.stdout, `    ${line}`);
     }
     writeLine(streams.stdout);
-    writeLine(streams.stdout, '  3. Create the app, then Basic Information → App-Level Tokens →');
-    writeLine(streams.stdout, '     Generate a token with the connections:write scope (xapp-…)');
-    writeLine(streams.stdout, '  4. Install App → copy the Bot User OAuth Token (xoxb-…)');
+    // The app-level token is the step people got lost on: it lives on
+    // Basic Information rather than OAuth & Permissions, where the other
+    // token is, and Slack creates it without a scope unless one is added
+    // in the same dialog. Spelled out click by click for that reason.
+    writeLine(streams.stdout, '  3. Click Create. You land on Basic Information — scroll down to');
+    writeLine(streams.stdout, '     App-Level Tokens and click Generate Token and Scopes:');
+    writeLine(streams.stdout, '       • Token Name: anything, e.g. socket');
+    writeLine(streams.stdout, '       • Add Scope → connections:write');
+    writeLine(streams.stdout, '       • Generate, then copy the token — it starts with xapp-');
+    writeLine(streams.stdout, '     That is the app-level token, and setup asks for it first.');
+    writeLine(streams.stdout, '  4. Sidebar → Install App → Install to your workspace → Allow, then copy');
+    writeLine(streams.stdout, '     the Bot User OAuth Token — it starts with xoxb-');
     writeLine(streams.stdout, `  5. Basic Information → Display Information → upload ${agentName}'s avatar`);
     writeLine(streams.stdout);
 
-    const appToken = await prompter.askSecret('Paste the app-level token (xapp-…, Enter to cancel; input is hidden): ');
+    const appToken = await prompter.askSecret('Paste the app-level token from step 3 (xapp-…, Enter to cancel; input is hidden): ');
     if (!appToken) {
       writeLine(streams.stdout, 'Cancelled — nothing was saved.');
       return;
     }
     if (!appToken.startsWith('xapp-')) {
-      writeLine(streams.stdout, '✗ That does not look like an app-level token (they start with xapp-). Nothing was saved.');
+      writeLine(streams.stdout, '✗ That does not look like an app-level token (they start with xapp-, and live under Basic Information → App-Level Tokens, not OAuth & Permissions). Nothing was saved.');
       return;
     }
-    const botToken = await prompter.askSecret('Paste the bot user OAuth token (xoxb-…, Enter to cancel; input is hidden): ');
+    const botToken = await prompter.askSecret('Paste the Bot User OAuth Token from step 4 (xoxb-…, Enter to cancel; input is hidden): ');
     if (!botToken) {
       writeLine(streams.stdout, 'Cancelled — nothing was saved.');
       return;
@@ -1055,7 +1064,7 @@ export const runSetup = async (
     }
     const app = await verifySlackAppToken(appToken, fetchImpl);
     if (app.status === 'rejected') {
-      writeLine(streams.stdout, `✗ Slack rejected the app-level token (${app.detail}). Nothing was saved — check it has the connections:write scope.`);
+      writeLine(streams.stdout, `✗ Slack rejected the app-level token (${app.detail}). Nothing was saved — generate a new one under Basic Information → App-Level Tokens with the connections:write scope.`);
       return;
     }
 

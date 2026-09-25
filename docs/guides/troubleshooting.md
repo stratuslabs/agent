@@ -89,6 +89,13 @@ subscription sign-in to per-token billing.
   `groups:history` / `mpim:history` and the matching `message.*` events and
   reinstall the app once; [Slack](./slack.md#talking-to-an-agent) has the
   rest of the addressing rules.
+- **A DM to the app says "Sending messages to this app has been turned
+  off"** — that is Slack's App Home setting, not Stratus: the app was
+  created before the manifest turned on its Messages Tab. In the app's
+  settings, **App Home → Messages Tab → Allow users to send Slash commands
+  and messages from the messages tab**, then reopen the DM. Channels are
+  unaffected. See [Setting up an agent's Slack
+  app](../../packages/channel-slack/README.md#setting-up-an-agents-slack-app-2-minutes).
 - **An agent replies as though it used a tool, but nothing happened** — check
   the daemon's startup lines for `lists tools nothing registered provides`.
   An allowlist entry that matches no registered tool grants nothing, and a
