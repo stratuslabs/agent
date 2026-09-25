@@ -427,6 +427,14 @@ prevents, and the spec says so.
      resolved through the same `CredentialResolver` a tool call uses. That
      resolver falls back to the environment, so a name a soul declares
      and a shell exports is a secret here even though nothing stores it.
+   - the control API's bearer token: the contents of `gateway-token`,
+     and `STRATUS_GATEWAY_TOKEN` when the environment sets it. Leaving
+     the file out of the tree does not keep out a copy that someone pasted
+     into a conversation. The token is random base64url, so no
+     provider-key pattern would catch it. Deleting the file is how the
+     token is rotated, so every `now` compares against the previous run's
+     value like any other source, and the old token goes onto the
+     retired list.
 
    The run has to see every value it is meant to redact, or the list is
    short exactly where it matters. The timer does not have the
@@ -792,6 +800,16 @@ with `lstat` so that no component it follows is a link. This is the
 derives passes through a link, applied to the one command that builds a
 home from somebody else's input.
 
+**No path climbs out.** Every path the snapshot names is checked as a
+string before any filesystem access at all. That covers the tree, the
+manifest, and the decrypted index. A path must be relative and already
+normalized: no leading `/`, no empty, `.`, or `..` component, no
+backslash, and no NUL. Anything else refuses the whole restore. Without
+this check, a modified repository restored with `--unverified` could name
+`../../victim`, and the staging build would write outside both `<dir>`
+and the staging directory before promotion ever ran. The `lstat` walk
+cannot catch that, because it only proves that no component is a link.
+
 **Modes are set, not inherited.** Git keeps no distinction between
 `0600` and `0644`, and a restore under an ordinary `022` umask would
 leave decrypted sessions, memory, and grants readable by other local
@@ -976,6 +994,9 @@ Two things follow for the design:
 - With `~/.stratus` at `0755`, another local user can read nothing
   under `~/.stratus/backup/`, including after a run over a clone
   someone loosened.
+- A pasted gateway token, current or rotated, is redacted.
+- `restore --unverified` of a repository whose index names
+  `../outside` refuses before writing anything.
 - Under a `022` umask, a restored home has the same `0700` and `0600`
   modes a fresh one has, and a skill script that was executable still is.
 - A value in a `plugin-mcp` server's `env` or `headers`, echoed into
