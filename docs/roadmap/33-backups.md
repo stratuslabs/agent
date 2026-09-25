@@ -502,7 +502,10 @@ prevents, and the spec says so.
    records the *name* (never the value) of any credential-classed
    variable it read from the environment alone, and a keyed
    fingerprint of the *value* it read (an HMAC under a local key that
-   never leaves the machine). That covers declared
+   never leaves the machine). The record keeps **every** fingerprint
+   seen for a name, not only the latest. Two one-off runs with values A
+   and B leave both, because A may already be echoed into memory while B
+   is the one still exported. That covers declared
    credentials resolved through the `CredentialResolver`, provider keys
    read through `resolveEnvApiKey` (`STRATUS_API_KEY`, the variable
    `STRATUS_API_KEY_ENV` names, and each provider's default), and also each
@@ -516,9 +519,13 @@ prevents, and the spec says so.
    resolves to a *different* value, which happens when the credential
    was rotated or mistyped before being stored. That is because the value
    that was used, and may have been echoed, is the one it cannot redact.
-   The block lifts when the matching value is in the credential store.
-   It also lifts on an explicit `stratus backup acknowledge <name>`
-   from an operator who has checked that nothing holds it. A value it
+   Each fingerprint is checked on its own. A fingerprint is cleared when
+   the matching value is in the credential store or on the retired list,
+   since then it is redacted. It is also cleared by an explicit
+   `stratus backup acknowledge <name>`, which clears every fingerprint
+   for that name and is for an operator who has checked that nothing
+   holds any of them. The block lifts only when no fingerprint for the
+   name is left. A value it
    cannot see is a value it cannot redact, so it does not push past it.
 
    **A retired value stays in the set.** Rotating or removing a
@@ -1126,6 +1133,9 @@ Two things follow for the design:
   confirmation.
 - A `workspaceRoot` set to `~/.stratus` or `~` makes `now` fail with
   the reason, and no file from the backup directory is ever staged.
+- Two `stratus run` invocations that export `GITHUB_TOKEN` with
+  different values before one `now` leave both fingerprints, and `now`
+  stays blocked until both are stored, retired, or acknowledged.
 - An MCP header named `X-APIKEY` is treated as a credential, and so is
   a `passEnv` entry named `PGPASSWORD`, while `MONKEY` still is not.
 - A config-only soul reached through a symlink backs up as a regular
