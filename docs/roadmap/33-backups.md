@@ -117,7 +117,11 @@ run rather than something to write.
     (a `soul`, a database, a workspace root) and those resolve against
     the process's working directory, which the service definition sets
     on purpose. The manifest records every such path as it resolved, so
-    a snapshot says exactly which files it came from.
+    a snapshot says exactly which files it came from. `init` records the
+    service's working directory next to the clone, and **every** `now`
+    runs its resolution from there, including one typed by hand in
+    some other directory. A manual run and the nightly one therefore
+    snapshot the same tree.
   - **The selected memory store.** With `@stratusagent/memory-sqlite`
     selected, the memories live in one database at the path its config
     names, and the per-agent `memory.jsonl` files are unused. `now`
@@ -162,9 +166,11 @@ run rather than something to write.
   Memory, sessions, grants, and schedules are all keyed by that id, so
   the same file restored under another home directory, another username,
   or `<dir>` itself comes back as a stranger to its own state. The
-  manifest records the id every soul resolved to, and restore writes it
-  into the frontmatter of each soul that did not declare one, printing
-  each soul it changed.
+  manifest records the whole generated identity every soul resolved to
+  (id, name, and avatar). Restore writes whichever of those a soul did
+  not declare into its frontmatter, printing each soul it changed. The
+  id alone is not enough, because the name and avatar are seeded from
+  the same path and would come back as a stranger's.
 - **Secret replacement before every commit** (design sketch). This is the
   part that must be right the first time, because git history is forever.
 - **A scheduled run every night**, installed next to the service unit
@@ -963,6 +969,11 @@ Two things follow for the design:
 - An `--unverified` restore brings back no command scope, origin, or
   tool grant. It succeeds on a machine lacking a plugin that it
   restores disabled anyway.
+- `stratus backup now` run by hand from another directory, with a
+  config holding a relative `soul`, backs up the same soul the daemon
+  serves.
+- An unnamed soul restored under another home keeps its name and avatar
+  as well as its id.
 - A global `pre-commit` hook that rewrites the index, or that always
   fails, has no effect on a backup run.
 - A soul hand-edited during the push to declare a credential already
