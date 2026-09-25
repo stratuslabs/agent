@@ -343,8 +343,12 @@ snapshot's business to interpret:
   `openat` semantics Node lacks. Its reach is also narrow, and made so
   on purpose. `now` refuses any overlap, in either direction, between
   an agent-writable root (a `tool-fs` root or a workspace root) and
-  anything it commits in plaintext: `skills/`, `agents/`, the config
-  file, an external soul, or a `memory-sqlite` database. A root that
+  anything it commits in plaintext. That means the plaintext *leaves*:
+  `skills/`, each soul file, each agent's `memory.jsonl` and
+  `whitelist.json`, the config file, an external soul, and a
+  `memory-sqlite` database. It does not mean `agents/` as a whole,
+  because `agents/<id>/workspace/` is the default workspace, and it is
+  the encrypted or omitted side. A root that
   contains one of them is refused. So is a root that lies *inside* one,
   such as `skills/example/output/`, because the plaintext traversal
   would commit whatever an agent wrote there. The refusal names the
@@ -757,7 +761,13 @@ Enumerating credential sources one at a time never ends. A token can
 also arrive through `http.extraHeader`, an `includeIf`, or a URL
 rewrite, and each lives in some config file. So the backup's git reads
 **no configuration but the clone's own**. Every git call runs with
-`GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`. The clone's
+`GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`, in an
+environment built from scratch rather than inherited. Every other
+`GIT_*` variable is dropped: `GIT_CONFIG_COUNT` with its
+`GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n`, `GIT_CONFIG_PARAMETERS`,
+`GIT_SSH_COMMAND`, `GIT_ASKPASS`, and the rest. Those inject
+configuration per command, and they would bypass both variables above.
+The clone's
 config lives inside the protected backup directory, and `init` writes
 into it everything the run needs: the pinned `core.sshCommand`, the
 helper, and the signing key it read from the operator's own config
@@ -811,9 +821,11 @@ rewrites. On top of that:
   pasted into a memory first, stored as a credential a week later.
   Redaction only covers snapshots from then on, and published history
   is never rewritten. So whenever the secret set gains a value, `now`
-  scans every plaintext blob already pushed for it. An upgrade that
+  scans everything already pushed in plaintext for it. That covers
+  every blob, and every path in every pushed tree, because a filename
+  carries a secret as well as a file does. An upgrade that
   teaches the scanner a new shape triggers the same scan of every
-  pushed blob against the new rule, because the value it now
+  pushed blob and path against the new rule, because the value it now
   recognizes may be gone from the live home. A hit fails the
   run and names the credential to rotate, since rotation is the only
   remedy for a published secret.
@@ -1289,7 +1301,12 @@ Two things follow for the design:
   refuses and names the fix. A token in `http.extraHeader` in
   `~/.config/git/config` is never used by the backup's git.
 - After an upgrade adds a scan pattern, a pushed snapshot holding a
-  value of that shape makes the next `now` fail and name it.
+  value of that shape, in content or in a filename, makes the next
+  `now` fail and name it.
+- `now` under `GIT_CONFIG_COUNT=1` with an injected `http.extraHeader`
+  pushes without that header.
+- A home with an agent workspace at `agents/<id>/workspace/` backs up;
+  the overlap guard does not treat it as inside a plaintext tree.
 - With `user.signingkey` at `~/.ssh/backup_ed25519` and a deploy key
   at `~/.ssh/stratus_deploy`, `fs.read` of either file under a
   `tool-fs` root of `~/.ssh` is refused.
