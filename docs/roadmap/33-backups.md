@@ -166,13 +166,18 @@ snapshot's business to interpret:
   Staging adds everything with ignore rules switched off (`git add -f`
   with no exclude files). The backup's own "Never" list is the only
   exclusion.
-- **The one supported link is materialized.** `agents/<id>/workspace/`
-  may be a symlink, because the state layout lets an operator put an
-  agent's output on another volume. With `workspaces` opted in, `now`
-  copies what that link points at into the snapshot as a real directory.
-  No link is ever committed, so restore's refusal of every link (below)
-  never rejects a snapshot `now` made. Any other link in the source is
-  not followed: it fails the run and names the path.
+- **Supported links are materialized; no link is ever committed.** Two
+  kinds of link are legitimate in a home. `agents/<id>/workspace/` may
+  be one, because the state layout lets an operator put an agent's
+  output on another volume. A skill may contain relative links between
+  its own files, which `skill add` validates for containment and keeps.
+  `now` copies what each of these points at into the snapshot as real
+  files and directories. For skill links it uses the same containment
+  check `skill add` runs (`findEscapingSymlink`, which is private to
+  `state` today and gets exported for its second consumer) rather than
+  a second copy of it. A link that reaches outside its own skill or workspace fails the
+  run and names the path. Because nothing committed is a link, restore's
+  refusal of every link (below) never rejects a snapshot `now` made.
 
 Databases are never copied as files: a live WAL-mode database copied
 byte for byte can be torn. Each one is snapshotted with `VACUUM INTO` a
@@ -255,7 +260,13 @@ there that holds a `sessions.db` as an agent.
    miss a key it knows about. It cannot know about a key nothing
    declares, which is what the next layer is for.
 3. **Anything that still looks like a secret stops the push.** A pattern
-   scan for the shapes of well-known keys runs over the staged tree. A
+   scan for the shapes of well-known keys runs over the staged tree.
+   **Pathnames are content too.** Git records every filename in its
+   trees, and a command that writes `$TOKEN.log` into a workspace puts a
+   secret in a path. So the exact-value check and the pattern scan both
+   run over every staged relative path as well as over file contents. A
+   hit in a path fails the run and names the file, because renaming it
+   would restore a file under a name nothing expects. A
    hit fails the run with the file and line and commits nothing. A false
    positive costs one night and an allowlist entry. A true positive
    pushed would cost rotating a key and rewriting a repository's history.
@@ -421,6 +432,11 @@ Two things follow for the design:
   restores without executing it and writes nothing outside `<dir>`.
 - A repository in which `agents/` or `external/` is a symlink is refused
   before anything is written.
+- A file in a workspace whose name contains a credential value fails the
+  run before anything is committed.
+- A skill with a relative link between its own files backs up and
+  restores (as a plain file). A skill link that reaches outside the skill
+  fails the run.
 - A skill installed from a repository (with `.git`) and a workspace
   holding a `.gitignore` are restored with every file. A workspace that
   is a symlink to another volume is backed up and restored as a real
