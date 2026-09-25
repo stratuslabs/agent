@@ -75,12 +75,17 @@ skills:
 You are a sharp, warm generalist assistant. Answer first, explain second...
 ```
 
-Every agent is also told, ahead of its persona, to keep replies the size
-of a text message — under six lines of plain prose, no headers or bullet
-lists, no preamble or closing offer, at most one follow-up question — and
-to go longer only when asked for depth or a document, or when a decision
-turns on detail the reader lacks. The persona comes after that and wins
-where they disagree, so a soul written for long-form work just says so:
+Every agent is also told, ahead of its persona, how to reply in chat: like
+a text message — usually one to four short sentences, the answer first, no
+preamble, recap, or closing offer, and headers or bullets only where they
+genuinely help. That is a default, not a cap. A draft, plan, or document
+it is asked for arrives whole the first time; a blocker or uncertainty is
+always said; and a long deliverable is shared as a real link the reader can
+open, never a path on the daemon's disk. It carries on with work it was
+already asked to do instead of asking permission for each step.
+
+The persona comes after that, and it — or the person in the conversation —
+wins where they disagree, so a soul written for long-form work just says so:
 
 ```markdown
 When asked for a report, write the full report — headings and all.

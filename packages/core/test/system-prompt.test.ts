@@ -35,7 +35,7 @@ test('the tagged parts label every section and keep the declared order', () => {
 
   assert.deepEqual(parts.map((part) => part.kind), ['preamble', 'replies', 'persona', 'memory', 'skills']);
   assert.equal(parts[0]?.text, 'House rules.');
-  assert.match(parts[1]?.text ?? '', /^How long to make a reply/);
+  assert.match(parts[1]?.text ?? '', /^How to reply:/);
   assert.match(parts[2]?.text ?? '', /^You are Ava\./);
   assert.match(parts[3]?.text ?? '', /prefers short answers/);
   assert.match(parts[4]?.text ?? '', /triage \(Triage\)/);
@@ -61,7 +61,7 @@ test('the string view is exactly the tagged parts with the labels dropped', () =
   ]);
 });
 
-test('empty sections are omitted, and every agent is still told how long to reply', () => {
+test('empty sections are omitted, and every agent is still told how to reply', () => {
   const bare = renderSystemPromptParts({
     session: {
       id: 's2',
@@ -74,18 +74,22 @@ test('empty sections are omitted, and every agent is still told how long to repl
   });
 
   // No instructions, no memory, no skills, no preamble, and no fallback
-  // persona asked for: the reply-length section is all that renders.
+  // persona asked for: the reply section is all that renders.
   assert.deepEqual(bare.map((part) => part.kind), ['replies']);
 });
 
-test('the reply-length section keeps replies phone-sized and yields to the soul', () => {
+test('the reply section keeps replies phone-sized without cutting what was asked for', () => {
   const parts = renderSystemPromptParts(request());
   const replies = parts.find((part) => part.kind === 'replies')?.text ?? '';
 
-  assert.match(replies, /under six lines of plain prose, no headers, no bullet lists/);
-  assert.match(replies, /at most one follow-up question/);
+  assert.match(replies, /like a text message — usually one to four short sentences/);
+  assert.match(replies, /ask at most one question/);
+  // Brevity is the default, not a cap: a requested deliverable arrives
+  // whole, and a long one is shared by a link the reader can open.
+  assert.match(replies, /deliver the whole thing the first time/);
+  assert.match(replies, /Never invent a link, and never assume a path on your own machine is one they can open/);
   // Ahead of the persona, and says the persona wins: a soul written for
   // long-form work must be able to ask for it.
   assert.ok(parts.findIndex((part) => part.kind === 'replies') < parts.findIndex((part) => part.kind === 'persona'));
-  assert.match(replies, /Where your own instructions below say otherwise, they win\./);
+  assert.match(replies, /Where your own instructions below, or the person you are talking to, ask for something else, that wins\./);
 });

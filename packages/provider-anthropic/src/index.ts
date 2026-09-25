@@ -238,7 +238,7 @@ const buildPrompt = (
   // definitions with it — one breakpoint, leaving three of the four the
   // request is allowed for whatever wants one later.
   //
-  // Every agent has a system block now — the reply-length section is always
+  // Every agent has a system block now — the reply section is always
   // rendered — so the marker lands there even for an agent with no
   // preamble, instructions, or skills, and still covers its tool schemas.
   // The last tool is the fallback only for a renderer that returns nothing.

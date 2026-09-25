@@ -4269,22 +4269,26 @@ export const renderSkillsSection = (skills: readonly SkillDescriptor[] | undefin
 };
 
 /**
- * How long a reply should be, told to every agent before its persona.
+ * How to reply, told to every agent before its persona.
  *
  * Models default to the long, headed, bulleted answer, and an agent is read
  * mostly in chat — often on a phone — where that is the wrong shape. Souls
  * were each growing their own copy of this rule, so it lives here once.
- * It sits ahead of the persona so a soul that wants long answers says so
- * after it, and the closing sentence says the soul wins. It says nothing
- * about files: an agent on Slack has nowhere to put one its reader can
- * open.
+ * Short must not turn into incomplete, so the same section says a requested
+ * deliverable arrives whole and a blocker is always said. A long one goes
+ * where the reader can open it: an agent on Slack that answers with a path
+ * on the daemon's disk has handed over nothing. It sits ahead of the
+ * persona, and its last sentence lets the soul and the person override it.
  */
-const REPLY_LENGTH_SECTION = [
-  'How long to make a reply: by default, like a text message — under six lines of plain prose, no headers, no bullet lists. That is the normal case, not the short end of a range.',
-  'Go longer only when you are asked for depth or for a document, or when a decision genuinely turns on detail the person does not have — and even then, answer first.',
+const REPLY_SECTION = [
+  'How to reply: like a text message — usually one to four short sentences. Lead with the answer, the result, or the decision you need, then stop.',
+  'No preamble, no restating the request, no summary of what you just said, no closing offer of more help, and no headers or bullet lists unless they genuinely make the reply easier to read.',
+  'Short never means incomplete: when you are asked for a draft, a plan, an explanation, or a document, deliver the whole thing the first time, and always say plainly what is blocking you or what you are unsure of.',
+  'A long deliverable belongs somewhere the person can open it — a file or page you can actually share — and the reply is the takeaway plus its real link. Never invent a link, and never assume a path on your own machine is one they can open.',
+  'Send a progress update only when something has changed, keep it to a line, and never split one long answer across several messages.',
+  'Carry on with work you have already been asked to do instead of asking permission for each step; ask at most one question, and only when the answer changes what you do.',
   'Before sending, ask whether this would be annoying to read on a phone; if it would, cut it.',
-  'No preamble, no restating the request, no closing offer of more help, and at most one follow-up question.',
-  'Where your own instructions below say otherwise, they win.',
+  'Where your own instructions below, or the person you are talking to, ask for something else, that wins.',
 ].join(' ');
 
 export interface SystemPromptOptions {
@@ -4330,7 +4334,7 @@ export const renderSystemPromptParts = (
 ): SystemPromptSection[] => {
   const sections: Array<{ kind: SystemPromptSectionKind; text: string | undefined }> = [
     { kind: 'preamble', text: options.preamble },
-    { kind: 'replies', text: REPLY_LENGTH_SECTION },
+    { kind: 'replies', text: REPLY_SECTION },
     { kind: 'persona', text: renderPersonaSection(request.session.agent, { fallback: options.fallbackPersona ?? false }) },
     { kind: 'memory', text: renderMemorySection(request.memory) },
     { kind: 'skills', text: renderSkillsSection(request.skills) },

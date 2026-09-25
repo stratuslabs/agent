@@ -264,7 +264,7 @@ test('createOpenAICompatibleProvider posts session messages to a real chat-compl
   assert.equal(body.messages.length, 3);
   assert.deepEqual(body.messages[0], { role: 'system', content: 'Be concise.' });
   assert.equal(body.messages[1].role, 'system');
-  assert.match(body.messages[1].content, /^How long to make a reply/);
+  assert.match(body.messages[1].content, /^How to reply:/);
   assert.deepEqual(body.messages[2], { role: 'user', content: 'Say hello' });
   assert.deepEqual(response.parts, [{ type: 'text', text: 'Hello from the real provider path.' }]);
 });
@@ -412,7 +412,7 @@ test('createOpenAICompatibleProvider maps tool call and tool result messages for
 
   const response = await provider.generate(request);
 
-  // Every agent is told how long to reply; the mapping under test is the rest.
+  // Every agent is told how to reply; the mapping under test is the rest.
   assert.equal(requestBody.messages?.[0]?.role, 'system');
   assert.deepEqual(requestBody.messages?.slice(1), [
     { role: 'user', content: 'Say hello' },
@@ -469,7 +469,7 @@ test('createOpenAICompatibleProvider injects the agent persona as a system messa
 
   const systemMessages = (requestBody.messages ?? []).filter((message) => message.role === 'system');
   assert.equal(systemMessages[0]?.content, 'Global rules apply.');
-  assert.match(systemMessages[1]?.content ?? '', /^How long to make a reply/);
+  assert.match(systemMessages[1]?.content ?? '', /^How to reply:/);
   assert.equal(
     systemMessages[2]?.content,
     'You are Priya Salinger. You answer precisely and cite sources.',
