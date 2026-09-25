@@ -599,6 +599,55 @@ test('a turn queued behind a running one does not overwrite its status', async (
   assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'second answer']);
 });
 
+test('a DM queued behind a running turn shows its own status at once', async () => {
+  // Every DM message is its own status key, and Slack stops showing the
+  // running turn's once a newer message sits below it. A queued DM that
+  // published nothing left the agent looking idle until the first reply.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const gateway: StubGateway = createStubGateway(async ({ sessionId, userMessage }) => {
+    if (/first/.test(userMessage)) {
+      await firstGate;
+      return sessionWithReply(sessionId, 'first answer');
+    }
+    return sessionWithReply(sessionId, 'second answer');
+  });
+  const ticks = async (): Promise<void> => {
+    for (let tick = 0; tick < 50; tick += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  const first = socket.deliver('message', mention('first', { type: 'message', ts: '300.1', channel: 'D1', channel_type: 'im' }));
+  await ticks();
+  const second = socket.deliver('message', mention('second', { type: 'message', ts: '300.2', channel: 'D1', channel_type: 'im' }));
+  await ticks();
+
+  assert.deepEqual(
+    statuses.filter((entry) => entry.status !== ''),
+    [
+      { channel_id: 'D1', thread_ts: '300.1', status: 'is thinking…' },
+      { channel_id: 'D1', thread_ts: '300.2', status: 'is thinking…' },
+    ],
+  );
+  releaseFirst();
+  await Promise.all([first, second]);
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'second answer']);
+});
+
 test('an agent on the stream reply mode still posts a placeholder and edits it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

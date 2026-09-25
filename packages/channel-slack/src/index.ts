@@ -582,7 +582,7 @@ class ReplyRenderer {
    * The thread the loading status belongs to: the reply's thread, or the
    * message itself in a DM, whose reply has no thread to key one on.
    */
-  private readonly statusThread: string | undefined;
+  readonly statusThread: string | undefined;
   /** Shared by a connection's renderers, so a status Slack refuses is said once, not per message. */
   private readonly statusWarned: { value: boolean };
   private loading = false;
@@ -656,10 +656,12 @@ class ReplyRenderer {
       return;
     }
     this.loading = true;
-    // A thread has one status per app, so a turn queued behind another
-    // must not publish its own: it would overwrite what the running turn
-    // says it is doing. It publishes when it reaches the head (`beginTurn`,
-    // or `refreshLoading` once the turn ahead has posted).
+    // A thread has one status per app, so a turn queued behind another in
+    // the same thread must not publish its own: it would overwrite what the
+    // running turn says it is doing. It publishes when it reaches the head
+    // (`beginTurn`, or `refreshLoading` once the turn ahead has posted).
+    // The caller passes `head` for a queued turn whose status lives on a
+    // key of its own — every DM message is — since it overwrites nothing.
     if (head) {
       this.publishLoading();
     }
@@ -3622,7 +3624,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const queue = renderers.get(sessionId) ?? [];
       queue.push(renderer);
       renderers.set(sessionId, queue);
-      renderer.showLoading(queue.length === 1);
+      // In a DM each message is its own status key, and Slack stops showing
+      // the running turn's once a newer message sits below it — so a
+      // message queued there that stayed dark read as the agent having
+      // stopped until the reply ahead of it posted. In a channel thread the
+      // key is shared, and the running turn's status stays up instead.
+      renderer.showLoading(queue.length === 1 || queue[0]?.statusThread !== renderer.statusThread);
       const turn = gateway.dispatch({
         sessionId,
         agentId: connection.config.agentId,

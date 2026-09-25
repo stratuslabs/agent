@@ -111,6 +111,12 @@ in front of you. A turn nobody asked for (an agent that
 [judges](#how-an-agent-listens)) shows no status, since it may decide to
 say nothing.
 
+Messages you send while it is still working wait their turn and are
+answered in order. In a DM each one shows the status as soon as you send
+it, so a second message never makes the agent look idle; in a channel
+thread the status keeps saying what the running turn is doing until its
+reply posts.
+
 If you would rather watch the reply being written, set `stream`: the agent
 posts a `…` placeholder at once, edits it as the reply arrives, shows
 `⚙ tool…` lines while tools run, and finalizes it — how every reply looked
