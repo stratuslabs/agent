@@ -341,11 +341,14 @@ snapshot's business to interpret:
   this cannot close is a swap that is made and undone again inside a
   single open. The spec states that residual rather than claiming
   `openat` semantics Node lacks. Its reach is also narrow, and made so
-  on purpose. `now` refuses any agent-writable root, meaning a `tool-fs`
-  root or a workspace root, that contains anything it commits in
-  plaintext: `skills/`, `agents/`, the config file, an external soul,
-  or a `memory-sqlite` database. The refusal names the file and the
-  fix, which is to move it out of the agent's root. Otherwise an agent
+  on purpose. `now` refuses any overlap, in either direction, between
+  an agent-writable root (a `tool-fs` root or a workspace root) and
+  anything it commits in plaintext: `skills/`, `agents/`, the config
+  file, an external soul, or a `memory-sqlite` database. A root that
+  contains one of them is refused. So is a root that lies *inside* one,
+  such as `skills/example/output/`, because the plaintext traversal
+  would commit whatever an agent wrote there. The refusal names the
+  path and the fix, which is to move one of the two. Otherwise an agent
   could swap a soul it can write for a link to another file, and
   materialization would commit that file's contents. It uses the same
   per-agent resolution as the backup-directory check. So the only trees
@@ -1273,7 +1276,8 @@ Two things follow for the design:
   `tool-fs` root of `~/.ssh` is refused.
 - A daemon whose default soul comes from `STRATUS_SOUL` backs that soul
   up, and restore prints the new path to export.
-- A `tool-fs` root of `~/.stratus/skills` makes `now` fail with the
+- A `tool-fs` root of `~/.stratus/skills`, or a workspace root at
+  `~/.stratus/skills/example/output`, makes `now` fail with the
   reason.
 - After a restore without the old private signing key,
   `init --rotate-signing-key` lets `now` resume. A later restore that
