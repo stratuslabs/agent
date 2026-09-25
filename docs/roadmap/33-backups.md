@@ -947,8 +947,10 @@ it comes from the tree, the manifest, or the decrypted index. Source
 paths are a different field. The original location of an external
 resource, and the absolute paths a provenance ledger is keyed by, are
 absolute on purpose. They are never used to write. Restore only maps
-them through the old-to-new table, and the result is itself a
-destination under `<dir>` and checked like one. A destination path
+them through the old-to-new table. Where the result names a file
+restore creates, it is a destination under `<dir>` and checked like
+one. Otherwise it is only text written into a restored file, such as
+a ledger record for a file on the operator's own disk. A destination path
 must be relative and already normalized: no leading `/`, no empty, `.`, or `..` component, and no
 NUL. Anything else refuses the whole restore. A backslash is an
 ordinary character in a POSIX filename, so it is allowed. None of
