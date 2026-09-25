@@ -344,7 +344,13 @@ snapshot's business to interpret:
   retried a few times. If the file never holds still, the previous
   snapshot's copy is kept and the file is reported. A file with no
   previous copy, because it is new or this is the first run, is skipped
-  and recorded like a FIFO, and the report names it. A torn file is
+  and recorded like a FIFO, and the report names it. Both fallbacks are
+  for optional content only, meaning skill and workspace files, the
+  same split the hard-link rule makes. A required state file that never
+  holds still fails the run: the selected config, a soul, a
+  `memory.jsonl`, or a `whitelist.json`. An old copy of the config
+  beside resources its new contents selected would be a snapshot of no
+  moment that ever existed. A torn file is
   never signed as a good one. A link the snapshot
   materializes is resolved the same way, one component at a time. What
   this cannot close is a swap that is made and undone again inside a
@@ -787,6 +793,15 @@ helper, and the signing key it read from the operator's own config
 once. Whatever authenticates the push is then named in a file no agent
 can read. A credential the operator's global config would have
 supplied is simply absent, and the unattended probe says so.
+
+That isolation is for the commands that run unattended beside agents:
+`init`, `enable`, and `now`. Restore is the other case. It runs on a
+replacement machine with no home yet, no protected clone, and no agent
+running, and the operator is at the keyboard. So a remote restore
+fetches with the operator's own git configuration. For a dedicated
+deploy key it also takes `--ssh-key <file>`, pinned the same way
+(`IdentitiesOnly=yes -F /dev/null`). A restore from a local path needs
+neither.
 
 **Whatever it is, it has to work with nobody there.** An SSH agent
 socket, a passphrase prompt, or an interactive credential helper
@@ -1290,7 +1305,10 @@ Two things follow for the design:
   post-read recheck fails the run, and no byte from the far side is
   committed.
 - A hard-linked `memory.jsonl` fails `now` with the path, rather than
-  producing a snapshot without memories.
+  producing a snapshot without memories, and so does a `config.json`
+  rewritten continuously through every retry.
+- On a fresh machine, `restore git@github.com:me/backup.git --ssh-key
+  ~/deploy_key` fetches the private repository.
 - A workspace file hard-linked to `~/.ssh/id_ed25519` is skipped,
   never copied.
 - Restoring a snapshot written by a newer state schema on an older
