@@ -51,6 +51,26 @@ run rather than something to write.
   Sessions are opt-in because they are the largest and most sensitive
   thing in a home: whole conversations, tool inputs, and command output.
   Workspaces are opt-in because they hold binaries that git stores badly.
+
+  **On the git target, both opt-ins are encrypted, not optional extras.**
+  They are where arbitrary tool output lands, and a tool can write a
+  secret in a form no scan can recognize: `base64`, hex, a compressed
+  archive, an image. Redaction (below) still runs on them. It also checks
+  the base64, hex, and URL-encoded forms of every known value, because
+  those are cheap. But it cannot promise to find a secret after an
+  arbitrary transformation, so the promise for this content is
+  ciphertext. `sessions` and `workspaces` are committed as per-file age
+  ciphertext under a key the operator holds outside the backup, and
+  `init` refuses either opt-in without one. Souls, skills, config, and
+  memory stay plaintext and diffable, and that is where the exact-value
+  guarantee is made.
+- **Only a fully migrated home is backed up.** An upgraded home whose
+  exclusive migration has not run yet still keeps its grants at
+  `agents/<id>.whitelist.json`, and its sessions and schedules in the
+  shared root `sessions.db`. A snapshot of the new layout would silently
+  miss them. `now` checks `pendingStateMigrations` first and fails with
+  the fix (`stratus update`, or starting the daemon once) rather than
+  learning the old layout a second time.
 - **Everything the trusted config points at, not only what sits under
   `~/.stratus`.** A snapshot that restores a config referring to a file
   it never saved is a broken restore. Four cases exist today:
@@ -166,10 +186,15 @@ snapshot's business to interpret:
   Staging adds everything with ignore rules switched off (`git add -f`
   with no exclude files). The backup's own "Never" list is the only
   exclusion.
-- **Supported links are materialized; no link is ever committed.** Two
-  kinds of link are legitimate in a home. `agents/<id>/workspace/` may
-  be one, because the state layout lets an operator put an agent's
-  output on another volume. A skill may contain relative links between
+- **Supported links are materialized; no link is ever committed.** Three
+  kinds of link are legitimate in a home. A soul file in `agents/` may be
+  one, which is how a template's soul stays edited in its own checkout.
+  It is copied as a regular file, and its identity is preserved like any
+  other soul's (see "Every soul's resolved agent id"). An unnamed linked
+  soul is seeded from the path it resolves through, so the id recorded
+  is the one the daemon actually used. `agents/<id>/workspace/` may be
+  one, because the state layout lets an operator put an agent's output on
+  another volume. And a skill may contain relative links between
   its own files, which `skill add` validates for containment and keeps.
   `now` copies what each of these points at into the snapshot as real
   files and directories. For skill links it uses the same containment
@@ -317,7 +342,12 @@ rewrites. On top of that:
   shrank. That puts the problem in front of someone while the good copy
   is one day back rather than ninety.
 - **A failed push keeps the local commit** and exits non-zero. The next
-  run pushes both.
+  run rescans every unpushed commit against the **current** secret set
+  before pushing anything. A secret learned since, such as a credential
+  added after the failed run, would otherwise go out in the older
+  commit. If the rescan hits, the unpushed commits are dropped and
+  rebuilt from the current tree. They were never published, so this
+  rewrites nothing anyone else has.
 - **A partial snapshot is a failure.** If one database could not be read,
   the run exits non-zero, so the timer never reports a half backup as
   success.
@@ -401,10 +431,11 @@ Two things follow for the design:
 - **Encryption is the answer for sessions, not a private repository.** A
   private repository is one visibility toggle or one leaked token away
   from public, and secret scanning on push is a paid feature for private
-  GitHub repositories, so it is not a backstop. Before `sessions` is
-  recommended for the git target, it should get per-file age encryption.
-  Otherwise the documentation should point operators who want transcripts
-  backed up at restic.
+  GitHub repositories, so it is not a backstop. That is why the git
+  target encrypts `sessions` and `workspaces` with age, per file. An
+  operator who wants transcripts with deduplication and retention rather
+  than git history is better served by restic, whose whole repository is
+  encrypted.
 
 ## Acceptance criteria
 
@@ -434,6 +465,14 @@ Two things follow for the design:
   before anything is written.
 - A file in a workspace whose name contains a credential value fails the
   run before anything is committed.
+- On the git target, `sessions` and `workspaces` are committed only as
+  ciphertext, and `init` refuses either without a key. A known credential
+  written base64-encoded into memory is replaced.
+- A credential added after a failed push is absent from every commit the
+  next run pushes, including the retained one.
+- A home with a pending layout migration fails `now` and names the fix.
+- A soul in `agents/` that is a symlink is backed up as a regular file and
+  restores with the same agent id.
 - A skill with a relative link between its own files backs up and
   restores (as a plain file). A skill link that reaches outside the skill
   fails the run.
