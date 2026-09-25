@@ -351,14 +351,23 @@ failing silently.
    variable is exported later for a single `stratus run`. The timer
    never sees that shell, so while backups are enabled, the runtime
    records the *name* (never the value) of any credential-classed
-   variable it read from the environment alone. That covers declared
+   variable it read from the environment alone, and a keyed
+   fingerprint of the *value* it read (an HMAC under a local key that
+   never leaves the machine). That covers declared
    credentials resolved through the `CredentialResolver`, and also each
    credential-named variable a `passEnv` list copies straight from
    `process.env` in `tool-shell` or `plugin-mcp`. Both go through one
    shared recording helper that `state` exports, and the two plugins
    call it. The record goes in a `0600` file
-   beside the clone. The next `now` finds a recorded name it cannot
-   resolve and fails before committing, with the same fix. A value it
+   beside the clone. The next `now` resolves each recorded name and
+   compares fingerprints. It fails before committing, with the same
+   fix, when the name does not resolve. It also fails when the name
+   resolves to a *different* value, which happens when the credential
+   was rotated or mistyped before being stored. That is because the value
+   that was used, and may have been echoed, is the one it cannot redact.
+   The block lifts when the matching value is in the credential store.
+   It also lifts on an explicit `stratus backup acknowledge <name>`
+   from an operator who has checked that nothing holds it. A value it
    cannot see is a value it cannot redact, so it does not push past it.
 
    Values that live in configuration rather than in a credential store
@@ -775,7 +784,8 @@ Two things follow for the design:
 - A credential exported for one `stratus run` after `enable` makes the
   next `now` fail before committing.
 - A value copied by `tool-shell`'s `passEnv` from a variable exported
-  after `enable` makes the next `now` fail before committing.
+  after `enable` makes the next `now` fail before committing. So does
+  storing a different value under the same name afterwards.
 - A workspace FIFO's name does not appear in the pushed tree.
 - With `sessions` enabled, a night that changed one of a hundred
   sessions commits one new ciphertext blob, not a hundred.
