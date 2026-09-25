@@ -331,6 +331,19 @@ quietly pruned. Pruning alone would leave the next ancestor-rooted
 tool a way to read the signing key. Every traversal also skips that
 directory by device and inode, as defence in depth.
 
+**The backup directory is owner-only, whatever the home's mode is.**
+`~/.stratus` itself can be traversable on a multi-user host: it is
+created without an explicit mode, so a `022` umask leaves it `0755`.
+Git writes its object store under the umask, so an untightened clone
+would expose the plaintext memory and whitelist blobs to every local
+user. `init` creates `~/.stratus/backup/`, the clone, and any staging
+directory `0700`, with an explicit `chmod` after creation, because
+`mkdir`'s mode is filtered by the umask. It sets
+`core.sharedRepository=false` in the clone. Every run re-tightens the
+directory before it writes anything, so an install made before this
+rule, or a directory a user loosened, is repaired on the next run
+rather than trusted.
+
 **One run at a time.** A manual `now` can overlap the timer's run, and
 both would work on the same clone, index, and ciphertext-reuse map.
 Git's per-command index lock does not cover a whole build, commit, and
@@ -960,6 +973,9 @@ Two things follow for the design:
 - Two runs with `sessions` enabled and nothing changed make one commit,
   not two. After the age recipient changes, the next run re-encrypts
   every opted-in file for the new key.
+- With `~/.stratus` at `0755`, another local user can read nothing
+  under `~/.stratus/backup/`, including after a run over a clone
+  someone loosened.
 - Under a `022` umask, a restored home has the same `0700` and `0600`
   modes a fresh one has, and a skill script that was executable still is.
 - A value in a `plugin-mcp` server's `env` or `headers`, echoed into
