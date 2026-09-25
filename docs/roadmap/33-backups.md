@@ -553,9 +553,13 @@ prevents, and the spec says so.
      resolved through the same `CredentialResolver` a tool call uses. That
      resolver falls back to the environment, so a name a soul declares
      and a shell exports is a secret here even though nothing stores it.
-   - the token the backup's own git pushes with, when HTTPS uses an
-     accepted `store --file` helper. A value `now` itself resolves is a
-     credential like any other, and it is retired when it changes.
+   - the token the backup's own git pushes with, whichever accepted
+     helper holds it: a keychain helper or a `store --file`. `now` asks
+     for it through git's own credential protocol (`git credential
+     fill` against the remote, in the isolated configuration). So a
+     keychain token is collected the same way as a file-backed one. A
+     value `now` itself resolves is a credential like any other, and it
+     is retired when it changes.
    - the control API's bearer token: the contents of `gateway-token`,
      and `STRATUS_GATEWAY_TOKEN` when the environment sets it. Leaving
      the file out of the tree does not keep out a copy that someone pasted
@@ -1341,8 +1345,8 @@ Two things follow for the design:
   `IdentitiesOnly=yes`, and `~/.ssh/id_ed25519` never authenticates a
   backup push.
 - `init` with `credential.helper='store --file /srv/shared/git-creds'`
-  refuses and names the fix. The token in an accepted
-  `store --file` helper, pasted into a memory, is redacted. A token in
+  refuses and names the fix. The token in an accepted helper, whether
+  `store --file` or `osxkeychain`, pasted into a memory, is redacted. A token in
   `http.extraHeader` in
   `~/.config/git/config` is never used by the backup's git.
 - After an upgrade adds a scan pattern, a pushed snapshot holding a
