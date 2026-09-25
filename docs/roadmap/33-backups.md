@@ -282,13 +282,17 @@ there that holds a `sessions.db` as an agent.
    that resolves to nothing at backup time is reported in `status`.
 
    Values that live in configuration rather than in a credential store
-   join the same set: every config property a manifest marks `writeOnly`
-   (below), the built-in secret-bearing ones (`provider-openai`'s
-   `headers`, `tool-shell`'s `env`), and the values of the variables
-   `tool-shell`'s `passEnv` hands to commands. A command can echo any of
-   them into a session or a memory, where they are no different from a
-   stored key. Redacting them only inside `config.json` would leave every
-   other copy in place.
+   join the same set. That is every config property a manifest marks
+   `writeOnly` (below). It is also, by shape and at any depth of the
+   trusted config, every string under an `env` or `headers` object and
+   the value of every variable a `passEnv` list names. That covers
+   `provider-openai`'s headers, `tool-shell`'s environment, and each
+   `plugin-mcp` server's `env`, `headers`, and `passEnv`. The last sits
+   inside an opaque `servers` object that no manifest annotation reaches,
+   which is why the rule is structural rather than a list of packages.
+   A tool can echo any of these values into a session or a memory, where
+   it is no different from a stored key. Redacting them only inside
+   `config.json` would leave every other copy in place.
 
    **A secret too short to replace safely stops the run.** Named
    credentials accept any non-blank value, and replacing every occurrence
@@ -414,7 +418,11 @@ already run, so startup will not fix it. Restore therefore creates every
 directory the state layout makes `0700` as `0700`, and every file it
 makes `0600` as `0600`. That includes `config.json`, the per-agent
 stores, `whitelist.json`, `memory.jsonl`, and everything under a
-workspace.
+workspace. The one bit kept from the source is execute. A skill's
+`scripts/` or a workspace's tooling has to run after recovery, so the
+snapshot records which files were executable (the git mode for
+plaintext, the encrypted file's metadata for ciphertext). Those files
+are restored `0700`, still owner-only.
 
 **Every write lands inside `<dir>`.** An external soul, a `memory-sqlite`
 database, and a configured workspace root are restored under
@@ -519,7 +527,9 @@ Two things follow for the design:
   not two. After the age recipient changes, the next run re-encrypts
   every opted-in file for the new key.
 - Under a `022` umask, a restored home has the same `0700` and `0600`
-  modes a fresh one has. A workspace that
+  modes a fresh one has, and a skill script that was executable still is.
+- A value in a `plugin-mcp` server's `env` or `headers`, echoed into
+  memory, is not in the pushed tree. A workspace that
   is a symlink to another volume is backed up and restored as a real
   directory.
 - An unnamed soul in `agents/` restored under a different home directory
