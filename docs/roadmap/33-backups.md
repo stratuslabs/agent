@@ -135,6 +135,11 @@ run rather than something to write.
   - **A config-only default `soul`.** The trusted config may name a soul
     file outside `agents/`. It is copied into the snapshot under
     `external/`, and the snapshot's manifest records the original path.
+    An external resource that lies inside a tree the snapshot already
+    copies in plaintext, such as a soul at `skills/example/SOUL.md`, is
+    not copied a second time. It is recorded as a subpath of that tree,
+    and restore points the config at the restored file inside it, so an
+    edit through the skill still changes the soul the daemon serves.
   - **A configured `workspaceRoot`.** `tool-fs`, `tool-shell`,
     `tool-browser`, and `plugin-mcp` accept one, and it wins over
     `agents/<id>/workspace/`. They are set independently, per plugin and
@@ -313,7 +318,13 @@ snapshot's business to interpret:
   opened with `O_NOFOLLOW` and read from its descriptor. After the
   read, every ancestor is `lstat`ed again, along with the leaf's path.
   If any of them is now a link or a different inode, the bytes are
-  discarded and the run fails and names the path. A link the snapshot
+  discarded and the run fails and names the path. An agent can also
+  rewrite a file in place while it is read, which keeps the inode and
+  path the same. So the leaf's size, `mtime`, and `ctime` from `fstat`
+  are compared before and after the read. On a change the read is
+  retried a few times. If the file never holds still, the previous
+  snapshot's copy is kept and the file is reported. A torn file is
+  never signed as a good one. A link the snapshot
   materializes is resolved the same way, one component at a time. What
   this cannot close is a swap that is made and undone again inside a
   single open. The spec states that residual rather than claiming
@@ -447,14 +458,16 @@ API's `PUT /v1/config`. A new writer can only bypass it by skipping
 `state`, and the "Do not re-derive rules" convention already forbids
 that.
 A hand edit cannot take a lock. So under the lock, `now` also compares
-a hash of every input it read (config files, souls, and the plugin
-manifests whose `credentials` it collected) against the hash it took at
-collection. A change starts the run over, exactly like a generation
+a hash of every file-backed input to the secret set against the hash
+it took at collection. That covers config files, souls, the plugin
+manifests whose `credentials` it collected, `credentials.json`, and
+`gateway-token`. Pasting a token straight into `credentials.json` is a
+documented setup path for a Slack channel. A change starts the run over, exactly like a generation
 change. A hand edit during the few seconds of the push itself cannot
 be locked out, because nothing makes an editor wait. So it is detected
 immediately afterwards instead. Once the push returns, `now` re-hashes
-every input the pre-push check hashed: config files, souls, and plugin
-manifests. If any of them changed, it recollects the secret set from
+every input the pre-push check hashed, the credential store and the
+gateway token included. If any of them changed, it recollects the secret set from
 all of them and rescans the commit it just published against it. A hit is reported at once and
 loudly, naming the credential to rotate, because a pushed commit is
 not taken back. This is the one place the design detects rather than
@@ -1157,6 +1170,13 @@ Two things follow for the design:
   never copied.
 - Restoring a snapshot written by a newer state schema on an older
   CLI writes nothing and prints the upgrade command.
+- A workspace file rewritten continuously during `now` is never
+  committed torn: its previous copy is kept and the file is reported.
+- A token pasted into `credentials.json` by hand during `now` restarts
+  the run, and one pasted during the push triggers the post-push
+  rescan.
+- A default soul at `skills/example/SOUL.md` is stored once, and after
+  restore an edit through the skill changes the soul the daemon serves.
 - A `tool-fs` root of `~/.stratus/skills` makes `now` fail with the
   reason.
 - After a restore without the old private signing key,
