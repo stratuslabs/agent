@@ -287,8 +287,9 @@ one JSONL file per table, rows ordered by primary key, so that:
   a whole new ciphertext for that file. So the session store is
   exported one file per session, not one file per table. The same
   applies to that session's row in the fleet session index, since
-  saving a conversation touches both. A night that touched one
-  conversation re-encrypts one conversation's files;
+  saving a conversation touches both. The transcript and its index row
+  go into **one encrypted unit** per session. A night that touched one
+  conversation therefore commits exactly one new blob;
 - a table can be left out or redacted by name.
 
 The local clone lives at `~/.stratus/backup/`. It must never live under
@@ -490,7 +491,12 @@ rewrites. On top of that:
   added after the failed run, would otherwise go out in the older
   commit. If the rescan hits, the unpushed commits are dropped and
   rebuilt from the current tree. They were never published, so this
-  rewrites nothing anyone else has.
+  rewrites nothing anyone else has. Ciphertext cannot be rescanned,
+  because `now` holds only the age recipient and never the identity. So
+  each unpushed commit also records a keyed fingerprint of the secret
+  set it was redacted against. If the set has changed since, every
+  unpushed commit that holds ciphertext is dropped and rebuilt without
+  inspection.
 - **A partial snapshot is a failure.** If one database could not be read,
   the run exits non-zero, so the timer never reports a half backup as
   success.
@@ -523,7 +529,14 @@ edited skill script, a new schedule with the grant that lets it run
 unattended. Git's hashes do not help, because anyone who can push can
 make a new commit. So each snapshot's manifest lists every file's
 path, a hash of its content, and its normalized mode (executable or
-not), and `now` signs the manifest with a key held outside the
+not), **plus the hash of the previous snapshot's signed manifest and a
+sequence number**. A signature on content alone does not say *when*.
+Someone with push access could append a commit that carries an older,
+validly signed snapshot, and bring back grants and schedules that were
+revoked since. Restore walks the chain from the tip, and refuses a
+snapshot whose signed predecessor is not the manifest of its parent
+commit. It prints the sequence number and signing time of what it is
+about to restore. and `now` signs the manifest with a key held outside the
 repository: an SSH signing key, the same kind git itself signs with.
 `init` asks for it, defaulting to git's own `user.signingkey` when that
 is an SSH key, and refuses to set up a target without one. **The key has
@@ -609,6 +622,15 @@ are restored `0700`, still owner-only. The bit restore applies is the
 one in the signed manifest, and a git mode that disagrees with it fails
 verification. Otherwise a commit that only flips a mode would pass a
 content-only signature.
+
+**No two paths may land on one file.** A snapshot taken on a
+case-sensitive filesystem can hold `skills/Foo/` and `skills/foo/`, and
+a default macOS volume reads those as one directory. So can two
+spellings of one accented name under Unicode normalization. Restore
+folds every path it is about to write by the target filesystem's rules
+(case and normalization, the same equivalence the state layout already
+applies to agent ids). It refuses a collision before writing anything,
+rather than letting the second write replace the first.
 
 **Every write lands inside `<dir>`.** An external soul, a `memory-sqlite`
 database, and a configured workspace root are restored under
@@ -740,7 +762,12 @@ Two things follow for the design:
 - A skill with `alias -> shared` beside `shared/` backs up. One with
   `loop -> .` fails.
 - A signed snapshot in which only a file's git mode was changed is
-  refused.
+  refused. So is a new commit that replays an older, validly signed
+  snapshot.
+- A snapshot holding `skills/Foo/` and `skills/foo/`, restored onto a
+  case-insensitive volume, is refused before anything is written.
+- After a credential is added, an unpushed commit holding ciphertext is
+  rebuilt before the next push.
 - Restoring a home with `api.enabled` on a machine without
   `control-api` writes nothing and prints the install command.
 - `init` with a passphrase-protected signing key is refused, with the
