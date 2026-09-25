@@ -777,6 +777,17 @@ home, never a half-promoted mix. A rerun recognizes an abandoned
 staging directory by its marker and removes it before starting. No
 check comes after the first file lands where the operator will look.
 
+**Provenance follows the files.** Each workspace's
+`fs-provenance.jsonl` ledger is keyed by absolute path, so a restored
+workspace under a new home, or relocated under `external/`, would find
+no labels for its own files. Content that came from outside would then
+read back as the agent's own, which is the one thing
+[30](./30-provenance.md) exists to prevent. Restore rewrites every
+ledger record through the same old-to-new mapping it applies to the
+config. A record that maps to no restored root is kept aside and
+listed, not dropped. When in doubt the label errs toward `external`,
+never toward trusted.
+
 **Every write lands inside `<dir>` or its own staging directory.** An external soul, a `memory-sqlite`
 database, and a configured workspace root are restored under
 `<dir>/external/`, and the
@@ -906,6 +917,9 @@ Two things follow for the design:
 - An `--unverified` restore of a config with an MCP server enabled
   restores it disabled, and the daemon starts no server process.
 - A skill with an empty `out/` directory restores with that directory.
+- A workspace file labelled `external` before the backup still reads
+  back as `external` after a restore into a different home, and after
+  a relocated `workspaceRoot`.
 - `enable` with a `STRATUS_API_KEY` exported only in the operator's
   shell is refused.
 - A credential exported for one `stratus run` after `enable` makes the
