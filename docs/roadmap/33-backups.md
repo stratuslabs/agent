@@ -146,10 +146,12 @@ run rather than something to write.
     not copied a second time. It is recorded as a subpath of that tree,
     and restore points the config at the restored file inside it, so an
     edit through the skill still changes the soul the daemon serves.
-    The config file is the exception. It is committed *redacted*, and
-    the tree around it would carry the raw file, so one blob cannot be
-    both. A config selected inside a copied tree (`skills/`, say) makes
-    `now` refuse and say to move it out.
+    The config file and a `memory-sqlite` database are the exceptions.
+    The config is committed *redacted*, and a database is committed as
+    a `VACUUM INTO` export. Either way, the tree around it would carry
+    the raw live file, so one blob cannot be both. A config or database
+    inside a copied tree (`skills/`, say) makes `now` refuse and say to
+    move it out.
   - **A configured `workspaceRoot`.** `tool-fs`, `tool-shell`,
     `tool-browser`, and `plugin-mcp` accept one, and it wins over
     `agents/<id>/workspace/`. They are set independently, per plugin and
@@ -492,7 +494,8 @@ a hash of every file-backed input to the secret set against the hash
 it took at collection. That covers config files, souls, the plugin
 manifests whose `credentials` it collected, `credentials.json`, and
 `gateway-token`. Pasting a token straight into `credentials.json` is a
-documented setup path for a Slack channel. A change starts the run over, exactly like a generation
+documented setup path for a Slack channel. It also covers the backing
+file of an accepted `store --file` git helper. A change starts the run over, exactly like a generation
 change. A hand edit during the few seconds of the push itself cannot
 be locked out, because nothing makes an editor wait. So it is detected
 immediately afterwards instead. Once the push returns, `now` re-hashes
@@ -531,6 +534,9 @@ prevents, and the spec says so.
      resolved through the same `CredentialResolver` a tool call uses. That
      resolver falls back to the environment, so a name a soul declares
      and a shell exports is a secret here even though nothing stores it.
+   - the token the backup's own git pushes with, when HTTPS uses an
+     accepted `store --file` helper. A value `now` itself resolves is a
+     credential like any other, and it is retired when it changes.
    - the control API's bearer token: the contents of `gateway-token`,
      and `STRATUS_GATEWAY_TOKEN` when the environment sets it. Leaving
      the file out of the tree does not keep out a copy that someone pasted
@@ -1291,14 +1297,17 @@ Two things follow for the design:
   rescan.
 - A default soul at `skills/example/SOUL.md` is stored once, and after
   restore an edit through the skill changes the soul the daemon serves.
-  A config selected at `skills/example/config.json` makes `now` refuse.
+  A config selected at `skills/example/config.json`, or a
+  `memory-sqlite` database inside `skills/`, makes `now` refuse.
 - Adding a credential whose value an earlier, already-pushed snapshot
   holds in plaintext makes the next `now` fail and name it for rotation.
 - `init` against an SSH remote refuses unless the key is pinned with
   `IdentitiesOnly=yes`, and `~/.ssh/id_ed25519` never authenticates a
   backup push.
 - `init` with `credential.helper='store --file /srv/shared/git-creds'`
-  refuses and names the fix. A token in `http.extraHeader` in
+  refuses and names the fix. The token in an accepted
+  `store --file` helper, pasted into a memory, is redacted. A token in
+  `http.extraHeader` in
   `~/.config/git/config` is never used by the backup's git.
 - After an upgrade adds a scan pattern, a pushed snapshot holding a
   value of that shape, in content or in a filename, makes the next
