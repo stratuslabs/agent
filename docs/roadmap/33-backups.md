@@ -256,6 +256,11 @@ snapshot's business to interpret:
   own `core.autocrlf` off and no exclude or attribute files consulted.
   The backup's own "Never" list is the only exclusion. A check after
   staging compares each indexed blob with the staged file byte for byte.
+  The commit is built with plumbing too (`write-tree` and `commit-tree`,
+  never `git commit`), with `core.hooksPath` pointed at an empty
+  directory. So no global or templated hook can mutate the index, apply
+  filtered staging, or fail every unattended night. The tree that is
+  signed and pushed is the tree that was verified.
 - **Supported links are materialized; no link is ever committed.** Three
   kinds of link are legitimate in a home. A soul file in `agents/` may be
   one, which is how a template's soul stays edited in its own checkout.
@@ -358,8 +363,9 @@ collection. A change starts the run over, exactly like a generation
 change. A hand edit during the few seconds of the push itself cannot
 be locked out, because nothing makes an editor wait. So it is detected
 immediately afterwards instead. Once the push returns, `now` re-hashes
-the config. If the config changed, it rescans the commit it just
-published against the new secret set. A hit is reported at once and
+every input the pre-push check hashed: config files, souls, and plugin
+manifests. If any of them changed, it recollects the secret set from
+all of them and rescans the commit it just published against it. A hit is reported at once and
 loudly, naming the credential to rotate, because a pushed commit is
 not taken back. This is the one place the design detects rather than
 prevents, and the spec says so.
@@ -957,6 +963,10 @@ Two things follow for the design:
 - An `--unverified` restore brings back no command scope, origin, or
   tool grant. It succeeds on a machine lacking a plugin that it
   restores disabled anyway.
+- A global `pre-commit` hook that rewrites the index, or that always
+  fails, has no effect on a backup run.
+- A soul hand-edited during the push to declare a credential already
+  staged in memory is reported right after the push, naming it.
 - A `PUT /agents/:id` that adds a credential to a soul between
   collection and commit makes the run start over.
 - A skill with an empty `out/` directory restores with that directory.
