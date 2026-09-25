@@ -354,7 +354,9 @@ failing silently.
    variable it read from the environment alone, and a keyed
    fingerprint of the *value* it read (an HMAC under a local key that
    never leaves the machine). That covers declared
-   credentials resolved through the `CredentialResolver`, and also each
+   credentials resolved through the `CredentialResolver`, provider keys
+   read through `resolveEnvApiKey` (`STRATUS_API_KEY`, the variable
+   `STRATUS_API_KEY_ENV` names, and each provider's default), and also each
    credential-named variable a `passEnv` list copies straight from
    `process.env` in `tool-shell` or `plugin-mcp`. Both go through one
    shared recording helper that `state` exports, and the two plugins
@@ -788,7 +790,8 @@ Two things follow for the design:
 - A credential exported for one `stratus run` after `enable` makes the
   next `now` fail before committing.
 - A value copied by `tool-shell`'s `passEnv` from a variable exported
-  after `enable` makes the next `now` fail before committing. So does
+  after `enable`, and a `STRATUS_API_KEY` exported for one run after
+  `enable`, each make the next `now` fail before committing. So does
   storing a different value under the same name afterwards.
 - A workspace FIFO's name does not appear in the pushed tree.
 - With `sessions` enabled, a night that changed one of a hundred
