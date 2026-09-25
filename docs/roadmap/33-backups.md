@@ -283,8 +283,13 @@ snapshot's business to interpret:
   directory. So no global or templated hook can mutate the index, apply
   filtered staging, or fail every unattended night. The tree that is
   signed and pushed is the tree that was verified.
-- **Supported links are materialized; no link is ever committed.** Three
-  kinds of link are legitimate in a home. A soul file may be one,
+- **Supported links are materialized; no link is ever committed.** Four
+  kinds of link are legitimate in a home. The trusted config file may
+  be one, whether it is `~/.stratus/config.json` or a file that
+  `--config` or `STRATUS_CONFIG` names, because the runtime reads it
+  through the link. It is read through the same check, open, and
+  recheck protocol, and committed as the regular, redacted
+  `config.json`. A soul file may be one,
   whether it sits in `agents/` or is the config-only default soul, which is how a template's soul stays edited in its own checkout.
   It is copied as a regular file, and its identity is preserved like any
   other soul's (see "Every soul's resolved agent id"). An unnamed linked
@@ -1175,7 +1180,8 @@ Two things follow for the design:
 - An MCP header named `X-APIKEY` is treated as a credential, and so is
   a `passEnv` entry named `PGPASSWORD`, while `MONKEY` still is not.
 - A config-only soul reached through a symlink backs up as a regular
-  file.
+  file, and so does a `config.json` that is a symlink into a dotfiles
+  checkout.
 - A config file (selected by `--config` or `STRATUS_CONFIG`), an
   external soul, or a `memory-sqlite` database inside a workspace or
   `tool-fs` root makes `now` refuse, name the file, and say to move it.
