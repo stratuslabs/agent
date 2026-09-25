@@ -365,7 +365,7 @@ the pattern scan's to catch or no one's.
    and the fix: `stratus credential set <name>`, which puts it where
    every run can read it. A gap can also open after `enable`, when a
    variable is exported later for a single `stratus run`. The timer
-   never sees that shell, so while backups are enabled, the runtime
+   never sees that shell, so from `init` on (whether or not the timer is enabled), the runtime
    records the *name* (never the value) of any credential-classed
    variable it read from the environment alone, and a keyed
    fingerprint of the *value* it read (an HMAC under a local key that
@@ -391,13 +391,18 @@ the pattern scan's to catch or no one's.
    **A retired value stays in the set.** Rotating or removing a
    credential does not remove the old value from memories and
    transcripts that already hold it, and the next rebuild of the staging
-   tree would copy it through unredacted. So while backups are enabled,
-   a value that `stratus credential set` overwrites or `credential
+   tree would copy it through unredacted. So from `init` on, a value
+   that `stratus credential set` overwrites or `credential
    remove` deletes is moved to a retired list rather than dropped. The
    list is `0600` beside the clone, with the same protection as the
    credential store, and is never committed. It serves only as
    redaction input. `stratus backup forget-retired` clears it once the
-   operator has purged the content that held those values.
+   operator has purged the content that held those values. Tracking
+   follows the configured target, not the timer: `disable` stops the
+   nightly run but not the retiring, and tracking ends only when the
+   target itself is removed. A value rotated *before* `init` is
+   something no run ever saw. The first `now` therefore says that
+   plainly, and names the one tool that covers it: the pattern scan.
 
    Values that live in configuration rather than in a credential store
    join the same set, and **the entry's name decides, not the field it
@@ -824,7 +829,8 @@ Two things follow for the design:
 - With `sessions` enabled, a night that changed one of a hundred
   sessions commits one new ciphertext blob, not a hundred.
 - A credential rotated after its old value was written into memory:
-  the old value is still replaced in every later snapshot.
+  the old value is still replaced in every later snapshot. This holds
+  when the rotation happened while backups were disabled too.
 - A `credential set` that lands between collection and commit makes the
   run start over, and the new value is redacted in what it commits. One
   issued during the push waits for it to finish.
