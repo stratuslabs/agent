@@ -326,9 +326,13 @@ snapshot's business to interpret:
   stored once, and restored with the same sharing, from restore's own
   record. A *required*
   state file with a second link fails the run instead, because a
-  snapshot without it is not a usable backup. That covers the
-  selected config, a soul, a `memory.jsonl`, and a `whitelist.json`.
-  The error names the file and says to break the link.
+  snapshot without it is not a usable backup. *Required* means every
+  file the Default column backs up that is not skill content: the
+  selected config, `state.json`, each soul, each `memory.jsonl` and
+  `whitelist.json`, and each workspace's `fs-provenance.jsonl`. The one
+  list serves every rule that distinguishes required from optional, so
+  a file cannot be required for one and optional for another. The error
+  names the file and says to break the link.
 - **Nothing in the tree gets to change how git stores it.** A skill or
   workspace can carry a `.gitignore` that would hide durable files, or a
   `.gitattributes` whose clean filter (Git LFS, say, if the user has it
@@ -391,10 +395,9 @@ snapshot's business to interpret:
   previous copy, because it is new or this is the first run, is skipped
   and recorded like a FIFO, and the report names it. Both fallbacks are
   for optional content only, meaning skill and workspace files, the
-  same split the hard-link rule makes. A required state file that never
-  holds still fails the run: the selected config, a soul, a
-  `memory.jsonl`, a `whitelist.json`, or a workspace's
-  `fs-provenance.jsonl`. A stale ledger beside newer workspace files
+  same split the hard-link rule makes, with the same list of required
+  files. A required state file that never holds still fails the run.
+  A stale ledger beside newer workspace files
   would restore those files without their labels. An old copy of the config
   beside resources its new contents selected would be a snapshot of no
   moment that ever existed. A torn file is
@@ -1434,6 +1437,8 @@ Two things follow for the design:
   kept stale or skipped.
 - `init` run beside a daemon that is already serving a `STRATUS_SOUL`
   soul backs that soul up on the first night.
+- A hard-linked `state.json` fails `now` with the path, rather than
+  producing an unversioned snapshot.
 - A hard-linked `memory.jsonl` fails `now` with the path, rather than
   producing a snapshot without memories, and so does a `config.json`
   rewritten continuously through every retry.
