@@ -860,8 +860,11 @@ manifest cannot be read has no schema to consult. That happens with a
 disabled plugin left in the config after its package was removed,
 which the config accepts and the loader skips. Every plugin-owned leaf
 value in such a block is then treated as a credential. The host-owned
-structural fields, `enabled` and `agents`, keep their types, because a
-restored config must still parse. Each plugin-owned value is
+fields keep their values and types, because a restored config must
+still parse and a reinstalled plugin must still accept them. Which
+fields those are comes from `HOST_CONFIG_KEYS`, exported by
+`@stratusagent/plugins` (`enabled`, `agents`, and `toolRisks` today),
+never from a list written here. Each plugin-owned value is
 redacted, added to the secret set, and listed for re-entry on restore. `status` names the
 block and says to reinstall the package or delete the block. A block
 nobody can inspect is never copied through as if it were known to be
@@ -1474,7 +1477,7 @@ Two things follow for the design:
   after a restore onto a replacement machine.
 - A disabled plugin block whose package is uninstalled has every
   plugin-owned value redacted and listed for re-entry, keeps
-  `enabled: false` as a boolean, and restores into a config that
+  `enabled: false` as a boolean and its `toolRisks` unchanged, and restores into a config that
   parses. `status` names it.
 - A ledger rewritten through every retry fails `now` rather than being
   kept stale or skipped.
