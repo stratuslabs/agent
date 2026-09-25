@@ -142,7 +142,9 @@ run rather than something to write.
     root and MCP output under another. With `workspaces` opted in, `now`
     enumerates every resolved `(plugin, agent)` root through the same
     resolver the plugins use, rather than by reading the settings. It
-    canonicalizes the roots and keeps the relationship between them.
+    canonicalizes the roots, together with every other external resource
+    (an external soul, a `memory-sqlite` database), and keeps the
+    relationships between them.
     Roots that coincide are one tree. A root nested inside another is
     not copied twice: it is recorded as a subpath of the outer tree.
     Restore rewrites each setting to its tree plus that subpath, so a
@@ -268,8 +270,8 @@ snapshot's business to interpret:
   filtered staging, or fail every unattended night. The tree that is
   signed and pushed is the tree that was verified.
 - **Supported links are materialized; no link is ever committed.** Three
-  kinds of link are legitimate in a home. A soul file in `agents/` may be
-  one, which is how a template's soul stays edited in its own checkout.
+  kinds of link are legitimate in a home. A soul file may be one,
+  whether it sits in `agents/` or is the config-only default soul, which is how a template's soul stays edited in its own checkout.
   It is copied as a regular file, and its identity is preserved like any
   other soul's (see "Every soul's resolved agent id"). An unnamed linked
   soul is seeded from the path it resolves through, so the id recorded
@@ -501,7 +503,10 @@ prevents, and the spec says so.
    name with `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`,
    or `AUTHENTICATION` as a whole component, splitting on `_`, `-`, and case changes. So
    `GITHUB_TOKEN`, `apiKey`, and `X-Api-Key` match, and `MONKEY` and
-   `KEYBOARD_LAYOUT` do not. A structured value is split into the parts
+   `KEYBOARD_LAYOUT` do not. Conventional fused spellings count too,
+   because nobody splits them: a component equal to `APIKEY`,
+   `ACCESSKEY`, `SECRETKEY`, `PRIVATEKEY`, `AUTHTOKEN`, `ACCESSTOKEN`,
+   `CLIENTSECRET`, or `PASSWD` matches, so `X-APIKEY` does. A structured value is split into the parts
    a tool would actually repeat. An `Authorization` or
    `Proxy-Authorization` header contributes
    its token after the scheme (`Bearer`, `Token`, and so on). For
@@ -979,6 +984,11 @@ Two things follow for the design:
   restores disabled anyway.
 - A `workspaceRoot` set to `~/.stratus` or `~` makes `now` fail with
   the reason, and no file from the backup directory is ever staged.
+- An MCP header named `X-APIKEY` is treated as a credential.
+- A config-only soul reached through a symlink backs up as a regular
+  file.
+- A default soul that lives inside a workspace root is stored once, and
+  after restore the daemon still serves the file the workspace holds.
 - `stratus backup now` run by hand from another directory, with a
   config holding a relative `soul`, backs up the same soul the daemon
   serves.
