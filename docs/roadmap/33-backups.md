@@ -120,8 +120,11 @@ run rather than something to write.
     a snapshot says exactly which files it came from. `init` records the
     service's working directory next to the clone, and **every** `now`
     runs its resolution from there, including one typed by hand in
-    some other directory. A manual run and the nightly one therefore
-    snapshot the same tree.
+    some other directory. `STRATUS_SOUL` is recorded the same way. The
+    service definition does not carry it, and the timer never sees the
+    environment of a daemon started by hand. So `init` records the soul
+    path the daemon resolves, and every `now` uses that recording. A
+    manual run and the nightly one therefore snapshot the same tree.
   - **The selected memory store.** With `@stratusagent/memory-sqlite`
     selected, the memories live in one database at the path its config
     names, and the per-agent `memory.jsonl` files are unused. `now`
@@ -282,9 +285,13 @@ snapshot's business to interpret:
   Never list nor in the secret set. It would also let a swapped entry
   point anywhere on the same filesystem. So a regular file whose
   descriptor reports `st_nlink > 1` is skipped and recorded like a
-  FIFO, and `now` names it. Links inside the tree are rare in skills
-  and workspaces. Refusing all of them costs less than proving where
-  the other name lives.
+  FIFO, and `now` names it, when it is optional content: a file in a
+  skill or a workspace. Links there are rare, and refusing all of them
+  costs less than proving where the other name lives. A *required*
+  state file with a second link fails the run instead, because a
+  snapshot without it is not a usable backup. That covers the
+  selected config, a soul, a `memory.jsonl`, and a `whitelist.json`.
+  The error names the file and says to break the link.
 - **Nothing in the tree gets to change how git stores it.** A skill or
   workspace can carry a `.gitignore` that would hide durable files, or a
   `.gitattributes` whose clean filter (Git LFS, say, if the user has it
@@ -1282,6 +1289,8 @@ Two things follow for the design:
 - A workspace directory swapped for a link between descent and the
   post-read recheck fails the run, and no byte from the far side is
   committed.
+- A hard-linked `memory.jsonl` fails `now` with the path, rather than
+  producing a snapshot without memories.
 - A workspace file hard-linked to `~/.ssh/id_ed25519` is skipped,
   never copied.
 - Restoring a snapshot written by a newer state schema on an older
@@ -1320,7 +1329,8 @@ Two things follow for the design:
   at `~/.ssh/stratus_deploy`, `fs.read` of either file under a
   `tool-fs` root of `~/.ssh` is refused.
 - A daemon whose default soul comes from `STRATUS_SOUL` backs that soul
-  up, and restore prints the new path to export.
+  up, from the timer as well as by hand, and restore prints the new
+  path to export.
 - A `tool-fs` root of `~/.stratus/skills`, or a workspace root at
   `~/.stratus/skills/example/output`, makes `now` fail with the
   reason.
