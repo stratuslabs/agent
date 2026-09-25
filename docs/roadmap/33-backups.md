@@ -51,6 +51,25 @@ run rather than something to write.
   Sessions are opt-in because they are the largest and most sensitive
   thing in a home: whole conversations, tool inputs, and command output.
   Workspaces are opt-in because they hold binaries that git stores badly.
+- **Everything the trusted config points at, not only what sits under
+  `~/.stratus`.** A snapshot that restores a config referring to a file
+  it never saved is a broken restore. Two cases exist today:
+  - **The selected memory store.** With `@stratusagent/memory-sqlite`
+    selected, the memories live in one database at the path its config
+    names, and the per-agent `memory.jsonl` files are unused. `now`
+    snapshots whichever store is selected: the JSONL files for the
+    default, and the configured database (by `VACUUM INTO`, like every
+    other) for `memory-sqlite`. A store contributed by any other plugin
+    fails the run with the store's name, until `MemoryStoreContribution`
+    grows an optional, defaulted export and import pair (a store that
+    omits it cannot be backed up, and says so) rather than having the
+    backup guess at its storage.
+  - **A config-only default `soul`.** The trusted config may name a soul
+    file outside `agents/`. It is copied into the snapshot under
+    `external/`, and the snapshot's manifest records the original path.
+
+  Restore puts each one back at its original path, or refuses and names
+  the path when something is already there.
 - **Secret replacement before every commit** (design sketch). This is the
   part that must be right the first time, because git history is forever.
 - **A scheduled run every night**, installed next to the service unit
@@ -129,11 +148,33 @@ there that holds a `sessions.db` as an agent.
    provider, and a tool echoes an environment dump. So excluding
    `credentials.json` does not keep its contents out of the backup.
    Before committing, every file is scanned for the exact values the home
-   knows to be secret: everything in `credentials.json` (provider keys,
-   OAuth tokens, channel tokens, named credentials) and the values of the
-   environment variables `apiKeyEnvNameFor` names. Each one is replaced
-   with `‹redacted:<which>›`. Exact-match replacement is deterministic,
-   needs no model, and cannot miss a key it knows about.
+   knows to be secret, and each one is replaced with
+   `‹redacted:<which>›`. That is **every value a run could resolve as a
+   credential**, not only what is stored:
+   - everything in `credentials.json`: provider keys, OAuth tokens,
+     channel tokens, and named credentials;
+   - every provider key the environment could supply: the generic
+     `STRATUS_API_KEY`, the variable an `apiKeyEnv` selection or
+     `STRATUS_API_KEY_ENV` names, and each provider's own default
+     variable. `resolveEnvApiKey` answers with only the variable that
+     wins, while redaction needs every candidate, because the loser is
+     still a live key (a fallback provider reads its own). So
+     `@stratusagent/state` exports the candidate list that
+     `resolveEnvApiKey` already walks, and both consume it, rather than
+     the backup re-deriving the precedence chain.
+   - every named credential the roster and the installed plugins declare
+     (each soul's `credentials:` list and each manifest's `credentials`),
+     resolved through the same `CredentialResolver` a tool call uses. That
+     resolver falls back to the environment, so a name a soul declares
+     and a shell exports is a secret here even though nothing stores it.
+
+   The run has to see the environment the daemon sees, or the list is
+   short exactly where it matters. So `enable` writes the timer with the
+   same environment the service definition carries, and a declared name
+   that resolves to nothing at backup time is reported in `status`.
+   Exact-match replacement is deterministic, needs no model, and cannot
+   miss a key it knows about. It cannot know about a key nothing
+   declares, which is what the next layer is for.
 3. **Anything that still looks like a secret stops the push.** A pattern
    scan for the shapes of well-known keys runs over the staged tree. A
    hit fails the run with the file and line and commits nothing. A false
@@ -247,7 +288,14 @@ Two things follow for the design:
   with no changes makes no commit.
 - A key present in `credentials.json` and pasted into a memory entry and a
   session appears nowhere in the pushed tree, including git history. The
-  test seeds the value and greps the clone.
+  test seeds the value and greps the clone. The same holds for a value
+  held only in `STRATUS_API_KEY`, and for one held only in an environment
+  variable a soul's `credentials:` list names, neither shaped like a
+  known key.
+- With `memory-sqlite` selected, a restore brings back its memories. With
+  a third-party memory store that has no export, `now` fails and names it.
+- A config-only `soul` outside `agents/` is in the snapshot, and restore
+  puts it back where the config expects it.
 - A planted key-shaped string that no credential store knows about fails
   the run before anything is committed.
 - A backup taken while the daemon is mid-turn restores to a database that
