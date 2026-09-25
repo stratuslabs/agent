@@ -268,6 +268,15 @@ The local clone lives at `~/.stratus/backup/`. It must never live under
 `agents/`, because the startup sweep treats any validly named directory
 there that holds a `sessions.db` as an agent.
 
+**One run at a time.** A manual `now` can overlap the timer's run, and
+both would work on the same clone, index, and ciphertext-reuse map.
+Git's per-command index lock does not cover a whole build, commit, and
+push, so two snapshots could interleave into a mixed tree. `now` holds
+an exclusive lock on the clone for the entire run, from staging through
+the push and the map update. A second run that finds the lock held
+exits with a distinct "already running" status rather than waiting or
+failing silently.
+
 ### Secrets: three layers, because one is not enough
 
 1. **Files that are secrets never enter the staging tree** (the "Never"
@@ -313,8 +322,10 @@ there that holds a `sessions.db` as an agent.
    an opaque `servers` object no manifest annotation reaches, an entry
    under `env` or `headers` joins the set when its name marks it as a
    credential: `Authorization`, `Cookie`, `Proxy-Authorization`, or a
-   name containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, or
-   `CREDENTIAL`. The same holds for each variable a `passEnv` list
+   name with `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, or `CREDENTIAL` as a
+   whole component, splitting on `_`, `-`, and case changes. So
+   `GITHUB_TOKEN`, `apiKey`, and `X-Api-Key` match, and `MONKEY` and
+   `KEYBOARD_LAYOUT` do not. The same holds for each variable a `passEnv` list
    names. So does any property a manifest marks `writeOnly` (below).
    **So does a credential carried in a URL.** An HTTP MCP server can
    authenticate as `https://host/mcp?access_token=…`, and the plugin
@@ -411,7 +422,7 @@ the defence, so the feature never force-pushes, never prunes, and never
 rewrites. On top of that:
 
 - **Shrinkage warns loudly.** If memory lines, sessions, or souls drop by
-  more than half since the last snapshot, `now` still commits (the
+  half or more since the last snapshot, `now` still commits (the
   history holds the good copy either way) but exits non-zero and says what
   shrank. That puts the problem in front of someone while the good copy
   is one day back rather than ninety.
@@ -451,7 +462,15 @@ path, a hash of its content, and its normalized mode (executable or
 not), and `now` signs the manifest with a key held outside the
 repository: an SSH signing key, the same kind git itself signs with.
 `init` asks for it, defaulting to git's own `user.signingkey` when that
-is an SSH key, and refuses to set up a target without one.
+is an SSH key, and refuses to set up a target without one. **The key has
+to work unattended.** The timer runs with no terminal and, as the
+service definition stands, no SSH agent socket. A passphrase-protected
+key, or one that lives only in an interactive agent, would sign in
+`init` and fail every night after. So `init` makes a test signature
+the way the timer will, from a clean environment with only what
+`enable` will pass on. It refuses a key that cannot sign there, and
+suggests a dedicated passphrase-less key kept `0600` beside the clone.
+That key's only power is to sign backups.
 Restore verifies that signature before writing anything, and refuses a
 snapshot it cannot verify. **The key it verifies against never comes
 from the repository**, because someone who can replace the snapshot
@@ -637,6 +656,11 @@ Two things follow for the design:
   refused.
 - Restoring a home with `api.enabled` on a machine without
   `control-api` writes nothing and prints the install command.
+- `init` with a passphrase-protected signing key is refused, with the
+  reason.
+- A `now` started while another is running exits with the
+  "already running" status and changes nothing.
+- `env: { MONKEY: "banana" }` backs up verbatim.
 - An MCP server URL carrying `?access_token=…` backs up with the token
   replaced and listed for re-entry.
 - `env: { NODE_ENV: "production" }` and a `Content-Type` header back up
