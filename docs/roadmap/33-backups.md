@@ -143,7 +143,8 @@ run rather than something to write.
     (`tool-fs` roots) are the operator's own files, not agent state, and
     stay out.
 
-  Restore never writes outside the directory it was given (see
+  Restore never writes outside the directory it was given, apart from
+  the staging directory it creates beside it (see
   [Restore](#restore)).
 - **The memory index's `usage` table.** The index is derived from
   `memory.jsonl` in every table but one. `usage` holds recall counts and
@@ -321,7 +322,12 @@ the secret set increments a **generation number**, kept beside the
 credential store: credential writes, the recorder, and a retired value
 (below). `now` reads the generation when it starts. For the final
 step, it then takes the **secret-set lock** that every one of those
-writers also takes: re-read the generation, commit, push. So no
+writers also takes: re-read the generation, commit, push. The push
+under the lock is **bounded**, five minutes by default and
+configurable. A stalled remote or credential helper aborts the push,
+releases the lock, keeps the local commit (rescanned before the next
+push, as above), and exits non-zero. A writer waiting on the lock
+therefore waits at most that long, not until the network recovers. So no
 credential can become known between that check and the moment the
 commit is published. A writer that arrives during the push waits a few
 seconds. If the generation moved before the lock was taken, `now`
@@ -751,13 +757,17 @@ rather than letting the second write replace the first.
 **Nothing is promoted until everything verifies.** Restore works in
 two phases. First it reads, decrypts, and verifies every blob, mode,
 directory, and database record against the signed manifest, building
-the home in a staging directory under `<dir>/.restore-staging/`. Only
-when all of it has verified are the entries renamed into place. If
-anything fails, the staging directory is removed and `<dir>` is left
-as empty as it was, so a failed restore can simply be run again. No
+the home in a staging directory that restore creates itself. That
+directory sits beside `<dir>`, on the same filesystem, with a random
+name, created exclusively, and it carries a marker saying whose it is.
+Only when all of it has verified is it promoted, with a **single
+rename** onto `<dir>`, which must be empty or absent. A crash at any
+point therefore leaves either the old empty `<dir>` or the complete
+home, never a half-promoted mix. A rerun recognizes an abandoned
+staging directory by its marker and removes it before starting. No
 check comes after the first file lands where the operator will look.
 
-**Every write lands inside `<dir>`.** An external soul, a `memory-sqlite`
+**Every write lands inside `<dir>` or its own staging directory.** An external soul, a `memory-sqlite`
 database, and a configured workspace root are restored under
 `<dir>/external/`, and the
 restored config is rewritten to point at them there, with each rewrite
@@ -896,6 +906,10 @@ Two things follow for the design:
   the old value is still replaced in every later snapshot. This holds
   when the rotation happened while backups were disabled too.
 - A `PUT /v1/config` that lands during the push waits for it to finish.
+  Against a remote that never answers, the push times out, the lock is
+  released, and the waiting write completes.
+- A restore killed mid-way leaves `<dir>` empty or complete, and a
+  rerun succeeds.
 - A `credential set`, or a hand edit to `config.json` adding a header,
   that lands between collection and commit makes the run start over, and the new value is redacted in what it commits. A
   `credential set` issued during the push waits for it to finish. A hand
