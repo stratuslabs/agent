@@ -753,6 +753,18 @@ such as the default `~/.git-credentials` or a `--file` elsewhere,
 and names the fix, because a token in a plain file is one `fs.read`
 away from an agent whose root covers it.
 
+Enumerating credential sources one at a time never ends. A token can
+also arrive through `http.extraHeader`, an `includeIf`, or a URL
+rewrite, and each lives in some config file. So the backup's git reads
+**no configuration but the clone's own**. Every git call runs with
+`GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`. The clone's
+config lives inside the protected backup directory, and `init` writes
+into it everything the run needs: the pinned `core.sshCommand`, the
+helper, and the signing key it read from the operator's own config
+once. Whatever authenticates the push is then named in a file no agent
+can read. A credential the operator's global config would have
+supplied is simply absent, and the unattended probe says so.
+
 **Whatever it is, it has to work with nobody there.** An SSH agent
 socket, a passphrase prompt, or an interactive credential helper
 authenticates `init` from the operator's shell and then fails every
@@ -793,12 +805,16 @@ rewrites. On top of that:
   upgrade taught the scanner a new shape, every
   unpushed commit that holds ciphertext is dropped and rebuilt without
   inspection.
-- **Published history is rescanned when the secret set grows.** A value
+- **Published history is rescanned when the secret set or the scan
+  policy grows.** A value
   can be committed in plaintext before anyone knows it is a secret:
   pasted into a memory first, stored as a credential a week later.
   Redaction only covers snapshots from then on, and published history
   is never rewritten. So whenever the secret set gains a value, `now`
-  scans every plaintext blob already pushed for it. A hit fails the
+  scans every plaintext blob already pushed for it. An upgrade that
+  teaches the scanner a new shape triggers the same scan of every
+  pushed blob against the new rule, because the value it now
+  recognizes may be gone from the live home. A hit fails the
   run and names the credential to rotate, since rotation is the only
   remedy for a published secret.
 - **A partial snapshot is a failure.** If one database could not be read,
@@ -1270,7 +1286,10 @@ Two things follow for the design:
   `IdentitiesOnly=yes`, and `~/.ssh/id_ed25519` never authenticates a
   backup push.
 - `init` with `credential.helper='store --file /srv/shared/git-creds'`
-  refuses and names the fix.
+  refuses and names the fix. A token in `http.extraHeader` in
+  `~/.config/git/config` is never used by the backup's git.
+- After an upgrade adds a scan pattern, a pushed snapshot holding a
+  value of that shape makes the next `now` fail and name it.
 - With `user.signingkey` at `~/.ssh/backup_ed25519` and a deploy key
   at `~/.ssh/stratus_deploy`, `fs.read` of either file under a
   `tool-fs` root of `~/.ssh` is refused.
