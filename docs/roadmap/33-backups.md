@@ -308,7 +308,14 @@ there that holds a `sessions.db` as an agent.
    of `a` or `test` across a home would corrupt the snapshot beyond use.
    A value below a floor (on the order of 12 characters) fails the run
    and names the credential, instead of silently rewriting common text or
-   silently skipping a secret.
+   silently skipping a secret. **Not every stored value is a secret,
+   either.** A Codex sign-in stores the marker `chatgpt` as its
+   `oauth_token`. The real tokens live in Codex's own store, and the
+   marker is never sent anywhere. Collecting it would fail every Codex
+   user's backup on the floor and rewrite the word everywhere. So
+   `state` exports the rule for which stored credentials hold a secret,
+   next to the comment that already says so, and the backup asks that
+   rule instead of listing providers itself.
 
    **Replacement works on values, not on bytes.** A credential can hold
    a quote, a backslash, or a newline, and once it is inside a JSONL line
@@ -399,6 +406,16 @@ rewrites. On top of that:
 `stratus backup restore <remote|path> --into <dir>` refuses any directory
 that is not empty. It rebuilds each database from its JSONL, rebuilds `memory.jsonl.index` on first use (which already happens),
 and prints the list of credentials to re-enter.
+
+**The packages the home ran on come first.** Rebuilding a store needs
+the package that owns its schema, and serving the restored config needs
+every plugin it enables. On a fresh machine with only the CLI and this
+package, `memory-sqlite` or any other optional plugin may simply be
+absent. So the manifest records each enabled plugin package, the
+selected memory store, and their versions. Restore checks them first.
+If one is missing or incompatible, restore writes nothing and prints
+the install command, instead of producing a home the daemon will refuse
+to start.
 
 **The repository's SQL is never executed.** Each database is created
 from the schema the owning store ships for the snapshot's recorded
@@ -541,6 +558,11 @@ Two things follow for the design:
   memory, is not in the pushed tree.
 - With `workspaces` enabled on the git target, no workspace filename
   appears in the pushed tree.
+- A home signed in to Codex backs up. The `chatgpt` marker is neither
+  collected as a secret nor rewritten.
+- Restoring a `memory-sqlite` home on a machine without that package
+  writes nothing and prints the install command. After installing it,
+  the same restore succeeds.
 - A skill containing a link cycle fails the run promptly and names the
   link, rather than running without end. A workspace that
   is a symlink to another volume is backed up and restored as a real
