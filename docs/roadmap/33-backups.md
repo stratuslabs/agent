@@ -7,8 +7,9 @@ parts of `~/.stratus` worth keeping (souls, skills, memory, schedules, and
 optionally conversations) are committed and pushed there. A script does
 the work, not a model. No value the home knows to be secret is pushed in
 any form the scan recognizes. Conversations and workspace files, where
-arbitrary tool output lands, go up only as ciphertext. Plaintext memory
-carries the scan's guarantee and no more: a secret an agent rewrote into
+arbitrary tool output lands, go up only as ciphertext. Plaintext memory,
+and the prompts of schedules an agent created, carry the scan's
+guarantee and no more: a secret an agent rewrote into
 a form nothing recognizes is not caught (see
 [Secrets](#secrets-three-layers-because-one-is-not-enough) for exactly
 where that line is). A lost machine can be restored from the repository
@@ -92,10 +93,14 @@ run rather than something to write.
   base64, hex, URL-encoded), and nothing shaped like a well-known key.
   It is not "no secret, whatever an agent did with it". Memory is
   model-authored text, and a model that stores a key ROT13'd or
-  paraphrased has moved it past any scanner. Encrypting memory by
+  paraphrased has moved it past any scanner. So is the prompt of a
+  schedule an agent created with `schedule.every` or `schedule.at`. It
+  sits in the `schedules` row, it is in the same class as memory, and
+  the same limit and the same option cover it. Encrypting memory by
   default would close that and cost the main reason to back up to git,
   readable history of what an agent believed. So `encrypt: "all"` is an
-  option for an operator who wants the stronger guarantee instead, and
+  option for an operator who wants the stronger guarantee instead,
+  covering memory and schedule bodies together, and
   the documentation says plainly which one the default makes.
 - **Only a fully migrated home is backed up.** An upgraded home whose
   exclusive migration has not run yet still keeps its grants at
@@ -650,7 +655,12 @@ prevents, and the spec says so.
    operator has purged the content that held those values. Values from
    configuration retire the same way. `init` records the first secret
    set, from every source, as the baseline, so a value removed before
-   the first `now` has something to be compared with. Each `now`
+   the first `now` has something to be compared with. When `init`
+   adopts a branch that already has history (a replacement machine, or
+   a clone whose local state was lost), nothing records what that
+   history was scanned against. So it runs the full plaintext-history
+   scan, over blobs and paths, against the whole current secret set and
+   the current scan policy before its first push. Each `now`
    compares its secret
    set with the previous run's, from every source: config `env`,
    `headers`, URL parameters, `writeOnly` properties, and stored
@@ -1376,6 +1386,9 @@ Two things follow for the design:
   `store --file` or `osxkeychain`, pasted into a memory, is redacted. A token in
   `http.extraHeader` in
   `~/.config/git/config` is never used by the backup's git.
+- `init` on a replacement machine, adopting the existing branch with a
+  credential re-entered first, finds that credential in older pushed
+  snapshots and names it for rotation.
 - After an upgrade adds a scan pattern, a pushed snapshot holding a
   value of that shape, in content or in a filename, makes the next
   `now` fail and name it.
