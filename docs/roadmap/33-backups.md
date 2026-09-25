@@ -122,9 +122,12 @@ run rather than something to write.
     runs its resolution from there, including one typed by hand in
     some other directory. `STRATUS_SOUL` is recorded the same way. The
     service definition does not carry it, and the timer never sees the
-    environment of a daemon started by hand. So `init` records the soul
-    path the daemon resolves, and every `now` uses that recording. A
-    manual run and the nightly one therefore snapshot the same tree.
+    environment of a daemon started by hand. So when the daemon's soul
+    came from `STRATUS_SOUL`, `init` records that path, and every `now`
+    uses the recording. A soul the config selects is never recorded. It
+    is resolved from the current config on every run, so an edit to
+    `soul` is followed the same night. A manual run and the nightly one
+    therefore snapshot the same tree.
   - **The selected memory store.** With `@stratusagent/memory-sqlite`
     selected, the memories live in one database at the path its config
     names, and the per-agent `memory.jsonl` files are unused. `now`
@@ -318,7 +321,15 @@ snapshot's business to interpret:
   another volume. And a skill may contain relative links between
   its own files, which `skill add` validates for containment and keeps.
   `now` copies what each of these points at into the snapshot as real
-  files and directories. For skill links it uses the same containment
+  files and directories. Two agents' workspace links can point at the
+  same directory. The state layout allows that, and the ledger
+  tolerates it. So workspaces are compared by device and inode, and a
+  shared one is stored once, with the manifest recording which agents
+  share it. Restore makes it a real directory under the first agent and
+  links each other agent's `workspace` to it. That link is the only one
+  restore ever creates, and it comes from restore's own record, never
+  from a tree entry. The ledger's old-to-new mapping then has one
+  target per old path. For skill links it uses the same containment
   check `skill add` runs (`findEscapingSymlink`, which is private to
   `state` today and gets exported for its second consumer) rather than
   a second copy of it. That check is a preflight, and the copy does not
@@ -1344,6 +1355,10 @@ Two things follow for the design:
 - With `user.signingkey` at `~/.ssh/backup_ed25519` and a deploy key
   at `~/.ssh/stratus_deploy`, `fs.read` of either file under a
   `tool-fs` root of `~/.ssh` is refused.
+- Changing `soul` in the config after `init` backs up the new soul the
+  same night.
+- Two agents whose workspaces link to one directory restore sharing one
+  directory and one ledger.
 - A daemon whose default soul comes from `STRATUS_SOUL` backs that soul
   up, from the timer as well as by hand, and restore prints the new
   path to export.
