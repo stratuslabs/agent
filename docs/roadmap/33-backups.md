@@ -494,7 +494,10 @@ rewrites. On top of that:
   rewrites nothing anyone else has. Ciphertext cannot be rescanned,
   because `now` holds only the age recipient and never the identity. So
   each unpushed commit also records a keyed fingerprint of the secret
-  set it was redacted against. If the set has changed since, every
+  set it was redacted against, together with the version of the
+  redaction and scan policy: patterns, encoded forms, and name rules.
+  If either has changed since, because a credential was added or an
+  upgrade taught the scanner a new shape, every
   unpushed commit that holds ciphertext is dropped and rebuilt without
   inspection.
 - **A partial snapshot is a failure.** If one database could not be read,
@@ -536,7 +539,24 @@ validly signed snapshot, and bring back grants and schedules that were
 revoked since. Restore walks the chain from the tip, and refuses a
 snapshot whose signed predecessor is not the manifest of its parent
 commit. It prints the sequence number and signing time of what it is
-about to restore. and `now` signs the manifest with a key held outside the
+about to restore.
+
+A chain proves order, not freshness. Someone who can force-push can
+move the branch back to an older tip that is authentic and correctly
+chained. Nothing inside the repository can tell that apart from the
+real latest backup, so the anchor has to come from outside it:
+- **The remote refuses rewrites.** `init` checks whether the branch is
+  protected against force-pushes and deletion. On GitHub it offers to
+  set that protection with the operator's own credentials; the deploy
+  key has no such right. `status` warns while the protection is absent.
+- **`now` notices a rewind.** Each run records the last sequence number
+  it pushed, beside the clone. A remote tip older than that stops the
+  run with a warning instead of building on it.
+- **Restore asks when the tip is old.** Restore shows the tip's
+  sequence number and signing time. If the tip is older than a few days
+  it requires `--expect-after <date>` or an explicit confirmation. The
+  operator's own knowledge, such as "my last backup was last night", is
+  the external checkpoint. and `now` signs the manifest with a key held outside the
 repository: an SSH signing key, the same kind git itself signs with.
 `init` asks for it, defaulting to git's own `user.signingkey` when that
 is an SSH key, and refuses to set up a target without one. **The key has
@@ -766,8 +786,12 @@ Two things follow for the design:
   snapshot.
 - A snapshot holding `skills/Foo/` and `skills/foo/`, restored onto a
   case-insensitive volume, is refused before anything is written.
-- After a credential is added, an unpushed commit holding ciphertext is
-  rebuilt before the next push.
+- After a credential is added, or after an upgrade that changes the scan
+  policy, an unpushed commit holding ciphertext is rebuilt before the
+  next push.
+- `now` against a remote whose tip was rewound below the last pushed
+  sequence refuses to run. Restore of a tip older than the threshold
+  requires `--expect-after` or confirmation.
 - Restoring a home with `api.enabled` on a machine without
   `control-api` writes nothing and prints the install command.
 - `init` with a passphrase-protected signing key is refused, with the
