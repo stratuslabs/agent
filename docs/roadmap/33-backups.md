@@ -248,9 +248,9 @@ snapshot's business to interpret:
 - **Only regular files and directories are copied.** A check made on a
   path and then acted on through the path again is a race: an agent
   still writing into its workspace can swap a checked file for a FIFO or
-  a link in between. So every entry is opened relative to its already
-  opened parent, with `O_NOFOLLOW` and `O_NONBLOCK`, and the *descriptor*
-  is checked with `fstat` before a byte is read. A FIFO would block the read
+  a link in between. So every leaf is opened with `O_NOFOLLOW` and
+  `O_NONBLOCK`, and the *descriptor* is checked with `fstat` before a
+  byte is read. A FIFO would block the read
   forever, a socket cannot be read at all, and a device file is not
   state. So sockets, FIFOs, and devices (a development server's
   leftovers, usually) are skipped rather than letting one stop or hang
@@ -297,12 +297,27 @@ snapshot's business to interpret:
   check `skill add` runs (`findEscapingSymlink`, which is private to
   `state` today and gets exported for its second consumer) rather than
   a second copy of it. That check is a preflight, and the copy does not
-  act on its answer by path. Following a link means reading it with
-  `readlinkat` on the already-open parent. The target is then resolved
-  one component at a time from the root descriptor with `O_NOFOLLOW`,
-  or with `openat2(RESOLVE_BENEATH)` where the kernel has it. An agent
-  that swaps a link between the check and the copy gets a refusal, not
-  a read outside its tree. A link that reaches outside its own skill or
+  act on its answer by path.
+
+  **Node has no `openat`**, so the walk cannot hold each directory open
+  and descend from it. `tool-fs` names the same limit in
+  `openContained`. The copy uses a check, open, and recheck protocol
+  instead, shared with `tool-fs` rather than written twice. Descending
+  records each ancestor's device and inode from `lstat`. The leaf is
+  opened with `O_NOFOLLOW` and read from its descriptor. After the
+  read, every ancestor is `lstat`ed again, along with the leaf's path.
+  If any of them is now a link or a different inode, the bytes are
+  discarded and the run fails and names the path. A link the snapshot
+  materializes is resolved the same way, one component at a time. What
+  this cannot close is a swap that is made and undone again inside a
+  single open. The spec states that residual rather than claiming
+  `openat` semantics Node lacks. Its reach is also narrow. Agents write
+  into workspaces, and on the git target a workspace is only ever
+  committed as ciphertext, so a file pulled in by such a race lands
+  encrypted, never in plaintext. A native helper with real `openat`
+  (and `openat2(RESOLVE_BENEATH)` on Linux) is the follow-up that
+  would close the residual. It is listed under open questions, not
+  assumed. A link that reaches outside its own skill or
   workspace fails the run and names the path. So does a cycle: a
   contained link such as `loop -> .` passes containment but has no
   finite copy. The copy tracks the real directories on its *current
@@ -913,20 +928,18 @@ config. The ledger is backed up **by default, not only with
 under `tool-fs` roots, which are the operator's own directories and
 are deliberately not copied. Those files usually survive the lost
 machine on their own mount, and without the ledger they would come
-back unlabelled. The records are split by where their files live.
-Any record for a file inside an agent workspace is never plaintext,
-whether or not `workspaces` is opted in, because those filenames are
-arbitrary tool output. With an age recipient configured, the record
-travels encrypted: in that workspace's index when the workspace is
-backed up, or in an encrypted ledger unit when it is not. Without a
-recipient, the record is omitted. That loses nothing for a workspace
-inside the home, since its files do not survive the lost machine
-either. It would lose labels for a workspace root outside the home,
-whose files do survive, so `now` refuses to run with such a root and
-no recipient, and names the fix. The rest are plaintext, and their paths
-go through the same secret and pattern scan as every other staged
-path. As with a filename, a hit **fails the run**; it is never
-redacted. A ledger is looked up by exact path, so a rewritten path
+back unlabelled. **No ledger record is ever plaintext.** Every path in
+it was chosen by an agent's write, whether inside a workspace or under
+a `tool-fs` root, so it is arbitrary tool output, like a workspace
+filename. The exact-value and pattern scans cannot catch a secret an
+agent transformed. With an age recipient configured, a record travels
+encrypted: in its workspace's index when that workspace is backed up,
+and otherwise in an encrypted ledger unit. Without a recipient, a
+record for a file inside the home is omitted, which loses nothing,
+because that file does not survive the lost machine either. A record
+for a file outside the home, whose file does survive, makes `now`
+refuse to run and name the fix, `init --recipient`. Records are never
+redacted: a ledger is looked up by exact path, so a rewritten path
 would silently strip the label from the real file.
 
 The ledger is **read last**, after every workspace file has been
@@ -1083,6 +1096,11 @@ Two things follow for the design:
   restores disabled anyway.
 - With `workspaces` off, no provenance record for a file inside any
   agent workspace appears in plaintext in the repository.
+- With a `tool-fs` root outside the home and no recipient, `now`
+  refuses. With a recipient, no ledger path appears in plaintext.
+- A workspace directory swapped for a link between descent and the
+  post-read recheck fails the run, and no byte from the far side is
+  committed.
 - A workspace file hard-linked to `~/.ssh/id_ed25519` is skipped,
   never copied.
 - Restoring a snapshot written by a newer state schema on an older
@@ -1232,6 +1250,13 @@ Two things follow for the design:
   [backing-up section](../reference/state-layout.md#moving-or-backing-up-a-home).
 
 ## Open questions
+
+- **A native helper for descriptor-relative traversal?** Node exposes
+  no `openat`, so the copy's check, open, and recheck protocol leaves a
+  swap that is made and undone inside one open. A small native addon,
+  or a prebuilt helper binary, would close it for both `backup` and
+  `tool-fs`. The price is a native build step in two packages that
+  ship none today.
 
 - **An OS timer or a daemon job kind?** The OS timer is proposed because it
   needs no kernel change and runs when the daemon is down. A daemon job
