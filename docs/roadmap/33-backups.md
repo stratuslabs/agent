@@ -325,9 +325,14 @@ there that holds a `sessions.db` as an agent. Everything else the
 backup keeps also lives in that directory: the ciphertext map, the
 retired list, the late-credential record, the signing key, the saved
 working directory, and the lock. So **no traversal ever enters it.**
-A workspace root that contains it (for example `~/.stratus` itself, or
-the home directory) is refused by `now` with the reason, rather than
-quietly pruned. Pruning alone would leave the next ancestor-rooted
+Any root an agent can read that contains it is refused by `now` with
+the reason, rather than quietly pruned. For example, `~/.stratus`
+itself or the home directory. That covers workspace roots, and also
+every `@stratusagent/tool-fs` `roots` entry, resolved per agent through
+the same resolver `fs` uses. `fs.read` is ungated inside its roots,
+so a root above the backup directory would hand every agent the
+signing key, and the `0700` mode cannot stop a process running as the
+same user. Pruning alone would leave the next ancestor-rooted
 tool a way to read the signing key. Every traversal also skips that
 directory by device and inode, as defence in depth.
 
@@ -848,9 +853,13 @@ the home in a staging directory that restore creates itself. That
 directory sits beside `<dir>`, on the same filesystem, with a random
 name, created exclusively, and it carries a marker saying whose it is.
 Only when all of it has verified is it promoted, with a **single
-rename** onto `<dir>`, which must be empty or absent. A crash at any
-point therefore leaves either the old empty `<dir>` or the complete
-home, never a half-promoted mix. A rerun recognizes an abandoned
+rename** onto `<dir>`, which must be empty or absent. Before the
+rename, every staged file and directory is `fsync`ed. After it, the
+parent directory is `fsync`ed too, because a rename alone does not
+make the data it points at durable. A crash at any point, power loss
+included, therefore leaves either the old empty `<dir>` or the
+complete home, never a half-promoted mix or a complete-looking home
+with truncated files. A rerun recognizes an abandoned
 staging directory by its marker and removes it before starting. No
 check comes after the first file lands where the operator will look.
 
@@ -1026,6 +1035,8 @@ Two things follow for the design:
 - An `--unverified` restore brings back no command scope, origin, or
   tool grant. It succeeds on a machine lacking a plugin that it
   restores disabled anyway.
+- A `tool-fs` root of `~` for any agent makes `now` fail with the
+  reason.
 - A `workspaceRoot` set to `~/.stratus` or `~` makes `now` fail with
   the reason, and no file from the backup directory is ever staged.
 - An MCP header named `X-APIKEY` is treated as a credential.
