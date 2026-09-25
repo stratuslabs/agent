@@ -793,6 +793,16 @@ snapshot whose signed predecessor is not the manifest of its parent
 commit. It prints the sequence number and signing time of what it is
 about to restore.
 
+**The chain has a root.** A remote that already has history, such as a
+GitHub repository created with a README, would give the first signed
+snapshot an unsigned parent, and the walk would refuse it forever. So
+`init` never builds on existing history. It writes to a dedicated
+branch, `stratus-backup` by default. If that branch does not exist, the
+first snapshot is an orphan commit whose manifest declares itself
+the root, at sequence 0. If the branch exists and its tip is not a
+signed snapshot, `init` refuses and names it. Restore stops its walk at
+the declared root and never needs to read further back.
+
 A chain proves order, not freshness. Someone who can force-push can
 move the branch back to an older tip that is authentic and correctly
 chained. Nothing inside the repository can tell that apart from the
@@ -801,9 +811,16 @@ real latest backup, so the anchor has to come from outside it:
   protected against force-pushes and deletion. On GitHub it offers to
   set that protection with the operator's own credentials; the deploy
   key has no such right. `status` warns while the protection is absent.
-- **`now` notices a rewind.** Each run records the last sequence number
-  it pushed, beside the clone. A remote tip older than that stops the
-  run with a warning instead of building on it.
+- **`now` builds only on its own tip.** Each run records the last
+  sequence number and commit it pushed, beside the clone. A remote tip
+  older than that is a rewind, and stops the run with a warning. A
+  remote tip that has moved *forward* stops it too, unless the new
+  commits verify: each carries a valid signature from the configured
+  key, links to its parent's manifest, and has the next sequence
+  number. A second machine backing up to the same branch is the honest
+  case, and it verifies. An unsigned or mis-chained commit does not, and
+  building on it would leave every later tip unrestorable, because the
+  restore walk would reach it.
 - **Restore always asks for a checkpoint.** A replacement machine does
   not have the sequence number `now` recorded, and yesterday's tip is
   as dangerous as last month's when a grant was revoked this morning.
@@ -1266,7 +1283,11 @@ Two things follow for the design:
   policy, an unpushed commit holding ciphertext is rebuilt before the
   next push.
 - `now` against a remote whose tip was rewound below the last pushed
-  sequence refuses to run.
+  sequence refuses to run, and so does `now` against a tip that advanced
+  with an unsigned commit.
+- `init` against a repository that has only a README commit creates the
+  orphan `stratus-backup` branch, and restore verifies its first
+  snapshot as the chain root.
 - Restoring a home with `api.enabled` on a machine without
   `control-api` writes nothing and prints the install command.
 - `init` with a passphrase-protected signing key is refused, with the
