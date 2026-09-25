@@ -220,6 +220,11 @@ snapshot's business to interpret:
   of the backup holds none of its files. So `.git` is never copied. The
   files are staged as ordinary files, and the manifest records where the
   skill came from.
+- **Empty directories are kept.** Git records no tree for a directory
+  with nothing in it, and tooling that expects a pre-created `out/` or
+  `fixtures/` would break after a restore. Every directory is listed:
+  in the signed manifest for plaintext trees, and in the encrypted
+  index for workspaces. Restore recreates them.
 - **Only regular files and directories are copied.** A check made on a
   path and then acted on through the path again is a race: an agent
   still writing into its workspace can swap a checked file for a FIFO or
@@ -280,8 +285,10 @@ one JSONL file per table, rows ordered by primary key, so that:
   multi-megabyte blob. For encrypted content this depends on the
   export's granularity, because any change to a file's plaintext means
   a whole new ciphertext for that file. So the session store is
-  exported one file per session, not one file per table. A night that
-  touched one conversation re-encrypts one conversation;
+  exported one file per session, not one file per table. The same
+  applies to that session's row in the fleet session index, since
+  saving a conversation touches both. A night that touched one
+  conversation re-encrypts one conversation's files;
 - a table can be left out or redacted by name.
 
 The local clone lives at `~/.stratus/backup/`. It must never live under
@@ -332,7 +339,10 @@ failing silently.
    else, so a credential that exists only as an exported shell variable
    is invisible to the nightly run, however visible it was to a
    `stratus run` that echoed it into memory. So `enable` resolves every
-   declared credential name twice: once in the operator's shell, and
+   environment credential candidate twice. That means the declared
+   names, and also the provider key variables (`STRATUS_API_KEY`
+   included) and the credential-named `passEnv` variables. Each is
+   resolved once in the operator's shell, and
    once in the environment the timer will have. It refuses when a name
    resolves in the first and not in the second, and names the credential
    and the fix: `stratus credential set <name>`, which puts it where
@@ -541,9 +551,13 @@ standing grant. A schedule has no paused state: an empty next-fire
 time is how a spent one-shot looks, and nothing resumes it. So the
 schedules are written as a readable list in the restored directory
 (agent, cadence, prompt, destination) for the operator to re-create
-deliberately. Those are the two ways
-restored state acts on its own. The printout says which ones it
-dropped.
+deliberately. **Plugin configuration is left switched off too.** A
+restored `plugins` block can start code without any schedule or grant:
+an MCP server's stdio command runs as soon as the daemon loads the
+plugin. So every plugin entry is restored with `enabled: false`, and
+its original block is kept in the same readable list for review.
+Together these are every way restored state acts on its own. The
+printout says what it dropped or disabled.
 
 **The packages the home ran on come first.** Rebuilding a store needs
 the package that owns its schema, and serving the restored config needs
@@ -711,6 +725,11 @@ Two things follow for the design:
   key than `--verify-key` names, and restore with no verify key at
   all. With `--unverified`, it restores with no schedules and no
   standing grants, and lists the schedules for re-creation.
+- An `--unverified` restore of a config with an MCP server enabled
+  restores it disabled, and the daemon starts no server process.
+- A skill with an empty `out/` directory restores with that directory.
+- `enable` with a `STRATUS_API_KEY` exported only in the operator's
+  shell is refused.
 - A credential exported for one `stratus run` after `enable` makes the
   next `now` fail before committing.
 - A value copied by `tool-shell`'s `passEnv` from a variable exported
