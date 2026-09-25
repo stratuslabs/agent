@@ -748,6 +748,15 @@ folds every path it is about to write by the target filesystem's rules
 applies to agent ids). It refuses a collision before writing anything,
 rather than letting the second write replace the first.
 
+**Nothing is promoted until everything verifies.** Restore works in
+two phases. First it reads, decrypts, and verifies every blob, mode,
+directory, and database record against the signed manifest, building
+the home in a staging directory under `<dir>/.restore-staging/`. Only
+when all of it has verified are the entries renamed into place. If
+anything fails, the staging directory is removed and `<dir>` is left
+as empty as it was, so a failed restore can simply be run again. No
+check comes after the first file lands where the operator will look.
+
 **Every write lands inside `<dir>`.** An external soul, a `memory-sqlite`
 database, and a configured workspace root are restored under
 `<dir>/external/`, and the
@@ -864,7 +873,8 @@ Two things follow for the design:
 - A restore of a snapshot with encrypted content refuses before writing
   anything when no identity is given, and again when the wrong one is.
 - A snapshot with one soul edited after signing is refused before
-  anything is written. So is a snapshot validly signed by a different
+  anything is written. So is one whose last blob fails verification,
+  and `<dir>` is empty afterwards. So is a snapshot validly signed by a different
   key than `--verify-key` names, and restore with no verify key at
   all. With `--unverified`, it restores with no schedules and no
   standing grants, and lists the schedules for re-creation.
