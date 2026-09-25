@@ -1169,11 +1169,13 @@ mapped. Only a record whose root the restored config no longer
 references is kept aside and listed. When in doubt the label errs
 toward `external`, never toward trusted.
 
-**Every write lands inside `<dir>` or its own staging directory.** An external soul, a `memory-sqlite`
-database, and a configured workspace root are restored under
-`<dir>/external/`, and the
+**Every write lands inside `<dir>` or its own staging directory.** An external soul and a `memory-sqlite`
+database are restored under `<dir>/external/`, and the
 restored config is rewritten to point at them there, with each rewrite
-printed beside the path it replaced. A path recorded in the manifest is
+printed beside the path it replaced. A workspace is not one of them.
+It is restored where the host resolves it, at
+`agents/<id>/workspace/`, as a real directory, and there is no setting
+to rewrite. A path recorded in the manifest is
 information for the operator, never a place restore writes to: the
 repository is input that someone other than the operator may have
 changed, and following its paths would let a modified backup create
@@ -1258,7 +1260,8 @@ Two things follow for the design:
   into memory and a session, appears in the pushed tree in no form, raw
   or escaped.
 - A repository whose `schema.sql` carries an `ATTACH` or `VACUUM INTO`
-  restores without executing it and writes nothing outside `<dir>`.
+  is refused, because the schema does not match the one the store
+  ships. Nothing in it is executed, and nothing is written anywhere.
 - A repository in which `agents/` or `external/` is a symlink is refused
   before anything is written.
 - A file in a workspace whose name contains a credential value fails the
