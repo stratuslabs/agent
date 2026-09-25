@@ -116,7 +116,17 @@ run rather than something to write.
     move it out of `~/.stratus`, so the snapshot takes the file
     `resolveConfigLocation` resolves, never `config.json` by assumption,
     and saves it as the snapshot's `config.json`. The manifest records
-    where it came from. `enable` writes the timer with the same
+    where it came from. The effective configuration can come from two
+    files at once. When the daemon's working directory holds an
+    auto-discovered `stratus.config.json`, that untrusted file is the
+    one selected, and `readTrustedConfigBlock` still reads every
+    trusted-only block the project file omits from
+    `~/.stratus/config.json`. So in that case both files are saved, both
+    redacted, and the manifest records which is which. Restore puts the
+    global file at `<dir>/config.json`, puts the project file under
+    `external/`, and prints where it came from. Saving only the selected
+    file would drop the plugins, memory store, principals, and channels
+    the daemon was actually running with. `enable` writes the timer with the same
     `--config` or `STRATUS_CONFIG` the service runs with, **and the
     same working directory**, because a config may hold relative paths
     (a `soul`, a database, a workspace root) and those resolve against
@@ -1332,6 +1342,9 @@ Two things follow for the design:
   known key.
 - With `memory-sqlite` selected, a restore brings back its memories. With
   a third-party memory store that has no export, `now` fails and names it.
+- A daemon whose working directory has a project `stratus.config.json`
+  that omits `plugins` backs up the global `config.json` too, and the
+  restored home runs with the plugins the daemon had.
 - A config-only `soul` outside `agents/` is in the snapshot. Restore puts
   it under `<dir>/external/` and rewrites the restored config to match.
 - With `workspaces` opted in, every root `workspaceResolver` gives an
