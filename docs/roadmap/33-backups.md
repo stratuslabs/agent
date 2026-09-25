@@ -397,7 +397,15 @@ the pattern scan's to catch or no one's.
    list is `0600` beside the clone, with the same protection as the
    credential store, and is never committed. It serves only as
    redaction input. `stratus backup forget-retired` clears it once the
-   operator has purged the content that held those values. Tracking
+   operator has purged the content that held those values. Values from
+   configuration retire the same way. Each `now` compares its secret
+   set with the previous run's, from every source: config `env`,
+   `headers`, URL parameters, `writeOnly` properties, and stored
+   credentials. Any value that has dropped out goes onto the retired
+   list. So a header rotated by editing `config.json` stays redacted
+   just like a credential rotated through `credential set`. A value
+   that was added and removed entirely between two runs is one no run
+   ever saw, the same limit as a rotation before `init`. Tracking
    follows the configured target, not the timer: `disable` stops the
    nightly run but not the retiring, and tracking ends only when the
    target itself is removed. A value rotated *before* `init` is
@@ -420,8 +428,10 @@ the pattern scan's to catch or no one's.
    `GITHUB_TOKEN`, `apiKey`, and `X-Api-Key` match, and `MONKEY` and
    `KEYBOARD_LAYOUT` do not. A structured value is split into the parts
    a tool would actually repeat. An `Authorization` header contributes
-   its token after the scheme (`Bearer`, `Token`, and so on), and for
-   `Basic` also the decoded password. A `Cookie` contributes each
+   its token after the scheme (`Bearer`, `Token`, and so on). For
+   `Basic` it also contributes the decoded `user:password` and each
+   half of it, because an API key is as often sent as the username with
+   an empty password. A `Cookie` contributes each
    cookie's value. The whole header value is added as well. The same holds for each variable a `passEnv` list
    names. So does any property a manifest marks `writeOnly` (below).
    **So does a credential carried in a URL.** An HTTP MCP server can
@@ -862,6 +872,9 @@ Two things follow for the design:
 - A `now` started while another is running exits with the
   "already running" status and changes nothing.
 - `env: { MONKEY: "banana" }` backs up verbatim.
+- An API key sent as the username in `Basic` auth (`key:`), and a header
+  value rotated by editing `config.json`, are both replaced in later
+  snapshots.
 - The bare token from an `Authorization: Bearer …` header, and one
   cookie value from a multi-cookie `Cookie` header, written into memory
   are replaced.
