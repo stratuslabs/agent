@@ -142,13 +142,14 @@ run rather than something to write.
     root and MCP output under another. With `workspaces` opted in, `now`
     enumerates every resolved `(plugin, agent)` root through the same
     resolver the plugins use, rather than by reading the settings. It
-    canonicalizes the roots, together with every other external resource
-    (an external soul, a `memory-sqlite` database, and the trusted
-    config file itself wherever `resolveConfigLocation` found it, whether
-    through `--config` or `STRATUS_CONFIG`), and keeps the
-    relationships between them. A config inside a workspace is stored
-    once, in its redacted form, and restore points both the daemon and
-    the workspace at that one file.
+    canonicalizes the roots and keeps the relationships between them.
+    A resource the snapshot commits in plaintext is never *inside* one.
+    That covers an external soul, a `memory-sqlite` database, and the
+    trusted config file wherever `resolveConfigLocation` found it,
+    through `--config` or `STRATUS_CONFIG`. The writable-root guard
+    below refuses that layout and says to move the file out. So there is
+    no overlap between a plaintext resource and an agent-written tree
+    to preserve.
     Roots that coincide are one tree. A root nested inside another is
     not copied twice: it is recorded as a subpath of the outer tree.
     Restore rewrites each setting to its tree plus that subpath, so a
@@ -313,8 +314,12 @@ snapshot's business to interpret:
   single open. The spec states that residual rather than claiming
   `openat` semantics Node lacks. Its reach is also narrow, and made so
   on purpose. `now` refuses any agent-writable root, meaning a `tool-fs`
-  root or a workspace root, that contains a tree it commits in
-  plaintext: `skills/`, `agents/`, or the config file. It uses the same
+  root or a workspace root, that contains anything it commits in
+  plaintext: `skills/`, `agents/`, the config file, an external soul,
+  or a `memory-sqlite` database. The refusal names the file and the
+  fix, which is to move it out of the agent's root. Otherwise an agent
+  could swap a soul it can write for a link to another file, and
+  materialization would commit that file's contents. It uses the same
   per-agent resolution as the backup-directory check. So the only trees
   an agent can race are workspaces. On the git target those are only
   ever committed as ciphertext, and a file pulled in by such a race
@@ -602,7 +607,10 @@ prevents, and the spec says so.
    applies, so `key:` contributes `key` and `key:` and nothing empty.
    A `Cookie` contributes each
    cookie's value. The whole header value is added as well. The same holds for each variable a `passEnv` list
-   names. So does any property a manifest marks `writeOnly` (below).
+   names, and a `passEnv` value is checked by *content* as well as by
+   name. A value that parses as a URL goes through the URL rule below
+   whatever its variable is called, so `DATABASE_URL`'s password
+   joins the set. The late-use record fingerprints it the same way. So does any property a manifest marks `writeOnly` (below).
    **So does a credential carried in a URL.** An HTTP MCP server can
    authenticate as `https://host/mcp?access_token=…`, and the plugin
    passes the URL to the transport as it is. Every URL-valued string in
@@ -1161,16 +1169,16 @@ Two things follow for the design:
 - Two `stratus run` invocations that export `GITHUB_TOKEN` with
   different values before one `now` leave both fingerprints, and `now`
   stays blocked until both are stored, retired, or acknowledged.
+- A `passEnv` entry `DATABASE_URL=postgres://u:long-password@host/db`
+  echoed into memory is redacted, although its name is not
+  credential-shaped.
 - An MCP header named `X-APIKEY` is treated as a credential, and so is
   a `passEnv` entry named `PGPASSWORD`, while `MONKEY` still is not.
 - A config-only soul reached through a symlink backs up as a regular
   file.
-- A config file inside a workspace root, selected by `--config` or by
-  `STRATUS_CONFIG`, is stored once, and after
-  restore an edit through the workspace changes the config the daemon
-  reads.
-- A default soul that lives inside a workspace root is stored once, and
-  after restore the daemon still serves the file the workspace holds.
+- A config file (selected by `--config` or `STRATUS_CONFIG`), an
+  external soul, or a `memory-sqlite` database inside a workspace or
+  `tool-fs` root makes `now` refuse, name the file, and say to move it.
 - `stratus backup now` run by hand from another directory, with a
   config holding a relative `soul`, backs up the same soul the daemon
   serves.
