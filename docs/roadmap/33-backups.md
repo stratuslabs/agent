@@ -405,6 +405,14 @@ check in `now` stays, as the early report. A gated tool such as
 `shell.run` can still read the key when the operator approves the
 call; that approval is the operator's decision, and the spec says so.
 
+The signing key need not live in the backup directory. When `init`
+takes git's own `user.signingkey`, it is usually under `~/.ssh`. So
+the protected set is the backup directory **plus the resolved private
+signing key, wherever it is**. `init` records that key's path, device,
+and inode beside the clone. `tool-fs` refuses a read of that file
+exactly as it refuses the backup directory. `now` refuses a root that
+contains it, and reports the refusal.
+
 **The backup directory is owner-only, whatever the home's mode is.**
 `~/.stratus` itself can be traversable on a multi-user host: it is
 created without an explicit mode, so a `022` umask leaves it `0755`.
@@ -1220,6 +1228,8 @@ Two things follow for the design:
   rescan.
 - A default soul at `skills/example/SOUL.md` is stored once, and after
   restore an edit through the skill changes the soul the daemon serves.
+- With `user.signingkey` at `~/.ssh/backup_ed25519`, `fs.read` of that
+  file under a `tool-fs` root of `~/.ssh` is refused.
 - A `tool-fs` root of `~/.stratus/skills` makes `now` fail with the
   reason.
 - After a restore without the old private signing key,
