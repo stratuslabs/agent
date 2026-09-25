@@ -217,6 +217,10 @@ test('collectAvailableModels falls back to the known lineup for a subscription t
   );
 
   assert.deepEqual(models.map((model) => model.id), KNOWN_CLAUDE_MODELS);
+  // The lineup is the only menu a subscription sign-in ever sees, so a
+  // released model missing from it cannot be picked in setup at all.
+  assert.ok(KNOWN_CLAUDE_MODELS.includes('claude-opus-5-5'));
+  assert.ok(KNOWN_CLAUDE_MODELS.includes('claude-fable-5-1'));
 });
 
 test('servedRuntimes resolves one runtime per pinned soul, not just the daemon default', async () => {
