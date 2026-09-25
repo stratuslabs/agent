@@ -195,8 +195,15 @@ run rather than something to write.
     below). So under one daemon, `tool-shell` output can land under a
     configured root while `plugin-mcp` output lands in the seam
     workspace. `tool-fs`'s provenance ledger always follows the seam.
-    With `workspaces` opted in, `now` asks `workspaceResolver` for each
-    plugin block in the config, enabled or disabled, and each agent. A
+    "Each agent" here means every agent with state on disk, not every
+    soul in the roster. An agent whose soul was deleted keeps its
+    `agents/<id>/` directory: its memories, grants, sessions, and
+    workspace are still there, and the state layout keeps them on
+    purpose. So `now` enumerates agents the way the host does, through
+    `allAgentWorkspaces` and the valid agent directories on disk, and a
+    configured root contributes every agent directory under it. With
+    `workspaces` opted in, `now` asks `workspaceResolver` for each
+    plugin block in the config, enabled or disabled, and each such agent. A
     disabled plugin's output is still durable output, and turning the
     plugin off does not delete it. It asks with the same `(seam, workspaceRoot)`
     pair that plugin receives or would receive. It never re-derives the
@@ -1280,7 +1287,13 @@ repository is input that someone other than the operator may have
 changed, and following its paths would let a modified backup create
 files anywhere the operator can write. Putting a file back at its
 original location, or pointing `--config` at the restored config, is the
-operator's move, the same as moving the directory into place with the
+operator's move. The one exception is a project-local
+`stratus.config.json`. Passing it through `--config` would make it
+trusted, and blocks the original daemon ignored as untrusted would take
+effect. So restore never suggests `--config` for it. It restores the
+file as `stratus.config.json` inside a directory of its own under
+`external/`, and says to start the daemon from that directory, where
+auto-discovery leaves it untrusted as it was. The rest is the operator's move, the same as moving the directory into place with the
 daemon stopped. Restoring is
 deliberately not an in-place operation: it winds approvals, grants, and
 schedules back to last night, and that is a decision to make with the
@@ -1344,7 +1357,11 @@ Two things follow for the design:
   a third-party memory store that has no export, `now` fails and names it.
 - A daemon whose working directory has a project `stratus.config.json`
   that omits `plugins` backs up the global `config.json` too, and the
-  restored home runs with the plugins the daemon had.
+  restored home runs with the plugins the daemon had. The restored
+  project file is never offered as `--config`, and a trusted-only block
+  in it stays ignored.
+- An agent whose soul was deleted but whose `agents/<id>/` remains is
+  still backed up, memories and workspace included.
 - A config-only `soul` outside `agents/` is in the snapshot. Restore puts
   it under `<dir>/external/` and rewrites the restored config to match.
 - With `workspaces` opted in, every root `workspaceResolver` gives an
