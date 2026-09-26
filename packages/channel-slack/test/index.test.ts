@@ -11,6 +11,7 @@ import {
   createSlackFileFetcher,
   type SlackAdapterOptions,
   type SlackBlock,
+  type SlackInboundFile,
   type SlackSocketEventArgs,
   type SlackSocketLike,
   type SlackWebLike,
@@ -594,6 +595,55 @@ test('a turn queued behind a running one does not overwrite its status', async (
   releaseFirst();
   await ticks();
   releaseSecond();
+  await Promise.all([first, second]);
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'second answer']);
+});
+
+test('a DM queued behind a running turn shows its own status at once', async () => {
+  // Every DM message is its own status key, and Slack stops showing the
+  // running turn's once a newer message sits below it. A queued DM that
+  // published nothing left the agent looking idle until the first reply.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const gateway: StubGateway = createStubGateway(async ({ sessionId, userMessage }) => {
+    if (/first/.test(userMessage)) {
+      await firstGate;
+      return sessionWithReply(sessionId, 'first answer');
+    }
+    return sessionWithReply(sessionId, 'second answer');
+  });
+  const ticks = async (): Promise<void> => {
+    for (let tick = 0; tick < 50; tick += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  const first = socket.deliver('message', mention('first', { type: 'message', ts: '300.1', channel: 'D1', channel_type: 'im' }));
+  await ticks();
+  const second = socket.deliver('message', mention('second', { type: 'message', ts: '300.2', channel: 'D1', channel_type: 'im' }));
+  await ticks();
+
+  assert.deepEqual(
+    statuses.filter((entry) => entry.status !== ''),
+    [
+      { channel_id: 'D1', thread_ts: '300.1', status: 'is thinking…' },
+      { channel_id: 'D1', thread_ts: '300.2', status: 'is thinking…' },
+    ],
+  );
+  releaseFirst();
   await Promise.all([first, second]);
   await adapter.stop();
   assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'second answer']);
@@ -6843,7 +6893,7 @@ test('an attached image is downloaded and travels with the dispatch; other files
       subtype: 'file_share',
       files: [
         { id: 'F1', name: 'error.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.slack.com/F1/download' },
-        { id: 'F2', name: 'server.log', mimetype: 'text/plain', size: 10, url_private_download: 'https://files.slack.com/F2/download' },
+        { id: 'F2', name: 'crash.pdf', mimetype: 'application/pdf', size: 10, url_private_download: 'https://files.slack.com/F2/download' },
       ],
     },
   });
@@ -6855,10 +6905,94 @@ test('an attached image is downloaded and travels with the dispatch; other files
   assert.deepEqual(gateway.dispatches, [{
     sessionId: 'slack:ava:T1:C1:960.0',
     agentId: 'ava',
-    // The image is not in the note: the model is shown it. The log still is.
-    userMessage: "Dylan: what's wrong here?\n[Attached: server.log. Attachment contents cannot be read here — say so rather than guessing at them.]",
+    // The image is not in the note: the model is shown it. The PDF still is.
+    userMessage: "Dylan: what's wrong here?\n[Attached: crash.pdf. Attachment contents cannot be read here — say so rather than guessing at them.]",
     images: [{ mediaType: 'image/png', data: PNG_BYTES.toString('base64'), name: 'error.png' }],
   }]);
+});
+
+const dmWithFiles = (eventId: string, ts: string, text: string, files: SlackInboundFile[]) => ({
+  body: { team_id: 'T1', event_id: eventId },
+  event: { type: 'message', channel_type: 'im', user: 'U-DYLAN', text, ts, channel: 'D1', subtype: 'file_share', files },
+});
+
+test('a Markdown file attached in a DM is read into the message', async () => {
+  // A plan attached as .md reached the agent as a filename, and it told the
+  // person it had no way to read Slack. A text file is read, whatever label
+  // the uploader's client gave it, and one dropped in alone is a question.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'read it'));
+  const bodies: Record<string, string> = {
+    'https://files.slack.com/F1/download': '# Brand ops plan\n\nShip the site.\n',
+    'https://files.slack.com/F2/download': 'name,owner\nsite,dylan\n',
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => ({ status: 200, contentType: 'text/plain; charset=utf-8', body: Buffer.from(bodies[url] ?? '') }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('message', dmWithFiles('evt-md', '970.0', 'can you read this', [
+    { id: 'F1', name: 'plan.md', mimetype: 'text/markdown', size: 36, url_private_download: 'https://files.slack.com/F1/download' },
+    { id: 'F3', name: 'deck.pdf', mimetype: 'application/pdf', size: 10, url_private_download: 'https://files.slack.com/F3/download' },
+  ]));
+  await socket.deliver('message', dmWithFiles('evt-csv', '971.0', '', [
+    { id: 'F2', name: 'owners.csv', mimetype: 'application/octet-stream', size: 24, url_private_download: 'https://files.slack.com/F2/download' },
+  ]));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    'can you read this\n[Attached: plan.md. Its contents follow.]\n# Brand ops plan\n\nShip the site.\n[End of plan.md]'
+      + '\n[Attached: deck.pdf. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    '\n[Attached: owners.csv. Its contents follow.]\nname,owner\nsite,dylan\n[End of owners.csv]',
+  ]);
+});
+
+test('a text file the token may not read, or too large, or not text, stays a note', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const fetched: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => {
+      fetched.push(url);
+      if (url.includes('F1')) {
+        // Without files:read Slack answers a 200 and a sign-in page, which
+        // for a text file is still text — so the page itself is refused.
+        return { status: 200, contentType: 'text/html; charset=utf-8', body: Buffer.from('<!DOCTYPE html><html>sign in</html>') };
+      }
+      return { status: 200, contentType: 'text/plain', body: Buffer.from([0xff, 0xfe, 0x00, 0xd8]) };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('message', dmWithFiles('evt-bad-text', '972.0', 'three files', [
+    { id: 'F1', name: 'plan.md', mimetype: 'text/markdown', size: 20, url_private_download: 'https://files.slack.com/F1/download' },
+    { id: 'F2', name: 'huge.log', mimetype: 'text/plain', size: 5_000_000, url_private_download: 'https://files.slack.com/F2/download' },
+    { id: 'F3', name: 'notes.txt', mimetype: 'text/plain', size: 4, url_private_download: 'https://files.slack.com/F3/download' },
+  ]));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    'three files\n[Attached: plan.md, huge.log, notes.txt. Attachment contents cannot be read here — say so rather than guessing at them.]',
+  ]);
+  // The oversized one is never downloaded.
+  assert.deepEqual(fetched, ['https://files.slack.com/F1/download', 'https://files.slack.com/F3/download']);
+  assert.equal(warnings.filter((line) => /plan\.md/.test(line) && /files:read/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /huge\.log/.test(line) && /Paste the part that matters/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /notes\.txt/.test(line) && /not UTF-8/.test(line)).length, 1);
 });
 
 test('an image dropped in with nothing said is still a question', async () => {

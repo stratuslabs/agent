@@ -4268,6 +4268,52 @@ export const renderSkillsSection = (skills: readonly SkillDescriptor[] | undefin
   return `You have skills — procedures for doing particular tasks well. When one is relevant to the task at hand, load its full instructions with the ${SKILL_READ_TOOL_NAME} tool (pass the id) and follow them; the one-line descriptions here are pointers, not the procedures themselves:\n${lines.join('\n')}`;
 };
 
+/**
+ * How to reply, told to every agent before its persona.
+ *
+ * Models default to the long, headed, bulleted answer, and an agent is read
+ * mostly in chat — often on a phone — where that is the wrong shape. Souls
+ * were each growing their own copy of this rule, so it lives here once.
+ * Short must not turn into incomplete, so the same section says a requested
+ * deliverable arrives whole and a blocker is always said. A long one goes
+ * where the reader can open it: an agent on Slack that answers with a path
+ * on the daemon's disk has handed over nothing. It sits ahead of the
+ * persona, and its last sentence lets the soul and the person override it.
+ * It is written without em dashes on purpose: a model imitates the prose
+ * it is prompted with, and a rule against them set in them undoes itself.
+ */
+const REPLY_SECTION = [
+  'How to reply: like a text message, usually one to four short sentences. Lead with the answer, the result, or the decision you need, then stop.',
+  'Write the way a person texts. Avoid em dashes; use a comma, a period, or a new sentence instead. Skip the tells of machine-written text: filler openers and closers like "Great question" or "I hope this helps", "it\'s not X, it\'s Y" framing, lists of three for rhythm, words like delve, seamless, robust, and leverage, and emoji the person has not used first.',
+  'No preamble, no restating the request, no summary of what you just said, no closing offer of more help, and no headers or bullet lists unless they genuinely make the reply easier to read.',
+  'Short never means incomplete. When you are asked for a draft, a plan, an explanation, or a document, deliver the whole thing the first time, and always say plainly what is blocking you or what you are unsure of.',
+  'A long deliverable belongs somewhere the person can open it, such as a file or page you can actually share, and the reply is the takeaway plus its real link. Never invent a link, and never assume a path on your own machine is one they can open.',
+  'Send a progress update only when something has changed, keep it to a line, and never split one long answer across several messages.',
+  'Carry on with work you have already been asked to do instead of asking permission for each step; ask at most one question, and only when the answer changes what you do.',
+  'Before sending, ask whether this would be annoying to read on a phone; if it would, cut it.',
+  'Where your own instructions below, or the person you are talking to, ask for something else, that wins.',
+].join(' ');
+
+/**
+ * Where the conversation is happening, for a session a channel started.
+ *
+ * A channel adapter records itself as `metadata.channel` on the sessions it
+ * dispatches (`slack` today). Without this the agent could not tell: an
+ * agent with no Slack tool, asked about an attachment in a Slack DM, told
+ * the person it had "no Slack connection at all" and argued the point.
+ * Rendered from the session rather than handed in per turn so sessions
+ * opened before this existed get it too. The name must look like a channel
+ * id, since it is interpolated into the prompt.
+ */
+export const renderChannelSection = (session: Pick<Session, 'metadata'>): string | undefined => {
+  const channel = session.metadata?.channel;
+  if (typeof channel !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(channel)) {
+    return undefined;
+  }
+  const name = `${channel.charAt(0).toUpperCase()}${channel.slice(1)}`;
+  return `Where you are: this conversation is happening in ${name}. The people in it are writing to you there and your replies are posted back to them there, so you are talking in ${name} whether or not you have any ${name} tools. What they attach reaches you with their message.`;
+};
+
 export interface SystemPromptOptions {
   /** Host-level preamble, rendered before the agent's own persona. */
   preamble?: string;
@@ -4279,12 +4325,12 @@ export interface SystemPromptOptions {
  * Which part of what an agent is told a section is.
  *
  * The distinction a caller actually needs is stable versus volatile:
- * `preamble`, `persona`, and `skills` are byte-identical across every turn of
+ * `preamble`, `replies`, `persona`, `channel`, and `skills` are byte-identical across every turn of
  * an agent's life, while `memory` is rewritten whenever the agent remembers
  * anything. A provider that caches its request prefix has to place those two
  * groups differently, and it cannot tell them apart from rendered strings.
  */
-export type SystemPromptSectionKind = 'preamble' | 'persona' | 'memory' | 'skills';
+export type SystemPromptSectionKind = 'preamble' | 'replies' | 'persona' | 'channel' | 'memory' | 'skills';
 
 export interface SystemPromptSection {
   kind: SystemPromptSectionKind;
@@ -4311,7 +4357,9 @@ export const renderSystemPromptParts = (
 ): SystemPromptSection[] => {
   const sections: Array<{ kind: SystemPromptSectionKind; text: string | undefined }> = [
     { kind: 'preamble', text: options.preamble },
+    { kind: 'replies', text: REPLY_SECTION },
     { kind: 'persona', text: renderPersonaSection(request.session.agent, { fallback: options.fallbackPersona ?? false }) },
+    { kind: 'channel', text: renderChannelSection(request.session) },
     { kind: 'memory', text: renderMemorySection(request.memory) },
     { kind: 'skills', text: renderSkillsSection(request.skills) },
   ];

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ContextOverflowError, UNADDRESSED_TURN_NOTE, type ImageAttachment, type MemoryEntry, type ProviderCallUsage, type ProviderRequest, type Session } from '@stratusagent/core';
+import { ContextOverflowError, UNADDRESSED_TURN_NOTE, renderSystemPromptParts, type ImageAttachment, type MemoryEntry, type ProviderCallUsage, type ProviderRequest, type Session } from '@stratusagent/core';
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
@@ -1075,11 +1075,11 @@ test('an unrelated 400 is not swallowed by the system-message fallback', async (
   );
 });
 
-test('an agent with tools but nothing to say caches its tool list', async () => {
-  // No preamble, no instructions, no skills — so there is no system block to
-  // carry the breakpoint, and the tool schemas are the largest stable thing
-  // in the request. Without the fallback below they would be re-sent at full
-  // price on every turn of the agent's life.
+test('an agent with tools but nothing to say still caches its tool list', async () => {
+  // No preamble, no instructions, no skills — only the reply section every
+  // agent is told. Its system block carries the one breakpoint, which
+  // covers the tool schemas ahead of it on the wire; without that they
+  // would be re-sent at full price on every turn of the agent's life.
   const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hi.' }])]);
   const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
 
@@ -1092,9 +1092,10 @@ test('an agent with tools but nothing to say caches its tool list', async () => 
   } as ProviderRequest);
 
   const body = requests[0]!.body;
-  assert.equal(body.system, undefined);
-  assert.equal(body.tools[0].cache_control, undefined);
-  assert.deepEqual(body.tools.at(-1).cache_control, { type: 'ephemeral', ttl: '5m' });
+  assert.equal(body.system.length, 1);
+  assert.match(body.system[0].text, /^How to reply:/);
+  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '5m' });
+  assert.equal(body.tools.at(-1).cache_control, undefined);
 });
 
 test('the breakpoint is never placed twice on one contiguous prefix', async () => {
@@ -1421,7 +1422,11 @@ test('the oldest replayed images give way when the whole request body would not 
   }) as typeof fetch;
   // Two images of 1800 bytes each are 2400 bytes of base64 apiece: together
   // they overflow a 4000-byte body with the text around them, one does not.
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, requestBodyMaxBytes: 4000 });
+  // The reply section every agent is told rides on top of that, so the cap
+  // grows by exactly its size and the test keeps measuring the images.
+  const replies = renderSystemPromptParts({ session: createSession() }).find((part) => part.kind === 'replies')?.text ?? '';
+  const cap = 4000 + Buffer.byteLength(JSON.stringify(replies));
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, requestBodyMaxBytes: cap });
   const older: ImageAttachment = { mediaType: 'image/png', data: 'A'.repeat(2400), name: 'older.png' };
   const newer: ImageAttachment = { mediaType: 'image/png', data: 'B'.repeat(2400), name: 'newer.png' };
   const stamp = new Date().toISOString();
@@ -1436,7 +1441,7 @@ test('the oldest replayed images give way when the whole request body would not 
   await provider.generate({ session });
 
   assert.equal(bodies.length, 1);
-  assert.ok(JSON.stringify(bodies[0]).length <= 4000, 'the request body must fit the cap');
+  assert.ok(Buffer.byteLength(JSON.stringify(bodies[0])) <= cap, 'the request body must fit the cap');
   const users = bodies[0]!.messages.filter((message: { role: string }) => message.role === 'user');
   assert.deepEqual(users[0].content, [
     { type: 'text', text: '[An image attached here (older.png) is no longer sent: this conversation\'s images have passed what one request can carry, and only the most recent are kept.]' },

@@ -541,7 +541,7 @@ test('a soul edit reaches an existing session on its next turn', async () => {
   const systemPrompts: string[] = [];
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
-    systemPrompts.push(body.messages.find((message) => message.role === 'system')?.content ?? '');
+    systemPrompts.push(body.messages.filter((message) => message.role === 'system').map((message) => message.content).join('\n\n'));
     return openAiText('ok');
   }) as typeof fetch;
 

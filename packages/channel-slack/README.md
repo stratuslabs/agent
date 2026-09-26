@@ -131,11 +131,24 @@ agent's runtime: the Anthropic API, OpenAI-compatible providers, and the
 Claude Code runtime send it as image content; the Codex harness takes a
 text prompt, so there the agent is told the image's name and that it cannot
 see it.
-**Every other attachment is unreadable** — a log, a PDF, an image that was
-too large — so the message reaches the agent naming those files and saying
-they cannot be opened, which is what lets it answer honestly instead of as
-though it had read the log. Such a file dropped in with nothing said is not
-a question, and gets no reply. 
+**Text files are read into the message.** Markdown, plain text, CSV, JSON,
+YAML, a log — anything Slack labels `text/*` (HTML aside), a few text
+`application/*` types, or an unlabelled file whose name says it is one of
+those — is downloaded with the same `files:read` scope and set into the
+message after what was said, between `[Attached: plan.md. Its contents
+follow.]` and `[End of plan.md]`. A text file dropped in alone is a
+question, like a screenshot. One file may be 100 KB and one message's text
+files 200 KB together, since read text joins the conversation and is sent
+again every turn; a larger one is never downloaded, and `stratus serve`
+warns with the file's name. A file that is not UTF-8, or that comes back as
+Slack's sign-in page because the scope is missing, is treated as unreadable
+and the warning names the scope. Text files share the message's 30-second
+download deadline with its images.
+**Every other attachment is unreadable** — a PDF, a Word file, an image that
+was too large, a text file over the caps — so the message reaches the agent
+naming those files and saying they cannot be opened, which is what lets it
+answer honestly instead of as though it had read them. Such a file dropped
+in with nothing said is not a question, and gets no reply. 
 Sessions are still per agent: an agent hears a thread from the mention
 that brought it in, and what was said before that — to the other agent, or
 by it — is not backfilled ([#147](https://github.com/stratuslabs/agent/issues/147)).
@@ -189,9 +202,10 @@ editing `credentials.json` by hand.
 The manual equivalent, if you prefer:
 
 1. https://api.slack.com/apps → **Create New App → From a manifest** → paste `manifest/stratus-agent.manifest.json` with `NAME` replaced by the agent's name.
-   The manifest asks for the `channels:history` / `groups:history` / `mpim:history` scopes and the matching `message.*` events, which is what lets an agent [stay in a thread](#who-a-message-is-for) instead of needing a mention every time, and for `files:read`, which is what lets it [see an attached image](#who-a-message-is-for). An app created before those shipped needs them added under **OAuth & Permissions** and **Event Subscriptions** and reinstalled once; leave the history scopes off and it answers mentions and DMs, exactly as it did before; leave `files:read` off and it hears about attachments by name only.
-2. **Basic Information → App-Level Tokens** → generate a token with `connections:write` (that's the `appToken`, `xapp-…`).
-3. **Install App** to the workspace → copy the **Bot User OAuth Token** (that's the `botToken`, `xoxb-…`).
+   The manifest asks for the `channels:history` / `groups:history` / `mpim:history` scopes and the matching `message.*` events, which is what lets an agent [stay in a thread](#who-a-message-is-for) instead of needing a mention every time, and for `files:read`, which is what lets it [see an attached image](#who-a-message-is-for). An app created before those shipped needs them added under **OAuth & Permissions** and **Event Subscriptions** and reinstalled once; leave the history scopes off and it answers mentions and DMs, exactly as it did before; leave `files:read` off and it hears about attachments, images and text files alike, by name only.
+   It also turns on the **Messages Tab** under App Home (`features.app_home.messages_tab_enabled`), which Slack creates apps without — until it is on, a DM to the app gets Slack's own *Sending messages to this app has been turned off* and never reaches the adapter. An app created before the manifest carried it needs **App Home → Messages Tab → Allow users to send Slash commands and messages from the messages tab** switched on once; reopen the DM afterwards.
+2. Still on **Basic Information**, scroll to **App-Level Tokens** → **Generate Token and Scopes** → name it anything → **Add Scope** → `connections:write` → **Generate**, and copy the token (that's the `appToken`, `xapp-…`). It is not on **OAuth & Permissions**, where the bot token is.
+3. **Install App** → **Install to** the workspace → **Allow** → copy the **Bot User OAuth Token** (that's the `botToken`, `xoxb-…`).
 4. Upload the agent's avatar under **Display Information**.
 5. Add both tokens under `channels.slack.<agentId>` in `~/.stratus/credentials.json` and restart `stratus serve` — the log will show `slack: <agentId> connected`.
 

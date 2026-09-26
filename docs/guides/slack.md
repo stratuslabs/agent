@@ -111,6 +111,12 @@ in front of you. A turn nobody asked for (an agent that
 [judges](#how-an-agent-listens)) shows no status, since it may decide to
 say nothing.
 
+Messages you send while it is still working wait their turn and are
+answered in order. In a DM each one shows the status as soon as you send
+it, so a second message never makes the agent look idle; in a channel
+thread the status keeps saying what the running turn is doing until its
+reply posts.
+
 If you would rather watch the reply being written, set `stream`: the agent
 posts a `…` placeholder at once, edits it as the reply arrives, shows
 `⚙ tool…` lines while tools run, and finalizes it — how every reply looked
@@ -142,11 +148,15 @@ into the thread on its own, and the agent is shown it. That takes the
 `files:read` scope, which the manifest `stratus setup` prints includes; an
 app installed before it needs the scope added under **OAuth & Permissions**
 and a reinstall, and until then `stratus serve` warns, naming the scope,
-whenever an image arrives. Anything that is not an image the model can
-take — a log, a PDF, an image over 5 MB or 8000 pixels a side, or one that
-would take a single message's images past 20 MB together — reaches the agent by name, told
-that it cannot be opened, so it answers honestly rather than as if it had
-read the file.
+whenever an image arrives.
+
+Text files are read too. Attach a Markdown plan, a CSV, a JSON file, or a
+log, and its contents reach the agent with your message, up to 100 KB a
+file and 200 KB a message. Anything else — a PDF, a Word file, an image
+over 5 MB or 8000 pixels a side, one that would take a single message's
+images past 20 MB together, or a text file over those caps — reaches the
+agent by name, told that it cannot be opened, so it answers honestly
+rather than as if it had read the file.
 
 Which runtimes can actually look: agents on the **Anthropic API**, an
 **OpenAI-compatible** provider, or a **Claude subscription** (the Claude Code
