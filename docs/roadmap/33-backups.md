@@ -864,7 +864,12 @@ fields keep their values and types, because a restored config must
 still parse and a reinstalled plugin must still accept them. Which
 fields those are comes from `HOST_CONFIG_KEYS`, exported by
 `@stratusagent/plugins` (`enabled`, `agents`, and `toolRisks` today),
-never from a list written here. Each plugin-owned value is
+never from a list written here. Host-owned is a property of the key,
+not of everything beneath it. `agents` is a host-owned container, but
+each `agents.<id>` entry is a per-agent override of the plugin's own
+settings, which `validatePluginConfig` checks against the plugin's
+schema. So the agent ids and the object structure are kept, and every
+leaf beneath them is plugin-owned like the defaults. Each plugin-owned value is
 redacted, added to the secret set, and listed for re-entry on restore. `status` names the
 block and says to reinstall the package or delete the block. A block
 nobody can inspect is never copied through as if it were known to be
@@ -1476,8 +1481,9 @@ Two things follow for the design:
   `/data/a/<id>` in the snapshot until `forget-root /data/a`, including
   after a restore onto a replacement machine.
 - A disabled plugin block whose package is uninstalled has every
-  plugin-owned value redacted and listed for re-entry, keeps
-  `enabled: false` as a boolean and its `toolRisks` unchanged, and restores into a config that
+  plugin-owned value redacted and listed for re-entry, including every
+  setting under `agents.<id>`, keeps `enabled: false` as a boolean, its
+  `toolRisks` unchanged, and its agent ids in place, and restores into a config that
   parses. `status` names it.
 - A ledger rewritten through every retry fails `now` rather than being
   kept stale or skipped.
