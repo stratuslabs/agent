@@ -613,7 +613,12 @@ way, and the manifest is signed from its copy. A keychain that rotates mid-run,
 or a deploy key edited in place, cannot put a credential on the wire
 that the scan never saw. A signing key replaced mid-run cannot sign a
 tip that fails verification. If any of them changed, it recollects the secret set from
-all of them and rescans the commit it just published against it. A hit is reported at once and
+all of them and rescans the commit it just published against it. If
+the set gained a value, that is not enough: the value may survive only
+in an older snapshot, deleted from the live home before this one was
+taken. So a gain runs the full scan of published history that any
+growth of the secret set requires (see "Published history is
+rescanned" below), not a scan of the tip alone. A hit is reported at once and
 loudly, naming the credential to rotate, because a pushed commit is
 not taken back. This is the one place the design detects rather than
 prevents, and the spec says so.
@@ -859,7 +864,14 @@ lives with the package that knows, not in a list here. A block whose
 manifest cannot be read has no schema to consult. That happens with a
 disabled plugin left in the config after its package was removed,
 which the config accepts and the loader skips. Every plugin-owned leaf
-value in such a block is then treated as a credential. The host-owned
+value in such a block is then redacted in place, by its path, whatever
+its type or length. Only string values at or above the short-value
+floor also join the global secret set, so a copy elsewhere in the home
+is caught too. A shorter or non-string value is redacted by path alone
+and never fails the floor. The floor exists for named credentials,
+where a short value is a broken secret. Here it is usually an ordinary
+setting like `shell: "bash"`, and exact-matching it across the home
+would corrupt the snapshot. The host-owned
 fields keep their values and types, because a restored config must
 still parse and a reinstalled plugin must still accept them. Which
 fields those are comes from `HOST_CONFIG_KEYS`, exported by
@@ -870,7 +882,7 @@ each `agents.<id>` entry is a per-agent override of the plugin's own
 settings, which `validatePluginConfig` checks against the plugin's
 schema. So the agent ids and the object structure are kept, and every
 leaf beneath them is plugin-owned like the defaults. Each plugin-owned value is
-redacted, added to the secret set, and listed for re-entry on restore. `status` names the
+redacted and listed for re-entry on restore. `status` names the
 block and says to reinstall the package or delete the block. A block
 nobody can inspect is never copied through as if it were known to be
 harmless.
@@ -1484,7 +1496,12 @@ Two things follow for the design:
   plugin-owned value redacted and listed for re-entry, including every
   setting under `agents.<id>`, keeps `enabled: false` as a boolean, its
   `toolRisks` unchanged, and its agent ids in place, and restores into a config that
-  parses. `status` names it.
+  parses. `status` names it. A short setting in it, like
+  `shell: "bash"`, is redacted there without failing the run or being
+  replaced anywhere else in the home.
+- A value first seen when the post-push re-hash finds a changed input,
+  present only in an older pushed snapshot, fails the run and names the
+  credential.
 - A ledger rewritten through every retry fails `now` rather than being
   kept stale or skipped.
 - `init` run beside a daemon that is already serving a `STRATUS_SOUL`
