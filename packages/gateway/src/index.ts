@@ -26,6 +26,7 @@ import {
   latestTurnReply,
   readPendingApproval,
   type AgentDefinition,
+  type AgentRuntimeContext,
   type AgentMemoryStore,
   type AlwaysMeans,
   type ApprovalAnswer,
@@ -1700,6 +1701,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return source;
   };
 
+  const agentWorkspaces = createAgentWorkspaces(env);
+  /**
+   * What an agent is told about how it runs. The soul path is the
+   * registered source's, so it follows a repointed default soul, and
+   * `soulReloads` is true because `refreshAgent` re-reads that file on
+   * every dispatch. The built-in agent has no file, so it is told only
+   * where its workspace is.
+   */
+  const agentRuntimeContext = (agent: AgentDefinition): AgentRuntimeContext => {
+    const soulPath = sources.get(agent.id)?.soulPath;
+    return {
+      ...(soulPath !== undefined ? { soulPath, soulReloads: true } : {}),
+      workspace: agentWorkspaces.forAgent(agent.id),
+    };
+  };
+
   // ---- runner pool --------------------------------------------------------
 
   const tools = new ToolRegistry();
@@ -1819,6 +1836,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       agents: registry,
       skills: skillCatalog,
       memory,
+      runtimeContext: agentRuntimeContext,
       streaming: true,
       ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
     });
@@ -2780,7 +2798,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // *calling* agent's — its allowlist checked, its own entry before the
       // fleet's shared one.
       credentials: createFileCredentialResolver(env),
-      workspaces: createAgentWorkspaces(env),
+      workspaces: agentWorkspaces,
       // The structured log, so a plugin's lifecycle lines — an MCP server
       // that dropped, a reconnect that failed — are in `stratus logs` and
       // not only on a stderr the service manager owns.

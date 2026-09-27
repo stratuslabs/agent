@@ -381,6 +381,14 @@ export const createAgentRuntime = async (
       bus,
       skills,
       memory,
+      // No `soulReloads`: a run reads its soul once, before it starts. The
+      // path is told only to the agent it belongs to.
+      runtimeContext: (agent) => ({
+        ...(options.runtime.soulPath !== undefined && agent.id === options.runtime.soul?.agent.id
+          ? { soulPath: options.runtime.soulPath }
+          : {}),
+        workspace: createAgentWorkspaces(runEnv).forAgent(agent.id),
+      }),
       ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
     });
 
