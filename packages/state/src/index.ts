@@ -204,6 +204,7 @@ export {
   ignoredUntrustedConfigKeys,
   discoverIgnoredUntrustedConfig,
   resolveRuntimeConfig,
+  languageFor,
 } from './runtime.ts';
 
 export {

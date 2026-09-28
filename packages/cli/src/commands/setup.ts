@@ -25,6 +25,7 @@ import {
   loadRosterSouls,
   loadSoulFile,
   isRegisteredProviderName,
+  languageFor,
   readNonEmptyString,
   registeredProviderNameOf,
   type BuiltinProviderName,
@@ -899,7 +900,16 @@ export const runSetup = async (
     };
   };
 
+  // The language the saved config would run in, soul over config, carried
+  // onto whichever variant the test run builds: it is part of what the
+  // quick hello is there to exercise.
   const buildTestRuntime = async (): Promise<RuntimeConfig | undefined> => {
+    const runtime = await buildTestRuntimeVariant();
+    const language = runtime ? languageFor(runtime.soul, state) : undefined;
+    return runtime && language !== undefined ? { ...runtime, language } : runtime;
+  };
+
+  const buildTestRuntimeVariant = async (): Promise<RuntimeConfig | undefined> => {
     let soul: ParsedSoul | undefined;
     if (state.soulPath) {
       try {
