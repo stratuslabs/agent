@@ -1065,6 +1065,38 @@ test('how an agent listens is editable by field, and only to a mode', async () =
   }
 });
 
+test('a soul language survives every field edit, and is editable by field only to a tag', async () => {
+  const home = await newHome();
+  const soulFile = path.join(home, '.stratus', 'agents', 'ava.md');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nlanguage: en-GB\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  const edit = (body: object): Promise<Response> => harness.call('/api/v1/agents/ava', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  try {
+    // The soul is rebuilt from fields: an edit of anything else must not
+    // drop the line and move the agent onto another language.
+    assert.equal((await edit({ name: 'Ava B', tools: ['memory.*'], listens: 'judge' })).status, 200);
+    assert.match(await readFile(soulFile, 'utf8'), /^language: en-GB$/m);
+    assert.equal((await json<{ language?: string }>(await harness.call('/api/v1/agents/ava'))).language, 'en-GB');
+
+    assert.equal((await edit({ language: 'en-AU' })).status, 200);
+    assert.match(await readFile(soulFile, 'utf8'), /^language: en-AU$/m);
+
+    const notATag = await edit({ language: 'Australian' });
+    assert.equal(notATag.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(notATag)).error.code, 'invalid_language');
+
+    // An empty string clears it back to the config's or the default.
+    assert.equal((await edit({ language: '' })).status, 200);
+    assert.doesNotMatch(await readFile(soulFile, 'utf8'), /language:/);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('a malformed allowlist edit is refused rather than silently ignored', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');

@@ -13,7 +13,7 @@ import {
   isValidDelegateEntry,
 } from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
-import { LISTENS_MODES, isListensMode } from '@stratusagent/core';
+import { LISTENS_MODES, isLanguageTag, isListensMode } from '@stratusagent/core';
 import { describeAgentGrants, WhitelistUnreadableError, type AgentGrantStore } from '@stratusagent/permissions';
 import {
   isScheduleSessionId,
@@ -622,6 +622,7 @@ export const routes: Route[] = [
         soulPath,
         ...(soul.provider ? { provider: soul.provider } : {}),
         ...(soul.model ? { model: soul.model } : {}),
+        ...(soul.language ? { language: soul.language } : {}),
       };
     },
   },
@@ -699,6 +700,18 @@ export const routes: Route[] = [
         if (provider !== undefined && provider.length > 0) {
           validateProvider(provider, 'provider');
         }
+        // The same shape as a pin: absent keeps the soul's, an empty string
+        // clears it back to the config's or the default, and only a tag is
+        // written. Rebuilt from fields, a soul that lost this key would move
+        // the agent onto another language with nobody having asked.
+        const language = optionalString(body, 'language');
+        if (language !== undefined && language.length > 0 && !isLanguageTag(language)) {
+          throw new ApiError(
+            400,
+            'invalid_language',
+            `language must be a language tag like en-US or en-GB, not ${JSON.stringify(language)}.`,
+          );
+        }
         // Cleared by an empty string, which the spread below cannot do: a
         // key the current definition carries has to be taken off it.
         const { listens: _kept, ...currentAgent } = current.agent;
@@ -718,6 +731,9 @@ export const routes: Route[] = [
           // An empty string clears a pin; an absent key leaves it alone.
           ...(provider === undefined ? (current.provider ? { provider: current.provider } : {}) : (provider ? { provider } : {})),
           ...(model === undefined ? (current.model ? { model: current.model } : {}) : (model ? { model } : {})),
+          ...(language === undefined
+            ? (current.language ? { language: current.language } : {})
+            : (language ? { language } : {})),
         };
       }
 
