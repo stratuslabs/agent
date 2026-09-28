@@ -204,7 +204,10 @@ submission; anyone else in the thread is told they cannot. What the form does:
   stored is refused, in the form, with the `stratus credential set` command
   that replaces it, and so is a name the daemon's environment already
   supplies, since a stored one would be read first and replace it.
-  Replacing or removing a key stays on the machine.
+  Replacing or removing a key stays on the machine. A request whose name
+  was stored since it was made (another form for the same shared key, or
+  the machine) can never be answered, so the refusal also takes its button
+  down; an empty value leaves the form open for another try.
 - **For the agent alone, unless it asked otherwise.** The agent chooses the
   scope when it asks (`scope: "shared"` offers the key to the whole fleet),
   and the message says which before anyone clicks.

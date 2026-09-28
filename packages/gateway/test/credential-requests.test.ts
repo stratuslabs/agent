@@ -305,3 +305,34 @@ test('a key stored whose grant then fails is still announced, so the change on d
     await gateway.stop();
   }
 });
+
+test('a request whose name was stored since is retired, since add-only means no answer can ever land', async () => {
+  const { home, gateway, events } = await startRequesting({ request: { name: 'search.apiKey', scope: 'shared' } });
+  try {
+    await gateway.dispatch({ sessionId: 'kai-12', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    // Another form for the same shared key, or the machine, got there first.
+    await writeFile(
+      path.join(home, '.stratus', 'credentials.json'),
+      JSON.stringify({ named: { shared: { 'search.apiKey': 'sk-first' }, agents: {} } }),
+    );
+
+    const conflict = await gateway.provideCredential({ requestId, value: 'sk-second' });
+    assert.equal(conflict.ok, false);
+    assert.equal(conflict.ok ? undefined : conflict.retired, true, 'the channel is told to take the form down');
+    const again = await gateway.provideCredential({ requestId, value: 'sk-third' });
+    assert.match(again.ok ? '' : again.message, /no longer pending/);
+
+    // An empty value is the other kind of refusal: fixable, so not retired.
+    const fresh = await startRequesting();
+    try {
+      await fresh.gateway.dispatch({ sessionId: 'kai-13', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+      const empty = await fresh.gateway.provideCredential({ requestId: requestedIn(fresh.events)?.requestId ?? '', value: ' ' });
+      assert.equal(empty.ok ? undefined : empty.retired, undefined);
+    } finally {
+      await fresh.gateway.stop();
+    }
+  } finally {
+    await gateway.stop();
+  }
+});

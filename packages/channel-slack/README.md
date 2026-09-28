@@ -325,7 +325,10 @@ The submission is checked against the approvers again and handed to the
 gateway's `provideCredential`, which stores it add-only and grants it in the
 requesting agent's soul. A refusal (a name already stored, an empty value, a
 request no longer pending) comes back as a `response_action: errors` ack,
-which keeps the modal open with the reason under the field. On success the
+which keeps the modal open with the reason under the field. A refusal the
+gateway marks `retired` (the name was stored since, or the request is gone)
+also rewrites the request message without its button, since no answer could
+land on it any more. On success the
 request message is rewritten to say what was added, for whom, and by whom,
 or, when the key was stored but the soul could not be written, that the
 agent cannot use it until the name is added by hand. The submission is

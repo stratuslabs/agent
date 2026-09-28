@@ -229,7 +229,10 @@ export interface GatewayLike {
   }): boolean;
   /**
    * Answers a `credential.requested` with the value a person entered.
-   * `ok: false` carries a sentence to show them, and nothing was stored.
+   * `ok: false` carries a sentence to show them. `retired` on it means no
+   * answer to this request can ever land (the name was stored since, or
+   * the request is gone), so the adapter should take the form down rather
+   * than leave a button that can only be refused.
    *
    * As with approvals, who may answer is the adapter's question: the
    * approver set is written in the channel's own user ids. The value is
@@ -244,7 +247,7 @@ export interface GatewayLike {
     requestId: string;
     value: string;
     actor?: string;
-  }): Promise<{ ok: true } | { ok: false; message: string }>;
+  }): Promise<{ ok: true } | { ok: false; message: string; retired?: boolean }>;
 }
 
 /**

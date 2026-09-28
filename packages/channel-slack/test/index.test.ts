@@ -7581,14 +7581,18 @@ const credentialAdapter = (approvers: string[]) => {
   });
   const provided: Array<{ requestId: string; value: string; actor?: string }> = [];
   const pending = new Set<string>();
-  let refuseWith: string | undefined;
+  let refuseWith: { message: string; retired: boolean } | undefined;
   gateway.provideCredential = async (input) => {
     provided.push(input);
     if (!pending.has(input.requestId)) {
-      return { ok: false, message: 'That credential request is no longer pending.' };
+      return { ok: false, retired: true, message: 'That credential request is no longer pending.' };
     }
     if (refuseWith !== undefined) {
-      return { ok: false, message: refuseWith };
+      if (refuseWith.retired) {
+        pending.delete(input.requestId);
+        return { ok: false, retired: true, message: refuseWith.message };
+      }
+      return { ok: false, message: refuseWith.message };
     }
     pending.delete(input.requestId);
     await gateway.bus.emit({
@@ -7620,7 +7624,9 @@ const credentialAdapter = (approvers: string[]) => {
     }
   };
   const formPosts = () => web.posts.filter((post) => buttonIds(post.blocks).includes('stratus_credential_add'));
-  return { socket, web, gateway, adapter, provided, pending, ask, formPosts, refuse: (message: string | undefined) => { refuseWith = message; } };
+  return { socket, web, gateway, adapter, provided, pending, ask, formPosts, refuse: (message: string, options: { retired?: boolean } = {}) => {
+    refuseWith = { message, retired: options.retired === true };
+  } };
 };
 
 test('a credential request is posted in the thread with a button only an approver can use', async () => {
@@ -7818,4 +7824,29 @@ test('a key stored but not granted says so in the thread instead of claiming the
   const update = web.updates.at(-1)?.text ?? '';
   assert.match(update, /Stored `github.token` as a shared credential, by <@U-DYLAN>, but it could not be added to Ava's soul \(the soul is not writable\), so Ava cannot use it yet\./);
   assert.doesNotMatch(update, /can use it from its next reply/);
+});
+
+test('a refusal no answer could get past takes the form down instead of leaving a button that can only fail', async () => {
+  const { socket, web, gateway, adapter, pending, refuse, ask } = credentialAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('cred-1');
+  await ask();
+
+  refuse('A shared credential named github.token is already stored.', { retired: true });
+  const acks: unknown[] = [];
+  await socket.deliver('interactive', credentialSubmission('cred-1', 'U-DYLAN', 'ghp-1'), async (response?: unknown) => {
+    acks.push(response);
+  });
+  assert.match(JSON.stringify(acks.at(-1)), /already stored/, 'the submitter sees why, in the form');
+  await adapter.stop();
+
+  const update = web.updates.at(-1);
+  assert.match(update?.text ?? '', /`github.token` was not added: A shared credential named github\.token is already stored\./);
+  assert.equal(buttonIds(update?.blocks).length, 0);
+  // Nothing left to press: a later click is told so, and opens no form.
+  await adapter.start(gateway);
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN'));
+  assert.equal(web.views_opened.length, 0);
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /no longer pending/);
+  await adapter.stop();
 });

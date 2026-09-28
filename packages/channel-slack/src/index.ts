@@ -3221,6 +3221,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
   };
 
+  /**
+   * Takes down a request no answer can land on any more, so its button stops
+   * inviting submissions that can only be refused the same way. A request
+   * `credential.provided` already settled is left to what that wrote, which
+   * says more (a key stored but not granted).
+   */
+  const retireCredentialPost = async (requestId: string, post: PendingCredentialPost, reason: string): Promise<void> => {
+    if (credentialPosts.get(requestId) !== post) {
+      return;
+    }
+    credentialPosts.delete(requestId);
+    const text = `\`${escapeSlackText(post.name)}\` was not added: ${escapeSlackText(reason)}`;
+    try {
+      await post.connection.web.chat.update({ channel: post.channel, ts: post.ts, text, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] });
+    } catch (error) {
+      warn(`slack: could not retire the credential request for ${post.agentId} (${error instanceof Error ? error.message : String(error)})`);
+    }
+  };
+
   const handleCredentialClick = async (connection: AgentConnection, args: SlackSocketEventArgs, requestId: string): Promise<void> => {
     await args.ack();
     const post = credentialPosts.get(requestId);
@@ -3275,7 +3294,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const value = view?.state?.values?.[CREDENTIAL_BLOCK]?.[CREDENTIAL_INPUT]?.value ?? '';
     const answer = gateway.provideCredential({ requestId, value, actor: submitter }).catch(
-      (error: unknown): { ok: false; message: string } => ({
+      (error: unknown): { ok: false; message: string; retired?: boolean } => ({
         ok: false,
         message: `It could not be stored: ${error instanceof Error ? error.message : String(error)}`,
       }),
@@ -3297,12 +3316,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // `credential.provided`, the one path every way of answering goes
       // through.
       await (first.ok ? args.ack() : refuse(first.message));
+      if (!first.ok && first.retired === true) {
+        track(retireCredentialPost(requestId, post, first.message));
+      }
       return;
     }
     await args.ack();
     track(answer.then(async (result) => {
       if (result.ok) {
         return;
+      }
+      if (result.retired === true) {
+        await retireCredentialPost(requestId, post, result.message);
       }
       try {
         await connection.web.chat.postEphemeral({

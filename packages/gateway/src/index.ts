@@ -855,12 +855,17 @@ export interface ProvideCredentialInput {
 /**
  * `ok: false` carries a sentence for the person who entered the value: the
  * request is gone, the name is already stored, or the value is empty.
- * Nothing was stored. `granted: false` on success means the soul already
- * listed the name.
+ * `granted: false` on success means the soul already listed the name.
+ *
+ * `retired: true` means the request is no longer pending and no answer
+ * can change that, so a channel should take its form down: the name was
+ * stored since (add-only means no retry can land), the soul went to another
+ * agent, or the request was already answered. Without it the refusal is
+ * one a corrected value can clear, like an empty one, and the form stays.
  */
 export type ProvideCredentialResult =
   | { ok: true; name: string; scope: CredentialScope; agentId: string; granted: boolean }
-  | { ok: false; message: string };
+  | { ok: false; message: string; retired?: boolean };
 
 interface AgentSource {
   definition: AgentDefinition;
@@ -1946,7 +1951,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const provideCredential = async (input: ProvideCredentialInput): Promise<ProvideCredentialResult> => {
     const request = credentialRequests.get(input.requestId);
     if (!request) {
-      return { ok: false, message: 'That credential request is no longer pending. Ask the agent to request it again.' };
+      return { ok: false, retired: true, message: 'That credential request is no longer pending. Ask the agent to request it again.' };
     }
     // The soul the grant will land in must still be the requester's, and is
     // checked before anything is stored: a file reassigned to another agent
@@ -1965,6 +1970,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       credentialRequests.delete(input.requestId);
       return {
         ok: false,
+        retired: true,
         message: `${request.soulPath} now belongs to ${owner}, not ${request.agentId}, so nothing was stored. Ask ${request.agentId} to request it again.`,
       };
     }
@@ -1975,8 +1981,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(request.scope === 'agent' ? { agentId: request.agentId } : {}),
       });
     } catch (error) {
-      // Refused, not failed: the request stays pending, so a person who
-      // typed an empty value can try again from the same form.
+      // A name stored since the request was made (another form for the
+      // same shared key, or the machine) is final under add-only: no value
+      // typed into this form can ever land, so the request is retired
+      // rather than left answering every submission with the same refusal.
+      if (error instanceof NamedCredentialExistsError) {
+        credentialRequests.delete(input.requestId);
+        return { ok: false, retired: true, message: error.message };
+      }
+      // Otherwise refused, not failed: the request stays pending, so a
+      // person who typed an empty value can try again from the same form.
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
     credentialRequests.delete(input.requestId);
@@ -2004,6 +2018,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (grantError !== undefined) {
       return {
         ok: false,
+        retired: true,
         message: `${request.name} was stored, but could not be added to ${request.soulPath} `
           + `(${grantError}). Add it to the soul's credentials list by hand.`,
       };
