@@ -129,6 +129,7 @@ import {
   FALLBACK_ACTIVE_METADATA_KEY,
   loadSoulFile,
   grantSoulCredential,
+  withSoulFileLock,
   addNamedCredential,
   namedCredentialSource,
   NamedCredentialExistsError,
@@ -2035,21 +2036,23 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // fails every call that reaches for it. Announced either way, because
     // the store already changed and a shared key is already usable.
     //
-    // The served path is checked again here, after the store's await, and
-    // with nothing awaited between the check and the grant taking its lock:
-    // a default repointed while the key was being written would otherwise
-    // be granted in a file the running agent no longer reads.
+    // The served path is checked again under the soul lock, which roster
+    // reloads take too: a default repointed while the key was being
+    // written, or while the grant queued behind another soul edit, would
+    // otherwise be granted in a file the running agent no longer reads.
     let granted = false;
     let grantError: string | undefined;
-    const servedNow = sources.get(request.agentId)?.soulPath;
-    if (servedNow !== request.soulPath) {
-      grantError = `${request.agentId} is now served from ${servedNow ?? 'no soul file'}, not ${request.soulPath}`;
-    } else {
-      try {
-        granted = await grantSoulCredential(request.soulPath, request.name, request.agentId);
-      } catch (error) {
-        grantError = error instanceof Error ? error.message : String(error);
-      }
+    try {
+      granted = await grantSoulCredential(request.soulPath, request.name, request.agentId, {
+        check: () => {
+          const servedNow = sources.get(request.agentId)?.soulPath;
+          if (servedNow !== request.soulPath) {
+            throw new Error(`${request.agentId} is now served from ${servedNow ?? 'no soul file'}, not ${request.soulPath}`);
+          }
+        },
+      });
+    } catch (error) {
+      grantError = error instanceof Error ? error.message : String(error);
     }
     await bus.emit({
       type: 'credential.provided',
@@ -3680,7 +3683,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     async reloadRoster() {
-      await reloadsInOrder(loadRoster);
+      // Under the soul lock, so a repoint cannot land between a credential
+      // grant's check of the served path and its write (`grantSoulCredential`).
+      await reloadsInOrder(() => withSoulFileLock(loadRoster));
       const roster = registry.list();
       log(`roster reloaded — ${roster.length} agent(s): ${roster.map((agent) => agent.name).join(', ')}`);
       return roster;

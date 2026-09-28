@@ -145,8 +145,22 @@ export const withSoulFileLock = async <T>(work: () => Promise<T>): Promise<T> =>
   return next;
 };
 
-export const grantSoulCredential = async (soulPath: string, name: string, agentId: string): Promise<boolean> => {
+export const grantSoulCredential = async (
+  soulPath: string,
+  name: string,
+  agentId: string,
+  options: {
+    /**
+     * Runs under the soul lock, before the file is read; throwing refuses
+     * the grant with that error. For a caller whose own state decides
+     * whether this file is still the right one (the gateway's served path),
+     * checked where nothing that also takes the lock can change it.
+     */
+    check?: () => void;
+  } = {},
+): Promise<boolean> => {
   const grant = async (): Promise<boolean> => {
+    options.check?.();
     // Identity is read at the configured path, which seeds a generated id,
     // and the bytes land on the file behind it.
     const soul = await loadSoulFile(soulPath);

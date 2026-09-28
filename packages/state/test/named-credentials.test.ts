@@ -216,3 +216,32 @@ test('a grant waits for a soul edit that holds the lock, so neither write drops 
   assert.match(soul, /You are Kai, edited\./);
   assert.match(soul, /^credentials:\n  - github\.token$/m);
 });
+
+test('a grant\'s check runs under the soul lock, after an edit holding it, and refuses by throwing', async () => {
+  // The gateway's served-path check lives here so a roster reload, which
+  // takes the same lock, cannot repoint the agent between check and write.
+  const env = await newEnv();
+  const soulFile = path.join(env.homeDir, 'kai.md');
+  await writeFile(soulFile, '---\nname: Kai\nid: kai\n---\n\nYou are Kai.\n');
+  let releaseEdit = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    releaseEdit = resolve;
+  });
+  let edited = false;
+  const edit = withSoulFileLock(async () => {
+    await gate;
+    edited = true;
+  });
+  let sawEdit: boolean | undefined;
+  const grant = grantSoulCredential(soulFile, 'github.token', 'kai', {
+    check: () => {
+      sawEdit = edited;
+      throw new Error('kai is now served from elsewhere');
+    },
+  });
+  releaseEdit();
+  await edit;
+  await assert.rejects(grant, /kai is now served from elsewhere/);
+  assert.equal(sawEdit, true, 'the check ran once the edit holding the lock was done');
+  assert.doesNotMatch(await readFile(soulFile, 'utf8'), /credentials/);
+});

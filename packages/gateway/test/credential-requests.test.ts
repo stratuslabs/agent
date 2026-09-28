@@ -417,3 +417,29 @@ test('a soul repointed while the key is being stored is not granted in the file 
     await gateway.stop();
   }
 });
+
+test('a roster reload waits for a soul write holding the lock, so a grant\'s served-path check cannot go stale', async () => {
+  const { gateway } = await startRequesting();
+  try {
+    let release!: () => void;
+    const held = withSoulFileLock(() => new Promise<void>((resolve) => {
+      release = resolve;
+    }));
+    const reload = gateway.reloadRoster();
+    // Bounded by event-loop turns, not the clock: an unlocked reload is a
+    // few file reads and finishes well inside this.
+    const yields = async (): Promise<'still waiting'> => {
+      for (let turn = 0; turn < 10_000; turn += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      return 'still waiting';
+    };
+    const before = await Promise.race([reload.then(() => 'reloaded' as const), yields()]);
+    release();
+    await held;
+    await reload;
+    assert.equal(before, 'still waiting', 'the reload queued behind the held soul lock');
+  } finally {
+    await gateway.stop();
+  }
+});
