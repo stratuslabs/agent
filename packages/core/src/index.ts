@@ -4352,12 +4352,24 @@ export const renderChannelSection = (session: Pick<Session, 'metadata'>): string
  * file is. An agent told only a path treats it as something to go and read,
  * and it usually cannot: the soul sits beside its state directory, outside
  * any root an operator hands `tool-fs`, and it has to stay there, since
- * the soul is what grants the agent its tools and credentials. Written
- * without em dashes for the reason the reply section is.
+ * the soul is what grants the agent its tools and credentials.
+ *
+ * Credentials get the same treatment, and for the same reason: an agent
+ * whose operator had stored a shared key went looking through its files and
+ * its environment for it. A named credential only ever reaches a plugin tool
+ * that declared it, so the section names what the soul grants and says there
+ * is nothing to find. Names only; a value never comes near a prompt.
+ * Written without em dashes for the reason the reply section is.
  */
-export const renderRuntimeSection = (runtime: AgentRuntimeContext | undefined): string | undefined => {
+export const renderRuntimeSection = (
+  runtime: AgentRuntimeContext | undefined,
+  agent: Pick<AgentDefinition, 'credentials'>,
+): string | undefined => {
+  if (runtime === undefined) {
+    return undefined;
+  }
   const lines: string[] = [];
-  if (runtime?.soulPath) {
+  if (runtime.soulPath) {
     lines.push(
       `Your soul, the persona and instructions you were given here, is the file ${runtime.soulPath}. `
       + 'Its contents are already part of these instructions, so there is nothing to open or reread, '
@@ -4365,10 +4377,17 @@ export const renderRuntimeSection = (runtime: AgentRuntimeContext | undefined): 
       + (runtime.soulReloads ? ' Stratus reads it again before every turn, so an edit to it reaches your next reply.' : ''),
     );
   }
-  if (runtime?.workspace) {
+  if (runtime.workspace) {
     lines.push(`Your workspace, the directory where Stratus keeps the files your tools make for you, is ${runtime.workspace}.`);
   }
-  return lines.length > 0 ? `How you run: you are an agent on Stratus Agent. ${lines.join(' ')}` : undefined;
+  const credentials = agent.credentials ?? [];
+  lines.push(
+    (credentials.length > 0
+      ? `Credentials you may use: ${credentials.join(', ')}. The tools that need one use it on your behalf, so you never see a value, and there is no file or environment variable to look for. `
+      : 'You hold no credentials. ')
+    + 'When a task needs a credential you do not hold, ask your operator to store it with stratus credential set and grant it to you.',
+  );
+  return `How you run: you are an agent on Stratus Agent. ${lines.join(' ')}`;
 };
 
 export interface SystemPromptOptions {
@@ -4416,7 +4435,7 @@ export const renderSystemPromptParts = (
     { kind: 'preamble', text: options.preamble },
     { kind: 'replies', text: REPLY_SECTION },
     { kind: 'persona', text: renderPersonaSection(request.session.agent, { fallback: options.fallbackPersona ?? false }) },
-    { kind: 'runtime', text: renderRuntimeSection(request.runtime) },
+    { kind: 'runtime', text: renderRuntimeSection(request.runtime, request.session.agent) },
     { kind: 'channel', text: renderChannelSection(request.session) },
     { kind: 'memory', text: renderMemorySection(request.memory) },
     { kind: 'skills', text: renderSkillsSection(request.skills) },

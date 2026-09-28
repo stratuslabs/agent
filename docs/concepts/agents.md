@@ -97,6 +97,14 @@ agent has no soul file and hears only about its workspace. Without this, an
 agent asked to reread an edited soul went looking for a `SOUL.md` in its
 workspace, the convention of other runtimes, and concluded it had none.
 
+The same section names the credentials the soul's `credentials:` list
+grants, by name and never by value, and says the tools that need one use it
+on the agent's behalf, so there is no file or environment variable to look
+for. An agent with none is told so, and told to ask its operator to store
+one and grant it. A stored credential reaches only a plugin tool that
+declares it ([Tools](../guides/tools.md#searching-the-web)); an agent that
+went searching for a shared key is what this line is for.
+
 A conversation a channel started also tells the agent where it is
 happening ("this conversation is happening in Slack"), after its persona,
 so an agent with no Slack tools still knows its replies reach people there.

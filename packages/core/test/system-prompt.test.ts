@@ -165,9 +165,26 @@ test('the runtime section says only what the host knows', () => {
   assert.doesNotMatch(builtIn, /soul/i);
   assert.match(builtIn, /Your workspace, .* is \/w\/stratus\./);
 
-  // Nothing known, nothing said.
-  assert.equal(renderSystemPromptParts({ ...request(), runtime: {} }).some((part) => part.kind === 'runtime'), false);
+  // A host that says nothing gets no section at all.
   assert.equal(renderSystemPromptParts(request()).some((part) => part.kind === 'runtime'), false);
+});
+
+test('the runtime section names the credentials the soul grants, and says there is nothing to find', () => {
+  // An agent whose operator had stored a shared key searched its files and
+  // its environment for it. A named credential only reaches a plugin tool
+  // that declared it, so the prompt says which names it holds, never a value.
+  const input = { ...request(), runtime: {} };
+  input.session.agent.credentials = ['search.apiKey', 'github.token'];
+  const held = renderSystemPromptParts(input).find((part) => part.kind === 'runtime')?.text ?? '';
+  assert.match(held, /Credentials you may use: search\.apiKey, github\.token\./);
+  assert.match(held, /you never see a value, and there is no file or environment variable to look for/);
+  assert.match(held, /ask your operator to store it with stratus credential set and grant it to you/);
+  assert.doesNotMatch(held, /—/);
+
+  delete input.session.agent.credentials;
+  const none = renderSystemPromptParts(input).find((part) => part.kind === 'runtime')?.text ?? '';
+  assert.match(none, /You hold no credentials\./);
+  assert.doesNotMatch(none, /Credentials you may use/);
 });
 
 test('the runner asks the host for the running agent’s context and hands it to the provider', async () => {
