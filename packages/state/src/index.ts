@@ -117,8 +117,14 @@ export {
   type NamedCredentials,
   loadNamedCredentials,
   saveNamedCredentials,
+  CREDENTIAL_NAME_PATTERN,
+  withCredentialsFileLock,
+  NamedCredentialExistsError,
+  addNamedCredential,
   createFileCredentialResolver,
 } from './credentials.ts';
+
+export { quoteShellArg } from './shell.ts';
 
 export {
   migrateLegacyMemory,

@@ -2,6 +2,7 @@ import { createInterface } from 'node:readline';
 import type { CliStreams, CliEnvironment } from './environment.ts';
 import { writeLine } from './io.ts';
 import { CLI_VERSION } from './npm.ts';
+import { quoteShellArg } from '@stratusagent/state';
 
 /**
  * Whether a string is a specifier npm would install — and therefore one
@@ -40,10 +41,9 @@ import { CLI_VERSION } from './npm.ts';
  */
 export const menuPrefixWidth = (optionCount: number): number => `  ${optionCount}) `.length + 1;
 
-// Printed commands must survive copy-paste into a shell, so anything outside
-// the safe character set gets single-quoted.
-export const quoteShellArg = (value: string): string =>
-  /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+// Lives in `@stratusagent/state` now that a message there prints a command
+// too; re-exported so this module's importers keep working.
+export { quoteShellArg };
 
 /** How a menu was answered: a picked option, free text, or backed out. */
 type MenuAnswer =

@@ -1,6 +1,6 @@
 import { isTrustLevel, TRUST_LEVELS, type TrustLevel } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
-import { parseProviderName, type StratusProviderName } from '@stratusagent/state';
+import { CREDENTIAL_NAME_PATTERN, parseProviderName, type StratusProviderName } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 
 export type CliProviderName = StratusProviderName;
@@ -107,15 +107,9 @@ export interface ParsedSkillsCommand {
   command: 'skills';
 }
 
-/**
- * What a credential name may be: the two conventions in use, and nothing
- * that would be awkward in a soul's `credentials:` list — `search.apiKey`
- * and environment-style `SLACK_TOKEN`. Leading letter required, which also
- * happens to exclude `__proto__`; the store does not *rely* on that (it
- * keys prototype-free maps), because a credentials file can be written by
- * something other than this command.
- */
-export const CREDENTIAL_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
+// The rule lives in `@stratusagent/state` now that the control API checks the
+// same names; re-exported so this module's importers keep working.
+export { CREDENTIAL_NAME_PATTERN };
 
 export interface ParsedCredentialCommand {
   command: 'credential';

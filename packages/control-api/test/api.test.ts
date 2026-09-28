@@ -590,6 +590,50 @@ test('credentials are writable but never readable, and channel tokens keep their
   }
 });
 
+test('a named credential can be added but never replaced or read back over the API', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'kai.md', '---\nname: Kai\nid: kai\n---\n\nYou are Kai.\n');
+  const harness = await startApi({ home });
+  const add = (body: object): Promise<Response> => harness.call('/api/v1/credentials/named', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  try {
+    const shared = await add({ name: 'github.token', value: 'ghp-secret' });
+    assert.equal(shared.status, 200);
+    assert.ok(!(await shared.text()).includes('ghp-secret'), 'the write does not echo the secret');
+    assert.equal((await add({ name: 'linear.apiKey', value: 'lin-secret', agentId: 'kai' })).status, 200);
+
+    // Add-only: a surface reachable from away from the machine must not be
+    // able to move every agent onto another account's key.
+    const replaced = await add({ name: 'github.token', value: 'ghp-other' });
+    assert.equal(replaced.status, 409);
+    const conflict = await replaced.json() as { error: { code: string; message: string } };
+    assert.equal(conflict.error.code, 'credential_exists');
+    assert.match(conflict.error.message, /stratus credential set github\.token/);
+    assert.equal((await add({ name: 'github.token', value: 'ghp-kai', agentId: 'kai' })).status, 409);
+
+    assert.equal((await add({ name: '__proto__', value: 'x' })).status, 400);
+    assert.equal((await add({ name: 'github.token', value: 'x', agentId: 'nobody' })).status, 404);
+
+    const listed = await harness.call('/api/v1/credentials');
+    const body = await listed.text();
+    assert.ok(!body.includes('ghp-secret') && !body.includes('lin-secret'), 'reading credentials never returns a value');
+    assert.deepEqual((JSON.parse(body) as { named: unknown }).named, {
+      shared: ['github.token'],
+      agents: { kai: ['linear.apiKey'] },
+    });
+
+    const raw = JSON.parse(await readFile(path.join(harness.home, '.stratus', 'credentials.json'), 'utf8')) as {
+      named?: { shared?: Record<string, string> };
+    };
+    assert.equal(raw.named?.shared?.['github.token'], 'ghp-secret', 'the refused writes changed nothing');
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('config round-trips, and an unknown key is refused rather than quietly kept', async () => {
   const harness = await startApi();
   try {

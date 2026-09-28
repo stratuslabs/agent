@@ -294,6 +294,12 @@ These are deliberate. Changing one is a decision, not a refactor.
   project-local `stratus.config.json` ships in any repository; which
   interface a daemon binds, who may approve its tool calls, and what the
   agent is told it is, are not decisions a cloned repo gets to make.
+- **Named credentials are add-only away from the machine.** Every surface
+  reachable remotely (the control API today, and whatever is built on it)
+  goes through `addNamedCredential`, which refuses a name already
+  stored, and an agent's own entry over a shared one of that name.
+  Replacing or removing one is `stratus credential` at the machine, because
+  a replaced shared key moves every agent that uses it onto another account.
 - **No endpoint returns a secret.** Credential reads report presence, type,
   and bound endpoint. Session reads strip the Anthropic raw-turn cache
   (`redactAnthropicRawTurns`), which exists for replay and carries raw model
