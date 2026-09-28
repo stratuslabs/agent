@@ -1,5 +1,6 @@
 import {
   BUILTIN_PROVIDER_NAMES,
+  type AgentModelContext,
   type ContributionRegistry,
   type ProviderContribution,
   type JsonValue,
@@ -118,6 +119,23 @@ export const PROVIDER_STATE_METADATA_KEYS: readonly string[] = [
   CODEX_THREAD_METADATA_KEY,
 ];
 
+/**
+ * What serves a run, for the prompt: the configured provider and model,
+ * the fallback behind them, and whether this conversation has already
+ * switched (its `FALLBACK_ACTIVE_METADATA_KEY`). One reading of a resolved
+ * config for every host, so the daemon and `stratus run` describe a
+ * runtime the same way. A switch that happens mid-turn is marked by the
+ * fallback wrapper itself, on the request it hands the fallback.
+ */
+export const describeServingModel = (config: RuntimeConfig, onFallback: boolean): AgentModelContext => ({
+  provider: config.provider,
+  ...(config.provider !== 'demo' && config.model !== undefined ? { model: config.model } : {}),
+  ...(config.provider !== 'demo' && config.fallback !== undefined
+    ? { fallback: { provider: config.fallback.provider, model: config.fallback.model } }
+    : {}),
+  ...(onFallback ? { onFallback: true } : {}),
+});
+
 // Wraps the fallback runtime as a provider: the primary model serves every
 // turn until it throws, then that session switches to the fallback for
 // good. Stickiness is per session, never per provider instance — a pooled
@@ -229,8 +247,13 @@ const attributeUsage = async (
   });
 
   let fallbackReported = false;
+  const runtime = request.runtime;
   const response = await fallback.generate({
     ...request,
+    // The host said what it had configured when the turn began, before
+    // this wrapper switched: the fallback answering must not be told the
+    // default is.
+    ...(runtime?.model !== undefined ? { runtime: { ...runtime, model: { ...runtime.model, onFallback: true } } } : {}),
     ...(onUsage
       ? {
           onUsage: (usage) => {

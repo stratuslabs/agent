@@ -177,6 +177,8 @@ const CONFIG_KEYS = {
   // round trip that refused the key would block every remote settings save
   // for that operator.
   vision: 'boolean',
+  // A tag the loader validates; GET returns it, so PUT takes it back.
+  language: 'string',
   approvals: 'object',
   api: 'object',
   // Like `api`: GET returns it, so PUT has to take it back or the documented

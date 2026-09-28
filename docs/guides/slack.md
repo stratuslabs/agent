@@ -155,8 +155,11 @@ log, and its contents reach the agent with your message, up to 100 KB a
 file and 200 KB a message. Anything else — a PDF, a Word file, an image
 over 5 MB or 8000 pixels a side, one that would take a single message's
 images past 20 MB together, or a text file over those caps — reaches the
-agent by name, told that it cannot be opened, so it answers honestly
-rather than as if it had read the file.
+agent by name, with the reason it was not read: not a kind of file read
+here, too large, not downloaded (in time, or at all), or not readable as
+text or an image. It answers honestly from that note rather than as if it
+had read the file, and without guessing at a cause the note does not give.
+A message the agent only overheard names its files as not opened.
 
 Which runtimes can actually look: agents on the **Anthropic API**, an
 **OpenAI-compatible** provider, or a **Claude subscription** (the Claude Code

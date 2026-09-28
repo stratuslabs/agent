@@ -1465,20 +1465,46 @@ const isPersonSpeaking = (event: SlackInboundEvent): boolean =>
 const MAX_LISTED_ATTACHMENTS = 5;
 
 /**
- * What a message's attachments are called, for a turn that cannot open
- * them. Without this the agent is handed "here's the log" and no log, and
- * answers as though it had read something — the note is what lets it say
- * the true thing instead. Images the model was actually shown are not
- * listed here: they travel on the dispatch, name included.
+ * Why an attachment reached the turn as a name only. The note says which,
+ * per file, because "cannot be read here" for every one of them read the
+ * same for a PDF nothing here opens, a log over the size cap, and a
+ * download Slack refused, and an agent asked why guessed at the cause.
  */
-const attachmentNote = (files: readonly SlackInboundFile[]): string => {
+type UnreadReason = 'unsupported' | 'too-large' | 'failed' | 'timed-out' | 'unreadable' | 'not-opened';
+type UnreadReasons = Map<SlackInboundFile, UnreadReason>;
+
+const UNREAD_REASON_TEXT: Record<UnreadReason, string> = {
+  unsupported: 'not a kind of file that can be read here',
+  'too-large': 'too large to read here',
+  failed: 'could not be downloaded',
+  'timed-out': 'not downloaded in time',
+  unreadable: 'not readable as text or as an image',
+  'not-opened': 'not opened, since this message was not addressed to you',
+};
+
+/**
+ * What a message's attachments are called, and why each was not read, for
+ * a turn that cannot open them. Without this the agent is handed "here's
+ * the log" and no log, and answers as though it had read something; the
+ * note is what lets it say the true thing instead. Images the model was
+ * actually shown are not listed here: they travel on the dispatch, name
+ * included. A file with no recorded reason is one no reader was handed,
+ * which is `unsupported`.
+ */
+const attachmentNote = (files: readonly SlackInboundFile[], reasons: UnreadReasons): string => {
   if (files.length === 0) {
     return '';
   }
-  const names = files.slice(0, MAX_LISTED_ATTACHMENTS).map((file) => file.name ?? file.title ?? 'an unnamed file');
-  const rest = files.length - names.length;
-  const listed = rest > 0 ? `${names.join(', ')}, and ${rest} more` : names.join(', ');
-  return `\n[Attached: ${listed}. Attachment contents cannot be read here — say so rather than guessing at them.]`;
+  const listed = files.slice(0, MAX_LISTED_ATTACHMENTS);
+  const groups = new Map<UnreadReason, string[]>();
+  for (const file of listed) {
+    const reason = reasons.get(file) ?? 'unsupported';
+    groups.set(reason, [...(groups.get(reason) ?? []), file.name ?? file.title ?? 'an unnamed file']);
+  }
+  const parts = [...groups].map(([reason, names]) => `${names.join(', ')} (${UNREAD_REASON_TEXT[reason]})`);
+  const rest = files.length - listed.length;
+  const all = rest > 0 ? `${parts.join('; ')}; and ${rest} more` : parts.join('; ');
+  return `\n[Attached, name only: ${all}. You have only the names, so say so rather than guessing at what is in them.]`;
 };
 
 /** What Slack calls a file, in a warning about it. */
@@ -1501,6 +1527,7 @@ const readImageAttachments = async (
   fetchFile: SlackFileFetcher,
   timeoutMs: number,
   warn: (line: string) => void,
+  reasons: UnreadReasons,
   deadline: AbortSignal = AbortSignal.timeout(timeoutMs),
 ): Promise<{ images: ImageAttachment[]; unread: SlackInboundFile[] }> => {
   // Decided from the last file back, the way the replay window is spent:
@@ -1509,6 +1536,12 @@ const readImageAttachments = async (
   // in the message's own order, because that is how the person sees them.
   const kept = new Map<number, ImageAttachment>();
   const dropped = new Set<number>();
+  // Recorded beside the drop, so the note says why and never guesses. A
+  // non-image goes on to the text reader with no reason: it decides.
+  const drop = (position: number, reason: UnreadReason): void => {
+    dropped.add(position);
+    reasons.set(files[position]!, reason);
+  };
   // Decoded bytes accepted so far. Checked against Slack's reported size
   // before a download and the real length after it, because the message
   // as a whole has a budget the per-image cap alone cannot keep.
@@ -1533,19 +1566,23 @@ const readImageAttachments = async (
   for (let position = files.length - 1; position >= 0; position -= 1) {
     const file = files[position]!;
     const url = file.url_private_download ?? file.url_private;
-    if (!isImageAttachmentMediaType(file.mimetype) || url === undefined) {
+    if (!isImageAttachmentMediaType(file.mimetype)) {
       dropped.add(position);
+      continue;
+    }
+    if (url === undefined) {
+      drop(position, 'failed');
       continue;
     }
     if (windowClosed) {
       warn(`slack: ${fileLabel(file)} was not taken: an image listed after it already filled what this message's images can carry; the turn is told it cannot be read.`);
-      dropped.add(position);
+      drop(position, 'too-large');
       continue;
     }
     const tooBig = file.size === undefined ? undefined : overLimit(fileLabel(file), file.size);
     if (tooBig !== undefined) {
       warn(tooBig);
-      dropped.add(position);
+      drop(position, 'too-large');
       continue;
     }
     // What this image may weigh: the per-image cap, or what is left of the
@@ -1554,7 +1591,7 @@ const readImageAttachments = async (
     const maxBytes = Math.min(IMAGE_ATTACHMENT_MAX_BYTES, IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES - total);
     if (deadline.aborted) {
       warn(`slack: ${fileLabel(file)} was not downloaded: this message's downloads had already taken longer than ${timeoutMs}ms. The turn is told it cannot be read.`);
-      dropped.add(position);
+      drop(position, 'timed-out');
       continue;
     }
     let download: SlackFileDownload;
@@ -1565,7 +1602,7 @@ const readImageAttachments = async (
         ? `this message's downloads took longer than ${timeoutMs}ms`
         : (error instanceof Error ? error.message : String(error));
       warn(`slack: could not download ${fileLabel(file)}: ${reason}. The turn is told it cannot be read.`);
-      dropped.add(position);
+      drop(position, error instanceof Error && error.name === 'TimeoutError' ? 'timed-out' : 'failed');
       continue;
     }
     // Refused on what Slack sends when it will not serve the file — a
@@ -1575,7 +1612,7 @@ const readImageAttachments = async (
     const contentType = download.contentType?.split(';')[0]?.trim().toLowerCase() ?? '';
     if (download.status !== 200 || contentType.startsWith('text/')) {
       warn(`slack: ${fileLabel(file)} came back as ${contentType || 'no content type'} (HTTP ${download.status}) rather than an image. This is what a bot token without the files:read scope gets — add the scope under OAuth & Permissions and reinstall the app.`);
-      dropped.add(position);
+      drop(position, 'failed');
       continue;
     }
     if (download.truncated === true) {
@@ -1586,13 +1623,13 @@ const readImageAttachments = async (
         windowClosed = true;
       }
       warn(`slack: ${fileLabel(file)} is larger than the ${maxBytes} bytes this message could still take for an image; the download was abandoned and the turn is told it cannot be read.`);
-      dropped.add(position);
+      drop(position, 'too-large');
       continue;
     }
     const stillTooBig = overLimit(fileLabel(file), download.body.length);
     if (stillTooBig !== undefined) {
       warn(stillTooBig);
-      dropped.add(position);
+      drop(position, 'too-large');
       continue;
     }
     // Read from the bytes, not from Slack's metadata: an image the model
@@ -1601,12 +1638,12 @@ const readImageAttachments = async (
     const dimensions = imageDimensions(download.body, file.mimetype);
     if (dimensions === undefined) {
       warn(`slack: ${fileLabel(file)} is not a complete ${file.mimetype} — its header or trailer is missing; the turn is told it cannot be read.`);
-      dropped.add(position);
+      drop(position, 'unreadable');
       continue;
     }
     if (dimensions.width > IMAGE_ATTACHMENT_MAX_DIMENSION || dimensions.height > IMAGE_ATTACHMENT_MAX_DIMENSION) {
       warn(`slack: ${fileLabel(file)} is ${dimensions.width}×${dimensions.height}, over the ${IMAGE_ATTACHMENT_MAX_DIMENSION}-pixel side the model can take; the turn is told it cannot be read.`);
-      dropped.add(position);
+      drop(position, 'too-large');
       continue;
     }
     total += download.body.length;
@@ -1685,25 +1722,38 @@ const readTextAttachments = async (
   timeoutMs: number,
   deadline: AbortSignal,
   warn: (line: string) => void,
+  reasons: UnreadReasons,
 ): Promise<{ texts: Array<{ name: string; text: string }>; unread: SlackInboundFile[] }> => {
   const texts: Array<{ name: string; text: string }> = [];
   const unread: SlackInboundFile[] = [];
+  const skip = (file: SlackInboundFile, reason: UnreadReason): void => {
+    unread.push(file);
+    reasons.set(file, reason);
+  };
   let total = 0;
   for (const file of files) {
     const url = file.url_private_download ?? file.url_private;
-    if (!isTextAttachment(file) || url === undefined) {
+    if (!isTextAttachment(file)) {
+      // An image the image reader already refused keeps its own reason.
       unread.push(file);
+      if (!reasons.has(file)) {
+        reasons.set(file, 'unsupported');
+      }
+      continue;
+    }
+    if (url === undefined) {
+      skip(file, 'failed');
       continue;
     }
     const maxBytes = Math.min(TEXT_ATTACHMENT_MAX_BYTES, TEXT_ATTACHMENTS_MAX_TOTAL_BYTES - total);
     if (file.size !== undefined && file.size > maxBytes) {
       warn(`slack: ${fileLabel(file)} is ${file.size} bytes, over the ${maxBytes} bytes of text this message could still take; the turn is told it cannot be read. Paste the part that matters, or split the file.`);
-      unread.push(file);
+      skip(file, 'too-large');
       continue;
     }
     if (deadline.aborted) {
       warn(`slack: ${fileLabel(file)} was not downloaded: this message's downloads had already taken longer than ${timeoutMs}ms. The turn is told it cannot be read.`);
-      unread.push(file);
+      skip(file, 'timed-out');
       continue;
     }
     let download: SlackFileDownload;
@@ -1714,7 +1764,7 @@ const readTextAttachments = async (
         ? `this message's downloads took longer than ${timeoutMs}ms`
         : (error instanceof Error ? error.message : String(error));
       warn(`slack: could not download ${fileLabel(file)}: ${reason}. The turn is told it cannot be read.`);
-      unread.push(file);
+      skip(file, error instanceof Error && error.name === 'TimeoutError' ? 'timed-out' : 'failed');
       continue;
     }
     // HTML is never a file read here (see isTextAttachment), so an HTML
@@ -1723,12 +1773,12 @@ const readTextAttachments = async (
     const head = download.body.subarray(0, 64).toString('utf8').trimStart().toLowerCase();
     if (download.status !== 200 || contentType === 'text/html' || head.startsWith('<!doctype html') || head.startsWith('<html')) {
       warn(`slack: ${fileLabel(file)} came back as ${contentType || 'no content type'} (HTTP ${download.status}) rather than the file. This is what a bot token without the files:read scope gets — add the scope under OAuth & Permissions and reinstall the app.`);
-      unread.push(file);
+      skip(file, 'failed');
       continue;
     }
     if (download.truncated === true || download.body.length > maxBytes) {
       warn(`slack: ${fileLabel(file)} is larger than the ${maxBytes} bytes of text this message could still take; the download was abandoned and the turn is told it cannot be read.`);
-      unread.push(file);
+      skip(file, 'too-large');
       continue;
     }
     let text: string;
@@ -1736,7 +1786,7 @@ const readTextAttachments = async (
       text = new TextDecoder('utf-8', { fatal: true }).decode(download.body);
     } catch {
       warn(`slack: ${fileLabel(file)} is not UTF-8 text; the turn is told it cannot be read.`);
-      unread.push(file);
+      skip(file, 'unreadable');
       continue;
     }
     total += download.body.length;
@@ -3646,6 +3696,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // names its attachments the way an overheard one does.
       // Images and text files share the message's one download deadline.
       const deadline = AbortSignal.timeout(fileDownloadTimeoutMs);
+      const reasons: UnreadReasons = new Map();
+      if (overhear || judged) {
+        for (const file of event.files ?? []) {
+          reasons.set(file, 'not-opened');
+        }
+      }
       const { images, unread: notImages } = overhear || judged
         ? { images: [] as ImageAttachment[], unread: event.files ?? [] }
         : await readImageAttachments(
@@ -3654,11 +3710,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           fetchFile,
           fileDownloadTimeoutMs,
           warn,
+          reasons,
           deadline,
         );
       const { texts, unread } = overhear || judged
         ? { texts: [], unread: notImages }
-        : await readTextAttachments(notImages, connection.config.botToken, fetchFile, fileDownloadTimeoutMs, deadline, warn);
+        : await readTextAttachments(notImages, connection.config.botToken, fetchFile, fileDownloadTimeoutMs, deadline, warn, reasons);
       // An image or a document with nothing said is still a question
       // ("what's this?"); a file the turn could not open with nothing said
       // is not one, and gets no reply.
@@ -3669,7 +3726,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // In shared channels the model should know who is speaking; a DM is
       // unambiguous. A bare image in a channel still says who sent it.
       const spoken = isDm ? cleaned : (cleaned.length > 0 ? `${author}: ${cleaned}` : `${author}:`);
-      const userMessage = `${spoken}${textAttachmentBlocks(texts)}${attachmentNote(unread)}`;
+      const userMessage = `${spoken}${textAttachmentBlocks(texts)}${attachmentNote(unread, reasons)}`;
       // Who sent this, judged against the operator's list — per message,
       // never remembered from the first one in the thread. A DM proves
       // nothing about who is typing, so a DM from an unlisted member is

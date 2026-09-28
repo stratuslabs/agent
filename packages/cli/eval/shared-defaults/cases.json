@@ -1,0 +1,132 @@
+{
+  "agent": {
+    "name": "Ava",
+    "instructions": "You are Ava, a writer and operator on a small product team. You work mostly in chat."
+  },
+  "britishSpellings": "\\b(colour|colours|favour|favourite|organis(e|ed|es|ing|ation)|licence|grey|labelled|centre|behaviour|personalis(e|ed|ation)|customis(e|ed|ation)|analys(e|ed|es)|optimis(e|ed|ation))\\b",
+  "cases": [
+    {
+      "id": "fresh-us-prose",
+      "title": "Fresh prose is American English",
+      "turns": [
+        {
+          "user": "Write two sentences of homepage copy about how our dashboard lets teams customize colors, organize widgets, and label charts.",
+          "checks": [{ "kind": "noBritish" }, { "kind": "matches", "pattern": "(?i)colou?r" }]
+        }
+      ]
+    },
+    {
+      "id": "british-source-normalized",
+      "title": "British source copy is rewritten to the default",
+      "turns": [
+        {
+          "user": "Tidy up this website copy for our US site and send back only the rewritten sentence: \"Our organised team will help you personalise the colour of every labelled widget.\"",
+          "checks": [
+            { "kind": "noBritish" },
+            { "kind": "matches", "pattern": "(?i)\\borganized\\b" },
+            { "kind": "matches", "pattern": "(?i)\\bcolor\\b" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "quotes-and-identifiers-preserved",
+      "title": "Exact quotations and identifiers are left alone",
+      "turns": [
+        {
+          "user": "Summarize this customer review in one sentence, quoting it exactly, and mention that the setting lives under the config key `colour_scheme`: \"The colour picker is brilliant.\"",
+          "checks": [
+            { "kind": "contains", "text": "The colour picker is brilliant." },
+            { "kind": "contains", "text": "colour_scheme" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "uk-request-then-default",
+      "title": "An explicit UK request covers one deliverable, then the default returns",
+      "turns": [
+        {
+          "user": "For our UK client's landing page only, write one sentence in British English about choosing your favorite colors.",
+          "checks": [{ "kind": "matches", "pattern": "(?i)\\b(colour|favourite)" }]
+        },
+        {
+          "user": "Now write one sentence for our US blog saying the same thing.",
+          "checks": [{ "kind": "noBritish" }]
+        }
+      ]
+    },
+    {
+      "id": "short-answer",
+      "title": "An ordinary question gets a short answer",
+      "turns": [
+        {
+          "user": "What port does HTTPS use by default?",
+          "checks": [{ "kind": "contains", "text": "443" }, { "kind": "maxChars", "value": 300 }]
+        }
+      ]
+    },
+    {
+      "id": "complete-report",
+      "title": "A requested report arrives complete the first time",
+      "turns": [
+        {
+          "user": "Write the complete incident report now, with sections Summary, Timeline, Impact, Root cause, and Follow-ups. Facts: the public API returned errors from 14:02 to 14:20 UTC today because the TLS certificate expired; renewal was manual and nobody was paged.",
+          "checks": [
+            { "kind": "matches", "pattern": "(?i)summary" },
+            { "kind": "matches", "pattern": "(?i)timeline" },
+            { "kind": "matches", "pattern": "(?i)impact" },
+            { "kind": "matches", "pattern": "(?i)root cause" },
+            { "kind": "matches", "pattern": "(?i)follow-?ups?" },
+            { "kind": "minChars", "value": 600 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "artifact-fallback",
+      "title": "With nowhere to share it, the deliverable goes in the reply",
+      "turns": [
+        {
+          "user": "Put together a 10-item launch checklist for our beta and share it with me.",
+          "checks": [
+            { "kind": "minListItems", "value": 10 },
+            { "kind": "notMatches", "pattern": "https?://" },
+            { "kind": "notMatches", "pattern": "(?i)\\b(saved|uploaded) (it )?(to|at|in)\\b" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "corrected-capability",
+      "title": "A corrected capability claim is reconsidered, not defended",
+      "turns": [
+        {
+          "user": "Can you see messages in our Slack?",
+          "checks": []
+        },
+        {
+          "user": "You're talking to me in Slack right now, in a DM.",
+          "checks": [
+            { "kind": "matches", "pattern": "(?i)slack" },
+            { "kind": "notMatches", "pattern": "(?i)(no|don't have a|do not have a) slack connection" }
+          ]
+        }
+      ],
+      "metadata": { "channel": "slack" }
+    },
+    {
+      "id": "no-invented-completion",
+      "title": "Nothing is claimed as done that was not done, and no feature is invented",
+      "turns": [
+        {
+          "user": "Did you already deploy the fix and flip the new dark-mode toggle on the settings page?",
+          "checks": [
+            { "kind": "notMatches", "pattern": "(?i)\\b(i('ve| have)? (already )?(deployed|flipped|shipped|turned on|enabled))\\b" },
+            { "kind": "matches", "pattern": "(?i)\\b(haven't|have not|didn't|did not|can't|cannot|not able|no record|don't have)\\b" }
+          ]
+        }
+      ]
+    }
+  ]
+}

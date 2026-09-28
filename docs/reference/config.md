@@ -20,7 +20,7 @@ use right now and which file or env var decided each setting.
 
 Setup writes only the keys its own menus set, and carries every other key
 it finds through unchanged — the `api` and `principals` blocks, and the
-`vision`, `promptCache`, and `promptCacheTtl` preferences. The `plugins` and
+`vision`, `promptCache`, `promptCacheTtl`, and `language` preferences. The `plugins` and
 `approvals` blocks have menus, and those menus edit what they read: a plugin
 switched off keeps its settings under `enabled: false`, and per-agent
 `agents` overrides and `toolRisks` entries setup never asks about survive
@@ -51,6 +51,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `promptCache` | Cache the stable head of each Anthropic request. Default `true` — see below |
 | `promptCacheTtl` | How long a cache entry lives: `5m` (default) or `1h` |
 | `maxTokens` | Per-turn output cap sent to Anthropic. Default `16000`; lower it for a model or proxy whose ceiling is below that, raise it for longer answers — see below |
+| `language` | The language every agent writes in, as a tag (`en-GB`, `en-AU`, `fr`). Default `en-US`. A soul's own `language:` outranks it for that agent; anything that is not a tag is refused when the file is read. Allowed in a project-local config: it changes how agents write, nothing they may do — see [Agents](../concepts/agents.md#language) |
 | `vision` | Whether an OpenAI-compatible model takes images — the main one or the fallback, it is one setting. Default `true`; set `false` for a text-only model, which would otherwise reject every turn of a session an image was sent to — see [Slack](../guides/slack.md#sending-an-image) |
 | `approvals` | Unattended-approval policy for `stratus serve` — trusted configs only, see below |
 | `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), and whether anyone else gets a turn at all: `admit` (`anyone`, the default, or `principals`), each with a per-agent `agents` sub-block — trusted configs only, see below |

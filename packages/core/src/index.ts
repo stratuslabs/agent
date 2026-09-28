@@ -2552,6 +2552,30 @@ export interface AgentRuntimeContext {
   soulReloads?: boolean;
   /** Where this agent's files go: `AgentWorkspaces.forAgent`. */
   workspace?: string;
+  /**
+   * The language the agent writes in, as a tag `isLanguageTag` accepts,
+   * already resolved by the host: the soul's `language:`, then the config
+   * file's. Absent means {@link DEFAULT_LANGUAGE}. Rendered in the reply
+   * section rather than here, so a host that says nothing else still gets
+   * the default rule.
+   */
+  language?: string;
+  /**
+   * What the host has configured to answer as this agent, and what it has
+   * observed: `onFallback` is true once this conversation has switched to
+   * the fallback, which is sticky, so a model asked what it is can tell a
+   * configured default from the one actually answering. The fallback
+   * wrapper sets it on the request it hands the fallback mid-turn, so the
+   * model that took over is not told it is the default.
+   */
+  model?: AgentModelContext;
+}
+
+export interface AgentModelContext {
+  provider: string;
+  model?: string;
+  fallback?: { provider: string; model: string };
+  onFallback?: boolean;
 }
 
 export interface ProviderRequest {
@@ -4299,30 +4323,90 @@ export const renderSkillsSection = (skills: readonly SkillDescriptor[] | undefin
 };
 
 /**
+ * The language agents write in when nothing says otherwise: American
+ * English. A soul's `language:` and the config file's `language` override
+ * it; see `resolveRuntimeConfig`, which decides between those two.
+ */
+export const DEFAULT_LANGUAGE = 'en-US';
+
+/**
+ * What a `language` setting may be: a BCP 47 tag's shape (`en-US`,
+ * `en-GB`, `fr`, `pt-BR`), and nothing else. It is interpolated into every
+ * prompt, and a project-local config may set it, so it cannot be allowed to
+ * carry a sentence.
+ */
+export const isLanguageTag = (value: unknown): value is string =>
+  typeof value === 'string' && /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}$/.test(value);
+
+const LANGUAGE_NAMES: Readonly<Record<string, string>> = {
+  'en-US': 'American English',
+  'en-GB': 'British English',
+  'en-AU': 'Australian English',
+  'en-CA': 'Canadian English',
+  'en-IE': 'Irish English',
+  'en-NZ': 'New Zealand English',
+};
+
+/**
  * How to reply, told to every agent before its persona.
  *
  * Models default to the long, headed, bulleted answer, and an agent is read
- * mostly in chat — often on a phone — where that is the wrong shape. Souls
- * were each growing their own copy of this rule, so it lives here once.
+ * mostly in chat, often on a phone, where that is the wrong shape. Souls
+ * were each growing their own copy of these rules, so they live here once.
  * Short must not turn into incomplete, so the same section says a requested
  * deliverable arrives whole and a blocker is always said. A long one goes
  * where the reader can open it: an agent on Slack that answers with a path
- * on the daemon's disk has handed over nothing. It sits ahead of the
- * persona, and its last sentence lets the soul and the person override it.
- * It is written without em dashes on purpose: a model imitates the prose
- * it is prompted with, and a rule against them set in them undoes itself.
+ * on the daemon's disk has handed over nothing, so when sharing is not
+ * possible the content itself goes in the reply.
+ *
+ * The accuracy rules are here for the same reason, each after an incident:
+ * an agent with no Slack tool insisted it had no Slack connection, and
+ * agents reported work as done that had only been drafted. The language
+ * rule is here because the default persona is not: a custom soul replaces
+ * it, and an agent wrote "favour" and "licence" into American website copy
+ * because nothing shared said which English. A pasted British paragraph is
+ * not a setting, so the rule says a task or a client's style guide decides
+ * one deliverable and nothing is inferred from source text.
+ *
+ * The last sentence lets the soul and the person override length, format,
+ * and language, and deliberately nothing else: a style preference never
+ * changes what an agent may do, and "be brief" must not read as "skip the
+ * blocker". Written without em dashes on purpose: a model imitates the
+ * prose it is prompted with, and a rule against them set in them undoes
+ * itself.
  */
-const REPLY_SECTION = [
-  'How to reply: like a text message, usually one to four short sentences. Lead with the answer, the result, or the decision you need, then stop.',
-  'Write the way a person texts. Avoid em dashes; use a comma, a period, or a new sentence instead. Skip the tells of machine-written text: filler openers and closers like "Great question" or "I hope this helps", "it\'s not X, it\'s Y" framing, lists of three for rhythm, words like delve, seamless, robust, and leverage, and emoji the person has not used first.',
-  'No preamble, no restating the request, no summary of what you just said, no closing offer of more help, and no headers or bullet lists unless they genuinely make the reply easier to read.',
-  'Short never means incomplete. When you are asked for a draft, a plan, an explanation, or a document, deliver the whole thing the first time, and always say plainly what is blocking you or what you are unsure of.',
-  'A long deliverable belongs somewhere the person can open it, such as a file or page you can actually share, and the reply is the takeaway plus its real link. Never invent a link, and never assume a path on your own machine is one they can open.',
-  'Send a progress update only when something has changed, keep it to a line, and never split one long answer across several messages.',
-  'Carry on with work you have already been asked to do instead of asking permission for each step; ask at most one question, and only when the answer changes what you do.',
-  'Before sending, ask whether this would be annoying to read on a phone; if it would, cut it.',
-  'Where your own instructions below, or the person you are talking to, ask for something else, that wins.',
-].join(' ');
+export const renderReplySection = (language: string | undefined): string => {
+  const tag = isLanguageTag(language) ? language : DEFAULT_LANGUAGE;
+  const name = LANGUAGE_NAMES[tag];
+  const variety = name === undefined ? `the language of the ${tag} locale` : name;
+  const written = name === undefined ? `the language of the ${tag} locale` : `${name} (${tag})`;
+  return [
+    [
+      'How to reply: like a text message, usually one to four short sentences. Lead with the answer, the result, or the decision you need, then stop.',
+      'Write the way a person texts. Avoid em dashes; use a comma, a period, or a new sentence instead. Skip the tells of machine-written text: filler openers and closers like "Great question" or "I hope this helps", "it\'s not X, it\'s Y" framing, lists of three for rhythm, words like delve and seamless used for effect, and emoji the person has not used first. A technical term used for what it means is not filler.',
+      'No preamble, no restating the request, no summary of what you just said, no closing offer of more help, and no headers or bullet lists unless they genuinely make the reply easier to read.',
+      'Short never means incomplete. When you are asked for a draft, a plan, an explanation, a review, or a document, deliver all of it at the depth asked for the first time. Cut repetition, never what was asked for, and always say plainly what is blocking you or what you are unsure of.',
+      'A long deliverable belongs somewhere the person can open it, such as a file or page you can actually share, and the reply is the takeaway plus its real link. Never invent a link, and never assume a path on your own machine is one they can open. When you cannot share it, put the deliverable itself in the reply: a file saved where they cannot reach it has not been delivered.',
+      'Send a progress update only when something has changed, keep it to a line, and never split one long answer across several messages.',
+      'Carry on with work you have already been asked to do instead of asking permission for each step. Ask only the questions you cannot go on without, all of them at once, and keep doing the parts that do not depend on the answers.',
+      'Before sending, ask whether this would be annoying to read on a phone; if it would, cut it.',
+    ].join(' '),
+    [
+      'Stay accurate: never invent a feature, a number, evidence, a fact about a customer, a personal experience, or work you did not do, however much better it would make the answer sound.',
+      'Say which parts are proposals and which are facts, and say exactly how far something got, because drafted, saved, tested, sent, deployed, and verified are different claims.',
+      'Judge what you can do from evidence. Having no Slack tool does not mean there is no Slack connection, and a lookup that came back empty does not prove an integration is disconnected. When someone corrects you, check the claim again instead of defending it.',
+      'Never promise to monitor, remind, follow up, or keep working in the background unless you have actually scheduled it or handed it to someone; say what you set up, or that you cannot.',
+    ].join(' '),
+    [
+      `Write in ${written}: replies, documents, drafts, reviews, website copy, and interface text, with its spelling consistent throughout.`,
+      `A task that asks for another variety, or a style guide you were given for that client, decides that one deliverable, and afterwards you go back to ${variety}. Never take a variety from text someone pasted or from your own habit.`,
+      'Leave quotations, names, URLs, paths, code identifiers, and API literals exactly as they are, and never rename code to change its spelling.',
+      'A preference about style or language changes how you write, never what you are allowed to do. An exception made for one task ends with that task, and what someone tells you now outranks an older memory that says otherwise.',
+      'Something you remember from one conversation stays out of another whose people were not part of it, unless it was plainly meant to be shared.',
+      'Where your own instructions below, or the person you are talking to, ask for a different length, format, or language, that wins.',
+    ].join(' '),
+  ].join('\n\n');
+};
 
 /**
  * Where the conversation is happening, for a session a channel started.
@@ -4334,6 +4418,13 @@ const REPLY_SECTION = [
  * Rendered from the session rather than handed in per turn so sessions
  * opened before this existed get it too. The name must look like a channel
  * id, since it is interpolated into the prompt.
+ *
+ * What it says about attachments is what the adapter writes into the
+ * message, not a promise that they arrive: it used to say that what people
+ * attach "reaches you", which read as though every file's contents did,
+ * when most reach the turn as a name only. The Slack adapter marks each
+ * file as read, shown, or unread with its reason; the section sends the
+ * model to that note and nowhere else.
  */
 export const renderChannelSection = (session: Pick<Session, 'metadata'>): string | undefined => {
   const channel = session.metadata?.channel;
@@ -4341,7 +4432,38 @@ export const renderChannelSection = (session: Pick<Session, 'metadata'>): string
     return undefined;
   }
   const name = `${channel.charAt(0).toUpperCase()}${channel.slice(1)}`;
-  return `Where you are: this conversation is happening in ${name}. The people in it are writing to you there and your replies are posted back to them there, so you are talking in ${name} whether or not you have any ${name} tools. What they attach reaches you with their message.`;
+  return `Where you are: this conversation is happening in ${name}. The people in it are writing to you there and your replies are posted back to them there, so you are talking in ${name} whether or not you have any ${name} tools. Their message says what became of each file they attach: its text follows, the image itself is shown to you, or only its name reached you, with the reason it was not read. That is everything you have of it, and a file the message does not mention did not reach you, so never guess at a file's contents, location, or why it failed beyond what the message says.`;
+};
+
+// A provider or model name as the prompt may carry it. A model name can
+// come from a project-local config, so one that does not look like a model
+// name is left out rather than read to the model as an instruction.
+const MODEL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
+
+/**
+ * Which model is configured and which is answering, stated as the runtime
+ * knows it. An agent asked what model it was could only guess, and the
+ * default persona told it the question did not matter; with a fallback in
+ * the picture the guess is wrong half the time. It stays the agent either
+ * way: this reports what serves it, not who it is.
+ */
+const renderModelLine = (model: AgentModelContext | undefined): string | undefined => {
+  if (model === undefined || !MODEL_NAME_PATTERN.test(model.provider)) {
+    return undefined;
+  }
+  const named = (entry: { provider: string; model?: string }): string =>
+    entry.model !== undefined && MODEL_NAME_PATTERN.test(entry.model) ? `${entry.model} on ${entry.provider}` : entry.provider;
+  const fallback = model.fallback !== undefined
+    && MODEL_NAME_PATTERN.test(model.fallback.provider)
+    && MODEL_NAME_PATTERN.test(model.fallback.model)
+    ? model.fallback
+    : undefined;
+  const parts = [`The model configured to answer as you is ${named(model)}${fallback ? `, with ${named(fallback)} as its fallback` : ''}.`];
+  if (model.onFallback === true && fallback !== undefined) {
+    parts.push(`This conversation has switched to the fallback, so ${named(fallback)} is the one answering now.`);
+  }
+  parts.push('Asked what model you are, say this, and keep the configured default and the one answering apart when they differ.');
+  return parts.join(' ');
 };
 
 /**
@@ -4379,6 +4501,10 @@ export const renderRuntimeSection = (
   }
   if (runtime.workspace) {
     lines.push(`Your workspace, the directory where Stratus keeps the files your tools make for you, is ${runtime.workspace}.`);
+  }
+  const model = renderModelLine(runtime.model);
+  if (model !== undefined) {
+    lines.push(model);
   }
   const credentials = agent.credentials ?? [];
   lines.push(
@@ -4433,7 +4559,7 @@ export const renderSystemPromptParts = (
 ): SystemPromptSection[] => {
   const sections: Array<{ kind: SystemPromptSectionKind; text: string | undefined }> = [
     { kind: 'preamble', text: options.preamble },
-    { kind: 'replies', text: REPLY_SECTION },
+    { kind: 'replies', text: renderReplySection(request.runtime?.language) },
     { kind: 'persona', text: renderPersonaSection(request.session.agent, { fallback: options.fallbackPersona ?? false }) },
     { kind: 'runtime', text: renderRuntimeSection(request.runtime, request.session.agent) },
     { kind: 'channel', text: renderChannelSection(request.session) },

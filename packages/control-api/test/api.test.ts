@@ -662,6 +662,22 @@ test('config round-trips, and an unknown key is refused rather than quietly kept
     const reread = await json<{ config: Record<string, unknown> }>(await harness.call('/api/v1/config'));
     assert.deepEqual(reread.config.principals, { slackUsers: ['U1'] });
 
+    // `language` is a tag the loader validates: the round trip takes one
+    // back, and a value that is not a tag is refused rather than written.
+    const withLanguage = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { ...reread.config, language: 'en-GB' } }),
+    });
+    assert.equal(withLanguage.status, 200);
+    assert.equal((await json<{ config: Record<string, unknown> }>(await harness.call('/api/v1/config'))).config.language, 'en-GB');
+    const badLanguage = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { ...reread.config, language: 'British English' } }),
+    });
+    assert.equal(badLanguage.status, 400);
+
     // `vision` is a boolean the loader accepts, so the round trip takes it
     // back too — and `false` is the whole point of the key.
     const withVision = await harness.call('/api/v1/config', {

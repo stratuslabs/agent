@@ -147,7 +147,8 @@ who counts as the operator on each channel is a trusted-config setting, and
 the only file this endpoint writes is a trusted one — so the GET-modify-PUT
 round trip keeps it. The same goes for `vision`, the boolean that tells a
 text-only OpenAI-compatible model to take images as a note: `GET` returns
-it, so `PUT` takes it back. `PUT /config` does not write the `plugins` block, nor the `executor` and
+it, so `PUT` takes it back, and for `language`, the fleet's writing
+language, which the loader refuses with a `400` unless it is a language tag. `PUT /config` does not write the `plugins` block, nor the `executor` and
 `memoryStore` selections. `GET` returns them, and a `PUT` carrying them back
 is accepted (the round trip has to work) but the values are ignored and the
 file's existing ones are preserved rather than deleted by the replace.

@@ -117,6 +117,7 @@ import {
   drainSharedMemory,
   hasBracketedLegacyStateIn,
   createRuntimeProvider,
+  describeServingModel,
   DEFAULT_STRATUS_AGENT,
   isRegisteredProviderName,
   loadChannelTransportSecrets,
@@ -1714,10 +1715,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * so the agent is told nothing about a soul file for that turn rather
    * than something the daemon could not just read. The built-in agent has
    * no file, so it is told only where its workspace is.
+   *
+   * The language and the model come from the config this same dispatch
+   * resolved for that source, for the same reason: the turn runs on it.
    */
-  const runtimeContextFor = (source: AgentSource): AgentRuntimeContext => ({
+  const runtimeContextFor = (
+    source: AgentSource,
+    config: RuntimeConfig,
+    onFallback: boolean,
+  ): AgentRuntimeContext => ({
     ...(source.soulPath !== undefined ? { soulPath: source.soulPath, soulReloads: true } : {}),
     workspace: agentWorkspaces.forAgent(source.definition.id),
+    ...(config.language !== undefined ? { language: config.language } : {}),
+    model: describeServingModel(config, onFallback),
   });
 
   // ---- runner pool --------------------------------------------------------
@@ -2335,7 +2345,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           ...(input.images !== undefined ? { images: input.images } : {}),
           ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
-          runtime: runtimeContextFor(source),
+          runtime: runtimeContextFor(source, config, switchedToFallback),
           signal,
         });
       }
@@ -2347,7 +2357,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(input.images !== undefined ? { images: input.images } : {}),
         ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
         metadata,
-        runtime: runtimeContextFor(source),
+        runtime: runtimeContextFor(source, config, switchedToFallback),
         signal,
       });
     });
@@ -2496,7 +2506,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         session.agent = source.definition;
         await store.save(session);
 
-        const runner = runnerFor(await runtimeForAgent(source));
+        const recoveredConfig = await runtimeForAgent(source);
+        const runner = runnerFor(recoveredConfig);
         // Tracked like a dispatched turn's controller: a recovered turn
         // that runs on past its approval is a turn like any other, and a
         // restart's window has to be able to cut it short with the same
@@ -2510,7 +2521,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         try {
           await runner.recoverPendingApproval(sessionId, {
             denyPending: expired,
-            runtime: runtimeContextFor(source),
+            runtime: runtimeContextFor(source, recoveredConfig, session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true),
             signal: controller.signal,
           });
         } finally {

@@ -160,12 +160,18 @@ export const resolveRuntimeConfig = async (
     env,
   );
 
+  // The soul's own language, then the config file's; both were checked as
+  // tags when read. Absent leaves the prompt on DEFAULT_LANGUAGE. The one
+  // place the two are decided between, carried on every variant.
+  const language = soul?.language ?? fileConfig.language;
+
   if (provider === 'demo') {
     return {
       provider: 'demo',
       ...(soul ? { soul } : {}),
       ...(soulPath ? { soulPath } : {}),
       ...(ignoredFromUntrustedConfig ? { ignoredFromUntrustedConfig } : {}),
+      ...(language !== undefined ? { language } : {}),
     };
   }
 
@@ -348,6 +354,7 @@ export const resolveRuntimeConfig = async (
       ...(soul ? { soul } : {}),
       ...(soulPath ? { soulPath } : {}),
       ...(ignoredFromUntrustedConfig ? { ignoredFromUntrustedConfig } : {}),
+      ...(language !== undefined ? { language } : {}),
     };
     // The same implicit-fallback rule as below: a fallback with no
     // provider of its own was written for the config's provider.
@@ -544,6 +551,10 @@ export const resolveRuntimeConfig = async (
 
   if (ignoredFromUntrustedConfig) {
     resolved.ignoredFromUntrustedConfig = ignoredFromUntrustedConfig;
+  }
+
+  if (language !== undefined) {
+    resolved.language = language;
   }
 
   if (env.fetch) {

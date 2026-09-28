@@ -3,6 +3,7 @@ import path from 'node:path';
 import {
   BUILTIN_EXECUTOR_NAME,
   BUILTIN_MEMORY_STORE_NAME,
+  isLanguageTag,
   type JsonObject,
 } from '@stratusagent/core';
 import {
@@ -142,6 +143,17 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   // `false` is the whole point of this key too.
   if (typeof config.vision === 'boolean') {
     resolved.vision = config.vision;
+  }
+  if (config.language !== undefined) {
+    // Refused rather than ignored: a typo would otherwise leave every agent
+    // on the default while the file says otherwise, and the tag is
+    // interpolated into every prompt, so it may only be a tag.
+    if (!isLanguageTag(config.language)) {
+      throw new Error(
+        `Invalid language in config ${configPath}: ${JSON.stringify(config.language)}. Use a language tag like en-US or en-GB.`,
+      );
+    }
+    resolved.language = config.language;
   }
   if (config.maxTurns !== undefined) {
     // Refused rather than clamped, like `approvals.timeoutMs`: every value

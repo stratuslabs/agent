@@ -227,6 +227,13 @@ export interface StratusConfigFile {
    * otherwise reject every turn of a session an image was sent to.
    */
   vision?: boolean;
+  /**
+   * The language every agent writes in, as a tag (`en-GB`). Default
+   * `en-US` (`DEFAULT_LANGUAGE` in core). A soul's `language:` outranks it
+   * for that agent. Allowed in a project-local config: it changes how the
+   * agent writes, nothing it may do, and the loader accepts only a tag.
+   */
+  language?: string;
   /** Unattended-approval policy for `stratus serve`. */
   approvals?: ApprovalsConfig;
   /** Which channel senders are each agent's operator. Trusted configs only. */
@@ -445,6 +452,12 @@ type RuntimeConfigVariant =
 
 export type RuntimeConfig = RuntimeConfigVariant & {
   ignoredFromUntrustedConfig?: IgnoredUntrustedConfig;
+  /**
+   * The language the run writes in: the soul's `language:`, then the config
+   * file's `language`. Absent means neither set one, and the prompt uses
+   * `DEFAULT_LANGUAGE`. Resolved here so no host decides between the two.
+   */
+  language?: string;
 };
 
 /**
