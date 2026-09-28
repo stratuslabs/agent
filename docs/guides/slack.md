@@ -244,8 +244,8 @@ so it never says it is waiting on someone who cannot see the question. A
 key that is already stored, or supplied by the daemon's environment, but not
 granted is not asked for either: the agent is told to have it added to its
 soul. Requests live in the daemon's memory, so after a restart
-the button answers that the request is no longer pending and the agent
-asks again. The form uses Slack's interactivity, which the app manifest in
+the first click on an old button answers that the request is no longer
+pending and takes the button down for everyone, and the agent asks again. The form uses Slack's interactivity, which the app manifest in
 the [`@stratusagent/channel-slack` README](../../packages/channel-slack/README.md)
 already turns on for approval buttons; no scope is added.
 

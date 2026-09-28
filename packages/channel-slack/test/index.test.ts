@@ -7900,3 +7900,18 @@ test('a private conversation with no approver in it gets no form, and one with a
   await assert.rejects(ask({ requestId: 'cred-unknown' }), /Slack would not say who can see this conversation \(channel_not_found\)/);
   await adapter.stop();
 });
+
+test('a credential button a restarted daemon forgot is taken down for everyone on the first click', async () => {
+  const { socket, web, gateway, adapter } = credentialAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  // The message is still in the thread with its button; this process never posted it.
+  const click = credentialClick('cred-from-before', 'U-DYLAN');
+  const blocks = [{ type: 'actions', elements: [{ type: 'button', action_id: 'stratus_credential_add', value: 'cred-from-before' }] }];
+  await socket.deliver('interactive', { body: { ...click.body, message: { ...click.body.message, blocks } } });
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /no longer pending/);
+  const update = web.updates.at(-1);
+  assert.equal(update?.ts, 'bot-ts-1');
+  assert.match(update?.text ?? '', /no longer pending/);
+  assert.equal(buttonIds(update?.blocks).length, 0);
+  await adapter.stop();
+});

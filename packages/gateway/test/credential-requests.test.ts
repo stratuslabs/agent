@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { StratusEvent } from '@stratusagent/core';
-import { withSoulFileLock } from '@stratusagent/state';
+import { withCredentialsFileLock, withSoulFileLock } from '@stratusagent/state';
 import { createGateway, type GatewayChannelAdapter } from '../src/index.ts';
 
 const openAiText = (text: string): Response =>
@@ -383,6 +383,36 @@ test('a request whose agent is served from another soul file since stores nothin
     const credentials = await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8').catch(() => '');
     assert.doesNotMatch(credentials, /ghp-secret-value/);
     assert.doesNotMatch(await readFile(soulFile, 'utf8'), /credentials/);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a soul repointed while the key is being stored is not granted in the file it left', async () => {
+  const { home, soulFile, gateway, events } = await startRequesting({ configSoul: true });
+  try {
+    await gateway.dispatch({ sessionId: 'kai-16', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    // The store waits on the credentials lock this holds, so the repoint
+    // lands after the first path check and before the grant.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const held = withCredentialsFileLock(() => released);
+    const answer = gateway.provideCredential({ requestId, value: 'ghp-secret-value', actor: 'U-DYLAN' });
+    const moved = path.join(home, 'souls', 'kai-b.md');
+    await writeFile(moved, await readFile(soulFile, 'utf8'));
+    await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai', model: 'model-a', soul: moved }));
+    await gateway.reloadRoster();
+    release();
+    await held;
+    const result = await answer;
+
+    assert.equal(result.ok, false);
+    assert.doesNotMatch(await readFile(soulFile, 'utf8'), /credentials/, 'the file it left was not granted');
+    const provided = events.find((event): event is Extract<StratusEvent, { type: 'credential.provided' }> => event.type === 'credential.provided');
+    assert.match(provided?.grantError ?? '', /kai is now served from .*kai-b\.md/);
   } finally {
     await gateway.stop();
   }

@@ -2884,7 +2884,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
       });
     } catch (error) {
-      warn(`slack: could not retire an orphaned approval request: ${error instanceof Error ? error.message : String(error)}`);
+      warn(`slack: could not retire an orphaned request: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -3309,6 +3309,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const post = credentialPosts.get(requestId);
     if (!post || post.connection !== connection) {
       await tellClicker(connection, args, 'That credential request is no longer pending. Ask the agent to request it again.');
+      // A daemon restart forgets every request, and the buttons it posted
+      // stay live for everyone else in the thread: take this one down the
+      // way an orphaned approval is, from the click's own copy.
+      if (!post) {
+        await retireOrphanedPrompt(connection, args);
+      }
       return;
     }
     // By actor, as approvals are: the request sits in a thread anyone in
