@@ -4,7 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { lstat, readFile, symlink, writeFile } from 'node:fs/promises';
 import {
   NamedCredentialExistsError,
   addNamedCredential,
@@ -118,7 +118,7 @@ test('granting a credential in a soul adds the name once and keeps everything el
   const soulFile = path.join(env.homeDir, 'kai.md');
   await writeFile(soulFile, '---\nname: Kai\nid: kai\nlanguage: en-GB\ntools: [web.*]\ncredentials: [search.apiKey]\n---\n\nYou are Kai.\n');
 
-  assert.equal(await grantSoulCredential(soulFile, 'github.token'), true);
+  assert.equal(await grantSoulCredential(soulFile, 'github.token', 'kai'), true);
   const soul = await readFile(soulFile, 'utf8');
   assert.match(soul, /^credentials:\n  - search\.apiKey\n  - github\.token$/m);
   assert.match(soul, /^language: en-GB$/m);
@@ -126,6 +126,42 @@ test('granting a credential in a soul adds the name once and keeps everything el
   assert.match(soul, /You are Kai\./);
 
   // Already granted: the file is left as it is.
-  assert.equal(await grantSoulCredential(soulFile, 'github.token'), false);
+  assert.equal(await grantSoulCredential(soulFile, 'github.token', 'kai'), false);
   assert.equal(await readFile(soulFile, 'utf8'), soul);
+});
+
+test('a grant refuses a soul that no longer belongs to the agent that asked', async () => {
+  // Reassigned while a request waited: granting would hand the key to
+  // whoever the file names now.
+  const env = await newEnv();
+  const soulFile = path.join(env.homeDir, 'kai.md');
+  await writeFile(soulFile, '---\nname: Bea\nid: bea\n---\n\nYou are Bea.\n');
+  await assert.rejects(grantSoulCredential(soulFile, 'github.token', 'kai'), /now declares agent bea, not kai, so nothing was granted/);
+  assert.doesNotMatch(await readFile(soulFile, 'utf8'), /credentials/);
+});
+
+test('grants answered at once for one agent both land', async () => {
+  const env = await newEnv();
+  const soulFile = path.join(env.homeDir, 'kai.md');
+  await writeFile(soulFile, '---\nname: Kai\nid: kai\n---\n\nYou are Kai.\n');
+  await Promise.all([
+    grantSoulCredential(soulFile, 'github.token', 'kai'),
+    grantSoulCredential(soulFile, 'linear.apiKey', 'kai'),
+    grantSoulCredential(soulFile, 'search.apiKey', 'kai'),
+  ]);
+  const soul = await readFile(soulFile, 'utf8');
+  for (const name of ['github.token', 'linear.apiKey', 'search.apiKey']) {
+    assert.ok(soul.includes(`  - ${name}`), `${name} was dropped:\n${soul}`);
+  }
+});
+
+test('a symlinked soul keeps its link: the grant lands on the file it points at', async () => {
+  const env = await newEnv();
+  const real = path.join(env.homeDir, 'dotfiles-kai.md');
+  const link = path.join(env.homeDir, 'kai.md');
+  await writeFile(real, '---\nname: Kai\nid: kai\n---\n\nYou are Kai.\n');
+  await symlink(real, link);
+  assert.equal(await grantSoulCredential(link, 'github.token', 'kai'), true);
+  assert.equal((await lstat(link)).isSymbolicLink(), true);
+  assert.match(await readFile(real, 'utf8'), /^credentials:\n  - github\.token$/m);
 });

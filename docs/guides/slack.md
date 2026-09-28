@@ -210,7 +210,8 @@ configured the message says so and has no button. What the form does:
 - **It grants the key to the agent that asked**, by adding the name to that
   agent's soul under `credentials:`. A shared key is still granted only to
   that one agent; others need their own soul entry. The agent can use it
-  from its next reply.
+  from its next reply. A soul file given to another agent while the
+  request waited stores nothing: the form says so, and the agent asks again.
 - **The value never enters the conversation.** It goes from the form to
   `~/.stratus/credentials.json` and nowhere else: not the thread, the
   transcript, the model, the event stream, or the daemon log. What the log

@@ -163,3 +163,21 @@ test('a request nothing can show a form for, or for a key already held, is refus
     await held.gateway.stop();
   }
 });
+
+test('a request whose soul was given to another agent while it waited stores nothing', async () => {
+  const { home, soulFile, gateway, events } = await startRequesting();
+  try {
+    await gateway.dispatch({ sessionId: 'kai-6', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    await writeFile(soulFile, '---\nname: Bea\nid: bea\nprovider: openai\nmodel: model-a\n---\n\nYou are Bea.\n');
+
+    const result = await gateway.provideCredential({ requestId, value: 'ghp-secret-value', actor: 'U-DYLAN' });
+    assert.equal(result.ok, false);
+    assert.match(result.ok ? '' : result.message, /now belongs to bea, not kai, so nothing was stored/);
+    const credentials = await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8').catch(() => '');
+    assert.doesNotMatch(credentials, /ghp-secret-value/);
+    assert.doesNotMatch(await readFile(soulFile, 'utf8'), /credentials/);
+  } finally {
+    await gateway.stop();
+  }
+});

@@ -1,4 +1,5 @@
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { formatSoul, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { loadConfigFile } from './config-file.ts';
@@ -113,24 +114,52 @@ export const loadSoulFile = async (resolvedPath: string): Promise<ParsedSoul> =>
  * storing a key grants no agent anything, so a form that only stored it
  * would leave the agent holding a key it may not resolve until somebody
  * edited the file by hand. It grants the one agent whose soul this is,
- * never another, whatever scope the key was stored under.
+ * never another, whatever scope the key was stored under — and refuses when
+ * the file no longer declares `agentId`, because a soul reassigned while a
+ * request was pending would otherwise hand the key to whoever it names now.
  *
  * Rendered through `formatSoul`, which canonicalizes the file the way every
  * field edit does, and parsed back before it is written: a soul that
  * survives the write but not the next read is an agent that vanishes on
- * restart.
+ * restart. Written to a sibling and renamed over the real file, so a
+ * dispatch re-reading the soul never sees it half-written and a crash
+ * leaves the old one; a symlinked soul keeps its link, since the rename
+ * lands on the file the link points at.
+ *
+ * Serialized within the process: two requests answered at once for one
+ * agent would otherwise both read the same list, and the second write
+ * would drop the first grant while both reported success.
  */
-export const grantSoulCredential = async (soulPath: string, name: string): Promise<boolean> => {
-  const soul = await loadSoulFile(soulPath);
-  const granted = soul.agent.credentials ?? [];
-  if (granted.includes(name)) {
-    return false;
-  }
-  const next: ParsedSoul = { ...soul, agent: { ...soul.agent, credentials: [...granted, name] } };
-  const rendered = formatSoul(next);
-  parseSoul(rendered, { seed: soulPath });
-  await writeFile(soulPath, rendered);
-  return true;
+let soulGrants: Promise<unknown> = Promise.resolve();
+export const grantSoulCredential = async (soulPath: string, name: string, agentId: string): Promise<boolean> => {
+  const grant = async (): Promise<boolean> => {
+    // Identity is read at the configured path, which seeds a generated id,
+    // and the bytes land on the file behind it.
+    const soul = await loadSoulFile(soulPath);
+    if (soul.agent.id !== agentId) {
+      throw new Error(`${soulPath} now declares agent ${soul.agent.id}, not ${agentId}, so nothing was granted.`);
+    }
+    const granted = soul.agent.credentials ?? [];
+    if (granted.includes(name)) {
+      return false;
+    }
+    const next: ParsedSoul = { ...soul, agent: { ...soul.agent, credentials: [...granted, name] } };
+    const rendered = formatSoul(next);
+    parseSoul(rendered, { seed: soulPath });
+    const target = await realpath(soulPath);
+    const temporary = `${target}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, rendered, { mode: (await stat(target)).mode & 0o777 });
+      await rename(temporary, target);
+    } catch (error) {
+      await rm(temporary, { force: true });
+      throw error;
+    }
+    return true;
+  };
+  const next = soulGrants.then(grant, grant);
+  soulGrants = next.catch(() => undefined);
+  return next;
 };
 
 export interface RosterEntry {

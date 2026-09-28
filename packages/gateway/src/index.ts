@@ -1887,6 +1887,26 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (!request) {
       return { ok: false, message: 'That credential request is no longer pending. Ask the agent to request it again.' };
     }
+    // The soul the grant will land in must still be the requester's, and is
+    // checked before anything is stored: a file reassigned to another agent
+    // while the request waited would otherwise receive a key nobody meant
+    // to give it. `grantSoulCredential` checks again as it writes.
+    let owner: string;
+    try {
+      owner = (await loadSoulFile(request.soulPath)).agent.id;
+    } catch (error) {
+      return {
+        ok: false,
+        message: `${request.agentId}'s soul could not be read (${error instanceof Error ? error.message : String(error)}), so nothing was stored.`,
+      };
+    }
+    if (owner !== request.agentId) {
+      credentialRequests.delete(input.requestId);
+      return {
+        ok: false,
+        message: `${request.soulPath} now belongs to ${owner}, not ${request.agentId}, so nothing was stored. Ask ${request.agentId} to request it again.`,
+      };
+    }
     try {
       await addNamedCredential(env, {
         name: request.name,
@@ -1904,7 +1924,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // fails every call that reaches for it.
     let granted: boolean;
     try {
-      granted = await grantSoulCredential(request.soulPath, request.name);
+      granted = await grantSoulCredential(request.soulPath, request.name, request.agentId);
     } catch (error) {
       return {
         ok: false,
