@@ -62,11 +62,17 @@ const startRequesting = async (options: {
   agentless?: boolean;
   processEnv?: Record<string, string>;
   channel?: GatewayChannelAdapter;
+  /** Serve Kai as the configured default soul, from outside the roster. */
+  configSoul?: boolean;
 } = {}) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-credreq-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
-  const soulFile = path.join(agentsDir, 'kai.md');
+  const soulFile = options.configSoul ? path.join(home, 'souls', 'kai-a.md') : path.join(agentsDir, 'kai.md');
+  if (options.configSoul) {
+    await mkdir(path.dirname(soulFile), { recursive: true });
+    await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai', model: 'model-a', soul: soulFile }));
+  }
   await writeFile(soulFile, options.soul ?? '---\nname: Kai\nprovider: openai\nmodel: model-a\nlanguage: en-GB\n---\n\nYou are Kai.\n');
   if (options.agentless) {
     await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai', model: 'model-a' }));
@@ -352,6 +358,31 @@ test('two answers to one request at once store one, and the other waits instead 
     assert.match(second.ok ? '' : second.message, /being stored right now/);
     const provided = events.filter((event) => event.type === 'credential.provided');
     assert.equal(provided.length, 1);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a request whose agent is served from another soul file since stores nothing and is retired', async () => {
+  const { home, soulFile, gateway, events } = await startRequesting({ configSoul: true });
+  try {
+    await gateway.dispatch({ sessionId: 'kai-15', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    assert.ok(requestId, 'the request was made against the configured soul');
+    // The default is repointed at another file declaring the same agent;
+    // the old one still exists, and still says it is Kai.
+    const moved = path.join(home, 'souls', 'kai-b.md');
+    await writeFile(moved, await readFile(soulFile, 'utf8'));
+    await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai', model: 'model-a', soul: moved }));
+    await gateway.reloadRoster();
+
+    const result = await gateway.provideCredential({ requestId, value: 'ghp-secret-value' });
+    assert.equal(result.ok, false);
+    assert.equal(result.ok ? undefined : result.retired, true);
+    assert.match(result.ok ? '' : result.message, /kai is no longer served from .*kai-a\.md, so nothing was stored/);
+    const credentials = await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8').catch(() => '');
+    assert.doesNotMatch(credentials, /ghp-secret-value/);
+    assert.doesNotMatch(await readFile(soulFile, 'utf8'), /credentials/);
   } finally {
     await gateway.stop();
   }

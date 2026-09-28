@@ -7677,7 +7677,7 @@ test('a credential request is posted in the thread with a button only an approve
   assert.match(JSON.stringify(opened?.view), /Value for github.token/);
 
   await ask({ requestId: 'cred-2', scope: 'shared' });
-  assert.match(JSON.stringify(formPosts().at(-1)?.blocks), /`github.token`, shared with every agent\./);
+  assert.match(JSON.stringify(formPosts().at(-1)?.blocks), /`github.token`, stored for the whole fleet, granted to Ava \(other agents need it in their own soul\)\./);
 
   await adapter.stop();
 });

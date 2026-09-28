@@ -209,7 +209,8 @@ submission; anyone else in the thread is told they cannot. What the form does:
   the machine) can never be answered, so the refusal also takes its button
   down; an empty value leaves the form open for another try.
 - **For the agent alone, unless it asked otherwise.** The agent chooses the
-  scope when it asks (`scope: "shared"` offers the key to the whole fleet),
+  scope when it asks (`scope: "shared"` stores one key for the whole fleet,
+  which other agents can use once their own souls list it),
   and the message says which before anyone clicks.
 - **It grants the key to the agent that asked**, by adding the name to that
   agent's soul under `credentials:`. A shared key is still granted only to

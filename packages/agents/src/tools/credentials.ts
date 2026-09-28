@@ -29,13 +29,13 @@ export type CredentialRequester = (
  */
 export const createCredentialRequestTool = (requestCredential: CredentialRequester): Tool => ({
   name: CREDENTIAL_REQUEST_TOOL_NAME,
-  description: 'Ask your operator for a named credential you do not hold (for example github.token). They are shown a form to add it; you never see the value, and once they add it the tools that need it can use it from your next reply. Scope "agent" (the default) keeps it yours alone; "shared" offers it to every agent.',
+  description: 'Ask your operator for a named credential you do not hold (for example github.token). They are shown a form to add it; you never see the value, and once they add it the tools that need it can use it from your next reply. Scope "agent" (the default) keeps it yours alone; "shared" stores it once for the fleet, but it is granted only to you: another agent can use it only once its own soul lists the name.',
   risk: 'safe',
   parameters: {
     type: 'object',
     properties: {
       name: { type: 'string', description: 'The credential name, as the tool that needs it documents it: search.apiKey, github.token.' },
-      scope: { type: 'string', enum: ['agent', 'shared'], description: 'Whose key it is. Default "agent", for you alone.' },
+      scope: { type: 'string', enum: ['agent', 'shared'], description: 'Where the key is stored. Default "agent", for you alone; "shared" stores one value other agents can be granted too.' },
       reason: { type: 'string', description: 'One sentence on what you need it for, shown to the person asked.' },
     },
     required: ['name'],

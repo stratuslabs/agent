@@ -1971,7 +1971,9 @@ const CREDENTIAL_ACK_MS = 2500;
 const CREDENTIAL_REASON_LIMIT = 300;
 
 const credentialWhose = (agentName: string, scope: CredentialScope): string =>
-  scope === 'agent' ? `for ${agentName} only` : 'shared with every agent';
+  scope === 'agent'
+    ? `for ${agentName} only`
+    : `stored for the whole fleet, granted to ${agentName} (other agents need it in their own soul)`;
 
 /**
  * The request as it appears in the conversation. What it says about the

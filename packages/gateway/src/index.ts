@@ -1976,6 +1976,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     input: ProvideCredentialInput,
     request: NonNullable<ReturnType<typeof credentialRequests.get>>,
   ): Promise<ProvideCredentialResult> => {
+    // The agent must still be served from the file the request captured: a
+    // repointed default soul (same id, another file) replaces the source,
+    // and a grant landing in the old file would report a key the agent now
+    // running cannot use.
+    const served = sources.get(request.agentId)?.soulPath;
+    if (served !== request.soulPath) {
+      credentialRequests.delete(input.requestId);
+      return {
+        ok: false,
+        retired: true,
+        message: `${request.agentId} is no longer served from ${request.soulPath}, so nothing was stored. Ask ${request.agentId} to request it again.`,
+      };
+    }
     // The soul the grant will land in must still be the requester's, and is
     // checked before anything is stored: a file reassigned to another agent
     // while the request waited would otherwise receive a key nobody meant
