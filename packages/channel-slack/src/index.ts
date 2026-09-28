@@ -2266,6 +2266,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Rendered approval requests, keyed by the gateway's request id — the
   // same id the buttons carry back.
   const approvalPosts = new Map<string, PendingApprovalPost>();
+  // Credential requests whose post is in flight: Slack can show the message,
+  // and take a click on it, before postMessage resolves here. The same
+  // window `rendering` covers for approvals, and bounded the same way.
+  const credentialsPosting = new Set<string>();
   // Credential requests with a live button, keyed by the gateway's request id.
   const credentialPosts = new Map<string, PendingCredentialPost>();
   // Requests whose message is mid-post. A request can settle — expire, or
@@ -3236,6 +3240,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       throw new Error(`${unseen}: none of ${agentName}'s approvers is a member of this private conversation. ${elsewhere}`);
     }
     let posted: { ts?: string; channel?: string };
+    credentialsPosting.add(request.requestId);
     try {
       posted = await connection.web.chat.postMessage({
         channel,
@@ -3244,9 +3249,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         blocks: credentialRequestBlocks(agentName, request.name, request.scope, request.reason, request.requestId),
       });
     } catch (error) {
+      credentialsPosting.delete(request.requestId);
       warn(`slack: could not post a credential request for ${request.agentId} to ${channel} (${error instanceof Error ? error.message : String(error)})`);
       throw new Error(`Slack refused the post (${error instanceof Error ? error.message : String(error)}).`);
     }
+    credentialsPosting.delete(request.requestId);
     if (!posted.ts) {
       throw new Error('Slack accepted the post but returned no message to attach the form to.');
     }
@@ -3307,6 +3314,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const handleCredentialClick = async (connection: AgentConnection, args: SlackSocketEventArgs, requestId: string): Promise<void> => {
     await args.ack();
     const post = credentialPosts.get(requestId);
+    if (!post && credentialsPosting.has(requestId)) {
+      // Live, with the index not caught up yet: retiring it here would
+      // strip the button from a request about to be registered as pending.
+      await tellClicker(connection, args, 'That credential request is still being posted. Try the button again in a moment.');
+      return;
+    }
     if (!post || post.connection !== connection) {
       await tellClicker(connection, args, 'That credential request is no longer pending. Ask the agent to request it again.');
       // A daemon restart forgets every request, and the buttons it posted
@@ -4537,6 +4550,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       botIdentities.clear();
       rendering.clear();
       resolvedWhileRendering.clear();
+      credentialsPosting.clear();
     },
   };
 };

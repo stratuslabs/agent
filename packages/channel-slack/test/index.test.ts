@@ -7915,3 +7915,40 @@ test('a credential button a restarted daemon forgot is taken down for everyone o
   assert.equal(buttonIds(update?.blocks).length, 0);
   await adapter.stop();
 });
+
+test('a click that lands while the credential post is still in flight leaves the button live', async () => {
+  const { socket, web, gateway, adapter, pending, ask } = credentialAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('cred-1');
+  // Slack can show the message, and take a click on it, before
+  // postMessage answers. Only the form's post is held.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered!: () => void;
+  const posting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const post = web.chat.postMessage.bind(web.chat);
+  web.chat.postMessage = async (args) => {
+    if (buttonIds(args.blocks).includes('stratus_credential_add')) {
+      entered();
+      await held;
+    }
+    return post(args);
+  };
+  const asked = ask();
+  await posting;
+  const click = credentialClick('cred-1', 'U-DYLAN');
+  const blocks = [{ type: 'actions', elements: [{ type: 'button', action_id: 'stratus_credential_add', value: 'cred-1' }] }];
+  await socket.deliver('interactive', { body: { ...click.body, message: { ...click.body.message, blocks } } });
+  assert.equal(web.updates.length, 0, 'the live request was not retired as an orphan');
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /still being posted/);
+
+  release();
+  await asked;
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN'));
+  assert.equal(web.views_opened.at(-1)?.view.private_metadata, 'cred-1', 'the button still opens the form');
+  await adapter.stop();
+});
