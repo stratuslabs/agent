@@ -297,7 +297,8 @@ These are deliberate. Changing one is a decision, not a refactor.
 - **Named credentials are add-only away from the machine.** Every surface
   reachable remotely (the control API and the Slack credential form today,
   and whatever is built next) goes through `addNamedCredential`, which refuses a name already
-  stored, and an agent's own entry over a shared one of that name.
+  stored, an agent's own entry over a shared one of that name, and any
+  name the daemon's environment supplies (a stored entry is read before it).
   Replacing or removing one is `stratus credential` at the machine, because
   a replaced shared key moves every agent that uses it onto another account.
 - **No endpoint returns a secret.** Credential reads report presence, type,

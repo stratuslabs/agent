@@ -121,6 +121,8 @@ export {
   withCredentialsFileLock,
   NamedCredentialExistsError,
   addNamedCredential,
+  type NamedCredentialSource,
+  namedCredentialSource,
   createFileCredentialResolver,
 } from './credentials.ts';
 
@@ -177,6 +179,7 @@ export {
   resolveConfiguredSoul,
   loadSoulFile,
   grantSoulCredential,
+  withSoulFileLock,
   type RosterEntry,
   DuplicateAgentIdError,
   loadRosterSouls,

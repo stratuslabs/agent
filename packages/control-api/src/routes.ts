@@ -50,6 +50,7 @@ import {
   servedRuntimes,
   verifyProviderKey,
   withCredentialsFileLock,
+  withSoulFileLock,
   addNamedCredential,
   loadNamedCredentials,
   CREDENTIAL_NAME_PATTERN,
@@ -671,114 +672,120 @@ export const routes: Route[] = [
     async handler(context) {
       const agentId = context.params.id ?? '';
       const body = await readJsonObject(context.request);
-      const { soul: current, path: soulPath } = await soulForAgent(context, agentId);
+      // Read, edited, and written under the soul lock `grantSoulCredential`
+      // shares, so a credential granted from Slack while this edit is in
+      // flight is not written over by a version read before it landed.
+      const written = await withSoulFileLock(async () => {
+        const { soul: current, path: soulPath } = await soulForAgent(context, agentId);
 
-      const raw = optionalString(body, 'soul');
-      let next: ParsedSoul;
-      if (raw !== undefined) {
-        // A raw edit still round-trips through the parser: the app offers a
-        // markdown view, and a soul the daemon cannot read must be refused
-        // here rather than discovered on the next dispatch.
-        try {
-          next = parseSoul(raw, { seed: soulPath });
-        } catch (error) {
-          throw new ApiError(400, 'invalid_soul', `That soul does not parse: ${error instanceof Error ? error.message : String(error)}`);
+        const raw = optionalString(body, 'soul');
+        let next: ParsedSoul;
+        if (raw !== undefined) {
+          // A raw edit still round-trips through the parser: the app offers a
+          // markdown view, and a soul the daemon cannot read must be refused
+          // here rather than discovered on the next dispatch.
+          try {
+            next = parseSoul(raw, { seed: soulPath });
+          } catch (error) {
+            throw new ApiError(400, 'invalid_soul', `That soul does not parse: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        } else {
+          const provider = optionalString(body, 'provider');
+          const model = optionalString(body, 'model');
+          // Like a pin: an empty string clears it back to the default, an
+          // absent key leaves it alone, and anything but a mode is refused.
+          const listens = optionalString(body, 'listens');
+          if (listens !== undefined && listens.length > 0 && !isListensMode(listens)) {
+            throw new ApiError(
+              400,
+              'invalid_listens',
+              `listens must be one of ${LISTENS_MODES.join(', ')}, not ${JSON.stringify(listens)}.`,
+            );
+          }
+          if (provider !== undefined && provider.length > 0) {
+            validateProvider(provider, 'provider');
+          }
+          // The same shape as a pin: absent keeps the soul's, an empty string
+          // clears it back to the config's or the default, and only a tag is
+          // written. Rebuilt from fields, a soul that lost this key would move
+          // the agent onto another language with nobody having asked.
+          const language = optionalString(body, 'language');
+          if (language !== undefined && language.length > 0 && !isLanguageTag(language)) {
+            throw new ApiError(
+              400,
+              'invalid_language',
+              `language must be a language tag like en-US or en-GB, not ${JSON.stringify(language)}.`,
+            );
+          }
+          // Cleared by an empty string, which the spread below cannot do: a
+          // key the current definition carries has to be taken off it.
+          const { listens: _kept, ...currentAgent } = current.agent;
+          next = {
+            agent: {
+              ...(listens === undefined ? current.agent : currentAgent),
+              ...(optionalString(body, 'name') !== undefined ? { name: optionalString(body, 'name') as string } : {}),
+              ...(optionalString(body, 'instructions') !== undefined
+                ? { instructions: optionalString(body, 'instructions') as string }
+                : {}),
+              ...(body.tools !== undefined ? { tools: allowlist(body.tools, 'tools') } : {}),
+              ...(body.skills !== undefined ? { skills: allowlist(body.skills, 'skills') } : {}),
+              ...(body.credentials !== undefined ? { credentials: allowlist(body.credentials, 'credentials') } : {}),
+              ...(body.delegates !== undefined ? { delegates: delegatesAllowlist(body.delegates) } : {}),
+              ...(isListensMode(listens) ? { listens } : {}),
+            },
+            // An empty string clears a pin; an absent key leaves it alone.
+            ...(provider === undefined ? (current.provider ? { provider: current.provider } : {}) : (provider ? { provider } : {})),
+            ...(model === undefined ? (current.model ? { model: current.model } : {}) : (model ? { model } : {})),
+            ...(language === undefined
+              ? (current.language ? { language: current.language } : {})
+              : (language ? { language } : {})),
+          };
         }
-      } else {
-        const provider = optionalString(body, 'provider');
-        const model = optionalString(body, 'model');
-        // Like a pin: an empty string clears it back to the default, an
-        // absent key leaves it alone, and anything but a mode is refused.
-        const listens = optionalString(body, 'listens');
-        if (listens !== undefined && listens.length > 0 && !isListensMode(listens)) {
+
+        if (next.agent.id !== agentId) {
+          // An id is the key for sessions, memory, and credentials. Letting an
+          // edit change it would not rename an agent — it would hand this
+          // agent's history to a different identity.
           throw new ApiError(
-            400,
-            'invalid_listens',
-            `listens must be one of ${LISTENS_MODES.join(', ')}, not ${JSON.stringify(listens)}.`,
+            409,
+            'agent_id_immutable',
+            `That soul declares id ${next.agent.id}, not ${agentId}. Ids key sessions, memory, and credentials, so they cannot be edited in place.`,
           );
         }
-        if (provider !== undefined && provider.length > 0) {
-          validateProvider(provider, 'provider');
+        if (!isValidAgentId(next.agent.id)) {
+          throw new ApiError(400, 'invalid_agent_id', `${next.agent.id} is not a usable agent id.`);
         }
-        // The same shape as a pin: absent keeps the soul's, an empty string
-        // clears it back to the config's or the default, and only a tag is
-        // written. Rebuilt from fields, a soul that lost this key would move
-        // the agent onto another language with nobody having asked.
-        const language = optionalString(body, 'language');
-        if (language !== undefined && language.length > 0 && !isLanguageTag(language)) {
-          throw new ApiError(
-            400,
-            'invalid_language',
-            `language must be a language tag like en-US or en-GB, not ${JSON.stringify(language)}.`,
-          );
+
+        // A raw edit writes the bytes it was given.
+        //
+        // `formatSoul` canonicalizes — frontmatter order, quoting, list layout,
+        // trailing whitespace — so reserializing a source edit hands back a
+        // file the author did not write, and silently discards an edit that was
+        // only formatting. It has already been through `parseSoul` above, which
+        // is the check that matters; there is nothing left for a round-trip to
+        // prove about text that came in as text.
+        //
+        // A field edit still renders, and still round-trips before it lands:
+        // `formatSoul` is the inverse of `parseSoul`, and the only honest way
+        // to promise that is to perform it. A soul that survives the write but
+        // not the next read is an agent that vanishes on restart.
+        let rendered: string;
+        if (raw !== undefined) {
+          rendered = raw;
+        } else {
+          rendered = formatSoul(next);
+          try {
+            parseSoul(rendered, { seed: soulPath });
+          } catch (error) {
+            throw new ApiError(500, 'soul_round_trip_failed', `Refusing to write a soul that will not parse back: ${error instanceof Error ? error.message : String(error)}`);
+          }
         }
-        // Cleared by an empty string, which the spread below cannot do: a
-        // key the current definition carries has to be taken off it.
-        const { listens: _kept, ...currentAgent } = current.agent;
-        next = {
-          agent: {
-            ...(listens === undefined ? current.agent : currentAgent),
-            ...(optionalString(body, 'name') !== undefined ? { name: optionalString(body, 'name') as string } : {}),
-            ...(optionalString(body, 'instructions') !== undefined
-              ? { instructions: optionalString(body, 'instructions') as string }
-              : {}),
-            ...(body.tools !== undefined ? { tools: allowlist(body.tools, 'tools') } : {}),
-            ...(body.skills !== undefined ? { skills: allowlist(body.skills, 'skills') } : {}),
-            ...(body.credentials !== undefined ? { credentials: allowlist(body.credentials, 'credentials') } : {}),
-            ...(body.delegates !== undefined ? { delegates: delegatesAllowlist(body.delegates) } : {}),
-            ...(isListensMode(listens) ? { listens } : {}),
-          },
-          // An empty string clears a pin; an absent key leaves it alone.
-          ...(provider === undefined ? (current.provider ? { provider: current.provider } : {}) : (provider ? { provider } : {})),
-          ...(model === undefined ? (current.model ? { model: current.model } : {}) : (model ? { model } : {})),
-          ...(language === undefined
-            ? (current.language ? { language: current.language } : {})
-            : (language ? { language } : {})),
-        };
-      }
 
-      if (next.agent.id !== agentId) {
-        // An id is the key for sessions, memory, and credentials. Letting an
-        // edit change it would not rename an agent — it would hand this
-        // agent's history to a different identity.
-        throw new ApiError(
-          409,
-          'agent_id_immutable',
-          `That soul declares id ${next.agent.id}, not ${agentId}. Ids key sessions, memory, and credentials, so they cannot be edited in place.`,
-        );
-      }
-      if (!isValidAgentId(next.agent.id)) {
-        throw new ApiError(400, 'invalid_agent_id', `${next.agent.id} is not a usable agent id.`);
-      }
-
-      // A raw edit writes the bytes it was given.
-      //
-      // `formatSoul` canonicalizes — frontmatter order, quoting, list layout,
-      // trailing whitespace — so reserializing a source edit hands back a
-      // file the author did not write, and silently discards an edit that was
-      // only formatting. It has already been through `parseSoul` above, which
-      // is the check that matters; there is nothing left for a round-trip to
-      // prove about text that came in as text.
-      //
-      // A field edit still renders, and still round-trips before it lands:
-      // `formatSoul` is the inverse of `parseSoul`, and the only honest way
-      // to promise that is to perform it. A soul that survives the write but
-      // not the next read is an agent that vanishes on restart.
-      let rendered: string;
-      if (raw !== undefined) {
-        rendered = raw;
-      } else {
-        rendered = formatSoul(next);
-        try {
-          parseSoul(rendered, { seed: soulPath });
-        } catch (error) {
-          throw new ApiError(500, 'soul_round_trip_failed', `Refusing to write a soul that will not parse back: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-
-      await writeFile(soulPath, rendered);
+        await writeFile(soulPath, rendered);
+        return { next, soulPath };
+      });
       await context.gateway.reloadRoster();
-      return { agent: next.agent, soulPath };
+      return { agent: written.next.agent, soulPath: written.soulPath };
     },
   },
   {

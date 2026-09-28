@@ -203,7 +203,9 @@ configured the message says so and has no button. What the form does:
 - **It stores the key add-only**, through the same rule as the
   [control API](../../packages/control-api/README.md): a name already
   stored is refused, in the form, with the `stratus credential set` command
-  that replaces it. Replacing or removing a key stays on the machine.
+  that replaces it, and so is a name the daemon's environment already
+  supplies, since a stored one would be read first and replace it.
+  Replacing or removing a key stays on the machine.
 - **For the agent alone, unless it asked otherwise.** The agent chooses the
   scope when it asks (`scope: "shared"` offers the key to the whole fleet),
   and the message says which before anyone clicks.
@@ -219,8 +221,8 @@ configured the message says so and has no button. What the form does:
 
 An agent asks only in a conversation a channel started, since that is where
 someone can see the form; a scheduled or HTTP turn is told to have the
-operator run `stratus credential set` instead. A key that is already stored
-but not granted is not asked for either: the agent is told to have it
+operator run `stratus credential set` instead. A key that is already stored,
+or supplied by the daemon's environment, but not granted is not asked for either: the agent is told to have it
 added to its soul. Requests live in the daemon's memory, so after a restart
 the button answers that the request is no longer pending and the agent
 asks again. The form uses Slack's interactivity, which the app manifest in

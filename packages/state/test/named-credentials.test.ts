@@ -9,6 +9,8 @@ import {
   NamedCredentialExistsError,
   addNamedCredential,
   grantSoulCredential,
+  namedCredentialSource,
+  withSoulFileLock,
   loadNamedCredentials,
   saveNamedCredentials,
 } from '../src/index.ts';
@@ -164,4 +166,53 @@ test('a symlinked soul keeps its link: the grant lands on the file it points at'
   assert.equal(await grantSoulCredential(link, 'github.token', 'kai'), true);
   assert.equal((await lstat(link)).isSymbolicLink(), true);
   assert.match(await readFile(real, 'utf8'), /^credentials:\n  - github\.token$/m);
+});
+
+test('an add never replaces a key the daemon environment supplies, since any stored entry outranks it', async () => {
+  const env = { ...(await newEnv()), processEnv: { GITHUB_TOKEN: 'from-the-environment' } };
+  assert.equal(await namedCredentialSource(env, 'kai', 'GITHUB_TOKEN'), 'environment');
+  await assert.rejects(
+    addNamedCredential(env, { name: 'GITHUB_TOKEN', value: 'from-a-form' }),
+    (error: unknown) => error instanceof NamedCredentialExistsError && /supplied by the daemon's environment/.test(error.message),
+  );
+  await assert.rejects(
+    addNamedCredential(env, { name: 'GITHUB_TOKEN', value: 'from-a-form', agentId: 'kai' }),
+    /would replace it for kai/,
+  );
+  assert.deepEqual(Object.keys((await loadNamedCredentials(env)).shared), []);
+});
+
+test('namedCredentialSource follows the resolver: the agent, then the fleet, then the environment', async () => {
+  const env = { ...(await newEnv()), processEnv: { SEARCH_KEY: 'env' } };
+  const named = await loadNamedCredentials(env);
+  named.shared.SEARCH_KEY = 'shared';
+  named.agents.kai = { SEARCH_KEY: 'own' };
+  await saveNamedCredentials(env, named);
+  assert.equal(await namedCredentialSource(env, 'kai', 'SEARCH_KEY'), 'agent');
+  assert.equal(await namedCredentialSource(env, 'ava', 'SEARCH_KEY'), 'shared');
+  assert.equal(await namedCredentialSource(env, 'ava', 'NOTHING'), undefined);
+});
+
+test('a grant waits for a soul edit that holds the lock, so neither write drops the other', async () => {
+  // The control API's field edits hold this lock across their read and
+  // write; a grant racing one would otherwise derive from the version the
+  // edit was about to replace.
+  const env = await newEnv();
+  const soulFile = path.join(env.homeDir, 'kai.md');
+  await writeFile(soulFile, '---\nname: Kai\nid: kai\n---\n\nYou are Kai.\n');
+  let releaseEdit = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    releaseEdit = resolve;
+  });
+  const edit = withSoulFileLock(async () => {
+    const before = await readFile(soulFile, 'utf8');
+    await gate;
+    await writeFile(soulFile, before.replace('You are Kai.', 'You are Kai, edited.'));
+  });
+  const grant = grantSoulCredential(soulFile, 'github.token', 'kai');
+  releaseEdit();
+  await Promise.all([edit, grant]);
+  const soul = await readFile(soulFile, 'utf8');
+  assert.match(soul, /You are Kai, edited\./);
+  assert.match(soul, /^credentials:\n  - github\.token$/m);
 });

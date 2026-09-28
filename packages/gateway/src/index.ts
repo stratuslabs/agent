@@ -130,7 +130,7 @@ import {
   loadSoulFile,
   grantSoulCredential,
   addNamedCredential,
-  loadNamedCredentials,
+  namedCredentialSource,
   NamedCredentialExistsError,
   CREDENTIAL_NAME_PATTERN,
   quoteShellArg,
@@ -1847,16 +1847,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     // A key already stored is not something to ask a person for again: the
     // form only adds, so it could only fail. Say what is actually missing.
-    const named = await loadNamedCredentials(env);
-    const stored = named.agents[agentId]?.[request.name] !== undefined || named.shared[request.name] !== undefined;
+    const source = await namedCredentialSource(env, agentId, request.name);
+    const stored = source !== undefined;
     const granted = session.agent.credentials?.includes(request.name) === true;
     if (stored && granted) {
       throw new Error(`You already hold ${request.name}; the tools that need it use it for you. There is nothing to ask for.`);
     }
     if (stored) {
       throw new Error(
-        `${request.name} is already stored but not granted to you. Ask your operator to add it to the credentials list in your soul; `
-        + 'a form would only refuse to store it again.',
+        `${request.name} is already ${source === 'environment' ? "supplied by the daemon's environment" : 'stored'} but not granted to you. `
+        + 'Ask your operator to add it to the credentials list in your soul; a form would only refuse to store it again.',
       );
     }
     // Only a conversation a channel started has anywhere to show a form;

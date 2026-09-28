@@ -33,7 +33,7 @@ const SLACK = { channel: 'slack', slackChannel: 'C1', slackThread: '100.1' };
  * A daemon whose model asks for a credential on its first call and answers
  * in words on every call after, with the events it emitted collected.
  */
-const startRequesting = async (options: { soul?: string; request?: object; agentless?: boolean } = {}) => {
+const startRequesting = async (options: { soul?: string; request?: object; agentless?: boolean; processEnv?: Record<string, string> } = {}) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-credreq-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
@@ -49,7 +49,7 @@ const startRequesting = async (options: { soul?: string; request?: object; agent
       ? openAiToolCall('credential_request', options.request ?? { name: 'github.token', reason: 'To open pull requests.' })
       : openAiText('asked');
   }) as typeof fetch;
-  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test', ...options.processEnv }, fetch: fetchImpl };
   const gateway = createGateway({ env, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
   const events: StratusEvent[] = [];
   gateway.bus.subscribe(async (event) => {
@@ -177,6 +177,22 @@ test('a request whose soul was given to another agent while it waited stores not
     const credentials = await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8').catch(() => '');
     assert.doesNotMatch(credentials, /ghp-secret-value/);
     assert.doesNotMatch(await readFile(soulFile, 'utf8'), /credentials/);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a key the daemon environment already supplies is not asked for, so a form never replaces it', async () => {
+  const { gateway, events } = await startRequesting({
+    request: { name: 'GITHUB_TOKEN' },
+    processEnv: { GITHUB_TOKEN: 'from-the-environment' },
+  });
+  try {
+    const session = await gateway.dispatch({ sessionId: 'kai-7', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const result = session.messages.find((message) => message.role === 'tool')?.toolResult;
+    assert.equal(result?.ok, false);
+    assert.match(result?.error ?? '', /GITHUB_TOKEN is already supplied by the daemon's environment but not granted to you/);
+    assert.equal(requestedIn(events), undefined);
   } finally {
     await gateway.stop();
   }

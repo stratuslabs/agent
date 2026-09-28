@@ -126,11 +126,25 @@ export const loadSoulFile = async (resolvedPath: string): Promise<ParsedSoul> =>
  * leaves the old one; a symlinked soul keeps its link, since the rename
  * lands on the file the link points at.
  *
- * Serialized within the process: two requests answered at once for one
- * agent would otherwise both read the same list, and the second write
- * would drop the first grant while both reported success.
+ * Serialized with every other soul write in the process
+ * (`withSoulFileLock`): two requests answered at once for one agent, or a
+ * grant beside a dashboard edit, would otherwise both read the same file,
+ * and the second write would drop the first while both reported success.
  */
-let soulGrants: Promise<unknown> = Promise.resolve();
+let soulWrites: Promise<unknown> = Promise.resolve();
+/**
+ * Serializes every read-modify-write of a soul within the process: the
+ * control API's field edits and `grantSoulCredential` both go through it.
+ * One chain for all of them, because a grant and a dashboard edit racing
+ * on one file would each derive from the same old version, and the second
+ * write would drop the first while both reported success.
+ */
+export const withSoulFileLock = async <T>(work: () => Promise<T>): Promise<T> => {
+  const next = soulWrites.then(work, work);
+  soulWrites = next.catch(() => undefined);
+  return next;
+};
+
 export const grantSoulCredential = async (soulPath: string, name: string, agentId: string): Promise<boolean> => {
   const grant = async (): Promise<boolean> => {
     // Identity is read at the configured path, which seeds a generated id,
@@ -157,9 +171,7 @@ export const grantSoulCredential = async (soulPath: string, name: string, agentI
     }
     return true;
   };
-  const next = soulGrants.then(grant, grant);
-  soulGrants = next.catch(() => undefined);
-  return next;
+  return withSoulFileLock(grant);
 };
 
 export interface RosterEntry {
