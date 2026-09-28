@@ -4330,13 +4330,30 @@ export const renderSkillsSection = (skills: readonly SkillDescriptor[] | undefin
 export const DEFAULT_LANGUAGE = 'en-US';
 
 /**
- * What a `language` setting may be: a BCP 47 tag's shape (`en-US`,
- * `en-GB`, `fr`, `pt-BR`), and nothing else. It is interpolated into every
- * prompt, and a project-local config may set it, so it cannot be allowed to
- * carry a sentence.
+ * A `language` setting in canonical form (`EN-us` is `en-US`), or nothing
+ * when it is not a BCP 47 tag.
+ *
+ * The runtime's own parser decides, rather than a pattern of ours: tags are
+ * case-insensitive and may carry extensions (`en-US-u-hc-h12`), and a
+ * hand-written shape refused both while the docs promised a language tag.
+ * The character and length gate in front of it is ours, and is the part
+ * that matters for safety: the tag is interpolated into every prompt and a
+ * project-local config may set it, so it may hold letters, digits, and
+ * hyphens and nothing that could make a sentence.
  */
-export const isLanguageTag = (value: unknown): value is string =>
-  typeof value === 'string' && /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}$/.test(value);
+const canonicalLanguageTag = (value: unknown): string | undefined => {
+  if (typeof value !== 'string' || value.length > 64 || !/^[A-Za-z0-9-]+$/.test(value)) {
+    return undefined;
+  }
+  try {
+    return Intl.getCanonicalLocales(value)[0];
+  } catch {
+    return undefined;
+  }
+};
+
+/** Whether a `language` setting is a BCP 47 tag; see `canonicalLanguageTag`. */
+export const isLanguageTag = (value: unknown): value is string => canonicalLanguageTag(value) !== undefined;
 
 const LANGUAGE_NAMES: Readonly<Record<string, string>> = {
   'en-US': 'American English',
@@ -4376,8 +4393,11 @@ const LANGUAGE_NAMES: Readonly<Record<string, string>> = {
  * itself.
  */
 export const renderReplySection = (language: string | undefined): string => {
-  const tag = isLanguageTag(language) ? language : DEFAULT_LANGUAGE;
-  const name = LANGUAGE_NAMES[tag];
+  const tag = canonicalLanguageTag(language) ?? DEFAULT_LANGUAGE;
+  // Named by language and region alone, so `en-GB-u-hc-h12` is still British
+  // English; the tag itself is shown whole.
+  const locale = new Intl.Locale(tag);
+  const name = LANGUAGE_NAMES[locale.region !== undefined ? `${locale.language}-${locale.region}` : locale.language];
   const variety = name === undefined ? `the language of the ${tag} locale` : name;
   const written = name === undefined ? `the language of the ${tag} locale` : `${name} (${tag})`;
   return [

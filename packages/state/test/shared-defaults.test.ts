@@ -28,10 +28,10 @@ test('the config file takes a language tag and refuses anything else', async () 
   const home = await newHome({ language: 'en-GB' });
   assert.equal((await loadConfigFile(path.join(home, '.stratus', 'config.json'))).language, 'en-GB');
 
-  const bad = await newHome({ language: 'British' });
+  const bad = await newHome({ language: 'British English' });
   await assert.rejects(
     loadConfigFile(path.join(bad, '.stratus', 'config.json')),
-    /Invalid language in config .*"British"\. Use a language tag like en-US or en-GB\./,
+    /Invalid language in config .*"British English"\. Use a language tag like en-US or en-GB\./,
   );
 });
 
