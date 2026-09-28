@@ -123,7 +123,7 @@ export const runChat = async (
     });
   };
 
-  const { runner, agent, metadata, disposePlugins } = await createAgentRuntime(streams, {
+  const { runner, agent, metadata, runtimeContext, disposePlugins } = await createAgentRuntime(streams, {
     runtime,
     approvals: command.approvals ?? defaultApprovalMode(env),
     approvalsDefaulted: command.approvals === undefined,
@@ -216,9 +216,9 @@ export const runChat = async (
       if (sessionId === undefined) {
         const id = randomUUID();
         sessionId = id;
-        session = await runner.run({ sessionId: id, agent, userMessage: line, metadata });
+        session = await runner.run({ sessionId: id, agent, userMessage: line, metadata, runtime: runtimeContext });
       } else {
-        session = await runner.resume({ sessionId, userMessage: line });
+        session = await runner.resume({ sessionId, userMessage: line, runtime: runtimeContext });
       }
       writeLine(streams.stdout, `${bold(`${agent.name} ›`)} ${lastAssistantReply(session)}`);
     } catch (error) {

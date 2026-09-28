@@ -1703,19 +1703,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
   const agentWorkspaces = createAgentWorkspaces(env);
   /**
-   * What an agent is told about how it runs. The soul path is the
-   * registered source's, so it follows a repointed default soul, and
-   * `soulReloads` is true because `refreshAgent` re-reads that file on
-   * every dispatch. The built-in agent has no file, so it is told only
-   * where its workspace is.
+   * What an agent is told about how it runs, from the source this dispatch
+   * refreshed and never from `sources` again. The persona the turn runs on
+   * came from that snapshot, and a repointed default soul can replace the
+   * registered source while the turn is still in preflight: read afresh,
+   * the agent would be told a file it is not running on is its soul.
+   *
+   * `soulReloads` is true because `refreshAgent` re-reads the file on every
+   * dispatch. A refresh that failed serves from cache and carries no path,
+   * so the agent is told nothing about a soul file for that turn rather
+   * than something the daemon could not just read. The built-in agent has
+   * no file, so it is told only where its workspace is.
    */
-  const agentRuntimeContext = (agent: AgentDefinition): AgentRuntimeContext => {
-    const soulPath = sources.get(agent.id)?.soulPath;
-    return {
-      ...(soulPath !== undefined ? { soulPath, soulReloads: true } : {}),
-      workspace: agentWorkspaces.forAgent(agent.id),
-    };
-  };
+  const runtimeContextFor = (source: AgentSource): AgentRuntimeContext => ({
+    ...(source.soulPath !== undefined ? { soulPath: source.soulPath, soulReloads: true } : {}),
+    workspace: agentWorkspaces.forAgent(source.definition.id),
+  });
 
   // ---- runner pool --------------------------------------------------------
 
@@ -1836,7 +1839,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       agents: registry,
       skills: skillCatalog,
       memory,
-      runtimeContext: agentRuntimeContext,
       streaming: true,
       ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
     });
@@ -2333,6 +2335,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           ...(input.images !== undefined ? { images: input.images } : {}),
           ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
+          runtime: runtimeContextFor(source),
           signal,
         });
       }
@@ -2344,6 +2347,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(input.images !== undefined ? { images: input.images } : {}),
         ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
         metadata,
+        runtime: runtimeContextFor(source),
         signal,
       });
     });
@@ -2504,7 +2508,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           controller.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
         }
         try {
-          await runner.recoverPendingApproval(sessionId, { denyPending: expired, signal: controller.signal });
+          await runner.recoverPendingApproval(sessionId, {
+            denyPending: expired,
+            runtime: runtimeContextFor(source),
+            signal: controller.signal,
+          });
         } finally {
           turnControllers.delete(controller);
           // A recovered firing's row outlived the process that would have

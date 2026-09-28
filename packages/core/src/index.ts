@@ -4668,6 +4668,17 @@ export interface RunInput {
    */
   addressed?: boolean;
   metadata?: JsonObject;
+  /**
+   * What the host can say about how this agent is run, rendered as the
+   * `runtime` section; see {@link AgentRuntimeContext}. Omitted, the
+   * section is not rendered.
+   *
+   * Per run rather than a runner option, because the answer belongs to the
+   * snapshot the host dispatched with: a daemon that re-reads the roster
+   * between two awaits would otherwise tell an agent running on one soul
+   * file that another file is its soul.
+   */
+  runtime?: AgentRuntimeContext;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
   signal?: AbortSignal;
 }
@@ -4687,6 +4698,8 @@ export interface ResumeInput {
    * trust.
    */
   metadata?: JsonObject;
+  /** See `RunInput.runtime`. */
+  runtime?: AgentRuntimeContext;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
   signal?: AbortSignal;
 }
@@ -4928,14 +4941,6 @@ export interface AgentRunnerOptions {
   /** Agent-scoped long-term memory, injected into every provider request. */
   memory?: AgentMemoryStore;
   /**
-   * What the host can tell an agent about how it is run, asked once per
-   * run, beside the tool list, for the agent the session runs as. See
-   * {@link AgentRuntimeContext}. A host that omits it renders no `runtime`
-   * section, and its agents are left to guess where their soul and
-   * workspace are.
-   */
-  runtimeContext?: (agent: AgentDefinition) => AgentRuntimeContext | undefined;
-  /**
    * How much of a session's images stay stored — bytes and a count, see
    * `omitImagesOutsideReplayBudget`. Defaults to core's constants for the
    * model API's limits; a host that omits it gets those, which is right
@@ -5056,7 +5061,7 @@ export class AgentRunner {
       await this.bus.emit({ type: 'session.tainted', sessionId: session.id, trust: senderTrust, source: 'sender' });
     }
 
-    return this.executeTurns(session, input.signal);
+    return this.executeTurns(session, input.signal, undefined, input.runtime);
   }
 
   /**
@@ -5150,7 +5155,7 @@ export class AgentRunner {
 
     await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
 
-    return this.executeTurns(working, input.signal);
+    return this.executeTurns(working, input.signal, undefined, input.runtime);
   }
 
   /**
@@ -5350,6 +5355,8 @@ export class AgentRunner {
      * re-ask the model — so recovery picks up exactly where the wait was.
      */
     resumeFrom?: { pending: ToolCall | undefined; remaining: ToolCall[]; parkedAt?: string; turn?: number },
+    /** See `RunInput.runtime`. */
+    runtime?: AgentRuntimeContext,
   ): Promise<Session> {
     let session = initialSession;
     let pendingEntry = resumeFrom;
@@ -5368,7 +5375,6 @@ export class AgentRunner {
         .filter((tool) => (tool.name === SKILL_READ_TOOL_NAME
           ? enabledSkills.length > 0
           : allowedTools === undefined || matchesToolAllowlist(tool.name, allowedTools)));
-      const runtime = this.options.runtimeContext?.(session.agent);
 
       // Resumed, not restarted: a recovered turn spends the budget it was
       // already on. Starting at 1 would let a call parked on the last
@@ -5700,6 +5706,8 @@ export class AgentRunner {
        * about at all, so they still face the policy normally.
        */
       denyPending?: boolean;
+      /** See `RunInput.runtime`. */
+      runtime?: AgentRuntimeContext;
       signal?: AbortSignal;
     } = {},
   ): Promise<Session | undefined> {
@@ -5741,7 +5749,7 @@ export class AgentRunner {
       // Result and retirement in one write: a crash between them would
       // either re-deny an answered call or lose the denial.
       await this.recordToolResult(session, result);
-        return this.executeTurns(session, options.signal, { pending: undefined, remaining, turn: record.turn });
+        return this.executeTurns(session, options.signal, { pending: undefined, remaining, turn: record.turn }, options.runtime);
     }
 
     return this.executeTurns(session, options.signal, {
@@ -5749,7 +5757,7 @@ export class AgentRunner {
       remaining,
       parkedAt: record.parkedAt,
       turn: record.turn,
-    });
+    }, options.runtime);
   }
 
   /**

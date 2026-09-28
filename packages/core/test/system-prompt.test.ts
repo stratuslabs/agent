@@ -187,7 +187,9 @@ test('the runtime section names the credentials the soul grants, and says there 
   assert.doesNotMatch(none, /Credentials you may use/);
 });
 
-test('the runner asks the host for the running agent’s context and hands it to the provider', async () => {
+test('the runtime a run was dispatched with reaches the provider, on a run and on a resume', async () => {
+  // Per run, not per runner: the host's answer belongs to the snapshot it
+  // dispatched with, and a runner is shared across dispatches.
   const requests: ProviderRequest[] = [];
   const provider: ModelProvider = {
     name: 'capturing',
@@ -196,24 +198,15 @@ test('the runner asks the host for the running agent’s context and hands it to
       return { parts: [{ type: 'text', text: 'ok' }] };
     },
   };
-  const asked: string[] = [];
-  const runner = new AgentRunner({
-    provider,
-    store: new InMemorySessionStore(),
-    runtimeContext: (agent) => {
-      asked.push(agent.id);
-      return { workspace: `/w/${agent.id}` };
-    },
-  });
+  const runner = new AgentRunner({ provider, store: new InMemorySessionStore() });
   await runner.initialize();
-  await runner.run({ sessionId: 'rt-1', agent: { id: 'ava', name: 'Ava' }, userMessage: 'hi' });
 
-  assert.deepEqual(asked, ['ava']);
-  assert.deepEqual(requests[0]?.runtime, { workspace: '/w/ava' });
+  await runner.run({ sessionId: 'rt-1', agent: { id: 'ava', name: 'Ava' }, userMessage: 'hi', runtime: { soulPath: '/souls/one.md' } });
+  await runner.resume({ sessionId: 'rt-1', userMessage: 'again', runtime: { soulPath: '/souls/two.md' } });
+  assert.deepEqual(requests[0]?.runtime, { soulPath: '/souls/one.md' });
+  assert.deepEqual(requests[1]?.runtime, { soulPath: '/souls/two.md' });
 
-  // A host that omits the slot sends no runtime at all.
-  const bare = new AgentRunner({ provider, store: new InMemorySessionStore() });
-  await bare.initialize();
-  await bare.run({ sessionId: 'rt-2', agent: { id: 'ava', name: 'Ava' }, userMessage: 'hi' });
-  assert.equal('runtime' in (requests[1] ?? {}), false);
+  // A run given none sends none.
+  await runner.run({ sessionId: 'rt-2', agent: { id: 'ava', name: 'Ava' }, userMessage: 'hi' });
+  assert.equal('runtime' in (requests[2] ?? {}), false);
 });

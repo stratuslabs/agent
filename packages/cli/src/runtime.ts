@@ -10,6 +10,7 @@ import {
   describeToolAllowlistFinding,
   unmatchedToolAllowlist,
   type AgentDefinition,
+  type AgentRuntimeContext,
   type AgentMemoryStore,
   type Executor,
   type ExecutorContribution,
@@ -381,14 +382,6 @@ export const createAgentRuntime = async (
       bus,
       skills,
       memory,
-      // No `soulReloads`: a run reads its soul once, before it starts. The
-      // path is told only to the agent it belongs to.
-      runtimeContext: (agent) => ({
-        ...(options.runtime.soulPath !== undefined && agent.id === options.runtime.soul?.agent.id
-          ? { soulPath: options.runtime.soulPath }
-          : {}),
-        workspace: createAgentWorkspaces(runEnv).forAgent(agent.id),
-      }),
       ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
     });
 
@@ -456,7 +449,17 @@ export const createAgentRuntime = async (
           executor: executorRecord,
         };
 
-    return { runner, agent, metadata, disposePlugins };
+    // What the agent is told about how it runs. No `soulReloads`: a run reads
+    // its soul once, before it starts, so an edit reaches the next run and
+    // not the next turn of this one.
+    const runtimeContext: AgentRuntimeContext = {
+      ...(options.runtime.soulPath !== undefined && options.runtime.soul !== undefined
+        ? { soulPath: options.runtime.soulPath }
+        : {}),
+      workspace: createAgentWorkspaces(runEnv).forAgent(agent.id),
+    };
+
+    return { runner, agent, metadata, runtimeContext, disposePlugins };
   } catch (error) {
     await disposePlugins();
     throw error;
@@ -477,13 +480,14 @@ export const runSingleLoop = async (
     configPath?: string;
   },
 ): Promise<Session> => {
-  const { runner, agent, metadata, disposePlugins } = await createAgentRuntime(streams, options);
+  const { runner, agent, metadata, runtimeContext, disposePlugins } = await createAgentRuntime(streams, options);
   try {
     return await runner.run({
       sessionId: randomUUID(),
       agent,
       userMessage: prompt,
       metadata,
+      runtime: runtimeContext,
     });
   } finally {
     // Even when the run failed: a plugin that started a browser started it
