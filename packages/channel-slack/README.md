@@ -309,10 +309,13 @@ The same approvers answer an agent's `credential.request`. The gateway hands
 the request to the adapter's `requestCredential`, the channel contract's
 method for this, and waits for it: the adapter resolves once the form is
 posted, and rejects, posting nothing, when the agent has no approvers, the
-turn is a DM with someone who is not one of them, the turn is not one the
-adapter dispatched from a Slack message, or Slack refuses the post. In a
-channel the form goes in the thread whoever is in it can see, the same as an
-approval posted there. Where to post comes from that turn (its conversation and
+turn is a DM with someone who is not one of them or a private channel or
+group DM none of them is a member of (`conversations.info`, then
+`conversations.members`, under the read scopes the manifest already has),
+the turn is not one the adapter dispatched from a Slack message, or Slack
+refuses the post. A public channel is open to everyone in the workspace and
+is not checked. When Slack will not answer the membership question, the
+form is refused rather than posted on a guess. Where to post comes from that turn (its conversation and
 thread), never from session metadata, which a control API caller can write. The gateway then
 drops the request and tells the agent why. The request is
 posted in the conversation the agent asked in (never an `approvalChannel`:

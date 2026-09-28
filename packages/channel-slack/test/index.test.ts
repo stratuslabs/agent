@@ -86,7 +86,9 @@ interface FakeWeb extends SlackWebLike {
   /** Held by chat.postMessage, so a test can act while a post is in flight. */
   postGate?: Promise<void>;
   /** What conversations.info answers for; anything else rejects channel_not_found. */
-  knownConversations: Map<string, { is_member?: boolean; is_im?: boolean }>;
+  knownConversations: Map<string, { is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean }>;
+  /** What conversations.members answers, one page per entry; unknown channels have no members. */
+  conversationMembers: Map<string, string[][]>;
   /**
    * The ts chat.postMessage answers with, for a test that orders bot
    * messages against user ones; the default `bot-ts-N` is readable but
@@ -155,6 +157,7 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
       },
     },
     knownConversations: new Map(),
+    conversationMembers: new Map(),
     conversations: {
       async info({ channel }) {
         const known = web.knownConversations.get(channel);
@@ -162,6 +165,12 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
           throw new Error('channel_not_found');
         }
         return { channel: { id: channel, ...known } };
+      },
+      async members({ channel, cursor }) {
+        const pages = web.conversationMembers.get(channel) ?? [[]];
+        const index = cursor === undefined ? 0 : Number(cursor);
+        const next = index + 1 < pages.length ? String(index + 1) : '';
+        return { members: pages[index] ?? [], response_metadata: { next_cursor: next } };
       },
     },
     users: {
@@ -7579,6 +7588,8 @@ const credentialAdapter = (approvers: string[]) => {
     createSocketClient: () => socket,
     createWebClient: () => web,
   });
+  // A public channel, where anyone in the workspace can see the thread.
+  web.knownConversations.set('C1', { is_member: true });
   const provided: Array<{ requestId: string; value: string; actor?: string }> = [];
   const pending = new Set<string>();
   let refuseWith: { message: string; retired: boolean } | undefined;
@@ -7868,5 +7879,24 @@ test('a direct message from someone who is not an approver gets no form nobody c
   const posted = formPosts().at(-1);
   assert.equal(posted?.channel, 'D1');
   assert.equal(posted?.thread_ts, undefined);
+  await adapter.stop();
+});
+
+test('a private conversation with no approver in it gets no form, and one with an approver does', async () => {
+  const { web, gateway, adapter, ask, formPosts } = credentialAdapter(['U-DYLAN']);
+  web.knownConversations.set('C1', { is_member: true, is_private: true });
+  // The approver is on the second page, so an answer from the first alone would be wrong.
+  web.conversationMembers.set('C1', [['U-STRANGER', 'B-AVA'], ['U-OTHER']]);
+  await adapter.start(gateway);
+  await assert.rejects(ask(), /none of Ava's approvers is a member of this private conversation/);
+  assert.equal(formPosts().length, 0);
+
+  web.conversationMembers.set('C1', [['U-STRANGER', 'B-AVA'], ['U-DYLAN']]);
+  await ask({ requestId: 'cred-private' });
+  assert.equal(formPosts().at(-1)?.channel, 'C1');
+
+  // Slack not saying is a refusal, not a guess.
+  web.knownConversations.delete('C1');
+  await assert.rejects(ask({ requestId: 'cred-unknown' }), /Slack would not say who can see this conversation \(channel_not_found\)/);
   await adapter.stop();
 });

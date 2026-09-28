@@ -1948,11 +1948,34 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return { requestId };
   }));
 
+  /**
+   * Requests an answer is being stored for now. Claimed before the first
+   * await: two approvers submitting one form at once would otherwise both
+   * start storing, and the second's add-only conflict would retire a
+   * request the first was about to settle as added.
+   */
+  const answering = new Set<string>();
+
   const provideCredential = async (input: ProvideCredentialInput): Promise<ProvideCredentialResult> => {
     const request = credentialRequests.get(input.requestId);
     if (!request) {
       return { ok: false, retired: true, message: 'That credential request is no longer pending. Ask the agent to request it again.' };
     }
+    if (answering.has(input.requestId)) {
+      return { ok: false, message: 'Someone else\'s answer to this request is being stored right now. Wait a moment before trying again.' };
+    }
+    answering.add(input.requestId);
+    try {
+      return await answerCredentialRequest(input, request);
+    } finally {
+      answering.delete(input.requestId);
+    }
+  };
+
+  const answerCredentialRequest = async (
+    input: ProvideCredentialInput,
+    request: NonNullable<ReturnType<typeof credentialRequests.get>>,
+  ): Promise<ProvideCredentialResult> => {
     // The soul the grant will land in must still be the requester's, and is
     // checked before anything is stored: a file reassigned to another agent
     // while the request waited would otherwise receive a key nobody meant

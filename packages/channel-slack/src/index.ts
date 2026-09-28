@@ -341,7 +341,16 @@ export interface SlackWebLike {
      * `im:read`, `mpim:read`) — see the README's app manifest.
      */
     info(args: { channel: string }): Promise<{
-      channel?: { id?: string; is_member?: boolean; is_im?: boolean };
+      channel?: { id?: string; is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean };
+    }>;
+    /**
+     * Who is in a conversation, a page at a time. Asked before a credential
+     * form goes into a private one, so it never lands where no approver can
+     * see it. Same read scopes as `info`.
+     */
+    members(args: { channel: string; cursor?: string; limit?: number }): Promise<{
+      members?: string[];
+      response_metadata?: { next_cursor?: string };
     }>;
   };
   users: {
@@ -3142,6 +3151,35 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
+   * Whether an approver can see a conversation: any public channel, or a
+   * private one with an approver among its members. Rejects, with the
+   * reason, when Slack will not say, so the caller refuses rather than
+   * guesses.
+   */
+  const approverCanSee = async (connection: AgentConnection, channel: string, approvers: Set<string>): Promise<boolean> => {
+    try {
+      const info = (await connection.web.conversations.info({ channel })).channel;
+      if (info?.is_private !== true && info?.is_mpim !== true) {
+        return true;
+      }
+      let cursor: string | undefined;
+      do {
+        const page = await connection.web.conversations.members({ channel, limit: 200, ...(cursor ? { cursor } : {}) });
+        if ((page.members ?? []).some((member) => approvers.has(member))) {
+          return true;
+        }
+        cursor = page.response_metadata?.next_cursor || undefined;
+      } while (cursor !== undefined);
+      return false;
+    } catch (error) {
+      throw new Error(
+        `Slack would not say who can see this conversation (${error instanceof Error ? error.message : String(error)}), so the form was not posted. `
+        + 'The app needs the conversations read scopes (channels:read, groups:read, mpim:read); see the app manifest.',
+      );
+    }
+  };
+
+  /**
    * The channel contract's `requestCredential`: posts the form and resolves
    * only once it is up with a button an approver can press. Every refusal
    * rejects with a sentence for the agent, which the gateway hands it in
@@ -3172,6 +3210,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const channel = turn.channel;
     const thread = turn.threadTs;
+    const unseen = `Nobody who can add it can see this conversation`;
     const approvers = new Set((connection.config.approvers ?? []).filter((id) => id.length > 0));
     const agentName = gateway.agents().find((agent) => agent.id === request.agentId)?.name ?? request.agentId;
     if (approvers.size === 0 || gateway.provideCredential === undefined) {
@@ -3182,11 +3221,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // A DM has one person in it besides the app. Posted there for someone
     // who is not an approver, the form is a button only they can see and
     // only approvers can press, which is a request nobody can answer.
+    const elsewhere = 'Ask in a channel an approver is in, or ask one of them directly.';
     if (turn.dmWith !== undefined && !approvers.has(turn.dmWith)) {
-      throw new Error(
-        `Nobody who can add it can see this conversation: it is a direct message with someone who is not an approver for ${agentName}. `
-        + 'Ask in a channel an approver is in, or ask one of them directly.',
-      );
+      throw new Error(`${unseen}: it is a direct message with someone who is not an approver for ${agentName}. ${elsewhere}`);
+    }
+    // A private channel or group DM shows the button only to its members,
+    // so one with no approver in it is the DM case again with more people.
+    // A public channel is open to anyone in the workspace, approvers
+    // included, and is not checked. Unknown is refused, not assumed fine:
+    // a form posted where nobody can answer it waits forever.
+    if (turn.dmWith === undefined && !(await approverCanSee(connection, channel, approvers))) {
+      throw new Error(`${unseen}: none of ${agentName}'s approvers is a member of this private conversation. ${elsewhere}`);
     }
     let posted: { ts?: string; channel?: string };
     try {

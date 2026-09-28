@@ -336,3 +336,23 @@ test('a request whose name was stored since is retired, since add-only means no 
     await gateway.stop();
   }
 });
+
+test('two answers to one request at once store one, and the other waits instead of retiring it', async () => {
+  const { gateway, events } = await startRequesting({ request: { name: 'search.apiKey', scope: 'shared' } });
+  try {
+    await gateway.dispatch({ sessionId: 'kai-14', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    const [first, second] = await Promise.all([
+      gateway.provideCredential({ requestId, value: 'sk-first', actor: 'U-DYLAN' }),
+      gateway.provideCredential({ requestId, value: 'sk-second', actor: 'U-BEA' }),
+    ]);
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, false);
+    assert.equal(second.ok ? undefined : second.retired, undefined, 'the answer being stored is not retired by the one behind it');
+    assert.match(second.ok ? '' : second.message, /being stored right now/);
+    const provided = events.filter((event) => event.type === 'credential.provided');
+    assert.equal(provided.length, 1);
+  } finally {
+    await gateway.stop();
+  }
+});

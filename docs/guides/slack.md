@@ -236,9 +236,9 @@ started from a Slack message, and the form goes to that message's thread:
 session metadata saying `channel: slack` is not enough, since a control API
 caller can write it. The agent hears that its operator was asked
 only once the form is posted. With no approver configured for it, or a post
-Slack refused, or a direct message with someone who is not an approver (the
-one person who would see the button could not press it), nothing is posted
-or left pending, and the agent is told why,
+Slack refused, or a conversation no approver can see (a direct message with
+someone who is not one, or a private channel or group DM with none of them
+in it), nothing is posted or left pending, and the agent is told why,
 so it never says it is waiting on someone who cannot see the question. A
 key that is already stored, or supplied by the daemon's environment, but not
 granted is not asked for either: the agent is told to have it added to its
