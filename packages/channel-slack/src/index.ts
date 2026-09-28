@@ -632,8 +632,9 @@ class ReplyRenderer {
   /** The tool the turn is running, for the status line; the streamed `toolLine` is the other mode's. */
   private runningTool: string | undefined;
   private readonly web: SlackWebLike;
-  private readonly channel: string;
-  private readonly threadTs: string | undefined;
+  /** The conversation, and the thread in it, this turn replies into. */
+  readonly channel: string;
+  readonly threadTs: string | undefined;
   private readonly editIntervalMs: number;
   private readonly warn: (line: string) => void;
   private readonly now: () => number;
@@ -1945,6 +1946,9 @@ const CREDENTIAL_ADD_ACTION = 'stratus_credential_add';
 const CREDENTIAL_VIEW = 'stratus_credential';
 const CREDENTIAL_BLOCK = 'credential_value';
 const CREDENTIAL_INPUT = 'value';
+// Under Slack's three-second acknowledgement window, with room for the ack
+// itself to travel.
+const CREDENTIAL_ACK_MS = 2500;
 // A reason is the agent's own text, shown to a person deciding whether to
 // hand over a key; long enough to explain, short enough to read.
 const CREDENTIAL_REASON_LIMIT = 300;
@@ -2031,6 +2035,8 @@ const credentialModal = (post: PendingCredentialPost, requestId: string): SlackB
 interface PendingCredentialPost {
   connection: AgentConnection;
   channel: string;
+  /** The thread the request was posted in, for a late answer's notice. */
+  thread?: string;
   ts: string;
   agentId: string;
   agentName: string;
@@ -3142,16 +3148,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ? `${request.agentId}'s Slack app is not connected right now.`
         : `${request.agentId} has no Slack app.`);
     }
-    // Only in the conversation the agent asked in. Unlike an approval there
-    // is no fallback channel: the person who can answer is the one the
-    // agent is talking to, and a key asked for somewhere else is a request
-    // nobody in the conversation can see being made.
-    const metadata = request.metadata;
-    if (metadata.channel !== 'slack' || typeof metadata.slackChannel !== 'string') {
-      throw new Error('This conversation is not a Slack conversation the form can be posted in.');
+    // Only in the conversation the agent asked in, and only for a turn this
+    // adapter dispatched from a Slack message: where to post comes from
+    // that turn's renderer, never from the session's metadata, which an
+    // HTTP caller can write (`channel: slack`, any `slackChannel`) to put a
+    // request nobody made in that conversation in front of its approvers.
+    // Unlike an approval there is no fallback channel: the person who can
+    // answer is the one the agent is talking to.
+    const active = gateway.activeTurnId?.(request.sessionId);
+    const turn = active === undefined
+      ? undefined
+      : (renderers.get(request.sessionId) ?? []).find((renderer) => renderer.turnId === active);
+    if (!turn) {
+      throw new Error('This turn did not come from a Slack message, so there is nobody in Slack to show the form to.');
     }
-    const channel = metadata.slackChannel;
-    const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
+    const channel = turn.channel;
+    const thread = turn.threadTs;
     const approvers = new Set((connection.config.approvers ?? []).filter((id) => id.length > 0));
     const agentName = gateway.agents().find((agent) => agent.id === request.agentId)?.name ?? request.agentId;
     if (approvers.size === 0 || gateway.provideCredential === undefined) {
@@ -3177,6 +3189,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     credentialPosts.set(request.requestId, {
       connection,
       channel: posted.channel ?? channel,
+      ...(thread !== undefined ? { thread } : {}),
       ts: posted.ts,
       agentId: request.agentId,
       agentName,
@@ -3196,7 +3209,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ? `for ${escapeSlackText(post.agentName)} only`
       : `as a shared credential, granted to ${escapeSlackText(post.agentName)}`;
     const by = event.actor !== undefined && post.approvers.has(event.actor) ? `, by <@${event.actor}>` : '';
-    const text = `Added \`${escapeSlackText(post.name)}\` ${whose}${by}. ${escapeSlackText(post.agentName)} can use it from its next reply; the value is in the credential store, not here.`;
+    const text = event.grantError === undefined
+      ? `Added \`${escapeSlackText(post.name)}\` ${whose}${by}. ${escapeSlackText(post.agentName)} can use it from its next reply; the value is in the credential store, not here.`
+      : `Stored \`${escapeSlackText(post.name)}\` ${event.scope === 'agent' ? `for ${escapeSlackText(post.agentName)}` : 'as a shared credential'}${by}, `
+        + `but it could not be added to ${escapeSlackText(post.agentName)}'s soul (${escapeSlackText(event.grantError)}), so ${escapeSlackText(post.agentName)} cannot use it yet. `
+        + 'Add the name to the credentials list in its soul on the machine.';
     try {
       await post.connection.web.chat.update({ channel: post.channel, ts: post.ts, text, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] });
     } catch (error) {
@@ -3257,19 +3274,47 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     const value = view?.state?.values?.[CREDENTIAL_BLOCK]?.[CREDENTIAL_INPUT]?.value ?? '';
-    let result: { ok: true } | { ok: false; message: string };
-    try {
-      result = await gateway.provideCredential({ requestId, value, actor: submitter });
-    } catch (error) {
-      result = { ok: false, message: `It could not be stored: ${error instanceof Error ? error.message : String(error)}` };
-    }
-    if (!result.ok) {
-      await refuse(result.message);
+    const answer = gateway.provideCredential({ requestId, value, actor: submitter }).catch(
+      (error: unknown): { ok: false; message: string } => ({
+        ok: false,
+        message: `It could not be stored: ${error instanceof Error ? error.message : String(error)}`,
+      }),
+    );
+    // Slack wants the submission acked within three seconds, and storing
+    // is two locked file writes and every bus subscriber: usually far
+    // inside that, not always. An answer in time keeps the form open with
+    // a refusal beside the field; a late one closes the form first and
+    // tells the submitter privately, rather than letting Slack time out
+    // and retry a submission the first attempt may already have stored.
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<'late'>((resolve) => {
+      timer = setTimeout(() => resolve('late'), CREDENTIAL_ACK_MS);
+    });
+    const first = await Promise.race([answer, deadline]);
+    clearTimeout(timer);
+    if (first !== 'late') {
+      // A plain ack closes the form. The message is rewritten from
+      // `credential.provided`, the one path every way of answering goes
+      // through.
+      await (first.ok ? args.ack() : refuse(first.message));
       return;
     }
-    // Closes the form. The message is rewritten from `credential.provided`,
-    // the one path every way of answering goes through.
     await args.ack();
+    track(answer.then(async (result) => {
+      if (result.ok) {
+        return;
+      }
+      try {
+        await connection.web.chat.postEphemeral({
+          channel: post.channel,
+          user: submitter,
+          text: `${post.name} was not added: ${result.message}`,
+          ...(post.thread !== undefined ? { thread_ts: post.thread } : {}),
+        });
+      } catch (error) {
+        warn(`slack: could not tell ${submitter} a credential was not added (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }));
   };
 
   const handleInteractive = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {

@@ -3270,8 +3270,14 @@ export type StratusEvent =
       metadata?: JsonObject;
     }
   /**
-   * A requested credential was stored and granted to the agent that asked.
-   * Names only; the value went to the credential store and nowhere else.
+   * A requested credential was stored for the agent that asked, and granted
+   * to it. Names only; the value went to the credential store and nowhere
+   * else.
+   *
+   * Emitted once the key is stored, whether or not the grant then landed:
+   * a key added from a chat is a change on disk, and a shared one is
+   * already usable by every agent granted that name, so it is recorded even
+   * when the soul write failed. `grantError` says it did, and why.
    */
   | {
       type: 'credential.provided';
@@ -3282,6 +3288,8 @@ export type StratusEvent =
       scope: CredentialScope;
       /** Who provided it. Channel-native id (a Slack user). */
       actor?: string;
+      /** Set when the key was stored but could not be added to the soul. */
+      grantError?: string;
     }
   | {
       type: 'session.completed';

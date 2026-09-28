@@ -309,7 +309,9 @@ The same approvers answer an agent's `credential.request`. The gateway hands
 the request to the adapter's `requestCredential`, the channel contract's
 method for this, and waits for it: the adapter resolves once the form is
 posted, and rejects, posting nothing, when the agent has no approvers, the
-conversation is not a Slack one, or Slack refuses the post. The gateway then
+turn is not one the adapter dispatched from a Slack message, or Slack
+refuses the post. Where to post comes from that turn (its conversation and
+thread), never from session metadata, which a control API caller can write. The gateway then
 drops the request and tells the agent why. The request is
 posted in the conversation the agent asked in (never an `approvalChannel`:
 the person who can answer is the one the agent is talking to) with an **Add
@@ -324,7 +326,12 @@ gateway's `provideCredential`, which stores it add-only and grants it in the
 requesting agent's soul. A refusal (a name already stored, an empty value, a
 request no longer pending) comes back as a `response_action: errors` ack,
 which keeps the modal open with the reason under the field. On success the
-request message is rewritten to say what was added, for whom, and by whom.
+request message is rewritten to say what was added, for whom, and by whom,
+or, when the key was stored but the soul could not be written, that the
+agent cannot use it until the name is added by hand. The submission is
+acked within Slack's three-second window: an answer slower than that closes
+the modal first, and a refusal arriving after is sent to the submitter as
+an ephemeral message in the request's thread.
 The value is read from the submission and passed to the gateway; the adapter
 never logs it, posts it, or dispatches it. Modals need no scope beyond the bot's,
 and arrive over the same Socket Mode connection as clicks. The full flow is

@@ -213,20 +213,31 @@ submission; anyone else in the thread is told they cannot. What the form does:
   that one agent; others need their own soul entry. The agent can use it
   from its next reply. A soul file given to another agent while the
   request waited stores nothing: the form says so, and the agent asks again.
+  A key stored whose soul could not then be written is recorded like any
+  other (`credential.provided`, with the error), and the message says the
+  agent cannot use it until the name is added to its soul by hand.
 - **The value never enters the conversation.** It goes from the form to
   `~/.stratus/credentials.json` and nowhere else: not the thread, the
   transcript, the model, the event stream, or the daemon log. What the log
   records is the name, the scope, and who added it.
+- **Slack hears back in time.** A submission is answered within Slack's
+  three-second window. When storing takes longer, the form closes first,
+  and if the key then could not be added, the submitter gets a private
+  message saying why.
 
 An agent asks only in a conversation a channel started, and only in a
 channel that can show the form, which today is Slack; a scheduled or HTTP
 turn, or a conversation in another channel, is told to have the operator run
-`stratus credential set` instead. The agent hears that its operator was asked
+`stratus credential set` instead. For Slack that means a turn the adapter
+started from a Slack message, and the form goes to that message's thread:
+session metadata saying `channel: slack` is not enough, since a control API
+caller can write it. The agent hears that its operator was asked
 only once the form is posted. With no approver configured for it, or a post
 Slack refused, nothing is posted or left pending, and the agent is told why,
-so it never says it is waiting on someone who cannot see the question. A key that is already stored,
-or supplied by the daemon's environment, but not granted is not asked for either: the agent is told to have it
-added to its soul. Requests live in the daemon's memory, so after a restart
+so it never says it is waiting on someone who cannot see the question. A
+key that is already stored, or supplied by the daemon's environment, but not
+granted is not asked for either: the agent is told to have it added to its
+soul. Requests live in the daemon's memory, so after a restart
 the button answers that the request is no longer pending and the agent
 asks again. The form uses Slack's interactivity, which the app manifest in
 the [`@stratusagent/channel-slack` README](../../packages/channel-slack/README.md)

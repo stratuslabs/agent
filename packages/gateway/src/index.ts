@@ -1982,16 +1982,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     credentialRequests.delete(input.requestId);
     // Stored first, granted second: a key nobody may use is recoverable by
     // editing the soul, while a soul naming a key that was never stored
-    // fails every call that reaches for it.
-    let granted: boolean;
+    // fails every call that reaches for it. Announced either way, because
+    // the store already changed and a shared key is already usable.
+    let granted = false;
+    let grantError: string | undefined;
     try {
       granted = await grantSoulCredential(request.soulPath, request.name, request.agentId);
     } catch (error) {
-      return {
-        ok: false,
-        message: `${request.name} was stored, but could not be added to ${request.soulPath} `
-          + `(${error instanceof Error ? error.message : String(error)}). Add it to the soul's credentials list by hand.`,
-      };
+      grantError = error instanceof Error ? error.message : String(error);
     }
     await bus.emit({
       type: 'credential.provided',
@@ -2001,7 +1999,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       name: request.name,
       scope: request.scope,
       ...(input.actor !== undefined ? { actor: input.actor } : {}),
+      ...(grantError !== undefined ? { grantError } : {}),
     });
+    if (grantError !== undefined) {
+      return {
+        ok: false,
+        message: `${request.name} was stored, but could not be added to ${request.soulPath} `
+          + `(${grantError}). Add it to the soul's credentials list by hand.`,
+      };
+    }
     return { ok: true, name: request.name, scope: request.scope, agentId: request.agentId, granted };
   };
 

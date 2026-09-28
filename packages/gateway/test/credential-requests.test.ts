@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { StratusEvent } from '@stratusagent/core';
+import { withSoulFileLock } from '@stratusagent/state';
 import { createGateway, type GatewayChannelAdapter } from '../src/index.ts';
 
 const openAiText = (text: string): Response =>
@@ -266,6 +267,40 @@ test('a form the channel failed to post is reported to the agent and leaves noth
     assert.ok(seen);
     const late = await gateway.provideCredential({ requestId: seen, value: 'ghp-1' });
     assert.equal(late.ok, false, 'the dropped request cannot be answered');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a key stored whose grant then fails is still announced, so the change on disk has a record', async () => {
+  const { home, soulFile, gateway, events } = await startRequesting();
+  try {
+    await gateway.dispatch({ sessionId: 'kai-11', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    const credentialsFile = path.join(home, '.stratus', 'credentials.json');
+    // Holding the soul lock parks the grant behind this, and the owner check
+    // ran before the key was stored: so once the value is on disk, a
+    // reassigned soul is what the grant finds. Gated on the store itself,
+    // over a bounded run of reads rather than a clock.
+    const reassigned = withSoulFileLock(async () => {
+      for (let attempt = 0; attempt < 10_000; attempt += 1) {
+        if ((await readFile(credentialsFile, 'utf8').catch(() => '')).includes('ghp-secret-value')) {
+          await writeFile(soulFile, '---\nname: Bea\nid: bea\nprovider: openai\nmodel: model-a\n---\n\nYou are Bea.\n');
+          return;
+        }
+      }
+      throw new Error('the value was never stored');
+    });
+    const result = await gateway.provideCredential({ requestId, value: 'ghp-secret-value', actor: 'U-DYLAN' });
+    await reassigned;
+
+    assert.equal(result.ok, false);
+    assert.match(result.ok ? '' : result.message, /github\.token was stored, but could not be added to .*now declares agent bea/);
+    const provided = events.find((event): event is Extract<StratusEvent, { type: 'credential.provided' }> => event.type === 'credential.provided');
+    assert.ok(provided, 'the stored key was announced');
+    assert.equal(provided.actor, 'U-DYLAN');
+    assert.match(provided.grantError ?? '', /now declares agent bea, not kai/);
+    assert.doesNotMatch(JSON.stringify(events), /ghp-secret-value/);
   } finally {
     await gateway.stop();
   }

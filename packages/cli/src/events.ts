@@ -24,7 +24,8 @@ export const formatEvent = (event: StratusEvent): string | null => {
     case 'credential.requested':
       return `• credential.requested ${event.name} (${event.scope}) for ${event.agentId}`;
     case 'credential.provided':
-      return `• credential.provided ${event.name} (${event.scope}) for ${event.agentId}${event.actor ? ` by ${event.actor}` : ''}`;
+      return `• credential.provided ${event.name} (${event.scope}) for ${event.agentId}${event.actor ? ` by ${event.actor}` : ''}`
+        + (event.grantError !== undefined ? ' — stored, not granted' : '');
     case 'session.completed':
       return `• session.completed ${event.sessionId}`;
     case 'session.failed':
@@ -107,6 +108,7 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
         scope: event.scope,
         requestId: event.requestId,
         ...(event.actor ? { actor: event.actor } : {}),
+        ...(event.grantError !== undefined ? { grantError: event.grantError } : {}),
       };
     case 'session.failed':
       return { error: event.error };
