@@ -2530,6 +2530,30 @@ export const totalTokenUsage = (records: readonly TokenUsage[]): TokenUsage | un
   return reported ? total : undefined;
 };
 
+/**
+ * Facts about how an agent is run that only the host knows, told to the
+ * agent so it does not have to guess them.
+ *
+ * It does guess otherwise, and guesses wrong: an agent asked to reread its
+ * soul after an edit answered that it had none, because there was no
+ * `SOUL.md` in its workspace, which is where other agent runtimes keep one.
+ * Handed in by the host rather than written into the soul because the
+ * paths are the host's to own, and a copy in every soul would go stale the
+ * next time the layout moved, the way the workspace already did once.
+ */
+export interface AgentRuntimeContext {
+  /** Absolute path of the soul file this agent's persona was loaded from. */
+  soulPath?: string;
+  /**
+   * True when the host reads the soul again before every turn, so an edit
+   * reaches the agent's next reply. The daemon does; a one-shot run reads
+   * it once, and leaving this out says nothing either way.
+   */
+  soulReloads?: boolean;
+  /** Where this agent's files go: `AgentWorkspaces.forAgent`. */
+  workspace?: string;
+}
+
 export interface ProviderRequest {
   /**
    * The live session. **Persistable**: a provider that saves it, or hands
@@ -2582,6 +2606,12 @@ export interface ProviderRequest {
    * the model decides a description is relevant.
    */
   skills?: SkillDescriptor[];
+  /**
+   * What the host can say about how this agent is run: where its soul and
+   * workspace are. Rendered as the `runtime` section; see
+   * {@link AgentRuntimeContext}.
+   */
+  runtime?: AgentRuntimeContext;
   /**
    * Streaming sink. Adapters that stream call this per fragment and MUST
    * await the returned promise before the next call (backpressure); the
@@ -4314,6 +4344,52 @@ export const renderChannelSection = (session: Pick<Session, 'metadata'>): string
   return `Where you are: this conversation is happening in ${name}. The people in it are writing to you there and your replies are posted back to them there, so you are talking in ${name} whether or not you have any ${name} tools. What they attach reaches you with their message.`;
 };
 
+/**
+ * How this agent is run, for a host that said (see
+ * {@link AgentRuntimeContext}).
+ *
+ * It says the soul is already in the prompt as firmly as it says where the
+ * file is. An agent told only a path treats it as something to go and read,
+ * and it usually cannot: the soul sits beside its state directory, outside
+ * any root an operator hands `tool-fs`, and it has to stay there, since
+ * the soul is what grants the agent its tools and credentials.
+ *
+ * Credentials get the same treatment, and for the same reason: an agent
+ * whose operator had stored a shared key went looking through its files and
+ * its environment for it. A named credential only ever reaches a plugin tool
+ * that declared it, so the section names what the soul grants and says there
+ * is nothing to find. Names only; a value never comes near a prompt.
+ * Written without em dashes for the reason the reply section is.
+ */
+export const renderRuntimeSection = (
+  runtime: AgentRuntimeContext | undefined,
+  agent: Pick<AgentDefinition, 'credentials'>,
+): string | undefined => {
+  if (runtime === undefined) {
+    return undefined;
+  }
+  const lines: string[] = [];
+  if (runtime.soulPath) {
+    lines.push(
+      `Your soul, the persona and instructions you were given here, is the file ${runtime.soulPath}. `
+      + 'Its contents are already part of these instructions, so there is nothing to open or reread, '
+      + 'and it is not a file in your workspace.'
+      + (runtime.soulReloads ? ' Stratus reads it again before every turn, so an edit to it reaches your next reply.' : ''),
+    );
+  }
+  if (runtime.workspace) {
+    lines.push(`Your workspace, the directory where Stratus keeps the files your tools make for you, is ${runtime.workspace}.`);
+  }
+  const credentials = agent.credentials ?? [];
+  lines.push(
+    (credentials.length > 0
+      ? `Credentials you may use: ${credentials.join(', ')}. The tools that need one use it on your behalf, so you never see a value, and there is no file or environment variable to look for. `
+      : 'You hold no credentials. ')
+    + 'When a task needs a credential you do not hold, ask your operator to store it with stratus credential set and grant it to you.',
+  );
+  return `How you run: you are an agent on Stratus Agent. ${lines.join(' ')}`;
+};
+
 export interface SystemPromptOptions {
   /** Host-level preamble, rendered before the agent's own persona. */
   preamble?: string;
@@ -4325,12 +4401,12 @@ export interface SystemPromptOptions {
  * Which part of what an agent is told a section is.
  *
  * The distinction a caller actually needs is stable versus volatile:
- * `preamble`, `replies`, `persona`, `channel`, and `skills` are byte-identical across every turn of
+ * `preamble`, `replies`, `persona`, `runtime`, `channel`, and `skills` are byte-identical across every turn of
  * an agent's life, while `memory` is rewritten whenever the agent remembers
  * anything. A provider that caches its request prefix has to place those two
  * groups differently, and it cannot tell them apart from rendered strings.
  */
-export type SystemPromptSectionKind = 'preamble' | 'replies' | 'persona' | 'channel' | 'memory' | 'skills';
+export type SystemPromptSectionKind = 'preamble' | 'replies' | 'persona' | 'runtime' | 'channel' | 'memory' | 'skills';
 
 export interface SystemPromptSection {
   kind: SystemPromptSectionKind;
@@ -4352,13 +4428,14 @@ export interface SystemPromptSection {
  * `renderSystemPromptSections` is the same rule with the labels dropped.
  */
 export const renderSystemPromptParts = (
-  request: Pick<ProviderRequest, 'session' | 'memory' | 'skills'>,
+  request: Pick<ProviderRequest, 'session' | 'memory' | 'skills' | 'runtime'>,
   options: SystemPromptOptions = {},
 ): SystemPromptSection[] => {
   const sections: Array<{ kind: SystemPromptSectionKind; text: string | undefined }> = [
     { kind: 'preamble', text: options.preamble },
     { kind: 'replies', text: REPLY_SECTION },
     { kind: 'persona', text: renderPersonaSection(request.session.agent, { fallback: options.fallbackPersona ?? false }) },
+    { kind: 'runtime', text: renderRuntimeSection(request.runtime, request.session.agent) },
     { kind: 'channel', text: renderChannelSection(request.session) },
     { kind: 'memory', text: renderMemorySection(request.memory) },
     { kind: 'skills', text: renderSkillsSection(request.skills) },
@@ -4370,13 +4447,13 @@ export const renderSystemPromptParts = (
 
 /** The sections as plain strings, in the same order. */
 export const renderSystemPromptSections = (
-  request: Pick<ProviderRequest, 'session' | 'memory' | 'skills'>,
+  request: Pick<ProviderRequest, 'session' | 'memory' | 'skills' | 'runtime'>,
   options: SystemPromptOptions = {},
 ): string[] => renderSystemPromptParts(request, options).map((section) => section.text);
 
 /** The sections joined the way single-string providers send them. */
 export const renderSystemPrompt = (
-  request: Pick<ProviderRequest, 'session' | 'memory' | 'skills'>,
+  request: Pick<ProviderRequest, 'session' | 'memory' | 'skills' | 'runtime'>,
   options: SystemPromptOptions = {},
 ): string | undefined => {
   const sections = renderSystemPromptSections(request, options);
@@ -4591,6 +4668,17 @@ export interface RunInput {
    */
   addressed?: boolean;
   metadata?: JsonObject;
+  /**
+   * What the host can say about how this agent is run, rendered as the
+   * `runtime` section; see {@link AgentRuntimeContext}. Omitted, the
+   * section is not rendered.
+   *
+   * Per run rather than a runner option, because the answer belongs to the
+   * snapshot the host dispatched with: a daemon that re-reads the roster
+   * between two awaits would otherwise tell an agent running on one soul
+   * file that another file is its soul.
+   */
+  runtime?: AgentRuntimeContext;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
   signal?: AbortSignal;
 }
@@ -4610,6 +4698,8 @@ export interface ResumeInput {
    * trust.
    */
   metadata?: JsonObject;
+  /** See `RunInput.runtime`. */
+  runtime?: AgentRuntimeContext;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
   signal?: AbortSignal;
 }
@@ -4971,7 +5061,7 @@ export class AgentRunner {
       await this.bus.emit({ type: 'session.tainted', sessionId: session.id, trust: senderTrust, source: 'sender' });
     }
 
-    return this.executeTurns(session, input.signal);
+    return this.executeTurns(session, input.signal, undefined, input.runtime);
   }
 
   /**
@@ -5065,7 +5155,7 @@ export class AgentRunner {
 
     await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
 
-    return this.executeTurns(working, input.signal);
+    return this.executeTurns(working, input.signal, undefined, input.runtime);
   }
 
   /**
@@ -5265,6 +5355,8 @@ export class AgentRunner {
      * re-ask the model — so recovery picks up exactly where the wait was.
      */
     resumeFrom?: { pending: ToolCall | undefined; remaining: ToolCall[]; parkedAt?: string; turn?: number },
+    /** See `RunInput.runtime`. */
+    runtime?: AgentRuntimeContext,
   ): Promise<Session> {
     let session = initialSession;
     let pendingEntry = resumeFrom;
@@ -5408,6 +5500,7 @@ export class AgentRunner {
               ...(wrappingUp && tools.length > 0 ? { toolChoice: 'none' as const } : {}),
               ...(injected.length > 0 || memory.topics.length > 0 ? { memory } : {}),
               ...(enabledSkills.length > 0 ? { skills: enabledSkills } : {}),
+              ...(runtime !== undefined ? { runtime } : {}),
               ...(this.streaming ? { onDelta } : {}),
               onUsage,
               ...(signal ? { signal } : {}),
@@ -5613,6 +5706,8 @@ export class AgentRunner {
        * about at all, so they still face the policy normally.
        */
       denyPending?: boolean;
+      /** See `RunInput.runtime`. */
+      runtime?: AgentRuntimeContext;
       signal?: AbortSignal;
     } = {},
   ): Promise<Session | undefined> {
@@ -5654,7 +5749,7 @@ export class AgentRunner {
       // Result and retirement in one write: a crash between them would
       // either re-deny an answered call or lose the denial.
       await this.recordToolResult(session, result);
-        return this.executeTurns(session, options.signal, { pending: undefined, remaining, turn: record.turn });
+        return this.executeTurns(session, options.signal, { pending: undefined, remaining, turn: record.turn }, options.runtime);
     }
 
     return this.executeTurns(session, options.signal, {
@@ -5662,7 +5757,7 @@ export class AgentRunner {
       remaining,
       parkedAt: record.parkedAt,
       turn: record.turn,
-    });
+    }, options.runtime);
   }
 
   /**

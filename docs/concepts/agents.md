@@ -87,6 +87,24 @@ always said; and a long deliverable is shared as a real link the reader can
 open, never a path on the daemon's disk. It carries on with work it was
 already asked to do instead of asking permission for each step.
 
+Right after its persona, an agent is told how it runs: that its soul is the
+file it was loaded from (named by its real path), that the file's contents
+are already in its instructions so there is nothing to open or reread, and
+where its workspace is. Under `stratus serve` it is also told that the
+daemon reads the soul again before every turn, so an edit reaches its next
+reply; `stratus run` reads it once and makes no such promise. The built-in
+agent has no soul file and hears only about its workspace. Without this, an
+agent asked to reread an edited soul went looking for a `SOUL.md` in its
+workspace, the convention of other runtimes, and concluded it had none.
+
+The same section names the credentials the soul's `credentials:` list
+grants, by name and never by value, and says the tools that need one use it
+on the agent's behalf, so there is no file or environment variable to look
+for. An agent with none is told so, and told to ask its operator to store
+one and grant it. A stored credential reaches only a plugin tool that
+declares it ([Tools](../guides/tools.md#searching-the-web)); an agent that
+went searching for a shared key is what this line is for.
+
 A conversation a channel started also tells the agent where it is
 happening ("this conversation is happening in Slack"), after its persona,
 so an agent with no Slack tools still knows its replies reach people there.

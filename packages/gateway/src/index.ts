@@ -26,6 +26,7 @@ import {
   latestTurnReply,
   readPendingApproval,
   type AgentDefinition,
+  type AgentRuntimeContext,
   type AgentMemoryStore,
   type AlwaysMeans,
   type ApprovalAnswer,
@@ -1700,6 +1701,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return source;
   };
 
+  const agentWorkspaces = createAgentWorkspaces(env);
+  /**
+   * What an agent is told about how it runs, from the source this dispatch
+   * refreshed and never from `sources` again. The persona the turn runs on
+   * came from that snapshot, and a repointed default soul can replace the
+   * registered source while the turn is still in preflight: read afresh,
+   * the agent would be told a file it is not running on is its soul.
+   *
+   * `soulReloads` is true because `refreshAgent` re-reads the file on every
+   * dispatch. A refresh that failed serves from cache and carries no path,
+   * so the agent is told nothing about a soul file for that turn rather
+   * than something the daemon could not just read. The built-in agent has
+   * no file, so it is told only where its workspace is.
+   */
+  const runtimeContextFor = (source: AgentSource): AgentRuntimeContext => ({
+    ...(source.soulPath !== undefined ? { soulPath: source.soulPath, soulReloads: true } : {}),
+    workspace: agentWorkspaces.forAgent(source.definition.id),
+  });
+
   // ---- runner pool --------------------------------------------------------
 
   const tools = new ToolRegistry();
@@ -2315,6 +2335,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           ...(input.images !== undefined ? { images: input.images } : {}),
           ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
+          runtime: runtimeContextFor(source),
           signal,
         });
       }
@@ -2326,6 +2347,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(input.images !== undefined ? { images: input.images } : {}),
         ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
         metadata,
+        runtime: runtimeContextFor(source),
         signal,
       });
     });
@@ -2486,7 +2508,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           controller.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
         }
         try {
-          await runner.recoverPendingApproval(sessionId, { denyPending: expired, signal: controller.signal });
+          await runner.recoverPendingApproval(sessionId, {
+            denyPending: expired,
+            runtime: runtimeContextFor(source),
+            signal: controller.signal,
+          });
         } finally {
           turnControllers.delete(controller);
           // A recovered firing's row outlived the process that would have
@@ -2780,7 +2806,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // *calling* agent's — its allowlist checked, its own entry before the
       // fleet's shared one.
       credentials: createFileCredentialResolver(env),
-      workspaces: createAgentWorkspaces(env),
+      workspaces: agentWorkspaces,
       // The structured log, so a plugin's lifecycle lines — an MCP server
       // that dropped, a reconnect that failed — are in `stratus logs` and
       // not only on a stderr the service manager owns.
