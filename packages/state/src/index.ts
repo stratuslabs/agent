@@ -117,6 +117,10 @@ export {
   type NamedCredentials,
   loadNamedCredentials,
   saveNamedCredentials,
+  CREDENTIAL_NAME_PATTERN,
+  withCredentialsFileLock,
+  NamedCredentialExistsError,
+  addNamedCredential,
   createFileCredentialResolver,
 } from './credentials.ts';
 

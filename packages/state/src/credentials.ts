@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { isValidAgentId } from '@stratusagent/agents';
 import {
   type ChannelTransportSecrets,
   type CredentialResolver,
@@ -99,8 +100,9 @@ const loadRawCredentialsFile = async (env: StateEnvironment): Promise<Record<str
 // credentials rather than none.
 //
 // What this does not buy: two processes each doing a read-modify-write can
-// still lose one another's update, which is why the control API serializes
-// its own writes. Atomicity is about what a *reader* can observe.
+// still lose one another's update, which is why the daemon's writers
+// serialize through `withCredentialsFileLock`. Atomicity is about what a
+// *reader* can observe.
 const writeRawCredentialsFile = async (env: StateEnvironment, contents: Record<string, unknown>): Promise<void> => {
   const filePath = credentialsPath(env);
   await mkdir(path.dirname(filePath), { recursive: true });
@@ -349,6 +351,127 @@ export const saveNamedCredentials = async (
   const existing = await loadRawCredentialsFile(env);
   existing.named = { shared: named.shared, agents: named.agents };
   await writeRawCredentialsFile(env, existing);
+};
+
+/**
+ * What a credential name may be: the two conventions in use, and nothing
+ * that would be awkward in a soul's `credentials:` list — `search.apiKey`
+ * and environment-style `SLACK_TOKEN`. Leading letter required, which also
+ * happens to exclude `__proto__`; the store does not *rely* on that (it
+ * keys prototype-free maps), because a credentials file can be written by
+ * something other than this package.
+ *
+ * Here rather than in the CLI's parser, which re-exports it, because the
+ * control API validates the same names now.
+ */
+export const CREDENTIAL_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Serializes every read-modify-write of the credentials file within one
+ * process.
+ *
+ * A promise chain rather than a lock file: this guards one daemon's own
+ * concurrent writers, which is the race a daemon reachable from several
+ * surfaces at once introduces. It moved here from the control API when a
+ * second writer inside the daemon needed the same chain; two chains over
+ * one file would each serialize only half the writes. Two processes
+ * sharing a home — the CLI writing while a daemon runs — are not covered,
+ * and would need a different mechanism than this one.
+ */
+let credentialsFileWrites: Promise<unknown> = Promise.resolve();
+export const withCredentialsFileLock = async <T>(work: () => Promise<T>): Promise<T> => {
+  const next = credentialsFileWrites.then(work, work);
+  // Swallowed for the chain only: the caller still sees the rejection, but a
+  // failed write must not poison every write after it.
+  credentialsFileWrites = next.catch(() => undefined);
+  return next;
+};
+
+/**
+ * A named credential that is already stored where an add would put it.
+ *
+ * Typed so a caller can answer it as a conflict rather than a failure: the
+ * surfaces that add credentials away from the machine may only add, and
+ * replacing one is `stratus credential set` on the machine itself.
+ */
+export class NamedCredentialExistsError extends Error {
+  readonly credentialName: string;
+  readonly agentId: string | undefined;
+
+  constructor(credentialName: string, agentId: string | undefined, message: string) {
+    super(message);
+    this.name = 'NamedCredentialExistsError';
+    this.credentialName = credentialName;
+    this.agentId = agentId;
+  }
+}
+
+/**
+ * Store a named credential that does not exist yet, for one agent or the
+ * whole fleet, and refuse anything that would replace one.
+ *
+ * Add-only on purpose. It is the write path for surfaces reachable from
+ * away from the machine, a Slack form or a browser, where the person
+ * submitting is further from the operator than someone at the shell.
+ * Replacing a shared key would move every agent that uses it onto whatever
+ * account the new value belongs to, so replacing and removing stay with
+ * `stratus credential set` and `remove`.
+ *
+ * An agent's own entry is refused over a shared one of the same name too:
+ * the agent's entry is consulted first, so adding it would replace the key
+ * that agent's calls use, which is an overwrite whatever the file says.
+ *
+ * The check and the write share one lock, so two adds of one name racing
+ * inside the daemon cannot both find it absent.
+ */
+export const addNamedCredential = async (
+  env: StateEnvironment,
+  entry: { name: string; value: string; agentId?: string },
+): Promise<void> => {
+  const { name, value, agentId } = entry;
+  if (!CREDENTIAL_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `${JSON.stringify(name)} is not a credential name. Use letters, digits, dots, dashes, or underscores, `
+      + 'starting with a letter: search.apiKey, or an environment-style SLACK_TOKEN.',
+    );
+  }
+  if (agentId !== undefined && !isValidAgentId(agentId)) {
+    throw new Error(`${JSON.stringify(agentId)} cannot be an agent id, so a credential stored under it could never be resolved.`);
+  }
+  if (value.trim().length === 0) {
+    throw new Error(`The value for ${name} is empty, so nothing was stored.`);
+  }
+  await withCredentialsFileLock(async () => {
+    const named = await loadNamedCredentials(env);
+    const replace = agentId === undefined
+      ? `printf %s "$KEY" | stratus credential set ${name}`
+      : `printf %s "$KEY" | stratus credential set ${name} --agent ${agentId}`;
+    if (named.shared[name] !== undefined) {
+      throw new NamedCredentialExistsError(
+        name,
+        agentId,
+        agentId === undefined
+          ? `A shared credential named ${name} is already stored. Replacing one is done on the machine: ${replace}.`
+          : `A shared credential named ${name} is already stored, and ${agentId}'s own would replace it for ${agentId}. `
+            + `Replacing one is done on the machine: ${replace}.`,
+      );
+    }
+    if (agentId !== undefined && named.agents[agentId]?.[name] !== undefined) {
+      throw new NamedCredentialExistsError(
+        name,
+        agentId,
+        `${agentId} already has its own credential named ${name}. Replacing one is done on the machine: ${replace}.`,
+      );
+    }
+    if (agentId === undefined) {
+      named.shared[name] = value;
+    } else {
+      const own = named.agents[agentId] ?? Object.create(null) as Record<string, string>;
+      own[name] = value;
+      named.agents[agentId] = own;
+    }
+    await saveNamedCredentials(env, named);
+  });
 };
 
 /**

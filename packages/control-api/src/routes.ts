@@ -49,6 +49,11 @@ import {
   validateConfigFile,
   servedRuntimes,
   verifyProviderKey,
+  withCredentialsFileLock,
+  addNamedCredential,
+  loadNamedCredentials,
+  CREDENTIAL_NAME_PATTERN,
+  NamedCredentialExistsError,
   type AgentSummary,
   type CredentialProviderName,
   type RuntimeConfig,
@@ -298,24 +303,6 @@ const soulForAgent = async (
 };
 
 /**
- * Serializes every read-modify-write of the credentials file.
- *
- * A promise chain rather than a lock file: this guards one daemon's own
- * concurrent requests, which is the race the API introduces by being reachable
- * from several surfaces at once. Two daemons sharing a home directory is
- * already unsupported for the session store, and would need a different
- * mechanism than this one.
- */
-let credentialWrites: Promise<unknown> = Promise.resolve();
-const withCredentialLock = async <T>(work: () => Promise<T>): Promise<T> => {
-  const next = credentialWrites.then(work, work);
-  // Swallowed for the chain only: the caller still sees the rejection, but a
-  // failed write must not poison every write after it.
-  credentialWrites = next.catch(() => undefined);
-  return next;
-};
-
-/**
  * An allowlist field, or a 400.
  *
  * Applied only when it happened to be an array, `{ "tools": "shell.run" }` —
@@ -389,6 +376,17 @@ const listChannelBindings = async (env: StateEnvironment): Promise<Record<string
     }
   }
   return bindings;
+};
+
+const listNamedCredentialNames = async (
+  env: StateEnvironment,
+): Promise<{ shared: string[]; agents: Record<string, string[]> }> => {
+  const named = await loadNamedCredentials(env);
+  const agents: Record<string, string[]> = {};
+  for (const [agentId, entries] of Object.entries(named.agents)) {
+    agents[agentId] = Object.keys(entries).sort();
+  }
+  return { shared: Object.keys(named.shared).sort(), agents };
 };
 
 const parseProviderParam = (value: string): CredentialProviderName => {
@@ -1264,6 +1262,9 @@ export const routes: Route[] = [
         // Every kind with tokens stored, Slack's and any plugin channel's:
         // agent ids only, never a value.
         channels: await listChannelBindings(context.env),
+        // Names only, the same answer `stratus credentials` gives: which are
+        // the fleet's, and which agents have their own.
+        named: await listNamedCredentialNames(context.env),
       };
     },
   },
@@ -1336,7 +1337,7 @@ export const routes: Route[] = [
       // would each write a snapshot taken before the other's — and the last
       // one would erase a sign-in that had just reported success. This API is
       // explicitly shared by several surfaces, so that race is reachable.
-      await withCredentialLock(async () => {
+      await withCredentialsFileLock(async () => {
         const credentials = await loadCredentials(context.env);
         credentials[provider] = {
           type,
@@ -1381,10 +1382,45 @@ export const routes: Route[] = [
       // must not be able to read the tokens of the transport carrying it.
       // Same lock as the provider credentials: both halves live in one file,
       // and both are read-modify-write.
-      await withCredentialLock(async () => {
+      await withCredentialsFileLock(async () => {
         await saveChannelTransportSecrets(context.env, channel, agentId, secrets);
       });
       return { channel, agentId, stored: true };
+    },
+  },
+
+  {
+    method: 'POST',
+    pattern: `${API_PREFIX}/credentials/named`,
+    async handler(context) {
+      const body = await readJsonObject(context.request);
+      const name = requireString(body, 'name');
+      const value = requireString(body, 'value');
+      const agentId = optionalString(body, 'agentId');
+      if (!CREDENTIAL_NAME_PATTERN.test(name)) {
+        throw new ApiError(
+          400,
+          'invalid_credential_name',
+          `${JSON.stringify(name)} is not a credential name. Use letters, digits, dots, dashes, or underscores, starting with a letter.`,
+        );
+      }
+      if (agentId !== undefined && !context.gateway.agents().some((agent) => agent.id === agentId)) {
+        // Stored against an id nothing runs as, the key would report stored
+        // here and never resolve for anyone.
+        throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}, so a credential stored for it would never be used.`);
+      }
+      // Add-only: this API is reachable from away from the machine, and
+      // replacing a shared key moves every agent using it onto another
+      // account. Replacing and removing stay with `stratus credential`.
+      try {
+        await addNamedCredential(context.env, { name, value, ...(agentId !== undefined ? { agentId } : {}) });
+      } catch (error) {
+        if (error instanceof NamedCredentialExistsError) {
+          throw new ApiError(409, 'credential_exists', error.message);
+        }
+        throw error;
+      }
+      return { name, ...(agentId !== undefined ? { agentId } : {}), stored: true };
     },
   },
 

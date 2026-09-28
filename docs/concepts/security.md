@@ -45,6 +45,14 @@ linked own the full story.
   printed back.** `stratus credential set` reads it from stdin, because a
   secret in argv is a secret in shell history and in every `ps` on the
   machine; `stratus credentials` reports names only.
+- **Away from the machine, a named credential can only be added.** The
+  control API's `POST /credentials/named` stores a name that is not stored
+  yet and refuses one that is, for the fleet or for one agent, and refuses
+  an agent's own entry over a shared one of that name, because the agent's
+  is read first. Replacing a shared key would move every agent that uses it
+  onto whatever account the new value belongs to, so replacing and removing
+  stay with `stratus credential set` and `remove` at the machine.
+  ([Control API](../../packages/control-api/README.md))
 
 ## What a cloned repo cannot decide
 

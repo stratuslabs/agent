@@ -117,17 +117,20 @@ log, and an address bar is one that gets noticed when it changes.
 | DELETE | `/schedules/:id` | Cancel a schedule. Also revokes the destination grant riding on the row — a still-running firing's next send is gated normally. 404 when no such schedule exists |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
 | GET | `/catalog/tools` | Every registered tool with the risk a call will face, every skill a soul's `skills:` can name, the plugins that contributed them (with the providers, channels, memory stores, and executors each registered), and `providers` — every name a soul's `provider:` can select on this daemon, built-ins and plugin-registered alike |
-| GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value — and `channels`: which agents have transport secrets stored on each channel kind, ids only |
+| GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value — `channels`: which agents have transport secrets stored on each channel kind, ids only, and `named`: `{ shared: [name…], agents: { id: [name…] } }`, names only |
 | POST | `/credentials/verify` | Live-check a key before storing it: `{ provider, key, type?, baseUrl? }` |
 | PUT | `/credentials/:provider` | Store an `api_key`, or an `oauth_token` for Anthropic (a Claude setup token) or Codex (a marker that the machine's `codex login` sign-in serves runs — the value is never read). A codex key refuses a `baseUrl`: the harness owns its endpoints, so a bound key could never be honored there |
 | PUT | `/credentials/channels/:channel` | Store one agent's transport secrets for a channel kind, under `channels.<kind>.<agentId>`. `slack` takes `{ agentId, appToken, botToken }`; any other kind — one a [channel plugin](../../docs/guides/extending.md#channels) declares — takes `{ agentId, secrets: { name: value, … } }`, the names its README documents. A kind that is not a contribution name answers `400 unknown_channel`; an agent not on the roster `404 agent_not_found`. Saving one kind never disturbs another's |
 
-**Named credentials are not on this API.** The `search.apiKey` an agent
-resolves through its soul's `credentials:` list lives in the same file under
-its own `named` namespace, and today `stratus credential set` is the only way
-to write one. Adding it here belongs with the settings surface in the fleet
-console, not bolted on beside the provider sign-ins.
+| POST | `/credentials/named` | Add a named credential — the `search.apiKey` kind an agent resolves through its soul's `credentials:` list: `{ name, value, agentId? }`, the fleet's shared entry without `agentId`, that agent's own with it. **Add-only**: a name already stored answers `409 credential_exists`, and so does an agent's own over a shared one of that name, since the agent's entry is read first. A name outside the credential-name rule answers `400 invalid_credential_name`; an `agentId` not on the roster `404 agent_not_found` |
 | GET/PUT | `/config` | Settings, whitelisted to keys this API owns |
+
+**Named credentials can be added here, never replaced or removed.** This API
+is reachable from away from the machine, and replacing a shared key would
+move every agent that uses it onto whatever account the new value belongs
+to. Replacing and removing stay with `stratus credential set` and
+`stratus credential remove`, which the `409` names. Storing one grants no
+agent anything: a soul still has to list the name under `credentials:`.
 
 `POST /credentials/verify` reports `ok`, `rejected`, or `unreachable`, and
 only an explicit 401/403 is `rejected` — a compatible endpoint with no models
@@ -491,7 +494,7 @@ how long the grant lasts; the request already said that.
   `PUT /credentials/channels/:channel` writes them; the provider-credential
   and config endpoints cannot reach that namespace.
 - **No endpoint returns a secret.** Credential reads report presence, type,
-  and bound endpoint. Session reads strip the Anthropic raw-turn cache, which
+  and bound endpoint; named credentials, their names. Session reads strip the Anthropic raw-turn cache, which
   exists for replay and carries raw model turns.
 
 ### Health does not probe
