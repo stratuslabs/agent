@@ -219,6 +219,23 @@ export interface GatewayChannelAdapter {
   resolveOutbound?(address: { agentId: string; to: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
+  /**
+   * Shows a person a form for a credential an agent asked for, mirroring
+   * `@stratusagent/channels`' `ChannelAdapter.requestCredential`. Optional:
+   * a channel without it cannot take credentials, and a request made in
+   * its conversations is refused instead of announced. Implementations
+   * MUST reject when the form reached nobody who can answer it, with a
+   * sentence for the agent.
+   */
+  requestCredential?(request: {
+    sessionId: string;
+    agentId: string;
+    requestId: string;
+    name: string;
+    scope: CredentialScope;
+    reason?: string;
+    metadata: JsonObject;
+  }): Promise<void>;
 }
 
 /**
@@ -998,6 +1015,42 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const scheduleStore = new SqliteScheduleStore(fleetDbIn(stateDir), { stateHome: stateDir });
 
   /**
+   * The started adapter of one kind that speaks for an agent and has the
+   * capability asked for. `carriesOthers` says there were capable adapters
+   * of that kind, just none carrying this agent, which callers word
+   * differently from there being none at all.
+   *
+   * One kind may be served by several adapters carrying disjoint
+   * agents — two plugins, or the host's adapter beside a plugin's — and
+   * the one that speaks for this agent is the one whose claims include
+   * it: a contribution's agent list, or the host's declared claims for
+   * an adapter no plugin contributed. A host that declared no claims for
+   * the kind left its adapter unclaimed, and an unclaimed adapter speaks
+   * for anyone, as the single host adapter always did. A claim miss is
+   * a refusal, never the first adapter that happens to be running: that
+   * adapter posts under another agent's transport identity, and it is
+   * exactly what a failed start of the right adapter would leave behind.
+   */
+  const channelCarrying = (
+    kind: string,
+    agentId: string,
+    capable: (candidate: GatewayChannelAdapter) => boolean,
+  ): { adapter?: GatewayChannelAdapter; carriesOthers: boolean } => {
+    const candidates = startedChannels.filter((candidate) => candidate.name === kind && capable(candidate));
+    const contributed = channelContributions.list();
+    const hostClaims = (options.hostChannelClaims ?? []).filter((claim) => claim.kind === kind);
+    const carries = (candidate: GatewayChannelAdapter): boolean => {
+      const entry = contributed.find((contribution) => contribution.adapter === candidate);
+      if (entry) {
+        return entry.agents.includes(agentId);
+      }
+      return hostClaims.length === 0 || hostClaims.some((claim) => claim.agents.includes(agentId));
+    };
+    const adapter = candidates.find(carries);
+    return adapter ? { adapter, carriesOthers: false } : { carriesOthers: candidates.length > 0 };
+  };
+
+  /**
    * The write side of an addressable destination, through whichever
    * started channel serves its kind. Resolution happens per call against
    * the live adapter list, so a channel that failed to start is honestly
@@ -1008,30 +1061,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     agentId: string,
     destination: ScheduleDestination,
   ): Promise<{ post(text: string): Promise<unknown> }> => {
-    const candidates = startedChannels.filter(
-      (candidate) => candidate.name === destination.channel && candidate.resolveOutbound,
-    );
-    // One kind may be served by several adapters carrying disjoint
-    // agents — two plugins, or the host's adapter beside a plugin's — and
-    // the one that speaks for this agent is the one whose claims include
-    // it: a contribution's agent list, or the host's declared claims for
-    // an adapter no plugin contributed. A host that declared no claims for
-    // the kind left its adapter unclaimed, and an unclaimed adapter speaks
-    // for anyone, as the single host adapter always did. A claim miss is
-    // a refusal, never the first adapter that happens to be running: that
-    // adapter posts under another agent's transport identity, and it is
-    // exactly what a failed start of the right adapter would leave behind.
-    const contributed = channelContributions.list();
-    const hostClaims = (options.hostChannelClaims ?? []).filter((claim) => claim.kind === destination.channel);
-    const carries = (candidate: GatewayChannelAdapter): boolean => {
-      const entry = contributed.find((contribution) => contribution.adapter === candidate);
-      if (entry) {
-        return entry.agents.includes(agentId);
-      }
-      return hostClaims.length === 0 || hostClaims.some((claim) => claim.agents.includes(agentId));
-    };
-    const adapter = candidates.find(carries);
-    if (!adapter?.resolveOutbound && candidates.length > 0) {
+    const { adapter, carriesOthers } = channelCarrying(destination.channel, agentId, (candidate) => candidate.resolveOutbound !== undefined);
+    if (!adapter?.resolveOutbound && carriesOthers) {
       throw new Error(
         `No running '${destination.channel}' channel carries agent ${agentId} — `
         + `the running ${destination.channel} adapters carry other agents, so a message from ${agentId} has no transport identity to post under.`,
@@ -1859,16 +1890,46 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         + 'Ask your operator to add it to the credentials list in your soul; a form would only refuse to store it again.',
       );
     }
-    // Only a conversation a channel started has anywhere to show a form;
-    // a scheduled or HTTP turn would announce a request nobody sees.
-    if (typeof session.metadata?.channel !== 'string') {
+    const onMachine = `\`stratus credential set ${request.name}${request.scope === 'agent' ? ` --agent ${quoteShellArg(agentId)}` : ''}\``;
+    // Only a conversation a channel started has anywhere to show a form,
+    // and only a channel that renders one can show it: a scheduled or HTTP
+    // turn, or a channel with no form, would record a request nobody sees
+    // while the agent tells its user the operator was asked.
+    const kind = session.metadata?.channel;
+    const { adapter } = typeof kind === 'string'
+      ? channelCarrying(kind, agentId, (candidate) => candidate.requestCredential !== undefined)
+      : { adapter: undefined };
+    if (!adapter?.requestCredential || !session.metadata) {
       throw new Error(
-        `This conversation is not in a channel that can show your operator a form. Ask them to store ${request.name} on the machine `
-        + `with \`stratus credential set ${request.name}${request.scope === 'agent' ? ` --agent ${quoteShellArg(agentId)}` : ''}\` and grant it to you.`,
+        (typeof kind === 'string'
+          ? `This conversation's channel (${kind}) cannot show your operator a credential form here.`
+          : 'This conversation is not in a channel that can show your operator a form.')
+        + ` Ask them to store ${request.name} on the machine with ${onMachine} and grant it to you.`,
       );
     }
     const requestId = randomUUID();
     credentialRequests.set(requestId, { agentId, sessionId: session.id, name: request.name, scope: request.scope, soulPath });
+    // Delivered before it is announced, and dropped if delivery fails: a
+    // request whose post never landed has no button to answer it, so
+    // keeping it would leave it pending for good behind a tool result
+    // saying the operator was asked.
+    try {
+      await adapter.requestCredential({
+        sessionId: session.id,
+        agentId,
+        requestId,
+        name: request.name,
+        scope: request.scope,
+        ...(request.reason !== undefined ? { reason: request.reason } : {}),
+        metadata: session.metadata,
+      });
+    } catch (error) {
+      credentialRequests.delete(requestId);
+      throw new Error(
+        `Your request for ${request.name} could not be shown to your operator: ${error instanceof Error ? error.message : String(error)} `
+        + `Nothing is pending. Ask again later, or ask them to store it on the machine with ${onMachine}.`,
+      );
+    }
     await bus.emit({
       type: 'credential.requested',
       sessionId: session.id,
@@ -1877,7 +1938,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       name: request.name,
       scope: request.scope,
       ...(request.reason !== undefined ? { reason: request.reason } : {}),
-      ...(session.metadata ? { metadata: session.metadata } : {}),
+      metadata: session.metadata,
     });
     return { requestId };
   }));

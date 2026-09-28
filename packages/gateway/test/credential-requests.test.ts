@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { StratusEvent } from '@stratusagent/core';
-import { createGateway } from '../src/index.ts';
+import { createGateway, type GatewayChannelAdapter } from '../src/index.ts';
 
 const openAiText = (text: string): Response =>
   new Response(
@@ -29,11 +29,39 @@ const openAiToolCall = (name: string, args: object): Response =>
 
 const SLACK = { channel: 'slack', slackChannel: 'C1', slackThread: '100.1' };
 
+type DeliveredRequest = Parameters<NonNullable<GatewayChannelAdapter['requestCredential']>>[0];
+
+/**
+ * A `slack` channel that shows credential forms by recording them, or
+ * refuses to the way a failed post does.
+ */
+const createFormChannel = (options: { refuse?: string } = {}) => {
+  const delivered: DeliveredRequest[] = [];
+  const adapter: GatewayChannelAdapter = {
+    name: 'slack',
+    start: async () => {},
+    stop: async () => {},
+    requestCredential: async (request) => {
+      if (options.refuse !== undefined) {
+        throw new Error(options.refuse);
+      }
+      delivered.push(request);
+    },
+  };
+  return { adapter, delivered };
+};
+
 /**
  * A daemon whose model asks for a credential on its first call and answers
  * in words on every call after, with the events it emitted collected.
  */
-const startRequesting = async (options: { soul?: string; request?: object; agentless?: boolean; processEnv?: Record<string, string> } = {}) => {
+const startRequesting = async (options: {
+  soul?: string;
+  request?: object;
+  agentless?: boolean;
+  processEnv?: Record<string, string>;
+  channel?: GatewayChannelAdapter;
+} = {}) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-credreq-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
@@ -50,24 +78,26 @@ const startRequesting = async (options: { soul?: string; request?: object; agent
       : openAiText('asked');
   }) as typeof fetch;
   const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test', ...options.processEnv }, fetch: fetchImpl };
-  const gateway = createGateway({ env, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
+  const form = createFormChannel();
+  const gateway = createGateway({ env, idleTimeoutMs: 0, log: () => {}, warn: () => {}, channels: [options.channel ?? form.adapter] });
   const events: StratusEvent[] = [];
   gateway.bus.subscribe(async (event) => {
     events.push(event);
   });
   await gateway.start();
-  return { home, soulFile, gateway, events };
+  return { home, soulFile, gateway, events, delivered: form.delivered };
 };
 
 const requestedIn = (events: StratusEvent[]) =>
   events.find((event): event is Extract<StratusEvent, { type: 'credential.requested' }> => event.type === 'credential.requested');
 
 test('an agent asks for a credential, an approver provides it, and it is stored for that agent and granted in its soul', async () => {
-  const { home, soulFile, gateway, events } = await startRequesting();
+  const { home, soulFile, gateway, events, delivered } = await startRequesting();
   try {
     const session = await gateway.dispatch({ sessionId: 'kai-1', agentId: 'kai', userMessage: 'open a PR', metadata: SLACK });
     const requested = requestedIn(events);
-    assert.ok(requested, 'the request was announced for a channel to render');
+    assert.ok(requested, 'the request was announced once delivered');
+    assert.equal(delivered[0]?.requestId, requested.requestId, 'the channel was handed the request to show');
     assert.deepEqual(
       { agentId: requested.agentId, name: requested.name, scope: requested.scope, reason: requested.reason, slackChannel: requested.metadata?.slackChannel },
       { agentId: 'kai', name: 'github.token', scope: 'agent', reason: 'To open pull requests.', slackChannel: 'C1' },
@@ -193,6 +223,49 @@ test('a key the daemon environment already supplies is not asked for, so a form 
     assert.equal(result?.ok, false);
     assert.match(result?.error ?? '', /GITHUB_TOKEN is already supplied by the daemon's environment but not granted to you/);
     assert.equal(requestedIn(events), undefined);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a channel that cannot show a credential form is refused before anything is pending', async () => {
+  // A started `slack` adapter with no form, and a conversation in a kind
+  // no adapter serves: both would have announced a request nobody sees.
+  const formless: GatewayChannelAdapter = { name: 'slack', start: async () => {}, stop: async () => {} };
+  for (const [kind, metadata] of [['slack', SLACK], ['discord', { channel: 'discord' }]] as const) {
+    const { gateway, events } = await startRequesting({ channel: formless });
+    try {
+      const session = await gateway.dispatch({ sessionId: `kai-${kind}`, agentId: 'kai', userMessage: 'go', metadata });
+      const result = session.messages.find((message) => message.role === 'tool')?.toolResult;
+      assert.equal(result?.ok, false);
+      assert.match(result?.error ?? '', new RegExp(`channel \\(${kind}\\) cannot show your operator a credential form.*stratus credential set github\\.token --agent kai`));
+      assert.equal(requestedIn(events), undefined);
+    } finally {
+      await gateway.stop();
+    }
+  }
+});
+
+test('a form the channel failed to post is reported to the agent and leaves nothing pending', async () => {
+  const refusing = createFormChannel({ refuse: 'Slack refused the post (ratelimited).' });
+  let seen: string | undefined;
+  const channel: GatewayChannelAdapter = {
+    ...refusing.adapter,
+    requestCredential: async (request) => {
+      seen = request.requestId;
+      await refusing.adapter.requestCredential?.(request);
+    },
+  };
+  const { gateway, events } = await startRequesting({ channel });
+  try {
+    const session = await gateway.dispatch({ sessionId: 'kai-10', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const result = session.messages.find((message) => message.role === 'tool')?.toolResult;
+    assert.equal(result?.ok, false);
+    assert.match(result?.error ?? '', /could not be shown to your operator: Slack refused the post \(ratelimited\)\. Nothing is pending/);
+    assert.equal(requestedIn(events), undefined, 'a request that reached nobody is not announced');
+    assert.ok(seen);
+    const late = await gateway.provideCredential({ requestId: seen, value: 'ghp-1' });
+    assert.equal(late.ok, false, 'the dropped request cannot be answered');
   } finally {
     await gateway.stop();
   }

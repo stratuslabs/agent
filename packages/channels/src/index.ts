@@ -1,6 +1,7 @@
 import type {
   AgentDefinition,
   ApprovalAnswer,
+  CredentialScope,
   EventBus,
   ImageAttachment,
   JsonObject,
@@ -267,6 +268,24 @@ export interface OutboundAddress {
   to: string;
 }
 
+/**
+ * A credential an agent asked for, handed to the channel its conversation
+ * is in so a person there can be shown a form. Everything the answer needs
+ * stays with the gateway under `requestId`; the channel only has to show
+ * the question and quote the id back through `GatewayLike.provideCredential`.
+ */
+export interface ChannelCredentialRequest {
+  sessionId: string;
+  agentId: string;
+  requestId: string;
+  name: string;
+  scope: CredentialScope;
+  /** The agent's own words for why; show them as the agent's. */
+  reason?: string;
+  /** The session's routing metadata: where the conversation is. */
+  metadata: JsonObject;
+}
+
 export interface ChannelAdapter {
   name: string;
   start(gateway: GatewayLike): Promise<void>;
@@ -287,6 +306,20 @@ export interface ChannelAdapter {
    * also how a destination is checked without sending anything.
    */
   resolveOutbound?(address: OutboundAddress): Promise<OutboundConnection>;
+  /**
+   * Shows a person in the conversation a form for a credential the agent
+   * asked for. Optional, like `resolveOutbound`: a channel without it
+   * cannot take credentials, and the gateway refuses a request made in its
+   * conversations rather than telling the agent someone was asked.
+   *
+   * Resolves once the form is in front of someone who can answer it, and
+   * MUST reject otherwise (the post failed, nobody here may answer, the
+   * agent has no app connected), with a sentence for the agent: the
+   * gateway drops the request and hands the agent that sentence, because
+   * a request nobody can see would otherwise wait forever while the agent
+   * tells its user the operator was asked.
+   */
+  requestCredential?(request: ChannelCredentialRequest): Promise<void>;
 }
 
 export interface ChannelSessionKeyParts {

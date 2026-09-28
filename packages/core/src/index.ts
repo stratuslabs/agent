@@ -3248,9 +3248,11 @@ export type StratusEvent =
     }
   /**
    * An agent asked for a named credential it does not hold
-   * (`credential.request`). A channel renders a form an approver can fill
-   * in; nothing about the request is a secret, and nothing that answers it
-   * ever travels on the bus. `scope` is whose the key would be: the
+   * (`credential.request`), and the channel it asked in has already put a
+   * form in front of someone who can answer it: the request is delivered
+   * first and announced after, so this is a record of a question that was
+   * asked, never a request for someone to render one. Nothing about it is
+   * a secret, and nothing that answers it ever travels on the bus. `scope` is whose the key would be: the
    * agent's own (`agent`, the default) or the fleet's (`shared`).
    *
    * `metadata` is the session's, for the same reason an approval request

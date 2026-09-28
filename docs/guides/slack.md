@@ -197,8 +197,7 @@ Kai says: To open pull requests on the website repo.
 **Add credential** opens a form. Whoever submits it is checked against the
 agent's approvers, the same `approvals.slackApprovers` list that decides
 [approval buttons](./approvals.md), on the click and again on the
-submission; anyone else in the thread is told they cannot. With no approver
-configured the message says so and has no button. What the form does:
+submission; anyone else in the thread is told they cannot. What the form does:
 
 - **It stores the key add-only**, through the same rule as the
   [control API](../../packages/control-api/README.md): a name already
@@ -219,9 +218,13 @@ configured the message says so and has no button. What the form does:
   transcript, the model, the event stream, or the daemon log. What the log
   records is the name, the scope, and who added it.
 
-An agent asks only in a conversation a channel started, since that is where
-someone can see the form; a scheduled or HTTP turn is told to have the
-operator run `stratus credential set` instead. A key that is already stored,
+An agent asks only in a conversation a channel started, and only in a
+channel that can show the form, which today is Slack; a scheduled or HTTP
+turn, or a conversation in another channel, is told to have the operator run
+`stratus credential set` instead. The agent hears that its operator was asked
+only once the form is posted. With no approver configured for it, or a post
+Slack refused, nothing is posted or left pending, and the agent is told why,
+so it never says it is waiting on someone who cannot see the question. A key that is already stored,
 or supplied by the daemon's environment, but not granted is not asked for either: the agent is told to have it
 added to its soul. Requests live in the daemon's memory, so after a restart
 the button answers that the request is no longer pending and the agent

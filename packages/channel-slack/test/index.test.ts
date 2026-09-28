@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { EventBus, type ApprovalAnswer, type ImageAttachment, type JsonObject, type Session, type StratusEvent } from '@stratusagent/core';
-import type { GatewayLike } from '@stratusagent/channels';
+import type { ChannelCredentialRequest, GatewayLike } from '@stratusagent/channels';
 import {
   createSlackChannelAdapter as createAdapterAsShipped,
   createSlackFileFetcher,
@@ -7515,9 +7515,8 @@ test('a download cut off at what was left of the budget closes the window too', 
 // ---- credential requests ---------------------------------------------------
 
 const credentialRequest = (
-  overrides: Partial<Extract<StratusEvent, { type: 'credential.requested' }>> = {},
-): Extract<StratusEvent, { type: 'credential.requested' }> => ({
-  type: 'credential.requested',
+  overrides: Partial<ChannelCredentialRequest> = {},
+): ChannelCredentialRequest => ({
   sessionId: 'slack:ava:T1:C1:100.1',
   agentId: 'ava',
   requestId: 'cred-1',
@@ -7582,14 +7581,20 @@ const credentialAdapter = (approvers: string[]) => {
     });
     return { ok: true };
   };
-  return { ...harness, provided, pending, refuse: (message: string | undefined) => { refuseWith = message; } };
+  // The gateway's side of delivery: it hands the adapter the request and
+  // awaits it, so a rejection here is what the agent is told.
+  const ask = async (overrides: Partial<ChannelCredentialRequest> = {}): Promise<void> => {
+    assert.ok(harness.adapter.requestCredential, 'the Slack adapter shows credential forms');
+    await harness.adapter.requestCredential(credentialRequest(overrides));
+  };
+  return { ...harness, provided, pending, ask, refuse: (message: string | undefined) => { refuseWith = message; } };
 };
 
 test('a credential request is posted in the thread with a button only an approver can use', async () => {
-  const { socket, web, gateway, adapter, pending } = credentialAdapter(['U-DYLAN']);
+  const { socket, web, gateway, adapter, pending, ask } = credentialAdapter(['U-DYLAN']);
   await adapter.start(gateway);
   pending.add('cred-1');
-  await gateway.bus.emit(credentialRequest());
+  await ask();
 
   const posted = web.posts.at(-1);
   assert.equal(posted?.channel, 'C1');
@@ -7614,14 +7619,17 @@ test('a credential request is posted in the thread with a button only an approve
   assert.equal(opened?.view.private_metadata, 'cred-1');
   assert.match(JSON.stringify(opened?.view), /Value for github.token/);
 
+  await ask({ requestId: 'cred-2', scope: 'shared' });
+  assert.match(JSON.stringify(web.posts.at(-1)?.blocks), /`github.token`, shared with every agent\./);
+
   await adapter.stop();
 });
 
 test('a submitted credential goes to the gateway and nowhere else, and the request says it was added', async () => {
-  const { socket, web, gateway, adapter, provided, pending } = credentialAdapter(['U-DYLAN']);
+  const { socket, web, gateway, adapter, provided, pending, ask } = credentialAdapter(['U-DYLAN']);
   await adapter.start(gateway);
   pending.add('cred-1');
-  await gateway.bus.emit(credentialRequest());
+  await ask();
 
   const acks: unknown[] = [];
   await socket.deliver('interactive', credentialSubmission('cred-1', 'U-DYLAN', 'ghp-secret-value'), async (response?: unknown) => {
@@ -7642,10 +7650,10 @@ test('a submitted credential goes to the gateway and nowhere else, and the reque
 });
 
 test('a refused submission keeps the form open with the reason beside the field', async () => {
-  const { socket, gateway, adapter, pending, refuse, provided } = credentialAdapter(['U-DYLAN']);
+  const { socket, gateway, adapter, pending, refuse, provided, ask } = credentialAdapter(['U-DYLAN']);
   await adapter.start(gateway);
   pending.add('cred-1');
-  await gateway.bus.emit(credentialRequest());
+  await ask();
 
   refuse('A shared credential named github.token is already stored.');
   const acks: unknown[] = [];
@@ -7670,15 +7678,27 @@ test('a refused submission keeps the form open with the reason beside the field'
   await adapter.stop();
 });
 
-test('with no approver configured, the request says it cannot be added from Slack and offers no button', async () => {
-  const { web, gateway, adapter } = credentialAdapter([]);
-  await adapter.start(gateway);
-  await gateway.bus.emit(credentialRequest({ scope: 'shared' }));
+test('a request nobody in Slack could answer is refused back to the gateway instead of posted', async () => {
+  // No approver: a post would be a question with no button, pending forever.
+  const unanswerable = credentialAdapter([]);
+  await unanswerable.adapter.start(unanswerable.gateway);
+  await assert.rejects(unanswerable.ask(), /Nobody can add it from Slack, because no approver is configured for Ava \(approvals\.slackApprovers\)\./);
+  assert.equal(unanswerable.web.posts.length, 0);
+  await unanswerable.adapter.stop();
 
-  const posted = web.posts.at(-1);
-  assert.match(JSON.stringify(posted?.blocks), /shared with every agent/);
-  assert.match(JSON.stringify(posted?.blocks), /Nobody can add it from Slack: no approver is configured for Ava/);
-  assert.deepEqual(buttonIds(posted?.blocks), []);
+  // A post Slack refused: the agent hears it, and no button exists to press.
+  const failing = credentialAdapter(['U-DYLAN']);
+  failing.web.chat.postMessage = async () => {
+    throw new Error('ratelimited');
+  };
+  await failing.adapter.start(failing.gateway);
+  failing.pending.add('cred-1');
+  await assert.rejects(failing.ask(), /Slack refused the post \(ratelimited\)\./);
+  await failing.socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN'));
+  assert.equal(failing.web.views_opened.length, 0);
+  assert.match(failing.web.ephemerals.at(-1)?.text ?? '', /no longer pending/);
 
-  await adapter.stop();
+  // Somewhere that is not a Slack conversation has no thread to post in.
+  await assert.rejects(failing.ask({ metadata: { channel: 'http' } }), /not a Slack conversation/);
+  await failing.adapter.stop();
 });

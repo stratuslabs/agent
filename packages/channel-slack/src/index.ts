@@ -27,6 +27,7 @@ import {
 import {
   channelSessionKey,
   type ChannelAdapter,
+  type ChannelCredentialRequest,
   type GatewayLike,
   type OutboundAddress,
   type OutboundConnection,
@@ -1962,7 +1963,6 @@ const credentialRequestBlocks = (
   scope: CredentialScope,
   reason: string | undefined,
   requestId: string,
-  answerable: boolean,
 ): SlackBlock[] => {
   const shortReason = reason !== undefined && reason.length > CREDENTIAL_REASON_LIMIT
     ? `${reason.slice(0, CREDENTIAL_REASON_LIMIT)}…`
@@ -1982,23 +1982,19 @@ const credentialRequestBlocks = (
       type: 'context',
       elements: [{
         type: 'mrkdwn',
-        text: answerable
-          ? 'Only an approver can add it. The value goes straight to the credential store, never into this conversation, and a key already stored is never replaced from here.'
-          : `Nobody can add it from Slack: no approver is configured for ${escapeSlackText(agentName)}. Store it on the machine with \`stratus credential set\`.`,
+        text: 'Only an approver can add it. The value goes straight to the credential store, never into this conversation, and a key already stored is never replaced from here.',
       }],
     },
-    ...(answerable
-      ? [{
-          type: 'actions',
-          elements: [{
-            type: 'button',
-            action_id: CREDENTIAL_ADD_ACTION,
-            style: 'primary',
-            value: requestId,
-            text: { type: 'plain_text', text: 'Add credential' },
-          }],
-        }]
-      : []),
+    {
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        action_id: CREDENTIAL_ADD_ACTION,
+        style: 'primary',
+        value: requestId,
+        text: { type: 'plain_text', text: 'Add credential' },
+      }],
+    },
   ];
 };
 
@@ -3131,49 +3127,63 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     log(`slack: posted the reply of a turn finished after a restart to ${channel}`);
   };
 
-  const renderCredentialRequest = async (
-    event: Extract<StratusEvent, { type: 'credential.requested' }>,
-  ): Promise<void> => {
+  /**
+   * The channel contract's `requestCredential`: posts the form and resolves
+   * only once it is up with a button an approver can press. Every refusal
+   * rejects with a sentence for the agent, which the gateway hands it in
+   * place of "your operator was asked": a request nobody can answer would
+   * otherwise sit pending while the agent says it is waiting on someone.
+   */
+  const requestCredential = async (request: ChannelCredentialRequest): Promise<void> => {
     const gateway = gatewayRef;
-    const connection = connectionFor(event.agentId);
+    const connection = connectionFor(request.agentId);
     if (!gateway || !connection) {
-      return;
+      throw new Error(configuredAgents.has(request.agentId)
+        ? `${request.agentId}'s Slack app is not connected right now.`
+        : `${request.agentId} has no Slack app.`);
     }
     // Only in the conversation the agent asked in. Unlike an approval there
     // is no fallback channel: the person who can answer is the one the
     // agent is talking to, and a key asked for somewhere else is a request
     // nobody in the conversation can see being made.
-    const metadata = event.metadata ?? {};
+    const metadata = request.metadata;
     if (metadata.channel !== 'slack' || typeof metadata.slackChannel !== 'string') {
-      return;
+      throw new Error('This conversation is not a Slack conversation the form can be posted in.');
     }
     const channel = metadata.slackChannel;
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
     const approvers = new Set((connection.config.approvers ?? []).filter((id) => id.length > 0));
-    const agentName = gateway.agents().find((agent) => agent.id === event.agentId)?.name ?? event.agentId;
-    const answerable = approvers.size > 0 && gateway.provideCredential !== undefined;
-    try {
-      const posted = await connection.web.chat.postMessage({
-        channel,
-        text: escapeSlackText(`${agentName} is asking for a credential: ${event.name}, ${credentialWhose(agentName, event.scope)}.`),
-        ...(thread ? { thread_ts: thread } : {}),
-        blocks: credentialRequestBlocks(agentName, event.name, event.scope, event.reason, event.requestId, answerable),
-      });
-      if (answerable && posted.ts) {
-        credentialPosts.set(event.requestId, {
-          connection,
-          channel: posted.channel ?? channel,
-          ts: posted.ts,
-          agentId: event.agentId,
-          agentName,
-          name: event.name,
-          scope: event.scope,
-          approvers,
-        });
-      }
-    } catch (error) {
-      warn(`slack: could not post a credential request for ${event.agentId} to ${channel} (${error instanceof Error ? error.message : String(error)})`);
+    const agentName = gateway.agents().find((agent) => agent.id === request.agentId)?.name ?? request.agentId;
+    if (approvers.size === 0 || gateway.provideCredential === undefined) {
+      throw new Error(
+        `Nobody can add it from Slack, because no approver is configured for ${agentName} (approvals.slackApprovers).`,
+      );
     }
+    let posted: { ts?: string; channel?: string };
+    try {
+      posted = await connection.web.chat.postMessage({
+        channel,
+        text: escapeSlackText(`${agentName} is asking for a credential: ${request.name}, ${credentialWhose(agentName, request.scope)}.`),
+        ...(thread ? { thread_ts: thread } : {}),
+        blocks: credentialRequestBlocks(agentName, request.name, request.scope, request.reason, request.requestId),
+      });
+    } catch (error) {
+      warn(`slack: could not post a credential request for ${request.agentId} to ${channel} (${error instanceof Error ? error.message : String(error)})`);
+      throw new Error(`Slack refused the post (${error instanceof Error ? error.message : String(error)}).`);
+    }
+    if (!posted.ts) {
+      throw new Error('Slack accepted the post but returned no message to attach the form to.');
+    }
+    credentialPosts.set(request.requestId, {
+      connection,
+      channel: posted.channel ?? channel,
+      ts: posted.ts,
+      agentId: request.agentId,
+      agentName,
+      name: request.name,
+      scope: request.scope,
+      approvers,
+    });
   };
 
   const settleCredentialPost = async (event: Extract<StratusEvent, { type: 'credential.provided' }>): Promise<void> => {
@@ -4180,6 +4190,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   return {
     name: 'slack',
     resolveOutbound,
+    requestCredential,
 
     async start(gateway) {
       gatewayRef = gateway;
@@ -4189,10 +4200,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // renderer would fold a question into the answer being streamed.
         if (event.type === 'tool.approval-requested') {
           track(renderApprovalRequest(event));
-          return;
-        }
-        if (event.type === 'credential.requested') {
-          track(renderCredentialRequest(event));
           return;
         }
         if (event.type === 'credential.provided') {

@@ -305,7 +305,12 @@ Mode connection.
 
 ### Credential requests
 
-The same approvers answer an agent's `credential.request`. The request is
+The same approvers answer an agent's `credential.request`. The gateway hands
+the request to the adapter's `requestCredential`, the channel contract's
+method for this, and waits for it: the adapter resolves once the form is
+posted, and rejects, posting nothing, when the agent has no approvers, the
+conversation is not a Slack one, or Slack refuses the post. The gateway then
+drops the request and tells the agent why. The request is
 posted in the conversation the agent asked in (never an `approvalChannel`:
 the person who can answer is the one the agent is talking to) with an **Add
 credential** button. A click by an approver opens a modal (`views.open`);
@@ -321,8 +326,7 @@ request no longer pending) comes back as a `response_action: errors` ack,
 which keeps the modal open with the reason under the field. On success the
 request message is rewritten to say what was added, for whom, and by whom.
 The value is read from the submission and passed to the gateway; the adapter
-never logs it, posts it, or dispatches it. With no approvers configured the
-message says so and has no button. Modals need no scope beyond the bot's,
+never logs it, posts it, or dispatches it. Modals need no scope beyond the bot's,
 and arrive over the same Socket Mode connection as clicks. The full flow is
 in [Slack](../../docs/guides/slack.md#adding-a-credential-from-slack).
 
