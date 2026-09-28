@@ -632,6 +632,12 @@ class ReplyRenderer {
   /** The tool the turn is running, for the status line; the streamed `toolLine` is the other mode's. */
   private runningTool: string | undefined;
   private readonly web: SlackWebLike;
+  /**
+   * The one person in the conversation when this turn is a DM: whoever sent
+   * the message. Undefined in a channel, where who can see a thread is
+   * Slack's membership to answer, not this turn's.
+   */
+  readonly dmWith: string | undefined;
   /** The conversation, and the thread in it, this turn replies into. */
   readonly channel: string;
   readonly threadTs: string | undefined;
@@ -652,6 +658,7 @@ class ReplyRenderer {
       statusThread?: string;
       statusWarned?: { value: boolean };
       after?: Promise<unknown>;
+      dmWith?: string;
     } = {},
   ) {
     this.web = web;
@@ -665,6 +672,7 @@ class ReplyRenderer {
     this.statusThread = options.statusThread ?? threadTs;
     this.statusWarned = options.statusWarned ?? { value: false };
     this.after = options.after ?? Promise.resolve();
+    this.dmWith = options.dmWith;
   }
 
   /**
@@ -3171,6 +3179,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         `Nobody can add it from Slack, because no approver is configured for ${agentName} (approvals.slackApprovers).`,
       );
     }
+    // A DM has one person in it besides the app. Posted there for someone
+    // who is not an approver, the form is a button only they can see and
+    // only approvers can press, which is a request nobody can answer.
+    if (turn.dmWith !== undefined && !approvers.has(turn.dmWith)) {
+      throw new Error(
+        `Nobody who can add it can see this conversation: it is a direct message with someone who is not an approver for ${agentName}. `
+        + 'Ask in a channel an approver is in, or ask one of them directly.',
+      );
+    }
     let posted: { ts?: string; channel?: string };
     try {
       posted = await connection.web.chat.postMessage({
@@ -4131,6 +4148,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         statusThread: thread ?? event.ts,
         statusWarned: connection.statusWarned,
         ...(ahead ? { after: ahead } : {}),
+        ...(isDm ? { dmWith: userId } : {}),
       });
       if (!streaming) {
         replyOrder.set(sessionId, renderer.posted);

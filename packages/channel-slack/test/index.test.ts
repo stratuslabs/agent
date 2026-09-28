@@ -7607,17 +7607,22 @@ const credentialAdapter = (approvers: string[]) => {
     return { ok: true };
   };
   let asks = 0;
-  const ask = async (overrides: Partial<ChannelCredentialRequest> = {}): Promise<void> => {
+  const ask = async (overrides: Partial<ChannelCredentialRequest> = {}, dmFrom?: string): Promise<void> => {
     next = overrides;
     const asked = new Promise<unknown>((resolve) => {
       settleAsked = resolve;
     });
     asks += 1;
-    // Each ask is a new message in the same thread, so the same session.
-    await socket.deliver('app_mention', mention(
-      `<@B-AVA> open a pull request (${asks})`,
-      asks === 1 ? {} : { ts: `100.${asks}`, thread_ts: '100.1' },
-    ));
+    // Each ask is a new message in the same thread, so the same session;
+    // or, from `dmFrom`, a direct message of theirs.
+    await (dmFrom !== undefined
+      ? socket.deliver('message', mention(`open a pull request (${asks})`, {
+          type: 'message', ts: `300.${asks}`, channel: 'D1', channel_type: 'im', user: dmFrom,
+        }))
+      : socket.deliver('app_mention', mention(
+          `<@B-AVA> open a pull request (${asks})`,
+          asks === 1 ? {} : { ts: `100.${asks}`, thread_ts: '100.1' },
+        )));
     const outcome = await asked;
     if (outcome !== undefined) {
       throw outcome;
@@ -7848,5 +7853,20 @@ test('a refusal no answer could get past takes the form down instead of leaving 
   await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN'));
   assert.equal(web.views_opened.length, 0);
   assert.match(web.ephemerals.at(-1)?.text ?? '', /no longer pending/);
+  await adapter.stop();
+});
+
+test('a direct message from someone who is not an approver gets no form nobody could answer', async () => {
+  const { gateway, adapter, ask, formPosts } = credentialAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  // The DM's only person cannot press the button; the approver cannot see it.
+  await assert.rejects(ask({}, 'U-STRANGER'), /Nobody who can add it can see this conversation: it is a direct message with someone who is not an approver for Ava\./);
+  assert.equal(formPosts().length, 0);
+
+  // An approver's own DM is somewhere they can answer it.
+  await ask({ requestId: 'cred-dm' }, 'U-DYLAN');
+  const posted = formPosts().at(-1);
+  assert.equal(posted?.channel, 'D1');
+  assert.equal(posted?.thread_ts, undefined);
   await adapter.stop();
 });
