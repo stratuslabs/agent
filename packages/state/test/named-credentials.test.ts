@@ -98,3 +98,15 @@ test('an add keeps every other named credential in the file', async () => {
   assert.equal(after.shared['search.apiKey'], 'search-1');
   assert.equal(after.shared['github.token'], 'ghp-1');
 });
+
+test('the replacement command an add prints quotes an agent id a shell would split', async () => {
+  // An agent id may hold a space or a `;`, and the refusal hands the reader
+  // a command to copy: it must run what it says and nothing else.
+  const env = await newEnv();
+  await addNamedCredential(env, { name: 'github.token', value: 'first', agentId: 'ava;echo' });
+  await assert.rejects(
+    addNamedCredential(env, { name: 'github.token', value: 'second', agentId: 'ava;echo' }),
+    (error: unknown) => error instanceof NamedCredentialExistsError
+      && error.message.includes("stratus credential set github.token --agent 'ava;echo'."),
+  );
+});

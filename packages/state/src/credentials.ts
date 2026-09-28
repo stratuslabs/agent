@@ -9,6 +9,7 @@ import {
 } from '@stratusagent/core';
 import { type StateEnvironment, readProcessEnv } from './environment.ts';
 import { credentialsPath } from './paths.ts';
+import { quoteShellArg } from './shell.ts';
 import {
   REGISTERED_PROVIDER_NAME_PATTERN,
   CREDENTIAL_PROVIDER_NAMES,
@@ -445,7 +446,7 @@ export const addNamedCredential = async (
     const named = await loadNamedCredentials(env);
     const replace = agentId === undefined
       ? `printf %s "$KEY" | stratus credential set ${name}`
-      : `printf %s "$KEY" | stratus credential set ${name} --agent ${agentId}`;
+      : `printf %s "$KEY" | stratus credential set ${name} --agent ${quoteShellArg(agentId)}`;
     if (named.shared[name] !== undefined) {
       throw new NamedCredentialExistsError(
         name,

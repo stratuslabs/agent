@@ -124,6 +124,8 @@ export {
   createFileCredentialResolver,
 } from './credentials.ts';
 
+export { quoteShellArg } from './shell.ts';
+
 export {
   migrateLegacyMemory,
   STATE_SCHEMA_VERSION,
