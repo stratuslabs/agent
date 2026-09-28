@@ -1,4 +1,4 @@
-import { isListensMode, LISTENS_MODES, type AgentDefinition } from '@stratusagent/core';
+import { isLanguageTag, isListensMode, LISTENS_MODES, type AgentDefinition } from '@stratusagent/core';
 import { defineAgent } from './define.ts';
 import {
   unquote,
@@ -28,6 +28,11 @@ export interface ParsedSoul {
   provider?: string;
   /** Model the soul prefers (e.g. "claude-opus-5"). Runtimes may override. */
   model?: string;
+  /**
+   * The language this agent writes in (`en-GB`), over the config file's
+   * `language` and the `en-US` default. See `resolveRuntimeConfig`.
+   */
+  language?: string;
 }
 
 export interface ParseSoulOptions {
@@ -35,7 +40,7 @@ export interface ParseSoulOptions {
   seed?: string;
 }
 
-const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model', 'listens'] as const;
+const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model', 'listens', 'language'] as const;
 
 const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials', 'delegates'] as const;
 
@@ -85,6 +90,14 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
     );
   }
 
+  // Strict for the same reason, and for one more: the tag is interpolated
+  // into every prompt the agent is sent, so it may only be a tag.
+  if (scalars.language !== undefined && !isLanguageTag(scalars.language)) {
+    throw new Error(
+      `Soul frontmatter language: ${JSON.stringify(scalars.language)} is not a language tag; use one like en-US or en-GB.`,
+    );
+  }
+
   const agent = defineAgent({
     ...(scalars.name ? { name: scalars.name } : {}),
     ...(scalars.id ? { id: scalars.id } : {}),
@@ -101,6 +114,7 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
     agent,
     ...(scalars.provider ? { provider: scalars.provider } : {}),
     ...(scalars.model ? { model: scalars.model } : {}),
+    ...(isLanguageTag(scalars.language) ? { language: scalars.language } : {}),
   };
 };
 
@@ -115,6 +129,9 @@ export const formatSoul = (soul: ParsedSoul): string => {
   }
   if (soul.agent.listens) {
     lines.push(`listens: ${soul.agent.listens}`);
+  }
+  if (soul.language) {
+    lines.push(`language: ${soul.language}`);
   }
   for (const [key, values] of [
     ['tools', soul.agent.tools],

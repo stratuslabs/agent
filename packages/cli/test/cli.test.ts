@@ -2233,6 +2233,45 @@ test('setup demo path can test run inline before saving', async () => {
   assert.deepEqual(config, { provider: 'demo' });
 });
 
+test('setup test run writes in the language the saved config would run in', async () => {
+  // The quick hello exists to exercise what setup is about to save; a test
+  // run that ignored the config's language would test a different agent.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.test/v1',
+    language: 'en-GB',
+  }));
+  const bodies: Array<{ messages?: Array<{ role: string; content: string }> }> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)) as (typeof bodies)[number]);
+    return new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Hello.' } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { OPENAI_API_KEY: 'sk-test' },
+      fetch: fetchImpl,
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['8\n', '9\n']),
+    },
+  });
+
+  assert.match(output.stdout, /Running a quick hello/);
+  const system = (bodies[0]?.messages ?? []).filter((message) => message.role === 'system').map((message) => message.content).join('\n');
+  assert.match(system, /Write in British English \(en-GB\)/);
+});
+
 test('setup warns when exported env vars override the saved config', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const { streams, output } = createStreams();
@@ -2523,7 +2562,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
   };
   // The scalar preferences setup has no menu for either — same defect, and
   // an operator who turned caching off was silently put back on it.
-  const preferences = { vision: false, promptCache: false, promptCacheTtl: '1h' };
+  const preferences = { vision: false, promptCache: false, promptCacheTtl: '1h', language: 'en-GB' };
   await writeFile(configPath, JSON.stringify({ provider: 'anthropic', ...preferences, ...carried }, null, 2));
 
   const { streams } = createStreams();
@@ -2547,6 +2586,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
   assert.deepEqual(written.slack, carried.slack);
   assert.equal(written.promptCache, false);
   assert.equal(written.promptCacheTtl, '1h');
+  assert.equal(written.language, 'en-GB');
   // The keys setup does own still get written, so this is a merge rather
   // than a refusal to touch a file it did not create.
   assert.equal(written.provider, 'anthropic');

@@ -2055,7 +2055,7 @@ test('an agent that judges takes a turn nobody asked for while attentive, hears 
     ['Dylan: and then', false, undefined],
     ['Dylan: help me', false, undefined],
     ['Dylan: back?', undefined, undefined],
-    ['Dylan: what about this\n[Attached: shot.png. Attachment contents cannot be read here — say so rather than guessing at them.]', false, undefined],
+    ['Dylan: what about this\n[Attached, name only: shot.png (not opened, since this message was not addressed to you). You have only the names, so say so rather than guessing at what is in them.]', false, undefined],
   ]);
   assert.deepEqual(gateway.observes.map((observed) => observed.message), [
     'Dylan: kicking off',
@@ -3382,7 +3382,7 @@ test('a message with attachments tells the turn what arrived and that it cannot 
   // The turn is told the names and told it cannot open them, so it can say
   // the true thing instead of answering as though it had read the log.
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
-    "Dylan: here's the log\n[Attached: server.log, crash dump. Attachment contents cannot be read here — say so rather than guessing at them.]",
+    "Dylan: here's the log\n[Attached, name only: server.log (could not be downloaded); crash dump (not a kind of file that can be read here). You have only the names, so say so rather than guessing at what is in them.]",
   ]);
 });
 
@@ -6906,7 +6906,7 @@ test('an attached image is downloaded and travels with the dispatch; other files
     sessionId: 'slack:ava:T1:C1:960.0',
     agentId: 'ava',
     // The image is not in the note: the model is shown it. The PDF still is.
-    userMessage: "Dylan: what's wrong here?\n[Attached: crash.pdf. Attachment contents cannot be read here — say so rather than guessing at them.]",
+    userMessage: "Dylan: what's wrong here?\n[Attached, name only: crash.pdf (not a kind of file that can be read here). You have only the names, so say so rather than guessing at what is in them.]",
     images: [{ mediaType: 'image/png', data: PNG_BYTES.toString('base64'), name: 'error.png' }],
   }]);
 });
@@ -6948,7 +6948,7 @@ test('a Markdown file attached in a DM is read into the message', async () => {
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
     'can you read this\n[Attached: plan.md. Its contents follow.]\n# Brand ops plan\n\nShip the site.\n[End of plan.md]'
-      + '\n[Attached: deck.pdf. Attachment contents cannot be read here — say so rather than guessing at them.]',
+      + '\n[Attached, name only: deck.pdf (not a kind of file that can be read here). You have only the names, so say so rather than guessing at what is in them.]',
     '\n[Attached: owners.csv. Its contents follow.]\nname,owner\nsite,dylan\n[End of owners.csv]',
   ]);
 });
@@ -6986,7 +6986,7 @@ test('a text file the token may not read, or too large, or not text, stays a not
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
-    'three files\n[Attached: plan.md, huge.log, notes.txt. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    'three files\n[Attached, name only: plan.md (could not be downloaded); huge.log (too large to read here); notes.txt (not readable as text or as an image). You have only the names, so say so rather than guessing at what is in them.]',
   ]);
   // The oversized one is never downloaded.
   assert.deepEqual(fetched, ['https://files.slack.com/F1/download', 'https://files.slack.com/F3/download']);
@@ -7063,7 +7063,7 @@ test('an image the token may not read falls back to the note and names the scope
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
-    'Dylan: see attached\n[Attached: error.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    'Dylan: see attached\n[Attached, name only: error.png (could not be downloaded). You have only the names, so say so rather than guessing at what is in them.]',
     undefined,
   ]]);
   assert.equal(warnings.filter((line) => /error\.png/.test(line) && /files:read/.test(line)).length, 1);
@@ -7108,7 +7108,7 @@ test('an image over the model limit is never downloaded, while a smaller one bes
   // requested, and the crop went through as usual.
   assert.deepEqual(fetched, ['https://files.slack.com/F6/download']);
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images?.map((image) => image.name)]), [[
-    'Dylan: full-res and a crop\n[Attached: poster.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    'Dylan: full-res and a crop\n[Attached, name only: poster.png (too large to read here). You have only the names, so say so rather than guessing at what is in them.]',
     ['crop.png'],
   ]]);
 });
@@ -7159,7 +7159,7 @@ test('a download that stalls is abandoned at the deadline and the turn goes on w
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
-    'Dylan: slow one\n[Attached: slow.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    'Dylan: slow one\n[Attached, name only: slow.png (not downloaded in time). You have only the names, so say so rather than guessing at what is in them.]',
     undefined,
   ]]);
   assert.equal(warnings.filter((line) => /slow\.png/.test(line) && /longer than 20ms/.test(line)).length, 1);
@@ -7211,7 +7211,7 @@ test('one message\'s downloads share a single deadline, so ten stalls cost one w
   assert.equal(signals.length, 1);
   assert.equal(
     gateway.dispatches[0]?.userMessage,
-    'Dylan: three slow ones\n[Attached: slow1.png, slow2.png, slow3.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    'Dylan: three slow ones\n[Attached, name only: slow1.png, slow2.png, slow3.png (not downloaded in time). You have only the names, so say so rather than guessing at what is in them.]',
   );
   assert.equal(warnings.filter((line) => /slow3\.png/.test(line) && /longer than 20ms/.test(line)).length, 1);
   assert.equal(warnings.filter((line) => /slow[12]\.png/.test(line) && /already taken longer/.test(line)).length, 2);
@@ -7263,7 +7263,7 @@ test('images that fit one by one are still held to the message\'s total budget',
   assert.deepEqual(gateway.dispatches[0]?.images?.map((image) => image.name), ['shot2.png', 'shot3.png', 'shot4.png', 'shot5.png']);
   assert.equal(
     gateway.dispatches[0]?.userMessage,
-    'Dylan: all of them\n[Attached: shot1.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    'Dylan: all of them\n[Attached, name only: shot1.png (too large to read here). You have only the names, so say so rather than guessing at what is in them.]',
   );
   assert.equal(warnings.filter((line) => /shot1\.png/.test(line) && /message of its own/.test(line)).length, 1);
 });
@@ -7347,7 +7347,7 @@ test('an image whose download is cut off at the cap falls back to the note', asy
   // The first image of a message may weigh the per-image cap.
   assert.deepEqual(caps, [5 * 1024 * 1024]);
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
-    'Dylan: unsized\n[Attached: unsized.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    'Dylan: unsized\n[Attached, name only: unsized.png (too large to read here). You have only the names, so say so rather than guessing at what is in them.]',
     undefined,
   ]]);
   assert.equal(warnings.filter((line) => /unsized\.png/.test(line) && /abandoned/.test(line)).length, 1);
@@ -7393,7 +7393,7 @@ test('an image the model API would refuse for its size in pixels is never stored
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
-    'Dylan: the big one and a fake\n[Attached: wide.png, fake.jpg. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    'Dylan: the big one and a fake\n[Attached, name only: wide.png (too large to read here); fake.jpg (not readable as text or as an image). You have only the names, so say so rather than guessing at what is in them.]',
     undefined,
   ]]);
   assert.equal(warnings.filter((line) => /wide\.png/.test(line) && /9000×100/.test(line)).length, 1);
@@ -7446,7 +7446,7 @@ test('an image left out for the message\'s budget closes the window to everythin
   assert.deepEqual(gateway.dispatches[0]?.images?.map((image) => image.name), ['shot3.png', 'shot4.png', 'shot5.png', 'shot6.png']);
   assert.equal(
     gateway.dispatches[0]?.userMessage,
-    'Dylan: six of them\n[Attached: shot1.png, shot2.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    'Dylan: six of them\n[Attached, name only: shot1.png, shot2.png (too large to read here). You have only the names, so say so rather than guessing at what is in them.]',
   );
   assert.equal(warnings.filter((line) => /shot2\.png/.test(line) && /message of its own/.test(line)).length, 1);
   assert.equal(warnings.filter((line) => /shot1\.png/.test(line) && /listed after it/.test(line)).length, 1);
@@ -7497,7 +7497,7 @@ test('a download cut off at what was left of the budget closes the window too', 
   assert.deepEqual(gateway.dispatches[0]?.images?.map((image) => image.name), ['shot3.png', 'shot4.png', 'shot5.png', 'shot6.png']);
   assert.equal(
     gateway.dispatches[0]?.userMessage,
-    'Dylan: six again\n[Attached: shot1.png, shot2.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    'Dylan: six again\n[Attached, name only: shot1.png, shot2.png (too large to read here). You have only the names, so say so rather than guessing at what is in them.]',
   );
   assert.equal(warnings.filter((line) => /shot2\.png/.test(line) && /abandoned/.test(line)).length, 1);
   assert.equal(warnings.filter((line) => /shot1\.png/.test(line) && /listed after it/.test(line)).length, 1);

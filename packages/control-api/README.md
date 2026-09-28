@@ -100,8 +100,8 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/health` | Uptime, roster, session counts, pending approvals, resolved runtimes |
 | GET | `/agents` | The roster as data — soul metadata, avatar palette, resolved provider/model, memory counts, activity |
 | POST | `/agents` | Create an agent: writes a soul file and reloads the roster |
-| GET | `/agents/:id` | One agent in full: complete instructions, the raw soul markdown, its pins |
-| PUT | `/agents/:id` | Edit a soul, by field (`name`, `instructions`, `tools`, `skills`, `credentials`, `provider`, `model`, `listens` — one of `mentions`, `thread`, `judge`, an empty string clearing it; anything else answers `400 invalid_listens`) or as raw markdown |
+| GET | `/agents/:id` | One agent in full: complete instructions, the raw soul markdown, its pins, and its `language` when the soul sets one |
+| PUT | `/agents/:id` | Edit a soul, by field (`name`, `instructions`, `tools`, `skills`, `credentials`, `provider`, `model`, `listens` — one of `mentions`, `thread`, `judge`, an empty string clearing it; anything else answers `400 invalid_listens` — `language` — a language tag, an empty string clearing it back to the config's or the default; anything else answers `400 invalid_language`; a field edit that omits it keeps the soul's) or as raw markdown |
 | GET | `/agents/:id/grants` | What this agent may do unattended beyond the built-in safe list — its command scopes, origins, and standing tool grants, from `~/.stratus/agents/<id>/whitelist.json`. A tool grant the engine would not honour carries `stale` saying why (the tool is now contributed by another package, or nothing loads it). The id is validated but not looked up: a grant can outlive its agent, and this is how it is found. `501 grants_unavailable` from a daemon started without a grant store |
 | POST | `/agents/:id/grants/revoke` | Take one back: exactly one of `{ tool }`, `{ scope }` (the listed `description`, such as `git push`), or `{ origin }` → `{ revoked: true }`. Through the daemon's own store, so the next call is judged without it — no restart. `404 grant_not_found` when nothing matched; `400 invalid_grant` for none or several; `409 grants_unreadable` when the agent's whitelist file exists but will not parse, since nothing is written over a grant list nobody can read |
 | POST | `/roster/reload` | Re-read the agents directory and the configured default soul |
@@ -147,7 +147,8 @@ who counts as the operator on each channel is a trusted-config setting, and
 the only file this endpoint writes is a trusted one — so the GET-modify-PUT
 round trip keeps it. The same goes for `vision`, the boolean that tells a
 text-only OpenAI-compatible model to take images as a note: `GET` returns
-it, so `PUT` takes it back. `PUT /config` does not write the `plugins` block, nor the `executor` and
+it, so `PUT` takes it back, and for `language`, the fleet's writing
+language, which the loader refuses with a `400` unless it is a language tag. `PUT /config` does not write the `plugins` block, nor the `executor` and
 `memoryStore` selections. `GET` returns them, and a `PUT` carrying them back
 is accepted (the round trip has to work) but the values are ignored and the
 file's existing ones are preserved rather than deleted by the replace.

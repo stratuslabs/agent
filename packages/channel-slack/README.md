@@ -146,8 +146,10 @@ and the warning names the scope. Text files share the message's 30-second
 download deadline with its images.
 **Every other attachment is unreadable** — a PDF, a Word file, an image that
 was too large, a text file over the caps — so the message reaches the agent
-naming those files and saying they cannot be opened, which is what lets it
-answer honestly instead of as though it had read them. Such a file dropped
+naming those files, each with why it was not read (not a kind of file read
+here, too large, not downloaded or not in time, not readable, or not opened
+because the message was overheard), which is what lets it answer honestly
+instead of as though it had read them, or guessing at why. Such a file dropped
 in with nothing said is not a question, and gets no reply. 
 Sessions are still per agent: an agent hears a thread from the mention
 that brought it in, and what was said before that — to the other agent, or

@@ -1098,6 +1098,20 @@ test('an agent with tools but nothing to say still caches its tool list', async 
   assert.equal(body.tools.at(-1).cache_control, undefined);
 });
 
+test('the Anthropic API path sends the shared defaults the host resolved', async () => {
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hi.' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+
+  await provider.generate({ session: createSession(), runtime: { language: 'en-GB', model: { provider: 'anthropic', model: 'claude-opus-5', fallback: { provider: 'openai', model: 'gpt-5' }, onFallback: true } } });
+
+  const prompt = requests[0]!.body.system.map((block: { text: string }) => block.text).join('\n\n');
+  // The shared defaults reach the model on this path: the language the
+  // host resolved, the accuracy rules, and what is serving the turn.
+  assert.match(prompt, /Write in British English \(en-GB\)/);
+  assert.match(prompt, /drafted, saved, tested, sent, deployed, and verified are different claims/);
+  assert.match(prompt, /This conversation has switched to the fallback, so gpt-5 on openai is the one answering now\./);
+});
+
 test('the breakpoint is never placed twice on one contiguous prefix', async () => {
   // A marker on the last system block already covers the tools ahead of it,
   // so a second one on the last tool would spend a slot to cache the same

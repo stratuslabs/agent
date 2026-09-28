@@ -476,6 +476,31 @@ test('createOpenAICompatibleProvider injects the agent persona as a system messa
   );
 });
 
+test('the OpenAI-compatible path sends the shared defaults the host resolved', async () => {
+  let requestBody: { messages?: Array<{ role: string; content: string }> } = {};
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as typeof requestBody;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: 'Hello!' } }] }),
+      } as Response;
+    },
+  });
+
+  await provider.generate({ ...createRequest(), runtime: { language: 'en-GB', model: { provider: 'anthropic', model: 'claude-opus-5', fallback: { provider: 'openai', model: 'gpt-5' }, onFallback: true } } });
+
+  const prompt = (requestBody.messages ?? []).filter((message) => message.role === 'system').map((message) => message.content).join('\n\n');
+  // The shared defaults reach the model on this path: the language the
+  // host resolved, the accuracy rules, and what is serving the turn.
+  assert.match(prompt, /Write in British English \(en-GB\)/);
+  assert.match(prompt, /drafted, saved, tested, sent, deployed, and verified are different claims/);
+  assert.match(prompt, /This conversation has switched to the fallback, so gpt-5 on openai is the one answering now\./);
+});
+
 test('createOpenAICompatibleProvider renders agent memory as a system message', async () => {
   let requestBody: { messages?: Array<{ role: string; content: string }> } = {};
 

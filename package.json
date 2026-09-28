@@ -9,7 +9,8 @@
     "demo": "pnpm cli run --prompt \"please use the echo tool\"",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "eval:room": "pnpm --filter @stratusagent/cli run eval:room"
+    "eval:room": "pnpm --filter @stratusagent/cli run eval:room",
+    "eval:defaults": "pnpm --filter @stratusagent/cli run eval:defaults"
   },
   "license": "MIT",
   "repository": {

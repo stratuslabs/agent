@@ -91,6 +91,24 @@ test('generate runs a turn through the Agent SDK and returns the result text', a
   assert.equal(options.env?.ANTHROPIC_API_KEY, undefined);
 });
 
+test('the Claude Code path sends the shared defaults the host resolved', async () => {
+  const { queryFn, calls } = createFakeQuery([
+    { type: 'system', subtype: 'init' },
+    { type: 'assistant' },
+    { type: 'result', subtype: 'success', is_error: false, result: 'Hi.' },
+  ]);
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+
+  await provider.generate({ session: createSession(), runtime: { language: 'en-GB', model: { provider: 'anthropic', model: 'claude-opus-5', fallback: { provider: 'openai', model: 'gpt-5' }, onFallback: true } } });
+
+  const prompt = (calls[0]!.options as { systemPrompt?: string }).systemPrompt ?? '';
+  // The shared defaults reach the model on this path: the language the
+  // host resolved, the accuracy rules, and what is serving the turn.
+  assert.match(prompt, /Write in British English \(en-GB\)/);
+  assert.match(prompt, /drafted, saved, tested, sent, deployed, and verified are different claims/);
+  assert.match(prompt, /This conversation has switched to the fallback, so gpt-5 on openai is the one answering now\./);
+});
+
 test('an image on the newest message reaches Claude Code as an image, not a note', async () => {
   const prompts: unknown[] = [];
   const queryFn: ClaudeCodeQueryFn = (params) => {

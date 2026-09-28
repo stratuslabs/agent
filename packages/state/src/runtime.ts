@@ -1,3 +1,4 @@
+import type { ParsedSoul } from '@stratusagent/agents';
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
 import { DEFAULT_CODEX_MODEL } from '@stratusagent/provider-codex';
 import { loadConfigFile } from './config-file.ts';
@@ -41,6 +42,18 @@ import { resolveSoulPath, loadSoulFile } from './souls.ts';
  * won: re-deriving this rule elsewhere drifts, and a warning that blames
  * the wrong variable leaves the real override — and its billing — in place.
  */
+/**
+ * The language a run writes in: the soul's own `language:`, then the config
+ * file's `language`; both were checked as tags when read. Absent leaves the
+ * prompt on `DEFAULT_LANGUAGE`. Exported because setup's test run builds a
+ * runtime of its own, and a second spelling of this order is the copy that
+ * drifts.
+ */
+export const languageFor = (
+  soul: Pick<ParsedSoul, 'language'> | undefined,
+  config: Pick<StratusConfigFile, 'language'>,
+): string | undefined => soul?.language ?? config.language;
+
 export const apiKeyEnvNameFor = (
   provider: CredentialProviderName,
   fileConfig: StratusConfigFile,
@@ -160,12 +173,15 @@ export const resolveRuntimeConfig = async (
     env,
   );
 
+  const language = languageFor(soul, fileConfig);
+
   if (provider === 'demo') {
     return {
       provider: 'demo',
       ...(soul ? { soul } : {}),
       ...(soulPath ? { soulPath } : {}),
       ...(ignoredFromUntrustedConfig ? { ignoredFromUntrustedConfig } : {}),
+      ...(language !== undefined ? { language } : {}),
     };
   }
 
@@ -348,6 +364,7 @@ export const resolveRuntimeConfig = async (
       ...(soul ? { soul } : {}),
       ...(soulPath ? { soulPath } : {}),
       ...(ignoredFromUntrustedConfig ? { ignoredFromUntrustedConfig } : {}),
+      ...(language !== undefined ? { language } : {}),
     };
     // The same implicit-fallback rule as below: a fallback with no
     // provider of its own was written for the config's provider.
@@ -544,6 +561,10 @@ export const resolveRuntimeConfig = async (
 
   if (ignoredFromUntrustedConfig) {
     resolved.ignoredFromUntrustedConfig = ignoredFromUntrustedConfig;
+  }
+
+  if (language !== undefined) {
+    resolved.language = language;
   }
 
   if (env.fetch) {

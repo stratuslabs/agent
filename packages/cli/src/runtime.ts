@@ -47,6 +47,7 @@ import {
   readProcessEnv,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   createAgentWorkspaces,
+  describeServingModel,
   type RuntimeSelection,
   type RuntimeConfig,
   type IgnoredUntrustedConfig,
@@ -457,6 +458,10 @@ export const createAgentRuntime = async (
         ? { soulPath: options.runtime.soulPath }
         : {}),
       workspace: createAgentWorkspaces(runEnv).forAgent(agent.id),
+      ...(options.runtime.language !== undefined ? { language: options.runtime.language } : {}),
+      // Not on the fallback when the run starts; the fallback wrapper marks
+      // the request itself if it takes over.
+      model: describeServingModel(options.runtime, false),
     };
 
     return { runner, agent, metadata, runtimeContext, disposePlugins };

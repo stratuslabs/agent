@@ -90,6 +90,20 @@ test('generate runs a turn through the Codex SDK and returns the reply text', as
   assert.match(config.developer_instructions ?? '', /The user prefers short answers\./);
 });
 
+test('the Codex path sends the shared defaults the host resolved', async () => {
+  const { runTurn, calls } = createFakeRunTurn(successEvents('Hi.'));
+  const provider = createCodexProvider({ runTurn });
+
+  await provider.generate({ session: createSession(), runtime: { language: 'en-GB', model: { provider: 'anthropic', model: 'claude-opus-5', fallback: { provider: 'openai', model: 'gpt-5' }, onFallback: true } } });
+
+  const prompt = (calls[0]!.clientOptions.config as CapturedConfig).developer_instructions ?? '';
+  // The shared defaults reach the model on this path: the language the
+  // host resolved, the accuracy rules, and what is serving the turn.
+  assert.match(prompt, /Write in British English \(en-GB\)/);
+  assert.match(prompt, /drafted, saved, tested, sent, deployed, and verified are different claims/);
+  assert.match(prompt, /This conversation has switched to the fallback, so gpt-5 on openai is the one answering now\./);
+});
+
 test('the harness posture is pinned: no native tools, read-only sandbox, no repo instructions', async () => {
   const { runTurn, calls } = createFakeRunTurn(successEvents('ok'));
   await createCodexProvider({ runTurn }).generate({ session: createSession() });

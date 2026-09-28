@@ -204,6 +204,7 @@ export {
   ignoredUntrustedConfigKeys,
   discoverIgnoredUntrustedConfig,
   resolveRuntimeConfig,
+  languageFor,
 } from './runtime.ts';
 
 export {
@@ -212,6 +213,7 @@ export {
   FALLBACK_ACTIVE_METADATA_KEY,
   PROVIDER_STATE_METADATA_KEYS,
   createFallbackWrappedProvider,
+  describeServingModel,
   type RegisteredProviders,
   createRuntimeProvider,
 } from './provider-runtime.ts';

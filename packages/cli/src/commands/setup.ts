@@ -25,6 +25,7 @@ import {
   loadRosterSouls,
   loadSoulFile,
   isRegisteredProviderName,
+  languageFor,
   readNonEmptyString,
   registeredProviderNameOf,
   type BuiltinProviderName,
@@ -109,6 +110,12 @@ interface SetupState {
    */
   promptCache?: boolean;
   promptCacheTtl?: '5m' | '1h';
+  /**
+   * The fleet's writing language, carried for the same reason: setup has
+   * no menu for it, and a save that dropped it would put every agent back
+   * on the default without anyone choosing that.
+   */
+  language?: string;
   /**
    * Settings setup has no menu for, held so a save does not drop them —
    * see the round-trip below.
@@ -232,6 +239,7 @@ export const runSetup = async (
     ...(existing.vision !== undefined ? { vision: existing.vision } : {}),
     ...(existing.promptCache !== undefined ? { promptCache: existing.promptCache } : {}),
     ...(existing.promptCacheTtl !== undefined ? { promptCacheTtl: existing.promptCacheTtl } : {}),
+    ...(existing.language !== undefined ? { language: existing.language } : {}),
     ...(existing.plugins !== undefined ? { plugins: existing.plugins } : {}),
     ...(existing.approvals !== undefined ? { approvals: existing.approvals } : {}),
     ...(existing.api !== undefined ? { api: existing.api } : {}),
@@ -892,7 +900,16 @@ export const runSetup = async (
     };
   };
 
+  // The language the saved config would run in, soul over config, carried
+  // onto whichever variant the test run builds: it is part of what the
+  // quick hello is there to exercise.
   const buildTestRuntime = async (): Promise<RuntimeConfig | undefined> => {
+    const runtime = await buildTestRuntimeVariant();
+    const language = runtime ? languageFor(runtime.soul, state) : undefined;
+    return runtime && language !== undefined ? { ...runtime, language } : runtime;
+  };
+
+  const buildTestRuntimeVariant = async (): Promise<RuntimeConfig | undefined> => {
     let soul: ParsedSoul | undefined;
     if (state.soulPath) {
       try {
@@ -2570,6 +2587,9 @@ export const runSetup = async (
     }
     if (state.promptCacheTtl !== undefined) {
       config.promptCacheTtl = state.promptCacheTtl;
+    }
+    if (state.language !== undefined) {
+      config.language = state.language;
     }
     // `plugins` and `approvals` have menus above; `api`, `principals`, and
     // `slack` do not and are written back exactly as they were read. Both cases
