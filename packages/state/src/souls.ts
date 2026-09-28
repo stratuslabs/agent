@@ -1,6 +1,6 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { parseSoul, type ParsedSoul } from '@stratusagent/agents';
+import { formatSoul, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { loadConfigFile } from './config-file.ts';
 import { resolveConfigLocation } from './config-location.ts';
 import type { StratusConfigFile, RuntimeSelection } from './config.ts';
@@ -103,6 +103,34 @@ export const loadSoulFile = async (resolvedPath: string): Promise<ParsedSoul> =>
       `Could not parse soul file ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+};
+
+/**
+ * Add a credential name to a soul's `credentials:` list, reporting whether
+ * the file changed.
+ *
+ * The step that makes an approver's answer to `credential.request` usable:
+ * storing a key grants no agent anything, so a form that only stored it
+ * would leave the agent holding a key it may not resolve until somebody
+ * edited the file by hand. It grants the one agent whose soul this is,
+ * never another, whatever scope the key was stored under.
+ *
+ * Rendered through `formatSoul`, which canonicalizes the file the way every
+ * field edit does, and parsed back before it is written: a soul that
+ * survives the write but not the next read is an agent that vanishes on
+ * restart.
+ */
+export const grantSoulCredential = async (soulPath: string, name: string): Promise<boolean> => {
+  const soul = await loadSoulFile(soulPath);
+  const granted = soul.agent.credentials ?? [];
+  if (granted.includes(name)) {
+    return false;
+  }
+  const next: ParsedSoul = { ...soul, agent: { ...soul.agent, credentials: [...granted, name] } };
+  const rendered = formatSoul(next);
+  parseSoul(rendered, { seed: soulPath });
+  await writeFile(soulPath, rendered);
+  return true;
 };
 
 export interface RosterEntry {

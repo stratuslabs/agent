@@ -2351,6 +2351,9 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
  * Resolves named credentials for an agent. Implementations must enforce the
  * agent's `credentials` allowlist so secrets stay scoped per agent.
  */
+/** Whose a named credential is: one agent's own, or the whole fleet's. */
+export type CredentialScope = 'agent' | 'shared';
+
 export interface CredentialResolver {
   resolve(agent: AgentDefinition, name: string): Promise<string | undefined>;
 }
@@ -3241,6 +3244,41 @@ export type StratusEvent =
       answer: ApprovalAnswer;
       reason: ApprovalResolutionReason;
       /** Who decided, when a person did. Channel-native id (a Slack user). */
+      actor?: string;
+    }
+  /**
+   * An agent asked for a named credential it does not hold
+   * (`credential.request`). A channel renders a form an approver can fill
+   * in; nothing about the request is a secret, and nothing that answers it
+   * ever travels on the bus. `scope` is whose the key would be: the
+   * agent's own (`agent`, the default) or the fleet's (`shared`).
+   *
+   * `metadata` is the session's, for the same reason an approval request
+   * carries it: it says which conversation to ask in.
+   */
+  | {
+      type: 'credential.requested';
+      sessionId: string;
+      agentId: string;
+      requestId: string;
+      name: string;
+      scope: CredentialScope;
+      /** The agent's own words on what it needs the key for. Untrusted text. */
+      reason?: string;
+      metadata?: JsonObject;
+    }
+  /**
+   * A requested credential was stored and granted to the agent that asked.
+   * Names only; the value went to the credential store and nowhere else.
+   */
+  | {
+      type: 'credential.provided';
+      sessionId: string;
+      agentId: string;
+      requestId: string;
+      name: string;
+      scope: CredentialScope;
+      /** Who provided it. Channel-native id (a Slack user). */
       actor?: string;
     }
   | {
@@ -4531,7 +4569,7 @@ export const renderRuntimeSection = (
     (credentials.length > 0
       ? `Credentials you may use: ${credentials.join(', ')}. The tools that need one use it on your behalf, so you never see a value, and there is no file or environment variable to look for. `
       : 'You hold no credentials. ')
-    + 'When a task needs a credential you do not hold, ask your operator to store it with stratus credential set and grant it to you.',
+    + 'When a task needs a credential you do not hold, ask for it with the credential.request tool if you have it; otherwise ask your operator to store it with stratus credential set and grant it to you.',
   );
   return `How you run: you are an agent on Stratus Agent. ${lines.join(' ')}`;
 };

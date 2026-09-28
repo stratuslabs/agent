@@ -176,6 +176,7 @@ export {
   resolveSoul,
   resolveConfiguredSoul,
   loadSoulFile,
+  grantSoulCredential,
   type RosterEntry,
   DuplicateAgentIdError,
   loadRosterSouls,

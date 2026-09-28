@@ -122,8 +122,10 @@ project-local config can set it) is left out rather than read to the model.
 The same section names the credentials the soul's `credentials:` list
 grants, by name and never by value, and says the tools that need one use it
 on the agent's behalf, so there is no file or environment variable to look
-for. An agent with none is told so, and told to ask its operator to store
-one and grant it. A stored credential reaches only a plugin tool that
+for. An agent that needs one it does not hold is told to ask for it with
+`credential.request`, which puts a form in front of an approver in Slack
+([Slack](../guides/slack.md#adding-a-credential-from-slack)), or otherwise to
+ask its operator to store one and grant it. A stored credential reaches only a plugin tool that
 declares it ([Tools](../guides/tools.md#searching-the-web)); an agent that
 went searching for a shared key is what this line is for.
 

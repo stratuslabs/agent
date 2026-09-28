@@ -108,4 +108,9 @@ export {
   createMessageSendTool,
 } from './tools/message.ts';
 
+export {
+  CREDENTIAL_REQUEST_TOOL_NAME,
+  type CredentialRequester,
+  createCredentialRequestTool,
+} from './tools/credentials.ts';
 export { GATEWAY_ONLY_TOOL_NAMES } from './tools/gateway-only.ts';

@@ -226,6 +226,24 @@ export interface GatewayLike {
      */
     reason?: 'decided' | 'undeliverable';
   }): boolean;
+  /**
+   * Answers a `credential.requested` with the value a person entered.
+   * `ok: false` carries a sentence to show them, and nothing was stored.
+   *
+   * As with approvals, who may answer is the adapter's question: the
+   * approver set is written in the channel's own user ids. The value is
+   * handed over here and nowhere else — an adapter never logs it, posts it,
+   * or passes it to `dispatch`.
+   *
+   * Optional: a host that omits it gives up taking credentials from a
+   * channel, and an adapter says so to whoever tried instead of offering a
+   * form that cannot land.
+   */
+  provideCredential?(input: {
+    requestId: string;
+    value: string;
+    actor?: string;
+  }): Promise<{ ok: true } | { ok: false; message: string }>;
 }
 
 /**

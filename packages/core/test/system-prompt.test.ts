@@ -280,7 +280,7 @@ test('the runtime section names the credentials the soul grants, and says there 
   const held = renderSystemPromptParts(input).find((part) => part.kind === 'runtime')?.text ?? '';
   assert.match(held, /Credentials you may use: search\.apiKey, github\.token\./);
   assert.match(held, /you never see a value, and there is no file or environment variable to look for/);
-  assert.match(held, /ask your operator to store it with stratus credential set and grant it to you/);
+  assert.match(held, /ask for it with the credential\.request tool if you have it; otherwise ask your operator to store it with stratus credential set and grant it to you/);
   assert.doesNotMatch(held, /—/);
 
   delete input.session.agent.credentials;

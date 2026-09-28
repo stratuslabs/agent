@@ -4,9 +4,11 @@ import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { readFile, writeFile } from 'node:fs/promises';
 import {
   NamedCredentialExistsError,
   addNamedCredential,
+  grantSoulCredential,
   loadNamedCredentials,
   saveNamedCredentials,
 } from '../src/index.ts';
@@ -109,4 +111,21 @@ test('the replacement command an add prints quotes an agent id a shell would spl
     (error: unknown) => error instanceof NamedCredentialExistsError
       && error.message.includes("stratus credential set github.token --agent 'ava;echo'."),
   );
+});
+
+test('granting a credential in a soul adds the name once and keeps everything else the soul says', async () => {
+  const env = await newEnv();
+  const soulFile = path.join(env.homeDir, 'kai.md');
+  await writeFile(soulFile, '---\nname: Kai\nid: kai\nlanguage: en-GB\ntools: [web.*]\ncredentials: [search.apiKey]\n---\n\nYou are Kai.\n');
+
+  assert.equal(await grantSoulCredential(soulFile, 'github.token'), true);
+  const soul = await readFile(soulFile, 'utf8');
+  assert.match(soul, /^credentials:\n  - search\.apiKey\n  - github\.token$/m);
+  assert.match(soul, /^language: en-GB$/m);
+  assert.match(soul, /^tools:\n  - web\.\*$/m);
+  assert.match(soul, /You are Kai\./);
+
+  // Already granted: the file is left as it is.
+  assert.equal(await grantSoulCredential(soulFile, 'github.token'), false);
+  assert.equal(await readFile(soulFile, 'utf8'), soul);
 });

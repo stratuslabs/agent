@@ -28,6 +28,9 @@ import {
   isValidSessionId,
   MAX_SESSION_ID_LENGTH,
   MAX_AGENT_ID_LENGTH,
+  CREDENTIAL_REQUEST_TOOL_NAME,
+  GATEWAY_ONLY_TOOL_NAMES,
+  createCredentialRequestTool,
 } from '../src/index.ts';
 
 test('generateAgentName is a human-ish first name, deterministic for a seed', () => {
@@ -853,4 +856,33 @@ test('a session id may open a conversation only when it is a single addressable 
   // fail it is still a valid agent id, because that bound applies where an
   // id is minted and agent ids predate it.
   assert.equal(isValidAgentId('a'.repeat(MAX_SESSION_ID_LENGTH + 1)), true);
+});
+
+test('credential.request passes a name, a scope defaulting to the agent, and a reason, and refuses anything else', async () => {
+  const asked: Array<{ name: string; scope: string; reason?: string }> = [];
+  const tool = createCredentialRequestTool(async (request) => {
+    asked.push(request);
+    return { requestId: 'req-1' };
+  });
+  const session = {
+    id: 's1',
+    agent: { id: 'kai', name: 'Kai' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  const output = await tool.execute({ name: ' github.token ', reason: ' To open PRs. ' }, session);
+  assert.deepEqual(asked[0], { name: 'github.token', scope: 'agent', reason: 'To open PRs.' });
+  assert.match(JSON.stringify(output), /You will not see the value/);
+  await tool.execute({ name: 'search.apiKey', scope: 'shared' }, session);
+  assert.deepEqual(asked[1], { name: 'search.apiKey', scope: 'shared' });
+
+  await assert.rejects(tool.execute({}, session), /needs "name"/);
+  await assert.rejects(tool.execute({ name: 'x', scope: 'everyone' }, session), /"scope" is "agent".*or "shared"/);
+  assert.equal(asked.length, 2);
+  // A human decides everything after the question, so asking is safe.
+  assert.equal(tool.risk, 'safe');
+  assert.ok(GATEWAY_ONLY_TOOL_NAMES.includes(CREDENTIAL_REQUEST_TOOL_NAME));
 });

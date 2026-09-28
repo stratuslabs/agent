@@ -27,6 +27,7 @@ import {
   readPendingApproval,
   type AgentDefinition,
   type AgentRuntimeContext,
+  type CredentialScope,
   type AgentMemoryStore,
   type AlwaysMeans,
   type ApprovalAnswer,
@@ -44,6 +45,7 @@ import {
   type ToolRisk,
 } from '@stratusagent/core';
 import {
+  createCredentialRequestTool,
   createDelegateTool,
   createForgetTool,
   createPinTool,
@@ -126,6 +128,12 @@ import {
   loadRosterSouls,
   FALLBACK_ACTIVE_METADATA_KEY,
   loadSoulFile,
+  grantSoulCredential,
+  addNamedCredential,
+  loadNamedCredentials,
+  NamedCredentialExistsError,
+  CREDENTIAL_NAME_PATTERN,
+  quoteShellArg,
   migrateLegacyMemory,
   PROVIDER_STATE_METADATA_KEYS,
   ConfigFileError,
@@ -808,7 +816,34 @@ export interface Gateway {
    * it as "try again".
    */
   resolveApproval(input: ResolveApprovalInput): boolean;
+  /**
+   * Answers a `credential.requested` with the value an approver entered:
+   * stores it add-only (`addNamedCredential`), under the agent or the fleet
+   * as the request asked, and adds the name to the requesting agent's soul.
+   * The value goes to the credential store and nowhere else — not onto the
+   * bus, the log, or the session.
+   *
+   * Who may answer is the channel's question, as it is for approvals.
+   */
+  provideCredential(input: ProvideCredentialInput): Promise<ProvideCredentialResult>;
 }
+
+export interface ProvideCredentialInput {
+  requestId: string;
+  value: string;
+  /** Who provided it. Channel-native id (a Slack user). */
+  actor?: string;
+}
+
+/**
+ * `ok: false` carries a sentence for the person who entered the value: the
+ * request is gone, the name is already stored, or the value is empty.
+ * Nothing was stored. `granted: false` on success means the soul already
+ * listed the name.
+ */
+export type ProvideCredentialResult =
+  | { ok: true; name: string; scope: CredentialScope; agentId: string; granted: boolean }
+  | { ok: false; message: string };
 
 interface AgentSource {
   definition: AgentDefinition;
@@ -1779,6 +1814,116 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const connection = await outboundFor(agentId, destination);
     await connection.post(text);
   }));
+  /**
+   * Credential requests waiting on a person, by request id.
+   *
+   * In memory on purpose: a request is a question somebody is being asked
+   * now, and a restart that forgot it only means the agent asks again. What
+   * matters is that the entry carries everything the answer needs, so a
+   * channel quoting the id back decides nothing about where the key goes.
+   */
+  const credentialRequests = new Map<string, {
+    agentId: string;
+    sessionId: string;
+    name: string;
+    scope: CredentialScope;
+    soulPath: string;
+  }>();
+
+  tools.register(createCredentialRequestTool(async (request, session) => {
+    const agentId = session.agent.id;
+    const soulPath = sources.get(agentId)?.soulPath;
+    if (soulPath === undefined) {
+      throw new Error(
+        `${session.agent.name} is the built-in agent and has no soul file to grant a credential in. `
+        + `Your operator can store one on the machine with \`stratus credential set ${request.name}\`.`,
+      );
+    }
+    if (!CREDENTIAL_NAME_PATTERN.test(request.name)) {
+      throw new Error(
+        `${JSON.stringify(request.name)} is not a credential name. Use letters, digits, dots, dashes, or underscores, `
+        + 'starting with a letter, the way the tool that needs it spells it: search.apiKey, github.token.',
+      );
+    }
+    // A key already stored is not something to ask a person for again: the
+    // form only adds, so it could only fail. Say what is actually missing.
+    const named = await loadNamedCredentials(env);
+    const stored = named.agents[agentId]?.[request.name] !== undefined || named.shared[request.name] !== undefined;
+    const granted = session.agent.credentials?.includes(request.name) === true;
+    if (stored && granted) {
+      throw new Error(`You already hold ${request.name}; the tools that need it use it for you. There is nothing to ask for.`);
+    }
+    if (stored) {
+      throw new Error(
+        `${request.name} is already stored but not granted to you. Ask your operator to add it to the credentials list in your soul; `
+        + 'a form would only refuse to store it again.',
+      );
+    }
+    // Only a conversation a channel started has anywhere to show a form;
+    // a scheduled or HTTP turn would announce a request nobody sees.
+    if (typeof session.metadata?.channel !== 'string') {
+      throw new Error(
+        `This conversation is not in a channel that can show your operator a form. Ask them to store ${request.name} on the machine `
+        + `with \`stratus credential set ${request.name}${request.scope === 'agent' ? ` --agent ${quoteShellArg(agentId)}` : ''}\` and grant it to you.`,
+      );
+    }
+    const requestId = randomUUID();
+    credentialRequests.set(requestId, { agentId, sessionId: session.id, name: request.name, scope: request.scope, soulPath });
+    await bus.emit({
+      type: 'credential.requested',
+      sessionId: session.id,
+      agentId,
+      requestId,
+      name: request.name,
+      scope: request.scope,
+      ...(request.reason !== undefined ? { reason: request.reason } : {}),
+      ...(session.metadata ? { metadata: session.metadata } : {}),
+    });
+    return { requestId };
+  }));
+
+  const provideCredential = async (input: ProvideCredentialInput): Promise<ProvideCredentialResult> => {
+    const request = credentialRequests.get(input.requestId);
+    if (!request) {
+      return { ok: false, message: 'That credential request is no longer pending. Ask the agent to request it again.' };
+    }
+    try {
+      await addNamedCredential(env, {
+        name: request.name,
+        value: input.value,
+        ...(request.scope === 'agent' ? { agentId: request.agentId } : {}),
+      });
+    } catch (error) {
+      // Refused, not failed: the request stays pending, so a person who
+      // typed an empty value can try again from the same form.
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+    credentialRequests.delete(input.requestId);
+    // Stored first, granted second: a key nobody may use is recoverable by
+    // editing the soul, while a soul naming a key that was never stored
+    // fails every call that reaches for it.
+    let granted: boolean;
+    try {
+      granted = await grantSoulCredential(request.soulPath, request.name);
+    } catch (error) {
+      return {
+        ok: false,
+        message: `${request.name} was stored, but could not be added to ${request.soulPath} `
+          + `(${error instanceof Error ? error.message : String(error)}). Add it to the soul's credentials list by hand.`,
+      };
+    }
+    await bus.emit({
+      type: 'credential.provided',
+      sessionId: request.sessionId,
+      agentId: request.agentId,
+      requestId: input.requestId,
+      name: request.name,
+      scope: request.scope,
+      ...(input.actor !== undefined ? { actor: input.actor } : {}),
+    });
+    return { ok: true, name: request.name, scope: request.scope, agentId: request.agentId, granted };
+  };
+
   tools.register(createDelegateTool({
     registry,
     dispatch: (input) => dispatchInternal({
@@ -3592,6 +3737,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     resolveApproval,
+    provideCredential,
   };
 
   return gateway;

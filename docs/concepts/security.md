@@ -53,6 +53,14 @@ linked own the full story.
   onto whatever account the new value belongs to, so replacing and removing
   stay with `stratus credential set` and `remove` at the machine.
   ([Control API](../../packages/control-api/README.md))
+- **A credential an agent asks for never passes through the agent.**
+  `credential.request` announces a name and a scope, nothing else; the
+  Slack form's value goes from the approver's form to the credential store
+  through that same add-only rule, and is authorized by *who submitted it*
+  against the agent's approvers, on the click and on the submission. It
+  grants the name to the requesting agent's soul and to no other agent,
+  whatever scope the key was stored under.
+  ([Slack](../guides/slack.md#adding-a-credential-from-slack))
 
 ## What a cloned repo cannot decide
 

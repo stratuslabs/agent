@@ -75,6 +75,8 @@ interface FakeWeb extends SlackWebLike {
   updates: Array<{ channel: string; ts: string; text: string; blocks?: SlackBlock[] }>;
   deletes: Array<{ channel: string; ts: string }>;
   ephemerals: Array<{ channel: string; user: string; text: string }>;
+  /** Forms opened with views.open, in order. */
+  views_opened: Array<{ trigger_id: string; view: SlackBlock }>;
   uploads: Array<{ channel_id: string; filename?: string; contents: string; wasBuffer: boolean }>;
   userInfoDelayMs?: (callIndex: number) => number;
   /** Profile names to answer with, by user id, ahead of the default `name-<id>`. */
@@ -101,7 +103,14 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
     updates: [],
     deletes: [],
     ephemerals: [],
+    views_opened: [],
     uploads: [],
+    views: {
+      async open(args) {
+        web.views_opened.push(args);
+        return {};
+      },
+    },
     auth: {
       async test() {
         return { user_id: botUserId, team_id: teamId };
@@ -7501,4 +7510,175 @@ test('a download cut off at what was left of the budget closes the window too', 
   );
   assert.equal(warnings.filter((line) => /shot2\.png/.test(line) && /abandoned/.test(line)).length, 1);
   assert.equal(warnings.filter((line) => /shot1\.png/.test(line) && /listed after it/.test(line)).length, 1);
+});
+
+// ---- credential requests ---------------------------------------------------
+
+const credentialRequest = (
+  overrides: Partial<Extract<StratusEvent, { type: 'credential.requested' }>> = {},
+): Extract<StratusEvent, { type: 'credential.requested' }> => ({
+  type: 'credential.requested',
+  sessionId: 'slack:ava:T1:C1:100.1',
+  agentId: 'ava',
+  requestId: 'cred-1',
+  name: 'github.token',
+  scope: 'agent',
+  reason: 'To open pull requests on the website repo.',
+  metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+  ...overrides,
+});
+
+const credentialClick = (requestId: string, user: string) => ({
+  body: {
+    type: 'block_actions',
+    team_id: 'T1',
+    trigger_id: `trigger-${user}`,
+    user: { id: user },
+    channel: { id: 'C1' },
+    message: { ts: 'bot-ts-1', thread_ts: '100.1' },
+    actions: [{ action_id: 'stratus_credential_add', value: requestId }],
+  },
+});
+
+const credentialSubmission = (requestId: string, user: string, value: string) => ({
+  body: {
+    type: 'view_submission',
+    team_id: 'T1',
+    user: { id: user },
+    view: {
+      callback_id: 'stratus_credential',
+      private_metadata: requestId,
+      state: { values: { credential_value: { value: { value } } } },
+    },
+  },
+});
+
+/**
+ * A stub gateway that takes credentials the way the real one does: once per
+ * pending request, with its answer carried back as `credential.provided`.
+ */
+const credentialAdapter = (approvers: string[]) => {
+  const harness = approvalAdapter([{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers }]);
+  const provided: Array<{ requestId: string; value: string; actor?: string }> = [];
+  const pending = new Set<string>();
+  let refuseWith: string | undefined;
+  harness.gateway.provideCredential = async (input) => {
+    provided.push(input);
+    if (!pending.has(input.requestId)) {
+      return { ok: false, message: 'That credential request is no longer pending.' };
+    }
+    if (refuseWith !== undefined) {
+      return { ok: false, message: refuseWith };
+    }
+    pending.delete(input.requestId);
+    await harness.gateway.bus.emit({
+      type: 'credential.provided',
+      sessionId: 'slack:ava:T1:C1:100.1',
+      agentId: 'ava',
+      requestId: input.requestId,
+      name: 'github.token',
+      scope: 'agent',
+      ...(input.actor !== undefined ? { actor: input.actor } : {}),
+    });
+    return { ok: true };
+  };
+  return { ...harness, provided, pending, refuse: (message: string | undefined) => { refuseWith = message; } };
+};
+
+test('a credential request is posted in the thread with a button only an approver can use', async () => {
+  const { socket, web, gateway, adapter, pending } = credentialAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('cred-1');
+  await gateway.bus.emit(credentialRequest());
+
+  const posted = web.posts.at(-1);
+  assert.equal(posted?.channel, 'C1');
+  assert.equal(posted?.thread_ts, '100.1');
+  const blocks = JSON.stringify(posted?.blocks);
+  assert.match(blocks, /\*Ava\* is asking for a credential: `github.token`, for Ava only\./);
+  assert.match(blocks, /_Ava says:_ To open pull requests on the website repo\./);
+  assert.match(blocks, /never into this conversation, and a key already stored is never replaced from here/);
+  assert.deepEqual(buttonIds(posted?.blocks), ['stratus_credential_add']);
+
+  // Anyone in the thread can see the button; only an approver gets the form.
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-STRANGER'));
+  assert.equal(web.views_opened.length, 0);
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /You are not an approver for Ava, so you cannot add its credentials\./);
+
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN'));
+  const opened = web.views_opened.at(-1);
+  assert.equal(opened?.trigger_id, 'trigger-U-DYLAN');
+  assert.equal(opened?.view.callback_id, 'stratus_credential');
+  // Only the request id rides in the form: where the key goes is the
+  // gateway's record, never something a submission says about itself.
+  assert.equal(opened?.view.private_metadata, 'cred-1');
+  assert.match(JSON.stringify(opened?.view), /Value for github.token/);
+
+  await adapter.stop();
+});
+
+test('a submitted credential goes to the gateway and nowhere else, and the request says it was added', async () => {
+  const { socket, web, gateway, adapter, provided, pending } = credentialAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('cred-1');
+  await gateway.bus.emit(credentialRequest());
+
+  const acks: unknown[] = [];
+  await socket.deliver('interactive', credentialSubmission('cred-1', 'U-DYLAN', 'ghp-secret-value'), async (response?: unknown) => {
+    acks.push(response);
+  });
+  assert.deepEqual(provided, [{ requestId: 'cred-1', value: 'ghp-secret-value', actor: 'U-DYLAN' }]);
+  // A plain ack closes the form.
+  assert.deepEqual(acks, [undefined]);
+  const update = web.updates.at(-1);
+  assert.match(update?.text ?? '', /Added `github.token` for Ava only, by <@U-DYLAN>\. Ava can use it from its next reply/);
+  assert.equal(buttonIds(update?.blocks).length, 0);
+
+  // The value is in no message the adapter wrote, anywhere.
+  const written = JSON.stringify([web.posts, web.updates, web.ephemerals, web.views_opened]);
+  assert.doesNotMatch(written, /ghp-secret-value/);
+
+  await adapter.stop();
+});
+
+test('a refused submission keeps the form open with the reason beside the field', async () => {
+  const { socket, gateway, adapter, pending, refuse, provided } = credentialAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('cred-1');
+  await gateway.bus.emit(credentialRequest());
+
+  refuse('A shared credential named github.token is already stored.');
+  const acks: unknown[] = [];
+  const ack = async (response?: unknown): Promise<void> => {
+    acks.push(response);
+  };
+  await socket.deliver('interactive', credentialSubmission('cred-1', 'U-DYLAN', 'ghp-1'), ack);
+  assert.deepEqual(acks.at(-1), {
+    response_action: 'errors',
+    errors: { credential_value: 'A shared credential named github.token is already stored.' },
+  });
+
+  // Checked again on the answer, not only on the click.
+  await socket.deliver('interactive', credentialSubmission('cred-1', 'U-STRANGER', 'ghp-2'), ack);
+  assert.match(JSON.stringify(acks.at(-1)), /You are not an approver for Ava/);
+  assert.equal(provided.some((entry) => entry.actor === 'U-STRANGER'), false);
+
+  // A request this adapter never posted has nothing to land on.
+  await socket.deliver('interactive', credentialSubmission('cred-unknown', 'U-DYLAN', 'ghp-3'), ack);
+  assert.match(JSON.stringify(acks.at(-1)), /no longer pending/);
+
+  await adapter.stop();
+});
+
+test('with no approver configured, the request says it cannot be added from Slack and offers no button', async () => {
+  const { web, gateway, adapter } = credentialAdapter([]);
+  await adapter.start(gateway);
+  await gateway.bus.emit(credentialRequest({ scope: 'shared' }));
+
+  const posted = web.posts.at(-1);
+  assert.match(JSON.stringify(posted?.blocks), /shared with every agent/);
+  assert.match(JSON.stringify(posted?.blocks), /Nobody can add it from Slack: no approver is configured for Ava/);
+  assert.deepEqual(buttonIds(posted?.blocks), []);
+
+  await adapter.stop();
 });

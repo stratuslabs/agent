@@ -182,6 +182,50 @@ pixels. The same happens to an image the model
 API refuses outright: it is dropped from the session and the turn retried
 without it, so one bad file cannot fail a thread from then on.
 
+## Adding a credential from Slack
+
+An agent that needs a key it does not hold can ask for one in the
+conversation, with the `credential.request` tool (a daemon tool, so the soul
+lists it under `tools:` like `message.send`, or lists no `tools:` at all):
+
+```
+Kai is asking for a credential: github.token, for Kai only.
+Kai says: To open pull requests on the website repo.
+[Add credential]
+```
+
+**Add credential** opens a form. Whoever submits it is checked against the
+agent's approvers, the same `approvals.slackApprovers` list that decides
+[approval buttons](./approvals.md), on the click and again on the
+submission; anyone else in the thread is told they cannot. With no approver
+configured the message says so and has no button. What the form does:
+
+- **It stores the key add-only**, through the same rule as the
+  [control API](../../packages/control-api/README.md): a name already
+  stored is refused, in the form, with the `stratus credential set` command
+  that replaces it. Replacing or removing a key stays on the machine.
+- **For the agent alone, unless it asked otherwise.** The agent chooses the
+  scope when it asks (`scope: "shared"` offers the key to the whole fleet),
+  and the message says which before anyone clicks.
+- **It grants the key to the agent that asked**, by adding the name to that
+  agent's soul under `credentials:`. A shared key is still granted only to
+  that one agent; others need their own soul entry. The agent can use it
+  from its next reply.
+- **The value never enters the conversation.** It goes from the form to
+  `~/.stratus/credentials.json` and nowhere else: not the thread, the
+  transcript, the model, the event stream, or the daemon log. What the log
+  records is the name, the scope, and who added it.
+
+An agent asks only in a conversation a channel started, since that is where
+someone can see the form; a scheduled or HTTP turn is told to have the
+operator run `stratus credential set` instead. A key that is already stored
+but not granted is not asked for either: the agent is told to have it
+added to its soul. Requests live in the daemon's memory, so after a restart
+the button answers that the request is no longer pending and the agent
+asks again. The form uses Slack's interactivity, which the app manifest in
+the [`@stratusagent/channel-slack` README](../../packages/channel-slack/README.md)
+already turns on for approval buttons; no scope is added.
+
 ## Worth knowing
 
 - **Tokens are gateway infrastructure secrets.** They live under

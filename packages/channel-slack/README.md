@@ -303,6 +303,29 @@ needs `settings.interactivity.is_enabled` set to `true` once, under **App
 Manifest**. No request URL is needed — the clicks arrive over the same Socket
 Mode connection.
 
+### Credential requests
+
+The same approvers answer an agent's `credential.request`. The request is
+posted in the conversation the agent asked in (never an `approvalChannel`:
+the person who can answer is the one the agent is talking to) with an **Add
+credential** button. A click by an approver opens a modal (`views.open`);
+anyone else is told, privately, that they are not an approver. The modal
+carries only the request id in `private_metadata`, so where the key goes and
+for whom is the gateway's record of the request, never something a
+submission says about itself.
+
+The submission is checked against the approvers again and handed to the
+gateway's `provideCredential`, which stores it add-only and grants it in the
+requesting agent's soul. A refusal (a name already stored, an empty value, a
+request no longer pending) comes back as a `response_action: errors` ack,
+which keeps the modal open with the reason under the field. On success the
+request message is rewritten to say what was added, for whom, and by whom.
+The value is read from the submission and passed to the gateway; the adapter
+never logs it, posts it, or dispatches it. With no approvers configured the
+message says so and has no button. Modals need no scope beyond the bot's,
+and arrive over the same Socket Mode connection as clicks. The full flow is
+in [Slack](../../docs/guides/slack.md#adding-a-credential-from-slack).
+
 ## Who counts as the operator
 
 Everything above decides *which agent* a message is for. None of it decides

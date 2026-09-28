@@ -295,8 +295,8 @@ These are deliberate. Changing one is a decision, not a refactor.
   interface a daemon binds, who may approve its tool calls, and what the
   agent is told it is, are not decisions a cloned repo gets to make.
 - **Named credentials are add-only away from the machine.** Every surface
-  reachable remotely (the control API today, and whatever is built on it)
-  goes through `addNamedCredential`, which refuses a name already
+  reachable remotely (the control API and the Slack credential form today,
+  and whatever is built next) goes through `addNamedCredential`, which refuses a name already
   stored, and an agent's own entry over a shared one of that name.
   Replacing or removing one is `stratus credential` at the machine, because
   a replaced shared key moves every agent that uses it onto another account.

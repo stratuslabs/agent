@@ -117,7 +117,8 @@ nothing: the reader loads a skill's instructions, and the tools those
 instructions call for are still not there.
 
 **A daemon tool named in a local run is a right name in the wrong
-process.** `schedule.*`, `message.send`, and `agent.delegate` need the
+process.** `schedule.*`, `message.send`, `agent.delegate`, and
+`credential.request` need the
 dispatcher, the store, and the channels, so only `stratus serve` registers
 them. A soul that uses them is correct; `stratus run` just cannot call it,
 and says which it is rather than sending you after a plugin:
@@ -363,8 +364,9 @@ Three things are worth knowing, and the
   what makes a swap free: a backend asking for `BRAVE_API_KEY` would mean
   changing vendors edits every soul in the fleet. Store it with
   `stratus credential set` — never as a literal in a config file people
-  commit. A self-hosted backend that needs no key at all is legitimate and
-  asks for nothing.
+  commit — or let the agent ask for it from Slack with `credential.request`
+  ([Slack](./slack.md#adding-a-credential-from-slack)). A self-hosted
+  backend that needs no key at all is legitimate and asks for nothing.
 - **`credentials:` is a second, separate gate.** `tools: [web.*]` picks up
   search with no soul edit, but without `credentials: [search.apiKey]` every
   call answers "not allowed to access credential".
