@@ -139,7 +139,8 @@ reads that file on **every member request** rather than caching it, so
 `stratus token revoke` takes effect on the next request with no restart,
 and so does it for every browser session the token minted. An open event
 stream held by a revoked member is closed (WebSocket code `1008`) within
-about a second. A file that will not parse authenticates no member and is
+about a second, and so is one opened on a browser session, the operator's
+included, once that session's twelve hours are up. A file that will not parse authenticates no member and is
 reported in the daemon's log; the operator token does not depend on it.
 
 A member mints its own browser sessions through `POST /auth/ott` like the
@@ -609,7 +610,8 @@ endpoint whose job is to say what the daemon is doing right now. `POST
 ## The event stream
 
 `WS /api/v1/events`, open to both [roles](#roles-operator-and-member) (a
-member's stream is closed with code `1008` once its token is revoked),
+member's stream is closed with code `1008` once its token is revoked, and
+any stream opened on a browser session once that session expires),
 filterable at connect (`?session=`, `?agent=`) or with a frame:
 
 ```json

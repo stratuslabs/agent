@@ -178,7 +178,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   let pendingSessions: DashboardSession[] = [];
   /** What the last stop() found live, for the replacement. */
   let sessionsWhenStopped: DashboardSession[] = [];
-  /** Event streams a member holds open, each with the principal that opened it. */
+  /** Event streams whose credential can end — a member's, or one on a browser session — each with the principal that opened it. */
   const memberStreams = new Map<WebSocket, Principal>();
   let memberStreamTimer: ReturnType<typeof setInterval> | undefined;
   let recheckingStreams = false;
@@ -194,7 +194,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
           memberStreams.delete(socket);
           // 1008 is the protocol's "policy violation": the client is told
           // why the stream ended rather than left to retry into a 401.
-          socket.close(1008, 'The member token behind this stream was revoked.');
+          socket.close(1008, 'The credential behind this stream was revoked or its session expired.');
         }
       }
     } finally {
@@ -382,7 +382,10 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
     }
     wss.handleUpgrade(request, socket, head, (socket_) => {
       stream?.attach(socket_, filter);
-      if (principal.role === 'member') {
+      // Rechecked while open: a member's, whose token can be revoked, and
+      // any opened on a browser session, which expires — the operator's
+      // included. Only an operator bearer stream has nothing that can end.
+      if (principal.role === 'member' || principal.kind === 'cookie') {
         watchMemberStream(socket_, principal);
       }
     });

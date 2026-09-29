@@ -395,3 +395,23 @@ test('a stream held open past its browser session\'s expiry is let go at the nex
   // A bearer is judged on its token, which has no expiry.
   assert.equal(await auth.stillHeld({ kind: 'bearer', role: 'operator' }), true);
 });
+
+test('an operator stream opened on a browser session closes when the session expires', async () => {
+  const harness = await startApi();
+  // A session near the end of its twelve hours, handed over by a previous daemon.
+  harness.api.adoptSessions([{ id: 'op-short', expiresAt: Date.now() + 1_500, vouchedBy: tokenFingerprint(harness.token), role: 'operator' }]);
+  const client = await openSocket(`${harness.url.replace('http', 'ws')}/api/v1/events`, {
+    headers: { cookie: `${SESSION_COOKIE}=op-short`, origin: harness.url },
+  });
+  try {
+    assert.equal(client.opened, true);
+    await client.waitFor((frame) => frame.type === 'subscribed', 'the subscribe ack');
+    const closed = new Promise<number>((resolve) => {
+      client.socket.once('close', (code) => resolve(code));
+    });
+    assert.equal(await settles(closed, 'the expired session\'s stream closing'), 1008);
+  } finally {
+    client.close();
+    await harness.stop();
+  }
+});
