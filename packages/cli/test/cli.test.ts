@@ -14030,3 +14030,38 @@ test('stratus health fails in one sentence when no daemon is serving, and migrat
   assert.equal(await runCli({ argv: ['health', '--gateway', 'http://127.0.0.1:1'], streams: stale.streams, env }), 1);
   assert.match(stale.output.stderr, /Could not reach the gateway at http:\/\/127\.0\.0\.1:1/);
 });
+
+test('an announced restart under --log-format json keeps stdout JSON, and the next daemon writes it too', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-restart-json-'));
+  const watched = watchedServeStreams();
+  const respawned: string[][] = [];
+
+  const serving = runCli({
+    argv: ['serve', '--log-format', 'json', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      serveRespawn: async (argv) => {
+        respawned.push(argv);
+        return { code: 0 };
+      },
+    },
+  });
+
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test', drainTimeoutMs: 5000 });
+  assert.equal(accepted.status, 202, accepted.body);
+  assert.equal(await serving, 0);
+
+  assert.equal(respawned.length, 1);
+  assert.deepEqual(respawned[0]?.slice(respawned[0].indexOf('--log-format'), respawned[0].indexOf('--log-format') + 2), ['--log-format', 'json']);
+  // The supervisor's own "Restarting stratusd." is a human line, not a
+  // record: under json it is not said, and the restart is still in the log.
+  for (const line of watched.output.stdout.split('\n').filter((entry) => entry.length > 0)) {
+    assert.doesNotThrow(() => JSON.parse(line), `stdout carried a line that is not JSON: ${line}`);
+  }
+  assert.match(watched.output.stdout, /"msg":"restarting stratusd \(test\)"/);
+});
