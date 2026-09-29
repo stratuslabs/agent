@@ -273,6 +273,10 @@ const CONFIG_KEYS = {
   // this route; the loader validates both below.
   budget: 'object',
   leases: 'object',
+  // The runaway guard, which the hosted profile sets: GET returns it, so a
+  // control plane changing a tenant's budget by the documented round trip
+  // has to be able to hand it back, or lose it by replacing the file.
+  maxTurns: 'number',
 } as const;
 
 /**

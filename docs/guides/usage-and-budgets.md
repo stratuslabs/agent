@@ -131,12 +131,14 @@ Two properties are worth knowing before you rely on a number:
   would keep allowing calls. The hold survives a restart, so a restarted daemon still
   refuses until the held usage is written, and each held call is counted
   once. A disk too full for even that one-line append keeps it in memory
-  only. A stop then writes it out whole as a warning, which reaches the
-  service manager's log (journald, `docker logs`), and leaves
-  `~/.stratus/usage-unsettled` — a rename of an empty file made at start,
-  so it needs no room. The next daemon to start with room to write
-  settles the ledger from the saved sessions, where those calls' records
-  are, removes the marker, and refuses budgeted calls until it has. A line
+  only, and at that moment leaves `~/.stratus/usage-unsettled` — a rename
+  of an empty file made at start, so it needs no room — which stays if the
+  daemon stops or crashes before the usage is written, and is taken back
+  if it is written. A stop in that state also writes the calls out whole
+  as a warning, which reaches the service manager's log (journald,
+  `docker logs`). The next daemon to start with room to write settles the
+  ledger from the saved sessions, where those calls' records are, removes
+  the marker, and refuses budgeted calls until it has. A line
   of the hold file cut short by a crash is refused, never dropped, until
   someone repairs it. While any
   usage is held, `stratus usage` says so and exits non-zero, and

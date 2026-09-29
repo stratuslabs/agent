@@ -122,11 +122,13 @@ test('the operator sets a budget over PUT /config, and the next call is judged b
     const put = await harness.call('/api/v1/config', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ config: { budget: { daily: 5000 }, leases: { credentials: ['github.token'] } } }),
+      // With the hosted profile's runaway guard, which the round trip must keep.
+      body: JSON.stringify({ config: { budget: { daily: 5000 }, leases: { credentials: ['github.token'] }, maxTurns: 20 } }),
     });
     assert.equal(put.status, 200, await put.clone().text());
-    const round = await (await harness.call('/api/v1/config')).json() as { config: { budget?: object; leases?: object } };
+    const round = await (await harness.call('/api/v1/config')).json() as { config: { budget?: object; leases?: object; maxTurns?: number } };
     assert.deepEqual(round.config.budget, { daily: 5000 });
+    assert.equal(round.config.maxTurns, 20);
     assert.deepEqual(round.config.leases, { credentials: ['github.token'] });
     // GET then PUT of the same document keeps working with the blocks present.
     const again = await harness.call('/api/v1/config', {
@@ -134,7 +136,7 @@ test('the operator sets a budget over PUT /config, and the next call is judged b
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ config: round.config }),
     });
-    assert.equal(again.status, 200);
+    assert.equal(again.status, 200, await again.clone().text());
     assert.equal((await harness.gateway.budget())?.limits[0]?.limit, 5000);
     const bad = await harness.call('/api/v1/config', {
       method: 'PUT',

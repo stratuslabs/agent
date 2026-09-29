@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -564,6 +565,40 @@ test('spend that cannot be written stops only the agents a limit covers', async 
       /Spending could not be recorded/,
     );
     saboteur.exec('DROP TRIGGER full_disk');
+  } finally {
+    saboteur.close();
+    await gateway.stop();
+  }
+});
+
+test('spend held in memory only leaves word for the next daemon at once, not only at a stop, and takes it back once written', async () => {
+  const home = await newHome();
+  const stateDir = path.join(home, '.stratus');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  // Where the hold file goes, a directory: the append fails as well.
+  await mkdir(path.join(stateDir, 'usage-held.jsonl'), { recursive: true });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+    idleTimeoutMs: 0,
+    warn: () => {},
+  });
+  await gateway.start();
+  const { DatabaseSync } = await import('node:sqlite');
+  const saboteur = new DatabaseSync(fleetDbIn(stateDir));
+  const marker = path.join(stateDir, 'usage-unsettled');
+  try {
+    saboteur.exec("CREATE TRIGGER full_disk BEFORE INSERT ON usage BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+    const done = await gateway.dispatch({ sessionId: 'm-1', agentId: 'ava', userMessage: 'one' });
+    assert.equal(done.status, 'completed');
+    // A crash here runs no stop, and a completed turn is in no sweep of
+    // turns left running: the marker has to exist already.
+    assert.equal(existsSync(marker), true);
+
+    saboteur.exec('DROP TRIGGER full_disk');
+    // The next flush writes what was held in memory; the word is withdrawn.
+    gateway.unrecordedUsage();
+    assert.equal(existsSync(marker), false);
+    assert.equal(gateway.usage()[0]?.calls, 1);
   } finally {
     saboteur.close();
     await gateway.stop();

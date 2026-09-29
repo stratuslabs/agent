@@ -1172,6 +1172,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return error instanceof Error ? error : new Error(String(error));
     }
   };
+  /**
+   * Whether this process left the unsettled marker itself, because it came
+   * to hold spend in memory only — as opposed to finding one at start that
+   * a full settle has to clear. Its own marker it takes back once that
+   * spend is written.
+   */
+  let markedUnsettled = false;
   const flushUsage = (): Error | undefined => {
     while (unrecordedUsage.length > 0) {
       try {
@@ -1183,11 +1190,34 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           usageHold.append(unrecordedUsage);
           unrecordedUsage.length = 0;
         } catch {
-          // Held in memory only; the budget check still refuses.
+          // Held in memory only; the budget check still refuses. And word
+          // left for the next daemon now, not at the stop: a crash from here
+          // on runs no stop, and a turn that saved its record and finished
+          // `completed` is in no sweep of turns left running. The marker is
+          // a rename (see `arm`), so the full disk does not stop it.
+          if (!markedUnsettled) {
+            try {
+              usageHold.markUnsettled();
+              markedUnsettled = true;
+            } catch {
+              // Tried again at the next failure, and at the stop.
+            }
+          }
         }
         return error instanceof Error ? error : new Error(String(error));
       }
       unrecordedUsage.shift();
+    }
+    // Everything this process held in memory is written: its own word to
+    // the next daemon is no longer true.
+    if (markedUnsettled) {
+      try {
+        usageHold.settle();
+        markedUnsettled = false;
+        usageHold.arm();
+      } catch {
+        // A marker left behind only costs the next start a settle.
+      }
     }
     // What an earlier failure (or an earlier process) left on disk.
     try {
