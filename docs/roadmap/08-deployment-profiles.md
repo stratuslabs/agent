@@ -50,7 +50,15 @@ only what a local install can use too:
   `POST /credentials/verify`, `POST /restart`, and `POST /leases`. Without
   that, a tenant holding a cell's only token could point the operator's key
   at its own server through `baseUrl`, or enable `tool-shell`. A tenant id is
-  never read from a request, because a cell has only one tenant.
+  never read from a request, because a cell has only one tenant. Two member
+  routes check inside the handler, because review found them reaching past
+  the operator without changing any policy. A soul may gain only the
+  agent's *own* stored credentials, never the operator's shared ones. A
+  channel binding may be added but not replaced. What a member reaches is
+  bounded by the plugins the operator loaded, and not by less: a member
+  who edits souls and answers approvals can drive any loaded tool. With a
+  shell loaded, that includes the machine. The docs say so, and the hosted
+  profile loads no such tool.
 - **Metering**: [18](./18-usage-accounting.md) had shipped the usage
   records, and this step adds the rest. A `session.usage` kernel event
   announces each provider call's records before the next call. A usage

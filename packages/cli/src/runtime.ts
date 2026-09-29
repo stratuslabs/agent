@@ -274,9 +274,12 @@ export const createAgentRuntime = async (
   });
   // Imported only when something is leased: the gateway package is the
   // daemon's, and a plain one-shot never loads it.
-  const leaseBroker = leases && leases.credentials.length > 0
+  const leaseStore = leases && leases.credentials.length > 0
+    ? new (await import('@stratusagent/gateway')).SqliteLeaseStore(fleetDbPath(runEnv), { stateHome: stratusHomePath(runEnv) })
+    : undefined;
+  const leaseBroker = leaseStore && leases
     ? createLeaseBroker({
-        store: new (await import('@stratusagent/gateway')).SqliteLeaseStore(fleetDbPath(runEnv), { stateHome: stratusHomePath(runEnv) }),
+        store: leaseStore,
         leased: leases.credentials,
         onUse: (record) => {
           if (record.outcome === 'refused') {
@@ -325,7 +328,15 @@ export const createAgentRuntime = async (
   // provider factory that throws — has the same plugins to release and no
   // caller yet to release them: the callers' `finally` only begins once
   // this returns.
+  let leaseStoreClosed = false;
   const disposePlugins = async (): Promise<void> => {
+    // The lease store's connection goes with everything else this run
+    // acquired, on every path out — a failed start included — and once,
+    // since node:sqlite refuses a second close.
+    if (leaseStore && !leaseStoreClosed) {
+      leaseStoreClosed = true;
+      leaseStore.close();
+    }
     for (const plugin of loadedPlugins) {
       try {
         await plugin.instance.dispose?.();

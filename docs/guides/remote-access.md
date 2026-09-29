@@ -104,12 +104,19 @@ stratus token list                # id, name, role, created; never the token
 stratus token revoke alice        # by id or name
 ```
 
-A member may manage the roster, talk to agents, read sessions and the
-event stream, answer approvals, and bind a channel app or add a named
-credential (add-only). It may not change the config, store or check a
-provider sign-in, or restart the daemon — those answer `403
+A member may manage the roster, talk to agents, read sessions, usage, and
+the event stream, answer approvals, and bind a channel app or add a named
+credential (both add-only). It may not change the config, store or check a
+provider sign-in, grant a credential lease, restart the daemon, or give a
+soul a key that is not that agent's own — those answer `403
 operator_required`. The full split is in the
 [control API reference](../../packages/control-api/README.md#roles-operator-and-member).
+
+A member can have any agent use any tool the operator loaded, since it
+edits souls and answers approvals. Where `tool-shell` or `tool-fs` is
+loaded, that reaches the machine — the operator's token file included — so
+a member token there is a convenience for someone you already trust with
+those tools, not a boundary against them.
 
 Only each token's sha256 is kept, in `~/.stratus/api-tokens.json`
 (`0600`), so a lost token is revoked and replaced, never recovered. The

@@ -31,8 +31,10 @@ Turning tokens into a bill is a price table this project does not own — see
 [usage accounting](../roadmap/18-usage-accounting.md) for why.
 
 The ledger counts what went through a daemon: `stratus serve`, every
-channel, every schedule, every control API message. A `stratus run`
-one-shot is not counted, and nothing from before the ledger existed is.
+channel, every schedule, every control API message. A `stratus run` or
+`stratus chat` at the machine is neither counted nor limited — it is the
+operator at the keyboard, with the same keys — and nothing from before the
+ledger existed is counted.
 Each session still carries its own records (`GET /sessions/:id`), and the
 two agree call for call on everything the ledger saw.
 
@@ -102,11 +104,13 @@ event carries the same flag.
 
 Two properties are worth knowing before you rely on a number:
 
-- **One call of overshoot.** What a call will cost is not known until it
-  returns, so a budget can only refuse the call *after* the one that reached
-  it. For a harness provider — a Claude subscription through Claude Code,
-  or Codex — "one call" is one whole turn, since its inner steps happen
-  inside it. Set a limit with that headroom in mind.
+- **One call of overshoot per turn in flight.** What a call will cost is
+  not known until it returns, so a budget can only refuse the call *after*
+  the one that reached it — and turns running at the same moment each get
+  that one call, since each was allowed before the others reported. For a
+  harness provider (a Claude subscription through Claude Code, or Codex)
+  "one call" is one whole turn, since its inner steps happen inside it.
+  Set a limit with that headroom in mind.
 - **The fallback never answers instead.** A spent budget is not a model
   failing, so a configured `fallbackModel` does not take over — it would
   spend exactly what the limit exists to stop, and hide that it was

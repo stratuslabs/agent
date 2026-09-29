@@ -44,6 +44,7 @@ import {
   type StratusEvent,
   type ToolRisk,
   type CredentialResolver,
+  HostRefusalError,
 } from '@stratusagent/core';
 import {
   createCredentialRequestTool,
@@ -1189,6 +1190,23 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * sign-in this call would spend.
    */
   const guardProviderCall: ProviderCallGuard = async (request, credential) => {
+    try {
+      await judgeProviderCall(request, credential);
+    } catch (error) {
+      if (error instanceof HostRefusalError) {
+        throw error;
+      }
+      // A check that could not run — `fleet.db` busy past its timeout, a
+      // disk error — refuses the call, and as a refusal: thrown as itself it
+      // would read to the fallback wrapper as the primary model failing,
+      // and move this conversation onto the fallback for good over a
+      // database lock.
+      throw new HostRefusalError(
+        `The budget and lease checks could not run (${error instanceof Error ? error.message : String(error)}), so the model was not called. Try again in a moment.`,
+      );
+    }
+  };
+  const judgeProviderCall: ProviderCallGuard = async (request, credential) => {
     const agentId = request.session.agent.id;
     const budget = await currentBudget();
     if (budget) {
@@ -4127,7 +4145,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       validateLeaseGrant(input, new Date());
       return leaseStore.grant(input);
     },
-    revokeLease: (id, revokedBy) => leaseStore.revoke(id, revokedBy),
+    // A delegated sub-lease is listed beside the granted ones, so it can be
+    // taken back the same way; it lives only in this process.
+    revokeLease: (id, revokedBy) => leaseStore.revoke(id, revokedBy) ?? leaseBroker.revokeSubLease(id, revokedBy),
   };
 
   return gateway;

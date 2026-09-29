@@ -1,5 +1,6 @@
 import { HostRefusalError, type TokenUsage } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
+import { foldedAgentId } from './paths.ts';
 
 /**
  * The `budget` block of a trusted config: how much one home may spend on
@@ -155,6 +156,8 @@ export interface BudgetBreach {
   /** `home` for the block's own limits, `agent` for `budget.agents.<id>`. */
   scope: 'home' | 'agent';
   agentId: string;
+  /** For an agent's limit: the `budget.agents` key as the config spells it, which may differ from the id in case. */
+  configKey?: string;
   period: BudgetPeriod;
   limit: number;
   spent: number;
@@ -163,6 +166,18 @@ export interface BudgetBreach {
 
 /** Weighted spend since `since`, for one agent or (no agent) the whole home. */
 export type BudgetSpend = (since: string, agentId?: string) => number;
+
+/**
+ * An agent's own limits, matched the way agent identity is everywhere else:
+ * folded, so `budget.agents.scout` governs a soul whose id is `Scout`. Two
+ * spellings of one id are one agent — the roster refuses to load them as
+ * two — and an exact-match lookup here would be a limit the operator wrote
+ * down that silently never applies.
+ */
+const agentLimitsFor = (budget: BudgetConfig, agentId: string): [key: string, limits: BudgetLimits] | undefined => {
+  const folded = foldedAgentId(agentId);
+  return Object.entries(budget.agents ?? {}).find(([key]) => foldedAgentId(key) === folded);
+};
 
 /**
  * The first limit this agent's next call would exceed, or undefined.
@@ -180,9 +195,10 @@ export const findBudgetBreach = (
   spend: BudgetSpend,
   now: Date,
 ): BudgetBreach | undefined => {
+  const own = agentLimitsFor(budget, agentId);
   const scopes: Array<{ scope: 'home' | 'agent'; limits: BudgetLimits }> = [
     { scope: 'home', limits: budget },
-    ...(budget.agents?.[agentId] ? [{ scope: 'agent' as const, limits: budget.agents[agentId]! }] : []),
+    ...(own ? [{ scope: 'agent' as const, limits: own[1] }] : []),
   ];
   for (const { scope, limits } of scopes) {
     for (const period of BUDGET_PERIODS) {
@@ -193,7 +209,15 @@ export const findBudgetBreach = (
       const window = budgetWindow(period, now);
       const spent = spend(window.start, scope === 'agent' ? agentId : undefined);
       if (spent >= limit) {
-        return { scope, agentId, period, limit, spent, resetsAt: window.resetsAt };
+        return {
+          scope,
+          agentId,
+          ...(scope === 'agent' && own ? { configKey: own[0] } : {}),
+          period,
+          limit,
+          spent,
+          resetsAt: window.resetsAt,
+        };
       }
     }
   }
@@ -214,7 +238,9 @@ const formatReset = (iso: string): string => `${iso.slice(0, 10)} ${iso.slice(11
 export const budgetExceededMessage = (breach: BudgetBreach): string => {
   const which = breach.period === 'daily' ? 'daily' : 'monthly';
   const whose = breach.scope === 'home' ? 'This Stratus install has' : `Agent ${breach.agentId} has`;
-  const key = breach.scope === 'home' ? `budget.${breach.period}` : `budget.agents.${breach.agentId}.${breach.period}`;
+  const key = breach.scope === 'home'
+    ? `budget.${breach.period}`
+    : `budget.agents.${breach.configKey ?? breach.agentId}.${breach.period}`;
   return `${whose} used its ${which} model budget (${formatCount(breach.spent)} of ${formatCount(breach.limit)} weighted tokens), `
     + `so its model is not being called again until the budget resets at ${formatReset(breach.resetsAt)}. `
     + `To continue sooner, the operator can raise ${key} in the trusted config.`;

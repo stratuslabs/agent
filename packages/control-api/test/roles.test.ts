@@ -8,7 +8,7 @@ import { apiTokensPath, createApiToken, revokeApiToken, type StateEnvironment } 
 
 import { createAuthenticator, SESSION_COOKIE, tokenFingerprint } from '../src/auth.ts';
 import { routes } from '../src/routes.ts';
-import { openSocket, settles, startApi, type Harness } from './harness.ts';
+import { newHome, openSocket, settles, startApi, writeSoul, type Harness } from './harness.ts';
 
 const envOf = (harness: Harness): StateEnvironment => ({ homeDir: harness.home, cwd: harness.home, processEnv: {} });
 
@@ -303,4 +303,74 @@ test('a member session crosses a restart as a member, one of unknown role is dro
   // Revoked in the file between the two processes: judged on first use.
   records.length = 0;
   assert.equal(await after.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${minted}` } }), undefined);
+});
+
+test('a member can give a soul only that agent\'s own stored credentials, never the operator\'s shared ones', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nid: ava\nname: Ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  try {
+    const { token } = await createMember(harness);
+    const json = { 'content-type': 'application/json' };
+    // The operator's shared key, and one the member stores as the agent's own.
+    const shared = await harness.call('/api/v1/credentials/named', {
+      method: 'POST', headers: json, body: JSON.stringify({ name: 'billing.apiKey', value: 'sk-operator' }),
+    });
+    assert.equal(shared.status, 200);
+    const own = await asMember(harness, token, '/api/v1/credentials/named', {
+      method: 'POST', headers: json, body: JSON.stringify({ name: 'github.token', value: 'ghp_mine', agentId: 'ava' }),
+    });
+    assert.equal(own.status, 200);
+
+    const takesShared = await asMember(harness, token, '/api/v1/agents/ava', {
+      method: 'PUT', headers: json, body: JSON.stringify({ credentials: ['billing.apiKey'] }),
+    });
+    assert.equal(takesShared.status, 403);
+    assert.equal(await errorCode(takesShared), 'operator_required');
+    const takesOwn = await asMember(harness, token, '/api/v1/agents/ava', {
+      method: 'PUT', headers: json, body: JSON.stringify({ credentials: ['github.token'] }),
+    });
+    assert.equal(takesOwn.status, 200, await takesOwn.clone().text());
+    // The same through a raw soul edit.
+    const raw = await asMember(harness, token, '/api/v1/agents/ava', {
+      method: 'PUT', headers: json,
+      body: JSON.stringify({ soul: '---\nid: ava\nname: Ava\ncredentials:\n  - github.token\n  - billing.apiKey\n---\n\nYou are Ava.\n' }),
+    });
+    assert.equal(raw.status, 403);
+    // Narrowing is always a member's to do, and the operator is never checked.
+    const narrowed = await asMember(harness, token, '/api/v1/agents/ava', {
+      method: 'PUT', headers: json, body: JSON.stringify({ credentials: [] }),
+    });
+    assert.equal(narrowed.status, 200);
+    const operator = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT', headers: json, body: JSON.stringify({ credentials: ['billing.apiKey'] }),
+    });
+    assert.equal(operator.status, 200);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a member binds a channel app where none exists, and cannot replace one', async () => {
+  const harness = await startApi();
+  try {
+    const { token } = await createMember(harness);
+    const bind = (as: 'member' | 'operator', botToken: string) => {
+      const init = {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agentId: 'stratus', appToken: 'xapp-1', botToken }),
+      };
+      return as === 'member'
+        ? asMember(harness, token, '/api/v1/credentials/channels/slack', init)
+        : harness.call('/api/v1/credentials/channels/slack', init);
+    };
+    assert.equal((await bind('member', 'xoxb-first')).status, 200);
+    const replaced = await bind('member', 'xoxb-elsewhere');
+    assert.equal(replaced.status, 409);
+    assert.equal(await errorCode(replaced), 'channel_bound');
+    assert.equal((await bind('operator', 'xoxb-moved')).status, 200);
+  } finally {
+    await harness.stop();
+  }
 });

@@ -252,6 +252,8 @@ export interface LeaseBroker {
     child: AgentDefinition;
     childSessionId: string;
   }): CredentialLease[];
+  /** End one live sub-lease now, and every sub-lease drawn from it. Undefined when there is no such live sub-lease. */
+  revokeSubLease(id: string, revokedBy?: string): CredentialLease | undefined;
   /** Drop the sub-leases minted for a sub-session, once its delegated turn is over. */
   releaseSubLeases(childSessionId: string): void;
   /** The live sub-leases, for a listing. */
@@ -336,7 +338,9 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
         ...(context.use !== undefined ? { use: context.use } : {}),
       };
       if (leased instanceof Error) {
-        const reason = `Which credentials need a lease is unknown right now (${leased.message}), so ${credential} was not used. Fix the config's leases block and the next use will be judged by it.`;
+        // The config's own error stays in the daemon's warning: this
+        // sentence can reach a chat, and a file path is not the reader's.
+        const reason = `Which credentials need a lease is unknown right now, because the config could not be read, so ${credential} was not used. The operator can fix the config's leases block, and the next use will be judged by it.`;
         report({ ...base, outcome: 'refused', reason });
         throw new CredentialLeaseError(reason, agentId, credential);
       }
@@ -348,16 +352,23 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
         report({ ...base, outcome: 'allowed', leaseId: own.id });
         return own;
       }
+      let borrowed: CredentialLease | undefined;
       if (context.sessionId !== undefined) {
         for (const lease of subLeases.values()) {
-          if (lease.sessionId === context.sessionId && lease.agentId === agentId && lease.credential === credential
-            && consumeChain(lease, at)) {
-            report({ ...base, outcome: 'allowed', leaseId: lease.id, ...(lease.parentId ? { parentLeaseId: lease.parentId } : {}) });
-            return lease;
+          if (lease.sessionId === context.sessionId && lease.agentId === agentId && lease.credential === credential) {
+            if (consumeChain(lease, at)) {
+              report({ ...base, outcome: 'allowed', leaseId: lease.id, ...(lease.parentId ? { parentLeaseId: lease.parentId } : {}) });
+              return lease;
+            }
+            borrowed = lease;
           }
         }
       }
-      const reason = refusalFor(agentId, credential, at);
+      // A delegate that did borrow one is told about the lease it borrowed,
+      // not that it holds none of its own — the fix is the delegator's.
+      const reason = borrowed
+        ? `The lease ${agentId} borrowed for ${credential} (${borrowed.id}, from ${borrowed.parentId ?? 'its delegator'}) has ended — revoked, expired, or used up above it — so the key was not used. The delegating agent needs a live lease of its own.`
+        : refusalFor(agentId, credential, at);
       report({ ...base, outcome: 'refused', reason });
       throw new CredentialLeaseError(reason, agentId, credential);
     },
@@ -397,6 +408,20 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
         minted.push({ ...sub });
       }
       return minted;
+    },
+
+    revokeSubLease(id, revokedBy) {
+      const lease = subLeases.get(id);
+      if (!lease || lease.revokedAt !== undefined) {
+        return undefined;
+      }
+      // Marked rather than deleted: a nested sub-lease drawing on this one
+      // finds its parent revoked on its next use and refuses with it.
+      lease.revokedAt = now().toISOString();
+      if (revokedBy !== undefined) {
+        lease.revokedBy = revokedBy;
+      }
+      return { ...lease };
     },
 
     releaseSubLeases(childSessionId) {

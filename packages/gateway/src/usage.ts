@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { UsageRecord } from '@stratusagent/core';
-import type { BudgetWeights } from '@stratusagent/state';
+import { foldedAgentId, type BudgetWeights } from '@stratusagent/state';
 import { openStratusDatabase, tightenSqliteFile, type SqliteSessionStoreOptions } from './sessions.ts';
 
 /**
@@ -40,6 +40,7 @@ const USAGE_TABLE = `
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     at TEXT NOT NULL,
     agent_id TEXT NOT NULL,
+    agent_key TEXT NOT NULL,
     session_id TEXT NOT NULL,
     turn_id TEXT NOT NULL,
     provider TEXT NOT NULL,
@@ -50,7 +51,7 @@ const USAGE_TABLE = `
     cache_write_tokens INTEGER
   );
   CREATE INDEX IF NOT EXISTS usage_at ON usage (at);
-  CREATE INDEX IF NOT EXISTS usage_agent_at ON usage (agent_id, at);
+  CREATE INDEX IF NOT EXISTS usage_agent_at ON usage (agent_key, at);
 `;
 
 const whereFor = (query: UsageQuery): { clause: string; params: string[] } => {
@@ -64,9 +65,11 @@ const whereFor = (query: UsageQuery): { clause: string; params: string[] } => {
     conditions.push('at < ?');
     params.push(query.until);
   }
+  // By the folded id, the way agent identity is matched everywhere: a
+  // budget written for `scout` has to count what the soul `Scout` spent.
   if (query.agentId !== undefined) {
-    conditions.push('agent_id = ?');
-    params.push(query.agentId);
+    conditions.push('agent_key = ?');
+    params.push(foldedAgentId(query.agentId));
   }
   return { clause: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '', params };
 };
@@ -105,11 +108,12 @@ export class SqliteUsageLedger {
   record(entry: UsageLedgerEntry): void {
     const { record } = entry;
     this.db
-      .prepare(`INSERT INTO usage (at, agent_id, session_id, turn_id, provider, model,
-        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .prepare(`INSERT INTO usage (at, agent_id, agent_key, session_id, turn_id, provider, model,
+        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         entry.at,
         entry.agentId,
+        foldedAgentId(entry.agentId),
         entry.sessionId,
         record.turnId,
         record.provider,

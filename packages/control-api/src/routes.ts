@@ -93,6 +93,42 @@ const apiActorFor = (principal: Principal | undefined, label: string | undefined
   return label ? `${source}:${label}` : source;
 };
 
+/**
+ * What a member may add to a soul's `credentials:` list: only a name stored
+ * as *that agent's own* entry. A shared entry, or a name the daemon's
+ * environment supplies, is the operator's key — granted to the agents the
+ * operator chose — and a member listing it on another soul would hand that
+ * agent the key through a route that only exists to manage the roster.
+ * Removing names is always allowed; a member narrowing a soul takes nothing
+ * from the operator. An operator's edit is not checked: the operator owns
+ * every key there is.
+ */
+const assertMemberCredentialGrant = async (
+  context: RouteContext,
+  agentId: string,
+  current: readonly string[],
+  next: readonly string[],
+): Promise<void> => {
+  if (context.principal?.role !== 'member') {
+    return;
+  }
+  const added = next.filter((name) => !current.includes(name));
+  if (added.length === 0) {
+    return;
+  }
+  const named = await loadNamedCredentials(context.env);
+  const own = named.agents[agentId] ?? {};
+  const refused = added.filter((name) => own[name] === undefined);
+  if (refused.length > 0) {
+    throw new ApiError(
+      403,
+      'operator_required',
+      `A member can add only this agent's own stored credentials to its soul, and ${refused.join(', ')} ${refused.length === 1 ? 'is' : 'are'} not one. `
+      + `Store the agent's own key first (POST /credentials/named with agentId "${agentId}"), or ask the operator to grant a shared one.`,
+    );
+  }
+};
+
 /** An ISO timestamp query parameter, normalized, or undefined when absent. */
 const optionalIsoParam = (url: URL, name: string): string | undefined => {
   const raw = url.searchParams.get(name);
@@ -174,10 +210,19 @@ interface Route {
    * Opt-in and fail-closed: a route without it is operator-only, so a new
    * route nobody decided about is refused to members rather than silently
    * opened to them. A member route is one that works *within* the policy
-   * the operator set — the roster, conversations, approvals, anything that
-   * only narrows what is allowed. What stays operator-only is what rewrites
+   * the operator set — the roster, conversations, approvals, the grants and
+   * leases it may only take back. What stays operator-only is what rewrites
    * that policy or reaches past it: the trusted config, the provider
-   * sign-ins every agent bills to, and the process itself.
+   * sign-ins every agent bills to, lease grants, and the process itself.
+   *
+   * "Within the policy" is bounded by the plugins the operator loaded, and
+   * not by less: a member edits souls and answers approvals, so a member can
+   * make any agent use any loaded tool. Where the operator loaded a shell
+   * or filesystem tool, that reaches the machine, and a member token is no
+   * boundary against it; the hosted profile loads neither. The two routes
+   * that could still reach past the operator with no such tool check the
+   * member in their handlers: a soul may gain only the agent's own stored
+   * credentials, and a channel binding may be added but not replaced.
    */
   member?: true;
 }
@@ -802,6 +847,7 @@ export const routes: Route[] = [
         if (!isValidAgentId(next.agent.id)) {
           throw new ApiError(400, 'invalid_agent_id', `${next.agent.id} is not a usable agent id.`);
         }
+        await assertMemberCredentialGrant(context, agentId, current.agent.credentials ?? [], next.agent.credentials ?? []);
 
         // A raw edit writes the bytes it was given.
         //
@@ -1595,6 +1641,20 @@ export const routes: Route[] = [
       // Same lock as the provider credentials: both halves live in one file,
       // and both are read-modify-write.
       await withCredentialsFileLock(async () => {
+        // Add-only for a member, the rule every remotely reachable
+        // credential surface follows: binding an agent that has no app yet
+        // is setup, while replacing a binding moves the agent — its
+        // conversations and every approval its channel carries — onto
+        // whatever workspace the new tokens belong to. That stays the
+        // operator's.
+        if (context.principal?.role === 'member'
+          && (await loadChannelTransportSecrets(context.env, channel))[agentId] !== undefined) {
+          throw new ApiError(
+            409,
+            'channel_bound',
+            `${agentId} already has a ${channel} app bound. A member can bind one only where none exists; replacing it moves the agent to another workspace, so the operator does that.`,
+          );
+        }
         await saveChannelTransportSecrets(context.env, channel, agentId, secrets);
       });
       return { channel, agentId, stored: true };

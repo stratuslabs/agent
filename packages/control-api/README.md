@@ -109,7 +109,26 @@ the caller's choosing and exists only to precede a sign-in a member cannot
 store; a restart drains everyone's turns; and granting a lease widens what
 an agent may do with a fenced key, where revoking one only narrows it.
 A member calling one gets `403 operator_required` with a sentence saying
-so. The rule fails closed: a route is open to members only when it is
+so.
+
+Two member routes check the member inside the handler, because they could
+otherwise reach past the operator without changing any policy. A soul edit
+(`PUT /agents/:id`, fields or raw) may **add** to `credentials:` only names
+stored as that agent's own entry — never a shared one or one the daemon's
+environment supplies, which are the operator's keys for the agents the
+operator chose (`403 operator_required`; removing names is always
+allowed). And a channel binding (`PUT /credentials/channels/:channel`) is
+add-only for a member: replacing one moves the agent, its conversations,
+and every approval its channel carries onto another workspace
+(`409 channel_bound`).
+
+**What a member can reach is what the loaded tools can reach.** A member
+edits souls and answers approvals, so a member can have any agent use any
+tool the operator loaded. On an install with `tool-shell` or `tool-fs`
+loaded, that includes the machine, and a member token is not a boundary
+against it — hand one out there only to someone you would let run those
+tools. The [hosted profile](../../examples/profiles/hosted) loads neither,
+which is what makes a member token a tenant's token. The rule fails closed: a route is open to members only when it is
 marked for them, so an endpoint added later is operator-only until someone
 decides otherwise.
 

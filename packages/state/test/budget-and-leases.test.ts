@@ -102,7 +102,7 @@ test('the home\'s limit is judged before an agent\'s, and a limit is reached at,
   assert.equal(findBudgetBreach({ daily: 501, agents: { ava: { daily: 101 } } }, 'ava', spend, now), undefined);
   assert.equal(findBudgetBreach({ daily: 500, agents: { ava: { daily: 100 } } }, 'ava', spend, now)?.scope, 'home');
   const agentBreach = findBudgetBreach({ monthly: 10_000, agents: { ava: { daily: 100 } } }, 'ava', spend, now);
-  assert.deepEqual(agentBreach, { scope: 'agent', agentId: 'ava', period: 'daily', limit: 100, spent: 100, resetsAt: '2026-09-30T00:00:00.000Z' });
+  assert.deepEqual(agentBreach, { scope: 'agent', agentId: 'ava', configKey: 'ava', period: 'daily', limit: 100, spent: 100, resetsAt: '2026-09-30T00:00:00.000Z' });
   // Another agent is untouched by ava's limit.
   assert.equal(findBudgetBreach({ agents: { ava: { daily: 100 } } }, 'bea', spend, now), undefined);
 });
@@ -195,14 +195,27 @@ test('a sub-lease is clamped to its parent, bound to one sub-session, draws on t
   broker.use('cy', 'github.token', { sessionId: 'nested' });
   assert.equal(store.get(parent.id)?.uses, 3, 'every link up to the stored lease is charged');
 
-  // Revoking the parent ends every sub-lease beneath it, at once.
+  // Revoking the parent ends every sub-lease beneath it, at once — and the
+  // delegate is told it was the borrowed lease that ended.
   store.revoke(parent.id, 'cli');
-  assert.throws(() => broker.use('bea', 'github.token', { sessionId: 's-1:delegate:bea:1:x' }), CredentialLeaseError);
+  assert.throws(() => broker.use('bea', 'github.token', { sessionId: 's-1:delegate:bea:1:x' }), /The lease bea borrowed for github\.token .* has ended/);
   assert.throws(() => broker.use('cy', 'github.token', { sessionId: 'nested' }), CredentialLeaseError);
 
   broker.releaseSubLeases('s-1:delegate:bea:1:x');
   broker.releaseSubLeases('nested');
   assert.deepEqual(broker.subLeases(), []);
+});
+
+test('a live sub-lease can be revoked by id, and that ends the ones drawn from it', () => {
+  const store = createLeaseStore();
+  const broker = createLeaseBroker({ store, leased: ['github.token'] });
+  store.grant({ agentId: 'ava', credential: 'github.token', expiresAt: inAnHour(), reason: 'r' });
+  const [sub] = broker.mintSubLeases({ parentAgentId: 'ava', parentSessionId: 's', child: agent('bea'), childSessionId: 'c1' });
+  const [nested] = broker.mintSubLeases({ parentAgentId: 'bea', parentSessionId: 'c1', child: agent('cy'), childSessionId: 'c2' });
+  assert.ok(sub && nested);
+  assert.equal(broker.revokeSubLease(sub.id, 'api:ops')?.revokedBy, 'api:ops');
+  assert.equal(broker.revokeSubLease(sub.id), undefined, 'revoked once stays revoked as it was');
+  assert.throws(() => broker.use('cy', 'github.token', { sessionId: 'c2' }), CredentialLeaseError);
 });
 
 test('a delegator with no live lease lends nothing', () => {
@@ -218,7 +231,10 @@ test('an unknown leased list refuses every credential rather than freeing them a
   const store = createLeaseStore();
   const broker = createLeaseBroker({ store, leased: [] });
   broker.setLeased(new Error('config.json: Unexpected token'));
-  assert.throws(() => broker.use('ava', 'search.apiKey'), /Which credentials need a lease is unknown right now \(config\.json: Unexpected token\)/);
+  assert.throws(() => broker.use('ava', 'search.apiKey'), (error: unknown) =>
+    error instanceof CredentialLeaseError
+    && /Which credentials need a lease is unknown right now/.test(error.message)
+    && !error.message.includes('config.json'));
   broker.setLeased(['github.token']);
   assert.equal(broker.use('ava', 'search.apiKey'), undefined);
 });

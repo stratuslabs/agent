@@ -318,3 +318,26 @@ test('a sub-lease lasts only as long as the delegated task: the delegate asked d
     await gateway.stop();
   }
 });
+
+test('an agent\'s limit and lease match its id the way identity does, whatever the case it was written in', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'scout.md', '---\nid: Scout\nname: Scout\nprovider: openai\nmodel: model-a\n---\n\nYou are Scout.\n');
+  await writeConfig(home, { budget: { agents: { scout: { daily: 100 } } }, leases: { credentials: ['provider:openai'] } });
+  const fetchImpl = (async () => openAiText('ok')) as typeof fetch;
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+    idleTimeoutMs: 0,
+  });
+  await gateway.start();
+  try {
+    gateway.grantLease({ agentId: 'scout', credential: 'provider:openai', expiresAt: new Date(Date.now() + 3_600_000).toISOString(), reason: 'r' });
+    await gateway.dispatch({ sessionId: 'c-1', agentId: 'Scout', userMessage: 'one' });
+    await assert.rejects(
+      gateway.dispatch({ sessionId: 'c-1', agentId: 'Scout', userMessage: 'two' }),
+      /Agent Scout has used its daily model budget.*raise budget\.agents\.scout\.daily/,
+    );
+    assert.equal((await gateway.budget())?.limits[0]?.spent, 120);
+  } finally {
+    await gateway.stop();
+  }
+});

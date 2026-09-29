@@ -1,11 +1,12 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { newLeaseId, type CredentialLease, type LeaseGrant, type LeaseStore } from '@stratusagent/state';
+import { foldedAgentId, newLeaseId, type CredentialLease, type LeaseGrant, type LeaseStore } from '@stratusagent/state';
 import { openStratusDatabase, tightenSqliteFile, type SqliteSessionStoreOptions } from './sessions.ts';
 
 const LEASES_TABLE = `
   CREATE TABLE IF NOT EXISTS leases (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
+    agent_key TEXT NOT NULL,
     credential TEXT NOT NULL,
     granted_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
@@ -16,8 +17,15 @@ const LEASES_TABLE = `
     revoked_at TEXT,
     revoked_by TEXT
   );
-  CREATE INDEX IF NOT EXISTS leases_agent_credential ON leases (agent_id, credential);
+  CREATE INDEX IF NOT EXISTS leases_agent_credential ON leases (agent_key, credential);
 `;
+
+/**
+ * Rows are matched on `agent_key`, the folded id, the way agent identity is
+ * matched everywhere else: a lease granted to `scout` pays for the soul
+ * `Scout`, which the roster treats as the same agent. `agent_id` keeps the
+ * spelling the operator typed, for the listing.
+ */
 
 /** The condition a lease has to meet to pay for a use — one spelling, used by both consume paths. */
 const ACTIVE = 'revoked_at IS NULL AND expires_at > ? AND (max_uses IS NULL OR uses < max_uses)';
@@ -61,7 +69,7 @@ export class SqliteLeaseStore implements LeaseStore {
 
   list(filter: { agentId?: string } = {}): CredentialLease[] {
     const rows = (filter.agentId !== undefined
-      ? this.db.prepare('SELECT * FROM leases WHERE agent_id = ? ORDER BY granted_at ASC, rowid ASC').all(filter.agentId)
+      ? this.db.prepare('SELECT * FROM leases WHERE agent_key = ? ORDER BY granted_at ASC, rowid ASC').all(foldedAgentId(filter.agentId))
       : this.db.prepare('SELECT * FROM leases ORDER BY granted_at ASC, rowid ASC').all()) as Array<Record<string, unknown>>;
     return rows.map(leaseFrom);
   }
@@ -84,9 +92,9 @@ export class SqliteLeaseStore implements LeaseStore {
       ...(input.grantedBy !== undefined ? { grantedBy: input.grantedBy } : {}),
     };
     this.db
-      .prepare(`INSERT INTO leases (id, agent_id, credential, granted_at, expires_at, max_uses, uses, reason, granted_by)
-        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`)
-      .run(lease.id, lease.agentId, lease.credential, lease.grantedAt, lease.expiresAt,
+      .prepare(`INSERT INTO leases (id, agent_id, agent_key, credential, granted_at, expires_at, max_uses, uses, reason, granted_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`)
+      .run(lease.id, lease.agentId, foldedAgentId(lease.agentId), lease.credential, lease.grantedAt, lease.expiresAt,
         lease.maxUses ?? null, lease.reason, lease.grantedBy ?? null);
     return lease;
   }
@@ -105,11 +113,11 @@ export class SqliteLeaseStore implements LeaseStore {
     const row = this.db.prepare(`
       UPDATE leases SET uses = uses + 1
       WHERE id = (
-        SELECT id FROM leases WHERE agent_id = ? AND credential = ? AND ${ACTIVE}
+        SELECT id FROM leases WHERE agent_key = ? AND credential = ? AND ${ACTIVE}
         ORDER BY expires_at ASC LIMIT 1
       ) AND ${ACTIVE}
       RETURNING *
-    `).get(agentId, credential, at, at) as Record<string, unknown> | undefined;
+    `).get(foldedAgentId(agentId), credential, at, at) as Record<string, unknown> | undefined;
     return row ? leaseFrom(row) : undefined;
   }
 

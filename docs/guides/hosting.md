@@ -40,9 +40,10 @@ the same result from the operating system, and it reuses the per-agent
 layout ([state layout](../reference/state-layout.md)) one level up.
 
 The cost is a process per tenant: the Node runtime and whatever plugins
-the cell loads, about a hundred megabytes idle. For a handful to a few
-hundred tenants per machine that is the cheap end of the trade. If you
-need more tenants than that per host, measure before designing around it.
+the cell loads. An idle cell on the hosted profile measured 65–70 MB of
+memory in the drill below. For a handful to a few hundred tenants per
+machine that is the cheap end of the trade. If you need more tenants than
+that per host, measure before designing around it.
 
 ## What a cell runs
 
