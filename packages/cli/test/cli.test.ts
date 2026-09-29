@@ -14543,7 +14543,7 @@ test('stratus health fails in one sentence when no daemon is serving, and migrat
   assert.equal(await runCli({ argv: ['health'], streams: down.streams, env }), 1);
   assert.match(
     down.output.stderr,
-    /^Error: stratusd is not running — .*gateway\.json does not exist.*Start it with `stratus serve` or `stratus service start`/,
+    /^Error: stratusd is not serving — .*gateway\.json does not exist.*still starting or restarting.*Start it with `stratus serve` or `stratus service start`/,
   );
   assert.doesNotMatch(down.output.stderr, /Usage:/);
   assert.doesNotMatch(down.output.stderr, /state migration/);
@@ -14553,7 +14553,7 @@ test('stratus health fails in one sentence when no daemon is serving, and migrat
   assert.equal(await runCli({ argv: ['health', '--format', 'json'], streams: json.streams, env }), 1);
   const payload = JSON.parse(json.output.stdout) as { ok: boolean; error: string };
   assert.equal(payload.ok, false);
-  assert.match(payload.error, /stratusd is not running/);
+  assert.match(payload.error, /stratusd is not serving/);
 
   // Nothing answering where it was pointed — what a gateway.json left
   // behind by a killed daemon produces — says where it looked.
