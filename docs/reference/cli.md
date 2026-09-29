@@ -46,6 +46,9 @@ printf %s "$KEY" | stratus credential set search.apiKey   # store a named creden
 stratus credential set search.apiKey --agent ava         # one agent's own key, over the shared one
 stratus credentials                    # stored names, never values (also: stratus credential list)
 stratus credential remove search.apiKey
+stratus token create alice             # a member token for the control API — printed once, only its hash kept
+stratus token list                     # id, name, role, created — never the token (also: stratus tokens)
+stratus token revoke alice             # by id or name; a running daemon refuses it at once, no restart
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
 stratus grants ava                     # what ava may do unattended: standing tool grants, command scopes, sites
@@ -79,6 +82,7 @@ stratus dashboard                      # local browser dashboard
 | `template add` | [Templates](../guides/templates.md) |
 | `skill add`, `skill validate`, `skills`, `skill reload` | [Skills](../guides/skills.md), [Skill format](./skill-format.md) |
 | `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
+| `token create`, `token list`, `token revoke` | [Remote access](../guides/remote-access.md#member-tokens), [Control API](../../packages/control-api/README.md#roles-operator-and-member) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `grants`, `grants revoke` | [Approvals](../guides/approvals.md#standing-grants) |
@@ -122,7 +126,8 @@ stratus dashboard                      # local browser dashboard
 | `--port`, `--host` | `stratus dashboard`: where a daemon it starts should bind |
 | `--no-open` | `stratus dashboard`: skip automatic browser opening |
 | `--version`, `-v` | Print this build's version and exit — reads nothing but itself, so it answers offline and before any state migration |
-| `--token` | Bearer token for `--gateway` (default: `~/.stratus/gateway-token`, or `STRATUS_GATEWAY_TOKEN`) |
+| `--token` | Bearer token for `--gateway` (default: `~/.stratus/gateway-token`, or `STRATUS_GATEWAY_TOKEN`). A member token works for everything but `restart`, which is operator-only |
+| `--role` | `stratus token create`: `member`, the only role a created token has — the operator token is `~/.stratus/gateway-token` |
 | `--no-login` | `stratus service install`: install without the start-at-login trigger |
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
 | `-n <count>` | `stratus logs`: how much backlog to print (default 50) |

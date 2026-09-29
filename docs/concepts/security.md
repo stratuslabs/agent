@@ -7,6 +7,7 @@ linked own the full story.
 
 - `~/.stratus/credentials.json` is `0600` (owner-read-only), and so are
   `~/.stratus/gateway-token`, `~/.stratus/gateway.json`,
+  `~/.stratus/api-tokens.json` (member token hashes, never a token),
   `~/.stratus/logs/stratusd.jsonl`, and everything in each agent's own
   directory — its `sessions.db`, its `memory.jsonl`, and its
   `whitelist.json`. The directory itself is `0700`.
@@ -166,3 +167,15 @@ installed. Cookie-authenticated requests are origin-bound; bearer ones are
 not, because a browser never attaches a bearer token on a page's behalf.
 Reaching a machine from outside goes through a tunnel, not a public bind.
 ([Remote access](../guides/remote-access.md))
+
+Two roles hold the API. The **operator** token (`~/.stratus/gateway-token`)
+can do everything; a **member** token (`stratus token create`) works within
+the operator's policy — roster, conversations, events, approvals — and is
+refused the routes that rewrite it: the config, the provider sign-ins, the
+key check, and restart. The rule fails closed, so an endpoint added later
+is operator-only until marked otherwise, and a browser session keeps the
+role of the token that minted it. A revoked member token stops, with its
+sessions and event streams, on the next request — no restart. Every token
+a daemon accepts was issued by its own home, which is what makes one home
+and one daemon per tenant an isolation boundary for a hosted deployment.
+([Control API](../../packages/control-api/README.md#roles-operator-and-member))

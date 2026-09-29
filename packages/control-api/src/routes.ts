@@ -80,9 +80,16 @@ import {
  * token, `dashboard` for a browser session. Never a bare string the caller
  * chose: channel-native ids are recorded bare, and the two must not be
  * spellable as each other.
+ *
+ * A member is recorded under its token's name, and the label it offered is
+ * dropped: the name is the one thing about a member the daemon vouches
+ * for, and a label would let one member record a decision as another.
  */
 const apiActorFor = (principal: Principal | undefined, label: string | undefined): string => {
   const source = principal?.kind === 'cookie' ? 'dashboard' : 'api';
+  if (principal?.role === 'member') {
+    return `${source}:${principal.tokenName}`;
+  }
   return label ? `${source}:${label}` : source;
 };
 
@@ -116,8 +123,8 @@ export interface RouteContext {
   response: ServerResponse;
   /** When the daemon's API bound, for uptime. */
   startedAt: number;
-  /** Mint a one-time browser token. Bearer callers only. */
-  mintOneTimeToken: () => string;
+  /** Mint a one-time browser token carrying the caller's role. Bearer callers only. */
+  mintOneTimeToken: () => Promise<string>;
   /** Spend one, yielding a session id. */
   redeemOneTimeToken: (ott: string | undefined) => string | undefined;
   sessionCookie: (sessionId: string, secure?: boolean) => string;
@@ -161,6 +168,18 @@ interface Route {
    * unreachable.
    */
   selfAuthenticating?: boolean;
+  /**
+   * A member token (and a session minted from one) may call this.
+   *
+   * Opt-in and fail-closed: a route without it is operator-only, so a new
+   * route nobody decided about is refused to members rather than silently
+   * opened to them. A member route is one that works *within* the policy
+   * the operator set — the roster, conversations, approvals, anything that
+   * only narrows what is allowed. What stays operator-only is what rewrites
+   * that policy or reaches past it: the trusted config, the provider
+   * sign-ins every agent bills to, and the process itself.
+   */
+  member?: true;
 }
 
 // ---- helpers ---------------------------------------------------------------
@@ -446,9 +465,10 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/auth/ott`,
+    member: true,
     bearerOnly: true,
     async handler(context) {
-      const ott = context.mintOneTimeToken();
+      const ott = await context.mintOneTimeToken();
       const path = `${API_PREFIX}/auth/session?ott=${encodeURIComponent(ott)}`;
       // Built from the address this caller reached the daemon on, not the one
       // it bound to. Every request URL is parsed against the bound origin, so
@@ -475,6 +495,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/auth/session`,
+    member: true,
     selfAuthenticating: true,
     async handler(context) {
       const sessionId = context.redeemOneTimeToken(context.url.searchParams.get('ott') ?? undefined);
@@ -503,6 +524,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/health`,
+    member: true,
     async handler(context) {
       // The roster the daemon is serving, enriched by the files — the same
       // source `GET /agents` uses, and for the same reason: a soul added or
@@ -570,6 +592,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/agents`,
+    member: true,
     async handler(context) {
       // The roster the daemon is *serving*, enriched with what the files
       // say — not the other way round.
@@ -623,6 +646,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/agents/:id`,
+    member: true,
     async handler(context) {
       // One agent in full, which the roster listing deliberately is not: it
       // carries `persona`, a one-line snippet for a table row. An editor that
@@ -645,6 +669,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/agents`,
+    member: true,
     async handler(context) {
       const body = await readJsonObject(context.request);
       const instructions = requireString(body, 'instructions');
@@ -684,6 +709,7 @@ export const routes: Route[] = [
   {
     method: 'PUT',
     pattern: `${API_PREFIX}/agents/:id`,
+    member: true,
     async handler(context) {
       const agentId = context.params.id ?? '';
       const body = await readJsonObject(context.request);
@@ -806,6 +832,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/roster/reload`,
+    member: true,
     async handler(context) {
       const agents = await context.gateway.reloadRoster();
       return { agents: agents.map((agent) => ({ id: agent.id, name: agent.name })) };
@@ -814,6 +841,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/skills/reload`,
+    member: true,
     async handler(context) {
       try {
         return { skills: await context.gateway.reloadSkills() };
@@ -828,6 +856,8 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/restart`,
+    // Operator-only: it drains every agent's turns, not just a member's own,
+    // and brings the process back on whatever config and plugins are on disk.
     async handler(context) {
       const body = await readJsonObject(context.request);
       const reason = optionalString(body, 'reason');
@@ -858,6 +888,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/sessions`,
+    member: true,
     async handler(context) {
       const agent = context.url.searchParams.get('agent') ?? undefined;
       const raw = context.url.searchParams.get('limit');
@@ -872,6 +903,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/sessions/:id`,
+    member: true,
     async handler(context) {
       const session = await context.gateway.store.get(context.params.id ?? '');
       if (!session) {
@@ -885,6 +917,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/sessions/:id/messages`,
+    member: true,
     async handler(context) {
       const sessionId = context.params.id ?? '';
       const body = await readJsonObject(context.request);
@@ -1024,6 +1057,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/sessions/:id/rollover`,
+    member: true,
     async handler(context) {
       const sessionId = context.params.id ?? '';
       const existing = await context.gateway.store.get(sessionId);
@@ -1054,6 +1088,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/agents/:id/grants`,
+    member: true,
     async handler(context) {
       const agentId = validGrantsAgentId(context.params.id);
       const store = grantStoreOf(context);
@@ -1083,6 +1118,9 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/agents/:id/grants/revoke`,
+    // A member's: taking a grant back only ever narrows what an agent may
+    // do unattended, so it cannot reach past the operator's policy.
+    member: true,
     async handler(context) {
       const agentId = validGrantsAgentId(context.params.id);
       const store = grantStoreOf(context);
@@ -1128,6 +1166,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/approvals`,
+    member: true,
     async handler(context) {
       return { approvals: context.gateway.pendingApprovals() };
     },
@@ -1135,6 +1174,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/approvals`,
+    member: true,
     async handler(context) {
       const body = await readJsonObject(context.request);
       const requestId = requireString(body, 'requestId');
@@ -1170,6 +1210,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/schedules`,
+    member: true,
     async handler(context) {
       // The whole fleet's, not one agent's: this is the audit list — an
       // agent that scheduled something an operator cannot see is a bug —
@@ -1181,6 +1222,7 @@ export const routes: Route[] = [
   {
     method: 'DELETE',
     pattern: `${API_PREFIX}/schedules/:id`,
+    member: true,
     async handler(context) {
       const cancelled = context.gateway.cancelSchedule(context.params.id ?? '');
       if (!cancelled) {
@@ -1299,6 +1341,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/catalog/models`,
+    member: true,
     async handler(context) {
       // The daemon's own config, not whatever the working directory holds:
       // otherwise the catalog probes a different provider or base URL than
@@ -1363,6 +1406,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/catalog/tools`,
+    member: true,
     async handler(context) {
       // All three halves, because any alone misleads. The tool list says
       // what an agent can be granted and at what risk; the skill list says
@@ -1387,6 +1431,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/credentials`,
+    member: true,
     async handler(context) {
       const credentials = await loadCredentials(context.env);
       const channels = await loadChannelCredentials(context.env);
@@ -1414,6 +1459,11 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/credentials/verify`,
+    // Operator-only, though it sends only the caller's own key: it makes the
+    // daemon fetch a URL the caller chose, from wherever the daemon sits on
+    // the network, and reports how that went. Its one purpose is checking a
+    // key before `PUT /credentials/:provider` stores it, which a member
+    // cannot do anyway.
     async handler(context) {
       const body = await readJsonObject(context.request);
       const provider = parseProviderParam(requireString(body, 'provider'));
@@ -1442,6 +1492,9 @@ export const routes: Route[] = [
   {
     method: 'PUT',
     pattern: `${API_PREFIX}/credentials/:provider`,
+    // Operator-only: a provider sign-in is what every agent bills to, and
+    // replacing it (with an endpoint of the caller's choosing) would move
+    // the whole fleet onto another account or send its traffic elsewhere.
     async handler(context) {
       const provider = parseProviderParam(context.params.provider ?? '');
       const body = await readJsonObject(context.request);
@@ -1497,6 +1550,7 @@ export const routes: Route[] = [
   {
     method: 'PUT',
     pattern: `${API_PREFIX}/credentials/channels/:channel`,
+    member: true,
     async handler(context) {
       const channel = context.params.channel ?? '';
       if (!CHANNEL_KIND_PATTERN.test(channel)) {
@@ -1535,6 +1589,9 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/credentials/named`,
+    // A member's because it is add-only (`addNamedCredential`): it can put a
+    // key where none was, never replace one an agent already resolves.
+    member: true,
     async handler(context) {
       const body = await readJsonObject(context.request);
       const name = requireString(body, 'name');
@@ -1571,6 +1628,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/config`,
+    member: true,
     async handler(context) {
       const configPath = await activeConfigPath(context);
       let config: StratusConfigFile = {};
@@ -1587,6 +1645,10 @@ export const routes: Route[] = [
   {
     method: 'PUT',
     pattern: `${API_PREFIX}/config`,
+    // Operator-only: this is the trusted config — `baseUrl` and `apiKeyEnv`
+    // decide where the operator's provider key is sent, `approvals` who may
+    // approve, `api` what the daemon binds. A member reads it (GET above)
+    // and never writes it.
     async handler(context) {
       const body = await readJsonObject(context.request);
       const incoming = body.config;

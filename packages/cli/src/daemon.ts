@@ -99,8 +99,15 @@ export const callRunningGateway = async (
       + 'Is stratusd running, and does it have @stratusagent/control-api installed?',
     );
   }
-  if (response.status === 401 || response.status === 403) {
+  if (response.status === 401) {
     throw new Error(`The gateway at ${base} rejected this token. Check --token, STRATUS_GATEWAY_TOKEN, or ~/.stratus/gateway-token.`);
+  }
+  if (response.status === 403) {
+    // A token that authenticated and was refused this one route — a member
+    // token asking for an operator-only change. "Rejected this token" would
+    // send someone to replace a token that works; the API's own sentence
+    // says which route and why.
+    throw new Error(`The gateway at ${base} refused this call: ${await gatewayErrorMessage(response)}`);
   }
   return response;
 };
