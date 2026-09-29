@@ -60,10 +60,14 @@ stratus serve --log-format json
   streams land in the same `docker logs`. `--no-events` has nothing to hide
   in this mode: the event lines it suppresses are not printed anyway, and
   the event *records* are the file's, which it never touched.
-- **stderr still carries what never became a record** — above all a
-  daemon that failed before it started serving (see
-  [below](#when-the-log-is-empty)), and a log file that could not be
-  written. Keep stderr in whatever collects stdout.
+- **What comes before the daemon is a record too.** A state migration's
+  notice on the first start after an upgrade, a refused or failed start, a
+  flag that does not parse, and a log file that cannot be written are each
+  a `warn` record on stdout. Those from before the daemon started serving
+  are on stdout only: the file was not open yet (see
+  [below](#when-the-log-is-empty)). What can still reach stderr is what
+  Node itself prints, for a crash the CLI never caught — keep stderr in
+  whatever collects stdout.
 - **`stratus logs` still works** inside the container, reading the file,
   as long as the file is being written.
 
@@ -112,8 +116,9 @@ or `--session` to narrow it to the run you actually mean.
 A daemon that fails *before* it starts serving — a broken install, an
 unreadable credentials file — never gets as far as opening the structured
 log, so `stratus logs` shows nothing or shows yesterday. Those errors go to
-stderr, and where stderr lands is the service manager's business, so it
-differs by platform:
+stderr — or, under `--log-format json`, to stdout as `warn` records — and
+where either lands is the service manager's business, so it differs by
+platform:
 
 ```bash
 tail ~/.stratus/logs/stratusd.err.log      # macOS

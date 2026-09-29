@@ -29,6 +29,7 @@ import { runTemplateAdd } from './commands/template.ts';
 import { runUpdate } from './commands/update.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
 import { HELP_TEXT } from './help.ts';
+import { jsonRecordStreams, wantsJsonLog } from './logs.ts';
 import { writeLine, readPromptFromStdin } from './io.ts';
 import { CLI_VERSION } from './npm.ts';
 import { parseCommand, defaultApprovalMode, memoryCommandWritesState } from './parse.ts';
@@ -47,7 +48,10 @@ export interface CliRunOptions {
   env?: CliEnvironment;
 }
 
-export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {
+export const runCli = async ({ argv, streams: given = process, env = {} }: CliRunOptions): Promise<number> => {
+  // Chosen before anything can write — see `jsonRecordStreams`.
+  const jsonLog = wantsJsonLog(argv);
+  const streams = jsonLog ? jsonRecordStreams(given) : given;
   try {
     const resolvedEnv = argv.includes('--stdin') && env.stdin === undefined
       ? {
@@ -286,8 +290,12 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     writeLine(streams.stderr, `Error: ${message}`);
-    writeLine(streams.stderr, '');
-    writeLine(streams.stderr, HELP_TEXT);
+    // The help is for a person at a terminal; under a log shipper it would
+    // be a hundred records burying the one that says what failed.
+    if (!jsonLog) {
+      writeLine(streams.stderr, '');
+      writeLine(streams.stderr, HELP_TEXT);
+    }
     return 1;
   }
 };
