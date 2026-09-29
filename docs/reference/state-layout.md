@@ -144,7 +144,9 @@ Four things deliberately do not shard, and all of them live in `fleet.db`:
 Copy the whole directory. The SQLite files are in WAL mode, so copy them
 with the daemon stopped (`stratus service stop`) or copy `*-wal` and
 `*-shm` alongside each database; otherwise the newest turns are the ones
-you lose.
+you lose. On a server the home is a Docker volume or
+`/var/lib/stratus/.stratus`; [Deployment](../guides/deployment.md#back-up-and-restore)
+has the archive-and-restore procedure and a drill that proves it.
 
 An install upgrading from before this layout is migrated on first use — see
 [Updating](../guides/updating.md), which also says why the sessions,

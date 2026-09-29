@@ -1,0 +1,4 @@
+{
+  "name": "Single-tenant VM",
+  "description": "A server of your own: every tool plugin, gated calls approved in Slack by a designated approver, and only named operators get a turn."
+}

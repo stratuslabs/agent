@@ -33,6 +33,42 @@ Session ids are the channel's own key —
 is exactly what `--session` wants, and the same conversation keeps it
 across daemon restarts.
 
+## Logs on stdout, for a container or journald
+
+In a container, or under a system unit, stdout is not gone — it is the
+log pipeline. `docker logs`, a Docker logging driver, journald, and
+shippers like Vector or Fluent Bit all read it line by line, and they want
+one JSON object per line rather than the terminal's aligned text:
+
+```bash
+stratus serve --log-format json
+```
+
+```json
+{"ts":"2026-09-29T09:14:02.114Z","level":"info","msg":"stratusd ready — 3 agents, slack connected"}
+{"ts":"2026-09-29T09:14:31.020Z","level":"event","event":"session.created","sessionId":"slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456","agentId":"ava"}
+{"ts":"2026-09-29T09:14:36.482Z","level":"event","event":"tool.called","sessionId":"slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456","detail":{"tool":"web.fetch"},"agentId":"ava"}
+```
+
+- **The same records as the file, not a second stream.** Every record
+  written to `stratusd.jsonl` is written to stdout as it is, in the same
+  order — so everything below about what the log does and does not hold
+  applies to the stream too. With `--no-log-file` the file is skipped and
+  stdout still carries them.
+- **Nothing else goes to stdout.** The human lines are not printed, and
+  neither are warnings on stderr — a warning is already a record, and both
+  streams land in the same `docker logs`. `--no-events` has nothing to hide
+  in this mode: the event lines it suppresses are not printed anyway, and
+  the event *records* are the file's, which it never touched.
+- **stderr still carries what never became a record** — above all a
+  daemon that failed before it started serving (see
+  [below](#when-the-log-is-empty)), and a log file that could not be
+  written. Keep stderr in whatever collects stdout.
+- **`stratus logs` still works** inside the container, reading the file,
+  as long as the file is being written.
+
+The [Docker image](./deployment.md) starts the daemon this way.
+
 ## A trace, not a transcript
 
 The log records that a tool ran and that a session completed, with the
@@ -91,6 +127,8 @@ differs by platform:
 ```bash
 tail ~/.stratus/logs/stratusd.err.log      # macOS
 journalctl --user-unit=stratusd.service    # Linux
+docker logs stratusd                       # the Docker image — stdout and stderr both
+journalctl -u stratusd.service             # the system unit in deploy/systemd
 ```
 
 That is where a restart loop explains itself. On macOS the LaunchAgent

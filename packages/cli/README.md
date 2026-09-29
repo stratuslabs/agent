@@ -50,6 +50,7 @@ stratus skill add owner/repo           # install skills from GitHub (validated a
 stratus skill validate ./my-skill      # check a skill against the spec without installing it
 stratus plugins                        # installed → enabled → granted → what approvals does with it
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
+stratus health                         # is the running daemon serving? exit 0/1, for container and probe health checks
 stratus credentials                    # stored credential names (never values)
 stratus token create alice             # a member token for the control API — roster, chat, approvals, never the config (also `token list`, `token revoke`)
 stratus usage                          # tokens spent this month per agent and model, and where each budget stands
@@ -83,9 +84,10 @@ Full reference with every subcommand:
 | `--idle-timeout` | `serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |
 | `--no-log-file` | `serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
+| `--log-format` | `serve`: `text` (default) or `json` — the log's records as JSON lines on stdout, for `docker logs` and journald |
 | `--no-api` | `serve`: do not serve the control API |
 | `--api-host`, `--api-port` | `serve`: control API bind (default `127.0.0.1:4123`) |
-| `--gateway <url>`, `--token` | `agents`, `skill reload`, `restart`, `session rollover`, `grants`: a running daemon's control API |
+| `--gateway <url>`, `--token` | `agents`, `skill reload`, `restart`, `session rollover`, `grants`, `health`: a running daemon's control API |
 | `--tool`, `--scope`, `--origin` | `grants revoke`: which grant goes — exactly one |
 | `--trust <level>` | `memory list`: show only that label; `memory reassert`: the label to record (`user`, `agent`, `unknown`, `external`) |
 | `--all-unknown` | `memory reassert`: every live fact with no recorded origin |
