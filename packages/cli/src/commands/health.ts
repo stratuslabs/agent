@@ -71,12 +71,17 @@ export const runHealth = async (
     return 1;
   };
 
+  // The file is written when the API binds and removed when it stops, so a
+  // daemon between the two — starting, or inside an announced restart — is
+  // absent here too. Said, because a probe failing once during a restart is
+  // expected and one failing for minutes is not, and the reader of this line
+  // is deciding which.
   const base = await runningGatewayBase(env, command);
   if (!base) {
     return fail(
-      `stratusd is not running — ${gatewayInfoPath(env)} does not exist, so no daemon has said where it is `
-      + 'serving, and no --gateway was given. Start it with `stratus serve` or `stratus service start`; '
-      + 'a daemon started with --no-api has no control API to ask.',
+      `stratusd is not serving — ${gatewayInfoPath(env)} does not exist, so no daemon has said where it is `
+      + '(none is running, or one is still starting or restarting), and no --gateway was given. '
+      + 'Start it with `stratus serve` or `stratus service start`; a daemon started with --no-api has no control API to ask.',
     );
   }
 
