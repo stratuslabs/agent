@@ -14,6 +14,7 @@ import { runChannel } from './commands/channel.ts';
 import { runDashboard } from './commands/dashboard.ts';
 import { runDoctor } from './commands/doctor.ts';
 import { runGrants } from './commands/grants.ts';
+import { runHealth } from './commands/health.ts';
 import { runLogs } from './commands/logs.ts';
 import { runMemory } from './commands/memory.ts';
 import { runPlugins } from './commands/plugins.ts';
@@ -67,6 +68,15 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     if (command.command === 'version') {
       writeLine(streams.stdout, `stratus ${CLI_VERSION}`);
       return 0;
+    }
+
+    // Above the migrations too. A probe is run every few seconds for the
+    // life of a deployment by whatever supervises the daemon, and it asks
+    // the running process a question over HTTP — the home's format is the
+    // daemon's business, and a liveness check must not be the thing that
+    // advances it (or fails because it could not).
+    if (command.command === 'health') {
+      return await runHealth(command, streams, resolvedEnv);
     }
 
     // Migrations run on first use of a newer build — every command, every

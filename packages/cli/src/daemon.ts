@@ -77,6 +77,8 @@ export const callRunningGateway = async (
   pathname: string,
   body?: Record<string, unknown>,
   method: 'GET' | 'POST' = 'POST',
+  /** Gives up on the call — a probe must answer in bounded time even when the daemon cannot. */
+  signal?: AbortSignal,
 ): Promise<Response> => {
   const token = await gatewayToken(env, target.token);
   const fetchImpl = env.fetch ?? globalThis.fetch;
@@ -92,6 +94,7 @@ export const callRunningGateway = async (
         ...(body ? { 'content-type': 'application/json' } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
+      ...(signal !== undefined ? { signal } : {}),
     });
   } catch (error) {
     throw new Error(
