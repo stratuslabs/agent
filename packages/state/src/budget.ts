@@ -40,6 +40,27 @@ const WEIGHT_KEYS: ReadonlyArray<keyof TokenUsage> = ['inputTokens', 'outputToke
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+/**
+ * Refuse a key the block does not have. A misspelled limit — `montly`,
+ * `daliy` — would otherwise be skipped by every reader, and a config that
+ * reads as capped would run uncapped: the one failure a budget exists to
+ * rule out, and a silent one.
+ */
+const refuseUnknownKeys = (
+  raw: Record<string, unknown>,
+  known: readonly string[],
+  where: string,
+  configPath: string,
+): void => {
+  const unknown = Object.keys(raw).filter((key) => !known.includes(key));
+  if (unknown.length > 0) {
+    throw new Error(
+      `Invalid ${where} in config ${configPath}: unknown key${unknown.length === 1 ? '' : 's'} ${unknown.map((key) => JSON.stringify(key)).join(', ')}. `
+      + `It takes ${known.join(', ')}.`,
+    );
+  }
+};
+
 const parseLimits = (raw: Record<string, unknown>, where: string, configPath: string): BudgetLimits => {
   const limits: BudgetLimits = {};
   for (const period of BUDGET_PERIODS) {
@@ -72,6 +93,7 @@ export const parseBudgetConfig = (raw: unknown, configPath: string): BudgetConfi
   if (!isPlainObject(raw)) {
     throw new Error(`Invalid budget in config ${configPath}: expected an object like { "daily": 2000000 }.`);
   }
+  refuseUnknownKeys(raw, [...BUDGET_PERIODS, 'weights', 'agents'], 'budget', configPath);
   const budget: BudgetConfig = parseLimits(raw, 'budget', configPath);
   if (raw.weights !== undefined) {
     if (!isPlainObject(raw.weights)) {
@@ -105,6 +127,7 @@ export const parseBudgetConfig = (raw: unknown, configPath: string): BudgetConfi
       if (!isPlainObject(entry)) {
         throw new Error(`Invalid budget.agents.${agentId} in config ${configPath}: expected an object like { "daily": 500000 }.`);
       }
+      refuseUnknownKeys(entry, BUDGET_PERIODS, `budget.agents.${agentId}`, configPath);
       agents[agentId] = parseLimits(entry, `budget.agents.${agentId}`, configPath);
     }
     budget.agents = agents;
