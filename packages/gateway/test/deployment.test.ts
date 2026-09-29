@@ -236,6 +236,7 @@ test('a delegated agent borrows the delegator\'s lease as a sub-lease no wider t
 
   let gatewayRef: ReturnType<typeof createGateway> | undefined;
   let seenDuringDelegation: ReturnType<ReturnType<typeof createGateway>['leases']> = [];
+  let seenForBea: ReturnType<ReturnType<typeof createGateway>['leases']> = [];
   let avaCalls = 0;
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body)) as { model: string };
@@ -244,6 +245,8 @@ test('a delegated agent borrows the delegator\'s lease as a sub-lease no wider t
       return avaCalls === 1 ? openAiToolCall('agent_delegate', { agent: 'bea', prompt: 'look into it' }) : openAiText('ava done');
     }
     seenDuringDelegation = gatewayRef?.leases() ?? [];
+    // Filtered by agent, folded like the stored half.
+    seenForBea = gatewayRef?.leases({ agentId: 'BEA' }) ?? [];
     return openAiText('bea done');
   }) as typeof fetch;
   const gateway = createGateway({
@@ -261,6 +264,7 @@ test('a delegated agent borrows the delegator\'s lease as a sub-lease no wider t
 
     const sub = seenDuringDelegation.find((lease) => lease.parentId === parent.id);
     assert.ok(sub, 'Bea ran under a sub-lease of Ava\'s');
+    assert.ok(seenForBea.some((lease) => lease.id === sub.id), 'a filtered listing finds the sub-lease whatever the case');
     assert.equal(sub.agentId, 'bea');
     assert.equal(sub.credential, 'provider:openai');
     assert.match(sub.sessionId ?? '', /^d-1:delegate:bea:/);
@@ -377,8 +381,8 @@ test('usage totals are one row per agent, however the id was cased when each cal
   const ledger = new SqliteUsageLedger(fleetDbIn(path.join(os.tmpdir(), `stratus-ledger-${process.pid}-${Date.now()}`)));
   try {
     const at = new Date().toISOString();
-    ledger.record({ at, agentId: 'Scout', sessionId: 's', record: { turnId: 's:turn:1', provider: 'openai', model: 'm', inputTokens: 10 } });
-    ledger.record({ at, agentId: 'scout', sessionId: 's', record: { turnId: 's:turn:2', provider: 'openai', model: 'm', inputTokens: 5 } });
+    ledger.record({ id: 'e-1', at, agentId: 'Scout', sessionId: 's', record: { turnId: 's:turn:1', provider: 'openai', model: 'm', inputTokens: 10 } });
+    ledger.record({ id: 'e-2', at, agentId: 'scout', sessionId: 's', record: { turnId: 's:turn:2', provider: 'openai', model: 'm', inputTokens: 5 } });
     const rows = ledger.totals({ agentId: 'SCOUT' });
     assert.equal(rows.length, 1);
     assert.equal(rows[0]?.calls, 2);
@@ -411,5 +415,45 @@ test('a budget that has never been readable refuses model calls rather than read
     assert.equal((await gateway.budget())?.budget.daily, 100);
   } finally {
     await gateway.stop();
+  }
+});
+
+test('usage held across a restart is written once the ledger takes it, and refuses budgeted calls until then', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeConfig(home, { budget: { daily: 1_000_000 } });
+  const fetchImpl = (async () => openAiText('ok')) as typeof fetch;
+  const start = async () => {
+    const gateway = createGateway({
+      env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+      idleTimeoutMs: 0,
+    });
+    await gateway.start();
+    return gateway;
+  };
+  const { DatabaseSync } = await import('node:sqlite');
+  const saboteur = new DatabaseSync(fleetDbIn(path.join(home, '.stratus')));
+  try {
+    const first = await start();
+    saboteur.exec("CREATE TRIGGER full_disk BEFORE INSERT ON usage BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+    await first.dispatch({ sessionId: 'h-1', agentId: 'ava', userMessage: 'one' });
+    await first.stop();
+
+    // A new process on the same home: the held call is not forgotten.
+    const second = await start();
+    try {
+      await assert.rejects(
+        second.dispatch({ sessionId: 'h-1', agentId: 'ava', userMessage: 'two' }),
+        /Spending could not be recorded/,
+      );
+      saboteur.exec('DROP TRIGGER full_disk');
+      await second.dispatch({ sessionId: 'h-1', agentId: 'ava', userMessage: 'three' });
+      // The call made before the restart, and the one after: each once.
+      assert.equal(second.usage()[0]?.calls, 2);
+    } finally {
+      await second.stop();
+    }
+  } finally {
+    saboteur.close();
   }
 });

@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
+import { appendFileSync, chmodSync, readFileSync, unlinkSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
 import type { UsageRecord } from '@stratusagent/core';
-import { foldedAgentId, type BudgetWeights } from '@stratusagent/state';
+import { assertDerivedStatePathSync, foldedAgentId, type BudgetWeights } from '@stratusagent/state';
 import { openStratusDatabase, tightenSqliteFile, type SqliteSessionStoreOptions } from './sessions.ts';
 
 /**
@@ -8,6 +10,12 @@ import { openStratusDatabase, tightenSqliteFile, type SqliteSessionStoreOptions 
  * plus when it was spent and by whom.
  */
 export interface UsageLedgerEntry {
+  /**
+   * Unique per call, assigned once. Recording the same entry twice is a
+   * no-op, which is what makes replaying held usage safe: a drain that
+   * wrote its rows and died before clearing the file writes nothing twice.
+   */
+  id: string;
   at: string;
   agentId: string;
   sessionId: string;
@@ -38,6 +46,7 @@ export interface UsageQuery {
 const USAGE_TABLE = `
   CREATE TABLE IF NOT EXISTS usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id TEXT NOT NULL UNIQUE,
     at TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     agent_key TEXT NOT NULL,
@@ -108,9 +117,10 @@ export class SqliteUsageLedger {
   record(entry: UsageLedgerEntry): void {
     const { record } = entry;
     this.db
-      .prepare(`INSERT INTO usage (at, agent_id, agent_key, session_id, turn_id, provider, model,
-        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .prepare(`INSERT OR IGNORE INTO usage (entry_id, at, agent_id, agent_key, session_id, turn_id, provider, model,
+        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
+        entry.id,
         entry.at,
         entry.agentId,
         foldedAgentId(entry.agentId),
@@ -123,6 +133,20 @@ export class SqliteUsageLedger {
         record.cacheReadTokens ?? null,
         record.cacheWriteTokens ?? null,
       );
+  }
+
+  /** Record several entries, all or none. */
+  recordAll(entries: readonly UsageLedgerEntry[]): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const entry of entries) {
+        this.record(entry);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   /** Totals per (agent, provider, model) in the window, largest spender first. */
@@ -184,3 +208,70 @@ export class SqliteUsageLedger {
     this.db.close();
   }
 }
+
+/** Where held usage waits, in the state home beside `fleet.db`. */
+export const USAGE_HOLD_FILENAME = 'usage-held.jsonl';
+
+/** A fresh entry id — see `UsageLedgerEntry.id`. */
+export const newUsageEntryId = (): string => randomUUID();
+
+/**
+ * Usage the ledger could not write, kept on disk until it can be.
+ *
+ * Held in memory only, a row lost to a full disk was lost again at the next
+ * restart — and the budget, reading a ledger missing it, would allow the
+ * spend a second time. So a failed write is appended here (a few hundred
+ * bytes, which often still fits where a SQLite transaction does not), and
+ * every later budget check drains the file into the ledger before judging,
+ * refusing while it cannot. Rows carry their ids, so a drain that dies
+ * between writing the rows and clearing the file writes nothing twice.
+ *
+ * `0600` like every other file in the home, with the explicit chmod an
+ * append needs, and never through a link — it is a name Stratus chose.
+ */
+export const createUsageHold = (stateHome: string, filePath: string) => ({
+  path: filePath,
+  append(entries: readonly UsageLedgerEntry[]): void {
+    if (entries.length === 0) {
+      return;
+    }
+    assertDerivedStatePathSync(stateHome, filePath, 'file');
+    appendFileSync(filePath, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(''), { mode: 0o600 });
+    chmodSync(filePath, 0o600);
+  },
+  read(): UsageLedgerEntry[] {
+    assertDerivedStatePathSync(stateHome, filePath, 'file');
+    let text: string;
+    try {
+      text = readFileSync(filePath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+    // A line cut short by a crash mid-append is the one that did not land;
+    // everything before it did.
+    const entries: UsageLedgerEntry[] = [];
+    for (const line of text.split('\n')) {
+      if (line.trim().length === 0) {
+        continue;
+      }
+      try {
+        entries.push(JSON.parse(line) as UsageLedgerEntry);
+      } catch {
+        continue;
+      }
+    }
+    return entries;
+  },
+  clear(): void {
+    try {
+      unlinkSync(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
+  },
+});

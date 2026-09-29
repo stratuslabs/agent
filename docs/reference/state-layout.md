@@ -16,6 +16,7 @@ what moves when you rename an agent.
 | `fleet.db` | The schedules, the session index that says which agent's store holds a given session id, the usage ledger, and the credential leases. Fleet infrastructure, deliberately not per agent — see below. |
 | `gateway-token`, `gateway.json` | The [control API](../../packages/control-api/README.md)'s bearer token and the address a running daemon bound. Both `0600`. |
 | `api-tokens.json` | [Member tokens](../guides/remote-access.md#member-tokens) for the control API: `{ version: 1, tokens: [{ id, name, role, hash, createdAt }] }`, where `hash` is the token's sha256 — the token itself is never stored. Written by `stratus token`, read by the daemon on every member request. `0600`. |
+| `usage-held.jsonl` | Usage the ledger in `fleet.db` could not write yet (a full disk), kept until it can be — model calls under a budget are refused while it exists. Usually absent. `0600`. See [Usage and budgets](../guides/usage-and-budgets.md). |
 | `stratusd.lock` | Held by the daemon serving this home; how a second `stratus serve` is refused. |
 | `logs/` | `stratusd.jsonl`, the structured trace [`stratus logs`](../guides/logs.md) reads, plus the macOS LaunchAgent's stdout/stderr redirects. `0700`. |
 | `skills/` | Operator-installed [skills](../guides/skills.md), one directory each. |

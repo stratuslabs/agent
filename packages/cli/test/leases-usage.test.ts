@@ -87,6 +87,7 @@ test('stratus usage sums the ledger and says where the budget stands', async () 
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ budget: { daily: 100 } }));
   const ledger = new SqliteUsageLedger(fleetDbPath({ homeDir: home }));
   ledger.record({
+    id: 'e-1',
     at: new Date().toISOString(),
     agentId: 'ava',
     sessionId: 's-1',
@@ -137,4 +138,17 @@ test('stratus run spends a lease on a fenced sign-in, and is refused without one
   assert.match(answered.stdout, /hi there/);
   const listed = JSON.parse((await run(home, ['lease', 'list', '--all', '--format', 'json'])).stdout) as { leases: Array<{ uses: number }> };
   assert.equal(listed.leases[0]?.uses, 1);
+});
+
+test('stratus usage reports an unreadable budget as unknown, never as no budget', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ "budget": ');
+  const text = await run(home, ['usage']);
+  assert.equal(text.code, 1);
+  assert.match(text.stderr, /The budget could not be read .*whether spend is capped is unknown/);
+  assert.doesNotMatch(text.stdout, /No budget is set/);
+  const json = await run(home, ['usage', '--format', 'json']);
+  assert.equal(json.code, 1);
+  assert.equal(typeof (JSON.parse(json.stdout) as { budgetUnreadable?: string }).budgetUnreadable, 'string');
 });

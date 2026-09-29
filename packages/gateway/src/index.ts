@@ -182,7 +182,15 @@ import {
   type ProviderCallGuard,
 } from '@stratusagent/state';
 import { SqliteLeaseStore } from './leases.ts';
-import { SqliteUsageLedger, type UsageLedgerEntry, type UsageQuery, type UsageTotalsRow } from './usage.ts';
+import {
+  createUsageHold,
+  newUsageEntryId,
+  SqliteUsageLedger,
+  USAGE_HOLD_FILENAME,
+  type UsageLedgerEntry,
+  type UsageQuery,
+  type UsageTotalsRow,
+} from './usage.ts';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
 /**
@@ -1120,14 +1128,33 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // as the disk stayed full. Held rows keep their original timestamp, so a
   // late write still lands in the window the tokens were spent in.
   const unrecordedUsage: UsageLedgerEntry[] = [];
+  const usageHold = createUsageHold(stateDir, path.join(stateDir, USAGE_HOLD_FILENAME));
   const flushUsage = (): Error | undefined => {
     while (unrecordedUsage.length > 0) {
       try {
         usageLedger.record(unrecordedUsage[0]!);
       } catch (error) {
+        // Onto disk if the disk will take it, so a restart does not lose it;
+        // otherwise it stays here and the next flush tries both again.
+        try {
+          usageHold.append(unrecordedUsage);
+          unrecordedUsage.length = 0;
+        } catch {
+          // Held in memory only; the budget check still refuses.
+        }
         return error instanceof Error ? error : new Error(String(error));
       }
       unrecordedUsage.shift();
+    }
+    // What an earlier failure (or an earlier process) left on disk.
+    try {
+      const held = usageHold.read();
+      if (held.length > 0) {
+        usageLedger.recordAll(held);
+        usageHold.clear();
+      }
+    } catch (error) {
+      return error instanceof Error ? error : new Error(String(error));
     }
     return undefined;
   };
@@ -1137,7 +1164,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     const at = new Date().toISOString();
     for (const record of event.records) {
-      unrecordedUsage.push({ at, agentId: event.agentId, sessionId: event.sessionId, record });
+      unrecordedUsage.push({ id: newUsageEntryId(), at, agentId: event.agentId, sessionId: event.sessionId, record });
     }
     const failed = flushUsage();
     if (failed) {
@@ -4169,7 +4196,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
     leases: (filter = {}) => [
       ...leaseStore.list(filter),
-      ...leaseBroker.subLeases().filter((lease) => filter.agentId === undefined || lease.agentId === filter.agentId),
+      // Folded like the stored half, so `?agent=scout` finds Scout's too.
+      ...leaseBroker.subLeases().filter((lease) => filter.agentId === undefined
+        || foldedAgentId(lease.agentId) === foldedAgentId(filter.agentId)),
     ],
     grantLease(input) {
       validateLeaseGrant(input, new Date());

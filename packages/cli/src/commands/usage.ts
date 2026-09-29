@@ -19,20 +19,22 @@ const count = (value: number | undefined): string => (value === undefined ? '—
 /**
  * The budget this home runs under, read as the daemon reads it: the
  * trusted config, falling through to the global file past a project-local
- * one. Unreadable is reported rather than guessed at — a listing that
- * said "no budget" over a broken file would tell an operator nothing caps
- * spend when the daemon is holding the last one it could read.
+ * one. An unreadable one is reported as unknown, never as absent — a
+ * listing that said "no budget" over a broken file would tell an operator
+ * (or a script reading the JSON) that nothing caps spend, when the daemon
+ * is holding the last budget it could read, or refusing calls over it.
  */
-const readBudget = async (env: CliEnvironment, warn: (line: string) => void): Promise<BudgetConfig | undefined> => {
+const readBudget = async (env: CliEnvironment): Promise<
+  { status: 'present'; budget: BudgetConfig } | { status: 'absent' } | { status: 'unreadable'; error: string }
+> => {
   let block = await readTrustedConfigBlock('budget', env);
   if (block.status === 'untrusted') {
     block = await readGlobalConfigBlock('budget', env);
   }
   if (block.status === 'unreadable') {
-    warn(`could not read the budget (${block.error instanceof Error ? block.error.message : String(block.error)}).`);
-    return undefined;
+    return { status: 'unreadable', error: block.error instanceof Error ? block.error.message : String(block.error) };
   }
-  return block.status === 'present' ? block.value : undefined;
+  return block.status === 'present' ? { status: 'present', budget: block.value } : { status: 'absent' };
 };
 
 /**
@@ -55,7 +57,8 @@ export const runUsage = async (
     ? new Date(command.since).toISOString()
     : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
   const until = command.until !== undefined ? new Date(command.until).toISOString() : undefined;
-  const budget = await readBudget(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
+  const read = await readBudget(env);
+  const budget = read.status === 'present' ? read.budget : undefined;
 
   let exists = true;
   try {
@@ -87,8 +90,9 @@ export const runUsage = async (
       ...(command.agentId !== undefined ? { agent: command.agentId } : {}),
       usage: rows,
       ...(budget ? { budget: { budget, limits } } : {}),
+      ...(read.status === 'unreadable' ? { budgetUnreadable: read.error } : {}),
     }, null, 2));
-    return 0;
+    return read.status === 'unreadable' ? 1 : 0;
   }
 
   writeLine(streams.stdout, `Usage since ${since.slice(0, 10)}${until !== undefined ? `, until ${until.slice(0, 10)}` : ''} (tokens, as providers reported them):`);
@@ -102,6 +106,10 @@ export const runUsage = async (
       + `in ${count(row.inputTokens)}  out ${count(row.outputTokens)}  cache read ${count(row.cacheReadTokens)}  cache write ${count(row.cacheWriteTokens)}`
       + (budget ? `  weighted ${count(weightedTokens(row, budget.weights))}` : ''),
     );
+  }
+  if (read.status === 'unreadable') {
+    writeLine(streams.stderr, `The budget could not be read (${read.error}), so whether spend is capped is unknown here. A running daemon keeps the last budget it read, and refuses model calls if it never read one. Fix the config and run this again.`);
+    return 1;
   }
   if (!budget) {
     writeLine(streams.stdout, 'No budget is set. A `budget` block in ~/.stratus/config.json caps spend per UTC day or month.');

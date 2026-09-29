@@ -114,10 +114,14 @@ Two properties are worth knowing before you rely on a number:
   "one call" is one whole turn, since its inner steps happen inside it.
   Set a limit with that headroom in mind.
 - **Unrecorded spend stops budgeted calls.** If the ledger cannot be
-  written — a full disk, an I/O error — the usage is held and retried, and
-  while any is held no call under a budget is made: a check that cannot
-  see spent tokens would keep allowing calls. The turn is refused with a
-  sentence saying so, and calls resume once the held usage is written.
+  written — a full disk, an I/O error — the usage is held in
+  `~/.stratus/usage-held.jsonl` and retried, and while any is held no call
+  under a budget is made: a check that cannot see spent tokens would keep
+  allowing calls. The hold survives a restart, so a restarted daemon still
+  refuses until the held usage is written, and each held call is counted
+  once. A disk too full for even that one-line append keeps it in memory
+  only, where a crash would lose it. The turn is refused with a sentence
+  saying so, and calls resume once the held usage is written.
 - **The fallback never answers instead.** A spent budget is not a model
   failing, so a configured `fallbackModel` does not take over — it would
   spend exactly what the limit exists to stop, and hide that it was
