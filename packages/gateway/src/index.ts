@@ -1369,7 +1369,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       warn(`usage ledger: the last stratusd stopped with spend it could not write, and this session store cannot list sessions to settle it from. Budgeted calls are refused until ${usageHold.unsettledPath} is removed by hand, once that spend is accounted for.`);
       return;
     }
-    const before = usageLedger.count();
+    // What an earlier failure left held, first, so the settle below writes
+    // only what the sessions add.
+    const held = flushUsage();
+    if (held) {
+      warn(`usage ledger: could not settle what the last stratusd left unwritten (${held.message}); budgeted calls stay refused until it is written`);
+      return;
+    }
+    let marker: string;
+    try {
+      marker = usageHold.unsettledKey();
+    } catch (error) {
+      warn(`usage ledger: could not read ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)}); budgeted calls stay refused until it can be settled`);
+      return;
+    }
     const statuses: SessionStatus[] = ['idle', 'running', 'pending_approval', 'completed', 'failed'];
     const ids = new Set<string>();
     for (const status of statuses) {
@@ -1383,18 +1396,24 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         reconcileUsage(session);
       }
     }
-    const failed = flushUsage();
-    if (failed) {
-      warn(`usage ledger: could not settle what the last stratusd left unwritten (${failed.message}); budgeted calls stay refused until it is written`);
+    const entries = unrecordedUsage.splice(0);
+    let recovered: number;
+    try {
+      recovered = usageLedger.settle(entries, marker, new Date().toISOString());
+    } catch (error) {
+      unrecordedUsage.push(...entries);
+      flushUsage();
+      warn(`usage ledger: could not settle what the last stratusd left unwritten (${error instanceof Error ? error.message : String(error)}); budgeted calls stay refused until it is written`);
       return;
     }
-    // The marker says spend is missing. A settle that found none of it on
-    // any saved session has not recovered it — a crash between announcing
-    // a call and saving its session takes the record with it, and the full
-    // disk that caused the marker usually refused that save too — so the
-    // marker stays and says so, rather than being cleared by a settle that
-    // settled nothing.
-    const recovered = usageLedger.count() - before;
+    // The marker says spend is missing. A settle that has found none of it
+    // on any saved session — across every attempt at this marker, which
+    // the ledger totals with the rows, so one that committed and died
+    // before removing the marker still counts — has not recovered it: a
+    // crash between announcing a call and saving its session takes the
+    // record with it, and the full disk that caused the marker usually
+    // refused that save too. So the marker stays and says so, rather than
+    // being cleared by a settle that settled nothing.
     if (recovered === 0) {
       warn(
         `usage ledger: the last stratusd left spend it could not write, and none of it is on any saved session — it was lost with that process. `

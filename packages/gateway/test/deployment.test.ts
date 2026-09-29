@@ -632,6 +632,44 @@ test('a marker for spend no saved session holds stays, and keeps budgeted calls 
   }
 });
 
+test('a settle that committed and died before removing its marker is not mistaken for one that found nothing', async () => {
+  const home = await newHome();
+  const stateDir = path.join(home, '.stratus');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeConfig(home, { budget: { daily: 1_000_000 } });
+  const markerPath = path.join(stateDir, 'usage-unsettled');
+  await writeFile(markerPath, '');
+  // The last start's settle: its rows and its tally committed together,
+  // and then the process died with the marker still in place.
+  const { lstatSync } = await import('node:fs');
+  const stat = lstatSync(markerPath);
+  const ledger = new SqliteUsageLedger(fleetDbIn(stateDir));
+  assert.equal(
+    ledger.settle(
+      [{ id: 'call-1', at: new Date().toISOString(), agentId: 'ava', sessionId: 's-1', record: { turnId: 's-1:turn:1', provider: 'openai', inputTokens: 10 } }],
+      `${stat.ino}:${stat.mtimeMs}`,
+      new Date().toISOString(),
+    ),
+    1,
+  );
+  ledger.close();
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+    idleTimeoutMs: 0,
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    // Replaying inserts nothing now, and the marker is cleared anyway.
+    assert.equal(existsSync(markerPath), false);
+    const answered = await gateway.dispatch({ sessionId: 'r-1', agentId: 'ava', userMessage: 'hello' });
+    assert.equal(answered.status, 'completed');
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('usage totals are one row per agent, however the id was cased when each call was made', () => {
   const ledger = new SqliteUsageLedger(fleetDbIn(path.join(os.tmpdir(), `stratus-ledger-${process.pid}-${Date.now()}`)));
   try {

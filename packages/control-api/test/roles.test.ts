@@ -374,3 +374,24 @@ test('a member binds a channel app where none exists, and cannot replace one', a
     await harness.stop();
   }
 });
+
+test('a stream held open past its browser session\'s expiry is let go at the next recheck, member or operator', async () => {
+  const records = [{ id: 'tok_0123456789ab', name: 'alice', role: 'member' as const, hash: 'a'.repeat(64), createdAt: '2026-09-29T00:00:00.000Z' }];
+  let clock = Date.parse('2026-09-29T08:00:00.000Z');
+  const auth = createAuthenticator({ token: 'gateway-token', memberTokens: async () => records, now: () => clock });
+  const member = auth.redeemOneTimeToken(await auth.mintOneTimeToken({ role: 'member', tokenId: 'tok_0123456789ab', tokenName: 'alice' }));
+  const operator = auth.redeemOneTimeToken(await auth.mintOneTimeToken({ role: 'operator' }));
+  assert.ok(member && operator);
+  const asMember = await auth.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${member}` } });
+  const asOperator = await auth.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${operator}` } });
+  assert.ok(asMember && asOperator);
+  assert.equal(await auth.stillHeld(asMember), true);
+  assert.equal(await auth.stillHeld(asOperator), true);
+
+  // Twelve hours on, with the member's token still in the file.
+  clock += 12 * 60 * 60_000 + 1;
+  assert.equal(await auth.stillHeld(asMember), false);
+  assert.equal(await auth.stillHeld(asOperator), false);
+  // A bearer is judged on its token, which has no expiry.
+  assert.equal(await auth.stillHeld({ kind: 'bearer', role: 'operator' }), true);
+});

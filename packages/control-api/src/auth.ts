@@ -434,12 +434,19 @@ export const createAuthenticator = (options: AuthenticatorOptions) => {
      * process; a member's is judged against the file as it is now.
      */
     async stillHeld(principal: Principal): Promise<boolean> {
+      if (principal.kind === 'cookie') {
+        // Expired sessions go first: a browser session is held for its
+        // twelve hours and no longer, and a stream opened in hour eleven
+        // must not carry it past them — the operator's included.
+        sweep();
+        const session = sessions.get(principal.sessionId);
+        if (session === undefined) {
+          return false;
+        }
+        return principal.role === 'operator' || memberStillHeld(principal.tokenId, session.vouchedBy);
+      }
       if (principal.role === 'operator') {
         return true;
-      }
-      if (principal.kind === 'cookie') {
-        const session = sessions.get(principal.sessionId);
-        return session !== undefined && memberStillHeld(principal.tokenId, session.vouchedBy);
       }
       return memberStillHeld(principal.tokenId, undefined);
     },

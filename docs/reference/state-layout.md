@@ -135,7 +135,10 @@ Four things deliberately do not shard, and all of them live in `fleet.db`:
   session, which provider and model, and the four token counts — written as
   the call completes. A [budget](../guides/usage-and-budgets.md) is the
   home's, judged before every call across every agent, and `stratus usage`
-  reads it from another process. Counts only, never content.
+  reads it from another process. Counts only, never content. Beside it,
+  a tally of what each settle of a `usage-unsettled` marker recovered,
+  written with the rows it counts, so a settle that dies before removing
+  its marker is not mistaken on the next start for one that found nothing.
 - **Credential leases.** Which agent may use which fenced credential, until
   when, how many times, and why — with who granted and who revoked each.
   The operator grants them for the home, and a use is counted in the same

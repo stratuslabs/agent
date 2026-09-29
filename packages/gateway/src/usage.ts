@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { UsageRecord } from '@stratusagent/core';
@@ -62,6 +62,11 @@ const USAGE_TABLE = `
   );
   CREATE INDEX IF NOT EXISTS usage_at ON usage (at);
   CREATE INDEX IF NOT EXISTS usage_agent_at ON usage (agent_key, at);
+  CREATE TABLE IF NOT EXISTS usage_settlements (
+    marker TEXT PRIMARY KEY,
+    settled_at TEXT NOT NULL,
+    recovered INTEGER NOT NULL
+  );
 `;
 
 const whereFor = (query: UsageQuery): { clause: string; params: string[] } => {
@@ -205,10 +210,47 @@ export class SqliteUsageLedger {
     return row?.spent ?? 0;
   }
 
-  /** Rows in the ledger — how a settle tells whether it recovered anything. */
-  count(): number {
-    const row = this.db.prepare('SELECT COUNT(*) AS n FROM usage').get() as { n: number } | undefined;
-    return row?.n ?? 0;
+  /**
+   * Write a settle's entries and, in the same transaction, what it has
+   * recovered for this marker so far — every attempt at it added up.
+   * Answers that total. Kept beside the rows it counts so the two cannot
+   * disagree: a settle that commits and then dies before removing the
+   * marker leaves the next one a total that says the spend was found,
+   * where a count of rows it newly inserted would say zero.
+   */
+  settle(entries: readonly UsageLedgerEntry[], marker: string, at: string): number {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      let recovered = 0;
+      const insert = this.db.prepare(`INSERT OR IGNORE INTO usage (entry_id, at, agent_id, agent_key, session_id, turn_id, provider, model,
+        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const entry of entries) {
+        const { record } = entry;
+        recovered += Number(insert.run(
+          entry.id,
+          entry.at,
+          entry.agentId,
+          foldedAgentId(entry.agentId),
+          entry.sessionId,
+          record.turnId,
+          record.provider,
+          record.model ?? null,
+          record.inputTokens ?? null,
+          record.outputTokens ?? null,
+          record.cacheReadTokens ?? null,
+          record.cacheWriteTokens ?? null,
+        ).changes);
+      }
+      this.db.prepare(`INSERT INTO usage_settlements (marker, settled_at, recovered) VALUES (?, ?, ?)
+        ON CONFLICT(marker) DO UPDATE SET settled_at = excluded.settled_at, recovered = recovered + excluded.recovered`)
+        .run(marker, at, recovered);
+      const row = this.db.prepare('SELECT recovered FROM usage_settlements WHERE marker = ?').get(marker) as { recovered: number } | undefined;
+      this.db.exec('COMMIT');
+      return row?.recovered ?? recovered;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   close(): void {
@@ -329,6 +371,17 @@ export const createUsageHold = (stateHome: string, filePath: string) => ({
     } catch {
       writeFileSync(marker, '', { mode: 0o600 });
     }
+  },
+  /**
+   * Which marker this is: its inode and modification time, both kept by
+   * the rename that made it, so every settle of one marker agrees on it and
+   * a later marker — a fresh file — is another.
+   */
+  unsettledKey(): string {
+    const marker = path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME);
+    assertDerivedStatePathSync(stateHome, marker, 'file');
+    const stat = lstatSync(marker);
+    return `${stat.ino}:${stat.mtimeMs}`;
   },
   unsettled(): boolean {
     const marker = path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME);
