@@ -2354,8 +2354,31 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
 /** Whose a named credential is: one agent's own, or the whole fleet's. */
 export type CredentialScope = 'agent' | 'shared';
 
+/**
+ * What one resolution is for — the session asking and what it is about to
+ * spend the key on. Optional throughout, and only ever *narrowing*: a
+ * resolver that ignores it answers exactly as it did before it existed.
+ *
+ * It exists for credential leases, which need two things the agent alone
+ * cannot say: which conversation a use belongs to (a lease handed to a
+ * delegated agent is bound to the one sub-session it was minted for), and
+ * a name for the use in the audit trail. A resolver that enforces leases
+ * and is given no session can still honour the agent's own lease; it just
+ * cannot find a delegated one, and refuses — which is the safe direction.
+ */
+export interface CredentialUseContext {
+  sessionId?: string;
+  /** What the key is being resolved for — a tool name, or `provider`. A label for the record, never a decision. */
+  use?: string;
+}
+
 export interface CredentialResolver {
-  resolve(agent: AgentDefinition, name: string): Promise<string | undefined>;
+  /**
+   * `context` is optional and defaulted to nothing: a host that omits it
+   * gives up delegated (sub-)leases and the session attribution of lease
+   * records, and nothing else.
+   */
+  resolve(agent: AgentDefinition, name: string, context?: CredentialUseContext): Promise<string | undefined>;
 }
 
 export interface ScopedCredentials {
@@ -2394,9 +2417,10 @@ export class EnvCredentialResolver implements CredentialResolver {
 export const scopeCredentials = (
   agent: AgentDefinition,
   resolver: CredentialResolver,
+  context?: CredentialUseContext,
 ): ScopedCredentials => ({
   async get(name) {
-    const value = await resolver.resolve(agent, name);
+    const value = await resolver.resolve(agent, name, context);
     if (value === undefined) {
       throw new Error(`Credential not found: ${name}`);
     }
@@ -3291,6 +3315,25 @@ export type StratusEvent =
       /** Set when the key was stored but could not be added to the soul. */
       grantError?: string;
     }
+  /**
+   * A leased credential was asked for — every time, allowed or refused,
+   * because a lease exists to make each use of a key a recorded event.
+   * `leaseId` names the lease that paid for an allowed use (a delegated
+   * agent's sub-lease names its parent in `parentLeaseId`); `reason` is the
+   * refusal's own sentence. Names and ids only: the value never reaches the
+   * bus, and `use` is the caller's label for what the key was for.
+   */
+  | {
+      type: 'credential.leased';
+      sessionId: string;
+      agentId: string;
+      name: string;
+      outcome: 'allowed' | 'refused';
+      leaseId?: string;
+      parentLeaseId?: string;
+      use?: string;
+      reason?: string;
+    }
   | {
       type: 'session.completed';
       sessionId: string;
@@ -3306,7 +3349,33 @@ export type StratusEvent =
        */
       usage?: UsageRecord[];
     }
-  | { type: 'session.failed'; sessionId: string; error: string }
+  | {
+      type: 'session.failed';
+      sessionId: string;
+      error: string;
+      /**
+       * True when the host stopped the turn on purpose (`HostRefusalError`):
+       * `error` is then a sentence meant for the person in the conversation,
+       * and a renderer shows it as it is rather than as a malfunction.
+       */
+      refused?: true;
+    }
+  /**
+   * Usage a provider call just reported, as it lands — the records one
+   * attempt added to the session, in the order they were recorded.
+   *
+   * Emitted per attempt rather than once per turn because a turn can make
+   * many calls and a host enforcing a budget has to know what the call
+   * before this one spent before it allows the next; `session.completed`
+   * arrives too late for that and is never sent for a turn that failed.
+   * Emitted for a failed attempt too, whenever it reported anything: the
+   * tokens of a call that threw were still spent. `agentId` rides along so
+   * a consumer attributing spend to an agent needs no store read.
+   *
+   * Counts and attribution only, the same records `session.completed`
+   * carries, so the log keeping it stays a trace.
+   */
+  | { type: 'session.usage'; sessionId: string; agentId: string; records: UsageRecord[] }
   /**
    * The session's trust label went down. `source` names what lowered it —
    * a tool, by name, or `memory` (an injected or recalled entry), `sender`
@@ -4934,6 +5003,29 @@ export class ContextOverflowError extends Error {
 }
 
 /**
+ * A turn the host stopped on purpose — a spent budget, a credential whose
+ * lease has run out — rather than one that broke.
+ *
+ * A kernel type because two layers that know nothing of budgets or leases
+ * have to treat it differently from every other failure. A fallback
+ * provider must not answer instead: the operator's limit applies to the
+ * agent, not to one model, and a silent switch would spend what the limit
+ * exists to stop while hiding that it was reached. And a channel must not
+ * frame it as something going wrong: the message is a sentence written for
+ * the person reading it, naming what ran out and what changes it, and
+ * `session.failed` says so with `refused`.
+ *
+ * Hosts subclass it (`BudgetExceededError`, `CredentialLeaseError` in
+ * `@stratusagent/state`); the kernel only ever asks `instanceof`.
+ */
+export class HostRefusalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HostRefusalError';
+  }
+}
+
+/**
  * How many of a session's oldest messages are no longer sent to the
  * provider.
  *
@@ -5495,6 +5587,26 @@ export class AgentRunner {
   }
 
   /**
+   * Emit `session.usage` for whatever one attempt added to the session.
+   *
+   * Awaited by the loop before the next provider call, which is the point:
+   * a host that meters spend from this event sees every earlier call's
+   * tokens before it is asked to allow another one.
+   */
+  private async announceUsage(session: Session, recordedBefore: number): Promise<void> {
+    const records = (session.usage ?? []).slice(recordedBefore);
+    if (records.length === 0) {
+      return;
+    }
+    await this.bus.emit({
+      type: 'session.usage',
+      sessionId: session.id,
+      agentId: session.agent.id,
+      records: records.map((record) => ({ ...record })),
+    });
+  }
+
+  /**
    * The allowlist entries this session's agent is held to, or undefined for
    * no limit. Entries, not a name set: `fs.*` is an entry, and matching is
    * `matchesToolAllowlist`'s job rather than each caller's.
@@ -5684,6 +5796,7 @@ export class AgentRunner {
             sinkReported = true;
             this.recordUsage(session, turnId, usage);
           };
+          const recordedBefore = session.usage?.length ?? 0;
           try {
             response = await this.options.provider.generate({
               // The real session, always: providers persist it. The window
@@ -5706,8 +5819,13 @@ export class AgentRunner {
             if (!sinkReported && response.usage) {
               this.recordUsage(session, turnId, response.usage);
             }
+            await this.announceUsage(session, recordedBefore);
             break;
           } catch (error) {
+            // Before anything else the failure does: an attempt that threw
+            // after reporting through the sink spent those tokens, and a
+            // budget judging the next call has to have seen them.
+            await this.announceUsage(session, recordedBefore);
             // Not an overflow, or nothing left to drop: the turn fails, and
             // the message says which — a single turn too big for the model
             // is a different problem from a conversation that got long, and
@@ -5873,7 +5991,12 @@ export class AgentRunner {
       const stored = await this.store.get(session.id);
       session = stored ?? session;
       await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
-      await this.bus.emit({ type: 'session.failed', sessionId: session.id, error: lastError });
+      await this.bus.emit({
+        type: 'session.failed',
+        sessionId: session.id,
+        error: lastError,
+        ...(error instanceof HostRefusalError ? { refused: true as const } : {}),
+      });
       throw error;
     }
   }

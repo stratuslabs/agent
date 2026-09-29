@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   AgentRunner,
   EventBus,
+  HostRefusalError,
   InMemorySessionStore,
   ToolRegistry,
   totalTokenUsage,
@@ -374,4 +375,68 @@ test('uncachedInputTokens subtracts the cache buckets and never goes negative', 
   assert.equal(uncachedInputTokens(100, 30, 10), 60);
   assert.equal(uncachedInputTokens(100, undefined), 100);
   assert.equal(uncachedInputTokens(10, 40), 0);
+});
+
+test('each attempt announces the usage it added, before the next call is made — a failed one included', async () => {
+  const store = new InMemorySessionStore();
+  const bus = new EventBus();
+  const seen: string[] = [];
+  bus.subscribe((event) => {
+    if (event.type === 'session.usage') {
+      seen.push(`usage ${event.agentId} ${event.records.map((record) => record.inputTokens).join(',')}`);
+    }
+  });
+  let calls = 0;
+  const provider: ModelProvider = {
+    name: 'metered',
+    async generate(request) {
+      calls += 1;
+      // What a budget check ahead of this call would see: every earlier
+      // call's tokens, already announced.
+      seen.push(`call ${calls}`);
+      if (calls === 1) {
+        return {
+          parts: [{ type: 'tool-call' as const, call: { id: 'c1', toolName: 'missing.tool', input: {} } }],
+          usage: { provider: 'metered', inputTokens: 10, outputTokens: 1 },
+        };
+      }
+      request.onUsage?.({ provider: 'metered', inputTokens: 20, outputTokens: 0 });
+      throw new Error('upstream exploded');
+    },
+  };
+
+  await assert.rejects(
+    new AgentRunner({ provider, store, bus }).run({ sessionId: 'usage-announce', agent: AGENT, userMessage: 'hello' }),
+    /upstream exploded/,
+  );
+
+  assert.deepEqual(seen, ['call 1', 'usage accountant 10', 'call 2', 'usage accountant 20']);
+});
+
+test('a turn the host refused on purpose is failed as refused, so a channel does not call it a malfunction', async () => {
+  const bus = new EventBus();
+  const failures: StratusEvent[] = [];
+  bus.subscribe((event) => {
+    if (event.type === 'session.failed') {
+      failures.push(event);
+    }
+  });
+  const refusing: ModelProvider = {
+    name: 'capped',
+    async generate() {
+      throw new HostRefusalError('This install has used its daily model budget.');
+    },
+  };
+  const broken: ModelProvider = {
+    name: 'broken',
+    async generate() {
+      throw new Error('upstream exploded');
+    },
+  };
+  await assert.rejects(new AgentRunner({ provider: refusing, bus }).run({ sessionId: 'refused-1', agent: AGENT, userMessage: 'hi' }));
+  await assert.rejects(new AgentRunner({ provider: broken, bus }).run({ sessionId: 'refused-2', agent: AGENT, userMessage: 'hi' }));
+  assert.deepEqual(failures, [
+    { type: 'session.failed', sessionId: 'refused-1', error: 'This install has used its daily model budget.', refused: true },
+    { type: 'session.failed', sessionId: 'refused-2', error: 'upstream exploded' },
+  ]);
 });

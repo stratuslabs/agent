@@ -29,14 +29,14 @@ export const createManifestBoundCredentialResolver = (
 ): CredentialResolver => {
   const declared = new Set(manifest.credentials);
   return {
-    async resolve(agent, name) {
+    async resolve(agent, name, context) {
       if (!declared.has(name)) {
         throw new PluginManifestError(
           `Plugin ${manifest.packageName} asked for credential ${name}, which its manifest does not declare. `
           + 'Add it to "credentials" in the package\'s stratus manifest.',
         );
       }
-      return resolver.resolve(agent, name);
+      return resolver.resolve(agent, name, context);
     },
   };
 };
