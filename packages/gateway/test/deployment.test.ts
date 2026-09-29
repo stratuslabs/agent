@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 
 import { totalTokenUsage, type StratusEvent, type UsageRecord } from '@stratusagent/core';
 import { fleetDbIn } from '@stratusagent/state';
-import { createGateway, SqliteLeaseStore, SqliteUsageLedger } from '../src/index.ts';
+import { createGateway, ShardedSessionStore, SqliteLeaseStore, SqliteUsageLedger } from '../src/index.ts';
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-deploy-'));
 
@@ -449,6 +449,84 @@ test('a budget with no limit in it refuses nothing, even while spend cannot be w
   } finally {
     saboteur.close();
     await gateway.stop();
+  }
+});
+
+test('spend saved on a session but never written to the ledger is counted after a restart, and only once', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeConfig(home, { budget: { daily: 100 } });
+  let calls = 0;
+  const fetchImpl = (async () => {
+    calls += 1;
+    return openAiText('ok', 90, 20);
+  }) as typeof fetch;
+  const start = async () => {
+    const gateway = createGateway({
+      env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+      idleTimeoutMs: 0,
+    });
+    await gateway.start();
+    return gateway;
+  };
+
+  const first = await start();
+  await first.dispatch({ sessionId: 'c-1', agentId: 'ava', userMessage: 'one' });
+  await first.stop();
+  // The window a crash leaves: the call's record saved on the session, its
+  // ledger row never written.
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(fleetDbIn(path.join(home, '.stratus')));
+  db.exec('DELETE FROM usage');
+  db.close();
+
+  const second = await start();
+  try {
+    await assert.rejects(
+      second.dispatch({ sessionId: 'c-1', agentId: 'ava', userMessage: 'two' }),
+      /has used its daily model budget|daily model budget/,
+    );
+    assert.equal(calls, 1, 'the budget saw the spend before a second call was made');
+    // Written once, however many times it is checked.
+    await assert.rejects(second.dispatch({ sessionId: 'c-1', agentId: 'ava', userMessage: 'three' }));
+    assert.equal(second.usage()[0]?.calls, 1);
+  } finally {
+    await second.stop();
+  }
+});
+
+test('a turn a crash left running has its saved spend written to the ledger when the daemon starts', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, '.stratus');
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'crashed-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'go', createdAt: new Date().toISOString() }],
+    usage: [{ id: 'call-1', turnId: 'crashed-1:turn:1', provider: 'openai', model: 'model-a', inputTokens: 70 }],
+  });
+  before.close();
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('unused')) as typeof fetch },
+    idleTimeoutMs: 0,
+    warn: () => {},
+  });
+  const events = collect(gateway);
+  await gateway.start();
+  // stop() drains the sweep start() began, so the assertions below read what it did.
+  await gateway.stop();
+  assert.ok(events.some((event) => event.type === 'session.failed' && event.sessionId === 'crashed-1'), 'the sweep ran');
+
+  const ledger = new SqliteUsageLedger(fleetDbIn(stateDir));
+  try {
+    assert.deepEqual(ledger.totals().map(({ agentId, calls, inputTokens }) => ({ agentId, calls, inputTokens })), [
+      { agentId: 'ava', calls: 1, inputTokens: 70 },
+    ]);
+  } finally {
+    ledger.close();
   }
 });
 

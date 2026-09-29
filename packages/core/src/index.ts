@@ -2497,6 +2497,15 @@ export interface UsageRecord extends TokenUsage {
   turnId: string;
   provider: string;
   model?: string;
+  /**
+   * Unique to this one provider call, assigned when the record is made and
+   * saved with it. What lets a host that meters spend outside the session
+   * — the daemon's usage ledger — record each call exactly once however
+   * many times it sees it: from the `session.usage` announcement, and again
+   * from the saved session after a crash that came between the save and the
+   * announcement. Absent on records saved before it existed.
+   */
+  id?: string;
 }
 
 /**
@@ -5574,6 +5583,8 @@ export class AgentRunner {
    */
   private recordUsage(session: Session, turnId: string, usage: ProviderCallUsage): void {
     const record: UsageRecord = {
+      // Web Crypto, present in every runtime core supports.
+      id: globalThis.crypto.randomUUID(),
       turnId,
       // The adapter's own name wins. `provider.name` is the fallback
       // wrapper's under a configured fallback, and that name is the

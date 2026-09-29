@@ -18,6 +18,13 @@ import {
 
 const AGENT = { id: 'accountant', name: 'Accountant' };
 
+/**
+ * Records without the id the runner gives each one, which is random — the
+ * id's own properties are asserted where it matters.
+ */
+const withoutIds = (records: readonly UsageRecord[] | undefined): Array<Omit<UsageRecord, 'id'>> | undefined =>
+  records?.map(({ id: _id, ...record }) => record);
+
 /** Records every completion event's usage, in emission order. */
 const createCompletionSink = (bus: EventBus): UsageRecord[][] => {
   const seen: UsageRecord[][] = [];
@@ -64,7 +71,7 @@ test('a session against a provider reporting known counts emits exactly those co
     userMessage: 'hello',
   });
 
-  assert.deepEqual(session.usage, [
+  assert.deepEqual(withoutIds(session.usage), [
     { turnId: 'usage-1:turn:1', provider: 'fake', model: 'fake-1', inputTokens: 120, outputTokens: 34 },
   ]);
   assert.deepEqual(completions, [session.usage]);
@@ -95,7 +102,7 @@ test('a subscriber cannot edit the session\'s records through the completion eve
     bus,
   }).run({ sessionId: 'usage-11', agent: AGENT, userMessage: 'hello' });
 
-  assert.deepEqual(session.usage, [
+  assert.deepEqual(withoutIds(session.usage), [
     { turnId: 'usage-11:turn:1', provider: 'fake', model: 'fake-1', inputTokens: 120 },
   ]);
   assert.deepEqual((await store.get('usage-11'))?.usage, session.usage);
@@ -141,6 +148,11 @@ test('a two-call session emits both records, one per Stratus turn', async () => 
   // Two records, not one summed row: the turn ids are what keep a resumed
   // session's turns distinguishable once two of them share provider and model.
   assert.deepEqual(session.usage?.map((record) => record.turnId), ['usage-2:turn:1', 'usage-2:turn:2']);
+  // Each call's record carries its own id, which a host metering spend
+  // elsewhere writes it under, so seeing a record twice counts it once.
+  const ids = session.usage?.map((record) => record.id) ?? [];
+  assert.ok(ids.every((id) => typeof id === 'string' && id.length > 0));
+  assert.equal(new Set(ids).size, ids.length);
   assert.deepEqual(totalTokenUsage(session.usage ?? []), { inputTokens: 40, outputTokens: 6 });
   assert.equal(completions[0]?.length, 2);
 });
@@ -267,7 +279,7 @@ test('a failed attempt reported through the sink survives on the session', async
 
   const stored = await store.get('usage-6');
   assert.equal(stored?.status, 'failed');
-  assert.deepEqual(stored?.usage, [
+  assert.deepEqual(withoutIds(stored?.usage), [
     { turnId: 'usage-6:turn:1', provider: 'flaky', model: 'flaky-1', inputTokens: 9, outputTokens: 0 },
   ]);
 });
@@ -300,7 +312,7 @@ test('a turn cancelled after the response still records what the response cost',
 
   const stored = await store.get('usage-9');
   assert.equal(stored?.status, 'failed');
-  assert.deepEqual(stored?.usage, [
+  assert.deepEqual(withoutIds(stored?.usage), [
     { turnId: 'usage-9:turn:1', provider: 'fake', model: 'fake-1', inputTokens: 12, outputTokens: 5 },
   ]);
 });
@@ -316,7 +328,7 @@ test('a bucket reported as an explicit undefined is written as absent', async ()
     provider: createReportingProvider('fake', [{ text: 'done', usage }]),
   }).run({ sessionId: 'usage-10', agent: AGENT, userMessage: 'hello' });
 
-  assert.deepEqual(Object.keys(session.usage?.[0] ?? {}), ['turnId', 'provider', 'inputTokens']);
+  assert.deepEqual(Object.keys(session.usage?.[0] ?? {}), ['id', 'turnId', 'provider', 'inputTokens']);
 });
 
 test('a resumed session adds to its stored usage rather than replacing it', async () => {
@@ -332,7 +344,7 @@ test('a resumed session adds to its stored usage rather than replacing it', asyn
   await runner.run({ sessionId: 'usage-7', agent: AGENT, userMessage: 'first' });
   const resumed = await runner.resume({ sessionId: 'usage-7', userMessage: 'second' });
 
-  assert.deepEqual(resumed.usage, [
+  assert.deepEqual(withoutIds(resumed.usage), [
     { turnId: 'usage-7:turn:1', provider: 'fake', model: 'fake-1', inputTokens: 10, outputTokens: 1 },
     { turnId: 'usage-7:turn:2', provider: 'fake', model: 'fake-1', inputTokens: 20, outputTokens: 2 },
   ]);
@@ -358,7 +370,7 @@ test('an unnamed usage report is attributed to the provider the runner asked', a
     userMessage: 'hello',
   });
 
-  assert.deepEqual(session.usage, [{ turnId: 'usage-8:turn:1', provider: 'minimal', inputTokens: 7 }]);
+  assert.deepEqual(withoutIds(session.usage), [{ turnId: 'usage-8:turn:1', provider: 'minimal', inputTokens: 7 }]);
 });
 
 test('totalTokenUsage leaves a bucket nobody measured absent', () => {

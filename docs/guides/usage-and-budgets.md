@@ -114,7 +114,11 @@ Two properties are worth knowing before you rely on a number:
   the one that reached it — and turns running at the same moment each get
   that one call, since each was allowed before the others reported. A
   fallback is not a second call: what a failed primary spent is counted
-  before the fallback is allowed. For a
+  before the fallback is allowed. Nor is a crash: a call whose record was
+  saved on its session but not yet written to the ledger when the daemon
+  died is written by the restarted daemon — as it starts, for the turn the
+  crash cut off, and otherwise before that session's next call — dated
+  then, and a call is only ever counted once. For a
   harness provider (a Claude subscription through Claude Code, or Codex)
   "one call" is one whole turn, since its inner steps happen inside it.
   Set a limit with that headroom in mind.

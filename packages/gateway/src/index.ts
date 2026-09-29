@@ -176,7 +176,6 @@ import {
   createLeasePolicyRefresh,
   createLeaseResolver,
   findBudgetBreach,
-  weightedTokens,
   readGlobalConfigBlock,
   readTrustedConfigBlock,
   validateLeaseGrant,
@@ -1137,19 +1136,23 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // late write still lands in the window the tokens were spent in.
   const unrecordedUsage: UsageLedgerEntry[] = [];
   /**
-   * How many of each session's usage records have been announced, so a
-   * budget check can count the ones that have not. The runner announces
-   * after every attempt, which leaves exactly one window: a primary that
-   * reported usage and then threw, with the fallback's check running inside
-   * the same `generate`, before the announcement. Those tokens were spent
-   * and are on the session, not in the ledger — without this, the fallback
-   * would be judged against a total missing them.
+   * How far into each session's usage records this process has checked the
+   * ledger, so the check before a provider call writes only what is new.
    *
-   * Seeded at a session's first check in this process with everything it
-   * already holds (announced before that `generate` began, by this process
-   * or the last), then advanced by each announcement.
+   * The announcement is not the only way a call's usage has to reach the
+   * ledger. A record is on the session before it is announced, and the
+   * session can be saved in between — the fallback wrapper saves its
+   * switch, with the failed primary's record, before the fallback's check
+   * runs; a harness provider saves tool activity before its last report. A
+   * process that dies there comes back with spend on the session and not in
+   * the ledger, and a budget reading the ledger would allow it again. So
+   * before each call every record the session holds that this process has
+   * not yet checked is written, under the id the kernel gave it: one the
+   * announcement (or an earlier process) already wrote is a no-op, and one
+   * nobody wrote is counted now. Starting from zero in each process is the
+   * point — a restart re-checks every session it serves, once.
    */
-  const announcedUsage = new Map<string, number>();
+  const reconciledUsage = new Map<string, { count: number; lastId: string | undefined }>();
   const usageHold = createUsageHold(stateDir, path.join(stateDir, USAGE_HOLD_FILENAME));
   const flushUsage = (): Error | undefined => {
     while (unrecordedUsage.length > 0) {
@@ -1186,11 +1189,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     const at = new Date().toISOString();
     for (const record of event.records) {
-      unrecordedUsage.push({ id: newUsageEntryId(), at, agentId: event.agentId, sessionId: event.sessionId, record });
-    }
-    const announced = announcedUsage.get(event.sessionId);
-    if (announced !== undefined) {
-      announcedUsage.set(event.sessionId, announced + event.records.length);
+      unrecordedUsage.push({ id: record.id ?? newUsageEntryId(), at, agentId: event.agentId, sessionId: event.sessionId, record });
     }
     const failed = flushUsage();
     if (failed) {
@@ -1280,30 +1279,48 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       );
     }
   };
+  /**
+   * Queue for the ledger every record `session` holds that this process has
+   * not yet checked — see `reconciledUsage`. The caller flushes.
+   */
+  const reconcileUsage = (session: Session): void => {
+    const records = session.usage ?? [];
+    const checked = reconciledUsage.get(session.id);
+    // A cursor that no longer lands on the record it stopped at means the
+    // records were replaced — a rollover empties them — so every one is
+    // checked again; writing by id makes that harmless.
+    const from = checked !== undefined && records[checked.count - 1]?.id === checked.lastId ? checked.count : 0;
+    if (records.length > from) {
+      const at = new Date().toISOString();
+      for (const record of records.slice(from)) {
+        if (record.id !== undefined) {
+          unrecordedUsage.push({ id: record.id, at, agentId: session.agent.id, sessionId: session.id, record });
+        }
+      }
+    }
+    reconciledUsage.set(session.id, { count: records.length, lastId: records.at(-1)?.id });
+  };
   const judgeProviderCall: ProviderCallGuard = async (request, credential) => {
     const agentId = request.session.agent.id;
     const budget = await currentBudget();
+    // Every record this session holds that this process has not checked —
+    // see `reconciledUsage`. Records from before ids existed are left out:
+    // there is no telling whether they were ever counted.
+    reconcileUsage(request.session);
+    const unwritten = flushUsage();
     if (budget && budgetHasLimit(budget)) {
       // Fail closed: spend the ledger could not record is spend the check
       // below cannot see, so no budgeted call is made until it is written.
-      const unwritten = flushUsage();
       if (unwritten) {
         throw new HostRefusalError(
           `Spending could not be recorded (${unwritten.message}), so the budget cannot be checked and the model was not called. `
           + 'The operator needs to free the disk or fix the home; calls resume once the held usage is written.',
         );
       }
-      const records = request.session.usage ?? [];
-      const announced = announcedUsage.get(request.session.id) ?? records.length;
-      announcedUsage.set(request.session.id, announced);
-      const unannounced = records.slice(announced)
-        .reduce((sum, record) => sum + weightedTokens(record, budget.weights), 0);
       const breach = findBudgetBreach(
         budget,
         agentId,
-        // The unannounced records are this session's, so this agent's and
-        // the home's, and spent now — inside every window.
-        (since, scopeAgent) => usageLedger.spent(since, scopeAgent, budget.weights) + unannounced,
+        (since, scopeAgent) => usageLedger.spent(since, scopeAgent, budget.weights),
         new Date(),
       );
       if (breach) {
@@ -3245,6 +3262,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // this session somewhere else, and that turn owns it now.
         if (!session || session.status !== 'running') {
           return;
+        }
+        // A crash mid-turn is exactly when a call's record can be on the
+        // session and not in the ledger. Written now, rather than on the
+        // session's next call — which may never come — so every other
+        // session's check of the home's limit sees it from the start.
+        reconcileUsage(session);
+        const unwritten = flushUsage();
+        if (unwritten) {
+          warn(`usage ledger: could not record what abandoned turn ${id} spent (${unwritten.message}); holding it, and refusing budgeted calls until it is written`);
         }
         session.status = 'failed';
         session.lastError = ABANDONED_TURN_ERROR;

@@ -427,9 +427,9 @@ order the calls completed.
 ```jsonc
 {
   "usage": [
-    { "turnId": "s-42:turn:1", "provider": "anthropic", "model": "claude-opus-5",
+    { "id": "3f0c9a1e-…", "turnId": "s-42:turn:1", "provider": "anthropic", "model": "claude-opus-5",
       "inputTokens": 40, "outputTokens": 210, "cacheReadTokens": 9100, "cacheWriteTokens": 300 },
-    { "turnId": "s-42:turn:2", "provider": "openai", "model": "gpt-5.5",
+    { "id": "8b27d4c0-…", "turnId": "s-42:turn:2", "provider": "openai", "model": "gpt-5.5",
       "inputTokens": 12, "outputTokens": 88 }
   ]
 }
@@ -464,6 +464,12 @@ OpenAI-compatible server that omits `usage` produces a session with no
 records at all, and a turn that cost real money would look free if a consumer
 read that absence as a measurement. `usage` itself is absent until something
 reports.
+
+`id` is unique to one provider call, assigned when the record is made.
+The usage ledger (`GET /usage`) writes each call under it, so a call seen
+twice — announced on the event stream, then found again on the saved
+session after a crash — is counted once. Records saved before it existed
+have none.
 
 `turnId` is the Stratus turn the tokens belong to — one pass through the
 runner, which is one provider call for the API providers and several for a
