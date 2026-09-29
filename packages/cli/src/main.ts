@@ -18,6 +18,8 @@ import { runMemory } from './commands/memory.ts';
 import { runPlugins } from './commands/plugins.ts';
 import { runRestart } from './commands/restart.ts';
 import { runSchedules } from './commands/schedules.ts';
+import { runUsage } from './commands/usage.ts';
+import { runLease } from './commands/lease.ts';
 import { runServe } from './commands/serve.ts';
 import { runService } from './commands/service.ts';
 import { runSessionRollover } from './commands/session.ts';
@@ -86,6 +88,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         || command.command === 'dashboard'
         || (command.command === 'credential' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
+        || (command.command === 'lease' && command.action !== 'list')
         || (command.command === 'memory' && memoryCommandWritesState(command.action))
         || command.command === 'session'
         || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
@@ -193,6 +196,14 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'grants') {
       return await runGrants(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'usage') {
+      return await runUsage(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'lease') {
+      return await runLease(command, streams, resolvedEnv);
     }
 
     if (command.command === 'memory') {

@@ -28,6 +28,8 @@ export const formatEvent = (event: StratusEvent): string | null => {
         + (event.grantError !== undefined ? ' — stored, not granted' : '');
     case 'session.completed':
       return `• session.completed ${event.sessionId}`;
+    case 'credential.leased':
+      return `• credential.leased ${event.name} for ${event.agentId} ${event.outcome}${event.leaseId ? ` (${event.leaseId})` : ''}`;
     case 'session.failed':
       return `• session.failed ${event.error}`;
     case 'session.tainted':
@@ -110,8 +112,25 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
         ...(event.actor ? { actor: event.actor } : {}),
         ...(event.grantError !== undefined ? { grantError: event.grantError } : {}),
       };
+    // Every leased use, allowed or refused — the audit trail a lease
+    // exists to leave. The lease that paid, never the key; `use` is the
+    // caller's label for what the key was for.
+    case 'credential.leased':
+      return {
+        name: event.name,
+        outcome: event.outcome,
+        ...(event.leaseId !== undefined ? { leaseId: event.leaseId } : {}),
+        ...(event.parentLeaseId !== undefined ? { parentLeaseId: event.parentLeaseId } : {}),
+        ...(event.use !== undefined ? { use: event.use } : {}),
+        ...(event.reason !== undefined ? { reason: event.reason } : {}),
+      };
+    // Counts and attribution per provider call, the ledger's own rows —
+    // what `stratus usage` sums, kept in the trace so a spend can be
+    // followed to the turn that made it.
+    case 'session.usage':
+      return { records: event.records };
     case 'session.failed':
-      return { error: event.error };
+      return { error: event.error, ...(event.refused ? { refused: true } : {}) };
     case 'session.tainted':
       // The label and what lowered it — a tool's name, or `memory`,
       // `sender`, `legacy`. Never the content that did: same rule as every

@@ -158,6 +158,35 @@ export interface ParsedSchedulesCommand {
   format: 'text' | 'json';
 }
 
+export interface ParsedUsageCommand {
+  command: 'usage';
+  /** ISO date or timestamp; default the start of the current UTC month. */
+  since?: string;
+  until?: string;
+  agentId?: string;
+  format: 'text' | 'json';
+}
+
+export interface ParsedLeaseCommand {
+  command: 'lease';
+  action: 'grant' | 'list' | 'revoke';
+  /** grant: who may use the key. list: filter. */
+  agentId?: string;
+  /** grant: the credential name, or `provider:<name>`. */
+  credential?: string;
+  /** grant: `30m`, `2h`, `7d`. */
+  duration?: string;
+  /** grant: the use limit. */
+  maxUses?: number;
+  /** grant: why, in the operator's words. */
+  reason?: string;
+  /** revoke: which lease. */
+  leaseId?: string;
+  /** list: include leases that have ended. */
+  all?: boolean;
+  format: 'text' | 'json';
+}
+
 export interface ParsedGrantsCommand {
   command: 'grants';
   action: 'list' | 'revoke';
@@ -304,6 +333,8 @@ export type ParsedCommand =
   | ParsedRestartCommand
   | ParsedSchedulesCommand
   | ParsedGrantsCommand
+  | ParsedUsageCommand
+  | ParsedLeaseCommand
   | ParsedMemoryCommand
   | ParsedSessionCommand
   | ParsedDoctorCommand
@@ -596,6 +627,165 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       command: 'schedules',
       action,
       ...(scheduleId ? { scheduleId } : {}),
+      format,
+    };
+  }
+
+  if (command === 'usage') {
+    let format: 'text' | 'json' = 'text';
+    let since: string | undefined;
+    let until: string | undefined;
+    let agentId: string | undefined;
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(rest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--since' || token === '--until') {
+        const value = readOptionValue(rest, index, token);
+        if (Number.isNaN(Date.parse(value))) {
+          throw new Error(`Invalid ${token} ${value}: use an ISO date or timestamp, like 2026-09-01.`);
+        }
+        if (token === '--since') {
+          since = value;
+        } else {
+          until = value;
+        }
+        index += 1;
+        continue;
+      }
+      if (token === '--agent') {
+        agentId = readOptionValue(rest, index, '--agent');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unexpected argument: ${token}. Try: stratus usage [--since <date>] [--until <date>] [--agent <id>] [--format json]`);
+    }
+    return {
+      command: 'usage',
+      format,
+      ...(since !== undefined ? { since } : {}),
+      ...(until !== undefined ? { until } : {}),
+      ...(agentId !== undefined ? { agentId } : {}),
+    };
+  }
+
+  if (command === 'lease' || command === 'leases') {
+    const first = rest[0];
+    const action: ParsedLeaseCommand['action'] = command === 'leases' || first === undefined || first.startsWith('--') || first === 'list'
+      ? 'list'
+      : first === 'grant' || first === 'revoke'
+        ? first
+        : (() => {
+            throw new Error(`Unknown lease action: ${first}. Try: stratus lease grant | list | revoke`);
+          })();
+    const tokens = command === 'lease' && first !== undefined && !first.startsWith('--') ? rest.slice(1) : rest;
+    const positional: string[] = [];
+    let format: 'text' | 'json' = 'text';
+    let agentId: string | undefined;
+    let duration: string | undefined;
+    let maxUses: number | undefined;
+    let reason: string | undefined;
+    let all = false;
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(tokens, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--for' && action === 'grant') {
+        duration = readOptionValue(tokens, index, '--for');
+        index += 1;
+        continue;
+      }
+      if (token === '--uses' && action === 'grant') {
+        const value = readOptionValue(tokens, index, '--uses');
+        maxUses = Number(value);
+        if (!Number.isInteger(maxUses) || maxUses < 1) {
+          throw new Error(`Invalid --uses ${value}: use a whole number, 1 or more.`);
+        }
+        index += 1;
+        continue;
+      }
+      if (token === '--reason' && action === 'grant') {
+        reason = readOptionValue(tokens, index, '--reason');
+        index += 1;
+        continue;
+      }
+      if (token === '--agent' && action === 'list') {
+        agentId = readOptionValue(tokens, index, '--agent');
+        index += 1;
+        continue;
+      }
+      if (token === '--all' && action === 'list') {
+        all = true;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option for lease ${action}: ${token}`);
+      }
+      positional.push(token);
+    }
+    if (action === 'grant') {
+      const [grantAgent, credential, ...extra] = positional;
+      if (!grantAgent || !credential || extra.length > 0) {
+        throw new Error('lease grant takes an agent and a credential: stratus lease grant <agent> <credential> --for 2h --reason "…" [--uses 20]');
+      }
+      if (!duration) {
+        throw new Error('A lease has to end: give --for with a duration like 30m, 2h, or 7d.');
+      }
+      if (!reason) {
+        throw new Error('A lease needs --reason: say why this agent may use this key, for whoever reads the record later.');
+      }
+      return {
+        command: 'lease',
+        action,
+        agentId: grantAgent,
+        credential,
+        duration,
+        reason,
+        ...(maxUses !== undefined ? { maxUses } : {}),
+        format,
+      };
+    }
+    if (action === 'revoke') {
+      const [leaseId, ...extra] = positional;
+      if (!leaseId || extra.length > 0) {
+        throw new Error('lease revoke takes one lease id: stratus lease revoke <id>. `stratus lease list` shows them.');
+      }
+      return { command: 'lease', action, leaseId, format };
+    }
+    if (positional.length > 0) {
+      throw new Error(`Unexpected argument: ${positional[0]}. Try: stratus lease list [--agent <id>] [--all]`);
+    }
+    return {
+      command: 'lease',
+      action,
+      ...(agentId !== undefined ? { agentId } : {}),
+      ...(all ? { all } : {}),
       format,
     };
   }

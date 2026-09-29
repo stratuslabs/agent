@@ -60,6 +60,8 @@ import {
   type RuntimeConfig,
   type StateEnvironment,
   type StratusConfigFile,
+  leaseState,
+  parseLeaseDuration,
 } from '@stratusagent/state';
 
 import { requestScheme, type Principal } from './auth.ts';
@@ -82,6 +84,19 @@ import {
 const apiActorFor = (principal: Principal | undefined, label: string | undefined): string => {
   const source = principal?.kind === 'cookie' ? 'dashboard' : 'api';
   return label ? `${source}:${label}` : source;
+};
+
+/** An ISO timestamp query parameter, normalized, or undefined when absent. */
+const optionalIsoParam = (url: URL, name: string): string | undefined => {
+  const raw = url.searchParams.get(name);
+  if (raw === null) {
+    return undefined;
+  }
+  const parsed = Date.parse(raw);
+  if (Number.isNaN(parsed)) {
+    throw new ApiError(400, 'invalid_query', `Invalid ${name} ${JSON.stringify(raw)}: use an ISO date or timestamp, like 2026-09-01.`);
+  }
+  return new Date(parsed).toISOString();
 };
 
 export interface RouteContext {
@@ -1174,6 +1189,109 @@ export const routes: Route[] = [
       // Cancelling also revoked the destination grant riding on the row —
       // the next send from a still-running firing is gated normally.
       return { cancelled: true };
+    },
+  },
+
+  // ---- usage and budget ----------------------------------------------------
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/usage`,
+    async handler(context) {
+      // The current UTC month by default: the window a monthly budget is
+      // judged over, and the one an invoice would be.
+      const now = new Date();
+      const since = optionalIsoParam(context.url, 'since')
+        ?? new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+      const until = optionalIsoParam(context.url, 'until');
+      const agentId = context.url.searchParams.get('agent') ?? undefined;
+      const rows = context.gateway.usage({
+        since,
+        ...(until !== undefined ? { until } : {}),
+        ...(agentId !== undefined ? { agentId } : {}),
+      });
+      const budget = await context.gateway.budget();
+      return {
+        since,
+        ...(until !== undefined ? { until } : {}),
+        ...(agentId !== undefined ? { agent: agentId } : {}),
+        // Provider-reported counts, bucket by bucket — never priced here.
+        usage: rows,
+        ...(budget ? { budget } : {}),
+      };
+    },
+  },
+
+  // ---- credential leases ---------------------------------------------------
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/leases`,
+    async handler(context) {
+      const agentId = context.url.searchParams.get('agent') ?? undefined;
+      const now = new Date();
+      return {
+        leases: context.gateway.leases(agentId !== undefined ? { agentId } : {})
+          .map((lease) => ({ ...lease, state: leaseState(lease, now) })),
+      };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: `${API_PREFIX}/leases`,
+    async handler(context) {
+      const body = await readJsonObject(context.request);
+      const agentId = requireString(body, 'agentId');
+      const credential = requireString(body, 'credential');
+      const reason = requireString(body, 'reason');
+      const expiresIn = optionalString(body, 'expiresIn');
+      const expiresAtRaw = optionalString(body, 'expiresAt');
+      if ((expiresIn === undefined) === (expiresAtRaw === undefined)) {
+        throw new ApiError(400, 'invalid_lease', 'Give exactly one of expiresIn (like "2h") or expiresAt (an ISO timestamp).');
+      }
+      let expiresAt: string;
+      if (expiresIn !== undefined) {
+        const ms = parseLeaseDuration(expiresIn);
+        if (ms === undefined) {
+          throw new ApiError(400, 'invalid_lease', `Invalid expiresIn ${JSON.stringify(expiresIn)}: use minutes, hours, or days, like 30m, 2h, or 7d.`);
+        }
+        expiresAt = new Date(Date.now() + ms).toISOString();
+      } else {
+        expiresAt = expiresAtRaw ?? '';
+      }
+      const maxUses = body.maxUses;
+      if (maxUses !== undefined && typeof maxUses !== 'number') {
+        throw new ApiError(400, 'invalid_lease', 'maxUses must be a whole number, 1 or more.');
+      }
+      const label = optionalString(body, 'actor');
+      try {
+        const lease = context.gateway.grantLease({
+          agentId,
+          credential,
+          expiresAt,
+          reason,
+          ...(maxUses !== undefined ? { maxUses } : {}),
+          grantedBy: apiActorFor(context.principal, label),
+        });
+        return { lease: { ...lease, state: leaseState(lease, new Date()) } };
+      } catch (error) {
+        throw new ApiError(400, 'invalid_lease', error instanceof Error ? error.message : String(error));
+      }
+    },
+  },
+  {
+    method: 'POST',
+    pattern: `${API_PREFIX}/leases/:id/revoke`,
+    async handler(context) {
+      const body = await readJsonObject(context.request);
+      const label = optionalString(body, 'actor');
+      const revoked = context.gateway.revokeLease(context.params.id ?? '', apiActorFor(context.principal, label));
+      if (!revoked) {
+        throw new ApiError(
+          404,
+          'lease_not_found',
+          `No active lease has id ${context.params.id}. GET /leases lists what exists; a lease already revoked stays revoked.`,
+        );
+      }
+      return { lease: { ...revoked, state: leaseState(revoked, new Date()) } };
     },
   },
 

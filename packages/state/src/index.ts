@@ -220,7 +220,47 @@ export {
   describeServingModel,
   type RegisteredProviders,
   createRuntimeProvider,
+  providerCredentialName,
+  type ProviderCallGuard,
 } from './provider-runtime.ts';
+
+export {
+  type BudgetConfig,
+  type BudgetLimits,
+  type BudgetWeights,
+  type BudgetPeriod,
+  type BudgetBreach,
+  type BudgetSpend,
+  parseBudgetConfig,
+  weightedTokens,
+  budgetWindow,
+  findBudgetBreach,
+  budgetExceededMessage,
+  BudgetExceededError,
+  type BudgetLimitStatus,
+  budgetStatus,
+} from './budget.ts';
+
+export {
+  type LeasesConfig,
+  type CredentialLease,
+  type LeaseState,
+  type LeaseGrant,
+  type LeaseStore,
+  type LeaseUseRecord,
+  type LeaseBroker,
+  type LeaseBrokerOptions,
+  isLeasableCredentialName,
+  parseLeasesConfig,
+  leaseState,
+  parseLeaseDuration,
+  validateLeaseGrant,
+  newLeaseId,
+  MAX_LEASE_MS,
+  CredentialLeaseError,
+  createLeaseBroker,
+  createLeaseResolver,
+} from './leases.ts';
 
 export {
   type SoulPinContext,

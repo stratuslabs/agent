@@ -43,6 +43,7 @@ import {
   type Session,
   type StratusEvent,
   type ToolRisk,
+  type CredentialResolver,
 } from '@stratusagent/core';
 import {
   createCredentialRequestTool,
@@ -74,6 +75,14 @@ import {
   type SchedulerLimits,
 } from './schedules.ts';
 import { ShardedSessionStore } from './sessions.ts';
+
+export { SqliteLeaseStore } from './leases.ts';
+export {
+  SqliteUsageLedger,
+  type UsageLedgerEntry,
+  type UsageQuery,
+  type UsageTotalsRow,
+} from './usage.ts';
 
 export {
   claimHome,
@@ -156,7 +165,22 @@ import {
   type RuntimeSelection,
   type StateEnvironment,
   foldedAgentId,
+  BudgetExceededError,
+  budgetStatus,
+  createLeaseBroker,
+  createLeaseResolver,
+  findBudgetBreach,
+  readGlobalConfigBlock,
+  readTrustedConfigBlock,
+  validateLeaseGrant,
+  type BudgetConfig,
+  type BudgetLimitStatus,
+  type CredentialLease,
+  type LeaseGrant,
+  type ProviderCallGuard,
 } from '@stratusagent/state';
+import { SqliteLeaseStore } from './leases.ts';
+import { SqliteUsageLedger, type UsageQuery, type UsageTotalsRow } from './usage.ts';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
 /**
@@ -608,6 +632,12 @@ export interface GatewayOptions {
   warn?: (line: string) => void;
 }
 
+/** Every configured budget limit and where it stands — see `Gateway.budget`. */
+export interface GatewayBudgetStatus {
+  budget: BudgetConfig;
+  limits: BudgetLimitStatus[];
+}
+
 export interface DispatchInput {
   /**
    * Stable session id chosen by the caller — channels derive it from the
@@ -844,6 +874,24 @@ export interface Gateway {
    * Who may answer is the channel's question, as it is for approvals.
    */
   provideCredential(input: ProvideCredentialInput): Promise<ProvideCredentialResult>;
+  /**
+   * Token usage from the home's ledger (`fleet.db`), summed per agent,
+   * provider, and model over the window asked for. The rows are the
+   * providers' own counts, bucket by bucket, never priced.
+   */
+  usage(query?: UsageQuery): UsageTotalsRow[];
+  /**
+   * The budget in force — the trusted config's `budget` block as the next
+   * provider call would read it — with every limit's spend so far, or
+   * undefined when none is configured.
+   */
+  budget(): Promise<GatewayBudgetStatus | undefined>;
+  /** Every credential lease this home has granted, oldest first, then the live delegated sub-leases. */
+  leases(filter?: { agentId?: string }): CredentialLease[];
+  /** Grant a lease. Validated by `validateLeaseGrant`; throws its sentence. */
+  grantLease(input: LeaseGrant): CredentialLease;
+  /** End a lease now. Undefined when there is no such lease or it was already revoked. */
+  revokeLease(id: string, revokedBy?: string): CredentialLease | undefined;
 }
 
 export interface ProvideCredentialInput {
@@ -1019,6 +1067,146 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // The same database sessions live in — one file to back up — through the
   // schedule store's own connection (see its docs for why).
   const scheduleStore = new SqliteScheduleStore(fleetDbIn(stateDir), { stateHome: stateDir });
+  // Beside the schedules in `fleet.db`, and fleet infrastructure for the
+  // same reason: a budget is the home's, and a lease is granted by the
+  // operator of the home, not by any agent.
+  const usageLedger = new SqliteUsageLedger(fleetDbIn(stateDir), { stateHome: stateDir });
+  const leaseStore = new SqliteLeaseStore(fleetDbIn(stateDir), { stateHome: stateDir });
+  const leaseBroker = createLeaseBroker({
+    store: leaseStore,
+    leased: [],
+    onUse: (record) => {
+      // Every leased resolution is recorded, allowed or refused. On the
+      // bus when there is a session to attribute it to, which is what puts
+      // it in `stratus logs` and in front of every other consumer; a
+      // caller that passed no session (a plugin that predates the context
+      // argument) still leaves a line.
+      if (record.sessionId !== undefined) {
+        void bus.emit({
+          type: 'credential.leased',
+          sessionId: record.sessionId,
+          agentId: record.agentId,
+          name: record.credential,
+          outcome: record.outcome,
+          ...(record.leaseId !== undefined ? { leaseId: record.leaseId } : {}),
+          ...(record.parentLeaseId !== undefined ? { parentLeaseId: record.parentLeaseId } : {}),
+          ...(record.use !== undefined ? { use: record.use } : {}),
+          ...(record.reason !== undefined ? { reason: record.reason } : {}),
+        });
+        return;
+      }
+      const line = `lease ${record.outcome}: ${record.credential} for ${record.agentId}`
+        + (record.leaseId !== undefined ? ` (${record.leaseId})` : '');
+      if (record.outcome === 'refused') {
+        warn(line);
+      } else {
+        log(line);
+      }
+    },
+  });
+
+  // Each call's usage lands in the ledger as the runner announces it, and
+  // the runner awaits the announcement before it makes the next call — so
+  // the budget check ahead of that call has seen every token before it.
+  bus.subscribe((event) => {
+    if (event.type !== 'session.usage') {
+      return;
+    }
+    const at = new Date().toISOString();
+    for (const record of event.records) {
+      usageLedger.record({ at, agentId: event.agentId, sessionId: event.sessionId, record });
+    }
+  });
+
+  /**
+   * The budget as the next provider call reads it: from the trusted config,
+   * on every call, so a limit an operator (or a hosting control plane)
+   * raises applies without a restart. Under the trust rule every policy
+   * block has — a project-local file naming one is ignored, loudly, in
+   * favour of the global file. A config that cannot be read keeps the last
+   * budget that could: an operator mid-edit must not lift every limit, and
+   * with no earlier read there was never a limit to keep.
+   */
+  let lastGoodBudget: BudgetConfig | undefined;
+  const currentBudget = async (): Promise<BudgetConfig | undefined> => {
+    let block = await readTrustedConfigBlock('budget', env, options.selection?.configPath);
+    if (block.status === 'untrusted') {
+      warn(`ignoring budget in ${block.path}: a project-local config cannot set this daemon's spending limits; using ~/.stratus/config.json instead`);
+      block = await readGlobalConfigBlock('budget', env);
+    }
+    if (block.status === 'unreadable') {
+      warn(`could not read the budget (${block.error instanceof Error ? block.error.message : String(block.error)}); using the last one read`);
+      return lastGoodBudget;
+    }
+    lastGoodBudget = block.status === 'present' ? block.value : undefined;
+    return lastGoodBudget;
+  };
+
+  /**
+   * The leased list as the next use reads it — re-read from the trusted
+   * config on every provider call and every leased resolution, so a key an
+   * operator fences is fenced from its next use, with no restart. A config
+   * that cannot be read keeps the last list that could; with none, the
+   * list is unknown and the broker refuses every credential until it is
+   * known, because "unknown" read as "nothing leased" would unfence them.
+   */
+  let leasesKnown = false;
+  let lastLeased = '';
+  const refreshLeases = async (): Promise<void> => {
+    let block = await readTrustedConfigBlock('leases', env, options.selection?.configPath);
+    if (block.status === 'untrusted') {
+      warn(`ignoring leases in ${block.path}: a project-local config cannot decide which credentials need a lease; using ~/.stratus/config.json instead`);
+      block = await readGlobalConfigBlock('leases', env);
+    }
+    if (block.status === 'unreadable') {
+      const error = block.error instanceof Error ? block.error : new Error(String(block.error));
+      if (!leasesKnown) {
+        leaseBroker.setLeased(error);
+      }
+      warn(`could not read the leases block (${error.message})${leasesKnown ? '; using the last one read' : '; refusing every credential until it can be read'}`);
+      return;
+    }
+    const names = block.status === 'present' ? block.value.credentials : [];
+    leaseBroker.setLeased(names);
+    leasesKnown = true;
+    const described = names.join(', ');
+    if (described !== lastLeased) {
+      lastLeased = described;
+      log(described.length > 0 ? `leases: ${described} may only be used under a lease` : 'leases: no credential needs a lease');
+    }
+  };
+  const leaseResolver = createLeaseResolver(createFileCredentialResolver(env), leaseBroker);
+  const leasedCredentials: CredentialResolver = {
+    async resolve(agent, name, context) {
+      await refreshLeases();
+      return leaseResolver.resolve(agent, name, context);
+    },
+  };
+
+  /**
+   * Asked before every provider call, primary and fallback alike: the
+   * budget first, since it refuses whatever the key, then the lease on the
+   * sign-in this call would spend.
+   */
+  const guardProviderCall: ProviderCallGuard = async (request, credential) => {
+    const agentId = request.session.agent.id;
+    const budget = await currentBudget();
+    if (budget) {
+      const breach = findBudgetBreach(
+        budget,
+        agentId,
+        (since, scopeAgent) => usageLedger.spent(since, scopeAgent, budget.weights),
+        new Date(),
+      );
+      if (breach) {
+        throw new BudgetExceededError(breach);
+      }
+    }
+    await refreshLeases();
+    if (credential !== undefined) {
+      leaseBroker.use(agentId, credential, { sessionId: request.session.id, use: 'provider' });
+    }
+  };
 
   /**
    * The started adapter of one kind that speaks for an agent and has the
@@ -2077,14 +2265,38 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
   tools.register(createDelegateTool({
     registry,
-    dispatch: (input) => dispatchInternal({
-      sessionId: input.sessionId,
-      agentId: input.agent.id,
-      userMessage: input.userMessage,
-      metadata: input.metadata,
-      // A cancelled parent turn cancels its delegated runs too.
-      ...(input.signal ? { signal: input.signal } : {}),
-    }),
+    dispatch: async (input) => {
+      // The delegator's leases, lent for this one task: each a sub-lease
+      // no wider than what it draws on, bound to the sub-session, and
+      // gone when the delegated turn is — or with the process, since they
+      // are never stored. A delegate that recovers after a restart has
+      // only its own leases, which is the narrower of the two answers.
+      const parentSessionId = delegatingSessionIdOf(input.sessionId);
+      const parentAgentId = input.metadata[DELEGATED_BY_METADATA_KEY];
+      if (parentSessionId !== undefined && typeof parentAgentId === 'string') {
+        const minted = leaseBroker.mintSubLeases({
+          parentAgentId,
+          parentSessionId,
+          child: input.agent,
+          childSessionId: input.sessionId,
+        });
+        if (minted.length > 0) {
+          log(`delegation ${parentAgentId} → ${input.agent.id} lent ${minted.map((lease) => `${lease.credential} (${lease.id} from ${lease.parentId ?? '?'})`).join(', ')}`);
+        }
+      }
+      try {
+        return await dispatchInternal({
+          sessionId: input.sessionId,
+          agentId: input.agent.id,
+          userMessage: input.userMessage,
+          metadata: input.metadata,
+          // A cancelled parent turn cancels its delegated runs too.
+          ...(input.signal ? { signal: input.signal } : {}),
+        });
+      } finally {
+        leaseBroker.releaseSubLeases(input.sessionId);
+      }
+    },
   }));
 
   const runners = new Map<string, AgentRunner>();
@@ -2130,6 +2342,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // must not retry the primary on restart.
       (session) => store.save(session),
       providerContributions,
+      guardProviderCall,
     );
 
     const runner = new AgentRunner({
@@ -3112,7 +3325,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // The file-backed resolver, so a plugin needing a key reaches the
       // *calling* agent's — its allowlist checked, its own entry before the
       // fleet's shared one.
-      credentials: createFileCredentialResolver(env),
+      // Behind the lease broker, so a leased key costs a lease use however
+      // a plugin reaches it.
+      credentials: leasedCredentials,
       workspaces: agentWorkspaces,
       // The structured log, so a plugin's lifecycle lines — an MCP server
       // that dropped, a reconnect that failed — are in `stratus logs` and
@@ -3343,6 +3558,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     storesClosed = true;
     scheduleStore.close();
+    usageLedger.close();
+    leaseStore.close();
     store.close();
   };
 
@@ -3891,6 +4108,26 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     resolveApproval,
     provideCredential,
+    usage: (query) => usageLedger.totals(query),
+    async budget() {
+      const budget = await currentBudget();
+      if (!budget) {
+        return undefined;
+      }
+      return {
+        budget,
+        limits: budgetStatus(budget, (since, agentId) => usageLedger.spent(since, agentId, budget.weights), new Date()),
+      };
+    },
+    leases: (filter = {}) => [
+      ...leaseStore.list(filter),
+      ...leaseBroker.subLeases().filter((lease) => filter.agentId === undefined || lease.agentId === filter.agentId),
+    ],
+    grantLease(input) {
+      validateLeaseGrant(input, new Date());
+      return leaseStore.grant(input);
+    },
+    revokeLease: (id, revokedBy) => leaseStore.revoke(id, revokedBy),
   };
 
   return gateway;

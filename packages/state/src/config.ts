@@ -1,3 +1,5 @@
+import type { BudgetConfig } from './budget.ts';
+import type { LeasesConfig } from './leases.ts';
 import type { JsonObject } from '@stratusagent/core';
 import type { ParsedSoul } from '@stratusagent/agents';
 import type { ClaudeCodeQueryFn } from '@stratusagent/provider-claude-code';
@@ -279,6 +281,19 @@ export interface StratusConfigFile {
    * `executor` and `principals` do.
    */
   maxTurns?: number;
+  /**
+   * How much this home may spend on models, per UTC day and month and per
+   * agent, in weighted tokens. See `BudgetConfig`. **Trusted configs
+   * only**: a limit is the operator's spend, and a cloned repository must
+   * be able neither to raise it nor to lower it into an outage. Read on
+   * every provider call, so a changed limit applies without a restart.
+   */
+  budget?: BudgetConfig;
+  /**
+   * Which credentials may only be used under a lease. See `LeasesConfig`.
+   * **Trusted configs only**, and read live like `budget`.
+   */
+  leases?: LeasesConfig;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */

@@ -1,3 +1,5 @@
+import { parseBudgetConfig } from './budget.ts';
+import { parseLeasesConfig } from './leases.ts';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -193,6 +195,14 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   const plugins = parsePluginsConfig(config.plugins, configPath);
   if (plugins) {
     resolved.plugins = plugins;
+  }
+  const budget = parseBudgetConfig(config.budget, configPath);
+  if (budget) {
+    resolved.budget = budget;
+  }
+  const leases = parseLeasesConfig(config.leases, configPath);
+  if (leases) {
+    resolved.leases = leases;
   }
 
   return resolved;

@@ -51,6 +51,10 @@ import {
   type RuntimeSelection,
   type RuntimeConfig,
   type IgnoredUntrustedConfig,
+  createLeaseBroker,
+  createLeaseResolver,
+  fleetDbPath,
+  stratusHomePath,
 } from '@stratusagent/state';
 import { createApprovalPolicy } from './approvals.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
@@ -58,7 +62,7 @@ import { formatEvent } from './events.ts';
 import { writeLine, stringifyValue } from './io.ts';
 import { quoteShellArg } from './prompter.ts';
 import type { CliApprovalMode, ParsedRunCommand } from './parse.ts';
-import { loadServePlugins, loadServeRuntimeSelection } from './trusted-config.ts';
+import { loadServeLeases, loadServePlugins, loadServeRuntimeSelection } from './trusted-config.ts';
 
 /**
  * Kept with its historical CLI signature: a parsed run command is a
@@ -261,6 +265,29 @@ export const createAgentRuntime = async (
   const pluginsConfig = await loadServePlugins(runEnv, options.configPath, (line) => {
     writeLine(streams.stderr, `Warning: ${line}`);
   });
+  // Leases hold for a one-shot exactly as for the daemon: a fenced key is
+  // fenced wherever it is used, and `stratus run` reaching it freely would
+  // be the way around the fence. Same table, same atomic count — the
+  // daemon and this process may both be spending one lease.
+  const leases = await loadServeLeases(runEnv, options.configPath, (line) => {
+    writeLine(streams.stderr, `Warning: ${line}`);
+  });
+  // Imported only when something is leased: the gateway package is the
+  // daemon's, and a plain one-shot never loads it.
+  const leaseBroker = leases && leases.credentials.length > 0
+    ? createLeaseBroker({
+        store: new (await import('@stratusagent/gateway')).SqliteLeaseStore(fleetDbPath(runEnv), { stateHome: stratusHomePath(runEnv) }),
+        leased: leases.credentials,
+        onUse: (record) => {
+          if (record.outcome === 'refused') {
+            writeLine(streams.stderr, `Warning: ${record.reason ?? `no lease for ${record.credential}`}`);
+          }
+        },
+      })
+    : undefined;
+  const fileCredentials = createFileCredentialResolver(runEnv);
+  const credentials = leaseBroker ? createLeaseResolver(fileCredentials, leaseBroker) : fileCredentials;
+
   const loadedPlugins: LoadedPlugin[] = [];
   const providers = new ContributionRegistry<ProviderContribution>();
   const memoryStores = new ContributionRegistry<MemoryStoreContribution>();
@@ -282,7 +309,7 @@ export const createAgentRuntime = async (
       // channels, so a channel plugin's registration is recorded and goes
       // nowhere, and its request for its secrets is refused with a message
       // that says so rather than answered with an empty roster.
-      credentials: createFileCredentialResolver(runEnv),
+      credentials,
       workspaces: createAgentWorkspaces(runEnv),
     });
     loadedPlugins.push(...result.loaded);
@@ -367,6 +394,13 @@ export const createAgentRuntime = async (
       options.maxTurns,
       undefined,
       providers,
+      leaseBroker
+        ? async (request, credential) => {
+            if (credential !== undefined) {
+              leaseBroker.use(request.session.agent.id, credential, { sessionId: request.session.id, use: 'provider' });
+            }
+          }
+        : undefined,
     );
 
     const runner = new AgentRunner({
