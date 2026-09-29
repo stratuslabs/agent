@@ -52,6 +52,11 @@ stratus lease revoke lease_3f9c0a1b2c3d4e5f
 | `--uses` | Optional. The most uses it pays for; without it, unlimited inside its window |
 | `--reason` | Required. The audit trail without a reason is a list of ids |
 
+The agent has to be one on the roster (`stratus agents`), matched
+case-insensitively. A grant to an id nothing runs as, a typo above all, is
+refused rather than recorded, since it could never be used and would leave
+the agent it was meant for still refused.
+
 The commands work on `fleet.db` directly, daemon or not, and each change is
 one atomic statement: the daemon reads the lease row on every use, so a
 revoke is the very next use's answer. The control API has the same three —
