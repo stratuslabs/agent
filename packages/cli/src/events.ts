@@ -21,6 +21,11 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• tool.approval-requested ${event.call.toolName} (${event.risk}) for ${event.agentId}`;
     case 'tool.approval-resolved':
       return `• tool.approval-resolved ${event.answer} (${event.reason})${event.actor ? ` by ${event.actor}` : ''}`;
+    case 'credential.requested':
+      return `• credential.requested ${event.name} (${event.scope}) for ${event.agentId}`;
+    case 'credential.provided':
+      return `• credential.provided ${event.name} (${event.scope}) for ${event.agentId}${event.actor ? ` by ${event.actor}` : ''}`
+        + (event.grantError !== undefined ? ' — stored, not granted' : '');
     case 'session.completed':
       return `• session.completed ${event.sessionId}`;
     case 'session.failed':
@@ -89,6 +94,21 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
         answer: event.answer,
         reason: event.reason,
         ...(event.actor ? { actor: event.actor } : {}),
+      };
+    // A credential's name and whose it is, and who provided it — the same
+    // reason the approval pair names its actor: a key added from a chat is
+    // a change to what an agent can do, and "who did that" has no other
+    // record. The agent's reason is its own text and stays out; the value
+    // never reaches the bus at all.
+    case 'credential.requested':
+      return { name: event.name, scope: event.scope, requestId: event.requestId };
+    case 'credential.provided':
+      return {
+        name: event.name,
+        scope: event.scope,
+        requestId: event.requestId,
+        ...(event.actor ? { actor: event.actor } : {}),
+        ...(event.grantError !== undefined ? { grantError: event.grantError } : {}),
       };
     case 'session.failed':
       return { error: event.error };

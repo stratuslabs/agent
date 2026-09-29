@@ -15,6 +15,7 @@ import {
   IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
   escapeControlCharacters,
   type AlwaysMeans,
+  type CredentialScope,
   type ApprovalAnswer,
   type ImageAttachment,
   type JsonObject,
@@ -26,6 +27,7 @@ import {
 import {
   channelSessionKey,
   type ChannelAdapter,
+  type ChannelCredentialRequest,
   type GatewayLike,
   type OutboundAddress,
   type OutboundConnection,
@@ -177,6 +179,16 @@ export interface SlackSocketEventArgs {
   body?: {
     team_id?: string;
     event_id?: string;
+    /** `block_actions` or `view_submission`, for the interactions this adapter handles. */
+    type?: string;
+    /** block_actions only: what `views.open` needs to put a form in front of the clicker. */
+    trigger_id?: string;
+    /** view_submission only: the form, what it was opened for, and what was entered. */
+    view?: {
+      callback_id?: string;
+      private_metadata?: string;
+      state?: { values?: Record<string, Record<string, { value?: string | null }>> };
+    };
     /** block_actions only: who clicked. The one field authorization reads. */
     user?: { id?: string };
     actions?: SlackBlockAction[];
@@ -329,11 +341,29 @@ export interface SlackWebLike {
      * `im:read`, `mpim:read`) — see the README's app manifest.
      */
     info(args: { channel: string }): Promise<{
-      channel?: { id?: string; is_member?: boolean; is_im?: boolean };
+      channel?: { id?: string; is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean };
+    }>;
+    /**
+     * Who is in a conversation, a page at a time. Asked before a credential
+     * form goes into a private one, so it never lands where no approver can
+     * see it. Same read scopes as `info`.
+     */
+    members(args: { channel: string; cursor?: string; limit?: number }): Promise<{
+      members?: string[];
+      response_metadata?: { next_cursor?: string };
     }>;
   };
   users: {
     info(args: { user: string }): Promise<{ user?: { name?: string; profile?: { display_name?: string; real_name?: string } } }>;
+  };
+  /**
+   * Opens a modal, which is how a credential is entered: its answer comes
+   * back as a `view_submission` to this app and never becomes a message in
+   * the conversation. Optional so a fake without it still runs; an adapter
+   * without it tells the clicker it cannot open the form.
+   */
+  views?: {
+    open(args: { trigger_id: string; view: SlackBlock }): Promise<unknown>;
   };
 }
 
@@ -611,8 +641,15 @@ class ReplyRenderer {
   /** The tool the turn is running, for the status line; the streamed `toolLine` is the other mode's. */
   private runningTool: string | undefined;
   private readonly web: SlackWebLike;
-  private readonly channel: string;
-  private readonly threadTs: string | undefined;
+  /**
+   * The one person in the conversation when this turn is a DM: whoever sent
+   * the message. Undefined in a channel, where who can see a thread is
+   * Slack's membership to answer, not this turn's.
+   */
+  readonly dmWith: string | undefined;
+  /** The conversation, and the thread in it, this turn replies into. */
+  readonly channel: string;
+  readonly threadTs: string | undefined;
   private readonly editIntervalMs: number;
   private readonly warn: (line: string) => void;
   private readonly now: () => number;
@@ -630,6 +667,7 @@ class ReplyRenderer {
       statusThread?: string;
       statusWarned?: { value: boolean };
       after?: Promise<unknown>;
+      dmWith?: string;
     } = {},
   ) {
     this.web = web;
@@ -643,6 +681,7 @@ class ReplyRenderer {
     this.statusThread = options.statusThread ?? threadTs;
     this.statusWarned = options.statusWarned ?? { value: false };
     this.after = options.after ?? Promise.resolve();
+    this.dmWith = options.dmWith;
   }
 
   /**
@@ -1920,6 +1959,112 @@ const approvalBlocks = (
   ];
 };
 
+const CREDENTIAL_ADD_ACTION = 'stratus_credential_add';
+const CREDENTIAL_VIEW = 'stratus_credential';
+const CREDENTIAL_BLOCK = 'credential_value';
+const CREDENTIAL_INPUT = 'value';
+// Under Slack's three-second acknowledgement window, with room for the ack
+// itself to travel.
+const CREDENTIAL_ACK_MS = 2500;
+// A reason is the agent's own text, shown to a person deciding whether to
+// hand over a key; long enough to explain, short enough to read.
+const CREDENTIAL_REASON_LIMIT = 300;
+
+const credentialWhose = (agentName: string, scope: CredentialScope): string =>
+  scope === 'agent'
+    ? `for ${agentName} only`
+    : `stored for the whole fleet, granted to ${agentName} (other agents need it in their own soul)`;
+
+/**
+ * The request as it appears in the conversation. What it says about the
+ * value is the promise the form keeps: straight to the credential store,
+ * never into the thread, and never over a key already there.
+ */
+const credentialRequestBlocks = (
+  agentName: string,
+  name: string,
+  scope: CredentialScope,
+  reason: string | undefined,
+  requestId: string,
+): SlackBlock[] => {
+  const shortReason = reason !== undefined && reason.length > CREDENTIAL_REASON_LIMIT
+    ? `${reason.slice(0, CREDENTIAL_REASON_LIMIT)}…`
+    : reason;
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*${escapeSlackText(agentName)}* is asking for a credential: \`${escapeSlackText(name)}\`, ${credentialWhose(escapeSlackText(agentName), scope)}.`,
+      },
+    },
+    ...(shortReason !== undefined
+      ? [{ type: 'section', text: { type: 'mrkdwn', text: `_${escapeSlackText(agentName)} says:_ ${escapeSlackText(shortReason)}` } }]
+      : []),
+    {
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: 'Only an approver can add it. The value goes straight to the credential store, never into this conversation, and a key already stored is never replaced from here.',
+      }],
+    },
+    {
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        action_id: CREDENTIAL_ADD_ACTION,
+        style: 'primary',
+        value: requestId,
+        text: { type: 'plain_text', text: 'Add credential' },
+      }],
+    },
+  ];
+};
+
+/**
+ * The form. `private_metadata` carries only the request id: where the key
+ * goes, and for whom, is the gateway's record of the request, never
+ * something a submission can say about itself.
+ */
+const credentialModal = (post: PendingCredentialPost, requestId: string): SlackBlock => ({
+  type: 'modal',
+  callback_id: CREDENTIAL_VIEW,
+  private_metadata: requestId,
+  title: { type: 'plain_text', text: 'Add a credential' },
+  submit: { type: 'plain_text', text: 'Add' },
+  close: { type: 'plain_text', text: 'Cancel' },
+  blocks: [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `\`${escapeSlackText(post.name)}\`, ${credentialWhose(escapeSlackText(post.agentName), post.scope)}. `
+          + `It is stored add-only and granted to ${escapeSlackText(post.agentName)}; it never appears in the conversation.`,
+      },
+    },
+    {
+      type: 'input',
+      block_id: CREDENTIAL_BLOCK,
+      label: { type: 'plain_text', text: `Value for ${post.name}` },
+      element: { type: 'plain_text_input', action_id: CREDENTIAL_INPUT },
+    },
+  ],
+});
+
+interface PendingCredentialPost {
+  connection: AgentConnection;
+  channel: string;
+  /** The thread the request was posted in, for a late answer's notice. */
+  thread?: string;
+  ts: string;
+  agentId: string;
+  agentName: string;
+  name: string;
+  scope: CredentialScope;
+  /** Bound at render time, as an approval request's are. */
+  approvers: Set<string>;
+}
+
 interface PendingApprovalPost {
   connection: AgentConnection;
   channel: string;
@@ -2121,6 +2266,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Rendered approval requests, keyed by the gateway's request id — the
   // same id the buttons carry back.
   const approvalPosts = new Map<string, PendingApprovalPost>();
+  // Credential requests whose post is in flight: Slack can show the message,
+  // and take a click on it, before postMessage resolves here. The same
+  // window `rendering` covers for approvals, and bounded the same way.
+  const credentialsPosting = new Set<string>();
+  // Credential requests with a live button, keyed by the gateway's request id.
+  const credentialPosts = new Map<string, PendingCredentialPost>();
   // Requests whose message is mid-post. A request can settle — expire, or
   // its turn be cancelled — while the postMessage that announces it is
   // still in flight, and the retraction would then find nothing to retract
@@ -2737,7 +2888,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
       });
     } catch (error) {
-      warn(`slack: could not retire an orphaned approval request: ${error instanceof Error ? error.message : String(error)}`);
+      warn(`slack: could not retire an orphaned request: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -3005,7 +3156,289 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     log(`slack: posted the reply of a turn finished after a restart to ${channel}`);
   };
 
+  /**
+   * Whether an approver can see a conversation: any public channel, or a
+   * private one with an approver among its members. Rejects, with the
+   * reason, when Slack will not say, so the caller refuses rather than
+   * guesses.
+   */
+  const approverCanSee = async (connection: AgentConnection, channel: string, approvers: Set<string>): Promise<boolean> => {
+    try {
+      const info = (await connection.web.conversations.info({ channel })).channel;
+      if (info?.is_private !== true && info?.is_mpim !== true) {
+        return true;
+      }
+      let cursor: string | undefined;
+      do {
+        const page = await connection.web.conversations.members({ channel, limit: 200, ...(cursor ? { cursor } : {}) });
+        if ((page.members ?? []).some((member) => approvers.has(member))) {
+          return true;
+        }
+        cursor = page.response_metadata?.next_cursor || undefined;
+      } while (cursor !== undefined);
+      return false;
+    } catch (error) {
+      throw new Error(
+        `Slack would not say who can see this conversation (${error instanceof Error ? error.message : String(error)}), so the form was not posted. `
+        + 'The app needs the conversations read scopes (channels:read, groups:read, mpim:read); see the app manifest.',
+      );
+    }
+  };
+
+  /**
+   * The channel contract's `requestCredential`: posts the form and resolves
+   * only once it is up with a button an approver can press. Every refusal
+   * rejects with a sentence for the agent, which the gateway hands it in
+   * place of "your operator was asked": a request nobody can answer would
+   * otherwise sit pending while the agent says it is waiting on someone.
+   */
+  const requestCredential = async (request: ChannelCredentialRequest): Promise<void> => {
+    const gateway = gatewayRef;
+    const connection = connectionFor(request.agentId);
+    if (!gateway || !connection) {
+      throw new Error(configuredAgents.has(request.agentId)
+        ? `${request.agentId}'s Slack app is not connected right now.`
+        : `${request.agentId} has no Slack app.`);
+    }
+    // Only in the conversation the agent asked in, and only for a turn this
+    // adapter dispatched from a Slack message: where to post comes from
+    // that turn's renderer, never from the session's metadata, which an
+    // HTTP caller can write (`channel: slack`, any `slackChannel`) to put a
+    // request nobody made in that conversation in front of its approvers.
+    // Unlike an approval there is no fallback channel: the person who can
+    // answer is the one the agent is talking to.
+    const active = gateway.activeTurnId?.(request.sessionId);
+    const turn = active === undefined
+      ? undefined
+      : (renderers.get(request.sessionId) ?? []).find((renderer) => renderer.turnId === active);
+    if (!turn) {
+      throw new Error('This turn did not come from a Slack message, so there is nobody in Slack to show the form to.');
+    }
+    const channel = turn.channel;
+    const thread = turn.threadTs;
+    const unseen = `Nobody who can add it can see this conversation`;
+    const approvers = new Set((connection.config.approvers ?? []).filter((id) => id.length > 0));
+    const agentName = gateway.agents().find((agent) => agent.id === request.agentId)?.name ?? request.agentId;
+    if (approvers.size === 0 || gateway.provideCredential === undefined) {
+      throw new Error(
+        `Nobody can add it from Slack, because no approver is configured for ${agentName} (approvals.slackApprovers).`,
+      );
+    }
+    // A DM has one person in it besides the app. Posted there for someone
+    // who is not an approver, the form is a button only they can see and
+    // only approvers can press, which is a request nobody can answer.
+    const elsewhere = 'Ask in a channel an approver is in, or ask one of them directly.';
+    if (turn.dmWith !== undefined && !approvers.has(turn.dmWith)) {
+      throw new Error(`${unseen}: it is a direct message with someone who is not an approver for ${agentName}. ${elsewhere}`);
+    }
+    // A private channel or group DM shows the button only to its members,
+    // so one with no approver in it is the DM case again with more people.
+    // A public channel is open to anyone in the workspace, approvers
+    // included, and is not checked. Unknown is refused, not assumed fine:
+    // a form posted where nobody can answer it waits forever.
+    if (turn.dmWith === undefined && !(await approverCanSee(connection, channel, approvers))) {
+      throw new Error(`${unseen}: none of ${agentName}'s approvers is a member of this private conversation. ${elsewhere}`);
+    }
+    let posted: { ts?: string; channel?: string };
+    credentialsPosting.add(request.requestId);
+    try {
+      posted = await connection.web.chat.postMessage({
+        channel,
+        text: escapeSlackText(`${agentName} is asking for a credential: ${request.name}, ${credentialWhose(agentName, request.scope)}.`),
+        ...(thread ? { thread_ts: thread } : {}),
+        blocks: credentialRequestBlocks(agentName, request.name, request.scope, request.reason, request.requestId),
+      });
+    } catch (error) {
+      credentialsPosting.delete(request.requestId);
+      warn(`slack: could not post a credential request for ${request.agentId} to ${channel} (${error instanceof Error ? error.message : String(error)})`);
+      throw new Error(`Slack refused the post (${error instanceof Error ? error.message : String(error)}).`);
+    }
+    credentialsPosting.delete(request.requestId);
+    if (!posted.ts) {
+      throw new Error('Slack accepted the post but returned no message to attach the form to.');
+    }
+    credentialPosts.set(request.requestId, {
+      connection,
+      channel: posted.channel ?? channel,
+      ...(thread !== undefined ? { thread } : {}),
+      ts: posted.ts,
+      agentId: request.agentId,
+      agentName,
+      name: request.name,
+      scope: request.scope,
+      approvers,
+    });
+  };
+
+  const settleCredentialPost = async (event: Extract<StratusEvent, { type: 'credential.provided' }>): Promise<void> => {
+    const post = credentialPosts.get(event.requestId);
+    if (!post) {
+      return;
+    }
+    credentialPosts.delete(event.requestId);
+    const whose = event.scope === 'agent'
+      ? `for ${escapeSlackText(post.agentName)} only`
+      : `as a shared credential, granted to ${escapeSlackText(post.agentName)}`;
+    const by = event.actor !== undefined && post.approvers.has(event.actor) ? `, by <@${event.actor}>` : '';
+    const text = event.grantError === undefined
+      ? `Added \`${escapeSlackText(post.name)}\` ${whose}${by}. ${escapeSlackText(post.agentName)} can use it from its next reply; the value is in the credential store, not here.`
+      : `Stored \`${escapeSlackText(post.name)}\` ${event.scope === 'agent' ? `for ${escapeSlackText(post.agentName)}` : 'as a shared credential'}${by}, `
+        + `but it could not be added to ${escapeSlackText(post.agentName)}'s soul (${escapeSlackText(event.grantError)}), so ${escapeSlackText(post.agentName)} cannot use it yet. `
+        + 'Add the name to the credentials list in its soul on the machine.';
+    try {
+      await post.connection.web.chat.update({ channel: post.channel, ts: post.ts, text, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] });
+    } catch (error) {
+      warn(`slack: could not update the credential request for ${post.agentId} (${error instanceof Error ? error.message : String(error)})`);
+    }
+  };
+
+  /**
+   * Takes down a request no answer can land on any more, so its button stops
+   * inviting submissions that can only be refused the same way. A request
+   * `credential.provided` already settled is left to what that wrote, which
+   * says more (a key stored but not granted).
+   */
+  const retireCredentialPost = async (requestId: string, post: PendingCredentialPost, reason: string): Promise<void> => {
+    if (credentialPosts.get(requestId) !== post) {
+      return;
+    }
+    credentialPosts.delete(requestId);
+    const text = `\`${escapeSlackText(post.name)}\` was not added: ${escapeSlackText(reason)}`;
+    try {
+      await post.connection.web.chat.update({ channel: post.channel, ts: post.ts, text, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] });
+    } catch (error) {
+      warn(`slack: could not retire the credential request for ${post.agentId} (${error instanceof Error ? error.message : String(error)})`);
+    }
+  };
+
+  const handleCredentialClick = async (connection: AgentConnection, args: SlackSocketEventArgs, requestId: string): Promise<void> => {
+    await args.ack();
+    const post = credentialPosts.get(requestId);
+    if (!post && credentialsPosting.has(requestId)) {
+      // Live, with the index not caught up yet: retiring it here would
+      // strip the button from a request about to be registered as pending.
+      await tellClicker(connection, args, 'That credential request is still being posted. Try the button again in a moment.');
+      return;
+    }
+    if (!post || post.connection !== connection) {
+      await tellClicker(connection, args, 'That credential request is no longer pending. Ask the agent to request it again.');
+      // A daemon restart forgets every request, and the buttons it posted
+      // stay live for everyone else in the thread: take this one down the
+      // way an orphaned approval is, from the click's own copy.
+      if (!post) {
+        await retireOrphanedPrompt(connection, args);
+      }
+      return;
+    }
+    // By actor, as approvals are: the request sits in a thread anyone in
+    // it can read, and a key is a bigger thing to hand over than a click.
+    const clicker = args.body?.user?.id;
+    if (!clicker || !post.approvers.has(clicker)) {
+      await tellClicker(connection, args, `You are not an approver for ${post.agentName}, so you cannot add its credentials.`);
+      return;
+    }
+    const triggerId = args.body?.trigger_id;
+    if (!connection.web.views || !triggerId) {
+      await tellClicker(connection, args, 'Slack did not hand over a way to open the form. Try the button again.');
+      return;
+    }
+    try {
+      await connection.web.views.open({ trigger_id: triggerId, view: credentialModal(post, requestId) });
+    } catch (error) {
+      warn(`slack: could not open the credential form for ${post.agentId} (${error instanceof Error ? error.message : String(error)})`);
+      await tellClicker(connection, args, 'The form could not be opened. Try the button again.');
+    }
+  };
+
+  /**
+   * The form's answer. Acked last rather than first, because the ack is how
+   * a refusal reaches the form: `errors` keeps it open with the reason
+   * beside the field, so a person told "already stored" or "no longer
+   * pending" learns it where they typed. The value is read here, handed to
+   * the gateway, and touched nowhere else: not logged, not posted.
+   */
+  const handleCredentialSubmission = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
+    const refuse = (message: string): Promise<void> =>
+      args.ack({ response_action: 'errors', errors: { [CREDENTIAL_BLOCK]: message } });
+    const view = args.body?.view;
+    const requestId = view?.private_metadata ?? '';
+    const post = credentialPosts.get(requestId);
+    const gateway = gatewayRef;
+    if (!post || post.connection !== connection || !gateway?.provideCredential) {
+      await refuse('That credential request is no longer pending. Ask the agent to request it again.');
+      return;
+    }
+    // Checked again on the answer, not only on the click: the form is a
+    // separate interaction, and the click is not what stores anything.
+    const submitter = args.body?.user?.id;
+    if (!submitter || !post.approvers.has(submitter)) {
+      await refuse(`You are not an approver for ${post.agentName}, so you cannot add its credentials.`);
+      return;
+    }
+    const value = view?.state?.values?.[CREDENTIAL_BLOCK]?.[CREDENTIAL_INPUT]?.value ?? '';
+    const answer = gateway.provideCredential({ requestId, value, actor: submitter }).catch(
+      (error: unknown): { ok: false; message: string; retired?: boolean } => ({
+        ok: false,
+        message: `It could not be stored: ${error instanceof Error ? error.message : String(error)}`,
+      }),
+    );
+    // Slack wants the submission acked within three seconds, and storing
+    // is two locked file writes and every bus subscriber: usually far
+    // inside that, not always. An answer in time keeps the form open with
+    // a refusal beside the field; a late one closes the form first and
+    // tells the submitter privately, rather than letting Slack time out
+    // and retry a submission the first attempt may already have stored.
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<'late'>((resolve) => {
+      timer = setTimeout(() => resolve('late'), CREDENTIAL_ACK_MS);
+    });
+    const first = await Promise.race([answer, deadline]);
+    clearTimeout(timer);
+    if (first !== 'late') {
+      // A plain ack closes the form. The message is rewritten from
+      // `credential.provided`, the one path every way of answering goes
+      // through.
+      await (first.ok ? args.ack() : refuse(first.message));
+      if (!first.ok && first.retired === true) {
+        track(retireCredentialPost(requestId, post, first.message));
+      }
+      return;
+    }
+    await args.ack();
+    track(answer.then(async (result) => {
+      if (result.ok) {
+        return;
+      }
+      if (result.retired === true) {
+        await retireCredentialPost(requestId, post, result.message);
+      }
+      try {
+        await connection.web.chat.postEphemeral({
+          channel: post.channel,
+          user: submitter,
+          text: `${post.name} was not added: ${result.message}`,
+          ...(post.thread !== undefined ? { thread_ts: post.thread } : {}),
+        });
+      } catch (error) {
+        warn(`slack: could not tell ${submitter} a credential was not added (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }));
+  };
+
   const handleInteractive = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
+    if (args.body?.type === 'view_submission') {
+      if (args.body.view?.callback_id === CREDENTIAL_VIEW) {
+        await handleCredentialSubmission(connection, args);
+      } else {
+        await args.ack();
+      }
+      return;
+    }
+    const first = args.body?.actions?.[0];
+    if (first?.action_id === CREDENTIAL_ADD_ACTION && first.value) {
+      await handleCredentialClick(connection, args, first.value);
+      return;
+    }
     // Ack first and unconditionally: Slack retries an unacked interaction,
     // and a redelivered click on a request that is no longer pending would
     // read as a second, rejected decision.
@@ -3781,6 +4214,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         statusThread: thread ?? event.ts,
         statusWarned: connection.statusWarned,
         ...(ahead ? { after: ahead } : {}),
+        ...(isDm ? { dmWith: userId } : {}),
       });
       if (!streaming) {
         replyOrder.set(sessionId, renderer.posted);
@@ -3910,6 +4344,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   return {
     name: 'slack',
     resolveOutbound,
+    requestCredential,
 
     async start(gateway) {
       gatewayRef = gateway;
@@ -3919,6 +4354,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // renderer would fold a question into the answer being streamed.
         if (event.type === 'tool.approval-requested') {
           track(renderApprovalRequest(event));
+          return;
+        }
+        if (event.type === 'credential.provided') {
+          track(settleCredentialPost(event));
           return;
         }
         if (event.type === 'tool.approval-resolved') {
@@ -4111,6 +4550,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       botIdentities.clear();
       rendering.clear();
       resolvedWhileRendering.clear();
+      credentialsPosting.clear();
     },
   };
 };

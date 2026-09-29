@@ -1,6 +1,7 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { parseSoul, type ParsedSoul } from '@stratusagent/agents';
+import { formatSoul, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { loadConfigFile } from './config-file.ts';
 import { resolveConfigLocation } from './config-location.ts';
 import type { StratusConfigFile, RuntimeSelection } from './config.ts';
@@ -103,6 +104,88 @@ export const loadSoulFile = async (resolvedPath: string): Promise<ParsedSoul> =>
       `Could not parse soul file ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+};
+
+/**
+ * Add a credential name to a soul's `credentials:` list, reporting whether
+ * the file changed.
+ *
+ * The step that makes an approver's answer to `credential.request` usable:
+ * storing a key grants no agent anything, so a form that only stored it
+ * would leave the agent holding a key it may not resolve until somebody
+ * edited the file by hand. It grants the one agent whose soul this is,
+ * never another, whatever scope the key was stored under — and refuses when
+ * the file no longer declares `agentId`, because a soul reassigned while a
+ * request was pending would otherwise hand the key to whoever it names now.
+ *
+ * Rendered through `formatSoul`, which canonicalizes the file the way every
+ * field edit does, and parsed back before it is written: a soul that
+ * survives the write but not the next read is an agent that vanishes on
+ * restart. Written to a sibling and renamed over the real file, so a
+ * dispatch re-reading the soul never sees it half-written and a crash
+ * leaves the old one; a symlinked soul keeps its link, since the rename
+ * lands on the file the link points at.
+ *
+ * Serialized with every other soul write in the process
+ * (`withSoulFileLock`): two requests answered at once for one agent, or a
+ * grant beside a dashboard edit, would otherwise both read the same file,
+ * and the second write would drop the first while both reported success.
+ */
+let soulWrites: Promise<unknown> = Promise.resolve();
+/**
+ * Serializes every read-modify-write of a soul within the process: the
+ * control API's field edits and `grantSoulCredential` both go through it.
+ * One chain for all of them, because a grant and a dashboard edit racing
+ * on one file would each derive from the same old version, and the second
+ * write would drop the first while both reported success.
+ */
+export const withSoulFileLock = async <T>(work: () => Promise<T>): Promise<T> => {
+  const next = soulWrites.then(work, work);
+  soulWrites = next.catch(() => undefined);
+  return next;
+};
+
+export const grantSoulCredential = async (
+  soulPath: string,
+  name: string,
+  agentId: string,
+  options: {
+    /**
+     * Runs under the soul lock, before the file is read; throwing refuses
+     * the grant with that error. For a caller whose own state decides
+     * whether this file is still the right one (the gateway's served path),
+     * checked where nothing that also takes the lock can change it.
+     */
+    check?: () => void;
+  } = {},
+): Promise<boolean> => {
+  const grant = async (): Promise<boolean> => {
+    options.check?.();
+    // Identity is read at the configured path, which seeds a generated id,
+    // and the bytes land on the file behind it.
+    const soul = await loadSoulFile(soulPath);
+    if (soul.agent.id !== agentId) {
+      throw new Error(`${soulPath} now declares agent ${soul.agent.id}, not ${agentId}, so nothing was granted.`);
+    }
+    const granted = soul.agent.credentials ?? [];
+    if (granted.includes(name)) {
+      return false;
+    }
+    const next: ParsedSoul = { ...soul, agent: { ...soul.agent, credentials: [...granted, name] } };
+    const rendered = formatSoul(next);
+    parseSoul(rendered, { seed: soulPath });
+    const target = await realpath(soulPath);
+    const temporary = `${target}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, rendered, { mode: (await stat(target)).mode & 0o777 });
+      await rename(temporary, target);
+    } catch (error) {
+      await rm(temporary, { force: true });
+      throw error;
+    }
+    return true;
+  };
+  return withSoulFileLock(grant);
 };
 
 export interface RosterEntry {

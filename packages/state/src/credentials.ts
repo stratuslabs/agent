@@ -457,6 +457,19 @@ export const addNamedCredential = async (
             + `Replacing one is done on the machine: ${replace}.`,
       );
     }
+    // The environment is read last but still counts: any stored entry
+    // outranks it, so adding one where the daemon's environment supplies
+    // the name would replace the key every agent resolves, which is the
+    // one thing this path may not do.
+    if (typeof readProcessEnv(env)[name] === 'string') {
+      throw new NamedCredentialExistsError(
+        name,
+        agentId,
+        `${name} is supplied by the daemon's environment, and a stored one would replace it`
+        + `${agentId === undefined ? '' : ` for ${agentId}`}. Change it where the environment is set, `
+        + `or on the machine: ${replace}.`,
+      );
+    }
     if (agentId !== undefined && named.agents[agentId]?.[name] !== undefined) {
       throw new NamedCredentialExistsError(
         name,
@@ -491,17 +504,53 @@ export const addNamedCredential = async (
  * hot path. Per-agent keys are a lookup order rather than an interface
  * change, because `CredentialResolver.resolve` already takes the agent.
  */
+/** Where a named credential an agent would resolve comes from. */
+export type NamedCredentialSource = 'agent' | 'shared' | 'environment';
+
+/**
+ * The resolution order, once: the agent's own entry, then the fleet's
+ * shared one, then the environment. The resolver reads the value through
+ * it and `namedCredentialSource` the answer to "does this agent already
+ * have one", so the two cannot disagree about what counts.
+ */
+const lookupNamedCredential = (
+  named: NamedCredentials,
+  processEnv: Record<string, string | undefined>,
+  agentId: string,
+  name: string,
+): { value: string; source: NamedCredentialSource } | undefined => {
+  const own = named.agents[agentId]?.[name];
+  if (own !== undefined) {
+    return { value: own, source: 'agent' };
+  }
+  const shared = named.shared[name];
+  if (shared !== undefined) {
+    return { value: shared, source: 'shared' };
+  }
+  // `process.env` is somebody else's object and does have a prototype, so
+  // this is the one lookup that could still answer with a function. A
+  // resolver promises a string or nothing.
+  const fromEnv = processEnv[name];
+  return typeof fromEnv === 'string' ? { value: fromEnv, source: 'environment' } : undefined;
+};
+
+/**
+ * Where `agentId` would resolve `name` from, or undefined when nothing
+ * supplies it. Presence only; the allowlist is the resolver's question.
+ */
+export const namedCredentialSource = async (
+  env: StateEnvironment,
+  agentId: string,
+  name: string,
+): Promise<NamedCredentialSource | undefined> =>
+  lookupNamedCredential(await loadNamedCredentials(env), readProcessEnv(env), agentId, name)?.source;
+
 export const createFileCredentialResolver = (
   env: StateEnvironment,
   processEnv: Record<string, string | undefined> = readProcessEnv(env),
 ): CredentialResolver => ({
   async resolve(agent, name) {
     assertCredentialAllowed(agent, name);
-    const named = await loadNamedCredentials(env);
-    const value = named.agents[agent.id]?.[name] ?? named.shared[name] ?? processEnv[name];
-    // `process.env` is somebody else's object and does have a prototype, so
-    // this is the one lookup above that could still answer with a function.
-    // A resolver promises a string or nothing.
-    return typeof value === 'string' ? value : undefined;
+    return lookupNamedCredential(await loadNamedCredentials(env), processEnv, agent.id, name)?.value;
   },
 });

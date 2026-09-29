@@ -2351,6 +2351,9 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
  * Resolves named credentials for an agent. Implementations must enforce the
  * agent's `credentials` allowlist so secrets stay scoped per agent.
  */
+/** Whose a named credential is: one agent's own, or the whole fleet's. */
+export type CredentialScope = 'agent' | 'shared';
+
 export interface CredentialResolver {
   resolve(agent: AgentDefinition, name: string): Promise<string | undefined>;
 }
@@ -3242,6 +3245,51 @@ export type StratusEvent =
       reason: ApprovalResolutionReason;
       /** Who decided, when a person did. Channel-native id (a Slack user). */
       actor?: string;
+    }
+  /**
+   * An agent asked for a named credential it does not hold
+   * (`credential.request`), and the channel it asked in has already put a
+   * form in front of someone who can answer it: the request is delivered
+   * first and announced after, so this is a record of a question that was
+   * asked, never a request for someone to render one. Nothing about it is
+   * a secret, and nothing that answers it ever travels on the bus. `scope` is whose the key would be: the
+   * agent's own (`agent`, the default) or the fleet's (`shared`).
+   *
+   * `metadata` is the session's, for the same reason an approval request
+   * carries it: it says which conversation to ask in.
+   */
+  | {
+      type: 'credential.requested';
+      sessionId: string;
+      agentId: string;
+      requestId: string;
+      name: string;
+      scope: CredentialScope;
+      /** The agent's own words on what it needs the key for. Untrusted text. */
+      reason?: string;
+      metadata?: JsonObject;
+    }
+  /**
+   * A requested credential was stored for the agent that asked, and granted
+   * to it. Names only; the value went to the credential store and nowhere
+   * else.
+   *
+   * Emitted once the key is stored, whether or not the grant then landed:
+   * a key added from a chat is a change on disk, and a shared one is
+   * already usable by every agent granted that name, so it is recorded even
+   * when the soul write failed. `grantError` says it did, and why.
+   */
+  | {
+      type: 'credential.provided';
+      sessionId: string;
+      agentId: string;
+      requestId: string;
+      name: string;
+      scope: CredentialScope;
+      /** Who provided it. Channel-native id (a Slack user). */
+      actor?: string;
+      /** Set when the key was stored but could not be added to the soul. */
+      grantError?: string;
     }
   | {
       type: 'session.completed';
@@ -4531,7 +4579,7 @@ export const renderRuntimeSection = (
     (credentials.length > 0
       ? `Credentials you may use: ${credentials.join(', ')}. The tools that need one use it on your behalf, so you never see a value, and there is no file or environment variable to look for. `
       : 'You hold no credentials. ')
-    + 'When a task needs a credential you do not hold, ask your operator to store it with stratus credential set and grant it to you.',
+    + 'When a task needs a credential you do not hold, ask for it with the credential.request tool if you have it; otherwise ask your operator to store it with stratus credential set and grant it to you.',
   );
   return `How you run: you are an agent on Stratus Agent. ${lines.join(' ')}`;
 };

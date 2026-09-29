@@ -27,6 +27,7 @@ import {
   readPendingApproval,
   type AgentDefinition,
   type AgentRuntimeContext,
+  type CredentialScope,
   type AgentMemoryStore,
   type AlwaysMeans,
   type ApprovalAnswer,
@@ -44,6 +45,7 @@ import {
   type ToolRisk,
 } from '@stratusagent/core';
 import {
+  createCredentialRequestTool,
   createDelegateTool,
   createForgetTool,
   createPinTool,
@@ -126,6 +128,13 @@ import {
   loadRosterSouls,
   FALLBACK_ACTIVE_METADATA_KEY,
   loadSoulFile,
+  grantSoulCredential,
+  withSoulFileLock,
+  addNamedCredential,
+  namedCredentialSource,
+  NamedCredentialExistsError,
+  CREDENTIAL_NAME_PATTERN,
+  quoteShellArg,
   migrateLegacyMemory,
   PROVIDER_STATE_METADATA_KEYS,
   ConfigFileError,
@@ -211,6 +220,23 @@ export interface GatewayChannelAdapter {
   resolveOutbound?(address: { agentId: string; to: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
+  /**
+   * Shows a person a form for a credential an agent asked for, mirroring
+   * `@stratusagent/channels`' `ChannelAdapter.requestCredential`. Optional:
+   * a channel without it cannot take credentials, and a request made in
+   * its conversations is refused instead of announced. Implementations
+   * MUST reject when the form reached nobody who can answer it, with a
+   * sentence for the agent.
+   */
+  requestCredential?(request: {
+    sessionId: string;
+    agentId: string;
+    requestId: string;
+    name: string;
+    scope: CredentialScope;
+    reason?: string;
+    metadata: JsonObject;
+  }): Promise<void>;
 }
 
 /**
@@ -808,7 +834,39 @@ export interface Gateway {
    * it as "try again".
    */
   resolveApproval(input: ResolveApprovalInput): boolean;
+  /**
+   * Answers a `credential.requested` with the value an approver entered:
+   * stores it add-only (`addNamedCredential`), under the agent or the fleet
+   * as the request asked, and adds the name to the requesting agent's soul.
+   * The value goes to the credential store and nowhere else — not onto the
+   * bus, the log, or the session.
+   *
+   * Who may answer is the channel's question, as it is for approvals.
+   */
+  provideCredential(input: ProvideCredentialInput): Promise<ProvideCredentialResult>;
 }
+
+export interface ProvideCredentialInput {
+  requestId: string;
+  value: string;
+  /** Who provided it. Channel-native id (a Slack user). */
+  actor?: string;
+}
+
+/**
+ * `ok: false` carries a sentence for the person who entered the value: the
+ * request is gone, the name is already stored, or the value is empty.
+ * `granted: false` on success means the soul already listed the name.
+ *
+ * `retired: true` means the request is no longer pending and no answer
+ * can change that, so a channel should take its form down: the name was
+ * stored since (add-only means no retry can land), the soul went to another
+ * agent, or the request was already answered. Without it the refusal is
+ * one a corrected value can clear, like an empty one, and the form stays.
+ */
+export type ProvideCredentialResult =
+  | { ok: true; name: string; scope: CredentialScope; agentId: string; granted: boolean }
+  | { ok: false; message: string; retired?: boolean };
 
 interface AgentSource {
   definition: AgentDefinition;
@@ -963,6 +1021,42 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const scheduleStore = new SqliteScheduleStore(fleetDbIn(stateDir), { stateHome: stateDir });
 
   /**
+   * The started adapter of one kind that speaks for an agent and has the
+   * capability asked for. `carriesOthers` says there were capable adapters
+   * of that kind, just none carrying this agent, which callers word
+   * differently from there being none at all.
+   *
+   * One kind may be served by several adapters carrying disjoint
+   * agents — two plugins, or the host's adapter beside a plugin's — and
+   * the one that speaks for this agent is the one whose claims include
+   * it: a contribution's agent list, or the host's declared claims for
+   * an adapter no plugin contributed. A host that declared no claims for
+   * the kind left its adapter unclaimed, and an unclaimed adapter speaks
+   * for anyone, as the single host adapter always did. A claim miss is
+   * a refusal, never the first adapter that happens to be running: that
+   * adapter posts under another agent's transport identity, and it is
+   * exactly what a failed start of the right adapter would leave behind.
+   */
+  const channelCarrying = (
+    kind: string,
+    agentId: string,
+    capable: (candidate: GatewayChannelAdapter) => boolean,
+  ): { adapter?: GatewayChannelAdapter; carriesOthers: boolean } => {
+    const candidates = startedChannels.filter((candidate) => candidate.name === kind && capable(candidate));
+    const contributed = channelContributions.list();
+    const hostClaims = (options.hostChannelClaims ?? []).filter((claim) => claim.kind === kind);
+    const carries = (candidate: GatewayChannelAdapter): boolean => {
+      const entry = contributed.find((contribution) => contribution.adapter === candidate);
+      if (entry) {
+        return entry.agents.includes(agentId);
+      }
+      return hostClaims.length === 0 || hostClaims.some((claim) => claim.agents.includes(agentId));
+    };
+    const adapter = candidates.find(carries);
+    return adapter ? { adapter, carriesOthers: false } : { carriesOthers: candidates.length > 0 };
+  };
+
+  /**
    * The write side of an addressable destination, through whichever
    * started channel serves its kind. Resolution happens per call against
    * the live adapter list, so a channel that failed to start is honestly
@@ -973,30 +1067,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     agentId: string,
     destination: ScheduleDestination,
   ): Promise<{ post(text: string): Promise<unknown> }> => {
-    const candidates = startedChannels.filter(
-      (candidate) => candidate.name === destination.channel && candidate.resolveOutbound,
-    );
-    // One kind may be served by several adapters carrying disjoint
-    // agents — two plugins, or the host's adapter beside a plugin's — and
-    // the one that speaks for this agent is the one whose claims include
-    // it: a contribution's agent list, or the host's declared claims for
-    // an adapter no plugin contributed. A host that declared no claims for
-    // the kind left its adapter unclaimed, and an unclaimed adapter speaks
-    // for anyone, as the single host adapter always did. A claim miss is
-    // a refusal, never the first adapter that happens to be running: that
-    // adapter posts under another agent's transport identity, and it is
-    // exactly what a failed start of the right adapter would leave behind.
-    const contributed = channelContributions.list();
-    const hostClaims = (options.hostChannelClaims ?? []).filter((claim) => claim.kind === destination.channel);
-    const carries = (candidate: GatewayChannelAdapter): boolean => {
-      const entry = contributed.find((contribution) => contribution.adapter === candidate);
-      if (entry) {
-        return entry.agents.includes(agentId);
-      }
-      return hostClaims.length === 0 || hostClaims.some((claim) => claim.agents.includes(agentId));
-    };
-    const adapter = candidates.find(carries);
-    if (!adapter?.resolveOutbound && candidates.length > 0) {
+    const { adapter, carriesOthers } = channelCarrying(destination.channel, agentId, (candidate) => candidate.resolveOutbound !== undefined);
+    if (!adapter?.resolveOutbound && carriesOthers) {
       throw new Error(
         `No running '${destination.channel}' channel carries agent ${agentId} — `
         + `the running ${destination.channel} adapters carry other agents, so a message from ${agentId} has no transport identity to post under.`,
@@ -1779,6 +1851,230 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const connection = await outboundFor(agentId, destination);
     await connection.post(text);
   }));
+  /**
+   * Credential requests waiting on a person, by request id.
+   *
+   * In memory on purpose: a request is a question somebody is being asked
+   * now, and a restart that forgot it only means the agent asks again. What
+   * matters is that the entry carries everything the answer needs, so a
+   * channel quoting the id back decides nothing about where the key goes.
+   */
+  const credentialRequests = new Map<string, {
+    agentId: string;
+    sessionId: string;
+    name: string;
+    scope: CredentialScope;
+    soulPath: string;
+  }>();
+
+  tools.register(createCredentialRequestTool(async (request, session) => {
+    const agentId = session.agent.id;
+    const soulPath = sources.get(agentId)?.soulPath;
+    if (soulPath === undefined) {
+      throw new Error(
+        `${session.agent.name} is the built-in agent and has no soul file to grant a credential in. `
+        + `Your operator can store one on the machine with \`stratus credential set ${request.name}\`.`,
+      );
+    }
+    if (!CREDENTIAL_NAME_PATTERN.test(request.name)) {
+      throw new Error(
+        `${JSON.stringify(request.name)} is not a credential name. Use letters, digits, dots, dashes, or underscores, `
+        + 'starting with a letter, the way the tool that needs it spells it: search.apiKey, github.token.',
+      );
+    }
+    // A key already stored is not something to ask a person for again: the
+    // form only adds, so it could only fail. Say what is actually missing.
+    const source = await namedCredentialSource(env, agentId, request.name);
+    const stored = source !== undefined;
+    const granted = session.agent.credentials?.includes(request.name) === true;
+    if (stored && granted) {
+      throw new Error(`You already hold ${request.name}; the tools that need it use it for you. There is nothing to ask for.`);
+    }
+    if (stored) {
+      throw new Error(
+        `${request.name} is already ${source === 'environment' ? "supplied by the daemon's environment" : 'stored'} but not granted to you. `
+        + 'Ask your operator to add it to the credentials list in your soul; a form would only refuse to store it again.',
+      );
+    }
+    const onMachine = `\`stratus credential set ${request.name}${request.scope === 'agent' ? ` --agent ${quoteShellArg(agentId)}` : ''}\``;
+    // Only a conversation a channel started has anywhere to show a form,
+    // and only a channel that renders one can show it: a scheduled or HTTP
+    // turn, or a channel with no form, would record a request nobody sees
+    // while the agent tells its user the operator was asked.
+    const kind = session.metadata?.channel;
+    const { adapter } = typeof kind === 'string'
+      ? channelCarrying(kind, agentId, (candidate) => candidate.requestCredential !== undefined)
+      : { adapter: undefined };
+    if (!adapter?.requestCredential || !session.metadata) {
+      throw new Error(
+        (typeof kind === 'string'
+          ? `This conversation's channel (${kind}) cannot show your operator a credential form here.`
+          : 'This conversation is not in a channel that can show your operator a form.')
+        + ` Ask them to store ${request.name} on the machine with ${onMachine} and grant it to you.`,
+      );
+    }
+    const requestId = randomUUID();
+    credentialRequests.set(requestId, { agentId, sessionId: session.id, name: request.name, scope: request.scope, soulPath });
+    // Delivered before it is announced, and dropped if delivery fails: a
+    // request whose post never landed has no button to answer it, so
+    // keeping it would leave it pending for good behind a tool result
+    // saying the operator was asked.
+    try {
+      await adapter.requestCredential({
+        sessionId: session.id,
+        agentId,
+        requestId,
+        name: request.name,
+        scope: request.scope,
+        ...(request.reason !== undefined ? { reason: request.reason } : {}),
+        metadata: session.metadata,
+      });
+    } catch (error) {
+      credentialRequests.delete(requestId);
+      throw new Error(
+        `Your request for ${request.name} could not be shown to your operator: ${error instanceof Error ? error.message : String(error)} `
+        + `Nothing is pending. Ask again later, or ask them to store it on the machine with ${onMachine}.`,
+      );
+    }
+    await bus.emit({
+      type: 'credential.requested',
+      sessionId: session.id,
+      agentId,
+      requestId,
+      name: request.name,
+      scope: request.scope,
+      ...(request.reason !== undefined ? { reason: request.reason } : {}),
+      metadata: session.metadata,
+    });
+    return { requestId };
+  }));
+
+  /**
+   * Requests an answer is being stored for now. Claimed before the first
+   * await: two approvers submitting one form at once would otherwise both
+   * start storing, and the second's add-only conflict would retire a
+   * request the first was about to settle as added.
+   */
+  const answering = new Set<string>();
+
+  const provideCredential = async (input: ProvideCredentialInput): Promise<ProvideCredentialResult> => {
+    const request = credentialRequests.get(input.requestId);
+    if (!request) {
+      return { ok: false, retired: true, message: 'That credential request is no longer pending. Ask the agent to request it again.' };
+    }
+    if (answering.has(input.requestId)) {
+      return { ok: false, message: 'Someone else\'s answer to this request is being stored right now. Wait a moment before trying again.' };
+    }
+    answering.add(input.requestId);
+    try {
+      return await answerCredentialRequest(input, request);
+    } finally {
+      answering.delete(input.requestId);
+    }
+  };
+
+  const answerCredentialRequest = async (
+    input: ProvideCredentialInput,
+    request: NonNullable<ReturnType<typeof credentialRequests.get>>,
+  ): Promise<ProvideCredentialResult> => {
+    // The agent must still be served from the file the request captured: a
+    // repointed default soul (same id, another file) replaces the source,
+    // and a grant landing in the old file would report a key the agent now
+    // running cannot use.
+    const served = sources.get(request.agentId)?.soulPath;
+    if (served !== request.soulPath) {
+      credentialRequests.delete(input.requestId);
+      return {
+        ok: false,
+        retired: true,
+        message: `${request.agentId} is no longer served from ${request.soulPath}, so nothing was stored. Ask ${request.agentId} to request it again.`,
+      };
+    }
+    // The soul the grant will land in must still be the requester's, and is
+    // checked before anything is stored: a file reassigned to another agent
+    // while the request waited would otherwise receive a key nobody meant
+    // to give it. `grantSoulCredential` checks again as it writes.
+    let owner: string;
+    try {
+      owner = (await loadSoulFile(request.soulPath)).agent.id;
+    } catch (error) {
+      return {
+        ok: false,
+        message: `${request.agentId}'s soul could not be read (${error instanceof Error ? error.message : String(error)}), so nothing was stored.`,
+      };
+    }
+    if (owner !== request.agentId) {
+      credentialRequests.delete(input.requestId);
+      return {
+        ok: false,
+        retired: true,
+        message: `${request.soulPath} now belongs to ${owner}, not ${request.agentId}, so nothing was stored. Ask ${request.agentId} to request it again.`,
+      };
+    }
+    try {
+      await addNamedCredential(env, {
+        name: request.name,
+        value: input.value,
+        ...(request.scope === 'agent' ? { agentId: request.agentId } : {}),
+      });
+    } catch (error) {
+      // A name stored since the request was made (another form for the
+      // same shared key, or the machine) is final under add-only: no value
+      // typed into this form can ever land, so the request is retired
+      // rather than left answering every submission with the same refusal.
+      if (error instanceof NamedCredentialExistsError) {
+        credentialRequests.delete(input.requestId);
+        return { ok: false, retired: true, message: error.message };
+      }
+      // Otherwise refused, not failed: the request stays pending, so a
+      // person who typed an empty value can try again from the same form.
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+    credentialRequests.delete(input.requestId);
+    // Stored first, granted second: a key nobody may use is recoverable by
+    // editing the soul, while a soul naming a key that was never stored
+    // fails every call that reaches for it. Announced either way, because
+    // the store already changed and a shared key is already usable.
+    //
+    // The served path is checked again under the soul lock, which roster
+    // reloads take too: a default repointed while the key was being
+    // written, or while the grant queued behind another soul edit, would
+    // otherwise be granted in a file the running agent no longer reads.
+    let granted = false;
+    let grantError: string | undefined;
+    try {
+      granted = await grantSoulCredential(request.soulPath, request.name, request.agentId, {
+        check: () => {
+          const servedNow = sources.get(request.agentId)?.soulPath;
+          if (servedNow !== request.soulPath) {
+            throw new Error(`${request.agentId} is now served from ${servedNow ?? 'no soul file'}, not ${request.soulPath}`);
+          }
+        },
+      });
+    } catch (error) {
+      grantError = error instanceof Error ? error.message : String(error);
+    }
+    await bus.emit({
+      type: 'credential.provided',
+      sessionId: request.sessionId,
+      agentId: request.agentId,
+      requestId: input.requestId,
+      name: request.name,
+      scope: request.scope,
+      ...(input.actor !== undefined ? { actor: input.actor } : {}),
+      ...(grantError !== undefined ? { grantError } : {}),
+    });
+    if (grantError !== undefined) {
+      return {
+        ok: false,
+        retired: true,
+        message: `${request.name} was stored, but could not be added to ${request.soulPath} `
+          + `(${grantError}). Add it to the soul's credentials list by hand.`,
+      };
+    }
+    return { ok: true, name: request.name, scope: request.scope, agentId: request.agentId, granted };
+  };
+
   tools.register(createDelegateTool({
     registry,
     dispatch: (input) => dispatchInternal({
@@ -3387,7 +3683,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     async reloadRoster() {
-      await reloadsInOrder(loadRoster);
+      // Under the soul lock, so a repoint cannot land between a credential
+      // grant's check of the served path and its write (`grantSoulCredential`).
+      await reloadsInOrder(() => withSoulFileLock(loadRoster));
       const roster = registry.list();
       log(`roster reloaded — ${roster.length} agent(s): ${roster.map((agent) => agent.name).join(', ')}`);
       return roster;
@@ -3592,6 +3890,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     resolveApproval,
+    provideCredential,
   };
 
   return gateway;
