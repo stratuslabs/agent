@@ -1310,19 +1310,23 @@ export const routes: Route[] = [
       try {
         budget = await context.gateway.budget();
       } catch (error) {
-        // A budget that has never been readable is unknown, not absent —
-        // the daemon is refusing model calls over it, and this says why.
+        // A budget that has never been readable, or spend that cannot be
+        // written, is unknown, not absent — the daemon is refusing budgeted
+        // calls over it, and this says why.
         if (error instanceof HostRefusalError) {
-          throw new ApiError(503, 'budget_unreadable', error.message);
+          throw new ApiError(503, 'budget_unavailable', error.message);
         }
         throw error;
       }
+      const unrecorded = context.gateway.unrecordedUsage();
       return {
         since,
         ...(until !== undefined ? { until } : {}),
         ...(agentId !== undefined ? { agent: agentId } : {}),
         // Provider-reported counts, bucket by bucket — never priced here.
         usage: rows,
+        // Spent and not yet in the rows above: never silently missing.
+        ...(unrecorded.calls !== 0 ? { unrecorded: { calls: Number.isNaN(unrecorded.calls) ? null : unrecorded.calls, ...(unrecorded.error ? { error: unrecorded.error } : {}) } } : {}),
         ...(budget ? { budget } : {}),
       };
     },

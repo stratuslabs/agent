@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { totalTokenUsage, type StratusEvent, type UsageRecord } from '@stratusagent/core';
 import { fleetDbIn } from '@stratusagent/state';
@@ -455,5 +456,89 @@ test('usage held across a restart is written once the ledger takes it, and refus
     }
   } finally {
     saboteur.close();
+  }
+});
+
+test('a primary that spent tokens and then failed is counted before the fallback is allowed to spend more', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeConfig(home, {
+    provider: 'metered',
+    model: 'primary',
+    fallbackProvider: 'metered',
+    fallbackModel: 'backup',
+    budget: { daily: 50 },
+  });
+  // A package on disk for the manifest, and its module handed over by the host.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-deploy-pkg-'));
+  await mkdir(path.join(root, 'dist'), { recursive: true });
+  await writeFile(path.join(root, 'package.json'), JSON.stringify({
+    name: 'stratus-plugin-metered',
+    stratus: { pluginVersion: 1, contributes: { providers: [{ name: 'metered' }] } },
+  }));
+  let fallbackCalls = 0;
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-metered': { enabled: true } },
+    pluginHost: {
+      resolve: () => pathToFileURL(path.join(root, 'dist', 'index.js')).href,
+      import: async () => ({
+        createPlugin: () => ({
+          name: 'metered',
+          setup(context: { providers?: { register(contribution: unknown): void } }) {
+            context.providers?.register({
+              name: 'metered',
+              streams: false,
+              create: (selection: { model?: string }) => ({
+                name: 'metered',
+                async generate(request: { onUsage?: (usage: object) => void }) {
+                  if (selection.model === 'primary') {
+                    // Billed, then broken: the tokens are spent all the same.
+                    request.onUsage?.({ provider: 'metered', model: 'primary', inputTokens: 100 });
+                    throw new Error('upstream 500');
+                  }
+                  fallbackCalls += 1;
+                  return { parts: [{ type: 'text', text: 'the fallback answered' }], usage: { provider: 'metered', model: 'backup', inputTokens: 1 } };
+                },
+              }),
+            });
+          },
+        }),
+      }),
+    },
+  });
+  await gateway.start();
+  try {
+    await assert.rejects(
+      gateway.dispatch({ sessionId: 'f-1', agentId: 'ava', userMessage: 'hi' }),
+      /This Stratus install has used its daily model budget \(100 of 50/,
+    );
+    assert.equal(fallbackCalls, 0);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a damaged line in held usage refuses budgeted calls rather than being dropped', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeConfig(home, { budget: { daily: 1_000_000 } });
+  // What a crash mid-append leaves: a record cut short.
+  await writeFile(path.join(home, '.stratus', 'usage-held.jsonl'), '{"id":"e-1","at":"2026-09-29T00:00:00.000Z","agentId":"ava","sess');
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+    idleTimeoutMs: 0,
+  });
+  await gateway.start();
+  try {
+    await assert.rejects(
+      gateway.dispatch({ sessionId: 'd-1', agentId: 'ava', userMessage: 'hi' }),
+      /line 1 of .*usage-held\.jsonl is damaged/,
+    );
+    await assert.rejects(gateway.budget(), /Spending could not be recorded/);
+    assert.equal(Number.isNaN(gateway.unrecordedUsage().calls), true);
+  } finally {
+    await gateway.stop();
   }
 });

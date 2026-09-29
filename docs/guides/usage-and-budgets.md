@@ -109,7 +109,9 @@ Two properties are worth knowing before you rely on a number:
 - **One call of overshoot per turn in flight.** What a call will cost is
   not known until it returns, so a budget can only refuse the call *after*
   the one that reached it — and turns running at the same moment each get
-  that one call, since each was allowed before the others reported. For a
+  that one call, since each was allowed before the others reported. A
+  fallback is not a second call: what a failed primary spent is counted
+  before the fallback is allowed. For a
   harness provider (a Claude subscription through Claude Code, or Codex)
   "one call" is one whole turn, since its inner steps happen inside it.
   Set a limit with that headroom in mind.
@@ -120,7 +122,10 @@ Two properties are worth knowing before you rely on a number:
   allowing calls. The hold survives a restart, so a restarted daemon still
   refuses until the held usage is written, and each held call is counted
   once. A disk too full for even that one-line append keeps it in memory
-  only, where a crash would lose it. The turn is refused with a sentence
+  only, where a crash would lose it; a line of the file cut short by a
+  crash is refused, never dropped, until someone repairs it. While any
+  usage is held, `stratus usage` says so and exits non-zero, and
+  `GET /usage` carries `unrecorded`. The turn is refused with a sentence
   saying so, and calls resume once the held usage is written.
 - **The fallback never answers instead.** A spent budget is not a model
   failing, so a configured `fallbackModel` does not take over — it would

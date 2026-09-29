@@ -1,4 +1,5 @@
 import { stat } from 'node:fs/promises';
+import path from 'node:path';
 
 import {
   budgetStatus,
@@ -66,7 +67,17 @@ export const runUsage = async (
   } catch {
     exists = false;
   }
-  const { SqliteUsageLedger } = await import('@stratusagent/gateway');
+  const { createUsageHold, SqliteUsageLedger, USAGE_HOLD_FILENAME } = await import('@stratusagent/gateway');
+  // Spend the daemon could not write yet sits in the hold file. Counted and
+  // reported, never drained from here: the daemon may be appending to it at
+  // this moment, and clearing it from a second process would lose a line.
+  let held: { calls: number } | { error: string };
+  try {
+    held = { calls: createUsageHold(stratusHomePath(env), path.join(stratusHomePath(env), USAGE_HOLD_FILENAME)).read().length };
+  } catch (error) {
+    held = { error: error instanceof Error ? error.message : String(error) };
+  }
+  const unresolved = 'error' in held || held.calls > 0;
   const ledger = exists ? new SqliteUsageLedger(fleetDbPath(env), { stateHome: stratusHomePath(env) }) : undefined;
   let rows: ReturnType<NonNullable<typeof ledger>['totals']> = [];
   let limits: BudgetLimitStatus[] = [];
@@ -91,8 +102,17 @@ export const runUsage = async (
       usage: rows,
       ...(budget ? { budget: { budget, limits } } : {}),
       ...(read.status === 'unreadable' ? { budgetUnreadable: read.error } : {}),
+      ...(unresolved ? { unrecorded: held } : {}),
     }, null, 2));
-    return read.status === 'unreadable' ? 1 : 0;
+    return read.status === 'unreadable' || unresolved ? 1 : 0;
+  }
+  if (unresolved) {
+    writeLine(
+      streams.stderr,
+      'error' in held
+        ? `Held usage could not be read (${held.error}), so the totals below may be missing spend. The daemon refuses budgeted calls until it is resolved.`
+        : `${held.calls} call(s) of spend are held in ${USAGE_HOLD_FILENAME}, not yet in the ledger, so the totals and budget below are missing them. The daemon writes them — and refuses budgeted calls until it can.`,
+    );
   }
 
   writeLine(streams.stdout, `Usage since ${since.slice(0, 10)}${until !== undefined ? `, until ${until.slice(0, 10)}` : ''} (tokens, as providers reported them):`);
@@ -113,7 +133,7 @@ export const runUsage = async (
   }
   if (!budget) {
     writeLine(streams.stdout, 'No budget is set. A `budget` block in ~/.stratus/config.json caps spend per UTC day or month.');
-    return 0;
+    return unresolved ? 1 : 0;
   }
   writeLine(streams.stdout, 'Budget (weighted tokens):');
   for (const limit of limits) {
@@ -124,5 +144,5 @@ export const runUsage = async (
       + (limit.reached ? '  — reached: model calls in this scope are refused' : ''),
     );
   }
-  return 0;
+  return unresolved ? 1 : 0;
 };

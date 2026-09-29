@@ -79,7 +79,9 @@ import { ShardedSessionStore } from './sessions.ts';
 
 export { SqliteLeaseStore } from './leases.ts';
 export {
+  createUsageHold,
   SqliteUsageLedger,
+  USAGE_HOLD_FILENAME,
   type UsageLedgerEntry,
   type UsageQuery,
   type UsageTotalsRow,
@@ -172,6 +174,7 @@ import {
   createLeasePolicyRefresh,
   createLeaseResolver,
   findBudgetBreach,
+  weightedTokens,
   readGlobalConfigBlock,
   readTrustedConfigBlock,
   validateLeaseGrant,
@@ -894,10 +897,17 @@ export interface Gateway {
    * The budget in force — the trusted config's `budget` block as the next
    * provider call would read it — with every limit's spend so far, or
    * undefined when none is configured. Throws a `HostRefusalError` while
-   * the config has never been readable: then whether a limit exists is
-   * unknown, and model calls are refused over it.
+   * the config has never been readable, or while spent usage cannot be
+   * written: then where the budget stands is unknown, and budgeted model
+   * calls are refused over it.
    */
   budget(): Promise<GatewayBudgetStatus | undefined>;
+  /**
+   * Usage spent but not yet in the ledger — held after a failed write —
+   * after one more attempt to write it. `calls` is NaN when the hold file
+   * itself cannot be read; `error` says why the write still fails.
+   */
+  unrecordedUsage(): { calls: number; error?: string };
   /** Every credential lease this home has granted, oldest first, then the live delegated sub-leases. */
   leases(filter?: { agentId?: string }): CredentialLease[];
   /** Grant a lease. Validated by `validateLeaseGrant`; throws its sentence. */
@@ -1128,6 +1138,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // as the disk stayed full. Held rows keep their original timestamp, so a
   // late write still lands in the window the tokens were spent in.
   const unrecordedUsage: UsageLedgerEntry[] = [];
+  /**
+   * How many of each session's usage records have been announced, so a
+   * budget check can count the ones that have not. The runner announces
+   * after every attempt, which leaves exactly one window: a primary that
+   * reported usage and then threw, with the fallback's check running inside
+   * the same `generate`, before the announcement. Those tokens were spent
+   * and are on the session, not in the ledger — without this, the fallback
+   * would be judged against a total missing them.
+   *
+   * Seeded at a session's first check in this process with everything it
+   * already holds (announced before that `generate` began, by this process
+   * or the last), then advanced by each announcement.
+   */
+  const announcedUsage = new Map<string, number>();
   const usageHold = createUsageHold(stateDir, path.join(stateDir, USAGE_HOLD_FILENAME));
   const flushUsage = (): Error | undefined => {
     while (unrecordedUsage.length > 0) {
@@ -1165,6 +1189,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const at = new Date().toISOString();
     for (const record of event.records) {
       unrecordedUsage.push({ id: newUsageEntryId(), at, agentId: event.agentId, sessionId: event.sessionId, record });
+    }
+    const announced = announcedUsage.get(event.sessionId);
+    if (announced !== undefined) {
+      announcedUsage.set(event.sessionId, announced + event.records.length);
     }
     const failed = flushUsage();
     if (failed) {
@@ -1267,10 +1295,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           + 'The operator needs to free the disk or fix the home; calls resume once the held usage is written.',
         );
       }
+      const records = request.session.usage ?? [];
+      const announced = announcedUsage.get(request.session.id) ?? records.length;
+      announcedUsage.set(request.session.id, announced);
+      const unannounced = records.slice(announced)
+        .reduce((sum, record) => sum + weightedTokens(record, budget.weights), 0);
       const breach = findBudgetBreach(
         budget,
         agentId,
-        (since, scopeAgent) => usageLedger.spent(since, scopeAgent, budget.weights),
+        // The unannounced records are this session's, so this agent's and
+        // the home's, and spent now — inside every window.
+        (since, scopeAgent) => usageLedger.spent(since, scopeAgent, budget.weights) + unannounced,
         new Date(),
       );
       if (breach) {
@@ -4183,11 +4218,35 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     resolveApproval,
     provideCredential,
-    usage: (query) => usageLedger.totals(query),
+    // Both drain held usage before answering, so a report never trails the
+    // spend the daemon itself is judging by.
+    usage(query) {
+      flushUsage();
+      return usageLedger.totals(query);
+    },
+    unrecordedUsage() {
+      const failed = flushUsage();
+      let held = 0;
+      try {
+        held = usageHold.read().length;
+      } catch {
+        held = Number.NaN;
+      }
+      return {
+        calls: unrecordedUsage.length + held,
+        ...(failed ? { error: failed.message } : {}),
+      };
+    },
     async budget() {
       const budget = await currentBudget();
       if (!budget) {
         return undefined;
+      }
+      const unwritten = flushUsage();
+      if (unwritten) {
+        throw new HostRefusalError(
+          `Spending could not be recorded (${unwritten.message}), so where the budget stands is unknown and budgeted model calls are being refused until it is written.`,
+        );
       }
       return {
         budget,

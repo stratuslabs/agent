@@ -250,17 +250,23 @@ export const createUsageHold = (stateHome: string, filePath: string) => ({
       }
       throw error;
     }
-    // A line cut short by a crash mid-append is the one that did not land;
-    // everything before it did.
+    // A line that does not parse is refused, never skipped: a crash or a
+    // full disk mid-append leaves a call's record cut short, and dropping
+    // it on the next drain would lose spend that happened. Whether that
+    // record can be recovered is a person's call, so the drain stops and
+    // says where.
     const entries: UsageLedgerEntry[] = [];
-    for (const line of text.split('\n')) {
+    for (const [index, line] of text.split('\n').entries()) {
       if (line.trim().length === 0) {
         continue;
       }
       try {
         entries.push(JSON.parse(line) as UsageLedgerEntry);
       } catch {
-        continue;
+        throw new Error(
+          `line ${index + 1} of ${filePath} is damaged, so the usage it held cannot be counted. `
+          + 'Repair or remove that line once you have accounted for the call it recorded.',
+        );
       }
     }
     return entries;

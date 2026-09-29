@@ -152,3 +152,18 @@ test('stratus usage reports an unreadable budget as unknown, never as no budget'
   assert.equal(json.code, 1);
   assert.equal(typeof (JSON.parse(json.stdout) as { budgetUnreadable?: string }).budgetUnreadable, 'string');
 });
+
+test('stratus usage says when spend is held outside the ledger, and exits non-zero', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'usage-held.jsonl'),
+    `${JSON.stringify({ id: 'e-1', at: new Date().toISOString(), agentId: 'ava', sessionId: 's', record: { turnId: 's:turn:1', provider: 'openai', inputTokens: 9 } })}\n`,
+  );
+  const text = await run(home, ['usage']);
+  assert.equal(text.code, 1);
+  assert.match(text.stderr, /1 call\(s\) of spend are held in usage-held\.jsonl, not yet in the ledger/);
+  const json = await run(home, ['usage', '--format', 'json']);
+  assert.equal(json.code, 1);
+  assert.deepEqual((JSON.parse(json.stdout) as { unrecorded?: unknown }).unrecorded, { calls: 1 });
+});
