@@ -1,7 +1,7 @@
 # stratusd on one machine, from this checkout. From this directory:
 #
 #   cp stratusd.env.example stratusd.env    # then fill in a provider key
-#   docker compose up -d --build
+#   docker compose up -d --build --wait      # returns once `stratus health` passes
 #   docker compose exec stratusd stratus health
 #
 # The whole recipe — first run, Slack, logs, backups, upgrades, hardening —
@@ -56,6 +56,9 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 60s
+      # Checked this often until the first success, so `up --wait` returns
+      # as soon as the daemon serves rather than after a full interval.
+      start_interval: 2s
       retries: 3
     # json-file keeps everything forever unless told otherwise. stdout is
     # the structured log (--log-format json), so it is also what a logging

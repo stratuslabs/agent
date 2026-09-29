@@ -22,7 +22,9 @@ stratus service uninstall
 ```
 
 `stratus setup` installs it for you at Save & finish unless you opt out, so
-most people never run these by hand. What they get:
+most people never run these by hand. (On a server nobody logs in to, run it
+as a system service or in Docker instead — [Deployment](./deployment.md).)
+What they get:
 
 - **macOS** — a LaunchAgent at
   `~/Library/LaunchAgents/com.stratusagent.stratusd.plist`
@@ -133,7 +135,9 @@ start without a login, but it runs as a system user, which breaks
 LaunchAgent is the right choice.) The systemd equivalent is
 `loginctl enable-linger` on a machine you don't stay logged in to. Setup
 says both in the menu rather than leaving them to be discovered after a
-reboot.
+reboot. A server is better served by a unit that starts at boot as its own
+account: [`deploy/systemd/stratusd.service`](../../deploy/systemd/stratusd.service),
+or the Docker image — see [Deployment](./deployment.md).
 
 ## One daemon per home
 
