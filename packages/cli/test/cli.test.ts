@@ -13983,6 +13983,34 @@ test('serve --log-format json reports a log file it cannot write as a record, ne
   assert.doesNotMatch(stderr, /could not write the log file/);
 });
 
+test('serve --log-format json keeps stdout JSON before the daemon starts: a refused start and a bad flag are records too', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-json-early-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const parse = (stdout: string) => stdout.split('\n').filter((line) => line.length > 0).map((line) => {
+    try {
+      return JSON.parse(line) as { level: string; msg?: string };
+    } catch {
+      return assert.fail(`stdout carried a line that is not JSON: ${line}`);
+    }
+  });
+
+  // A home stamped by a newer build: refused in runCli, long before serve's own logger exists.
+  await writeFile(stateFilePath({ homeDir: home }), JSON.stringify({ schemaVersion: 1_000, applied: [] }));
+  const refused = createStreams();
+  assert.equal(await runCli({ argv: ['serve', '--log-format', 'json'], streams: refused.streams, env }), 1);
+  assert.equal(refused.output.stderr, '');
+  assert.ok(parse(refused.output.stdout).some((record) => record.level === 'warn' && /Refusing `stratus serve`/.test(String(record.msg))));
+
+  // A flag that does not parse: one record naming it, and no help text.
+  const bad = createStreams();
+  assert.equal(await runCli({ argv: ['serve', '--log-format', 'json', '--no-such-flag'], streams: bad.streams, env }), 1);
+  assert.equal(bad.output.stderr, '');
+  const records = parse(bad.output.stdout);
+  assert.equal(records.length, 1, bad.output.stdout);
+  assert.match(String(records[0]?.msg), /^Error: .*--no-such-flag/);
+});
+
 test('stratus health reports a serving daemon in one line, or as JSON', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-health-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
