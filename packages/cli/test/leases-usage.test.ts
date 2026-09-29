@@ -92,6 +92,23 @@ test('stratus lease grants, lists, and revokes on fleet.db with no daemon runnin
   assert.equal(JSON.parse((await run(home, ['lease', 'list', '--all', '--format', 'json'])).stdout).leases.length, 1, 'the typo left no row');
 });
 
+test('stratus lease grant checks the roster the daemon\'s --config serves, not the one discovery finds', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A default soul outside ~/.stratus/agents, named only by the daemon's config.
+  const soul = path.join(home, 'zed.md');
+  await writeFile(soul, '---\nname: Zed\nid: zed\n---\n\nYou are Zed.\n');
+  const daemonConfig = path.join(home, 'daemon.json');
+  await writeFile(daemonConfig, JSON.stringify({ soul }));
+  const grant = ['lease', 'grant', 'zed', 'github.token', '--for', '1h', '--reason', 'r'];
+  const without = await run(home, grant);
+  assert.equal(without.code, 1);
+  assert.match(without.stderr, /no agent has id zed/);
+  const withConfig = await run(home, [...grant, '--config', daemonConfig]);
+  assert.equal(withConfig.code, 0, withConfig.stderr);
+  assert.match(withConfig.stdout, /Granted lease_[0-9a-f]+: zed may use github\.token/);
+});
+
 test('stratus usage sums the ledger and says where the budget stands', async () => {
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });

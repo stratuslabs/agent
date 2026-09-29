@@ -204,6 +204,8 @@ export interface ParsedLeaseCommand {
   leaseId?: string;
   /** list: include leases that have ended. */
   all?: boolean;
+  /** grant: the daemon's `--config`, so the roster checked is the one it serves. */
+  configPath?: string;
   format: 'text' | 'json';
 }
 
@@ -743,6 +745,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     let duration: string | undefined;
     let maxUses: number | undefined;
     let reason: string | undefined;
+    let configPath: string | undefined;
     let all = false;
     for (let index = 0; index < tokens.length; index += 1) {
       const token = tokens[index];
@@ -780,6 +783,11 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         index += 1;
         continue;
       }
+      if (token === '--config' && action === 'grant') {
+        configPath = readOptionValue(tokens, index, '--config');
+        index += 1;
+        continue;
+      }
       if (token === '--agent' && action === 'list') {
         agentId = readOptionValue(tokens, index, '--agent');
         index += 1;
@@ -797,7 +805,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     if (action === 'grant') {
       const [grantAgent, credential, ...extra] = positional;
       if (!grantAgent || !credential || extra.length > 0) {
-        throw new Error('lease grant takes an agent and a credential: stratus lease grant <agent> <credential> --for 2h --reason "…" [--uses 20]');
+        throw new Error('lease grant takes an agent and a credential: stratus lease grant <agent> <credential> --for 2h --reason "…" [--uses 20] [--config <path>]');
       }
       if (!duration) {
         throw new Error('A lease has to end: give --for with a duration like 30m, 2h, or 7d.');
@@ -813,6 +821,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         duration,
         reason,
         ...(maxUses !== undefined ? { maxUses } : {}),
+        ...(configPath !== undefined ? { configPath } : {}),
         format,
       };
     }

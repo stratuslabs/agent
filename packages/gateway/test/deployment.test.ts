@@ -730,6 +730,37 @@ test('a marking cut off before its rename is finished at the next start, and a f
   }
 });
 
+test('a complete marker whose settle could not write at start is cleared by the first flush that can', async () => {
+  const home = await newHome();
+  const stateDir = path.join(home, '.stratus');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const markerPath = path.join(stateDir, 'usage-unsettled');
+  const lost = { id: 'call-late', at: new Date().toISOString(), agentId: 'ava', sessionId: 's-gone', record: { turnId: 's-gone:turn:1', provider: 'openai', inputTokens: 5 } };
+  await writeFile(markerPath, `${JSON.stringify(lost)}\n`);
+  // The ledger refuses writes as the daemon starts: the settle cannot land.
+  new SqliteUsageLedger(fleetDbIn(stateDir)).close();
+  const { DatabaseSync } = await import('node:sqlite');
+  const saboteur = new DatabaseSync(fleetDbIn(stateDir));
+  saboteur.exec("CREATE TRIGGER full_disk BEFORE INSERT ON usage BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+    idleTimeoutMs: 0,
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    assert.equal(existsSync(markerPath), true, 'the settle could not write, so the marker stands');
+    saboteur.exec('DROP TRIGGER full_disk');
+    // The next flush writes the marker's call, and with it the marker goes.
+    gateway.unrecordedUsage();
+    assert.equal(existsSync(markerPath), false);
+    assert.equal(gateway.usage()[0]?.calls, 1);
+  } finally {
+    saboteur.close();
+    await gateway.stop();
+  }
+});
+
 test('usage totals are one row per agent, however the id was cased when each call was made', () => {
   const ledger = new SqliteUsageLedger(fleetDbIn(path.join(os.tmpdir(), `stratus-ledger-${process.pid}-${Date.now()}`)));
   try {

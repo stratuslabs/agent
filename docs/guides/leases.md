@@ -53,7 +53,8 @@ stratus lease revoke lease_3f9c0a1b2c3d4e5f
 | `--reason` | Required. The audit trail without a reason is a list of ids |
 
 The agent has to be one on the roster (`stratus agents`), matched
-case-insensitively. A grant to an id nothing runs as, a typo above all, is
+case-insensitively, and read under the daemon's config: pass
+`--config <path>` if the daemon was started with one. A grant to an id nothing runs as, a typo above all, is
 refused rather than recorded, since it could never be used and would leave
 the agent it was meant for still refused.
 

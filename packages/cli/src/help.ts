@@ -171,7 +171,9 @@ Commands:
   lease grant      Let one agent use a credential listed in the config's
                    leases.credentials, for a while: stratus lease grant
                    <agent> <credential> --for 2h [--uses 20] --reason "…".
-                   Every use is counted and logged; a sign-in is leased as
+                   The agent must be on the roster (--config <path>: the
+                   daemon's, if it was given one). Every use is counted
+                   and logged; a sign-in is leased as
                    provider:anthropic, provider:openai, or provider:codex
   lease list       Active leases (--all adds ended ones, --agent, --format
                    json; also: stratus leases)

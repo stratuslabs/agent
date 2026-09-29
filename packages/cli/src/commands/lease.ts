@@ -67,7 +67,9 @@ export const runLease = async (
       // for an id nothing runs as would report granted and sit in the record
       // as though it meant something, while the agent it was meant for stays
       // refused. The same check `POST /leases` makes.
-      const roster = await listAgentSummaries(env);
+      // Under the config the daemon was started with, when it was given one:
+      // a default soul it names is served, and is on the roster, only there.
+      const roster = await listAgentSummaries(env, () => {}, command.configPath);
       if (!roster.some((agent) => foldedAgentId(agent.id) === foldedAgentId(grant.agentId))) {
         writeLine(streams.stderr, `Error: no agent has id ${grant.agentId}, so a lease granted to it would never be used. \`stratus agents\` lists the roster.`);
         return 1;

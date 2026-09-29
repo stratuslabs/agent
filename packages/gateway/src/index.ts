@@ -1177,6 +1177,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * takes it back: it stays until a settle, or the operator, clears it.
    */
   let foreignMarker = false;
+  /**
+   * A complete marker whose settle at start could not write its calls: they
+   * wait in `unrecordedUsage` like any held spend, and the first flush that
+   * writes them all clears the marker. Without this it would stand until a
+   * restart, refusing every budgeted call over spend already in the ledger.
+   */
+  let settleOnFlush = false;
   const flushUsage = (): Error | undefined => {
     while (unrecordedUsage.length > 0) {
       try {
@@ -1228,6 +1235,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
     } catch (error) {
       return error instanceof Error ? error : new Error(String(error));
+    }
+    if (settleOnFlush) {
+      try {
+        usageHold.settle();
+        settleOnFlush = false;
+        foreignMarker = false;
+        log('usage ledger: settled what the last stratusd could not write, now that the ledger takes it');
+        usageHold.arm();
+      } catch {
+        // Tried again at the next flush; the marker keeps refusing meanwhile.
+      }
     }
     return undefined;
   };
@@ -1417,6 +1435,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     const failed = flushUsage();
     if (failed) {
+      // A complete marker is cleared by the first flush that writes it; an
+      // incomplete one waits for the operator either way.
+      settleOnFlush = marked.complete;
       warn(`usage ledger: could not settle what the last stratusd left unwritten (${failed.message}); budgeted calls stay refused until it is written`);
       return;
     }
