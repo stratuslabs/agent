@@ -53,7 +53,7 @@ import {
   type RuntimeConfig,
   type IgnoredUntrustedConfig,
   createLeaseBroker,
-  leaseUseEvent,
+  reportLeaseUse,
   createLeasePolicyRefresh,
   createLeaseResolver,
   fleetDbPath,
@@ -296,12 +296,10 @@ export const createAgentRuntime = async (
     // run's bus, so `--events` and an `onEvent` consumer see which session
     // and which tool spent each use of a lease.
     onUse: (record) => {
-      const event = leaseUseEvent(record);
-      if (event) {
-        void bus.emit(event);
-      } else if (record.outcome === 'refused') {
-        writeLine(streams.stderr, `Warning: ${record.reason ?? `no lease for ${record.credential}`}`);
-      }
+      reportLeaseUse(record, {
+        emit: (event) => void bus.emit(event),
+        note: (line, refused) => writeLine(streams.stderr, refused ? `Warning: ${line}` : line),
+      });
     },
   });
   const refreshLeases = createLeasePolicyRefresh({

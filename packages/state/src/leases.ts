@@ -247,6 +247,31 @@ export const leaseUseEvent = (record: LeaseUseRecord): StratusEvent | undefined 
       ...(record.reason !== undefined ? { reason: record.reason } : {}),
     };
 
+/**
+ * Where a host sends each lease use — the one rule for the daemon and for
+ * `stratus run` and `stratus chat` alike. With a session, the
+ * `credential.leased` event; without one (a plugin that resolves through
+ * the two-argument `resolve`, predating the use context) a line, allowed
+ * uses as well as refusals, since the audit a lease promises is every use,
+ * not only the ones that come with a session.
+ */
+export const reportLeaseUse = (
+  record: LeaseUseRecord,
+  sinks: { emit: (event: StratusEvent) => void; note: (line: string, refused: boolean) => void },
+): void => {
+  const event = leaseUseEvent(record);
+  if (event) {
+    sinks.emit(event);
+    return;
+  }
+  sinks.note(
+    `lease ${record.outcome}: ${record.credential} for ${record.agentId}`
+      + (record.leaseId !== undefined ? ` (${record.leaseId})` : '')
+      + (record.reason !== undefined ? ` — ${record.reason}` : ''),
+    record.outcome === 'refused',
+  );
+};
+
 export interface LeaseBrokerOptions {
   store: LeaseStore;
   /** `leases.credentials` — the names that need a lease. Replaced later with `setLeased`. */

@@ -131,20 +131,19 @@ Two properties are worth knowing before you rely on a number:
   would keep allowing calls. The hold survives a restart, so a restarted daemon still
   refuses until the held usage is written, and each held call is counted
   once. A disk too full for even that one-line append keeps it in memory
-  only, and at that moment leaves `~/.stratus/usage-unsettled` — a rename
-  of an empty file made at start, so it needs no room — which stays if the
-  daemon stops or crashes before the usage is written, and is taken back
-  if it is written. A stop in that state also writes the calls out whole
-  as a warning, which reaches the service manager's log (journald,
-  `docker logs`). The next daemon to start with room to write settles the
-  ledger from the saved sessions, where those calls' records usually are,
-  removes the marker, and refuses budgeted calls until it has. A crash
-  between a call and its session's save can take the record with it; a
-  settle that recovers none of the missing spend leaves the marker, and
+  only, and at that moment writes the calls into
+  `~/.stratus/usage-unsettled` — into space a file made at start already
+  holds, then a rename, so neither needs room the disk no longer has. The
+  marker stays if the daemon stops or crashes before the usage is written,
+  and is taken back if it is written; a stop in that state also writes the
+  calls out as a warning, which reaches the service manager's log
+  (journald, `docker logs`). The next daemon to start with room to write
+  puts every call the marker names in the ledger, with whatever the saved
+  sessions add, removes it, and refuses budgeted calls until it has. A
+  marker that cannot name every call — more than its reserved space holds
+  (about two hundred), or never armed and so empty — stays after that, and
   budgeted calls stay refused until you remove `~/.stratus/usage-unsettled`
-  having accounted for it. What a settle cannot tell is a partial
-  recovery — at most one call per turn that was in flight, since every
-  budgeted call is refused from the moment the spend goes unwritten. A line
+  having accounted for the rest. A line
   of the hold file cut short by a crash is refused, never dropped, until
   someone repairs it. While any
   usage is held, `stratus usage` says so and exits non-zero, and

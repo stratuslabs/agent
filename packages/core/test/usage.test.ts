@@ -19,11 +19,11 @@ import {
 const AGENT = { id: 'accountant', name: 'Accountant' };
 
 /**
- * Records without the id the runner gives each one, which is random — the
- * id's own properties are asserted where it matters.
+ * Records without the id and time the runner gives each one, which vary
+ * from run to run — their own properties are asserted where it matters.
  */
-const withoutIds = (records: readonly UsageRecord[] | undefined): Array<Omit<UsageRecord, 'id'>> | undefined =>
-  records?.map(({ id: _id, ...record }) => record);
+const withoutIds = (records: readonly UsageRecord[] | undefined): Array<Omit<UsageRecord, 'id' | 'at'>> | undefined =>
+  records?.map(({ id: _id, at: _at, ...record }) => record);
 
 /** Records every completion event's usage, in emission order. */
 const createCompletionSink = (bus: EventBus): UsageRecord[][] => {
@@ -328,7 +328,7 @@ test('a bucket reported as an explicit undefined is written as absent', async ()
     provider: createReportingProvider('fake', [{ text: 'done', usage }]),
   }).run({ sessionId: 'usage-10', agent: AGENT, userMessage: 'hello' });
 
-  assert.deepEqual(Object.keys(session.usage?.[0] ?? {}), ['id', 'turnId', 'provider', 'inputTokens']);
+  assert.deepEqual(Object.keys(session.usage?.[0] ?? {}), ['id', 'at', 'turnId', 'provider', 'inputTokens']);
 });
 
 test('a resumed session adds to its stored usage rather than replacing it', async () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { UsageRecord } from '@stratusagent/core';
@@ -62,11 +62,6 @@ const USAGE_TABLE = `
   );
   CREATE INDEX IF NOT EXISTS usage_at ON usage (at);
   CREATE INDEX IF NOT EXISTS usage_agent_at ON usage (agent_key, at);
-  CREATE TABLE IF NOT EXISTS usage_settlements (
-    marker TEXT PRIMARY KEY,
-    settled_at TEXT NOT NULL,
-    recovered INTEGER NOT NULL
-  );
 `;
 
 const whereFor = (query: UsageQuery): { clause: string; params: string[] } => {
@@ -210,49 +205,6 @@ export class SqliteUsageLedger {
     return row?.spent ?? 0;
   }
 
-  /**
-   * Write a settle's entries and, in the same transaction, what it has
-   * recovered for this marker so far — every attempt at it added up.
-   * Answers that total. Kept beside the rows it counts so the two cannot
-   * disagree: a settle that commits and then dies before removing the
-   * marker leaves the next one a total that says the spend was found,
-   * where a count of rows it newly inserted would say zero.
-   */
-  settle(entries: readonly UsageLedgerEntry[], marker: string, at: string): number {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      let recovered = 0;
-      const insert = this.db.prepare(`INSERT OR IGNORE INTO usage (entry_id, at, agent_id, agent_key, session_id, turn_id, provider, model,
-        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-      for (const entry of entries) {
-        const { record } = entry;
-        recovered += Number(insert.run(
-          entry.id,
-          entry.at,
-          entry.agentId,
-          foldedAgentId(entry.agentId),
-          entry.sessionId,
-          record.turnId,
-          record.provider,
-          record.model ?? null,
-          record.inputTokens ?? null,
-          record.outputTokens ?? null,
-          record.cacheReadTokens ?? null,
-          record.cacheWriteTokens ?? null,
-        ).changes);
-      }
-      this.db.prepare(`INSERT INTO usage_settlements (marker, settled_at, recovered) VALUES (?, ?, ?)
-        ON CONFLICT(marker) DO UPDATE SET settled_at = excluded.settled_at, recovered = recovered + excluded.recovered`)
-        .run(marker, at, recovered);
-      const row = this.db.prepare('SELECT recovered FROM usage_settlements WHERE marker = ?').get(marker) as { recovered: number } | undefined;
-      this.db.exec('COMMIT');
-      return row?.recovered ?? recovered;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-  }
-
   close(): void {
     this.db.close();
   }
@@ -267,8 +219,41 @@ export const USAGE_HOLD_FILENAME = 'usage-held.jsonl';
  * calls while it exists, and removes it once it has settled the ledger.
  */
 export const USAGE_UNSETTLED_FILENAME = 'usage-unsettled';
-/** The empty file made ahead of time, while there is room, that becomes the marker by a rename. */
+/** The file made ahead of time, while there is room, that becomes the marker by a rename. */
 const USAGE_UNSETTLED_ARMED_FILENAME = 'usage-unsettled.armed';
+/**
+ * The room the armed file holds for the calls a marker names: some two
+ * hundred. Allocated at start, so writing them later overwrites blocks the
+ * file already has and needs none the full disk no longer has.
+ */
+const USAGE_UNSETTLED_RESERVE_BYTES = 64 * 1024;
+/** The last line of a marker whose calls did not all fit: the list is not the whole of what is missing. */
+const INCOMPLETE_LINE = JSON.stringify({ complete: false });
+
+/**
+ * The calls a marker names, as lines, padded to the reserve so a shorter
+ * list overwrites every byte of a longer one. What does not fit is dropped
+ * and said to be, so the next daemon knows the list is not the whole of it.
+ */
+const encodeUnsettled = (entries: readonly UsageLedgerEntry[]): Buffer => {
+  const room = USAGE_UNSETTLED_RESERVE_BYTES - Buffer.byteLength(`${INCOMPLETE_LINE}\n`);
+  let body = '';
+  let complete = true;
+  for (const entry of entries) {
+    const line = `${JSON.stringify(entry)}\n`;
+    if (Buffer.byteLength(body) + Buffer.byteLength(line) > room) {
+      complete = false;
+      break;
+    }
+    body += line;
+  }
+  if (!complete) {
+    body += `${INCOMPLETE_LINE}\n`;
+  }
+  const bytes = Buffer.alloc(USAGE_UNSETTLED_RESERVE_BYTES, 0x20);
+  bytes.write(body, 0, 'utf8');
+  return bytes;
+};
 
 /** A fresh entry id — see `UsageLedgerEntry.id`. */
 export const newUsageEntryId = (): string => randomUUID();
@@ -341,15 +326,16 @@ export const createUsageHold = (stateHome: string, filePath: string) => ({
   /** Where the unsettled marker goes; see `USAGE_UNSETTLED_FILENAME`. */
   unsettledPath: path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME),
   /**
-   * Make the marker's stand-in now, while the disk has room for a new file,
-   * so that marking later is a rename — which needs no free data blocks and
-   * so still works on the full disk that is the reason for marking.
+   * Make the marker's stand-in now, while the disk has room: a file of the
+   * reserve's size, so that marking later is an overwrite of blocks it
+   * already has and a rename — neither of which needs space the full disk
+   * that is the reason for marking no longer has.
    */
   arm(): void {
     const armed = path.join(path.dirname(filePath), USAGE_UNSETTLED_ARMED_FILENAME);
     assertDerivedStatePathSync(stateHome, armed, 'file');
     try {
-      writeFileSync(armed, '', { mode: 0o600, flag: 'wx' });
+      writeFileSync(armed, Buffer.alloc(USAGE_UNSETTLED_RESERVE_BYTES, 0x20), { mode: 0o600, flag: 'wx' });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         throw error;
@@ -357,31 +343,70 @@ export const createUsageHold = (stateHome: string, filePath: string) => ({
     }
   },
   /**
-   * Leave word for the next daemon that this one is stopping with spend it
-   * could not write: the armed file renamed into place, or — if it was never
-   * armed — an empty file, which is the next best chance on a full disk.
-   * Throws only when neither lands.
+   * Leave word for the next daemon that this one holds spend it could not
+   * write — and which calls: written over the armed file's reserve (or the
+   * marker's, when this process marked already), then renamed into place.
+   * Named call by call, the next daemon settles exactly them and knows when
+   * it has; a list too long for the reserve says it is incomplete. Never
+   * armed, it falls back to an empty marker: missing spend, amount unknown.
+   * Throws only when nothing lands.
    */
-  markUnsettled(): void {
+  markUnsettled(entries: readonly UsageLedgerEntry[]): void {
     const armed = path.join(path.dirname(filePath), USAGE_UNSETTLED_ARMED_FILENAME);
     const marker = path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME);
+    assertDerivedStatePathSync(stateHome, armed, 'file');
     assertDerivedStatePathSync(stateHome, marker, 'file');
+    const target = existsSync(marker) ? marker : armed;
     try {
-      renameSync(armed, marker);
+      const fd = openSync(target, 'r+');
+      try {
+        writeSync(fd, encodeUnsettled(entries), 0, USAGE_UNSETTLED_RESERVE_BYTES, 0);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      if (target === armed) {
+        renameSync(armed, marker);
+      }
     } catch {
       writeFileSync(marker, '', { mode: 0o600 });
     }
   },
   /**
-   * Which marker this is: its inode and modification time, both kept by
-   * the rename that made it, so every settle of one marker agrees on it and
-   * a later marker — a fresh file — is another.
+   * The calls the marker names and whether that is all of them, or
+   * undefined with no marker. An empty marker, or one with a line that does
+   * not parse, is incomplete: spend is missing and how much is not known.
    */
-  unsettledKey(): string {
+  readUnsettled(): { entries: UsageLedgerEntry[]; complete: boolean } | undefined {
     const marker = path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME);
     assertDerivedStatePathSync(stateHome, marker, 'file');
-    const stat = lstatSync(marker);
-    return `${stat.ino}:${stat.mtimeMs}`;
+    let text: string;
+    try {
+      text = readFileSync(marker, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+      throw error;
+    }
+    const entries: UsageLedgerEntry[] = [];
+    let complete = true;
+    for (const line of text.split('\n')) {
+      if (line.trim().length === 0) {
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(line) as UsageLedgerEntry | { complete: false };
+        if ('complete' in parsed) {
+          complete = false;
+        } else {
+          entries.push(parsed);
+        }
+      } catch {
+        complete = false;
+      }
+    }
+    return { entries, complete: complete && entries.length > 0 };
   },
   unsettled(): boolean {
     const marker = path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME);

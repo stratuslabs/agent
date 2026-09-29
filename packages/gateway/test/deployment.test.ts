@@ -506,7 +506,8 @@ test('a turn a crash left running has its saved spend written to the ledger when
     agent: { id: 'ava', name: 'Ava' },
     status: 'running',
     messages: [{ id: 'u1', role: 'user', content: 'go', createdAt: new Date().toISOString() }],
-    usage: [{ id: 'call-1', turnId: 'crashed-1:turn:1', provider: 'openai', model: 'model-a', inputTokens: 70 }],
+    // Spent yesterday; found today.
+    usage: [{ id: 'call-1', at: new Date(Date.now() - 86_400_000).toISOString(), turnId: 'crashed-1:turn:1', provider: 'openai', model: 'model-a', inputTokens: 70 }],
   });
   before.close();
 
@@ -518,16 +519,20 @@ test('a turn a crash left running has its saved spend written to the ledger when
   const events = collect(gateway);
   await gateway.start();
   let atStart: Array<{ agentId: string; calls: number }>;
+  let today: unknown[];
   try {
     // Written by the time start() returns — before any channel, schedule,
     // or API message can be judged against the home's total — not left to
     // the sweep that fails the turn once the channels are up.
     atStart = gateway.usage().map(({ agentId, calls }) => ({ agentId, calls }));
+    // Filed in the day it was spent, not the day it was found.
+    today = gateway.usage({ since: new Date(new Date().toISOString().slice(0, 10)).toISOString() });
   } finally {
     // stop() drains the sweep start() began, so the assertions below read what it did.
     await gateway.stop();
   }
   assert.deepEqual(atStart, [{ agentId: 'ava', calls: 1 }]);
+  assert.deepEqual(today, []);
   assert.ok(events.some((event) => event.type === 'session.failed' && event.sessionId === 'crashed-1'), 'the sweep ran');
 
   const ledger = new SqliteUsageLedger(fleetDbIn(stateDir));
@@ -591,8 +596,11 @@ test('spend held in memory only leaves word for the next daemon at once, not onl
     const done = await gateway.dispatch({ sessionId: 'm-1', agentId: 'ava', userMessage: 'one' });
     assert.equal(done.status, 'completed');
     // A crash here runs no stop, and a completed turn is in no sweep of
-    // turns left running: the marker has to exist already.
+    // turns left running: the marker has to exist already — and name the
+    // call, in case the session's own save is what the crash cut off.
     assert.equal(existsSync(marker), true);
+    const { readFileSync } = await import('node:fs');
+    assert.match(readFileSync(marker, 'utf8'), /"turnId":"m-1:turn:1"/);
 
     saboteur.exec('DROP TRIGGER full_disk');
     // The next flush writes what was held in memory; the word is withdrawn.
@@ -605,13 +613,12 @@ test('spend held in memory only leaves word for the next daemon at once, not onl
   }
 });
 
-test('a marker for spend no saved session holds stays, and keeps budgeted calls refused, rather than being cleared by an empty settle', async () => {
+test('a marker that cannot say which calls it stands for stays, and keeps budgeted calls refused', async () => {
   const home = await newHome();
   const stateDir = path.join(home, '.stratus');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
   await writeConfig(home, { budget: { daily: 1_000_000 } });
-  // What a crash between announcing a call and saving its session leaves:
-  // the marker, and no session with the record on it.
+  // Never armed, so empty: spend is missing, and how much is not known.
   await writeFile(path.join(stateDir, 'usage-unsettled'), '');
   const warnings: string[] = [];
   const gateway = createGateway({
@@ -621,7 +628,7 @@ test('a marker for spend no saved session holds stays, and keeps budgeted calls 
   });
   await gateway.start();
   try {
-    assert.ok(warnings.some((line) => /none of it is on any saved session/.test(line)), warnings.join('\n'));
+    assert.ok(warnings.some((line) => /could not list all of it/.test(line)), warnings.join('\n'));
     assert.equal(existsSync(path.join(stateDir, 'usage-unsettled')), true);
     await assert.rejects(
       gateway.dispatch({ sessionId: 'e-1', agentId: 'ava', userMessage: 'hello' }),
@@ -632,41 +639,43 @@ test('a marker for spend no saved session holds stays, and keeps budgeted calls 
   }
 });
 
-test('a settle that committed and died before removing its marker is not mistaken for one that found nothing', async () => {
+test('a marker names the calls it stands for: the next start writes them — once, however often it runs — and clears it', async () => {
   const home = await newHome();
   const stateDir = path.join(home, '.stratus');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
-  await writeConfig(home, { budget: { daily: 1_000_000 } });
+  await writeConfig(home, { budget: { daily: 100 } });
   const markerPath = path.join(stateDir, 'usage-unsettled');
-  await writeFile(markerPath, '');
-  // The last start's settle: its rows and its tally committed together,
-  // and then the process died with the marker still in place.
-  const { lstatSync } = await import('node:fs');
-  const stat = lstatSync(markerPath);
-  const ledger = new SqliteUsageLedger(fleetDbIn(stateDir));
-  assert.equal(
-    ledger.settle(
-      [{ id: 'call-1', at: new Date().toISOString(), agentId: 'ava', sessionId: 's-1', record: { turnId: 's-1:turn:1', provider: 'openai', inputTokens: 10 } }],
-      `${stat.ino}:${stat.mtimeMs}`,
-      new Date().toISOString(),
-    ),
-    1,
-  );
-  ledger.close();
-
-  const gateway = createGateway({
-    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
-    idleTimeoutMs: 0,
-    warn: () => {},
-  });
-  await gateway.start();
+  // A call on no saved session — a crash took the session save with it —
+  // and so known only from the marker.
+  const lost = { id: 'call-lost', at: new Date().toISOString(), agentId: 'ava', sessionId: 's-gone', record: { turnId: 's-gone:turn:1', provider: 'openai', inputTokens: 150 } };
+  await writeFile(markerPath, `${JSON.stringify(lost)}\n`);
+  const start = async () => {
+    const gateway = createGateway({
+      env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+      idleTimeoutMs: 0,
+      warn: () => {},
+    });
+    await gateway.start();
+    return gateway;
+  };
+  const first = await start();
   try {
-    // Replaying inserts nothing now, and the marker is cleared anyway.
     assert.equal(existsSync(markerPath), false);
-    const answered = await gateway.dispatch({ sessionId: 'r-1', agentId: 'ava', userMessage: 'hello' });
-    assert.equal(answered.status, 'completed');
+    assert.equal(first.usage()[0]?.calls, 1);
+    // Counted: 150 of a daily 100.
+    await assert.rejects(first.dispatch({ sessionId: 'n-1', agentId: 'ava', userMessage: 'hello' }), /daily model budget/);
   } finally {
-    await gateway.stop();
+    await first.stop();
+  }
+  // A settle that wrote its rows and died before removing the marker: the
+  // same marker again finds its call already there, and is cleared anyway.
+  await writeFile(markerPath, `${JSON.stringify(lost)}\n`);
+  const second = await start();
+  try {
+    assert.equal(existsSync(markerPath), false);
+    assert.equal(second.usage()[0]?.calls, 1);
+  } finally {
+    await second.stop();
   }
 });
 

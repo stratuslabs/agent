@@ -428,9 +428,9 @@ order the calls completed.
 ```jsonc
 {
   "usage": [
-    { "id": "3f0c9a1e-…", "turnId": "s-42:turn:1", "provider": "anthropic", "model": "claude-opus-5",
+    { "id": "3f0c9a1e-…", "at": "2026-09-29T09:14:36.482Z", "turnId": "s-42:turn:1", "provider": "anthropic", "model": "claude-opus-5",
       "inputTokens": 40, "outputTokens": 210, "cacheReadTokens": 9100, "cacheWriteTokens": 300 },
-    { "id": "8b27d4c0-…", "turnId": "s-42:turn:2", "provider": "openai", "model": "gpt-5.5",
+    { "id": "8b27d4c0-…", "at": "2026-09-29T09:15:02.110Z", "turnId": "s-42:turn:2", "provider": "openai", "model": "gpt-5.5",
       "inputTokens": 12, "outputTokens": 88 }
   ]
 }
@@ -469,8 +469,9 @@ reports.
 `id` is unique to one provider call, assigned when the record is made.
 The usage ledger (`GET /usage`) writes each call under it, so a call seen
 twice — announced on the event stream, then found again on the saved
-session after a crash — is counted once. Records saved before it existed
-have none.
+session after a crash — is counted once. `at` is when the call's usage
+was recorded, so one the ledger learns of late is still filed in the day
+and month it was spent. Records saved before either existed have neither.
 
 `turnId` is the Stratus turn the tokens belong to — one pass through the
 runner, which is one provider call for the API providers and several for a

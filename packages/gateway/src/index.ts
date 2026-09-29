@@ -173,7 +173,7 @@ import {
   BudgetExceededError,
   budgetStatus,
   budgetHasLimit,
-  leaseUseEvent,
+  reportLeaseUse,
   createLeaseBroker,
   createLeasePolicyRefresh,
   createLeaseResolver,
@@ -1111,18 +1111,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // it in `stratus logs` and in front of every other consumer; a
       // caller that passed no session (a plugin that predates the context
       // argument) still leaves a line.
-      const event = leaseUseEvent(record);
-      if (event) {
-        void bus.emit(event);
-        return;
-      }
-      const line = `lease ${record.outcome}: ${record.credential} for ${record.agentId}`
-        + (record.leaseId !== undefined ? ` (${record.leaseId})` : '');
-      if (record.outcome === 'refused') {
-        warn(line);
-      } else {
-        log(line);
-      }
+      reportLeaseUse(record, {
+        emit: (event) => void bus.emit(event),
+        note: (line, refused) => (refused ? warn(line) : log(line)),
+      });
     },
   });
 
@@ -1179,6 +1171,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * spend is written.
    */
   let markedUnsettled = false;
+  /**
+   * Whether the marker in place is the last daemon's, not yet cleared (see
+   * `settleUsage`). This process neither writes its own calls over it nor
+   * takes it back: it stays until a settle, or the operator, clears it.
+   */
+  let foreignMarker = false;
   const flushUsage = (): Error | undefined => {
     while (unrecordedUsage.length > 0) {
       try {
@@ -1195,9 +1193,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           // on runs no stop, and a turn that saved its record and finished
           // `completed` is in no sweep of turns left running. The marker is
           // a rename (see `arm`), so the full disk does not stop it.
-          if (!markedUnsettled) {
+          // Rewritten at every such failure, so the list it names is the
+          // calls held now.
+          if (!foreignMarker) {
             try {
-              usageHold.markUnsettled();
+              usageHold.markUnsettled(unrecordedUsage);
               markedUnsettled = true;
             } catch {
               // Tried again at the next failure, and at the stop.
@@ -1237,7 +1237,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     const at = new Date().toISOString();
     for (const record of event.records) {
-      unrecordedUsage.push({ id: record.id ?? newUsageEntryId(), at, agentId: event.agentId, sessionId: event.sessionId, record });
+      unrecordedUsage.push({ id: record.id ?? newUsageEntryId(), at: record.at ?? at, agentId: event.agentId, sessionId: event.sessionId, record });
     }
     const failed = flushUsage();
     if (failed) {
@@ -1342,7 +1342,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       const at = new Date().toISOString();
       for (const record of records.slice(from)) {
         if (record.id !== undefined) {
-          unrecordedUsage.push({ id: record.id, at, agentId: session.agent.id, sessionId: session.id, record });
+          // When it was spent, not when it was found: a call recovered after a
+          // crash that crossed midnight belongs to the day it was made.
+          unrecordedUsage.push({ id: record.id, at: record.at ?? at, agentId: session.agent.id, sessionId: session.id, record });
         }
       }
     }
@@ -1356,73 +1358,62 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * point: the marker says the ledger is short, not by how much.
    */
   const settleUsage = async (): Promise<void> => {
+    let marked: ReturnType<typeof usageHold.readUnsettled>;
     try {
-      if (!usageHold.unsettled()) {
+      marked = usageHold.readUnsettled();
+      if (!marked) {
         usageHold.arm();
         return;
       }
     } catch (error) {
-      warn(`usage ledger: could not prepare ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)}); a stop on a full disk may not be able to leave word for the next stratusd`);
+      warn(`usage ledger: could not read or prepare ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)}); budgeted calls are refused while it is there, and a stop on a full disk may not be able to leave word for the next stratusd`);
+      foreignMarker = true;
       return;
     }
-    if (!store.listIdsByStatus) {
-      warn(`usage ledger: the last stratusd stopped with spend it could not write, and this session store cannot list sessions to settle it from. Budgeted calls are refused until ${usageHold.unsettledPath} is removed by hand, once that spend is accounted for.`);
-      return;
+    // Held by this process from here: until it is cleared, it is the last
+    // daemon's word, and this one does not write over it or take it back.
+    foreignMarker = true;
+    // The calls the marker names, each under its id — whatever of them the
+    // last daemon or an earlier settle already wrote is a no-op — and every
+    // saved session's records with them, which costs nothing when they
+    // agree and recovers a call the marker could not fit.
+    for (const entry of marked.entries) {
+      unrecordedUsage.push(entry);
     }
-    // What an earlier failure left held, first, so the settle below writes
-    // only what the sessions add.
-    const held = flushUsage();
-    if (held) {
-      warn(`usage ledger: could not settle what the last stratusd left unwritten (${held.message}); budgeted calls stay refused until it is written`);
-      return;
-    }
-    let marker: string;
-    try {
-      marker = usageHold.unsettledKey();
-    } catch (error) {
-      warn(`usage ledger: could not read ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)}); budgeted calls stay refused until it can be settled`);
-      return;
-    }
-    const statuses: SessionStatus[] = ['idle', 'running', 'pending_approval', 'completed', 'failed'];
-    const ids = new Set<string>();
-    for (const status of statuses) {
-      for (const id of await store.listIdsByStatus(status)) {
-        ids.add(id);
+    if (store.listIdsByStatus) {
+      const statuses: SessionStatus[] = ['idle', 'running', 'pending_approval', 'completed', 'failed'];
+      const ids = new Set<string>();
+      for (const status of statuses) {
+        for (const id of await store.listIdsByStatus(status)) {
+          ids.add(id);
+        }
+      }
+      for (const id of ids) {
+        const session = await store.get(id);
+        if (session) {
+          reconcileUsage(session);
+        }
       }
     }
-    for (const id of ids) {
-      const session = await store.get(id);
-      if (session) {
-        reconcileUsage(session);
-      }
-    }
-    const entries = unrecordedUsage.splice(0);
-    let recovered: number;
-    try {
-      recovered = usageLedger.settle(entries, marker, new Date().toISOString());
-    } catch (error) {
-      unrecordedUsage.push(...entries);
-      flushUsage();
-      warn(`usage ledger: could not settle what the last stratusd left unwritten (${error instanceof Error ? error.message : String(error)}); budgeted calls stay refused until it is written`);
+    const failed = flushUsage();
+    if (failed) {
+      warn(`usage ledger: could not settle what the last stratusd left unwritten (${failed.message}); budgeted calls stay refused until it is written`);
       return;
     }
-    // The marker says spend is missing. A settle that has found none of it
-    // on any saved session — across every attempt at this marker, which
-    // the ledger totals with the rows, so one that committed and died
-    // before removing the marker still counts — has not recovered it: a
-    // crash between announcing a call and saving its session takes the
-    // record with it, and the full disk that caused the marker usually
-    // refused that save too. So the marker stays and says so, rather than
-    // being cleared by a settle that settled nothing.
-    if (recovered === 0) {
+    // Cleared only when the marker named every call it stood for: then all
+    // of them are in the ledger now, however many times this has run. A
+    // marker that could not — too many calls for its reserve, or never
+    // armed and so empty — cannot say what is still missing, so it stays.
+    if (!marked.complete) {
       warn(
-        `usage ledger: the last stratusd left spend it could not write, and none of it is on any saved session — it was lost with that process. `
-        + `Budgeted calls stay refused until ${usageHold.unsettledPath} is removed, once that spend is accounted for (a stop, unlike a crash, wrote it to the service manager's log).`,
+        `usage ledger: the last stratusd left spend it could not write, and ${usageHold.unsettledPath} could not list all of it. `
+        + `What it and the saved sessions name is in the ledger now; budgeted calls stay refused until that file is removed, once the rest is accounted for (a stop, unlike a crash, wrote it to the service manager's log).`,
       );
       return;
     }
     usageHold.settle();
-    log(`usage ledger: settled what the last stratusd could not write — ${recovered} call(s), from ${ids.size} saved session(s)`);
+    foreignMarker = false;
+    log(`usage ledger: settled what the last stratusd could not write — ${marked.entries.length} call(s)`);
     try {
       usageHold.arm();
     } catch {
@@ -3862,21 +3853,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const unwritten = flushUsage();
     if (unwritten && unrecordedUsage.length > 0) {
       // And word for the next daemon, so it does not judge budgets on a
-      // ledger missing this: a rename of the file armed at start, which
-      // needs no room the disk does not have. That daemon settles the
-      // ledger from the saved sessions — where these calls' records are —
-      // and refuses budgeted calls until it has.
-      let marked = true;
-      try {
-        usageHold.markUnsettled();
-      } catch {
-        marked = false;
+      // ledger missing this: the calls written into the file armed at
+      // start and renamed into place, neither of which needs room the disk
+      // does not have. That daemon writes them before it allows a budgeted
+      // call. Under the last daemon's marker, still uncleared, this one
+      // leaves that marker as it is: budgeted calls stay refused either way.
+      let note: string;
+      if (foreignMarker) {
+        note = `The last stratusd's ${usageHold.unsettledPath} is still in place, so budgeted calls stay refused; these calls are not on it — add them to the ledger once the disk has room. `;
+      } else {
+        try {
+          usageHold.markUnsettled(unrecordedUsage);
+          note = `Marked ${usageHold.unsettledPath} with them: the next stratusd writes them before it allows a budgeted call. `;
+        } catch {
+          note = `Could not mark ${usageHold.unsettledPath} either, so the next stratusd will not know to settle them: add them to the ledger once the disk has room. `;
+        }
       }
       warn(
         `usage ledger: stopping with ${unrecordedUsage.length} call(s) of spend that could not be written anywhere (${unwritten.message}). `
-        + (marked
-          ? `Marked ${usageHold.unsettledPath}: the next stratusd settles them from the saved sessions before it allows a budgeted call. `
-          : `Could not mark ${usageHold.unsettledPath} either, so the next stratusd will not know to settle them: add them to the ledger once the disk has room. `)
+        + note
         + `The calls: ${JSON.stringify(unrecordedUsage)}`,
       );
     }

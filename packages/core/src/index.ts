@@ -2506,6 +2506,13 @@ export interface UsageRecord extends TokenUsage {
    * announcement. Absent on records saved before it existed.
    */
   id?: string;
+  /**
+   * When the call's usage was recorded, ISO 8601. A host that learns of a
+   * call late — reconciling a session after a crash — still files it in
+   * the day and month it was spent. Absent on records saved before it
+   * existed.
+   */
+  at?: string;
 }
 
 /**
@@ -5585,6 +5592,7 @@ export class AgentRunner {
     const record: UsageRecord = {
       // Web Crypto, present in every runtime core supports.
       id: globalThis.crypto.randomUUID(),
+      at: new Date().toISOString(),
       turnId,
       // The adapter's own name wins. `provider.name` is the fallback
       // wrapper's under a configured fallback, and that name is the

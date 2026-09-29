@@ -15,6 +15,7 @@ import {
   CredentialLeaseError,
   findBudgetBreach,
   leaseState,
+  reportLeaseUse,
   newLeaseId,
   parseLeaseDuration,
   validateConfigFile,
@@ -370,4 +371,19 @@ test('the leased list follows the trusted config live, keeps the last good one m
   assert.equal(broker.isLeased('github.token'), true, 'a broken edit keeps the last list');
   assert.equal(broker.isLeased('search.apiKey'), false);
   assert.ok(warnings.some((line) => /using the last one read/.test(line)));
+});
+
+test('every lease use is reported: with a session as an event, without one as a line — allowed uses too', () => {
+  const events: unknown[] = [];
+  const lines: Array<[string, boolean]> = [];
+  const sinks = { emit: (event: unknown) => { events.push(event); }, note: (line: string, refused: boolean) => { lines.push([line, refused]); } };
+  reportLeaseUse({ agentId: 'ava', credential: 'github.token', outcome: 'allowed', sessionId: 's-1', leaseId: 'lease_1', use: 'web.search' }, sinks);
+  assert.equal(events.length, 1);
+  // A plugin resolving through the two-argument resolve: no session.
+  reportLeaseUse({ agentId: 'ava', credential: 'github.token', outcome: 'allowed', leaseId: 'lease_1' }, sinks);
+  reportLeaseUse({ agentId: 'ava', credential: 'github.token', outcome: 'refused', reason: 'no lease' }, sinks);
+  assert.deepEqual(lines, [
+    ['lease allowed: github.token for ava (lease_1)', false],
+    ['lease refused: github.token for ava — no lease', true],
+  ]);
 });

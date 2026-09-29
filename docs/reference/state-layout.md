@@ -17,8 +17,8 @@ what moves when you rename an agent.
 | `gateway-token`, `gateway.json` | The [control API](../../packages/control-api/README.md)'s bearer token and the address a running daemon bound. Both `0600`. |
 | `api-tokens.json` | [Member tokens](../guides/remote-access.md#member-tokens) for the control API: `{ version: 1, tokens: [{ id, name, role, hash, createdAt }] }`, where `hash` is the token's sha256 — the token itself is never stored. Written by `stratus token`, read by the daemon on every member request. `0600`. |
 | `usage-held.jsonl` | Usage the ledger in `fleet.db` could not write yet (a full disk), kept until it can be — model calls under a budget are refused while it exists. Usually absent. `0600`. See [Usage and budgets](../guides/usage-and-budgets.md). |
-| `usage-unsettled.armed` | Empty, made by the daemon at start while the disk has room, so that on a full disk it can still leave word by renaming it. `0600`. |
-| `usage-unsettled` | Left while a daemon holds spend it could write nowhere, and still there if it stops or crashes in that state; taken back once the spend is written. The next daemon settles the ledger from the saved sessions at start and removes it — unless that recovered nothing, when it stays for the operator to remove once the spend is accounted for. Budgeted calls are refused while it exists. Usually absent. |
+| `usage-unsettled.armed` | 64 KiB of reserved space, made by the daemon at start while the disk has room, so that on a full disk it can still write which calls it holds into it and rename it into place. `0600`. |
+| `usage-unsettled` | Names, one JSON line each, the calls a daemon holds but could write nowhere; still there if it stops or crashes in that state, taken back once they are written. The next daemon writes them to the ledger at start and removes it — unless it could not name them all (a last line `{"complete":false}`, or empty), when it stays for the operator to remove once the rest is accounted for. Budgeted calls are refused while it exists. Usually absent. |
 | `api-tokens.json.lock` | Held while a `stratus token` command rewrites `api-tokens.json`, so two at once cannot drop each other's change — a revoked token written back, or a created one lost. Empty; safe to delete when no `stratus token` command is running. `0600`. |
 | `stratusd.lock` | Held by the daemon serving this home; how a second `stratus serve` is refused. |
 | `logs/` | `stratusd.jsonl`, the structured trace [`stratus logs`](../guides/logs.md) reads, plus the macOS LaunchAgent's stdout/stderr redirects. `0700`. |
@@ -135,10 +135,7 @@ Four things deliberately do not shard, and all of them live in `fleet.db`:
   session, which provider and model, and the four token counts — written as
   the call completes. A [budget](../guides/usage-and-budgets.md) is the
   home's, judged before every call across every agent, and `stratus usage`
-  reads it from another process. Counts only, never content. Beside it,
-  a tally of what each settle of a `usage-unsettled` marker recovered,
-  written with the rows it counts, so a settle that dies before removing
-  its marker is not mistaken on the next start for one that found nothing.
+  reads it from another process. Counts only, never content.
 - **Credential leases.** Which agent may use which fenced credential, until
   when, how many times, and why — with who granted and who revoked each.
   The operator grants them for the home, and a use is counted in the same

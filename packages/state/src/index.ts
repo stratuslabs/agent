@@ -267,6 +267,7 @@ export {
   parseLeasesConfig,
   leaseState,
   leaseUseEvent,
+  reportLeaseUse,
   parseLeaseDuration,
   validateLeaseGrant,
   newLeaseId,
