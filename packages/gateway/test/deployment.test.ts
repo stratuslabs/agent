@@ -516,8 +516,17 @@ test('a turn a crash left running has its saved spend written to the ledger when
   });
   const events = collect(gateway);
   await gateway.start();
-  // stop() drains the sweep start() began, so the assertions below read what it did.
-  await gateway.stop();
+  let atStart: Array<{ agentId: string; calls: number }>;
+  try {
+    // Written by the time start() returns — before any channel, schedule,
+    // or API message can be judged against the home's total — not left to
+    // the sweep that fails the turn once the channels are up.
+    atStart = gateway.usage().map(({ agentId, calls }) => ({ agentId, calls }));
+  } finally {
+    // stop() drains the sweep start() began, so the assertions below read what it did.
+    await gateway.stop();
+  }
+  assert.deepEqual(atStart, [{ agentId: 'ava', calls: 1 }]);
   assert.ok(events.some((event) => event.type === 'session.failed' && event.sessionId === 'crashed-1'), 'the sweep ran');
 
   const ledger = new SqliteUsageLedger(fleetDbIn(stateDir));

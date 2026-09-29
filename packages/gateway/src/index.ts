@@ -3315,6 +3315,29 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     await Promise.allSettled(abandoned.map((id) => failAbandonedTurn(id)));
   };
 
+  /**
+   * Write what the turns a crash left `running` had spent — the records on
+   * each session this process has not checked — before anything can
+   * dispatch. See `reconcileUsage`; the sweep that fails them later finds
+   * nothing left to write.
+   */
+  const reconcileAbandonedUsage = async (abandoned: string[]): Promise<void> => {
+    for (const id of abandoned) {
+      try {
+        const session = await store.get(id);
+        if (session) {
+          reconcileUsage(session);
+        }
+      } catch (error) {
+        warn(`could not read abandoned turn ${id} to count what it spent: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const unwritten = flushUsage();
+    if (unwritten) {
+      warn(`usage ledger: could not record what abandoned turns spent (${unwritten.message}); holding it, and refusing budgeted calls until it is written`);
+    }
+  };
+
   const failAbandonedTurn = (id: string): Promise<void> =>
     onSessionChain(id, async () => {
       if (stopping) {
@@ -3680,6 +3703,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Applied further down, once there is somewhere for the failure to
     // be heard.
     const abandoned = await listAbandonedTurns();
+    // Their spend into the ledger now, not with the sweep that fails them
+    // once the channels are up: a crash is exactly when a call's record can
+    // be on its session and not in the ledger, and the first message a
+    // channel delivers must not be judged against a total missing it.
+    await reconcileAbandonedUsage(abandoned);
     // Likewise: which parked sub-sessions have a parent still inside its
     // agent.delegate call is only answerable while nothing can resume that
     // parent. See listOrphanedDelegations.
