@@ -9539,7 +9539,7 @@ test('parseCommand parses skill reload, restart, and skill add --no-reload', () 
 test('serveArgv round-trips every serve option, so the daemon a restart starts is the one that was running', () => {
   const full = parseCommand([
     'serve', '--config', './x.json', '--idle-timeout', '30', '--approvals', 'remote',
-    '--no-events', '--no-log-file', '--no-api', '--api-port', '0', '--api-host', '0.0.0.0',
+    '--no-events', '--no-log-file', '--log-format', 'json', '--no-api', '--api-port', '0', '--api-host', '0.0.0.0',
   ]);
   assert.equal(full.command, 'serve');
   assert.deepEqual(parseCommand(serveArgv(full)), full);
@@ -13895,4 +13895,138 @@ test('stratus memory export refuses a corpus holding one id twice rather than mi
   assert.match(exported.output.stderr, /shared:1/);
   assert.match(exported.output.stderr, /stratus memory audit stratus/);
   await assert.rejects(() => readFile(dump, 'utf8'), /ENOENT/);
+});
+
+test('parseCommand reads serve --log-format and health, and refuses what neither means', () => {
+  assert.deepEqual(parseCommand(['serve', '--log-format', 'json']), { command: 'serve', events: true, logFormat: 'json' });
+  assert.deepEqual(parseCommand(['serve', '--log-format', 'text']), { command: 'serve', events: true, logFormat: 'text' });
+  assert.throws(() => parseCommand(['serve', '--log-format', 'yaml']), /Unsupported --log-format: yaml/);
+  // A daemon a restart starts has to write the same stdout the old one did,
+  // or a log shipper parsing it breaks on the first restart.
+  const json = parseCommand(['serve', '--log-format', 'json', '--no-events']);
+  assert.equal(json.command, 'serve');
+  assert.deepEqual(parseCommand(serveArgv(json)), json);
+
+  assert.deepEqual(parseCommand(['health']), { command: 'health', format: 'text' });
+  assert.deepEqual(parseCommand(['health', '--gateway', 'http://10.0.0.5:4123', '--token', 't', '--format', 'json']), {
+    command: 'health',
+    format: 'json',
+    gateway: 'http://10.0.0.5:4123',
+    token: 't',
+  });
+  assert.throws(() => parseCommand(['health', '--format', 'yaml']), /Unsupported format: yaml/);
+  assert.throws(() => parseCommand(['health', '--agent', 'ava']), /Unknown option: --agent/);
+});
+
+test('serve --log-format json puts exactly the log file\'s records on stdout, and nothing else', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-json-log-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+
+  const { stdout, stderr } = await withServedApi(home, async ({ url, token }) => {
+    // Queued before the stop, so the stop's drain is what waits for the
+    // turn — its events are on both sides by the time the serve returns.
+    const queued = await postJson(`${url}/api/v1/sessions/s-json/messages`, token, { message: 'hello', agentId: 'ava' });
+    assert.equal(queued.status, 202, queued.body);
+  }, ['--log-format', 'json']);
+
+  const lines = stdout.split('\n').filter((line) => line.length > 0);
+  // Every line parses: one human line anywhere breaks a shipper for the rest.
+  const printed = lines.map((line) => {
+    try {
+      return JSON.parse(line) as unknown;
+    } catch {
+      return assert.fail(`stdout carried a line that is not JSON: ${line}`);
+    }
+  });
+  const filed = await readRecentRecords(path.join(home, '.stratus', 'logs'), 10_000);
+  // The same records, in the same order: the stream says no more than the
+  // file, so the log stays a trace rather than a transcript on either.
+  assert.deepEqual(printed, filed);
+  assert.ok(
+    filed.some((record) => record.event === 'session.completed' && record.sessionId === 's-json' && record.agentId === 'ava'),
+    `the turn's completion is a record: ${stdout}`,
+  );
+  assert.ok(filed.some((record) => /stratusd ready/.test(String(record.msg))));
+  assert.doesNotMatch(stdout, /hello/, 'the prompt is not in the log');
+  assert.doesNotMatch(stdout, /Press Ctrl\+C/);
+  assert.doesNotMatch(stderr, /^Warning:/m, 'a warning is a record on stdout, not a second line on stderr');
+});
+
+test('serve --log-format json still streams records with --no-log-file', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-json-nofile-'));
+  const { stdout } = await withServedApi(home, async () => {}, ['--log-format', 'json', '--no-log-file']);
+  const records = stdout
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as { level: string; msg?: string });
+  assert.ok(records.some((record) => record.level === 'info' && /stratusd ready/.test(String(record.msg))), stdout);
+  assert.deepEqual(await readRecentRecords(path.join(home, '.stratus', 'logs'), 50), []);
+});
+
+test('stratus health reports a serving daemon in one line, or as JSON', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-health-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+
+  await withServedApi(home, async ({ url }) => {
+    const env = { homeDir: home, cwd: home, processEnv: {} };
+    const text = createStreams();
+    assert.equal(await runCli({ argv: ['health'], streams: text.streams, env }), 0, text.output.stderr);
+    // Found through gateway.json and gateway-token, like every command
+    // that talks to the running daemon.
+    const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(
+      text.output.stdout,
+      new RegExp(`^stratusd ok at ${escaped} — version \\S+, up \\d+s, 2 agents, 0 sessions, 0 approvals pending\\n$`),
+    );
+
+    const json = createStreams();
+    assert.equal(await runCli({ argv: ['health', '--format', 'json'], streams: json.streams, env }), 0);
+    const payload = JSON.parse(json.output.stdout) as { ok: boolean; gateway: string; agents: Array<{ id: string }> };
+    assert.equal(payload.ok, true);
+    assert.equal(payload.gateway, url);
+    assert.ok(payload.agents.some((agent) => agent.id === 'ava'));
+
+    const rejected = createStreams();
+    assert.equal(await runCli({ argv: ['health', '--gateway', url, '--token', 'wrong'], streams: rejected.streams, env }), 1);
+    assert.match(rejected.output.stderr, /rejected this token/);
+    // A probe's output lands in `docker inspect`; the help text does not belong there.
+    assert.doesNotMatch(rejected.output.stderr, /Usage:/);
+  });
+});
+
+test('stratus health fails in one sentence when no daemon is serving, and migrates nothing', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-health-down-'));
+  // A credentials file looser than 0600 is what migration 0001 tightens, so
+  // it shows whether the probe ran migrations: it must not — a supervisor
+  // runs it every few seconds for the life of the deployment.
+  const loose = path.join(home, '.stratus', 'credentials.json');
+  await mkdir(path.dirname(loose), { recursive: true });
+  await writeFile(loose, '{}');
+  await chmod(loose, 0o644);
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+
+  const down = createStreams();
+  assert.equal(await runCli({ argv: ['health'], streams: down.streams, env }), 1);
+  assert.match(
+    down.output.stderr,
+    /^Error: stratusd is not running — .*gateway\.json does not exist.*Start it with `stratus serve` or `stratus service start`/,
+  );
+  assert.doesNotMatch(down.output.stderr, /Usage:/);
+  assert.doesNotMatch(down.output.stderr, /state migration/);
+  assert.equal((await stat(loose)).mode & 0o777, 0o644);
+
+  const json = createStreams();
+  assert.equal(await runCli({ argv: ['health', '--format', 'json'], streams: json.streams, env }), 1);
+  const payload = JSON.parse(json.output.stdout) as { ok: boolean; error: string };
+  assert.equal(payload.ok, false);
+  assert.match(payload.error, /stratusd is not running/);
+
+  // Nothing answering where it was pointed — what a gateway.json left
+  // behind by a killed daemon produces — says where it looked.
+  await writeFile(path.join(home, '.stratus', 'gateway-token'), 'token\n');
+  const stale = createStreams();
+  assert.equal(await runCli({ argv: ['health', '--gateway', 'http://127.0.0.1:1'], streams: stale.streams, env }), 1);
+  assert.match(stale.output.stderr, /Could not reach the gateway at http:\/\/127\.0\.0\.1:1/);
 });

@@ -26,6 +26,7 @@ Usage:
   stratus plugins --format json
   stratus skill reload
   stratus restart
+  stratus health
   stratus schedules
   stratus schedules cancel <id>
   stratus grants ava
@@ -70,10 +71,12 @@ Commands:
                    (--idle-timeout <seconds>, --approvals <headless|remote>,
                    --no-events, --no-log-file, --config <path>); everything it
                    says is also written to ~/.stratus/logs, which
-                   "stratus logs" reads. With @stratusagent/control-api
-                   installed it also serves the HTTP + WebSocket control API
-                   on 127.0.0.1:4123 (--no-api, --api-host, --api-port, or
-                   the config file's "api" block)
+                   "stratus logs" reads (--log-format json puts those same
+                   records on stdout as JSON lines instead of the human
+                   ones, for docker logs and journald). With
+                   @stratusagent/control-api installed it also serves the
+                   HTTP + WebSocket control API on 127.0.0.1:4123 (--no-api,
+                   --api-host, --api-port, or the config file's "api" block)
   service          Keep stratusd running under launchd (macOS) or systemd
                    (Linux): install, uninstall, status, start, stop.
                    Installing starts it now and at every login
@@ -126,6 +129,11 @@ Commands:
                    ones finish for up to --drain-timeout <seconds> (default
                    30), then comes back with sessions, schedules, and
                    channels intact, under the service manager or not
+  health           Ask the running daemon whether it is serving: exit 0 and
+                   one line (version, uptime, agents, sessions, pending
+                   approvals), or exit 1 and one sentence saying why not.
+                   For a container HEALTHCHECK, a Kubernetes probe, or a
+                   monitoring script (--gateway, --token, --format json)
   credential set   Store a named credential an agent can resolve — a search
                    backend asks for search.apiKey. The value is read from
                    stdin, never from a flag, so it stays out of your shell
@@ -240,9 +248,9 @@ Options:
   --port           dashboard: port for a daemon it starts (default: 4123)
   --host           dashboard: host for a daemon it starts (default: 127.0.0.1)
   --no-open        Do not open the browser automatically
-  --gateway        agents / skill reload / restart / session rollover: a running
-                   daemon's control API (all but agents default to the daemon
-                   ~/.stratus/gateway.json names)
+  --gateway        agents / skill reload / restart / session rollover / health: a
+                   running daemon's control API (all but agents default to the
+                   daemon ~/.stratus/gateway.json names)
   --trust          memory list: show only this label; memory reassert: the
                    label to record (user, agent, unknown, external)
   --all-unknown    memory reassert: every live entry with no recorded origin
@@ -260,6 +268,8 @@ Options:
   --api            serve: serve it even where the config says api.enabled: false
   --api-host       serve: control API interface (default: 127.0.0.1)
   --api-port       serve: control API port (default: 4123, 0 for any free port)
+  --log-format     serve: text (default) or json — every structured log record
+                   as one JSON line on stdout, and no human lines
   --help, -h       Show this help message
   --version, -v    Print this build's version and exit
 
