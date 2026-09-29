@@ -181,7 +181,7 @@ import {
   type ProviderCallGuard,
 } from '@stratusagent/state';
 import { SqliteLeaseStore } from './leases.ts';
-import { SqliteUsageLedger, type UsageQuery, type UsageTotalsRow } from './usage.ts';
+import { SqliteUsageLedger, type UsageLedgerEntry, type UsageQuery, type UsageTotalsRow } from './usage.ts';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
 /**
@@ -1109,13 +1109,36 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // Each call's usage lands in the ledger as the runner announces it, and
   // the runner awaits the announcement before it makes the next call — so
   // the budget check ahead of that call has seen every token before it.
+  //
+  // A write that fails is held, not dropped, and retried before the next
+  // budget check and with every later announcement. The bus swallows a
+  // subscriber's error, so a lost row would be silent — and a budget judged
+  // on a ledger missing spent tokens would keep allowing calls for as long
+  // as the disk stayed full. Held rows keep their original timestamp, so a
+  // late write still lands in the window the tokens were spent in.
+  const unrecordedUsage: UsageLedgerEntry[] = [];
+  const flushUsage = (): Error | undefined => {
+    while (unrecordedUsage.length > 0) {
+      try {
+        usageLedger.record(unrecordedUsage[0]!);
+      } catch (error) {
+        return error instanceof Error ? error : new Error(String(error));
+      }
+      unrecordedUsage.shift();
+    }
+    return undefined;
+  };
   bus.subscribe((event) => {
     if (event.type !== 'session.usage') {
       return;
     }
     const at = new Date().toISOString();
     for (const record of event.records) {
-      usageLedger.record({ at, agentId: event.agentId, sessionId: event.sessionId, record });
+      unrecordedUsage.push({ at, agentId: event.agentId, sessionId: event.sessionId, record });
+    }
+    const failed = flushUsage();
+    if (failed) {
+      warn(`usage ledger: could not record ${unrecordedUsage.length} call(s) (${failed.message}); holding them, and refusing budgeted calls until they are written`);
     }
   });
 
@@ -1210,6 +1233,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const agentId = request.session.agent.id;
     const budget = await currentBudget();
     if (budget) {
+      // Fail closed: spend the ledger could not record is spend the check
+      // below cannot see, so no budgeted call is made until it is written.
+      const unwritten = flushUsage();
+      if (unwritten) {
+        throw new HostRefusalError(
+          `Spending could not be recorded (${unwritten.message}), so the budget cannot be checked and the model was not called. `
+          + 'The operator needs to free the disk or fix the home; calls resume once the held usage is written.',
+        );
+      }
       const breach = findBudgetBreach(
         budget,
         agentId,

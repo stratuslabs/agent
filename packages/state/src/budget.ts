@@ -120,10 +120,20 @@ export const parseBudgetConfig = (raw: unknown, configPath: string): BudgetConfi
       throw new Error(`Invalid budget.agents in config ${configPath}: expected an object keyed by agent id.`);
     }
     const agents: Record<string, BudgetLimits> = {};
+    const seen = new Map<string, string>();
     for (const [agentId, entry] of Object.entries(raw.agents)) {
       if (!isValidAgentId(agentId)) {
         throw new Error(`Invalid budget.agents key in config ${configPath}: ${JSON.stringify(agentId)} is not an agent id.`);
       }
+      // Two spellings of one id are one agent, and only one of two limits
+      // could ever apply — so editing the other would change nothing.
+      const earlier = seen.get(foldedAgentId(agentId));
+      if (earlier !== undefined) {
+        throw new Error(
+          `Invalid budget.agents in config ${configPath}: ${JSON.stringify(earlier)} and ${JSON.stringify(agentId)} are the same agent. Keep one.`,
+        );
+      }
+      seen.set(foldedAgentId(agentId), agentId);
       if (!isPlainObject(entry)) {
         throw new Error(`Invalid budget.agents.${agentId} in config ${configPath}: expected an object like { "daily": 500000 }.`);
       }

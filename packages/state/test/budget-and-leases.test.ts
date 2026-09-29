@@ -119,6 +119,7 @@ test('a misshapen budget or leases block is refused with the key and the fix, no
   // A misspelled limit is refused, never skipped into an uncapped install.
   assert.throws(() => validateConfigFile({ budget: { montly: 5 } }, 'c.json'), /Invalid budget in config c\.json: unknown key "montly"\. It takes daily, monthly, weights, agents/);
   assert.throws(() => validateConfigFile({ budget: { agents: { ava: { daliy: 5 } } } }, 'c.json'), /Invalid budget\.agents\.ava.*unknown key "daliy"/);
+  assert.throws(() => validateConfigFile({ budget: { agents: { Scout: { daily: 5 }, scout: { daily: 9 } } } }, 'c.json'), /"Scout" and "scout" are the same agent/);
   assert.deepEqual(validateConfigFile({ leases: { credentials: ['github.token', 'provider:anthropic', 'github.token'] } }, 'c.json').leases, {
     credentials: ['github.token', 'provider:anthropic'],
   });

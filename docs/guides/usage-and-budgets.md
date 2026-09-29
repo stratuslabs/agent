@@ -111,6 +111,11 @@ Two properties are worth knowing before you rely on a number:
   harness provider (a Claude subscription through Claude Code, or Codex)
   "one call" is one whole turn, since its inner steps happen inside it.
   Set a limit with that headroom in mind.
+- **Unrecorded spend stops budgeted calls.** If the ledger cannot be
+  written — a full disk, an I/O error — the usage is held and retried, and
+  while any is held no call under a budget is made: a check that cannot
+  see spent tokens would keep allowing calls. The turn is refused with a
+  sentence saying so, and calls resume once the held usage is written.
 - **The fallback never answers instead.** A spent budget is not a model
   failing, so a configured `fallbackModel` does not take over — it would
   spend exactly what the limit exists to stop, and hide that it was

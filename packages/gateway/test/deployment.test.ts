@@ -341,3 +341,51 @@ test('an agent\'s limit and lease match its id the way identity does, whatever t
     await gateway.stop();
   }
 });
+
+test('spend the ledger cannot write is held, budgeted calls are refused until it is, and nothing is lost', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeConfig(home, { budget: { daily: 1_000_000 } });
+  const fetchImpl = (async () => openAiText('ok')) as typeof fetch;
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+    idleTimeoutMs: 0,
+  });
+  await gateway.start();
+  // A disk that refuses writes, as SQLite reports one: every insert aborts.
+  const { DatabaseSync } = await import('node:sqlite');
+  const saboteur = new DatabaseSync(fleetDbIn(path.join(home, '.stratus')));
+  try {
+    saboteur.exec("CREATE TRIGGER full_disk BEFORE INSERT ON usage BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+    await gateway.dispatch({ sessionId: 'w-1', agentId: 'ava', userMessage: 'one' });
+    await assert.rejects(
+      gateway.dispatch({ sessionId: 'w-1', agentId: 'ava', userMessage: 'two' }),
+      /Spending could not be recorded \(database or disk is full\)/,
+    );
+    saboteur.exec('DROP TRIGGER full_disk');
+    const recovered = await gateway.dispatch({ sessionId: 'w-1', agentId: 'ava', userMessage: 'three' });
+    assert.equal(recovered.status, 'completed');
+    // The held call was written on recovery: both answered calls are counted.
+    assert.equal(gateway.usage()[0]?.calls, 2);
+  } finally {
+    saboteur.close();
+    await gateway.stop();
+  }
+});
+
+test('usage totals are one row per agent, however the id was cased when each call was made', () => {
+  const ledger = new SqliteUsageLedger(fleetDbIn(path.join(os.tmpdir(), `stratus-ledger-${process.pid}-${Date.now()}`)));
+  try {
+    const at = new Date().toISOString();
+    ledger.record({ at, agentId: 'Scout', sessionId: 's', record: { turnId: 's:turn:1', provider: 'openai', model: 'm', inputTokens: 10 } });
+    ledger.record({ at, agentId: 'scout', sessionId: 's', record: { turnId: 's:turn:2', provider: 'openai', model: 'm', inputTokens: 5 } });
+    const rows = ledger.totals({ agentId: 'SCOUT' });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.calls, 2);
+    assert.equal(rows[0]?.inputTokens, 15);
+    // The newest spelling is the one shown.
+    assert.equal(rows[0]?.agentId, 'scout');
+  } finally {
+    ledger.close();
+  }
+});

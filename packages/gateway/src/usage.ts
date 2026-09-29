@@ -128,13 +128,16 @@ export class SqliteUsageLedger {
   /** Totals per (agent, provider, model) in the window, largest spender first. */
   totals(query: UsageQuery = {}): UsageTotalsRow[] {
     const { clause, params } = whereFor(query);
+    // Grouped by the folded id, as the budget counts it: an agent whose id
+    // changed case is one agent with one row. The spelling shown is the
+    // newest row's — SQLite takes a bare column from the row MAX() chose.
     const rows = this.db.prepare(`
-      SELECT agent_id, provider, model, COUNT(*) AS calls,
+      SELECT agent_id, MAX(id) AS newest, provider, model, COUNT(*) AS calls,
         SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
         SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens
       FROM usage ${clause}
-      GROUP BY agent_id, provider, model
-      ORDER BY agent_id, provider, model
+      GROUP BY agent_key, provider, model
+      ORDER BY agent_key, provider, model
     `).all(...params) as Array<Record<string, unknown>>;
     return rows.map((row) => {
       const model = typeof row.model === 'string' ? row.model : undefined;
