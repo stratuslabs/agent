@@ -41,8 +41,11 @@ Two files appear while it is serving, both `0600`:
 
 | File | What |
 | --- | --- |
-| `~/.stratus/gateway-token` | The bearer token clients authenticate with |
+| `~/.stratus/gateway-token` | The operator's bearer token — the whole API |
 | `~/.stratus/gateway.json` | Where the daemon is reachable — url, host, port, pid — removed on a clean stop |
+
+`~/.stratus/api-tokens.json` (also `0600`) appears once you create a
+[member token](#member-tokens).
 
 A third, `~/.stratus/stratusd.lock`, is the daemon's exclusive claim on the
 home for as long as it runs; see [One daemon per home](./always-on.md#one-daemon-per-home).
@@ -87,6 +90,39 @@ stratus agents --gateway http://127.0.0.1:4123
 Locally that needs nothing else: the token comes from
 `~/.stratus/gateway-token`. A daemon reached through a tunnel has its own
 token, so pass it with `--token` or `STRATUS_GATEWAY_TOKEN`.
+
+## Member tokens
+
+`~/.stratus/gateway-token` is the **operator** token: everything the API
+can do, including rewriting the config and the provider sign-ins every agent
+bills to. Handing it to a teammate, a CI job, or a hosted tenant hands them
+all of that. A **member** token is the least-privileged alternative:
+
+```bash
+stratus token create alice        # prints the token once, on stdout — store it now
+stratus token list                # id, name, role, created; never the token
+stratus token revoke alice        # by id or name
+```
+
+A member may manage the roster, talk to agents, read sessions and the
+event stream, answer approvals, and bind a channel app or add a named
+credential (add-only). It may not change the config, store or check a
+provider sign-in, or restart the daemon — those answer `403
+operator_required`. The full split is in the
+[control API reference](../../packages/control-api/README.md#roles-operator-and-member).
+
+Only each token's sha256 is kept, in `~/.stratus/api-tokens.json`
+(`0600`), so a lost token is revoked and replaced, never recovered. The
+daemon reads that file on every member request, so a new token works and a
+revoked one stops — along with every dashboard session and event stream it
+opened — **without a restart**. `stratus dashboard` always signs in as the
+operator; a member opens its own browser session with `POST
+/api/v1/auth/ott`, and that session stays a member. Approvals a member
+answers are recorded under its token's name (`api:alice`).
+
+In a hosted deployment, run one home and one daemon per tenant and give
+each tenant a member token for its own daemon: every token a daemon accepts
+was issued by that daemon's home, so it can reach nothing else.
 
 **Localhost is the posture.** To reach a machine at home, put it behind a
 tunnel (Tailscale is the pattern we recommend) rather than binding a public

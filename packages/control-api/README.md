@@ -19,7 +19,8 @@ macOS app and a headless VM — want the API and not a web page.
 
 ## Authentication
 
-Two credentials, one check. Every endpoint requires one of them.
+Two credentials, one check. Every endpoint requires one of them, and what
+it may then do depends on its [role](#roles-operator-and-member).
 
 **Bearer token** — generated into `~/.stratus/gateway-token` (0600) the first
 time the API binds. Programmatic clients read the file and send it:
@@ -43,7 +44,7 @@ cannot read the token file, and a WebSocket upgrade cannot carry an
 opens the browser at it:
 
 ```
-POST /api/v1/auth/ott          → { ott, url }          (bearer only)
+POST /api/v1/auth/ott          → { ott, url }          (bearer only, either role)
 GET  /api/v1/auth/session?ott= → 302 /, Set-Cookie      (single use, 60s)
 ```
 
@@ -64,7 +65,9 @@ Sessions live in memory and are never written to disk. An announced restart
 (`stratus restart`, `POST /restart`) hands them from the stopping process to
 the one replacing it, so the browser stays signed in; a crash or a plain
 stop-and-start signs it out, and so does rotating the token (a handed session
-is adopted only under the token it was minted with). Run `stratus dashboard`
+is adopted only under the token it was minted with). A session minted by a
+member token crosses the restart as a member, and is judged against the
+member token file on its next request like any other. Run `stratus dashboard`
 again for a new link.
 
 **Origin binding.** `SameSite` matching ignores ports, so a page served from
@@ -85,9 +88,51 @@ from the page making the request, and cannot be made to send another one —
 `Host` is a forbidden header name for `fetch`, `XMLHttpRequest`, forms, and
 WebSockets alike. A page on another port, or another host, still fails.
 
+### Roles: operator and member
+
+Every credential above carries one of two roles, and every token a daemon
+accepts is one its own home issued — so each is bound to that daemon, and
+to that daemon's tenant, by construction. A hosted deployment runs one home
+and one daemon per tenant; nothing here takes a tenant id from a request.
+
+| Role | Credential | May | May not |
+| --- | --- | --- | --- |
+| `operator` | `~/.stratus/gateway-token`, and every browser session minted from it | Everything | — |
+| `member` | A token from `stratus token create` (`stm_…`), and every browser session minted from it | Manage the roster (create, edit, reload agents and skills), talk to agents, read sessions and the event stream, answer approvals, list and revoke grants, list and cancel schedules, read the catalogs, credentials (presence only), and config, bind a channel app to an agent, add a named credential (add-only) | `PUT /config`, `PUT /credentials/:provider`, `POST /credentials/verify`, `POST /restart` |
+
+The four operator-only routes are the ones that reach past the policy the
+operator set rather than working within it: the trusted config decides
+where the operator's provider key is sent (`baseUrl`, `apiKeyEnv`) and who
+may approve; a provider sign-in is what every agent bills to; the key check
+makes the daemon fetch a URL of the caller's choosing and exists only to
+precede a sign-in a member cannot store; a restart drains everyone's turns.
+A member calling one gets `403 operator_required` with a sentence saying
+so. The rule fails closed: a route is open to members only when it is
+marked for them, so an endpoint added later is operator-only until someone
+decides otherwise.
+
+The operator token behaves exactly as it always has. Member tokens live
+in `~/.stratus/api-tokens.json` (0600) as their sha256 — the token itself
+is printed once by `stratus token create` and stored nowhere. The daemon
+reads that file on **every member request** rather than caching it, so
+`stratus token revoke` takes effect on the next request with no restart,
+and so does it for every browser session the token minted. An open event
+stream held by a revoked member is closed (WebSocket code `1008`) within
+about a second. A file that will not parse authenticates no member and is
+reported in the daemon's log; the operator token does not depend on it.
+
+A member mints its own browser sessions through `POST /auth/ott` like the
+operator, and a session keeps the role of the token that minted it — a
+browser is never a way up. An approval a member answers is recorded as
+`api:<token name>` (or `dashboard:<token name>` from a browser session),
+and the `actor` label in the request is ignored for members: the token's
+name is the one thing about a member the daemon vouches for.
+
 Localhost binding is the posture. Remote access is the operator's tunnel
 decision — Tailscale is the pattern we recommend for reaching a machine at
-home. There are no user accounts; that belongs to a hosted deployment.
+home. There are no user accounts: a member token names who holds it, and
+anything richer (sign-up, SSO, billing) belongs to a hosted deployment's
+own service in front of this API.
 
 ## Endpoints
 
@@ -427,7 +472,9 @@ endpoint records how the caller authenticated — `api` for a bearer token,
 `dashboard` for a browser session — with the optional `actor` from the body
 appended after a colon (`api:ops-bot`). The body never sets the recorded
 actor bare, so a request cannot spell a Slack approver's id and read as that
-approver's decision. A request that has already been decided, has expired,
+approver's decision. A [member](#roles-operator-and-member) is recorded under
+its token's name instead (`api:alice`, `dashboard:alice`) and its `actor` is
+ignored, so one member cannot record a decision as another. A request that has already been decided, has expired,
 or whose turn was cancelled answers `409 approval_not_pending` rather than
 silently doing nothing twice.
 
@@ -526,8 +573,9 @@ endpoint whose job is to say what the daemon is doing right now. `POST
 
 ## The event stream
 
-`WS /api/v1/events`, filterable at connect (`?session=`, `?agent=`) or with a
-frame:
+`WS /api/v1/events`, open to both [roles](#roles-operator-and-member) (a
+member's stream is closed with code `1008` once its token is revoked),
+filterable at connect (`?session=`, `?agent=`) or with a frame:
 
 ```json
 { "type": "subscribe", "sessionId": "…", "agentId": "…" }
