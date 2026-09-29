@@ -144,6 +144,19 @@ test('stratus run spends a lease on a fenced sign-in, and is refused without one
   assert.equal(listed.leases[0]?.uses, 2);
 });
 
+test('stratus usage reads the budget from the config the daemon was given, not the one discovery finds', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ budget: { daily: 100 } }));
+  const selected = path.join(home, 'daemon.json');
+  await writeFile(selected, JSON.stringify({ budget: { monthly: 7_000 } }));
+  assert.deepEqual(parseCommand(['usage', '--config', selected]), { command: 'usage', format: 'text', configPath: selected });
+  const text = await run(home, ['usage', '--config', selected]);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /this install {2}monthly {2}0 of 7,000/);
+  assert.doesNotMatch(text.stdout, /daily/);
+});
+
 test('stratus usage says a budget with no limit in it caps nothing', async () => {
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });

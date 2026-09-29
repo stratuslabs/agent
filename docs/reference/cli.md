@@ -54,6 +54,7 @@ stratus token list                     # id, name, role, created — never the t
 stratus token revoke alice             # by id or name; a running daemon refuses it at once, no restart
 stratus usage                          # tokens spent this month, per agent and model, and where each budget limit stands
 stratus usage --since 2026-09-01 --agent ava --format json
+stratus usage --config /etc/stratus/config.json   # the budget a daemon started with --config enforces
 stratus lease grant ava github.token --for 2h --uses 20 --reason "incident 412"   # let ava use a fenced key, for a while
 stratus lease list                     # active leases (also: stratus leases); --all includes ended ones
 stratus lease revoke <id>              # end one now — the very next use is refused, daemon or not
@@ -114,7 +115,7 @@ stratus dashboard                      # local browser dashboard
 | `--provider` | `anthropic`, `openai`, `codex`, `demo` (offline, no account), or the name a [plugin provider](../guides/extending.md#providers) registers |
 | `--model` | Model for real providers (anthropic default: `claude-opus-5`, codex default: `gpt-5.5`) |
 | `--base-url` | Override the provider API base URL |
-| `--config <file>` | Load settings from a specific config file |
+| `--config <file>` | Load settings from a specific config file. `stratus usage`: read the budget from it — pass the file the daemon was started with, so the limits reported are the ones it enforces |
 | `--approvals` | `run`/`chat`: tool approval mode — `always`, `ask` (a y/N on every call), `gated` (`safe` tools run, the rest ask), or `never`. Default: `gated` at a terminal; `always` when stdin is not one (a pipe, a script, `--stdin`), said once on stderr the first time a gated tool runs. `serve`: how the daemon reaches a human — `headless` (refuse gated calls) or `remote` (ask in Slack); overrides the config's `approvals.mode` |
 | `--max-turns` | Max tool turns per run before it wraps up with a summary (default 40). `stratus serve` has no flag for it — the daemon reads [`maxTurns`](./config.md#how-many-turns-one-message-may-spend) from a trusted config |
 | `--format` | `text` or `json`; `agent new` also accepts `soul` — a ready-to-edit soul file |

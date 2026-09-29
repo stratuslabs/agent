@@ -166,6 +166,7 @@ Commands:
                    and model, from the ledger the daemon keeps in fleet.db —
                    as the providers reported them, never priced — and where
                    each budget limit stands (--since, --until, --agent,
+                   --config <path> — the daemon's, if it was given one —
                    --format json). Default window: this UTC month
   lease grant      Let one agent use a credential listed in the config's
                    leases.credentials, for a while: stratus lease grant

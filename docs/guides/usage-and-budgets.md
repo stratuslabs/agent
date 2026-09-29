@@ -13,6 +13,7 @@ before the next call rather than after the bill.
 stratus usage                                   # this UTC month, every agent
 stratus usage --since 2026-09-01 --until 2026-09-15
 stratus usage --agent ava --format json
+stratus usage --config /etc/stratus/config.json   # a daemon started with --config reads its budget there
 ```
 
 ```text

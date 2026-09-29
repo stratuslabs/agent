@@ -25,10 +25,13 @@ const count = (value: number | undefined): string => (value === undefined ? '—
  * (or a script reading the JSON) that nothing caps spend, when the daemon
  * is holding the last budget it could read, or refusing calls over it.
  */
-const readBudget = async (env: CliEnvironment): Promise<
+const readBudget = async (env: CliEnvironment, configPath: string | undefined): Promise<
   { status: 'present'; budget: BudgetConfig } | { status: 'absent' } | { status: 'unreadable'; error: string }
 > => {
-  let block = await readTrustedConfigBlock('budget', env);
+  // The same selection the daemon was given — `--config` here, or
+  // STRATUS_CONFIG, which discovery reads — or this reports a budget the
+  // running service is not enforcing.
+  let block = await readTrustedConfigBlock('budget', env, configPath);
   if (block.status === 'untrusted') {
     block = await readGlobalConfigBlock('budget', env);
   }
@@ -58,7 +61,7 @@ export const runUsage = async (
     ? new Date(command.since).toISOString()
     : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
   const until = command.until !== undefined ? new Date(command.until).toISOString() : undefined;
-  const read = await readBudget(env);
+  const read = await readBudget(env, command.configPath);
   const budget = read.status === 'present' ? read.budget : undefined;
 
   // Only a missing file is an empty ledger. Anything else — permissions,

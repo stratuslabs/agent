@@ -182,6 +182,8 @@ export interface ParsedUsageCommand {
   since?: string;
   until?: string;
   agentId?: string;
+  /** The daemon's `--config`, so the budget reported is the one it enforces. */
+  configPath?: string;
   format: 'text' | 'json';
 }
 
@@ -672,6 +674,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     let since: string | undefined;
     let until: string | undefined;
     let agentId: string | undefined;
+    let configPath: string | undefined;
     for (let index = 0; index < rest.length; index += 1) {
       const token = rest[index];
       if (!token) {
@@ -707,7 +710,12 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         index += 1;
         continue;
       }
-      throw new Error(`Unexpected argument: ${token}. Try: stratus usage [--since <date>] [--until <date>] [--agent <id>] [--format json]`);
+      if (token === '--config') {
+        configPath = readOptionValue(rest, index, '--config');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unexpected argument: ${token}. Try: stratus usage [--since <date>] [--until <date>] [--agent <id>] [--config <path>] [--format json]`);
     }
     return {
       command: 'usage',
@@ -715,6 +723,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       ...(since !== undefined ? { since } : {}),
       ...(until !== undefined ? { until } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
+      ...(configPath !== undefined ? { configPath } : {}),
     };
   }
 
