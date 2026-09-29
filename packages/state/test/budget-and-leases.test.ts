@@ -263,6 +263,24 @@ test('a budget of weights alone caps nothing', () => {
   assert.equal(budgetHasLimit({ monthly: 10 }, 'ava'), true);
 });
 
+test('a sub-lease under an ancestor that has ended is not lent on, and does not crowd out one that has not', () => {
+  const store = createLeaseStore();
+  const broker = createLeaseBroker({ store, leased: ['github.token'] });
+  const root = store.grant({ agentId: 'ava', credential: 'github.token', expiresAt: new Date(Date.now() + 7_200_000).toISOString(), reason: 'r' });
+  const [sub] = broker.mintSubLeases({ parentAgentId: 'ava', parentSessionId: 's', child: agent('bea'), childSessionId: 'c1' });
+  assert.ok(sub);
+  store.revoke(root.id, 'cli');
+  // Its own fields read active; the chain above it does not.
+  assert.equal(leaseState(sub, new Date()), 'active');
+  assert.deepEqual(broker.mintSubLeases({ parentAgentId: 'bea', parentSessionId: 'c1', child: agent('cy'), childSessionId: 'c2' }), []);
+
+  // With a live lease of Bea's own, that is the one lent — though the dead
+  // borrowed one expires later and would win the sort.
+  const own = store.grant({ agentId: 'bea', credential: 'github.token', expiresAt: inAnHour(), reason: 'bea too' });
+  const [lent] = broker.mintSubLeases({ parentAgentId: 'bea', parentSessionId: 'c1', child: agent('cy'), childSessionId: 'c3' });
+  assert.equal(lent?.parentId, own.id);
+});
+
 test('a delegator with no live lease lends nothing', () => {
   const store = createLeaseStore();
   const broker = createLeaseBroker({ store, leased: ['github.token'] });

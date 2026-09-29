@@ -309,6 +309,27 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
   };
 
   /**
+   * Where a lease stands through everything it draws on — see `stateOf`.
+   * Also what picks a parent to lend from: a sub-lease whose own fields
+   * read active under an ancestor that has ended would mint a descendant
+   * no use could pay for, and could win the expiry sort over a parent
+   * that still can.
+   */
+  const chainState = (lease: CredentialLease, at: Date): LeaseState => {
+    let current: CredentialLease | undefined = lease;
+    while (current) {
+      const state = leaseState(current, at);
+      if (state !== 'active' || current.parentId === undefined || current.sessionId === undefined) {
+        return state;
+      }
+      current = subLeases.get(current.parentId) ?? options.store.get(current.parentId);
+    }
+    // A parent that is no longer anywhere cannot pay for a use — the
+    // answer `consumeChain` gives it too.
+    return 'revoked';
+  };
+
+  /**
    * Take one use of a sub-lease and of everything above it, or of none.
    * A chain is judged whole before anything is counted: a sub-lease whose
    * parent is spent must not burn its own use on the way to finding out.
@@ -422,7 +443,7 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
         const parents = [
           ...options.store.list({ agentId: parentAgentId }),
           ...[...subLeases.values()].filter((lease) => lease.sessionId === parentSessionId && lease.agentId === parentAgentId),
-        ].filter((lease) => lease.credential === credential && leaseState(lease, at) === 'active');
+        ].filter((lease) => lease.credential === credential && chainState(lease, at) === 'active');
         // The latest-expiring parent: the sub-lease is clamped to it
         // anyway, and lending the shortest one would end the delegate's
         // task early for no narrowing the clamp does not already give.
@@ -473,19 +494,7 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
 
     subLeases: () => [...subLeases.values()].map((lease) => ({ ...lease })),
 
-    stateOf(lease, at = now()) {
-      let current: CredentialLease | undefined = lease;
-      while (current) {
-        const state = leaseState(current, at);
-        if (state !== 'active' || current.parentId === undefined || current.sessionId === undefined) {
-          return state;
-        }
-        current = subLeases.get(current.parentId) ?? options.store.get(current.parentId);
-      }
-      // A parent that is no longer anywhere cannot pay for a use — the
-      // answer `consumeChain` gives it too.
-      return 'revoked';
-    },
+    stateOf: (lease, at = now()) => chainState(lease, at),
   };
 };
 

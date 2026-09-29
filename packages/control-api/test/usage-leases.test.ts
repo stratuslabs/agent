@@ -45,7 +45,9 @@ test('GET /usage answers from the ledger, and carries the budget with where each
 });
 
 test('leases are granted, listed with their state, and revoked over the API, with who did each', async () => {
-  const harness = await startApi();
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
   try {
     const granted = await harness.call('/api/v1/leases', {
       method: 'POST',
@@ -84,6 +86,24 @@ test('leases are granted, listed with their state, and revoked over the API, wit
     });
     assert.equal(noReason.status, 400);
     assert.match((await noReason.json() as { error: { message: string } }).error.message, /reason/);
+
+    // A typo for an agent nothing runs as is refused, not recorded as a grant.
+    const typo = await harness.call('/api/v1/leases', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'avaa', credential: 'github.token', expiresIn: '1h', reason: 'incident 9' }),
+    });
+    assert.equal(typo.status, 404);
+    assert.equal((await typo.json() as { error: { code: string } }).error.code, 'agent_not_found');
+    // Folded, the way identity is matched: `AVA` is Ava.
+    const cased = await harness.call('/api/v1/leases', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'AVA', credential: 'github.token', expiresIn: '1h', reason: 'incident 9' }),
+    });
+    assert.equal(cased.status, 200);
+    const all = await (await harness.call('/api/v1/leases')).json() as { leases: Array<{ agentId: string }> };
+    assert.equal(all.leases.some((entry) => entry.agentId === 'avaa'), false);
   } finally {
     await harness.stop();
   }

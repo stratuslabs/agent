@@ -60,6 +60,7 @@ import {
   type RuntimeConfig,
   type StateEnvironment,
   type StratusConfigFile,
+  foldedAgentId,
   leaseState,
   parseLeaseDuration,
 } from '@stratusagent/state';
@@ -1372,6 +1373,13 @@ export const routes: Route[] = [
         throw new ApiError(400, 'invalid_lease', 'maxUses must be a whole number, 1 or more.');
       }
       const label = optionalString(body, 'actor');
+      // Matched the way agent identity is everywhere, folded: a lease for an
+      // id nothing runs as would report granted, sit in the audit trail as
+      // though it meant something, and leave the agent it was meant for
+      // still refused.
+      if (!context.gateway.agents().some((agent) => foldedAgentId(agent.id) === foldedAgentId(agentId))) {
+        throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}, so a lease granted to it would never be used. GET /agents lists the roster.`);
+      }
       try {
         const lease = context.gateway.grantLease({
           agentId,
