@@ -342,7 +342,9 @@ test('every command migrates on first use of a newer build, and serve refuses ne
   // …while anything that writes under ~/.stratus refuses outright rather
   // than guessing at a format it was not written for — the daemon, and
   // equally a downgraded CLI's setup/chat/run.
-  for (const argv of [['serve'], ['run', 'hello'], ['chat'], ['setup']]) {
+  // `usage` and `lease list` too: reports, but through stores that create
+  // their tables in fleet.db on open.
+  for (const argv of [['serve'], ['run', 'hello'], ['chat'], ['setup'], ['usage'], ['lease', 'list']]) {
     const refused = createStreams();
     assert.equal(await runCli({
       argv,

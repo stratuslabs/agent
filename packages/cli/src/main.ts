@@ -100,7 +100,11 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         || (command.command === 'credential' && command.action !== 'list')
         || (command.command === 'token' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
-        || (command.command === 'lease' && command.action !== 'list')
+        // Every action, `list` included, and `usage` with it: both open
+        // `fleet.db` through a store that creates its table and sets WAL
+        // mode, so even a report writes into a database a newer build owns.
+        || command.command === 'lease'
+        || command.command === 'usage'
         || (command.command === 'memory' && memoryCommandWritesState(command.action))
         || command.command === 'session'
         || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
