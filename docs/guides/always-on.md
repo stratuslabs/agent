@@ -77,6 +77,8 @@ The question every operator asks on their second day:
 | Tools from an MCP server that reconnects | No | Discovered on reconnect |
 | A plugin enabled, disabled, upgraded, or reconfigured | **Yes** | `stratus restart` |
 | Credentials, or the `api`, `approvals`, and `maxTurns` settings | **Yes** | `stratus restart` — they come from a trusted config and decide who may approve, what the daemon binds, and how much one message may spend, so they are not re-read live |
+| The `budget` or `leases` block | No | Re-read from the trusted config before every model call and every leased credential use — see [Usage and budgets](./usage-and-budgets.md) and [Credential leases](./leases.md) |
+| A lease granted or revoked | No | `stratus lease grant` / `revoke` change the row the daemon reads on every use |
 | The `stratus` package itself | **Yes** | `stratus update`, which stops and starts the service around the upgrade |
 
 ### `stratus restart`: announced, drained, and back

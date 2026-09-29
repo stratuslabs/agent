@@ -105,7 +105,25 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
   file with `--config <path>`, or move the base URL into
   `~/.stratus/config.json`.
 
+Nor does a clone get to decide **what may be spent, or which keys are
+fenced**: `budget` and `leases` are trusted-config blocks too, and a
+project-local file naming either is ignored, loudly. Both are read live —
+a budget before every model call, the leased list before every leased use
+— and a config that cannot be read keeps the last good answer, or, with
+none, refuses every leased credential rather than freeing them.
+([Usage and budgets](../guides/usage-and-budgets.md),
+[Credential leases](../guides/leases.md))
+
 ## What an agent can reach
+
+- **A leased credential costs a live lease per use.** Listing a key under
+  `leases.credentials` means holding it (the soul's `credentials:`) is no
+  longer enough: each use needs an unexpired, unrevoked, not-used-up lease
+  granted by an operator with a reason, and each use — allowed or refused
+  — is a `credential.leased` record naming the lease, never the key. A
+  delegated agent borrows its delegator's lease only as a sub-lease that
+  cannot outlast it, cannot use more than it had left, works in one
+  sub-session, and ends with the task.
 
 - **A plugin resolves only the credentials its own manifest declares.**
   Installing two plugins does not let one read the other's key, even when

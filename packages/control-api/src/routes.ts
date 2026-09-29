@@ -221,6 +221,12 @@ const CONFIG_KEYS = {
   // by the loader below like the other blocks; it is a trusted-config key,
   // and the only file this endpoint writes is a trusted one.
   principals: 'object',
+  // Spending limits and fenced credentials: GET returns them, so PUT takes
+  // them back — and this is how a hosting control plane sets a tenant's
+  // budget without a shell in its container. Operator-only like the rest of
+  // this route; the loader validates both below.
+  budget: 'object',
+  leases: 'object',
 } as const;
 
 /**

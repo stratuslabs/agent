@@ -49,6 +49,11 @@ stratus credential remove search.apiKey
 stratus token create alice             # a member token for the control API — printed once, only its hash kept
 stratus token list                     # id, name, role, created — never the token (also: stratus tokens)
 stratus token revoke alice             # by id or name; a running daemon refuses it at once, no restart
+stratus usage                          # tokens spent this month, per agent and model, and where each budget limit stands
+stratus usage --since 2026-09-01 --agent ava --format json
+stratus lease grant ava github.token --for 2h --uses 20 --reason "incident 412"   # let ava use a fenced key, for a while
+stratus lease list                     # active leases (also: stratus leases); --all includes ended ones
+stratus lease revoke <id>              # end one now — the very next use is refused, daemon or not
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
 stratus grants ava                     # what ava may do unattended: standing tool grants, command scopes, sites
@@ -84,6 +89,8 @@ stratus dashboard                      # local browser dashboard
 | `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
 | `token create`, `token list`, `token revoke` | [Remote access](../guides/remote-access.md#member-tokens), [Control API](../../packages/control-api/README.md#roles-operator-and-member) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
+| `usage` | [Usage and budgets](../guides/usage-and-budgets.md) |
+| `lease grant`, `lease list`, `lease revoke` | [Credential leases](../guides/leases.md) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `grants`, `grants revoke` | [Approvals](../guides/approvals.md#standing-grants) |
 | `memory list`, `memory search`, `memory audit`, `memory forget` | [Memory](../concepts/memory.md#searching-it-yourself) — every `memory` subcommand works the built-in store, and refuses against a fleet whose config selects another |
@@ -131,13 +138,17 @@ stratus dashboard                      # local browser dashboard
 | `--no-login` | `stratus service install`: install without the start-at-login trigger |
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
 | `-n <count>` | `stratus logs`: how much backlog to print (default 50) |
-| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one |
+| `--agent` | `stratus logs`: show only one agent's records. `stratus usage` / `stratus lease list`: only that agent's. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one |
 | `--session` | `stratus logs`: show only one session's records |
 | `--skill <id>` | `stratus skill add`: pick one skill from a multi-skill repo (repeatable) |
 | `--force` | `stratus skill add`: replace an already-installed skill id. `stratus template add`: replace an agent or skill already installed under the same name |
 | `--no-reload` | `stratus skill add`: install without telling a running daemon to reload |
 | `--yes`, `-y` | `stratus template add`: install without the review prompt |
-| `--reason` | `stratus restart`: why, for the daemon's log |
+| `--reason` | `stratus restart`: why, for the daemon's log. `stratus lease grant`: why this agent may use this key — required |
+| `--for <duration>` | `stratus lease grant`: how long the lease lasts — `30m`, `2h`, `7d`; at most 90 days, and required |
+| `--uses <n>` | `stratus lease grant`: the most uses the lease pays for (default: no limit inside its window) |
+| `--all` | `stratus lease list`: include expired, used-up, and revoked leases |
+| `--since`, `--until` | `stratus usage`: the window, as ISO dates or timestamps (default: since the start of this UTC month) |
 | `--drain-timeout <seconds>` | `stratus restart`: how long in-flight turns get to finish before they are aborted (default 30) |
 | `--help`, `-h` | Show help |
 

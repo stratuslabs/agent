@@ -28,6 +28,9 @@ Usage:
   stratus restart
   stratus schedules
   stratus schedules cancel <id>
+  stratus usage
+  stratus lease grant ava github.token --for 2h --reason "incident 412"
+  stratus lease revoke <id>
   stratus grants ava
   stratus grants revoke ava --tool web.fetch
   stratus memory list ava
@@ -151,6 +154,20 @@ Commands:
   token revoke     Revoke one by id or name. A running daemon refuses it, and
                    every dashboard session and event stream opened with it,
                    without a restart
+  usage            Tokens this home has spent on models, per agent, provider,
+                   and model, from the ledger the daemon keeps in fleet.db —
+                   as the providers reported them, never priced — and where
+                   each budget limit stands (--since, --until, --agent,
+                   --format json). Default window: this UTC month
+  lease grant      Let one agent use a credential listed in the config's
+                   leases.credentials, for a while: stratus lease grant
+                   <agent> <credential> --for 2h [--uses 20] --reason "…".
+                   Every use is counted and logged; a sign-in is leased as
+                   provider:anthropic, provider:openai, or provider:codex
+  lease list       Active leases (--all adds ended ones, --agent, --format
+                   json; also: stratus leases)
+  lease revoke     End a lease now. The next use is refused, whether or not
+                   a daemon is serving
   schedules        List every schedule the fleet has set — cadence, prompt,
                    pre-authorized destination, next firing — straight from the
                    daemon's database (--format json). "stratus schedules
@@ -268,7 +285,12 @@ Options:
   --role           token create: member, the only role a created token has
   --no-reload      skill add: install without reloading a running daemon
   -y, --yes        template add: install without the review prompt
-  --reason         restart: why, for the daemon's log
+  --reason         restart: why, for the daemon's log; lease grant: why this
+                   agent may use this key (required)
+  --for            lease grant: how long — 30m, 2h, 7d (required, at most 90d)
+  --uses           lease grant: the most uses it pays for (default: no limit)
+  --all            lease list: include expired, used-up, and revoked leases
+  --since, --until usage: the window, as ISO dates (default: this UTC month)
   --drain-timeout  restart: seconds the daemon lets in-flight turns finish
                    before aborting them (default: 30)
   --no-api         serve: do not serve the control API

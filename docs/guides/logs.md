@@ -65,6 +65,15 @@ that ran under a **standing grant** is recorded as such, with the grant's
 date and approver, so it can be told from one that ran because the tool was
 `safe` — see [Approvals](./approvals.md#what-the-log-records-about-a-grant).
 
+Every model call's usage is a `session.usage` record — provider, model, and
+the four token counts, the same rows [`stratus usage`](./usage-and-budgets.md)
+sums — so a spend can be followed to the turn that made it. Every use of a
+[leased credential](./leases.md) is a `credential.leased` record, allowed or
+refused, with the credential's name, the lease that paid, and what it was
+used for — never the key. A turn stopped by a spent budget or a missing
+lease is `session.failed` with `refused: true`, its error the sentence the
+person in the conversation was shown.
+
 One exception worth knowing before you paste a log anywhere. A failed
 session records the **provider's error text verbatim**, and providers
 routinely quote the request that failed — so a malformed prompt can end up

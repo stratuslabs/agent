@@ -52,6 +52,8 @@ stratus plugins                        # installed → enabled → granted → w
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 stratus credentials                    # stored credential names (never values)
 stratus token create alice             # a member token for the control API — roster, chat, approvals, never the config (also `token list`, `token revoke`)
+stratus usage                          # tokens spent this month per agent and model, and where each budget stands
+stratus lease grant ava github.token --for 2h --reason "incident 412"   # a fenced key, usable for a while (also `lease list`, `lease revoke`)
 stratus schedules                      # what the fleet has scheduled, and where it reports
 stratus grants ava                     # what ava may do unattended, and `grants revoke` to take one back
 stratus memory list ava                # every live fact, with its trust label, pin, and validity
@@ -90,6 +92,8 @@ Full reference with every subcommand:
 | `--limit <n>` | `memory search`: maximum hits |
 | `--file <path>`, `--preserve-trust` | `memory export` / `memory import`: the JSONL, and keeping each recorded label instead of landing entries `external` |
 | `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one |
+| `--for`, `--uses`, `--reason` | `lease grant`: how long (`2h`, required), the most uses, and why (required) ([leases](https://github.com/stratuslabs/agent/blob/main/docs/guides/leases.md)) |
+| `--since`, `--until`, `--all` | `usage`: the window (default this UTC month); `lease list`: include ended leases |
 | `--role` | `token create`: `member`, the only role a created token has ([roles](https://github.com/stratuslabs/agent/blob/main/packages/control-api/README.md#roles-operator-and-member)) |
 | `--port`, `--host`, `--no-open` | `dashboard`: where a daemon it starts should bind; skip opening the browser |
 | `--no-login` | `service install`: install without the start-at-login trigger |
@@ -142,6 +146,8 @@ The reasoning:
 | Let agents act on their own schedule | [Schedules](https://github.com/stratuslabs/agent/blob/main/docs/guides/schedules.md) |
 | Teach an agent a procedure | [Skills](https://github.com/stratuslabs/agent/blob/main/docs/guides/skills.md) |
 | Run it as a service, read its logs, upgrade it | [Always on](https://github.com/stratuslabs/agent/blob/main/docs/guides/always-on.md) · [Logs](https://github.com/stratuslabs/agent/blob/main/docs/guides/logs.md) · [Updating](https://github.com/stratuslabs/agent/blob/main/docs/guides/updating.md) |
+| Run it on a server, or host it for other people | [Deployment](https://github.com/stratuslabs/agent/blob/main/docs/guides/deployment.md) · [Hosting](https://github.com/stratuslabs/agent/blob/main/docs/guides/hosting.md) |
+| Cap what agents spend, or fence a credential | [Usage and budgets](https://github.com/stratuslabs/agent/blob/main/docs/guides/usage-and-budgets.md) · [Credential leases](https://github.com/stratuslabs/agent/blob/main/docs/guides/leases.md) |
 | Understand souls, ids, and memory | [Agents](https://github.com/stratuslabs/agent/blob/main/docs/concepts/agents.md) · [Memory](https://github.com/stratuslabs/agent/blob/main/docs/concepts/memory.md) |
 | Fix a surprise | [Troubleshooting](https://github.com/stratuslabs/agent/blob/main/docs/guides/troubleshooting.md) |
 

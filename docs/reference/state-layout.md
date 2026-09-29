@@ -13,7 +13,7 @@ what moves when you rename an agent.
 | `config.json` | The global [configuration](./config.md). The **trusted** config: `api`, `approvals`, `soul`, and `systemPrompt` are read only from here (or a `--config` file you named), never from a project-local one. |
 | `credentials.json` | Stored sign-ins and Slack channel tokens. `0600`. No endpoint ever returns a secret from it. |
 | `state.json` | The schema stamp: which format this home is in, and which migrations have run. See [Updating](../guides/updating.md). |
-| `fleet.db` | The schedules, and the session index that says which agent's store holds a given session id. Fleet infrastructure, deliberately not per agent — see below. |
+| `fleet.db` | The schedules, the session index that says which agent's store holds a given session id, the usage ledger, and the credential leases. Fleet infrastructure, deliberately not per agent — see below. |
 | `gateway-token`, `gateway.json` | The [control API](../../packages/control-api/README.md)'s bearer token and the address a running daemon bound. Both `0600`. |
 | `api-tokens.json` | [Member tokens](../guides/remote-access.md#member-tokens) for the control API: `{ version: 1, tokens: [{ id, name, role, hash, createdAt }] }`, where `hash` is the token's sha256 — the token itself is never stored. Written by `stratus token`, read by the daemon on every member request. `0600`. |
 | `stratusd.lock` | Held by the daemon serving this home; how a second `stratus serve` is refused. |
@@ -113,7 +113,7 @@ that are worth knowing:
 
 ## What stays fleet-wide, and why
 
-Two things deliberately do not shard, and both live in `fleet.db`:
+Four things deliberately do not shard, and all of them live in `fleet.db`:
 
 - **Schedules.** The scheduler ticks once for the whole fleet, `stratus
   schedules` is the fleet's audit list, and cancelling by bare id revokes
@@ -127,6 +127,17 @@ Two things deliberately do not shard, and both live in `fleet.db`:
   is already held) and what such a lookup consults. It carries routing and
   status, never a message: nothing about a conversation can be read out of
   a fleet-wide file.
+- **The usage ledger.** One row per provider call — when, which agent and
+  session, which provider and model, and the four token counts — written as
+  the call completes. A [budget](../guides/usage-and-budgets.md) is the
+  home's, judged before every call across every agent, and `stratus usage`
+  reads it from another process. Counts only, never content.
+- **Credential leases.** Which agent may use which fenced credential, until
+  when, how many times, and why — with who granted and who revoked each.
+  The operator grants them for the home, and a use is counted in the same
+  row a `stratus lease revoke` ends, in one atomic statement. Ended leases
+  stay as the record. Never a key: the values stay in `credentials.json` or
+  the environment. See [Credential leases](../guides/leases.md).
 
 ## Moving or backing up a home
 

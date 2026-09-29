@@ -98,14 +98,16 @@ and one daemon per tenant; nothing here takes a tenant id from a request.
 | Role | Credential | May | May not |
 | --- | --- | --- | --- |
 | `operator` | `~/.stratus/gateway-token`, and every browser session minted from it | Everything | — |
-| `member` | A token from `stratus token create` (`stm_…`), and every browser session minted from it | Manage the roster (create, edit, reload agents and skills), talk to agents, read sessions and the event stream, answer approvals, list and revoke grants, list and cancel schedules, read the catalogs, credentials (presence only), and config, bind a channel app to an agent, add a named credential (add-only) | `PUT /config`, `PUT /credentials/:provider`, `POST /credentials/verify`, `POST /restart` |
+| `member` | A token from `stratus token create` (`stm_…`), and every browser session minted from it | Manage the roster (create, edit, reload agents and skills), talk to agents, read sessions and the event stream, answer approvals, list and revoke grants, list and cancel schedules, read the catalogs, credentials (presence only), and config, bind a channel app to an agent, add a named credential (add-only), read usage and the budget, list credential leases and revoke one | `PUT /config`, `PUT /credentials/:provider`, `POST /credentials/verify`, `POST /restart`, `POST /leases` |
 
-The four operator-only routes are the ones that reach past the policy the
+The five operator-only routes are the ones that reach past the policy the
 operator set rather than working within it: the trusted config decides
-where the operator's provider key is sent (`baseUrl`, `apiKeyEnv`) and who
-may approve; a provider sign-in is what every agent bills to; the key check
-makes the daemon fetch a URL of the caller's choosing and exists only to
-precede a sign-in a member cannot store; a restart drains everyone's turns.
+where the operator's provider key is sent (`baseUrl`, `apiKeyEnv`), who
+may approve, and how much may be spent (`budget`); a provider sign-in is
+what every agent bills to; the key check makes the daemon fetch a URL of
+the caller's choosing and exists only to precede a sign-in a member cannot
+store; a restart drains everyone's turns; and granting a lease widens what
+an agent may do with a fenced key, where revoking one only narrows it.
 A member calling one gets `403 operator_required` with a sentence saying
 so. The rule fails closed: a route is open to members only when it is
 marked for them, so an endpoint added later is operator-only until someone
@@ -160,6 +162,10 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }`, where `answer` is `once`, `always`, or `deny` — see [below](#always-means-one-thing-and-the-request-says-which) |
 | GET | `/schedules` | Every schedule the fleet has set — cadence, prompt, pre-authorized destination, next firing. The audit list: each row with a destination is a standing permission to speak |
 | DELETE | `/schedules/:id` | Cancel a schedule. Also revokes the destination grant riding on the row — a still-running firing's next send is gated normally. 404 when no such schedule exists |
+| GET | `/usage?since=&until=&agent=` | Tokens spent, from the home's usage ledger in `fleet.db`: `usage` is one row per (agent, provider, model) with `calls` and the four token buckets summed as the providers reported them, never priced. `since`/`until` are ISO dates or timestamps (default: the start of this UTC month, open-ended); a bad one answers `400 invalid_query`. When a `budget` is configured, `budget` carries the block and `limits` — every limit with `spent`, `resetsAt`, and `reached` — see [Usage and budgets](../../docs/guides/usage-and-budgets.md) |
+| GET | `/leases?agent=` | Every credential lease this home has granted, with its `state` (`active`, `expired`, `exhausted`, `revoked`), then the live delegated sub-leases (`parentId`, `sessionId`), which exist only in the daemon that lent them. Names, counts, and reasons — never a key |
+| POST | `/leases` | Operator-only. Grant one: `{ agentId, credential, expiresIn \| expiresAt, maxUses?, reason, actor? }` → `{ lease }`. `expiresIn` is `30m`, `2h`, `7d`; a lease must end within 90 days and give a reason, or `400 invalid_lease` says which. `grantedBy` records `api:<actor>` (or `dashboard:`) — see [Credential leases](../../docs/guides/leases.md) |
+| POST | `/leases/:id/revoke` | End a lease now: `{ actor? }` → `{ lease }` with `state: "revoked"`. The very next use is refused — the daemon reads the row on every use. `404 lease_not_found` for an unknown id or one already revoked, which stays revoked as it was |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
 | GET | `/catalog/tools` | Every registered tool with the risk a call will face, every skill a soul's `skills:` can name, the plugins that contributed them (with the providers, channels, memory stores, and executors each registered), and `providers` — every name a soul's `provider:` can select on this daemon, built-ins and plugin-registered alike |
 | GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value — `channels`: which agents have transport secrets stored on each channel kind, ids only, and `named`: `{ shared: [name…], agents: { id: [name…] } }`, names only |
@@ -193,7 +199,11 @@ the only file this endpoint writes is a trusted one — so the GET-modify-PUT
 round trip keeps it. The same goes for `vision`, the boolean that tells a
 text-only OpenAI-compatible model to take images as a note: `GET` returns
 it, so `PUT` takes it back, and for `language`, the fleet's writing
-language, which the loader refuses with a `400` unless it is a language tag. `PUT /config` does not write the `plugins` block, nor the `executor` and
+language, which the loader refuses with a `400` unless it is a language tag.
+`budget` and `leases` round-trip the same way, and this route is how a
+hosting control plane sets a tenant's spending limit without a shell in its
+container: the loader validates both, and the next provider call reads
+them — no restart. `PUT /config` does not write the `plugins` block, nor the `executor` and
 `memoryStore` selections. `GET` returns them, and a `PUT` carrying them back
 is accepted (the round trip has to work) but the values are ignored and the
 file's existing ones are preserved rather than deleted by the replace.
@@ -608,6 +618,18 @@ carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own
 deltas from the next caller's. The id is assigned at dispatch and returned by
 `POST /sessions/:id/messages`.
+
+Three more joined it with [deployment profiles](../../docs/roadmap/08-deployment-profiles.md).
+`session.usage` announces the records one provider call added, as it lands,
+with the `agentId` — the stream a meter reads, since `session.completed` is
+too late to stop the next call and is never sent for a failed turn.
+`credential.leased` records every use of a leased credential, `outcome`
+`allowed` (with the `leaseId` that paid, and `parentLeaseId` for a
+delegate's sub-lease) or `refused` (with the refusal's `reason`), plus the
+caller's `use` label — names and ids, never a key. And `session.failed`
+carries `refused: true` when the host stopped the turn on purpose — a spent
+budget, an expired lease — so its `error` is a sentence for the person in
+the conversation, to show as it is rather than as a malfunction.
 
 `session.completed` carries the session's `usage` records in the same shape
 `GET /sessions/:id` returns — the whole set, not just this run's, because that

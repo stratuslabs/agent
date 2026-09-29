@@ -30,6 +30,9 @@ tree is where the depth lives.
 | Mount an MCP server's tools | [MCP](./guides/mcp.md) |
 | Run agents on a provider, channel, memory store, or executor a plugin supplies — or write one | [Extending](./guides/extending.md) |
 | Use the web dashboard, or reach a daemon from another machine | [Remote access](./guides/remote-access.md) |
+| See what agents spend on models, and cap it per day or month | [Usage and budgets](./guides/usage-and-budgets.md) |
+| Let an agent use a sensitive key only for a while, and see every use | [Credential leases](./guides/leases.md) |
+| Host Stratus for other people — one isolated cell per tenant | [Hosting](./guides/hosting.md) |
 | Look up a command or flag | [CLI reference](./reference/cli.md) |
 | Look up a config key, or understand precedence | [Configuration](./reference/config.md) |
 | Know what is in `~/.stratus`, and what belongs to one agent | [State layout](./reference/state-layout.md) |

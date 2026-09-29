@@ -61,6 +61,8 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `executor` | Which executor runs tool calls: `local` (the default) or the name a [plugin executor](../guides/extending.md#executors) registers — trusted configs only, see below |
 | `memoryStore` | Which store backs agent memory: `file` (the default) or the name a [plugin memory store](../guides/extending.md#memory-stores) registers — trusted configs only, see below |
 | `maxTurns` | How many tool turns one message may take before the agent stops and reports where it got to. Default `40` — trusted configs only, see below |
+| `budget` | How many weighted tokens this home may spend on models per UTC day and month, for the whole install and per agent, with optional per-bucket `weights` — trusted configs only, read live, see [Usage and budgets](../guides/usage-and-budgets.md) |
+| `leases` | `{ "credentials": [...] }`: which credentials may only be used under a time-bounded lease — named credentials, or a sign-in as `provider:anthropic` / `provider:openai` / `provider:codex`. Trusted configs only, read live, see [Credential leases](../guides/leases.md) |
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
@@ -242,6 +244,8 @@ set.
 | `slack` | How the daemon's agents post into your workspace | [Slack](../guides/slack.md#how-replies-appear) |
 | `api` | Which interface and port a daemon binds | [Remote access](../guides/remote-access.md) |
 | `maxTurns` | How long a loop one message can buy, which is both a runaway guard and a spending limit | [Always on](../guides/always-on.md#how-many-turns-one-message-may-spend) |
+| `budget` | How much the operator's keys may spend, and on whom — raising it spends their money, lowering it can stop every agent | [Usage and budgets](../guides/usage-and-budgets.md) |
+| `leases` | Which keys holding is not the same as being allowed to use — a clone taking one off the list unfences it | [Credential leases](../guides/leases.md) |
 | `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
 | `soul`, `systemPrompt` | What the agent is told it is and what it may do — a persona in a cloned repo is a system prompt written by whoever pushed it. `--soul` and `STRATUS_SOUL` still name one; the run says once, on stderr, what the file asked for and did not get, and `stratus serve` says it once at startup, whether or not its runtime resolves | [Security](../concepts/security.md) |
 

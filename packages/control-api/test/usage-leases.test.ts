@@ -88,3 +88,34 @@ test('leases are granted, listed with their state, and revoked over the API, wit
     await harness.stop();
   }
 });
+
+test('the operator sets a budget over PUT /config, and the next call is judged by it', async () => {
+  const harness = await startApi();
+  try {
+    const put = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { budget: { daily: 5000 }, leases: { credentials: ['github.token'] } } }),
+    });
+    assert.equal(put.status, 200, await put.clone().text());
+    const round = await (await harness.call('/api/v1/config')).json() as { config: { budget?: object; leases?: object } };
+    assert.deepEqual(round.config.budget, { daily: 5000 });
+    assert.deepEqual(round.config.leases, { credentials: ['github.token'] });
+    // GET then PUT of the same document keeps working with the blocks present.
+    const again = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: round.config }),
+    });
+    assert.equal(again.status, 200);
+    assert.equal((await harness.gateway.budget())?.limits[0]?.limit, 5000);
+    const bad = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { budget: { daily: -1 } } }),
+    });
+    assert.equal(bad.status, 400);
+  } finally {
+    await harness.stop();
+  }
+});
