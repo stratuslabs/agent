@@ -530,6 +530,37 @@ test('a turn a crash left running has its saved spend written to the ledger when
   }
 });
 
+test('spend that cannot be written stops only the agents a limit covers', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-a\n---\n\nYou are Bea.\n');
+  await writeConfig(home, { budget: { agents: { ava: { daily: 1_000_000 } } } });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+    idleTimeoutMs: 0,
+    warn: () => {},
+  });
+  await gateway.start();
+  const { DatabaseSync } = await import('node:sqlite');
+  const saboteur = new DatabaseSync(fleetDbIn(path.join(home, '.stratus')));
+  try {
+    saboteur.exec("CREATE TRIGGER full_disk BEFORE INSERT ON usage BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+    await gateway.dispatch({ sessionId: 'b-1', agentId: 'bea', userMessage: 'one' });
+    // Bea has no limit of her own and the home has none: nothing to protect.
+    const again = await gateway.dispatch({ sessionId: 'b-1', agentId: 'bea', userMessage: 'two' });
+    assert.equal(again.status, 'completed');
+    // Ava's limit cannot be judged while spend is unwritten.
+    await assert.rejects(
+      gateway.dispatch({ sessionId: 'a-1', agentId: 'ava', userMessage: 'one' }),
+      /Spending could not be recorded/,
+    );
+    saboteur.exec('DROP TRIGGER full_disk');
+  } finally {
+    saboteur.close();
+    await gateway.stop();
+  }
+});
+
 test('usage totals are one row per agent, however the id was cased when each call was made', () => {
   const ledger = new SqliteUsageLedger(fleetDbIn(path.join(os.tmpdir(), `stratus-ledger-${process.pid}-${Date.now()}`)));
   try {

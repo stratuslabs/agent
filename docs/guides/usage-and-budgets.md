@@ -126,8 +126,9 @@ Two properties are worth knowing before you rely on a number:
 - **Unrecorded spend stops budgeted calls.** If the ledger cannot be
   written — a full disk, an I/O error — the usage is held in
   `~/.stratus/usage-held.jsonl` and retried, and while any is held no call
-  under a budget with a limit in it is made: a check that cannot see spent tokens would keep
-  allowing calls. The hold survives a restart, so a restarted daemon still
+  a limit covers is made — any call, under a limit on the install; only
+  that agent's, under an agent's own: a check that cannot see spent tokens
+  would keep allowing calls. The hold survives a restart, so a restarted daemon still
   refuses until the held usage is written, and each held call is counted
   once. A disk too full for even that one-line append keeps it in memory
   only: a stop then writes it out whole as a warning, which reaches the

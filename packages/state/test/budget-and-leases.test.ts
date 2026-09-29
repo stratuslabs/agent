@@ -257,6 +257,10 @@ test('a budget of weights alone caps nothing', () => {
   assert.equal(budgetHasLimit({ weights: { outputTokens: 5 }, agents: { ava: {} } }), false);
   assert.equal(budgetHasLimit({ monthly: 10 }), true);
   assert.equal(budgetHasLimit({ agents: { ava: {}, bea: { daily: 1 } } }), true);
+  // For one agent: the home's limits, or its own — never another agent's.
+  assert.equal(budgetHasLimit({ agents: { ava: {}, bea: { daily: 1 } } }, 'ava'), false);
+  assert.equal(budgetHasLimit({ agents: { ava: {}, bea: { daily: 1 } } }, 'BEA'), true);
+  assert.equal(budgetHasLimit({ monthly: 10 }, 'ava'), true);
 });
 
 test('a delegator with no live lease lends nothing', () => {

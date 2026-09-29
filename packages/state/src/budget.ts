@@ -145,17 +145,6 @@ export const parseBudgetConfig = (raw: unknown, configPath: string): BudgetConfi
   return budget;
 };
 
-/**
- * Whether a budget caps anything: a daily or monthly limit for the home or
- * for some agent. `{}`, or a block of weights alone, is accepted — a
- * control plane may write the weights before it sells a limit — but caps
- * nothing, so it must refuse nothing either. The fail-closed paths (usage
- * the ledger could not write) exist to protect a limit, and with none to
- * protect they would stop every call for a number no check reads.
- */
-export const budgetHasLimit = (budget: BudgetConfig): boolean =>
-  [budget, ...Object.values(budget.agents ?? {})]
-    .some((limits) => BUDGET_PERIODS.some((period) => limits[period] !== undefined));
 
 /**
  * One usage record's weight against a budget. A bucket the provider did
@@ -222,6 +211,28 @@ export type BudgetSpend = (since: string, agentId?: string) => number;
 const agentLimitsFor = (budget: BudgetConfig, agentId: string): [key: string, limits: BudgetLimits] | undefined => {
   const folded = foldedAgentId(agentId);
   return Object.entries(budget.agents ?? {}).find(([key]) => foldedAgentId(key) === folded);
+};
+
+/**
+ * Whether a budget caps anything — or, given an agent, anything that agent
+ * spends: a daily or monthly limit for the home, or one of its own.
+ * `{}`, or a block of weights alone, is accepted — a control plane may
+ * write the weights before it sells a limit — but caps nothing, so it must
+ * refuse nothing either. The fail-closed paths (usage the ledger could not
+ * write) exist to protect a limit, and with none to protect they would stop
+ * every call for a number no check reads; likewise one agent's own limit is
+ * no reason to stop an agent it does not cover.
+ */
+export const budgetHasLimit = (budget: BudgetConfig, agentId?: string): boolean => {
+  const hasLimit = (limits: BudgetLimits): boolean => BUDGET_PERIODS.some((period) => limits[period] !== undefined);
+  if (hasLimit(budget)) {
+    return true;
+  }
+  if (agentId !== undefined) {
+    const own = agentLimitsFor(budget, agentId);
+    return own !== undefined && hasLimit(own[1]);
+  }
+  return Object.values(budget.agents ?? {}).some(hasLimit);
 };
 
 /**

@@ -1308,7 +1308,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // there is no telling whether they were ever counted.
     reconcileUsage(request.session);
     const unwritten = flushUsage();
-    if (budget && budgetHasLimit(budget)) {
+    if (budget && budgetHasLimit(budget, agentId)) {
       // Fail closed: spend the ledger could not record is spend the check
       // below cannot see, so no budgeted call is made until it is written.
       if (unwritten) {
