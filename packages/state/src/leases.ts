@@ -266,6 +266,14 @@ export interface LeaseBroker {
   releaseSubLeases(childSessionId: string): void;
   /** The live sub-leases, for a listing. */
   subLeases(): CredentialLease[];
+  /**
+   * Where a lease stands, judged the way a use judges it: a sub-lease is
+   * only as live as everything it draws on, so one whose parent (or any
+   * ancestor) was revoked, expired, or used up reports that ancestor's
+   * state. `leaseState` alone reads only the lease's own fields, and would
+   * list a key as usable after its authority had ended.
+   */
+  stateOf(lease: CredentialLease, at?: Date): LeaseState;
 }
 
 export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
@@ -441,6 +449,20 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
     },
 
     subLeases: () => [...subLeases.values()].map((lease) => ({ ...lease })),
+
+    stateOf(lease, at = now()) {
+      let current: CredentialLease | undefined = lease;
+      while (current) {
+        const state = leaseState(current, at);
+        if (state !== 'active' || current.parentId === undefined || current.sessionId === undefined) {
+          return state;
+        }
+        current = subLeases.get(current.parentId) ?? options.store.get(current.parentId);
+      }
+      // A parent that is no longer anywhere cannot pay for a use — the
+      // answer `consumeChain` gives it too.
+      return 'revoked';
+    },
   };
 };
 

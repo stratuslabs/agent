@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import { HostRefusalError, type AgentDefinition, type CredentialResolver, type ModelProvider } from '@stratusagent/core';
 import {
+  budgetHasLimit,
   budgetWindow,
   createFallbackWrappedProvider,
   createLeaseBroker,
@@ -228,6 +229,34 @@ test('a live sub-lease can be revoked by id, and that ends the ones drawn from i
   assert.equal(broker.revokeSubLease(sub.id, 'api:ops')?.revokedBy, 'api:ops');
   assert.equal(broker.revokeSubLease(sub.id), undefined, 'revoked once stays revoked as it was');
   assert.throws(() => broker.use('cy', 'github.token', { sessionId: 'c2' }), CredentialLeaseError);
+});
+
+test('a sub-lease is listed as ended once anything above it has, whatever its own fields say', () => {
+  const store = createLeaseStore();
+  const broker = createLeaseBroker({ store, leased: ['github.token'] });
+  const parent = store.grant({ agentId: 'ava', credential: 'github.token', expiresAt: inAnHour(), maxUses: 3, reason: 'r' });
+  const [sub] = broker.mintSubLeases({ parentAgentId: 'ava', parentSessionId: 's', child: agent('bea'), childSessionId: 'c1' });
+  const [nested] = broker.mintSubLeases({ parentAgentId: 'bea', parentSessionId: 'c1', child: agent('cy'), childSessionId: 'c2' });
+  assert.ok(sub && nested);
+  assert.equal(broker.stateOf(nested), 'active');
+
+  // The parent used up by its own holder: the grandchild's fields are untouched.
+  broker.use('ava', 'github.token');
+  broker.use('ava', 'github.token');
+  broker.use('ava', 'github.token');
+  assert.equal(leaseState(nested, new Date()), 'active', 'its own fields still read active');
+  assert.equal(broker.stateOf(nested), 'exhausted');
+
+  store.revoke(parent.id, 'cli');
+  assert.equal(broker.stateOf(sub), 'revoked');
+  assert.equal(broker.stateOf(store.get(parent.id)!), 'revoked');
+});
+
+test('a budget of weights alone caps nothing', () => {
+  assert.equal(budgetHasLimit({}), false);
+  assert.equal(budgetHasLimit({ weights: { outputTokens: 5 }, agents: { ava: {} } }), false);
+  assert.equal(budgetHasLimit({ monthly: 10 }), true);
+  assert.equal(budgetHasLimit({ agents: { ava: {}, bea: { daily: 1 } } }), true);
 });
 
 test('a delegator with no live lease lends nothing', () => {

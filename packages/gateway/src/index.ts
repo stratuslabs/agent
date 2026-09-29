@@ -170,6 +170,7 @@ import {
   foldedAgentId,
   BudgetExceededError,
   budgetStatus,
+  budgetHasLimit,
   createLeaseBroker,
   createLeasePolicyRefresh,
   createLeaseResolver,
@@ -181,6 +182,7 @@ import {
   type BudgetConfig,
   type BudgetLimitStatus,
   type CredentialLease,
+  type LeaseState,
   type LeaseGrant,
   type ProviderCallGuard,
 } from '@stratusagent/state';
@@ -908,8 +910,12 @@ export interface Gateway {
    * itself cannot be read; `error` says why the write still fails.
    */
   unrecordedUsage(): { calls: number; error?: string };
-  /** Every credential lease this home has granted, oldest first, then the live delegated sub-leases. */
-  leases(filter?: { agentId?: string }): CredentialLease[];
+  /**
+   * Every credential lease this home has granted, oldest first, then the
+   * live delegated sub-leases — each with its `state` as a use would judge
+   * it, so a sub-lease whose parent has ended is never listed `active`.
+   */
+  leases(filter?: { agentId?: string }): Array<CredentialLease & { state: LeaseState }>;
   /** Grant a lease. Validated by `validateLeaseGrant`; throws its sentence. */
   grantLease(input: LeaseGrant): CredentialLease;
   /** End a lease now. Undefined when there is no such lease or it was already revoked. */
@@ -1285,7 +1291,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const judgeProviderCall: ProviderCallGuard = async (request, credential) => {
     const agentId = request.session.agent.id;
     const budget = await currentBudget();
-    if (budget) {
+    if (budget && budgetHasLimit(budget)) {
       // Fail closed: spend the ledger could not record is spend the check
       // below cannot see, so no budgeted call is made until it is written.
       const unwritten = flushUsage();
@@ -4257,6 +4263,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (!budget) {
         return undefined;
       }
+      if (!budgetHasLimit(budget)) {
+        return { budget, limits: [] };
+      }
       const unwritten = flushUsage();
       if (unwritten) {
         throw new HostRefusalError(
@@ -4268,12 +4277,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         limits: budgetStatus(budget, (since, agentId) => usageLedger.spent(since, agentId, budget.weights), new Date()),
       };
     },
-    leases: (filter = {}) => [
-      ...leaseStore.list(filter),
-      // Folded like the stored half, so `?agent=scout` finds Scout's too.
-      ...leaseBroker.subLeases().filter((lease) => filter.agentId === undefined
-        || foldedAgentId(lease.agentId) === foldedAgentId(filter.agentId)),
-    ],
+    leases: (filter = {}) => {
+      const now = new Date();
+      return [
+        ...leaseStore.list(filter),
+        // Folded like the stored half, so `?agent=scout` finds Scout's too.
+        ...leaseBroker.subLeases().filter((lease) => filter.agentId === undefined
+          || foldedAgentId(lease.agentId) === foldedAgentId(filter.agentId)),
+      ].map((lease) => ({ ...lease, state: leaseBroker.stateOf(lease, now) }));
+    },
     grantLease(input) {
       validateLeaseGrant(input, new Date());
       return leaseStore.grant(input);

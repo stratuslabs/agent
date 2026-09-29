@@ -1340,11 +1340,8 @@ export const routes: Route[] = [
     member: true,
     async handler(context) {
       const agentId = context.url.searchParams.get('agent') ?? undefined;
-      const now = new Date();
-      return {
-        leases: context.gateway.leases(agentId !== undefined ? { agentId } : {})
-          .map((lease) => ({ ...lease, state: leaseState(lease, now) })),
-      };
+      // Each with the state the gateway judged through its parent chain.
+      return { leases: context.gateway.leases(agentId !== undefined ? { agentId } : {}) };
     },
   },
   {

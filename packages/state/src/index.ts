@@ -248,6 +248,7 @@ export {
   budgetWindow,
   findBudgetBreach,
   budgetExceededMessage,
+  budgetHasLimit,
   BudgetExceededError,
   type BudgetLimitStatus,
   budgetStatus,

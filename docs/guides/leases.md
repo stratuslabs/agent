@@ -108,7 +108,9 @@ the delegate borrows it as a **sub-lease** for that one task:
 
 The delegate's own leases come first; a sub-lease is what the delegator
 lends on top, for this task. `GET /leases` lists live sub-leases with their
-`parentId` and `sessionId`, and `POST /leases/<sub-id>/revoke` ends one —
+`parentId` and `sessionId` — and with the `state` a use would find, so one
+whose parent has ended is listed as ended, not `active` — and
+`POST /leases/<sub-id>/revoke` ends one —
 and any lent on from it — while the task is still running. `stratus lease
 list`, which reads the file, shows only granted ones. A delegate whose
 borrowed lease has ended is told that, not that it holds none.

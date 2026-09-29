@@ -70,7 +70,10 @@ conversation under prompt caching — mostly cache reads at a tenth of the
 input price — would hit a cap at a tenth of the spend you had in mind. Set
 them to your provider's price ratios (input 1, and the others relative to
 it) and a limit reads as "input-token-equivalents", which converts to money
-with one multiplication. Leave a limit out for no limit.
+with one multiplication. Leave a limit out for no limit. A block with no
+`daily` or `monthly` anywhere in it — `{}`, or weights alone — caps nothing,
+so it refuses nothing either, including under the unrecorded-spend rule
+below.
 
 Every limit is a whole number, 1 or more; weights are numbers, 0 or more. A
 misshapen block is refused with the key named — a limit silently ignored
@@ -118,7 +121,7 @@ Two properties are worth knowing before you rely on a number:
 - **Unrecorded spend stops budgeted calls.** If the ledger cannot be
   written — a full disk, an I/O error — the usage is held in
   `~/.stratus/usage-held.jsonl` and retried, and while any is held no call
-  under a budget is made: a check that cannot see spent tokens would keep
+  under a budget with a limit in it is made: a check that cannot see spent tokens would keep
   allowing calls. The hold survives a restart, so a restarted daemon still
   refuses until the held usage is written, and each held call is counted
   once. A disk too full for even that one-line append keeps it in memory

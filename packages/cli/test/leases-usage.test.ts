@@ -140,6 +140,15 @@ test('stratus run spends a lease on a fenced sign-in, and is refused without one
   assert.equal(listed.leases[0]?.uses, 1);
 });
 
+test('stratus usage says a budget with no limit in it caps nothing', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ budget: { weights: { outputTokens: 5 } } }));
+  const text = await run(home, ['usage']);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /sets no daily or monthly limit, so nothing is capped/);
+});
+
 test('stratus usage reports an unreadable budget as unknown, never as no budget', async () => {
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });

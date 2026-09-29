@@ -146,6 +146,18 @@ export const parseBudgetConfig = (raw: unknown, configPath: string): BudgetConfi
 };
 
 /**
+ * Whether a budget caps anything: a daily or monthly limit for the home or
+ * for some agent. `{}`, or a block of weights alone, is accepted — a
+ * control plane may write the weights before it sells a limit — but caps
+ * nothing, so it must refuse nothing either. The fail-closed paths (usage
+ * the ledger could not write) exist to protect a limit, and with none to
+ * protect they would stop every call for a number no check reads.
+ */
+export const budgetHasLimit = (budget: BudgetConfig): boolean =>
+  [budget, ...Object.values(budget.agents ?? {})]
+    .some((limits) => BUDGET_PERIODS.some((period) => limits[period] !== undefined));
+
+/**
  * One usage record's weight against a budget. A bucket the provider did
  * not report adds nothing — absent is "not reported", and inventing a zero
  * or anything else here would bill for a measurement nobody made.

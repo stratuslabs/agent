@@ -282,6 +282,53 @@ test('a delegated agent borrows the delegator\'s lease as a sub-lease no wider t
   }
 });
 
+test('a sub-lease whose parent is revoked mid-task is listed as revoked, not active', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', [
+    '---', 'name: Ava', 'provider: openai', 'model: model-a',
+    'tools:', '  - agent.delegate', 'delegates:', '  - bea',
+    '---', '', 'You are Ava.', '',
+  ].join('\n'));
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-b\n---\n\nYou are Bea.\n');
+  await writeConfig(home, { leases: { credentials: ['provider:openai'] } });
+  let gatewayRef: ReturnType<typeof createGateway> | undefined;
+  let parentId = '';
+  let seen: ReturnType<ReturnType<typeof createGateway>['leases']> = [];
+  let avaCalls = 0;
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { model: string };
+    if (body.model === 'model-a') {
+      avaCalls += 1;
+      return avaCalls === 1 ? openAiToolCall('agent_delegate', { agent: 'bea', prompt: 'look into it' }) : openAiText('ava done');
+    }
+    gatewayRef?.revokeLease(parentId, 'cli');
+    seen = gatewayRef?.leases() ?? [];
+    return openAiText('bea done');
+  }) as typeof fetch;
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+    idleTimeoutMs: 0,
+  });
+  gatewayRef = gateway;
+  await gateway.start();
+  try {
+    parentId = gateway.grantLease({
+      agentId: 'ava',
+      credential: 'provider:openai',
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      reason: 'incident 8',
+    }).id;
+    // Ava's next call is refused with the lease gone; the listing is the point.
+    await gateway.dispatch({ sessionId: 'r-1', agentId: 'ava', userMessage: 'delegate it' }).catch(() => undefined);
+    const sub = seen.find((lease) => lease.parentId === parentId);
+    assert.ok(sub, 'the sub-lease was listed during the delegated turn');
+    assert.equal(sub.revokedAt, undefined, 'its own fields say nothing ended');
+    assert.equal(sub.state, 'revoked');
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a sub-lease lasts only as long as the delegated task: the delegate asked directly afterwards is refused', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', [
@@ -372,6 +419,33 @@ test('spend the ledger cannot write is held, budgeted calls are refused until it
     assert.equal(recovered.status, 'completed');
     // The held call was written on recovery: both answered calls are counted.
     assert.equal(gateway.usage()[0]?.calls, 2);
+  } finally {
+    saboteur.close();
+    await gateway.stop();
+  }
+});
+
+test('a budget with no limit in it refuses nothing, even while spend cannot be written', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeConfig(home, { budget: { weights: { outputTokens: 5 }, agents: { ava: {} } } });
+  const fetchImpl = (async () => openAiText('ok')) as typeof fetch;
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+    idleTimeoutMs: 0,
+  });
+  await gateway.start();
+  const { DatabaseSync } = await import('node:sqlite');
+  const saboteur = new DatabaseSync(fleetDbIn(path.join(home, '.stratus')));
+  try {
+    saboteur.exec("CREATE TRIGGER full_disk BEFORE INSERT ON usage BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+    await gateway.dispatch({ sessionId: 'n-1', agentId: 'ava', userMessage: 'one' });
+    const second = await gateway.dispatch({ sessionId: 'n-1', agentId: 'ava', userMessage: 'two' });
+    assert.equal(second.status, 'completed');
+    assert.deepEqual((await gateway.budget())?.limits, []);
+    // Still held and still reported — only the refusal is gone.
+    assert.ok(gateway.unrecordedUsage().calls >= 1);
+    saboteur.exec('DROP TRIGGER full_disk');
   } finally {
     saboteur.close();
     await gateway.stop();

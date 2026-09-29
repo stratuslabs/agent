@@ -142,6 +142,10 @@ export const runUsage = async (
     writeLine(streams.stdout, 'No budget is set. A `budget` block in ~/.stratus/config.json caps spend per UTC day or month.');
     return unresolved ? 1 : 0;
   }
+  if (limits.length === 0) {
+    writeLine(streams.stdout, 'The budget sets no daily or monthly limit, so nothing is capped — only weighed.');
+    return unresolved ? 1 : 0;
+  }
   writeLine(streams.stdout, 'Budget (weighted tokens):');
   for (const limit of limits) {
     const who = limit.scope === 'home' ? 'this install' : `agent ${limit.agentId ?? ''}`;
