@@ -61,10 +61,17 @@ export const runUsage = async (
   const read = await readBudget(env);
   const budget = read.status === 'present' ? read.budget : undefined;
 
+  // Only a missing file is an empty ledger. Anything else — permissions,
+  // an I/O error — means the spend cannot be read, and reporting zero over
+  // it would tell an operator (or a script) that nothing was spent.
   let exists = true;
   try {
     await stat(fleetDbPath(env));
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      writeLine(streams.stderr, `Error: the usage ledger at ${fleetDbPath(env)} could not be read (${error instanceof Error ? error.message : String(error)}), so what was spent is unknown here.`);
+      return 1;
+    }
     exists = false;
   }
   const { createUsageHold, SqliteUsageLedger, USAGE_HOLD_FILENAME } = await import('@stratusagent/gateway');

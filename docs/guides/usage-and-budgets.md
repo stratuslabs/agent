@@ -122,7 +122,9 @@ Two properties are worth knowing before you rely on a number:
   allowing calls. The hold survives a restart, so a restarted daemon still
   refuses until the held usage is written, and each held call is counted
   once. A disk too full for even that one-line append keeps it in memory
-  only, where a crash would lose it; a line of the file cut short by a
+  only: a stop then writes it out whole as a warning, which reaches the
+  service manager's log (journald, `docker logs`) for someone to add back,
+  and only a crash would lose it; a line of the file cut short by a
   crash is refused, never dropped, until someone repairs it. While any
   usage is held, `stratus usage` says so and exits non-zero, and
   `GET /usage` carries `unrecorded`. The turn is refused with a sentence

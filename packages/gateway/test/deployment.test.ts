@@ -542,3 +542,30 @@ test('a damaged line in held usage refuses budgeted calls rather than being drop
     await gateway.stop();
   }
 });
+
+test('usage no disk would take is written out whole as the daemon stops, never dropped silently', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  // Where the hold file goes, a directory: the append fails as well.
+  await mkdir(path.join(home, '.stratus', 'usage-held.jsonl'), { recursive: true });
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+    idleTimeoutMs: 0,
+    warn: (line) => warnings.push(line),
+  });
+  await gateway.start();
+  const { DatabaseSync } = await import('node:sqlite');
+  const saboteur = new DatabaseSync(fleetDbIn(path.join(home, '.stratus')));
+  try {
+    saboteur.exec("CREATE TRIGGER full_disk BEFORE INSERT ON usage BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+    await gateway.dispatch({ sessionId: 'z-1', agentId: 'ava', userMessage: 'one' });
+  } finally {
+    await gateway.stop();
+    saboteur.close();
+  }
+  const last = warnings.find((line) => /stopping with 1 call\(s\) of spend that could not be written anywhere/.test(line));
+  assert.ok(last, warnings.join('\n'));
+  assert.match(last, /"turnId":"z-1:turn:1"/);
+  assert.match(last, /"inputTokens":100/);
+});

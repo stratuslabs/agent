@@ -3667,6 +3667,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return;
     }
     storesClosed = true;
+    // One last try at usage still held, before the ledger closes. What
+    // neither the ledger nor the hold file would take — a disk with no room
+    // at all — would otherwise end with this process, and the next one
+    // would judge its budget without it. So it is written out, whole, as a
+    // warning: that reaches the service manager's log (journald, `docker
+    // logs`), usually the one channel still writing, and nothing is lost
+    // silently. Refusing to stop instead would take a daemon's shutdown
+    // away from its operator over accounting it can still recover.
+    const unwritten = flushUsage();
+    if (unwritten && unrecordedUsage.length > 0) {
+      warn(
+        `usage ledger: stopping with ${unrecordedUsage.length} call(s) of spend that could not be written anywhere (${unwritten.message}). `
+        + `Add them to the ledger once the disk has room, or the budget will not count them: ${JSON.stringify(unrecordedUsage)}`,
+      );
+    }
     scheduleStore.close();
     usageLedger.close();
     leaseStore.close();

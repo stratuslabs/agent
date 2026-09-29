@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -166,4 +166,15 @@ test('stratus usage says when spend is held outside the ledger, and exits non-ze
   const json = await run(home, ['usage', '--format', 'json']);
   assert.equal(json.code, 1);
   assert.deepEqual((JSON.parse(json.stdout) as { unrecorded?: unknown }).unrecorded, { calls: 1 });
+});
+
+test('stratus usage fails, rather than reporting nothing spent, when the ledger cannot be read', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A link to itself: stat fails with ELOOP, not "no such file".
+  await symlink('fleet.db', path.join(home, '.stratus', 'fleet.db'));
+  const result = await run(home, ['usage']);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /the usage ledger at .* could not be read/);
+  assert.doesNotMatch(result.stdout, /nothing recorded/);
 });
