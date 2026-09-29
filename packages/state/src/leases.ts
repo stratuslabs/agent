@@ -5,6 +5,7 @@ import {
   type AgentDefinition,
   type CredentialResolver,
   type CredentialUseContext,
+  type StratusEvent,
 } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
 import { CREDENTIAL_NAME_PATTERN } from './credentials.ts';
@@ -216,6 +217,28 @@ export interface LeaseUseRecord {
   parentLeaseId?: string;
   reason?: string;
 }
+
+/**
+ * A lease use as the event every host publishes for it — the daemon onto
+ * its bus (and so into `stratus logs`), `stratus run` and `stratus chat`
+ * onto theirs — so a lease's audit trail reads the same wherever it was
+ * spent. Undefined for a use with no session to attribute it to (a plugin
+ * that predates the context argument); the host says so another way.
+ */
+export const leaseUseEvent = (record: LeaseUseRecord): StratusEvent | undefined =>
+  record.sessionId === undefined
+    ? undefined
+    : {
+      type: 'credential.leased',
+      sessionId: record.sessionId,
+      agentId: record.agentId,
+      name: record.credential,
+      outcome: record.outcome,
+      ...(record.leaseId !== undefined ? { leaseId: record.leaseId } : {}),
+      ...(record.parentLeaseId !== undefined ? { parentLeaseId: record.parentLeaseId } : {}),
+      ...(record.use !== undefined ? { use: record.use } : {}),
+      ...(record.reason !== undefined ? { reason: record.reason } : {}),
+    };
 
 export interface LeaseBrokerOptions {
   store: LeaseStore;

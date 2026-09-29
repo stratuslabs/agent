@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { StateEnvironment } from './environment.ts';
 import { apiTokensPath, stratusHomePath } from './paths.ts';
@@ -122,9 +124,9 @@ export const loadApiTokens = async (env: StateEnvironment): Promise<ApiTokenReco
  * never exist at a looser mode, even briefly, which `writeFile`'s mode
  * (applied only on create) cannot promise alone.
  *
- * Not locked across processes. Two `stratus token` commands racing can
- * lose one another's write, as two `stratus credential` commands can; the
- * daemon never writes this file, so it is not one of the racers.
+ * Called only under `withApiTokensLock`: the rename makes each write whole,
+ * but not each read-modify-write, and two racing commands would each
+ * replace the file with their own view of it.
  */
 const saveApiTokens = async (env: StateEnvironment, tokens: ApiTokenRecord[]): Promise<void> => {
   const filePath = apiTokensPath(env);
@@ -141,6 +143,57 @@ const saveApiTokens = async (env: StateEnvironment, tokens: ApiTokenRecord[]): P
   } catch (error) {
     await rm(temporary, { force: true });
     throw error;
+  }
+};
+
+/** How long a `stratus token` command waits for another to finish its write. */
+const API_TOKENS_LOCK_WAIT_MS = 10_000;
+
+/**
+ * Run one read-modify-write of `api-tokens.json` with no other in flight,
+ * in this process or any other.
+ *
+ * Without it, a `create` racing a `revoke` could each read the old list
+ * and the create's rename land last — writing the revoked token back
+ * after `revoke` had reported success, and the daemon, which rereads the
+ * file per request, honouring it again. Two creates could likewise hand
+ * out a token the other's write then dropped.
+ *
+ * The lock is the one `stratusd.lock` uses: an SQLite exclusive
+ * transaction held open and never committed, so it lives on the file
+ * descriptor and a command that dies holding it lets go. Retried
+ * asynchronously rather than with a busy timeout, which would block this
+ * thread — and with it a holder in the same process — while it waited.
+ * The daemon only reads the file, and never takes this lock.
+ */
+const withApiTokensLock = async <T>(env: StateEnvironment, work: () => Promise<T>): Promise<T> => {
+  const lockPath = `${apiTokensPath(env)}.lock`;
+  await mkdir(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+  const db = new DatabaseSync(lockPath);
+  try {
+    const deadline = Date.now() + API_TOKENS_LOCK_WAIT_MS;
+    for (;;) {
+      try {
+        db.exec('PRAGMA journal_mode = MEMORY');
+        db.exec('BEGIN EXCLUSIVE');
+        break;
+      } catch (error) {
+        const busy = typeof error === 'object' && error !== null && (error as { errcode?: unknown }).errcode === 5;
+        if (!busy) {
+          throw error;
+        }
+        if (Date.now() >= deadline) {
+          throw new Error(
+            `Another stratus token command has held ${lockPath} for over ${API_TOKENS_LOCK_WAIT_MS / 1000}s. Let it finish, then run this again.`,
+          );
+        }
+        await sleep(20);
+      }
+    }
+    await chmod(lockPath, 0o600);
+    return await work();
+  } finally {
+    db.close();
   }
 };
 
@@ -170,26 +223,28 @@ export const createApiToken = async (
     // make which one it meant a guess.
     throw new Error(`${JSON.stringify(name)} is spelled like a token id. Pick a name that names who holds it.`);
   }
-  const tokens = await loadApiTokens(env);
-  const folded = name.toLowerCase();
-  // Case-insensitively: the name is how an approval record says who
-  // decided, and `Alice` and `alice` would read as one person.
-  const taken = tokens.find((entry) => entry.name.toLowerCase() === folded);
-  if (taken) {
-    throw new Error(
-      `A token named ${taken.name} already exists (${taken.id}). Pick another name, or revoke that one first: stratus token revoke ${taken.id}.`,
-    );
-  }
-  const token = `${API_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
-  const record: ApiTokenRecord = {
-    id: `tok_${randomBytes(6).toString('hex')}`,
-    name,
-    role: 'member',
-    hash: hashApiToken(token),
-    createdAt: (request.now?.() ?? new Date()).toISOString(),
-  };
-  await saveApiTokens(env, [...tokens, record]);
-  return { token, record };
+  return withApiTokensLock(env, async () => {
+    const tokens = await loadApiTokens(env);
+    const folded = name.toLowerCase();
+    // Case-insensitively: the name is how an approval record says who
+    // decided, and `Alice` and `alice` would read as one person.
+    const taken = tokens.find((entry) => entry.name.toLowerCase() === folded);
+    if (taken) {
+      throw new Error(
+        `A token named ${taken.name} already exists (${taken.id}). Pick another name, or revoke that one first: stratus token revoke ${taken.id}.`,
+      );
+    }
+    const token = `${API_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
+    const record: ApiTokenRecord = {
+      id: `tok_${randomBytes(6).toString('hex')}`,
+      name,
+      role: 'member',
+      hash: hashApiToken(token),
+      createdAt: (request.now?.() ?? new Date()).toISOString(),
+    };
+    await saveApiTokens(env, [...tokens, record]);
+    return { token, record };
+  });
 };
 
 /**
@@ -198,14 +253,15 @@ export const createApiToken = async (
  * the token, and every browser session opened with it, from its next
  * request — it reads this file per request rather than caching it.
  */
-export const revokeApiToken = async (env: StateEnvironment, idOrName: string): Promise<ApiTokenRecord | undefined> => {
-  const tokens = await loadApiTokens(env);
-  const folded = idOrName.toLowerCase();
-  const target = tokens.find((entry) => entry.id === idOrName)
-    ?? tokens.find((entry) => entry.name.toLowerCase() === folded);
-  if (!target) {
-    return undefined;
-  }
-  await saveApiTokens(env, tokens.filter((entry) => entry.id !== target.id));
-  return target;
-};
+export const revokeApiToken = async (env: StateEnvironment, idOrName: string): Promise<ApiTokenRecord | undefined> =>
+  withApiTokensLock(env, async () => {
+    const tokens = await loadApiTokens(env);
+    const folded = idOrName.toLowerCase();
+    const target = tokens.find((entry) => entry.id === idOrName)
+      ?? tokens.find((entry) => entry.name.toLowerCase() === folded);
+    if (!target) {
+      return undefined;
+    }
+    await saveApiTokens(env, tokens.filter((entry) => entry.id !== target.id));
+    return target;
+  });

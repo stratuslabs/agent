@@ -171,6 +171,7 @@ import {
   BudgetExceededError,
   budgetStatus,
   budgetHasLimit,
+  leaseUseEvent,
   createLeaseBroker,
   createLeasePolicyRefresh,
   createLeaseResolver,
@@ -1109,18 +1110,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // it in `stratus logs` and in front of every other consumer; a
       // caller that passed no session (a plugin that predates the context
       // argument) still leaves a line.
-      if (record.sessionId !== undefined) {
-        void bus.emit({
-          type: 'credential.leased',
-          sessionId: record.sessionId,
-          agentId: record.agentId,
-          name: record.credential,
-          outcome: record.outcome,
-          ...(record.leaseId !== undefined ? { leaseId: record.leaseId } : {}),
-          ...(record.parentLeaseId !== undefined ? { parentLeaseId: record.parentLeaseId } : {}),
-          ...(record.use !== undefined ? { use: record.use } : {}),
-          ...(record.reason !== undefined ? { reason: record.reason } : {}),
-        });
+      const event = leaseUseEvent(record);
+      if (event) {
+        void bus.emit(event);
         return;
       }
       const line = `lease ${record.outcome}: ${record.credential} for ${record.agentId}`

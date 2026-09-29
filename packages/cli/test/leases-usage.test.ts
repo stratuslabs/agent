@@ -108,10 +108,10 @@ test('stratus run spends a lease on a fenced sign-in, and is refused without one
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ leases: { credentials: ['provider:openai'] } }));
-  const oneShot = async () => {
+  const oneShot = async (events = false) => {
     const { streams, output } = createStreams();
     const code = await runCli({
-      argv: ['run', '--prompt', 'hello', '--provider', 'openai', '--no-events'],
+      argv: ['run', '--prompt', 'hello', '--provider', 'openai', ...(events ? [] : ['--no-events'])],
       streams,
       env: {
         homeDir: home,
@@ -131,13 +131,17 @@ test('stratus run spends a lease on a fenced sign-in, and is refused without one
   assert.notEqual(refused.code, 0);
   assert.match(refused.stderr, /provider:openai may only be used under a lease, and agent \S+ holds none/);
 
-  const granted = await run(home, ['lease', 'grant', 'stratus', 'provider:openai', '--for', '1h', '--uses', '1', '--reason', 'try it']);
+  const granted = await run(home, ['lease', 'grant', 'stratus', 'provider:openai', '--for', '1h', '--uses', '2', '--reason', 'try it']);
   assert.equal(granted.code, 0, granted.stderr);
   const answered = await oneShot();
   assert.equal(answered.code, 0, answered.stderr);
   assert.match(answered.stdout, /hi there/);
+  // The use is on the run's own event stream, as the daemon's are on its.
+  const audited = await oneShot(true);
+  assert.equal(audited.code, 0, audited.stderr);
+  assert.match(audited.stdout, /credential\.leased provider:openai for stratus allowed \(lease_[0-9a-f]+\)/);
   const listed = JSON.parse((await run(home, ['lease', 'list', '--all', '--format', 'json'])).stdout) as { leases: Array<{ uses: number }> };
-  assert.equal(listed.leases[0]?.uses, 1);
+  assert.equal(listed.leases[0]?.uses, 2);
 });
 
 test('stratus usage says a budget with no limit in it caps nothing', async () => {

@@ -266,6 +266,7 @@ export {
   isLeasableCredentialName,
   parseLeasesConfig,
   leaseState,
+  leaseUseEvent,
   parseLeaseDuration,
   validateLeaseGrant,
   newLeaseId,

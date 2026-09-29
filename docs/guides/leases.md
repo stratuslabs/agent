@@ -85,8 +85,9 @@ fallback model does not answer instead.
 **Every use is recorded**, allowed or refused, as a `credential.leased`
 event: the credential's name, the lease that paid, what it was used for
 (`web.search`, `provider`), and for a refusal its sentence. It is in
-[`stratus logs`](./logs.md) and on the control API's event stream. The key
-never is.
+[`stratus logs`](./logs.md) and on the control API's event stream, and a
+`stratus run` or `stratus chat` spending a lease prints it with its other
+events. The key never is.
 
 A restart neither resets a lease's count nor extends it: uses are counted in
 `fleet.db` as they happen.

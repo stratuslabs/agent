@@ -91,3 +91,18 @@ test('a file of the wrong shape or a newer version is refused by name rather tha
   await writeFile(apiTokensPath(env), 'not json');
   await assert.rejects(loadApiTokens(env), /not valid JSON/);
 });
+
+test('token writes that race keep every create and every revoke, however they interleave', async () => {
+  const env = await newEnv();
+  const { record: doomed } = await createApiToken(env, { name: 'doomed' });
+  const [revoked, ...created] = await Promise.all([
+    revokeApiToken(env, doomed.id),
+    ...['a', 'b', 'c', 'd', 'e'].map((name) => createApiToken(env, { name })),
+  ]);
+  assert.equal(revoked?.id, doomed.id);
+  const stored = await loadApiTokens(env);
+  assert.deepEqual(stored.map((entry) => entry.name).sort(), ['a', 'b', 'c', 'd', 'e']);
+  for (const { token } of created) {
+    assert.ok(stored.some((entry) => entry.hash === hashApiToken(token)), 'every token handed out is one the file keeps');
+  }
+});
