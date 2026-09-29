@@ -30,6 +30,8 @@ const GATEWAY_TOKEN_FILENAME = 'gateway-token';
 
 const GATEWAY_INFO_FILENAME = 'gateway.json';
 
+const API_TOKENS_FILENAME = 'api-tokens.json';
+
 export const stratusHomePath = (env: StateEnvironment): string =>
   path.join(readHomeDirectory(env), STRATUS_HOME_DIRNAME);
 
@@ -130,6 +132,15 @@ export const gatewayTokenPath = (env: StateEnvironment): string =>
  */
 export const gatewayInfoPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), GATEWAY_INFO_FILENAME);
+
+/**
+ * The control API's member tokens (0600): their ids, names, and hashes —
+ * never a token itself. `gatewayTokenPath` stays the one operator token;
+ * everything here is the least-privileged role. `stratus token` writes it
+ * and a running daemon reads it per request, so a revoke needs no restart.
+ */
+export const apiTokensPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), API_TOKENS_FILENAME);
 
 // ---- the per-agent state layout -------------------------------------------
 //

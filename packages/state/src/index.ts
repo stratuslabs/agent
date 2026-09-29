@@ -62,6 +62,7 @@ export {
   foldedAgentId,
   gatewayTokenPath,
   gatewayInfoPath,
+  apiTokensPath,
 } from './paths.ts';
 
 export {
@@ -127,6 +128,17 @@ export {
 } from './credentials.ts';
 
 export { quoteShellArg } from './shell.ts';
+
+export {
+  API_TOKEN_NAME_PATTERN,
+  API_TOKEN_PREFIX,
+  type ApiTokenRecord,
+  type ApiTokenRole,
+  createApiToken,
+  hashApiToken,
+  loadApiTokens,
+  revokeApiToken,
+} from './api-tokens.ts';
 
 export {
   migrateLegacyMemory,
