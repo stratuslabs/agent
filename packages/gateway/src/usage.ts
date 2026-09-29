@@ -354,10 +354,13 @@ export const createUsageHold = (stateHome: string, filePath: string) => ({
   markUnsettled(entries: readonly UsageLedgerEntry[]): void {
     const armed = path.join(path.dirname(filePath), USAGE_UNSETTLED_ARMED_FILENAME);
     const marker = path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME);
-    assertDerivedStatePathSync(stateHome, armed, 'file');
     assertDerivedStatePathSync(stateHome, marker, 'file');
     const target = existsSync(marker) ? marker : armed;
     try {
+      // Inside the try: an armed file that is not one — never made, or
+      // something else in its place — falls back to the empty marker below
+      // rather than leaving no word at all.
+      assertDerivedStatePathSync(stateHome, target, 'file');
       const fd = openSync(target, 'r+');
       try {
         writeSync(fd, encodeUnsettled(entries), 0, USAGE_UNSETTLED_RESERVE_BYTES, 0);
@@ -371,6 +374,35 @@ export const createUsageHold = (stateHome: string, filePath: string) => ({
     } catch {
       writeFileSync(marker, '', { mode: 0o600 });
     }
+  },
+  /**
+   * Finish a marking a crash cut short: an armed file whose reserve holds
+   * calls was written by `markUnsettled` and killed before the rename, so it
+   * is the marker in all but name, and is given the name. Answers whether it
+   * did. With a marker already in place the armed file is left alone.
+   */
+  promoteArmed(): boolean {
+    const armed = path.join(path.dirname(filePath), USAGE_UNSETTLED_ARMED_FILENAME);
+    const marker = path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME);
+    assertDerivedStatePathSync(stateHome, armed, 'file');
+    assertDerivedStatePathSync(stateHome, marker, 'file');
+    if (existsSync(marker)) {
+      return false;
+    }
+    let text: string;
+    try {
+      text = readFileSync(armed, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return false;
+      }
+      throw error;
+    }
+    if (text.trim().length === 0) {
+      return false;
+    }
+    renameSync(armed, marker);
+    return true;
   },
   /**
    * The calls the marker names and whether that is all of them, or

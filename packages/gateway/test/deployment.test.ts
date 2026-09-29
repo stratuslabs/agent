@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -675,6 +675,57 @@ test('a marker names the calls it stands for: the next start writes them — onc
     assert.equal(existsSync(markerPath), false);
     assert.equal(second.usage()[0]?.calls, 1);
   } finally {
+    await second.stop();
+  }
+});
+
+test('a marking cut off before its rename is finished at the next start, and a failed arm is not taken for a marker', async () => {
+  const home = await newHome();
+  const stateDir = path.join(home, '.stratus');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeConfig(home, { budget: { daily: 100 } });
+  const armed = path.join(stateDir, 'usage-unsettled.armed');
+  // Written and fsynced, then killed before the rename: the calls are in
+  // the armed file, padded out to its reserve, and nowhere else.
+  const lost = { id: 'call-armed', at: new Date().toISOString(), agentId: 'ava', sessionId: 's-gone', record: { turnId: 's-gone:turn:1', provider: 'openai', inputTokens: 150 } };
+  await writeFile(armed, `${JSON.stringify(lost)}\n${' '.repeat(1024)}`);
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+    idleTimeoutMs: 0,
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    assert.equal(gateway.usage()[0]?.calls, 1);
+    assert.equal(existsSync(path.join(stateDir, 'usage-unsettled')), false);
+    await assert.rejects(gateway.dispatch({ sessionId: 'p-1', agentId: 'ava', userMessage: 'hello' }), /daily model budget/);
+  } finally {
+    await gateway.stop();
+  }
+
+  // No marker, and no room to arm: the next memory-only failure still marks.
+  const again = await newHome();
+  const againDir = path.join(again, '.stratus');
+  await writeSoul(again, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  // Where the armed file goes, a link: arming refuses it, since a name
+  // Stratus chose is never followed through one.
+  await mkdir(againDir, { recursive: true });
+  await symlink(path.join(again, 'elsewhere'), path.join(againDir, 'usage-unsettled.armed'));
+  await mkdir(path.join(againDir, 'usage-held.jsonl'), { recursive: true });
+  const second = createGateway({
+    env: { homeDir: again, cwd: again, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+    idleTimeoutMs: 0,
+    warn: () => {},
+  });
+  await second.start();
+  const { DatabaseSync } = await import('node:sqlite');
+  const saboteur = new DatabaseSync(fleetDbIn(againDir));
+  try {
+    saboteur.exec("CREATE TRIGGER full_disk BEFORE INSERT ON usage BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+    await second.dispatch({ sessionId: 'q-1', agentId: 'ava', userMessage: 'one' });
+    assert.equal(existsSync(path.join(againDir, 'usage-unsettled')), true);
+  } finally {
+    saboteur.close();
     await second.stop();
   }
 });

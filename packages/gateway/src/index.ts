@@ -1358,16 +1358,36 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * point: the marker says the ledger is short, not by how much.
    */
   const settleUsage = async (): Promise<void> => {
+    // A marking the last daemon wrote and died before naming counts as
+    // made: its calls are in the armed file, and arming over it would throw
+    // them away. An armed file that cannot be read is not a marker.
+    try {
+      if (usageHold.promoteArmed()) {
+        warn(`usage ledger: the last stratusd died while marking spend it could not write; settling it from ${usageHold.unsettledPath}`);
+      }
+    } catch (error) {
+      warn(`usage ledger: could not read the armed reserve beside ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)})`);
+    }
     let marked: ReturnType<typeof usageHold.readUnsettled>;
     try {
       marked = usageHold.readUnsettled();
-      if (!marked) {
-        usageHold.arm();
-        return;
-      }
     } catch (error) {
-      warn(`usage ledger: could not read or prepare ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)}); budgeted calls are refused while it is there, and a stop on a full disk may not be able to leave word for the next stratusd`);
+      // A marker that is there and cannot be read is still a marker:
+      // budgeted calls stay refused while it exists, and it is the last
+      // daemon's to be cleared, not this one's to write over.
+      warn(`usage ledger: could not read ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)}); budgeted calls are refused while it is there`);
       foreignMarker = true;
+      return;
+    }
+    if (!marked) {
+      // No marker: this daemon's to make if it comes to hold spend it cannot
+      // write. A failure to arm only costs that marking its reserve — it
+      // falls back to an empty marker, which still refuses on the next start.
+      try {
+        usageHold.arm();
+      } catch (error) {
+        warn(`usage ledger: could not reserve ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)}); on a full disk a stop may be able to leave only an empty marker for the next stratusd`);
+      }
       return;
     }
     // Held by this process from here: until it is cleared, it is the last
