@@ -70,6 +70,10 @@ export interface DashboardSession {
   expiresAt: number;
   /** A fingerprint of the bearer token it was minted under; the replacement adopts it only under the same one. */
   vouchedBy: string;
+  /** Carried through untouched; absent means operator (a predecessor that predates roles). */
+  role?: 'operator' | 'member';
+  tokenId?: string;
+  tokenName?: string;
 }
 
 /** What a daemon and its supervisor say to each other. See SupervisorLink. */

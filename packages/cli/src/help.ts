@@ -38,6 +38,8 @@ Usage:
   stratus session rollover slack:ava:T01ABCDEF:D07GHIJKL
   printf %s "$BRAVE_KEY" | stratus credential set search.apiKey
   stratus credentials
+  stratus token create alice
+  stratus token revoke alice
   stratus doctor
   stratus update
   stratus update --check
@@ -137,6 +139,18 @@ Commands:
                    own — names only, never values (also: credential list)
   credential remove
                    Forget one (--agent <id> for that agent's own entry)
+  token create     Create a member token for the control API — for a
+                   teammate, a CI job, or a hosted tenant. Printed once, on
+                   stdout; only its hash is kept, in ~/.stratus/api-tokens.json
+                   (0600). A member manages the roster, talks to agents, reads
+                   sessions and events, and answers approvals, but cannot
+                   change the config or the provider sign-ins, or restart the
+                   daemon. The operator token stays ~/.stratus/gateway-token
+  token list       Member tokens: id, name, role, created — never the token
+                   (--format json; also: stratus tokens)
+  token revoke     Revoke one by id or name. A running daemon refuses it, and
+                   every dashboard session and event stream opened with it,
+                   without a restart
   schedules        List every schedule the fleet has set — cadence, prompt,
                    pre-authorized destination, next firing — straight from the
                    daemon's database (--format json). "stratus schedules
@@ -251,6 +265,7 @@ Options:
   --preserve-trust memory import: keep each entry's recorded trust label
                    instead of landing it external
   --token          Bearer token for --gateway (default: ~/.stratus/gateway-token)
+  --role           token create: member, the only role a created token has
   --no-reload      skill add: install without reloading a running daemon
   -y, --yes        template add: install without the review prompt
   --reason         restart: why, for the daemon's log

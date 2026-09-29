@@ -120,6 +120,16 @@ export interface ParsedCredentialCommand {
   agentId?: string;
 }
 
+export interface ParsedTokenCommand {
+  command: 'token';
+  action: 'create' | 'list' | 'revoke';
+  /** create: who holds it. revoke: its id or its name. */
+  target?: string;
+  /** create: only `member` today — the operator token is the gateway token file. */
+  role: 'member';
+  format: 'text' | 'json';
+}
+
 export interface ParsedSkillReloadCommand {
   command: 'skill-reload';
   /** A daemon's control API URL; default: the one `~/.stratus/gateway.json` names. */
@@ -301,6 +311,7 @@ export type ParsedCommand =
   | ParsedSkillsCommand
   | ParsedSkillReloadCommand
   | ParsedCredentialCommand
+  | ParsedTokenCommand
   | ParsedRestartCommand
   | ParsedSchedulesCommand
   | ParsedGrantsCommand
@@ -803,6 +814,69 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       action: subcommand,
       ...(name !== undefined ? { name } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
+    };
+  }
+
+  if (command === 'tokens' || command === 'token') {
+    const [subcommand, ...tokenRest] = command === 'tokens' ? ['list', ...rest] : rest;
+    if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+      return { command: 'help' };
+    }
+    if (subcommand !== 'create' && subcommand !== 'list' && subcommand !== 'revoke') {
+      throw new Error(`No token subcommand named ${JSON.stringify(subcommand)}. It is create, list, or revoke.`);
+    }
+    let target: string | undefined;
+    let format: 'text' | 'json' = 'text';
+    for (let index = 0; index < tokenRest.length; index += 1) {
+      const argument = tokenRest[index];
+      if (!argument) {
+        continue;
+      }
+      if (argument === '--help' || argument === '-h') {
+        return { command: 'help' };
+      }
+      if (argument === '--role' && subcommand === 'create') {
+        const role = readOptionValue(tokenRest, index, '--role');
+        if (role !== 'member') {
+          // Not a role this file can hold: there is one operator token, and
+          // it is the one the daemon generated.
+          throw new Error(
+            `--role ${role} is not a role a created token can have. Tokens made here are member tokens; `
+            + 'the operator token is ~/.stratus/gateway-token, and there is exactly one.',
+          );
+        }
+        index += 1;
+        continue;
+      }
+      if (argument === '--format' && subcommand === 'list') {
+        const value = readOptionValue(tokenRest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      if (argument.startsWith('--')) {
+        throw new Error(`Unknown option for token ${subcommand}: ${argument}`);
+      }
+      if (subcommand === 'list' || target !== undefined) {
+        throw new Error(`Unexpected argument: ${argument}. Try: stratus token create <name>, stratus token list, stratus token revoke <id|name>.`);
+      }
+      target = argument;
+    }
+    if (subcommand === 'create' && target === undefined) {
+      throw new Error('token create needs a name for whoever will hold it: stratus token create alice.');
+    }
+    if (subcommand === 'revoke' && target === undefined) {
+      throw new Error('token revoke needs the token\'s id or name; `stratus token list` shows both.');
+    }
+    return {
+      command: 'token',
+      action: subcommand,
+      ...(target !== undefined ? { target } : {}),
+      role: 'member',
+      format,
     };
   }
 

@@ -24,6 +24,7 @@ import { runSessionRollover } from './commands/session.ts';
 import { runSetup } from './commands/setup.ts';
 import { runSkillAdd, runSkillValidate, runSkillReload, runSkills } from './commands/skills.ts';
 import { runTemplateAdd } from './commands/template.ts';
+import { runToken } from './commands/token.ts';
 import { runUpdate } from './commands/update.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
 import { HELP_TEXT } from './help.ts';
@@ -85,6 +86,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         || command.command === 'template-add'
         || command.command === 'dashboard'
         || (command.command === 'credential' && command.action !== 'list')
+        || (command.command === 'token' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
         || (command.command === 'memory' && memoryCommandWritesState(command.action))
         || command.command === 'session'
@@ -177,6 +179,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'credential') {
       return await runCredential(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'token') {
+      return await runToken(command, streams, resolvedEnv);
     }
 
     if (command.command === 'skill-reload') {
