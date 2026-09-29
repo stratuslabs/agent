@@ -169,6 +169,7 @@ import {
   BudgetExceededError,
   budgetStatus,
   createLeaseBroker,
+  createLeasePolicyRefresh,
   createLeaseResolver,
   findBudgetBreach,
   readGlobalConfigBlock,
@@ -1189,31 +1190,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * list is unknown and the broker refuses every credential until it is
    * known, because "unknown" read as "nothing leased" would unfence them.
    */
-  let leasesKnown = false;
-  let lastLeased = '';
-  const refreshLeases = async (): Promise<void> => {
-    let block = await readTrustedConfigBlock('leases', env, options.selection?.configPath);
-    if (block.status === 'untrusted') {
-      warn(`ignoring leases in ${block.path}: a project-local config cannot decide which credentials need a lease; using ~/.stratus/config.json instead`);
-      block = await readGlobalConfigBlock('leases', env);
-    }
-    if (block.status === 'unreadable') {
-      const error = block.error instanceof Error ? block.error : new Error(String(block.error));
-      if (!leasesKnown) {
-        leaseBroker.setLeased(error);
-      }
-      warn(`could not read the leases block (${error.message})${leasesKnown ? '; using the last one read' : '; refusing every credential until it can be read'}`);
-      return;
-    }
-    const names = block.status === 'present' ? block.value.credentials : [];
-    leaseBroker.setLeased(names);
-    leasesKnown = true;
-    const described = names.join(', ');
-    if (described !== lastLeased) {
-      lastLeased = described;
-      log(described.length > 0 ? `leases: ${described} may only be used under a lease` : 'leases: no credential needs a lease');
-    }
-  };
+  const refreshLeases = createLeasePolicyRefresh({
+    broker: leaseBroker,
+    env,
+    ...(options.selection?.configPath !== undefined ? { configPath: options.selection.configPath } : {}),
+    warn,
+    log,
+  });
   const leaseResolver = createLeaseResolver(createFileCredentialResolver(env), leaseBroker);
   const leasedCredentials: CredentialResolver = {
     async resolve(agent, name, context) {

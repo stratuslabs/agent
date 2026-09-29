@@ -140,14 +140,22 @@ const serveHeldHome = async (
   // Under a service manager the daemon's stdout is gone, so everything it
   // says is also written to ~/.stratus/logs — that file is what `stratus
   // logs` reads, and the only record of an overnight run.
+  const jsonOut = command.logFormat === 'json';
   const logWriter: LogWriter | undefined = command.logToFile === false
     ? undefined
     : createLogWriter({
         dir: logsDirPath(env),
-        onError: (error) => writeLine(
-          streams.stderr,
-          `Warning: could not write the log file (${error instanceof Error ? error.message : String(error)}); continuing.`,
-        ),
+        // Under `--log-format json` a failing file is reported as a record
+        // on stdout like every other warning: a full disk is exactly when a
+        // shipper must not be handed a line it cannot parse.
+        onError: (error) => {
+          const message = `could not write the log file (${error instanceof Error ? error.message : String(error)}); continuing.`;
+          if (jsonOut) {
+            writeLine(streams.stdout, JSON.stringify({ ts: new Date().toISOString(), level: 'warn', msg: message } satisfies LogRecord));
+          } else {
+            writeLine(streams.stderr, `Warning: ${message}`);
+          }
+        },
       });
   // `--log-format json` puts the file's records on stdout as well — the
   // same objects, built once, so what a log shipper sees can never say more
@@ -156,7 +164,6 @@ const serveHeldHome = async (
   // that is not JSON breaks the parser for everything after it. Warnings go
   // with them rather than to stderr, because both streams land in the same
   // `docker logs` and the warning is already a record.
-  const jsonOut = command.logFormat === 'json';
   const record = (entry: LogRecord): Promise<void> => {
     if (jsonOut) {
       writeLine(streams.stdout, JSON.stringify(entry));

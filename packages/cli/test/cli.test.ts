@@ -13964,6 +13964,25 @@ test('serve --log-format json still streams records with --no-log-file', async (
   assert.deepEqual(await readRecentRecords(path.join(home, '.stratus', 'logs'), 50), []);
 });
 
+test('serve --log-format json reports a log file it cannot write as a record, never a plain line', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-json-badfile-'));
+  // A directory where the log file goes: every append fails, root or not.
+  await mkdir(path.join(home, '.stratus', 'logs', 'stratusd.jsonl'), { recursive: true });
+  const { stdout, stderr } = await withServedApi(home, async () => {}, ['--log-format', 'json']);
+  const records = stdout
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      try {
+        return JSON.parse(line) as { level: string; msg?: string };
+      } catch {
+        return assert.fail(`stdout carried a line that is not JSON: ${line}`);
+      }
+    });
+  assert.ok(records.some((record) => record.level === 'warn' && /could not write the log file/.test(String(record.msg))), stdout);
+  assert.doesNotMatch(stderr, /could not write the log file/);
+});
+
 test('stratus health reports a serving daemon in one line, or as JSON', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-health-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });

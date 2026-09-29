@@ -20,6 +20,7 @@ import {
   type ProviderContribution,
   type Session,
   type StratusEvent,
+  type CredentialResolver,
 } from '@stratusagent/core';
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
@@ -52,6 +53,7 @@ import {
   type RuntimeConfig,
   type IgnoredUntrustedConfig,
   createLeaseBroker,
+  createLeasePolicyRefresh,
   createLeaseResolver,
   fleetDbPath,
   stratusHomePath,
@@ -62,7 +64,7 @@ import { formatEvent } from './events.ts';
 import { writeLine, stringifyValue } from './io.ts';
 import { quoteShellArg } from './prompter.ts';
 import type { CliApprovalMode, ParsedRunCommand } from './parse.ts';
-import { loadServeLeases, loadServePlugins, loadServeRuntimeSelection } from './trusted-config.ts';
+import { loadServePlugins, loadServeRuntimeSelection } from './trusted-config.ts';
 
 /**
  * Kept with its historical CLI signature: a parsed run command is a
@@ -265,31 +267,50 @@ export const createAgentRuntime = async (
   const pluginsConfig = await loadServePlugins(runEnv, options.configPath, (line) => {
     writeLine(streams.stderr, `Warning: ${line}`);
   });
-  // Leases hold for a one-shot exactly as for the daemon: a fenced key is
-  // fenced wherever it is used, and `stratus run` reaching it freely would
-  // be the way around the fence. Same table, same atomic count — the
-  // daemon and this process may both be spending one lease.
-  const leases = await loadServeLeases(runEnv, options.configPath, (line) => {
-    writeLine(streams.stderr, `Warning: ${line}`);
+  // Leases hold for a one-shot and a chat exactly as for the daemon: a
+  // fenced key is fenced wherever it is used, and `stratus run` reaching it
+  // freely would be the way around the fence. Same table, same atomic
+  // count — the daemon and this process may both be spending one lease —
+  // and the same live read of the leased list before every use, so a key
+  // fenced while a chat is open is fenced from its next use. The store is
+  // opened on its first use only: a run that never meets a fenced key
+  // never opens `fleet.db`.
+  const { SqliteLeaseStore } = await import('@stratusagent/gateway');
+  let openedLeaseStore: InstanceType<typeof SqliteLeaseStore> | undefined;
+  const leaseStore = (): InstanceType<typeof SqliteLeaseStore> => {
+    openedLeaseStore ??= new SqliteLeaseStore(fleetDbPath(runEnv), { stateHome: stratusHomePath(runEnv) });
+    return openedLeaseStore;
+  };
+  const leaseBroker = createLeaseBroker({
+    store: {
+      list: (filter) => leaseStore().list(filter),
+      get: (id) => leaseStore().get(id),
+      grant: (input) => leaseStore().grant(input),
+      revoke: (id, revokedBy, now) => leaseStore().revoke(id, revokedBy, now),
+      consume: (agentId, credential, now) => leaseStore().consume(agentId, credential, now),
+      consumeById: (id, now) => leaseStore().consumeById(id, now),
+    },
+    leased: [],
+    onUse: (record) => {
+      if (record.outcome === 'refused') {
+        writeLine(streams.stderr, `Warning: ${record.reason ?? `no lease for ${record.credential}`}`);
+      }
+    },
   });
-  // Imported only when something is leased: the gateway package is the
-  // daemon's, and a plain one-shot never loads it.
-  const leaseStore = leases && leases.credentials.length > 0
-    ? new (await import('@stratusagent/gateway')).SqliteLeaseStore(fleetDbPath(runEnv), { stateHome: stratusHomePath(runEnv) })
-    : undefined;
-  const leaseBroker = leaseStore && leases
-    ? createLeaseBroker({
-        store: leaseStore,
-        leased: leases.credentials,
-        onUse: (record) => {
-          if (record.outcome === 'refused') {
-            writeLine(streams.stderr, `Warning: ${record.reason ?? `no lease for ${record.credential}`}`);
-          }
-        },
-      })
-    : undefined;
-  const fileCredentials = createFileCredentialResolver(runEnv);
-  const credentials = leaseBroker ? createLeaseResolver(fileCredentials, leaseBroker) : fileCredentials;
+  const refreshLeases = createLeasePolicyRefresh({
+    broker: leaseBroker,
+    env: runEnv,
+    ...(options.configPath !== undefined ? { configPath: options.configPath } : {}),
+    warn: (line) => writeLine(streams.stderr, `Warning: ${line}`),
+  });
+  await refreshLeases();
+  const leaseResolver = createLeaseResolver(createFileCredentialResolver(runEnv), leaseBroker);
+  const credentials: CredentialResolver = {
+    async resolve(agent, name, context) {
+      await refreshLeases();
+      return leaseResolver.resolve(agent, name, context);
+    },
+  };
 
   const loadedPlugins: LoadedPlugin[] = [];
   const providers = new ContributionRegistry<ProviderContribution>();
@@ -333,9 +354,9 @@ export const createAgentRuntime = async (
     // The lease store's connection goes with everything else this run
     // acquired, on every path out — a failed start included — and once,
     // since node:sqlite refuses a second close.
-    if (leaseStore && !leaseStoreClosed) {
+    if (openedLeaseStore && !leaseStoreClosed) {
       leaseStoreClosed = true;
-      leaseStore.close();
+      openedLeaseStore.close();
     }
     for (const plugin of loadedPlugins) {
       try {
@@ -405,13 +426,12 @@ export const createAgentRuntime = async (
       options.maxTurns,
       undefined,
       providers,
-      leaseBroker
-        ? async (request, credential) => {
-            if (credential !== undefined) {
-              leaseBroker.use(request.session.agent.id, credential, { sessionId: request.session.id, use: 'provider' });
-            }
-          }
-        : undefined,
+      async (request, credential) => {
+        if (credential !== undefined) {
+          await refreshLeases();
+          leaseBroker.use(request.session.agent.id, credential, { sessionId: request.session.id, use: 'provider' });
+        }
+      },
     );
 
     const runner = new AgentRunner({

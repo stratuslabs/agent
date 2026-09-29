@@ -102,3 +102,39 @@ test('stratus usage sums the ledger and says where the budget stands', async () 
   const json = JSON.parse((await run(home, ['usage', '--format', 'json'])).stdout) as { usage: Array<{ inputTokens: number }> };
   assert.equal(json.usage[0]?.inputTokens, 90);
 });
+
+test('stratus run spends a lease on a fenced sign-in, and is refused without one', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ leases: { credentials: ['provider:openai'] } }));
+  const oneShot = async () => {
+    const { streams, output } = createStreams();
+    const code = await runCli({
+      argv: ['run', '--prompt', 'hello', '--provider', 'openai', '--no-events'],
+      streams,
+      env: {
+        homeDir: home,
+        cwd: home,
+        processEnv: { OPENAI_API_KEY: 'test-key' },
+        fetch: (async () => ({
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'hi there' } }] }),
+        })) as unknown as typeof fetch,
+      },
+    });
+    return { code, stdout: output.stdout, stderr: output.stderr };
+  };
+
+  const refused = await oneShot();
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.stderr, /provider:openai may only be used under a lease, and agent \S+ holds none/);
+
+  const granted = await run(home, ['lease', 'grant', 'stratus', 'provider:openai', '--for', '1h', '--uses', '1', '--reason', 'try it']);
+  assert.equal(granted.code, 0, granted.stderr);
+  const answered = await oneShot();
+  assert.equal(answered.code, 0, answered.stderr);
+  assert.match(answered.stdout, /hi there/);
+  const listed = JSON.parse((await run(home, ['lease', 'list', '--all', '--format', 'json'])).stdout) as { leases: Array<{ uses: number }> };
+  assert.equal(listed.leases[0]?.uses, 1);
+});

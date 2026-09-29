@@ -41,9 +41,17 @@ export const parseLeasesConfig = (raw: unknown, configPath: string): LeasesConfi
   if (raw === undefined) {
     return undefined;
   }
-  const credentials = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
-    ? (raw as Record<string, unknown>).credentials
-    : undefined;
+  const block = typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? raw as Record<string, unknown> : undefined;
+  // A key the block does not have is refused, not skipped: a misspelled
+  // `credentails` beside a real list would leave every name in it unfenced
+  // while the config reads as fencing them.
+  const unknown = block ? Object.keys(block).filter((key) => key !== 'credentials') : [];
+  if (unknown.length > 0) {
+    throw new Error(
+      `Invalid leases in config ${configPath}: unknown key${unknown.length === 1 ? '' : 's'} ${unknown.map((key) => JSON.stringify(key)).join(', ')}. It takes only "credentials".`,
+    );
+  }
+  const credentials = block?.credentials;
   // Refused rather than dropped: a leased list silently ignored is a key an
   // operator believes is fenced and every agent holding it can use freely.
   if (!Array.isArray(credentials) || credentials.some((name) => typeof name !== 'string')) {

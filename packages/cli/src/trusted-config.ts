@@ -3,7 +3,6 @@ import {
   readTrustedConfigBlock,
   type ApiConfig,
   type ApprovalsConfig,
-  type LeasesConfig,
   type PrincipalsConfig,
   type PluginsConfig,
   type SlackConfig,
@@ -268,38 +267,6 @@ export const loadServeRuntimeSelection = async (
   if (block.status === 'unreadable') {
     warn(`ignoring ${key} (${block.error instanceof Error ? block.error.message : String(block.error)}); using the built-in`);
     return undefined;
-  }
-  return block.status === 'present' ? block.value : undefined;
-};
-
-/**
- * The daemon's `leases` block — which credentials may only be used under a
- * lease — under the trust rule every policy block has, falling through to
- * the global file past a project-local one that names it.
- *
- * Fails closed where the other blocks degrade: a config that cannot be
- * read throws. Starting anyway would mean starting with nothing leased,
- * which hands every agent the very keys the operator fenced, for as long as
- * the daemon runs — the one direction this block exists to rule out.
- */
-export const loadServeLeases = async (
-  env: CliEnvironment,
-  configPath: string | undefined,
-  warn: (line: string) => void,
-): Promise<LeasesConfig | undefined> => {
-  let block = await readTrustedConfigBlock('leases', env, configPath);
-  if (block.status === 'untrusted') {
-    warn(
-      `ignoring leases in ${block.path}: a project-local config cannot decide which credentials need a lease. `
-      + 'Using ~/.stratus/config.json instead.',
-    );
-    block = await readGlobalConfigBlock('leases', env);
-  }
-  if (block.status === 'unreadable') {
-    throw new Error(
-      `Could not read the leases block (${block.error instanceof Error ? block.error.message : String(block.error)}), `
-      + 'so which credentials need a lease is unknown and nothing was started. Fix the config and try again.',
-    );
   }
   return block.status === 'present' ? block.value : undefined;
 };

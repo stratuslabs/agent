@@ -274,6 +274,8 @@ export {
   createLeaseResolver,
 } from './leases.ts';
 
+export { createLeasePolicyRefresh, type LeasePolicyOptions } from './lease-policy.ts';
+
 export {
   type SoulPinContext,
   applySoulPins,

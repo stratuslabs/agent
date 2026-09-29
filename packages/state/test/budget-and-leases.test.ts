@@ -1,11 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import { HostRefusalError, type AgentDefinition, type CredentialResolver, type ModelProvider } from '@stratusagent/core';
 import {
   budgetWindow,
   createFallbackWrappedProvider,
   createLeaseBroker,
+  createLeasePolicyRefresh,
   createLeaseResolver,
   CredentialLeaseError,
   findBudgetBreach,
@@ -124,6 +128,10 @@ test('a misshapen budget or leases block is refused with the key and the fix, no
     credentials: ['github.token', 'provider:anthropic'],
   });
   assert.throws(() => validateConfigFile({ leases: ['github.token'] }, 'c.json'), /Invalid leases in config c\.json/);
+  assert.throws(
+    () => validateConfigFile({ leases: { credentials: ['provider:openai'], credentails: ['github.token'] } }, 'c.json'),
+    /Invalid leases in config c\.json: unknown key "credentails"\. It takes only "credentials"/,
+  );
   assert.throws(() => validateConfigFile({ leases: { credentials: ['provider:demo'] } }, 'c.json'), /Invalid leases\.credentials entry/);
 });
 
@@ -282,4 +290,33 @@ test('a refusal the host made is never answered by the fallback model', async ()
     /lease expired/,
   );
   assert.equal(fallbackCalls, 0);
+});
+
+test('the leased list follows the trusted config live, keeps the last good one mid-edit, and refuses before any read', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-lease-policy-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const broker = createLeaseBroker({ store: createLeaseStore(), leased: [] });
+  const warnings: string[] = [];
+  const refresh = createLeasePolicyRefresh({ broker, env, warn: (line) => warnings.push(line) });
+
+  await writeFile(configPath, '{ "leases": ');
+  await refresh();
+  assert.equal(broker.isLeased('anything'), true, 'unknown before any read refuses everything');
+
+  await writeFile(configPath, JSON.stringify({}));
+  await refresh();
+  assert.equal(broker.isLeased('github.token'), false);
+
+  // Fenced while the process runs: the next refresh sees it.
+  await writeFile(configPath, JSON.stringify({ leases: { credentials: ['github.token'] } }));
+  await refresh();
+  assert.equal(broker.isLeased('github.token'), true);
+
+  await writeFile(configPath, '{ "leases": ');
+  await refresh();
+  assert.equal(broker.isLeased('github.token'), true, 'a broken edit keeps the last list');
+  assert.equal(broker.isLeased('search.apiKey'), false);
+  assert.ok(warnings.some((line) => /using the last one read/.test(line)));
 });

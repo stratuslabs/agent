@@ -32,8 +32,8 @@ Two kinds of name:
   `credentials.json` included.
 
 From then on, a use with no live lease is refused. The block is re-read
-before every use, so fencing a key applies to its next use, with no
-restart. If the config cannot be read and no list was ever read, every
+before every use — by the daemon, and by a `stratus run` or `stratus chat`
+already open — so fencing a key applies to its next use, with no restart. If the config cannot be read and no list was ever read, every
 credential is refused until it can be — "unknown" is never taken to mean
 "nothing is leased".
 
