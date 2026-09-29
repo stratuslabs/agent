@@ -6,6 +6,7 @@ import {
   type CredentialResolver,
   type CredentialUseContext,
 } from '@stratusagent/core';
+import { isValidAgentId } from '@stratusagent/agents';
 import { CREDENTIAL_NAME_PATTERN } from './credentials.ts';
 import { CREDENTIAL_PROVIDER_NAMES } from './provider-names.ts';
 
@@ -171,6 +172,9 @@ export const MAX_LEASE_MS = 90 * 86_400_000;
  * disagree about what a valid lease is.
  */
 export const validateLeaseGrant = (input: LeaseGrant, now: Date): void => {
+  if (!isValidAgentId(input.agentId)) {
+    throw new Error(`${JSON.stringify(input.agentId)} is not an agent id. \`stratus agents\` lists the roster.`);
+  }
   if (!isLeasableCredentialName(input.credential)) {
     throw new Error(
       `${JSON.stringify(input.credential)} cannot be leased. Name a stored credential or a sign-in as ${CREDENTIAL_PROVIDER_NAMES.map((p) => `provider:${p}`).join(', ')}.`,

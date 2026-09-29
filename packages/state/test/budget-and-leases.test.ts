@@ -132,6 +132,7 @@ test('a grant has to end, within 90 days, and say why', () => {
   assert.throws(() => validateLeaseGrant({ ...base, reason: '  ' }, now), /needs a reason/);
   assert.throws(() => validateLeaseGrant({ ...base, maxUses: 0 }, now), /use limit/);
   assert.throws(() => validateLeaseGrant({ ...base, credential: 'provider:demo' }, now), /cannot be leased/);
+  assert.throws(() => validateLeaseGrant({ ...base, agentId: '../ava' }, now), /is not an agent id/);
   assert.equal(parseLeaseDuration('90m'), 5_400_000);
   assert.equal(parseLeaseDuration('2h'), 7_200_000);
   assert.equal(parseLeaseDuration('7d'), 604_800_000);
