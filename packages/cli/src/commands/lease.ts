@@ -1,6 +1,8 @@
 import {
   fleetDbPath,
+  foldedAgentId,
   leaseState,
+  listAgentSummaries,
   parseLeaseDuration,
   stratusHomePath,
   validateLeaseGrant,
@@ -59,6 +61,15 @@ export const runLease = async (
         validateLeaseGrant(grant, now);
       } catch (error) {
         writeLine(streams.stderr, `Error: ${error instanceof Error ? error.message : String(error)}`);
+        return 1;
+      }
+      // The roster the daemon serves, matched folded as identity is: a lease
+      // for an id nothing runs as would report granted and sit in the record
+      // as though it meant something, while the agent it was meant for stays
+      // refused. The same check `POST /leases` makes.
+      const roster = await listAgentSummaries(env);
+      if (!roster.some((agent) => foldedAgentId(agent.id) === foldedAgentId(grant.agentId))) {
+        writeLine(streams.stderr, `Error: no agent has id ${grant.agentId}, so a lease granted to it would never be used. \`stratus agents\` lists the roster.`);
         return 1;
       }
       const lease = store.grant(grant);

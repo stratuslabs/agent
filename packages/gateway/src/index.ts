@@ -41,6 +41,7 @@ import {
   type MemoryStoreContribution,
   type ProviderContribution,
   type Session,
+  type SessionStatus,
   type StratusEvent,
   type ToolRisk,
   type CredentialResolver,
@@ -82,6 +83,7 @@ export {
   createUsageHold,
   SqliteUsageLedger,
   USAGE_HOLD_FILENAME,
+  USAGE_UNSETTLED_FILENAME,
   type UsageLedgerEntry,
   type UsageQuery,
   type UsageTotalsRow,
@@ -1154,6 +1156,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const reconciledUsage = new Map<string, { count: number; lastId: string | undefined }>();
   const usageHold = createUsageHold(stateDir, path.join(stateDir, USAGE_HOLD_FILENAME));
+  /**
+   * Whether the last daemon stopped holding spend it could write nowhere —
+   * a disk with room for neither the ledger nor the hold file. Its stop left
+   * a marker (see `closeStores`), and until `settleUsage` has put every
+   * saved session's records in the ledger and removed it, budgeted calls
+   * are refused: the ledger is missing spend, and by how much is not known.
+   */
+  const unsettledError = (): Error | undefined => {
+    try {
+      return usageHold.unsettled()
+        ? new Error(`the last stratusd stopped with spend it could not write anywhere, marked by ${usageHold.unsettledPath}; it is settled from the saved sessions when the daemon next starts with room to write`)
+        : undefined;
+    } catch (error) {
+      return error instanceof Error ? error : new Error(String(error));
+    }
+  };
   const flushUsage = (): Error | undefined => {
     while (unrecordedUsage.length > 0) {
       try {
@@ -1300,6 +1318,53 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     reconciledUsage.set(session.id, { count: records.length, lastId: records.at(-1)?.id });
   };
+  /**
+   * Run at start. With no marker, arm one for this daemon's stop. With one,
+   * put every saved session's records in the ledger — each under its id, so
+   * whatever was already there is a no-op — and remove the marker once all
+   * of it is written. Until then budgeted calls stay refused, which is the
+   * point: the marker says the ledger is short, not by how much.
+   */
+  const settleUsage = async (): Promise<void> => {
+    try {
+      if (!usageHold.unsettled()) {
+        usageHold.arm();
+        return;
+      }
+    } catch (error) {
+      warn(`usage ledger: could not prepare ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)}); a stop on a full disk may not be able to leave word for the next stratusd`);
+      return;
+    }
+    if (!store.listIdsByStatus) {
+      warn(`usage ledger: the last stratusd stopped with spend it could not write, and this session store cannot list sessions to settle it from. Budgeted calls are refused until ${usageHold.unsettledPath} is removed by hand, once that spend is accounted for.`);
+      return;
+    }
+    const statuses: SessionStatus[] = ['idle', 'running', 'pending_approval', 'completed', 'failed'];
+    const ids = new Set<string>();
+    for (const status of statuses) {
+      for (const id of await store.listIdsByStatus(status)) {
+        ids.add(id);
+      }
+    }
+    for (const id of ids) {
+      const session = await store.get(id);
+      if (session) {
+        reconcileUsage(session);
+      }
+    }
+    const failed = flushUsage();
+    if (failed) {
+      warn(`usage ledger: could not settle what the last stratusd left unwritten (${failed.message}); budgeted calls stay refused until it is written`);
+      return;
+    }
+    usageHold.settle();
+    log(`usage ledger: settled what the last stratusd could not write, from ${ids.size} saved session(s)`);
+    try {
+      usageHold.arm();
+    } catch {
+      // Reported on the next start that finds it missing; nothing is at stake until a stop.
+    }
+  };
   const judgeProviderCall: ProviderCallGuard = async (request, credential) => {
     const agentId = request.session.agent.id;
     const budget = await currentBudget();
@@ -1307,7 +1372,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // see `reconciledUsage`. Records from before ids existed are left out:
     // there is no telling whether they were ever counted.
     reconcileUsage(request.session);
-    const unwritten = flushUsage();
+    const unwritten = flushUsage() ?? unsettledError();
     if (budget && budgetHasLimit(budget, agentId)) {
       // Fail closed: spend the ledger could not record is spend the check
       // below cannot see, so no budgeted call is made until it is written.
@@ -3604,6 +3669,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       );
     }
     await loadRoster();
+    // Before anything can dispatch, so no budgeted call is judged on a ledger
+    // the last daemon left short.
+    await settleUsage();
     const named = registry.list().map((agent) => agent.name).join(', ');
     log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
 
@@ -3701,9 +3769,23 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // away from its operator over accounting it can still recover.
     const unwritten = flushUsage();
     if (unwritten && unrecordedUsage.length > 0) {
+      // And word for the next daemon, so it does not judge budgets on a
+      // ledger missing this: a rename of the file armed at start, which
+      // needs no room the disk does not have. That daemon settles the
+      // ledger from the saved sessions — where these calls' records are —
+      // and refuses budgeted calls until it has.
+      let marked = true;
+      try {
+        usageHold.markUnsettled();
+      } catch {
+        marked = false;
+      }
       warn(
         `usage ledger: stopping with ${unrecordedUsage.length} call(s) of spend that could not be written anywhere (${unwritten.message}). `
-        + `Add them to the ledger once the disk has room, or the budget will not count them: ${JSON.stringify(unrecordedUsage)}`,
+        + (marked
+          ? `Marked ${usageHold.unsettledPath}: the next stratusd settles them from the saved sessions before it allows a budgeted call. `
+          : `Could not mark ${usageHold.unsettledPath} either, so the next stratusd will not know to settle them: add them to the ledger once the disk has room. `)
+        + `The calls: ${JSON.stringify(unrecordedUsage)}`,
       );
     }
     scheduleStore.close();
@@ -4264,7 +4346,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return usageLedger.totals(query);
     },
     unrecordedUsage() {
-      const failed = flushUsage();
+      const failed = flushUsage() ?? unsettledError();
       let held = 0;
       try {
         held = usageHold.read().length;
@@ -4284,7 +4366,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (!budgetHasLimit(budget)) {
         return { budget, limits: [] };
       }
-      const unwritten = flushUsage();
+      const unwritten = flushUsage() ?? unsettledError();
       if (unwritten) {
         throw new HostRefusalError(
           `Spending could not be recorded (${unwritten.message}), so where the budget stands is unknown and budgeted model calls are being refused until it is written.`,

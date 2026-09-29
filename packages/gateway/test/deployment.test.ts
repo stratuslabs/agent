@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -726,29 +726,56 @@ test('a damaged line in held usage refuses budgeted calls rather than being drop
   }
 });
 
-test('usage no disk would take is written out whole as the daemon stops, never dropped silently', async () => {
+test('usage no disk would take is written out whole as the daemon stops, and the next daemon settles it before a budgeted call', async () => {
   const home = await newHome();
+  const stateDir = path.join(home, '.stratus');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
   // Where the hold file goes, a directory: the append fails as well.
-  await mkdir(path.join(home, '.stratus', 'usage-held.jsonl'), { recursive: true });
+  await mkdir(path.join(stateDir, 'usage-held.jsonl'), { recursive: true });
   const warnings: string[] = [];
-  const gateway = createGateway({
-    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
-    idleTimeoutMs: 0,
-    warn: (line) => warnings.push(line),
-  });
-  await gateway.start();
+  const logs: string[] = [];
+  const start = async () => {
+    const gateway = createGateway({
+      env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+      idleTimeoutMs: 0,
+      warn: (line) => warnings.push(line),
+      log: (line) => logs.push(line),
+    });
+    await gateway.start();
+    return gateway;
+  };
+  const first = await start();
   const { DatabaseSync } = await import('node:sqlite');
-  const saboteur = new DatabaseSync(fleetDbIn(path.join(home, '.stratus')));
+  const saboteur = new DatabaseSync(fleetDbIn(stateDir));
   try {
     saboteur.exec("CREATE TRIGGER full_disk BEFORE INSERT ON usage BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
-    await gateway.dispatch({ sessionId: 'z-1', agentId: 'ava', userMessage: 'one' });
+    await first.dispatch({ sessionId: 'z-1', agentId: 'ava', userMessage: 'one' });
   } finally {
-    await gateway.stop();
-    saboteur.close();
+    await first.stop();
   }
   const last = warnings.find((line) => /stopping with 1 call\(s\) of spend that could not be written anywhere/.test(line));
   assert.ok(last, warnings.join('\n'));
   assert.match(last, /"turnId":"z-1:turn:1"/);
   assert.match(last, /"inputTokens":100/);
+  assert.match(last, /Marked .*usage-unsettled/);
+
+  // The disk has room again. Nothing of the call is in the ledger or the
+  // hold — only on the session, and in the marker's word that the ledger
+  // is short.
+  saboteur.exec('DROP TRIGGER full_disk');
+  saboteur.close();
+  await rm(path.join(stateDir, 'usage-held.jsonl'), { recursive: true });
+  await writeConfig(home, { budget: { daily: 100 } });
+  const second = await start();
+  try {
+    assert.ok(logs.some((line) => /settled what the last stratusd could not write/.test(line)), logs.join('\n'));
+    assert.equal(second.usage()[0]?.calls, 1);
+    // Judged with it counted: 120 of a daily 100.
+    await assert.rejects(
+      second.dispatch({ sessionId: 'z-2', agentId: 'ava', userMessage: 'another conversation' }),
+      /daily model budget/,
+    );
+  } finally {
+    await second.stop();
+  }
 });

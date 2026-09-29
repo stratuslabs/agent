@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, readFileSync, unlinkSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { UsageRecord } from '@stratusagent/core';
 import { assertDerivedStatePathSync, foldedAgentId, type BudgetWeights } from '@stratusagent/state';
@@ -212,6 +213,15 @@ export class SqliteUsageLedger {
 /** Where held usage waits, in the state home beside `fleet.db`. */
 export const USAGE_HOLD_FILENAME = 'usage-held.jsonl';
 
+/**
+ * Present when a daemon stopped holding spend it could write nowhere — see
+ * `createUsageHold`'s `markUnsettled`. The next daemon refuses budgeted
+ * calls while it exists, and removes it once it has settled the ledger.
+ */
+export const USAGE_UNSETTLED_FILENAME = 'usage-unsettled';
+/** The empty file made ahead of time, while there is room, that becomes the marker by a rename. */
+const USAGE_UNSETTLED_ARMED_FILENAME = 'usage-unsettled.armed';
+
 /** A fresh entry id — see `UsageLedgerEntry.id`. */
 export const newUsageEntryId = (): string => randomUUID();
 
@@ -279,5 +289,47 @@ export const createUsageHold = (stateHome: string, filePath: string) => ({
         throw error;
       }
     }
+  },
+  /** Where the unsettled marker goes; see `USAGE_UNSETTLED_FILENAME`. */
+  unsettledPath: path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME),
+  /**
+   * Make the marker's stand-in now, while the disk has room for a new file,
+   * so that marking later is a rename — which needs no free data blocks and
+   * so still works on the full disk that is the reason for marking.
+   */
+  arm(): void {
+    const armed = path.join(path.dirname(filePath), USAGE_UNSETTLED_ARMED_FILENAME);
+    assertDerivedStatePathSync(stateHome, armed, 'file');
+    try {
+      writeFileSync(armed, '', { mode: 0o600, flag: 'wx' });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw error;
+      }
+    }
+  },
+  /**
+   * Leave word for the next daemon that this one is stopping with spend it
+   * could not write: the armed file renamed into place, or — if it was never
+   * armed — an empty file, which is the next best chance on a full disk.
+   * Throws only when neither lands.
+   */
+  markUnsettled(): void {
+    const armed = path.join(path.dirname(filePath), USAGE_UNSETTLED_ARMED_FILENAME);
+    const marker = path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME);
+    assertDerivedStatePathSync(stateHome, marker, 'file');
+    try {
+      renameSync(armed, marker);
+    } catch {
+      writeFileSync(marker, '', { mode: 0o600 });
+    }
+  },
+  unsettled(): boolean {
+    const marker = path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME);
+    assertDerivedStatePathSync(stateHome, marker, 'file');
+    return existsSync(marker);
+  },
+  settle(): void {
+    unlinkSync(path.join(path.dirname(filePath), USAGE_UNSETTLED_FILENAME));
   },
 });

@@ -1327,7 +1327,7 @@ export const routes: Route[] = [
         // Provider-reported counts, bucket by bucket — never priced here.
         usage: rows,
         // Spent and not yet in the rows above: never silently missing.
-        ...(unrecorded.calls !== 0 ? { unrecorded: { calls: Number.isNaN(unrecorded.calls) ? null : unrecorded.calls, ...(unrecorded.error ? { error: unrecorded.error } : {}) } } : {}),
+        ...(unrecorded.calls !== 0 || unrecorded.error !== undefined ? { unrecorded: { calls: Number.isNaN(unrecorded.calls) ? null : unrecorded.calls, ...(unrecorded.error ? { error: unrecorded.error } : {}) } } : {}),
         ...(budget ? { budget } : {}),
       };
     },

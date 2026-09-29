@@ -102,6 +102,13 @@ test('leases are granted, listed with their state, and revoked over the API, wit
       body: JSON.stringify({ agentId: 'AVA', credential: 'github.token', expiresIn: '1h', reason: 'incident 9' }),
     });
     assert.equal(cased.status, 200);
+    const absurd = await harness.call('/api/v1/leases', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'ava', credential: 'github.token', expiresIn: '999999999999999999999d', reason: 'r' }),
+    });
+    assert.equal(absurd.status, 400);
+    assert.equal((await absurd.json() as { error: { code: string } }).error.code, 'invalid_lease');
     const all = await (await harness.call('/api/v1/leases')).json() as { leases: Array<{ agentId: string }> };
     assert.equal(all.leases.some((entry) => entry.agentId === 'avaa'), false);
   } finally {

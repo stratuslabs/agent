@@ -58,6 +58,12 @@ test('parseCommand reads lease and usage commands, and refuses a lease with no e
 
 test('stratus lease grants, lists, and revokes on fleet.db with no daemon running', async () => {
   const home = await newHome();
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  // An id nothing runs as — a typo — is refused, not recorded as a grant.
+  const typo = await run(home, ['lease', 'grant', 'avaa', 'github.token', '--for', '30m', '--reason', 'deploy fix']);
+  assert.equal(typo.code, 1);
+  assert.match(typo.stderr, /no agent has id avaa/);
   const granted = await run(home, ['lease', 'grant', 'ava', 'github.token', '--for', '30m', '--uses', '2', '--reason', 'deploy fix']);
   assert.equal(granted.code, 0, granted.stderr);
   const id = /Granted (lease_[0-9a-f]+)/.exec(granted.stdout)?.[1];
@@ -79,6 +85,11 @@ test('stratus lease grants, lists, and revokes on fleet.db with no daemon runnin
   const tooLong = await run(home, ['lease', 'grant', 'ava', 'github.token', '--for', '120d', '--reason', 'r']);
   assert.equal(tooLong.code, 1);
   assert.match(tooLong.stderr, /at most 90 days/);
+  // Longer than any date can hold: the same sentence, not a RangeError.
+  const absurd = await run(home, ['lease', 'grant', 'ava', 'github.token', '--for', '999999999999999999999d', '--reason', 'r']);
+  assert.equal(absurd.code, 1);
+  assert.match(absurd.stderr, /at most 90 days/);
+  assert.equal(JSON.parse((await run(home, ['lease', 'list', '--all', '--format', 'json'])).stdout).leases.length, 1, 'the typo left no row');
 });
 
 test('stratus usage sums the ledger and says where the budget stands', async () => {
@@ -192,6 +203,18 @@ test('stratus usage says when spend is held outside the ledger, and exits non-ze
   const json = await run(home, ['usage', '--format', 'json']);
   assert.equal(json.code, 1);
   assert.deepEqual((JSON.parse(json.stdout) as { unrecorded?: unknown }).unrecorded, { calls: 1 });
+});
+
+test('stratus usage says when the last daemon stopped with spend it could not write, and exits non-zero', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'usage-unsettled'), '');
+  const text = await run(home, ['usage']);
+  assert.equal(text.code, 1);
+  assert.match(text.stderr, /stopped with spend it could not write anywhere \(usage-unsettled\)/);
+  const json = await run(home, ['usage', '--format', 'json']);
+  assert.equal(json.code, 1);
+  assert.deepEqual((JSON.parse(json.stdout) as { unrecorded?: unknown }).unrecorded, { calls: 0, unsettled: true });
 });
 
 test('stratus usage fails, rather than reporting nothing spent, when the ledger cannot be read', async () => {

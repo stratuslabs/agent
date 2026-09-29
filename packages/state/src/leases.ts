@@ -169,7 +169,14 @@ export const parseLeaseDuration = (value: string): number | undefined => {
   }
   const amount = Number(match[1]);
   const unit = match[2] === 'm' ? 60_000 : match[2] === 'h' ? 3_600_000 : 86_400_000;
-  return amount > 0 ? amount * unit : undefined;
+  if (!(amount > 0)) {
+    return undefined;
+  }
+  // Anything past the ceiling comes back as just past it: `validateLeaseGrant`
+  // refuses it with the 90-day rule either way, and `999999999999d` — no
+  // Date can hold that expiry — has to reach that sentence, not a RangeError
+  // from building the date first.
+  return Math.min(amount * unit, MAX_LEASE_MS + unit);
 };
 
 /** The longest a single grant may run. A lease that outlives a quarter is a standing grant with extra steps. */

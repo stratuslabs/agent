@@ -77,17 +77,18 @@ export const runUsage = async (
     }
     exists = false;
   }
-  const { createUsageHold, SqliteUsageLedger, USAGE_HOLD_FILENAME } = await import('@stratusagent/gateway');
+  const { createUsageHold, SqliteUsageLedger, USAGE_HOLD_FILENAME, USAGE_UNSETTLED_FILENAME } = await import('@stratusagent/gateway');
   // Spend the daemon could not write yet sits in the hold file. Counted and
   // reported, never drained from here: the daemon may be appending to it at
   // this moment, and clearing it from a second process would lose a line.
-  let held: { calls: number } | { error: string };
+  let held: { calls: number; unsettled?: true } | { error: string };
   try {
-    held = { calls: createUsageHold(stratusHomePath(env), path.join(stratusHomePath(env), USAGE_HOLD_FILENAME)).read().length };
+    const hold = createUsageHold(stratusHomePath(env), path.join(stratusHomePath(env), USAGE_HOLD_FILENAME));
+    held = { calls: hold.read().length, ...(hold.unsettled() ? { unsettled: true as const } : {}) };
   } catch (error) {
     held = { error: error instanceof Error ? error.message : String(error) };
   }
-  const unresolved = 'error' in held || held.calls > 0;
+  const unresolved = 'error' in held || held.calls > 0 || held.unsettled === true;
   const ledger = exists ? new SqliteUsageLedger(fleetDbPath(env), { stateHome: stratusHomePath(env) }) : undefined;
   let rows: ReturnType<NonNullable<typeof ledger>['totals']> = [];
   let limits: BudgetLimitStatus[] = [];
@@ -121,7 +122,9 @@ export const runUsage = async (
       streams.stderr,
       'error' in held
         ? `Held usage could not be read (${held.error}), so the totals below may be missing spend. The daemon refuses budgeted calls until it is resolved.`
-        : `${held.calls} call(s) of spend are held in ${USAGE_HOLD_FILENAME}, not yet in the ledger, so the totals and budget below are missing them. The daemon writes them — and refuses budgeted calls until it can.`,
+        : held.unsettled === true
+          ? `The last stratusd stopped with spend it could not write anywhere (${USAGE_UNSETTLED_FILENAME}), so the totals and budget below are short. The next stratusd to start with room to write settles it from the saved sessions, and refuses budgeted calls until it has.`
+          : `${held.calls} call(s) of spend are held in ${USAGE_HOLD_FILENAME}, not yet in the ledger, so the totals and budget below are missing them. The daemon writes them — and refuses budgeted calls until it can.`,
     );
   }
 
