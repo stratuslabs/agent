@@ -415,11 +415,11 @@ test('a session minted through TLS is Secure; a loopback one is not', async () =
   }
 });
 
-test('an authenticator hands its live sessions on with the expiry each was minted with, and drops one already expired', () => {
+test('an authenticator hands its live sessions on with the expiry each was minted with, and drops one already expired', async () => {
   let clock = 1_000_000;
   const old = createAuthenticator({ token: 'gateway-token', now: () => clock });
-  const kept = old.redeemOneTimeToken(old.mintOneTimeToken());
-  const stale = old.redeemOneTimeToken(old.mintOneTimeToken());
+  const kept = old.redeemOneTimeToken(await old.mintOneTimeToken({ role: 'operator' }));
+  const stale = old.redeemOneTimeToken(await old.mintOneTimeToken({ role: 'operator' }));
   assert.ok(kept && stale);
 
   const handed = old.exportSessions();
@@ -435,20 +435,20 @@ test('an authenticator hands its live sessions on with the expiry each was minte
   clock += 60_000;
   const replacement = createAuthenticator({ token: 'gateway-token', now: () => clock });
   replacement.adoptSessions([
-    { id: kept, expiresAt: keptExpiry, vouchedBy },
-    { id: stale, expiresAt: clock - 1, vouchedBy },
+    { id: kept, expiresAt: keptExpiry, vouchedBy, role: 'operator' },
+    { id: stale, expiresAt: clock - 1, vouchedBy, role: 'operator' },
   ]);
   assert.equal(replacement.sessionCount(), 1);
   assert.deepEqual(
-    replacement.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${kept}` } }),
-    { kind: 'cookie', sessionId: kept },
+    await replacement.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${kept}` } }),
+    { kind: 'cookie', sessionId: kept, role: 'operator' },
   );
-  assert.equal(replacement.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${stale}` } }), undefined);
-  assert.deepEqual(replacement.exportSessions(), [{ id: kept, expiresAt: keptExpiry, vouchedBy }]);
+  assert.equal(await replacement.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${stale}` } }), undefined);
+  assert.deepEqual(replacement.exportSessions(), [{ id: kept, expiresAt: keptExpiry, vouchedBy, role: 'operator' }]);
 
   // And at its own expiry the adopted session goes the way a minted one does.
   clock = keptExpiry;
-  assert.equal(replacement.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${kept}` } }), undefined);
+  assert.equal(await replacement.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${kept}` } }), undefined);
 });
 
 test('a session handed to a control API authenticates there, whether adopted before or after it starts, and is handed on when it stops', async () => {
@@ -493,16 +493,16 @@ test('a session handed to a control API authenticates there, whether adopted bef
   }
 });
 
-test('a session minted under another gateway token is not adopted, so rotating the token signs the browser out across a restart', () => {
+test('a session minted under another gateway token is not adopted, so rotating the token signs the browser out across a restart', async () => {
   const before = createAuthenticator({ token: 'token-before-rotation' });
-  const minted = before.redeemOneTimeToken(before.mintOneTimeToken());
+  const minted = before.redeemOneTimeToken(await before.mintOneTimeToken({ role: 'operator' }));
   assert.ok(minted);
   const handed = before.exportSessions();
 
   const rotated = createAuthenticator({ token: 'token-after-rotation' });
   rotated.adoptSessions(handed);
   assert.equal(rotated.sessionCount(), 0);
-  assert.equal(rotated.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${minted}` } }), undefined);
+  assert.equal(await rotated.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${minted}` } }), undefined);
 
   // The same token, read again by the replacement, is the case that works.
   const same = createAuthenticator({ token: 'token-before-rotation' });

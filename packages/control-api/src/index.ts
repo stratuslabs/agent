@@ -5,8 +5,8 @@ import path from 'node:path';
 
 import type { Gateway, GatewayChannelAdapter } from '@stratusagent/gateway';
 import type { AgentGrantStore } from '@stratusagent/permissions';
-import { gatewayInfoPath, type StateEnvironment } from '@stratusagent/state';
-import { WebSocketServer } from 'ws';
+import { gatewayInfoPath, loadApiTokens, type StateEnvironment } from '@stratusagent/state';
+import { WebSocketServer, type WebSocket } from 'ws';
 
 import {
   allowedOrigins,
@@ -15,6 +15,7 @@ import {
   originAllowed,
   type Authenticator,
   type DashboardSession,
+  type Principal,
 } from './auth.ts';
 import { createEventStream, type EventFilter } from './events.ts';
 import { API_PREFIX, ApiError, MAX_BODY_BYTES, isStateChanging, sendError, sendJson } from './http.ts';
@@ -31,6 +32,15 @@ export const CONTROL_API_VERSION = '0.11.6';
 /** The default port `stratusd` serves its API on. Loopback only. */
 /** How long stop() lets an answer already being written finish before it closes the socket anyway. */
 const IN_FLIGHT_RESPONSE_GRACE_MS = 2_000;
+
+/**
+ * How often an open event stream held by a member is checked against the
+ * token file. A request is judged when it arrives, but a socket outlives
+ * the upgrade that opened it, and a revoked tenant still watching the
+ * fleet's events would be exactly the access the revoke meant to end.
+ * Only runs while a member holds a stream open.
+ */
+const MEMBER_STREAM_RECHECK_MS = 1_000;
 
 export const DEFAULT_CONTROL_API_PORT = 4123;
 export const DEFAULT_CONTROL_API_HOST = '127.0.0.1';
@@ -168,6 +178,47 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   let pendingSessions: DashboardSession[] = [];
   /** What the last stop() found live, for the replacement. */
   let sessionsWhenStopped: DashboardSession[] = [];
+  /** Event streams a member holds open, each with the principal that opened it. */
+  const memberStreams = new Map<WebSocket, Principal>();
+  let memberStreamTimer: ReturnType<typeof setInterval> | undefined;
+  let recheckingStreams = false;
+
+  const recheckMemberStreams = async (): Promise<void> => {
+    if (recheckingStreams || !auth) {
+      return;
+    }
+    recheckingStreams = true;
+    try {
+      for (const [socket, principal] of memberStreams) {
+        if (!(await auth.stillHeld(principal))) {
+          memberStreams.delete(socket);
+          // 1008 is the protocol's "policy violation": the client is told
+          // why the stream ended rather than left to retry into a 401.
+          socket.close(1008, 'The member token behind this stream was revoked.');
+        }
+      }
+    } finally {
+      recheckingStreams = false;
+    }
+    if (memberStreams.size === 0 && memberStreamTimer !== undefined) {
+      clearInterval(memberStreamTimer);
+      memberStreamTimer = undefined;
+    }
+  };
+
+  const watchMemberStream = (socket: WebSocket, principal: Principal): void => {
+    memberStreams.set(socket, principal);
+    socket.once('close', () => memberStreams.delete(socket));
+    if (memberStreamTimer === undefined) {
+      memberStreamTimer = setInterval(() => {
+        void recheckMemberStreams().catch((error: unknown) => {
+          warn(`control API could not recheck member event streams: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }, MEMBER_STREAM_RECHECK_MS);
+      // A daemon with nothing else to do must still be able to exit.
+      memberStreamTimer.unref?.();
+    }
+  };
 
   const handleApiRequest = async (
     gateway: Gateway,
@@ -186,7 +237,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       throw new ApiError(404, 'not_found', `No route for ${method} ${requestUrl.pathname}.`);
     }
 
-    const principal = auth?.authenticate(request);
+    const principal = await auth?.authenticate(request);
     if (!resolved.route.selfAuthenticating) {
       if (!principal) {
         response.setHeader('www-authenticate', 'Bearer realm="stratus"');
@@ -210,6 +261,17 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
           'A cookie-authenticated request must come from this gateway\'s own origin.',
         );
       }
+      // Fail closed: a route is a member's only when it says so, so one
+      // added without a decision is the operator's until someone makes one.
+      if (principal.role === 'member' && resolved.route.member !== true) {
+        throw new ApiError(
+          403,
+          'operator_required',
+          `${method} ${requestUrl.pathname} is operator-only: it reaches the daemon's own policy — its config, its provider `
+            + 'sign-ins, or the process itself — which a member token may not change. Send the operator token from '
+            + '~/.stratus/gateway-token, or ask whoever holds it to make this change.',
+        );
+      }
     }
 
     const context: RouteContext = {
@@ -223,11 +285,16 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       request,
       response,
       startedAt,
-      mintOneTimeToken: () => {
-        if (!auth) {
+      mintOneTimeToken: async () => {
+        if (!auth || !principal) {
           throw new ApiError(503, 'not_ready', 'The control API is not serving yet.');
         }
-        return auth.mintOneTimeToken();
+        // The session this becomes holds the minter's role, never more.
+        try {
+          return await auth.mintOneTimeToken(principal);
+        } catch (error) {
+          throw new ApiError(401, 'unauthorized', error instanceof Error ? error.message : String(error));
+        }
       },
       redeemOneTimeToken: (ott) => auth?.redeemOneTimeToken(ott),
       sessionCookie: (sessionId, secure) => auth?.sessionCookie(sessionId, secure) ?? '',
@@ -260,7 +327,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
     // Everything outside /api is the dashboard's, and it is authenticated
     // too: the shell carries no data, but serving it to an unauthenticated
     // caller only invites confusion about what this port is.
-    if (!auth?.authenticate(request)) {
+    if (!(await auth?.authenticate(request))) {
       response.statusCode = 401;
       response.setHeader('content-type', 'text/html; charset=utf-8');
       response.setHeader('cache-control', 'no-store');
@@ -281,13 +348,16 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
     );
   };
 
-  const handleUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
+  const handleUpgrade = async (request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> => {
     const requestUrl = new URL(request.url ?? '/', url ?? `http://${authority(host, 0)}`);
     if (requestUrl.pathname !== `${API_PREFIX}/events`) {
       refuseUpgrade(socket, 404, 'Not Found');
       return;
     }
-    const principal = auth?.authenticate(request);
+    // Open to members as well as the operator: watching conversations is
+    // what a member token is for. A member's stream is rechecked against
+    // the token file while it stays open (see MEMBER_STREAM_RECHECK_MS).
+    const principal = await auth?.authenticate(request);
     if (!principal) {
       refuseUpgrade(socket, 401, 'Unauthorized');
       return;
@@ -305,8 +375,16 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       ...(requestUrl.searchParams.get('session') ? { sessionId: requestUrl.searchParams.get('session') as string } : {}),
       ...(requestUrl.searchParams.get('agent') ? { agentId: requestUrl.searchParams.get('agent') as string } : {}),
     };
-    wss?.handleUpgrade(request, socket, head, (socket_) => {
+    if (!wss) {
+      // Stopped while the credential was being judged.
+      refuseUpgrade(socket, 503, 'Service Unavailable');
+      return;
+    }
+    wss.handleUpgrade(request, socket, head, (socket_) => {
       stream?.attach(socket_, filter);
+      if (principal.role === 'member') {
+        watchMemberStream(socket_, principal);
+      }
     });
   };
 
@@ -380,7 +458,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
         ? undefined
         : options.ui ?? await loadDashboardAssets();
       token = await ensureGatewayToken(env);
-      auth = createAuthenticator({ token });
+      auth = createAuthenticator({ token, memberTokens: () => loadApiTokens(env), warn });
       auth.adoptSessions(pendingSessions);
       pendingSessions = [];
       stream = createEventStream(gateway);
@@ -408,7 +486,12 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
           response.end();
         });
       });
-      server.on('upgrade', handleUpgrade);
+      server.on('upgrade', (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+        void handleUpgrade(request, socket, head).catch((error: unknown) => {
+          warn(`control API refused an event-stream upgrade: ${error instanceof Error ? error.message : String(error)}`);
+          refuseUpgrade(socket, 500, 'Internal Server Error');
+        });
+      });
 
       const listening = server;
       const asked = authority(host, options.port ?? DEFAULT_CONTROL_API_PORT);
@@ -444,6 +527,11 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
     async stop() {
       stream?.close();
       stream = undefined;
+      if (memberStreamTimer !== undefined) {
+        clearInterval(memberStreamTimer);
+        memberStreamTimer = undefined;
+      }
+      memberStreams.clear();
       // Sockets first: an open WebSocket keeps `server.close()` waiting
       // forever, and a drain that never finishes is a daemon that will not
       // shut down.
