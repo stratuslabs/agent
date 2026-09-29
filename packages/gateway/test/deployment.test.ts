@@ -605,6 +605,33 @@ test('spend held in memory only leaves word for the next daemon at once, not onl
   }
 });
 
+test('a marker for spend no saved session holds stays, and keeps budgeted calls refused, rather than being cleared by an empty settle', async () => {
+  const home = await newHome();
+  const stateDir = path.join(home, '.stratus');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeConfig(home, { budget: { daily: 1_000_000 } });
+  // What a crash between announcing a call and saving its session leaves:
+  // the marker, and no session with the record on it.
+  await writeFile(path.join(stateDir, 'usage-unsettled'), '');
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+    idleTimeoutMs: 0,
+    warn: (line) => warnings.push(line),
+  });
+  await gateway.start();
+  try {
+    assert.ok(warnings.some((line) => /none of it is on any saved session/.test(line)), warnings.join('\n'));
+    assert.equal(existsSync(path.join(stateDir, 'usage-unsettled')), true);
+    await assert.rejects(
+      gateway.dispatch({ sessionId: 'e-1', agentId: 'ava', userMessage: 'hello' }),
+      /stopped with spend it could not write anywhere/,
+    );
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('usage totals are one row per agent, however the id was cased when each call was made', () => {
   const ledger = new SqliteUsageLedger(fleetDbIn(path.join(os.tmpdir(), `stratus-ledger-${process.pid}-${Date.now()}`)));
   try {

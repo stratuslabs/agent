@@ -137,8 +137,14 @@ Two properties are worth knowing before you rely on a number:
   if it is written. A stop in that state also writes the calls out whole
   as a warning, which reaches the service manager's log (journald,
   `docker logs`). The next daemon to start with room to write settles the
-  ledger from the saved sessions, where those calls' records are, removes
-  the marker, and refuses budgeted calls until it has. A line
+  ledger from the saved sessions, where those calls' records usually are,
+  removes the marker, and refuses budgeted calls until it has. A crash
+  between a call and its session's save can take the record with it; a
+  settle that recovers none of the missing spend leaves the marker, and
+  budgeted calls stay refused until you remove `~/.stratus/usage-unsettled`
+  having accounted for it. What a settle cannot tell is a partial
+  recovery — at most one call per turn that was in flight, since every
+  budgeted call is refused from the moment the spend goes unwritten. A line
   of the hold file cut short by a crash is refused, never dropped, until
   someone repairs it. While any
   usage is held, `stratus usage` says so and exits non-zero, and

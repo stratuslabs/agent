@@ -205,6 +205,12 @@ export class SqliteUsageLedger {
     return row?.spent ?? 0;
   }
 
+  /** Rows in the ledger — how a settle tells whether it recovered anything. */
+  count(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM usage').get() as { n: number } | undefined;
+    return row?.n ?? 0;
+  }
+
   close(): void {
     this.db.close();
   }

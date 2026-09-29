@@ -1369,6 +1369,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       warn(`usage ledger: the last stratusd stopped with spend it could not write, and this session store cannot list sessions to settle it from. Budgeted calls are refused until ${usageHold.unsettledPath} is removed by hand, once that spend is accounted for.`);
       return;
     }
+    const before = usageLedger.count();
     const statuses: SessionStatus[] = ['idle', 'running', 'pending_approval', 'completed', 'failed'];
     const ids = new Set<string>();
     for (const status of statuses) {
@@ -1387,8 +1388,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       warn(`usage ledger: could not settle what the last stratusd left unwritten (${failed.message}); budgeted calls stay refused until it is written`);
       return;
     }
+    // The marker says spend is missing. A settle that found none of it on
+    // any saved session has not recovered it — a crash between announcing
+    // a call and saving its session takes the record with it, and the full
+    // disk that caused the marker usually refused that save too — so the
+    // marker stays and says so, rather than being cleared by a settle that
+    // settled nothing.
+    const recovered = usageLedger.count() - before;
+    if (recovered === 0) {
+      warn(
+        `usage ledger: the last stratusd left spend it could not write, and none of it is on any saved session — it was lost with that process. `
+        + `Budgeted calls stay refused until ${usageHold.unsettledPath} is removed, once that spend is accounted for (a stop, unlike a crash, wrote it to the service manager's log).`,
+      );
+      return;
+    }
     usageHold.settle();
-    log(`usage ledger: settled what the last stratusd could not write, from ${ids.size} saved session(s)`);
+    log(`usage ledger: settled what the last stratusd could not write — ${recovered} call(s), from ${ids.size} saved session(s)`);
     try {
       usageHold.arm();
     } catch {
