@@ -1,0 +1,94 @@
+# stratusd as a system service, for a server with no desktop session.
+#
+# `stratus service install` writes a *user* unit instead, which is right on
+# a workstation but starts at login and needs `loginctl enable-linger` to
+# survive a reboot on a machine nobody logs in to. This one runs from boot as
+# a dedicated account. The full recipe is docs/guides/deployment.md:
+#
+#   sudo useradd --system --home-dir /var/lib/stratus --shell /usr/sbin/nologin stratus
+#   sudo npm install -g @stratusagent/cli @stratusagent/control-api    # + the plugins you use
+#   sudo install -d -m 0700 /etc/stratus
+#   sudo install -m 0600 /dev/null /etc/stratus/stratusd.env           # then add provider keys
+#   sudo cp stratusd.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now stratusd
+#
+# Everything the daemon keeps is $HOME/.stratus, so /var/lib/stratus/.stratus.
+
+[Unit]
+Description=Stratus Agent gateway (stratusd)
+Documentation=https://github.com/stratuslabs/agent/blob/main/docs/guides/deployment.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=stratus
+Group=stratus
+# HOME is what the daemon's state is found under, so it is pinned rather
+# than left to the passwd entry: a home that moved would start a second,
+# empty install beside the first.
+Environment=HOME=/var/lib/stratus
+WorkingDirectory=/var/lib/stratus
+# Created at start if missing, owned by User=, and writable under
+# ProtectSystem=strict below.
+StateDirectory=stratus
+StateDirectoryMode=0700
+# Provider keys and anything else read from the environment. Root-owned and
+# 0600: systemd reads it before dropping to User=, so the account itself
+# never needs to read the file.
+EnvironmentFile=/etc/stratus/stratusd.env
+# Absolute paths to node and to the CLI's entry script, never a bare
+# `stratus`: that is a `#!/usr/bin/env node` script, so it would run
+# whichever node the service's PATH finds first. Find yours with
+#   command -v node
+#   readlink -f "$(command -v stratus)"
+# /usr/lib/node_modules is Debian/Ubuntu's global prefix (NodeSource
+# included); the nodejs.org tarballs use /usr/local/lib/node_modules. After
+# upgrading node or the CLI, check both paths still exist.
+ExecStart=/usr/bin/node /usr/lib/node_modules/@stratusagent/cli/dist/bin.js serve --log-format json
+Restart=on-failure
+RestartSec=5
+# The daemon drains in-flight turns for up to 30 seconds on SIGTERM. The
+# stop timeout has to be longer, or SIGKILL lands mid-drain and the turns
+# still running are failed instead of finished.
+KillSignal=SIGTERM
+TimeoutStopSec=45
+UMask=0077
+
+# --- Hardening --------------------------------------------------------------
+# `systemd-analyze security stratusd` scores what is left.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# The whole filesystem read-only except the state directory. A tool-fs root
+# or a tool-shell cwd outside it needs its own ReadWritePaths= (or
+# ReadOnlyPaths=) line here.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/stratus
+# The home is under /var/lib, so /home, /root and /run/user can go. If
+# agents are meant to read files under /home, use ProtectHome=read-only
+# and name the directory in ReadOnlyPaths=.
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RemoveIPC=yes
+# Netlink is how Node and Chromium enumerate network interfaces.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Not set: MemoryDenyWriteExecute=yes. V8 compiles JavaScript into
+# executable memory, and node does not start under it.
+
+[Install]
+WantedBy=multi-user.target
