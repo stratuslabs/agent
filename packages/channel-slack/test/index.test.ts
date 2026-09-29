@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { EventBus, type ApprovalAnswer, type ImageAttachment, type JsonObject, type Session, type StratusEvent } from '@stratusagent/core';
+import { EventBus, HostRefusalError, type ApprovalAnswer, type ImageAttachment, type JsonObject, type Session, type StratusEvent } from '@stratusagent/core';
 import type { ChannelCredentialRequest, GatewayLike } from '@stratusagent/channels';
 import {
   createSlackChannelAdapter as createAdapterAsShipped,
@@ -3876,6 +3876,26 @@ test('a failed turn edits the placeholder into an error note instead of going si
   await adapter.stop();
 
   assert.match(web.updates.at(-1)?.text ?? '', /Something went wrong: provider exploded/);
+});
+
+test('a turn the host refused is posted as its own sentence, not framed as something going wrong', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(() => {
+    throw new HostRefusalError('Agent ava has used its daily model budget. It resets at 2026-09-30 00:00 UTC.');
+  });
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> one more'));
+  await adapter.stop();
+
+  assert.equal(web.updates.at(-1)?.text, 'Agent ava has used its daily model budget. It resets at 2026-09-30 00:00 UTC.');
 });
 
 test('replies longer than one Slack message split across thread messages', async () => {
