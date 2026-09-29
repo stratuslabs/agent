@@ -47,6 +47,8 @@ line, 23.4+) — details in [Installation](docs/start/installation.md).
 | 📦 | **Start from a template** — a folder or repo carrying an agent, its skills, and the plugins behind its tools, installed in one reviewed command | [Templates](docs/guides/templates.md) |
 | 🤝 | **Work as a team** — delegation between agents, routing that keeps the same face in the same places | [Agents](docs/concepts/agents.md) |
 | 🖥 | **Managed from anywhere** — one authenticated API, a web dashboard on top | [Remote access](docs/guides/remote-access.md) |
+| 🚀 | **Deploy anywhere** — a container or a system unit on a server, or one isolated cell per tenant when you host it for others | [Deployment](docs/guides/deployment.md) · [Hosting](docs/guides/hosting.md) |
+| 💰 | **Spend on purpose** — every model call counted, daily and monthly budgets that stop an agent cleanly, and time-bounded leases on the keys that matter | [Usage and budgets](docs/guides/usage-and-budgets.md) · [Credential leases](docs/guides/leases.md) |
 
 Providers: Claude via the official Anthropic SDK, Claude subscription
 (Pro/Max) via the Claude Agent SDK, ChatGPT/Codex via the OpenAI Codex SDK,
@@ -113,6 +115,8 @@ The trust model behind that is in
 | Give agents real capability, safely | [Tools](docs/guides/tools.md) · [Shell commands](docs/guides/shell.md) · [Browser actions](docs/guides/browser.md) · [Approvals](docs/guides/approvals.md) |
 | Let agents act on a schedule | [Schedules](docs/guides/schedules.md) |
 | Run it as a service, read its logs, upgrade it | [Always on](docs/guides/always-on.md) · [Logs](docs/guides/logs.md) · [Updating](docs/guides/updating.md) |
+| Run it on a server, or host it for other people | [Deployment](docs/guides/deployment.md) · [Hosting](docs/guides/hosting.md) |
+| Cap spend, or fence a sensitive key | [Usage and budgets](docs/guides/usage-and-budgets.md) · [Credential leases](docs/guides/leases.md) |
 | Fix a surprise | [Troubleshooting](docs/guides/troubleshooting.md) |
 | Look up any command, flag, or config key | [CLI reference](docs/reference/cli.md) · [Configuration](docs/reference/config.md) |
 | Know what is on disk, and what belongs to one agent | [State layout](docs/reference/state-layout.md) |

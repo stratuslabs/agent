@@ -41,8 +41,11 @@ import {
   type MemoryStoreContribution,
   type ProviderContribution,
   type Session,
+  type SessionStatus,
   type StratusEvent,
   type ToolRisk,
+  type CredentialResolver,
+  HostRefusalError,
 } from '@stratusagent/core';
 import {
   createCredentialRequestTool,
@@ -74,6 +77,17 @@ import {
   type SchedulerLimits,
 } from './schedules.ts';
 import { ShardedSessionStore } from './sessions.ts';
+
+export { SqliteLeaseStore } from './leases.ts';
+export {
+  createUsageHold,
+  SqliteUsageLedger,
+  USAGE_HOLD_FILENAME,
+  USAGE_UNSETTLED_FILENAME,
+  type UsageLedgerEntry,
+  type UsageQuery,
+  type UsageTotalsRow,
+} from './usage.ts';
 
 export {
   claimHome,
@@ -156,7 +170,34 @@ import {
   type RuntimeSelection,
   type StateEnvironment,
   foldedAgentId,
+  BudgetExceededError,
+  budgetStatus,
+  budgetHasLimit,
+  reportLeaseUse,
+  createLeaseBroker,
+  createLeasePolicyRefresh,
+  createLeaseResolver,
+  findBudgetBreach,
+  readGlobalConfigBlock,
+  readTrustedConfigBlock,
+  validateLeaseGrant,
+  type BudgetConfig,
+  type BudgetLimitStatus,
+  type CredentialLease,
+  type LeaseState,
+  type LeaseGrant,
+  type ProviderCallGuard,
 } from '@stratusagent/state';
+import { SqliteLeaseStore } from './leases.ts';
+import {
+  createUsageHold,
+  newUsageEntryId,
+  SqliteUsageLedger,
+  USAGE_HOLD_FILENAME,
+  type UsageLedgerEntry,
+  type UsageQuery,
+  type UsageTotalsRow,
+} from './usage.ts';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
 /**
@@ -608,6 +649,12 @@ export interface GatewayOptions {
   warn?: (line: string) => void;
 }
 
+/** Every configured budget limit and where it stands — see `Gateway.budget`. */
+export interface GatewayBudgetStatus {
+  budget: BudgetConfig;
+  limits: BudgetLimitStatus[];
+}
+
 export interface DispatchInput {
   /**
    * Stable session id chosen by the caller — channels derive it from the
@@ -844,6 +891,37 @@ export interface Gateway {
    * Who may answer is the channel's question, as it is for approvals.
    */
   provideCredential(input: ProvideCredentialInput): Promise<ProvideCredentialResult>;
+  /**
+   * Token usage from the home's ledger (`fleet.db`), summed per agent,
+   * provider, and model over the window asked for. The rows are the
+   * providers' own counts, bucket by bucket, never priced.
+   */
+  usage(query?: UsageQuery): UsageTotalsRow[];
+  /**
+   * The budget in force — the trusted config's `budget` block as the next
+   * provider call would read it — with every limit's spend so far, or
+   * undefined when none is configured. Throws a `HostRefusalError` while
+   * the config has never been readable, or while spent usage cannot be
+   * written: then where the budget stands is unknown, and budgeted model
+   * calls are refused over it.
+   */
+  budget(): Promise<GatewayBudgetStatus | undefined>;
+  /**
+   * Usage spent but not yet in the ledger — held after a failed write —
+   * after one more attempt to write it. `calls` is NaN when the hold file
+   * itself cannot be read; `error` says why the write still fails.
+   */
+  unrecordedUsage(): { calls: number; error?: string };
+  /**
+   * Every credential lease this home has granted, oldest first, then the
+   * live delegated sub-leases — each with its `state` as a use would judge
+   * it, so a sub-lease whose parent has ended is never listed `active`.
+   */
+  leases(filter?: { agentId?: string }): Array<CredentialLease & { state: LeaseState }>;
+  /** Grant a lease. Validated by `validateLeaseGrant`; throws its sentence. */
+  grantLease(input: LeaseGrant): CredentialLease;
+  /** End a lease now. Undefined when there is no such lease or it was already revoked. */
+  revokeLease(id: string, revokedBy?: string): CredentialLease | undefined;
 }
 
 export interface ProvideCredentialInput {
@@ -1019,6 +1097,402 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // The same database sessions live in — one file to back up — through the
   // schedule store's own connection (see its docs for why).
   const scheduleStore = new SqliteScheduleStore(fleetDbIn(stateDir), { stateHome: stateDir });
+  // Beside the schedules in `fleet.db`, and fleet infrastructure for the
+  // same reason: a budget is the home's, and a lease is granted by the
+  // operator of the home, not by any agent.
+  const usageLedger = new SqliteUsageLedger(fleetDbIn(stateDir), { stateHome: stateDir });
+  const leaseStore = new SqliteLeaseStore(fleetDbIn(stateDir), { stateHome: stateDir });
+  const leaseBroker = createLeaseBroker({
+    store: leaseStore,
+    leased: [],
+    onUse: (record) => {
+      // Every leased resolution is recorded, allowed or refused. On the
+      // bus when there is a session to attribute it to, which is what puts
+      // it in `stratus logs` and in front of every other consumer; a
+      // caller that passed no session (a plugin that predates the context
+      // argument) still leaves a line.
+      reportLeaseUse(record, {
+        emit: (event) => void bus.emit(event),
+        note: (line, refused) => (refused ? warn(line) : log(line)),
+      });
+    },
+  });
+
+  // Each call's usage lands in the ledger as the runner announces it, and
+  // the runner awaits the announcement before it makes the next call — so
+  // the budget check ahead of that call has seen every token before it.
+  //
+  // A write that fails is held, not dropped, and retried before the next
+  // budget check and with every later announcement. The bus swallows a
+  // subscriber's error, so a lost row would be silent — and a budget judged
+  // on a ledger missing spent tokens would keep allowing calls for as long
+  // as the disk stayed full. Held rows keep their original timestamp, so a
+  // late write still lands in the window the tokens were spent in.
+  const unrecordedUsage: UsageLedgerEntry[] = [];
+  /**
+   * How far into each session's usage records this process has checked the
+   * ledger, so the check before a provider call writes only what is new.
+   *
+   * The announcement is not the only way a call's usage has to reach the
+   * ledger. A record is on the session before it is announced, and the
+   * session can be saved in between — the fallback wrapper saves its
+   * switch, with the failed primary's record, before the fallback's check
+   * runs; a harness provider saves tool activity before its last report. A
+   * process that dies there comes back with spend on the session and not in
+   * the ledger, and a budget reading the ledger would allow it again. So
+   * before each call every record the session holds that this process has
+   * not yet checked is written, under the id the kernel gave it: one the
+   * announcement (or an earlier process) already wrote is a no-op, and one
+   * nobody wrote is counted now. Starting from zero in each process is the
+   * point — a restart re-checks every session it serves, once.
+   */
+  const reconciledUsage = new Map<string, { count: number; lastId: string | undefined }>();
+  const usageHold = createUsageHold(stateDir, path.join(stateDir, USAGE_HOLD_FILENAME));
+  /**
+   * Whether the last daemon stopped holding spend it could write nowhere —
+   * a disk with room for neither the ledger nor the hold file. Its stop left
+   * a marker (see `closeStores`), and until `settleUsage` has put every
+   * saved session's records in the ledger and removed it, budgeted calls
+   * are refused: the ledger is missing spend, and by how much is not known.
+   */
+  const unsettledError = (): Error | undefined => {
+    try {
+      return usageHold.unsettled()
+        ? new Error(`the last stratusd stopped with spend it could not write anywhere, marked by ${usageHold.unsettledPath}; it is settled from the saved sessions when the daemon next starts with room to write`)
+        : undefined;
+    } catch (error) {
+      return error instanceof Error ? error : new Error(String(error));
+    }
+  };
+  /**
+   * Whether this process left the unsettled marker itself, because it came
+   * to hold spend in memory only — as opposed to finding one at start that
+   * a full settle has to clear. Its own marker it takes back once that
+   * spend is written.
+   */
+  let markedUnsettled = false;
+  /**
+   * Whether the marker in place is the last daemon's, not yet cleared (see
+   * `settleUsage`). This process neither writes its own calls over it nor
+   * takes it back: it stays until a settle, or the operator, clears it.
+   */
+  let foreignMarker = false;
+  /**
+   * A complete marker whose settle at start could not write its calls: they
+   * wait in `unrecordedUsage` like any held spend, and the first flush that
+   * writes them all clears the marker. Without this it would stand until a
+   * restart, refusing every budgeted call over spend already in the ledger.
+   */
+  let settleOnFlush = false;
+  const flushUsage = (): Error | undefined => {
+    while (unrecordedUsage.length > 0) {
+      try {
+        usageLedger.record(unrecordedUsage[0]!);
+      } catch (error) {
+        // Onto disk if the disk will take it, so a restart does not lose it;
+        // otherwise it stays here and the next flush tries both again.
+        try {
+          usageHold.append(unrecordedUsage);
+          unrecordedUsage.length = 0;
+        } catch {
+          // Held in memory only; the budget check still refuses. And word
+          // left for the next daemon now, not at the stop: a crash from here
+          // on runs no stop, and a turn that saved its record and finished
+          // `completed` is in no sweep of turns left running. The marker is
+          // a rename (see `arm`), so the full disk does not stop it.
+          // Rewritten at every such failure, so the list it names is the
+          // calls held now.
+          if (!foreignMarker) {
+            try {
+              usageHold.markUnsettled(unrecordedUsage);
+              markedUnsettled = true;
+            } catch {
+              // Tried again at the next failure, and at the stop.
+            }
+          }
+        }
+        return error instanceof Error ? error : new Error(String(error));
+      }
+      unrecordedUsage.shift();
+    }
+    // Everything this process held in memory is written: its own word to
+    // the next daemon is no longer true.
+    if (markedUnsettled) {
+      try {
+        usageHold.settle();
+        markedUnsettled = false;
+        usageHold.arm();
+      } catch {
+        // A marker left behind only costs the next start a settle.
+      }
+    }
+    // What an earlier failure (or an earlier process) left on disk.
+    try {
+      const held = usageHold.read();
+      if (held.length > 0) {
+        usageLedger.recordAll(held);
+        usageHold.clear();
+      }
+    } catch (error) {
+      return error instanceof Error ? error : new Error(String(error));
+    }
+    if (settleOnFlush) {
+      try {
+        usageHold.settle();
+        settleOnFlush = false;
+        foreignMarker = false;
+        log('usage ledger: settled what the last stratusd could not write, now that the ledger takes it');
+        usageHold.arm();
+      } catch {
+        // Tried again at the next flush; the marker keeps refusing meanwhile.
+      }
+    }
+    return undefined;
+  };
+  bus.subscribe((event) => {
+    if (event.type !== 'session.usage') {
+      return;
+    }
+    const at = new Date().toISOString();
+    for (const record of event.records) {
+      unrecordedUsage.push({ id: record.id ?? newUsageEntryId(), at: record.at ?? at, agentId: event.agentId, sessionId: event.sessionId, record });
+    }
+    const failed = flushUsage();
+    if (failed) {
+      warn(`usage ledger: could not record ${unrecordedUsage.length} call(s) (${failed.message}); holding them, and refusing budgeted calls until they are written`);
+    }
+  });
+
+  /**
+   * The budget as the next provider call reads it: from the trusted config,
+   * on every call, so a limit an operator (or a hosting control plane)
+   * raises applies without a restart. Under the trust rule every policy
+   * block has — a project-local file naming one is ignored, loudly, in
+   * favour of the global file. A config that cannot be read keeps the last
+   * budget that could: an operator mid-edit must not lift every limit, and
+   * with no earlier read there was never a limit to keep.
+   */
+  let lastGoodBudget: BudgetConfig | undefined;
+  let budgetKnown = false;
+  const currentBudget = async (): Promise<BudgetConfig | undefined> => {
+    let block = await readTrustedConfigBlock('budget', env, options.selection?.configPath);
+    if (block.status === 'untrusted') {
+      warn(`ignoring budget in ${block.path}: a project-local config cannot set this daemon's spending limits; using ~/.stratus/config.json instead`);
+      block = await readGlobalConfigBlock('budget', env);
+    }
+    if (block.status === 'unreadable') {
+      const reason = block.error instanceof Error ? block.error.message : String(block.error);
+      if (!budgetKnown) {
+        // Never read: whether a limit exists is unknown, and unknown must
+        // not read as "no limit" — the same fail-closed rule as the leased
+        // list. The config's own error stays in the warning; the refusal
+        // can reach a chat.
+        warn(`could not read the budget (${reason}); refusing model calls until it can be read`);
+        throw new HostRefusalError(
+          'The spending limit could not be read, so the model was not called. The operator can fix the config, and calls resume once it reads.',
+        );
+      }
+      warn(`could not read the budget (${reason}); using the last one read`);
+      return lastGoodBudget;
+    }
+    lastGoodBudget = block.status === 'present' ? block.value : undefined;
+    budgetKnown = true;
+    return lastGoodBudget;
+  };
+
+  /**
+   * The leased list as the next use reads it — re-read from the trusted
+   * config on every provider call and every leased resolution, so a key an
+   * operator fences is fenced from its next use, with no restart. A config
+   * that cannot be read keeps the last list that could; with none, the
+   * list is unknown and the broker refuses every credential until it is
+   * known, because "unknown" read as "nothing leased" would unfence them.
+   */
+  const refreshLeases = createLeasePolicyRefresh({
+    broker: leaseBroker,
+    env,
+    ...(options.selection?.configPath !== undefined ? { configPath: options.selection.configPath } : {}),
+    warn,
+    log,
+  });
+  const leaseResolver = createLeaseResolver(createFileCredentialResolver(env), leaseBroker);
+  const leasedCredentials: CredentialResolver = {
+    async resolve(agent, name, context) {
+      await refreshLeases();
+      return leaseResolver.resolve(agent, name, context);
+    },
+  };
+
+  /**
+   * Asked before every provider call, primary and fallback alike: the
+   * budget first, since it refuses whatever the key, then the lease on the
+   * sign-in this call would spend.
+   */
+  const guardProviderCall: ProviderCallGuard = async (request, credential) => {
+    try {
+      await judgeProviderCall(request, credential);
+    } catch (error) {
+      if (error instanceof HostRefusalError) {
+        throw error;
+      }
+      // A check that could not run — `fleet.db` busy past its timeout, a
+      // disk error — refuses the call, and as a refusal: thrown as itself it
+      // would read to the fallback wrapper as the primary model failing,
+      // and move this conversation onto the fallback for good over a
+      // database lock.
+      throw new HostRefusalError(
+        `The budget and lease checks could not run (${error instanceof Error ? error.message : String(error)}), so the model was not called. Try again in a moment.`,
+      );
+    }
+  };
+  /**
+   * Queue for the ledger every record `session` holds that this process has
+   * not yet checked — see `reconciledUsage`. The caller flushes.
+   */
+  const reconcileUsage = (session: Session): void => {
+    const records = session.usage ?? [];
+    const checked = reconciledUsage.get(session.id);
+    // A cursor that no longer lands on the record it stopped at means the
+    // records were replaced — a rollover empties them — so every one is
+    // checked again; writing by id makes that harmless.
+    const from = checked !== undefined && records[checked.count - 1]?.id === checked.lastId ? checked.count : 0;
+    if (records.length > from) {
+      const at = new Date().toISOString();
+      for (const record of records.slice(from)) {
+        if (record.id !== undefined) {
+          // When it was spent, not when it was found: a call recovered after a
+          // crash that crossed midnight belongs to the day it was made.
+          unrecordedUsage.push({ id: record.id, at: record.at ?? at, agentId: session.agent.id, sessionId: session.id, record });
+        }
+      }
+    }
+    reconciledUsage.set(session.id, { count: records.length, lastId: records.at(-1)?.id });
+  };
+  /**
+   * Run at start. With no marker, arm one for this daemon's stop. With one,
+   * put every saved session's records in the ledger — each under its id, so
+   * whatever was already there is a no-op — and remove the marker once all
+   * of it is written. Until then budgeted calls stay refused, which is the
+   * point: the marker says the ledger is short, not by how much.
+   */
+  const settleUsage = async (): Promise<void> => {
+    // A marking the last daemon wrote and died before naming counts as
+    // made: its calls are in the armed file, and arming over it would throw
+    // them away. An armed file that cannot be read is not a marker.
+    try {
+      if (usageHold.promoteArmed()) {
+        warn(`usage ledger: the last stratusd died while marking spend it could not write; settling it from ${usageHold.unsettledPath}`);
+      }
+    } catch (error) {
+      warn(`usage ledger: could not read the armed reserve beside ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)})`);
+    }
+    let marked: ReturnType<typeof usageHold.readUnsettled>;
+    try {
+      marked = usageHold.readUnsettled();
+    } catch (error) {
+      // A marker that is there and cannot be read is still a marker:
+      // budgeted calls stay refused while it exists, and it is the last
+      // daemon's to be cleared, not this one's to write over.
+      warn(`usage ledger: could not read ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)}); budgeted calls are refused while it is there`);
+      foreignMarker = true;
+      return;
+    }
+    if (!marked) {
+      // No marker: this daemon's to make if it comes to hold spend it cannot
+      // write. A failure to arm only costs that marking its reserve — it
+      // falls back to an empty marker, which still refuses on the next start.
+      try {
+        usageHold.arm();
+      } catch (error) {
+        warn(`usage ledger: could not reserve ${usageHold.unsettledPath} (${error instanceof Error ? error.message : String(error)}); on a full disk a stop may be able to leave only an empty marker for the next stratusd`);
+      }
+      return;
+    }
+    // Held by this process from here: until it is cleared, it is the last
+    // daemon's word, and this one does not write over it or take it back.
+    foreignMarker = true;
+    // The calls the marker names, each under its id — whatever of them the
+    // last daemon or an earlier settle already wrote is a no-op — and every
+    // saved session's records with them, which costs nothing when they
+    // agree and recovers a call the marker could not fit.
+    for (const entry of marked.entries) {
+      unrecordedUsage.push(entry);
+    }
+    if (store.listIdsByStatus) {
+      const statuses: SessionStatus[] = ['idle', 'running', 'pending_approval', 'completed', 'failed'];
+      const ids = new Set<string>();
+      for (const status of statuses) {
+        for (const id of await store.listIdsByStatus(status)) {
+          ids.add(id);
+        }
+      }
+      for (const id of ids) {
+        const session = await store.get(id);
+        if (session) {
+          reconcileUsage(session);
+        }
+      }
+    }
+    const failed = flushUsage();
+    if (failed) {
+      // A complete marker is cleared by the first flush that writes it; an
+      // incomplete one waits for the operator either way.
+      settleOnFlush = marked.complete;
+      warn(`usage ledger: could not settle what the last stratusd left unwritten (${failed.message}); budgeted calls stay refused until it is written`);
+      return;
+    }
+    // Cleared only when the marker named every call it stood for: then all
+    // of them are in the ledger now, however many times this has run. A
+    // marker that could not — too many calls for its reserve, or never
+    // armed and so empty — cannot say what is still missing, so it stays.
+    if (!marked.complete) {
+      warn(
+        `usage ledger: the last stratusd left spend it could not write, and ${usageHold.unsettledPath} could not list all of it. `
+        + `What it and the saved sessions name is in the ledger now; budgeted calls stay refused until that file is removed, once the rest is accounted for (a stop, unlike a crash, wrote it to the service manager's log).`,
+      );
+      return;
+    }
+    usageHold.settle();
+    foreignMarker = false;
+    log(`usage ledger: settled what the last stratusd could not write — ${marked.entries.length} call(s)`);
+    try {
+      usageHold.arm();
+    } catch {
+      // Reported on the next start that finds it missing; nothing is at stake until a stop.
+    }
+  };
+  const judgeProviderCall: ProviderCallGuard = async (request, credential) => {
+    const agentId = request.session.agent.id;
+    const budget = await currentBudget();
+    // Every record this session holds that this process has not checked —
+    // see `reconciledUsage`. Records from before ids existed are left out:
+    // there is no telling whether they were ever counted.
+    reconcileUsage(request.session);
+    const unwritten = flushUsage() ?? unsettledError();
+    if (budget && budgetHasLimit(budget, agentId)) {
+      // Fail closed: spend the ledger could not record is spend the check
+      // below cannot see, so no budgeted call is made until it is written.
+      if (unwritten) {
+        throw new HostRefusalError(
+          `Spending could not be recorded (${unwritten.message}), so the budget cannot be checked and the model was not called. `
+          + 'The operator needs to free the disk or fix the home; calls resume once the held usage is written.',
+        );
+      }
+      const breach = findBudgetBreach(
+        budget,
+        agentId,
+        (since, scopeAgent) => usageLedger.spent(since, scopeAgent, budget.weights),
+        new Date(),
+      );
+      if (breach) {
+        throw new BudgetExceededError(breach);
+      }
+    }
+    await refreshLeases();
+    if (credential !== undefined) {
+      leaseBroker.use(agentId, credential, { sessionId: request.session.id, use: 'provider' });
+    }
+  };
 
   /**
    * The started adapter of one kind that speaks for an agent and has the
@@ -2077,14 +2551,38 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
   tools.register(createDelegateTool({
     registry,
-    dispatch: (input) => dispatchInternal({
-      sessionId: input.sessionId,
-      agentId: input.agent.id,
-      userMessage: input.userMessage,
-      metadata: input.metadata,
-      // A cancelled parent turn cancels its delegated runs too.
-      ...(input.signal ? { signal: input.signal } : {}),
-    }),
+    dispatch: async (input) => {
+      // The delegator's leases, lent for this one task: each a sub-lease
+      // no wider than what it draws on, bound to the sub-session, and
+      // gone when the delegated turn is — or with the process, since they
+      // are never stored. A delegate that recovers after a restart has
+      // only its own leases, which is the narrower of the two answers.
+      const parentSessionId = delegatingSessionIdOf(input.sessionId);
+      const parentAgentId = input.metadata[DELEGATED_BY_METADATA_KEY];
+      if (parentSessionId !== undefined && typeof parentAgentId === 'string') {
+        const minted = leaseBroker.mintSubLeases({
+          parentAgentId,
+          parentSessionId,
+          child: input.agent,
+          childSessionId: input.sessionId,
+        });
+        if (minted.length > 0) {
+          log(`delegation ${parentAgentId} → ${input.agent.id} lent ${minted.map((lease) => `${lease.credential} (${lease.id} from ${lease.parentId ?? '?'})`).join(', ')}`);
+        }
+      }
+      try {
+        return await dispatchInternal({
+          sessionId: input.sessionId,
+          agentId: input.agent.id,
+          userMessage: input.userMessage,
+          metadata: input.metadata,
+          // A cancelled parent turn cancels its delegated runs too.
+          ...(input.signal ? { signal: input.signal } : {}),
+        });
+      } finally {
+        leaseBroker.releaseSubLeases(input.sessionId);
+      }
+    },
   }));
 
   const runners = new Map<string, AgentRunner>();
@@ -2130,6 +2628,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // must not retry the primary on restart.
       (session) => store.save(session),
       providerContributions,
+      guardProviderCall,
     );
 
     const runner = new AgentRunner({
@@ -2912,6 +3411,29 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     await Promise.allSettled(abandoned.map((id) => failAbandonedTurn(id)));
   };
 
+  /**
+   * Write what the turns a crash left `running` had spent — the records on
+   * each session this process has not checked — before anything can
+   * dispatch. See `reconcileUsage`; the sweep that fails them later finds
+   * nothing left to write.
+   */
+  const reconcileAbandonedUsage = async (abandoned: string[]): Promise<void> => {
+    for (const id of abandoned) {
+      try {
+        const session = await store.get(id);
+        if (session) {
+          reconcileUsage(session);
+        }
+      } catch (error) {
+        warn(`could not read abandoned turn ${id} to count what it spent: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const unwritten = flushUsage();
+    if (unwritten) {
+      warn(`usage ledger: could not record what abandoned turns spent (${unwritten.message}); holding it, and refusing budgeted calls until it is written`);
+    }
+  };
+
   const failAbandonedTurn = (id: string): Promise<void> =>
     onSessionChain(id, async () => {
       if (stopping) {
@@ -2924,6 +3446,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // this session somewhere else, and that turn owns it now.
         if (!session || session.status !== 'running') {
           return;
+        }
+        // A crash mid-turn is exactly when a call's record can be on the
+        // session and not in the ledger. Written now, rather than on the
+        // session's next call — which may never come — so every other
+        // session's check of the home's limit sees it from the start.
+        reconcileUsage(session);
+        const unwritten = flushUsage();
+        if (unwritten) {
+          warn(`usage ledger: could not record what abandoned turn ${id} spent (${unwritten.message}); holding it, and refusing budgeted calls until it is written`);
         }
         session.status = 'failed';
         session.lastError = ABANDONED_TURN_ERROR;
@@ -3112,7 +3643,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // The file-backed resolver, so a plugin needing a key reaches the
       // *calling* agent's — its allowlist checked, its own entry before the
       // fleet's shared one.
-      credentials: createFileCredentialResolver(env),
+      // Behind the lease broker, so a leased key costs a lease use however
+      // a plugin reaches it.
+      credentials: leasedCredentials,
       workspaces: agentWorkspaces,
       // The structured log, so a plugin's lifecycle lines — an MCP server
       // that dropped, a reconnect that failed — are in `stratus logs` and
@@ -3255,6 +3788,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       );
     }
     await loadRoster();
+    // Before anything can dispatch, so no budgeted call is judged on a ledger
+    // the last daemon left short.
+    await settleUsage();
     const named = registry.list().map((agent) => agent.name).join(', ');
     log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
 
@@ -3263,6 +3799,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Applied further down, once there is somewhere for the failure to
     // be heard.
     const abandoned = await listAbandonedTurns();
+    // Their spend into the ledger now, not with the sweep that fails them
+    // once the channels are up: a crash is exactly when a call's record can
+    // be on its session and not in the ledger, and the first message a
+    // channel delivers must not be judged against a total missing it.
+    await reconcileAbandonedUsage(abandoned);
     // Likewise: which parked sub-sessions have a parent still inside its
     // agent.delegate call is only answerable while nothing can resume that
     // parent. See listOrphanedDelegations.
@@ -3342,7 +3883,42 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return;
     }
     storesClosed = true;
+    // One last try at usage still held, before the ledger closes. What
+    // neither the ledger nor the hold file would take — a disk with no room
+    // at all — would otherwise end with this process, and the next one
+    // would judge its budget without it. So it is written out, whole, as a
+    // warning: that reaches the service manager's log (journald, `docker
+    // logs`), usually the one channel still writing, and nothing is lost
+    // silently. Refusing to stop instead would take a daemon's shutdown
+    // away from its operator over accounting it can still recover.
+    const unwritten = flushUsage();
+    if (unwritten && unrecordedUsage.length > 0) {
+      // And word for the next daemon, so it does not judge budgets on a
+      // ledger missing this: the calls written into the file armed at
+      // start and renamed into place, neither of which needs room the disk
+      // does not have. That daemon writes them before it allows a budgeted
+      // call. Under the last daemon's marker, still uncleared, this one
+      // leaves that marker as it is: budgeted calls stay refused either way.
+      let note: string;
+      if (foreignMarker) {
+        note = `The last stratusd's ${usageHold.unsettledPath} is still in place, so budgeted calls stay refused; these calls are not on it — add them to the ledger once the disk has room. `;
+      } else {
+        try {
+          usageHold.markUnsettled(unrecordedUsage);
+          note = `Marked ${usageHold.unsettledPath} with them: the next stratusd writes them before it allows a budgeted call. `;
+        } catch {
+          note = `Could not mark ${usageHold.unsettledPath} either, so the next stratusd will not know to settle them: add them to the ledger once the disk has room. `;
+        }
+      }
+      warn(
+        `usage ledger: stopping with ${unrecordedUsage.length} call(s) of spend that could not be written anywhere (${unwritten.message}). `
+        + note
+        + `The calls: ${JSON.stringify(unrecordedUsage)}`,
+      );
+    }
     scheduleStore.close();
+    usageLedger.close();
+    leaseStore.close();
     store.close();
   };
 
@@ -3891,6 +4467,60 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     resolveApproval,
     provideCredential,
+    // Both drain held usage before answering, so a report never trails the
+    // spend the daemon itself is judging by.
+    usage(query) {
+      flushUsage();
+      return usageLedger.totals(query);
+    },
+    unrecordedUsage() {
+      const failed = flushUsage() ?? unsettledError();
+      let held = 0;
+      try {
+        held = usageHold.read().length;
+      } catch {
+        held = Number.NaN;
+      }
+      return {
+        calls: unrecordedUsage.length + held,
+        ...(failed ? { error: failed.message } : {}),
+      };
+    },
+    async budget() {
+      const budget = await currentBudget();
+      if (!budget) {
+        return undefined;
+      }
+      if (!budgetHasLimit(budget)) {
+        return { budget, limits: [] };
+      }
+      const unwritten = flushUsage() ?? unsettledError();
+      if (unwritten) {
+        throw new HostRefusalError(
+          `Spending could not be recorded (${unwritten.message}), so where the budget stands is unknown and budgeted model calls are being refused until it is written.`,
+        );
+      }
+      return {
+        budget,
+        limits: budgetStatus(budget, (since, agentId) => usageLedger.spent(since, agentId, budget.weights), new Date()),
+      };
+    },
+    leases: (filter = {}) => {
+      const now = new Date();
+      return [
+        ...leaseStore.list(filter),
+        // Folded like the stored half, so `?agent=scout` finds Scout's too.
+        ...leaseBroker.subLeases().filter((lease) => filter.agentId === undefined
+          || foldedAgentId(lease.agentId) === foldedAgentId(filter.agentId)),
+      ].map((lease) => ({ ...lease, state: leaseBroker.stateOf(lease, now) }));
+    },
+    grantLease(input) {
+      validateLeaseGrant(input, new Date());
+      return leaseStore.grant(input);
+    },
+    // A delegated sub-lease is listed beside the granted ones, so it can be
+    // taken back the same way; it lives only in this process.
+    revokeLease: (id, revokedBy) => leaseStore.revoke(id, revokedBy) ?? leaseBroker.revokeSubLease(id, revokedBy),
   };
 
   return gateway;

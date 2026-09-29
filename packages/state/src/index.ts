@@ -62,6 +62,7 @@ export {
   foldedAgentId,
   gatewayTokenPath,
   gatewayInfoPath,
+  apiTokensPath,
 } from './paths.ts';
 
 export {
@@ -127,6 +128,17 @@ export {
 } from './credentials.ts';
 
 export { quoteShellArg } from './shell.ts';
+
+export {
+  API_TOKEN_NAME_PATTERN,
+  API_TOKEN_PREFIX,
+  type ApiTokenRecord,
+  type ApiTokenRole,
+  createApiToken,
+  hashApiToken,
+  loadApiTokens,
+  revokeApiToken,
+} from './api-tokens.ts';
 
 export {
   migrateLegacyMemory,
@@ -220,7 +232,52 @@ export {
   describeServingModel,
   type RegisteredProviders,
   createRuntimeProvider,
+  providerCredentialName,
+  type ProviderCallGuard,
 } from './provider-runtime.ts';
+
+export {
+  type BudgetConfig,
+  type BudgetLimits,
+  type BudgetWeights,
+  type BudgetPeriod,
+  type BudgetBreach,
+  type BudgetSpend,
+  parseBudgetConfig,
+  weightedTokens,
+  budgetWindow,
+  findBudgetBreach,
+  budgetExceededMessage,
+  budgetHasLimit,
+  BudgetExceededError,
+  type BudgetLimitStatus,
+  budgetStatus,
+} from './budget.ts';
+
+export {
+  type LeasesConfig,
+  type CredentialLease,
+  type LeaseState,
+  type LeaseGrant,
+  type LeaseStore,
+  type LeaseUseRecord,
+  type LeaseBroker,
+  type LeaseBrokerOptions,
+  isLeasableCredentialName,
+  parseLeasesConfig,
+  leaseState,
+  leaseUseEvent,
+  reportLeaseUse,
+  parseLeaseDuration,
+  validateLeaseGrant,
+  newLeaseId,
+  MAX_LEASE_MS,
+  CredentialLeaseError,
+  createLeaseBroker,
+  createLeaseResolver,
+} from './leases.ts';
+
+export { createLeasePolicyRefresh, type LeasePolicyOptions } from './lease-policy.ts';
 
 export {
   type SoulPinContext,

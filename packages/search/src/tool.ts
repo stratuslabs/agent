@@ -94,7 +94,10 @@ const credentialsFor = (
   resolver: CredentialResolver | undefined,
 ): ScopedCredentials => {
   if (resolver) {
-    return scopeCredentials(session.agent, resolver);
+    // The session rides along so a leased key can be paid for by a
+    // delegated agent's sub-lease, and so the lease record says which
+    // conversation spent the use.
+    return scopeCredentials(session.agent, resolver, { sessionId: session.id, use: WEB_SEARCH_TOOL_NAME });
   }
   return {
     async get(name) {

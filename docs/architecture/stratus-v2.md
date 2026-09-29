@@ -118,8 +118,8 @@ Every surface is a thin client. None of them ever reimplements the loop.
 The runtime is one persistent Node process everywhere; only the recipe changes:
 
 - **Local machine**: launchd plist + `stratus serve`. Slack Socket Mode means no public ingress.
-- **VM (single-tenant)**: the same daemon under systemd, or in a Docker container, on any Linux box. Wide tool access, a handful of users, no multi-tenancy work.
-- **Hosted (multi-tenant)**: the same container image on a persistent-process platform, multi-tenant configuration, locked-down tool packs.
+- **VM (single-tenant)**: the same daemon under systemd, or in a Docker container, on any Linux box. Wide tool access, a handful of users, no multi-tenancy work. See [Deployment](../guides/deployment.md).
+- **Hosted (multi-tenant)**: the same container image on a persistent-process platform, one cell — home, daemon, container — per tenant, member-role API tokens, per-cell budgets, and locked-down tool packs. See [roadmap 08](../roadmap/08-deployment-profiles.md) and [Hosting](../guides/hosting.md).
 
 **The agent runtime does not run on serverless.** Agent loops are long-running, Slack Socket Mode needs a persistent connection, and scheduled/background work does not fit function invocations. Serverless platforms remain fine for frontends and marketing sites — not for the runtime.
 

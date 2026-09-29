@@ -3,7 +3,13 @@ import { chmod, link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
 import path from 'node:path';
 
-import { gatewayTokenPath, stratusHomePath, type StateEnvironment } from '@stratusagent/state';
+import {
+  gatewayTokenPath,
+  hashApiToken,
+  stratusHomePath,
+  type ApiTokenRecord,
+  type StateEnvironment,
+} from '@stratusagent/state';
 
 /** How long a browser session lasts before it has to be re-opened. */
 const SESSION_TTL_MS = 12 * 60 * 60_000;
@@ -17,19 +23,41 @@ const OTT_TTL_MS = 60_000;
 
 export const SESSION_COOKIE = 'stratus_session';
 
-/** How a request proved it may be here. */
-export type Principal =
+/**
+ * Whose authority a request carries, whichever way it arrived.
+ *
+ * `operator` is the gateway token file and every session minted from it:
+ * the whole API. `member` is a token from `~/.stratus/api-tokens.json`, and
+ * every session minted from one: the roster, conversations, events, and
+ * approvals, but none of the routes that rewrite what the operator decided
+ * the daemon trusts. Every token this daemon accepts is one its own home
+ * issued, so each is bound to this daemon's tenant by construction — a
+ * hosted deployment runs one home and one daemon per tenant.
+ */
+export type PrincipalRole =
+  | { role: 'operator' }
+  | {
+      role: 'member';
+      /** The token's id in the file, so a revoke can find every session it vouched for. */
+      tokenId: string;
+      /** Who holds it: what an approval this principal answers records. */
+      tokenName: string;
+    };
+
+/** How a request proved it may be here, and with whose authority. */
+export type Principal = (
   /**
-   * A token from the file, sent as a header. Carries no ambient authority:
-   * nothing attaches it automatically, so a page on another origin cannot
-   * cause one to be sent, and origin checks do not apply.
+   * A token, sent as a header. Carries no ambient authority: nothing
+   * attaches it automatically, so a page on another origin cannot cause one
+   * to be sent, and origin checks do not apply.
    */
   | { kind: 'bearer' }
   /**
    * A browser session cookie. Ambient — the browser attaches it to any
    * request to this host — so every state-changing use of one is origin-bound.
    */
-  | { kind: 'cookie'; sessionId: string };
+  | { kind: 'cookie'; sessionId: string }
+) & PrincipalRole;
 
 /**
  * Read the gateway's bearer token, generating one the first time.
@@ -156,7 +184,16 @@ const readBearer = (header: string | undefined): string | undefined => {
 };
 
 export interface AuthenticatorOptions {
+  /** The operator token: `~/.stratus/gateway-token`. */
   token: string;
+  /**
+   * The member tokens accepted right now. Asked on every member
+   * authentication, never cached, so a revoke takes effect on the next
+   * request (see `authenticate`). Omitted, no member token authenticates.
+   */
+  memberTokens?: () => Promise<ApiTokenRecord[]>;
+  /** Told when the member list could not be read, which refuses every member until it can. */
+  warn?: (line: string) => void;
   /** Now, injectable so expiry is testable without waiting for it. */
   now?: () => number;
 }
@@ -171,8 +208,21 @@ export interface DashboardSession {
    * replacement adopts a session only under the same token: rotating
    * `~/.stratus/gateway-token` must sign every browser out, and a restart
    * across the rotation must not carry the old token's sessions past it.
+   * For a member session, the member token's fingerprint, which the
+   * replacement checks against the file on every request.
    */
   vouchedBy: string;
+  /**
+   * Absent on a session handed over by a build that predates roles, and
+   * read as `operator` — correctly, because such a build had one token to
+   * mint sessions with and it was the operator's. `vouchedBy` still has to
+   * match that token for the session to be adopted at all.
+   */
+  role?: 'operator' | 'member';
+  /** Member sessions: the minting token's id. */
+  tokenId?: string;
+  /** Member sessions: the minting token's name. */
+  tokenName?: string;
 }
 
 /**
@@ -184,9 +234,9 @@ export const tokenFingerprint = (token: string): string =>
   createHash('sha256').update(token).digest('hex').slice(0, 16);
 
 /**
- * Everything the API knows about who may talk to it: the bearer token, the
- * browser sessions minted from it, and the one-time tokens that bootstrap
- * those sessions.
+ * Everything the API knows about who may talk to it: the operator token,
+ * the member tokens, the browser sessions minted from either, and the
+ * one-time tokens that bootstrap those sessions.
  *
  * Sessions live in memory on purpose, and are never written down: the API
  * must not grow a second durable secret store beside the credentials file.
@@ -195,12 +245,65 @@ export const tokenFingerprint = (token: string): string =>
  * IPC channel), so `stratus restart` does not log the dashboard out. A
  * crash or a plain stop still does, which is honest — the process that
  * vouched for the session is gone, and nothing on disk says otherwise.
+ *
+ * A session keeps the role of the token that minted it, so a member cannot
+ * climb to operator by way of a browser.
  */
 export const createAuthenticator = (options: AuthenticatorOptions) => {
   const now = options.now ?? Date.now;
+  const warn = options.warn ?? (() => {});
   const vouchedBy = tokenFingerprint(options.token);
-  const sessions = new Map<string, { expiresAt: number }>();
-  const oneTimeTokens = new Map<string, { expiresAt: number }>();
+  interface Held {
+    expiresAt: number;
+    holder: PrincipalRole;
+    /** The minting token's fingerprint: the operator's, or the member's. */
+    vouchedBy: string;
+  }
+  const sessions = new Map<string, Held>();
+  const oneTimeTokens = new Map<string, Held>();
+  let lastWarning: string | undefined;
+
+  /**
+   * The member tokens as of this moment.
+   *
+   * Read afresh on every member authentication — never cached, and never
+   * keyed on the file's mtime. A cache is what would let a revoked token
+   * keep working, the one thing this must not do: mtime has one-second
+   * granularity on some filesystems, so a revoke landing in the same tick
+   * as the last read, at the same size, would look like no change at all.
+   * The file is a few hundred bytes and only member requests pay for it;
+   * the operator token is judged before this is ever called, so a broken
+   * file cannot lock the operator out of repairing it.
+   */
+  const currentMembers = async (): Promise<ApiTokenRecord[]> => {
+    if (!options.memberTokens) {
+      return [];
+    }
+    try {
+      const members = await options.memberTokens();
+      lastWarning = undefined;
+      return members;
+    } catch (error) {
+      // Fails closed: an unreadable list authenticates no member. Said once
+      // per distinct failure rather than once per request.
+      const line = `member tokens refused until this is fixed: ${error instanceof Error ? error.message : String(error)}`;
+      if (line !== lastWarning) {
+        lastWarning = line;
+        warn(line);
+      }
+      return [];
+    }
+  };
+
+  /**
+   * Whether a member token still stands. By id — `tok_` plus 48 bits from
+   * the CSPRNG, never reissued, so a token revoked and re-created under the
+   * same name is a different id — and by fingerprint when the caller holds
+   * one, which a session always does.
+   */
+  const memberStillHeld = async (tokenId: string, fingerprint: string | undefined): Promise<boolean> =>
+    (await currentMembers()).some((record) =>
+      record.id === tokenId && (fingerprint === undefined || record.hash.startsWith(fingerprint)));
 
   const sweep = (): void => {
     const at = now();
@@ -218,14 +321,28 @@ export const createAuthenticator = (options: AuthenticatorOptions) => {
 
   return {
     /**
-     * Mint a one-time token for a browser handoff. Bearer-authenticated
-     * callers only — this is how the CLI, which can read the token file,
-     * lends its authority to a browser, which cannot.
+     * Mint a one-time token for a browser handoff, carrying the minter's
+     * role into the session it becomes. Bearer-authenticated callers only —
+     * this is how the CLI, which can read the token file, lends its
+     * authority to a browser, which cannot.
      */
-    mintOneTimeToken(): string {
+    async mintOneTimeToken(minter: PrincipalRole): Promise<string> {
       sweep();
+      let holder: PrincipalRole = { role: 'operator' };
+      let fingerprint = vouchedBy;
+      if (minter.role === 'member') {
+        const record = (await currentMembers()).find((entry) => entry.id === minter.tokenId);
+        if (!record) {
+          throw new Error(`Member token ${minter.tokenId} was revoked, so it cannot lend a browser its authority.`);
+        }
+        // `tokenFingerprint` of the member token, which its stored hash
+        // already begins with: the same fingerprint an operator session
+        // carries of the gateway token.
+        holder = { role: 'member', tokenId: record.id, tokenName: record.name };
+        fingerprint = record.hash.slice(0, 16);
+      }
       const ott = randomBytes(32).toString('base64url');
-      oneTimeTokens.set(ott, { expiresAt: now() + OTT_TTL_MS });
+      oneTimeTokens.set(ott, { expiresAt: now() + OTT_TTL_MS, holder, vouchedBy: fingerprint });
       return ott;
     },
 
@@ -248,7 +365,7 @@ export const createAuthenticator = (options: AuthenticatorOptions) => {
         return undefined;
       }
       const sessionId = randomBytes(32).toString('base64url');
-      sessions.set(sessionId, { expiresAt: now() + SESSION_TTL_MS });
+      sessions.set(sessionId, { expiresAt: now() + SESSION_TTL_MS, holder: record.holder, vouchedBy: record.vouchedBy });
       return sessionId;
     },
 
@@ -271,21 +388,67 @@ export const createAuthenticator = (options: AuthenticatorOptions) => {
       return `${SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}${secure ? '; Secure' : ''}`;
     },
 
-    /** How a request identified itself, or undefined if it did not. */
-    authenticate(request: Pick<IncomingMessage, 'headers'>): Principal | undefined {
+    /**
+     * How a request identified itself, or undefined if it did not.
+     *
+     * Asynchronous because a member is judged against the token file as it
+     * is now: a revoked token, and every session it minted, stops working
+     * on the next request with no restart.
+     */
+    async authenticate(request: Pick<IncomingMessage, 'headers'>): Promise<Principal | undefined> {
       sweep();
       const bearer = readBearer(request.headers.authorization);
       if (bearer !== undefined) {
         // A malformed or wrong bearer token is a rejection, not a fallthrough
         // to the cookie: a client that presented a credential gets judged on
         // it, or a stale header would silently ride someone else's session.
-        return secretEquals(bearer, options.token) ? { kind: 'bearer' } : undefined;
+        if (secretEquals(bearer, options.token)) {
+          return { kind: 'bearer', role: 'operator' };
+        }
+        // Compared as hashes, which is all the file holds, and in constant
+        // time like the operator token.
+        const hashed = hashApiToken(bearer);
+        const member = (await currentMembers()).find((record) => secretEquals(record.hash, hashed));
+        return member ? { kind: 'bearer', role: 'member', tokenId: member.id, tokenName: member.name } : undefined;
       }
       const sessionId = parseCookies(request.headers.cookie).get(SESSION_COOKIE);
-      if (sessionId && sessions.has(sessionId)) {
-        return { kind: 'cookie', sessionId };
+      const session = sessionId !== undefined ? sessions.get(sessionId) : undefined;
+      if (sessionId === undefined || session === undefined) {
+        return undefined;
       }
-      return undefined;
+      if (session.holder.role === 'operator') {
+        return { kind: 'cookie', sessionId, role: 'operator' };
+      }
+      if (!(await memberStillHeld(session.holder.tokenId, session.vouchedBy))) {
+        // Revoked since it was minted: forgotten, not just refused.
+        sessions.delete(sessionId);
+        return undefined;
+      }
+      return { kind: 'cookie', sessionId, ...session.holder };
+    },
+
+    /**
+     * Whether the credential behind a principal still stands — for a
+     * connection that outlives the request that opened it, the event
+     * stream above all. The operator token is fixed for the life of the
+     * process; a member's is judged against the file as it is now.
+     */
+    async stillHeld(principal: Principal): Promise<boolean> {
+      if (principal.kind === 'cookie') {
+        // Expired sessions go first: a browser session is held for its
+        // twelve hours and no longer, and a stream opened in hour eleven
+        // must not carry it past them — the operator's included.
+        sweep();
+        const session = sessions.get(principal.sessionId);
+        if (session === undefined) {
+          return false;
+        }
+        return principal.role === 'operator' || memberStillHeld(principal.tokenId, session.vouchedBy);
+      }
+      if (principal.role === 'operator') {
+        return true;
+      }
+      return memberStillHeld(principal.tokenId, undefined);
     },
 
     /** Test seam: how many sessions are live. */
@@ -297,20 +460,46 @@ export const createAuthenticator = (options: AuthenticatorOptions) => {
     /** Every live session, for the hand-off to a replacement process. Never for disk. */
     exportSessions(): DashboardSession[] {
       sweep();
-      return [...sessions].map(([id, session]) => ({ id, expiresAt: session.expiresAt, vouchedBy }));
+      return [...sessions].map(([id, session]) => ({
+        id,
+        expiresAt: session.expiresAt,
+        vouchedBy: session.vouchedBy,
+        role: session.holder.role,
+        ...(session.holder.role === 'member'
+          ? { tokenId: session.holder.tokenId, tokenName: session.holder.tokenName }
+          : {}),
+      }));
     },
 
     /**
      * Sessions a predecessor handed over, each with the expiry it was
      * minted with — a hand-off extends nothing. One already expired is
-     * dropped rather than kept for the next sweep to find, and one minted
-     * under another bearer token is dropped too (see DashboardSession).
+     * dropped rather than kept for the next sweep to find, and an operator
+     * session minted under another gateway token is dropped too (see
+     * DashboardSession). A member session is taken on as a member and
+     * judged against the token file on its first request, like any other.
+     * A role this build does not know is dropped, never guessed upward.
      */
     adoptSessions(handed: DashboardSession[]): void {
       const at = now();
       for (const session of handed) {
-        if (session.expiresAt > at && session.vouchedBy === vouchedBy) {
-          sessions.set(session.id, { expiresAt: session.expiresAt });
+        if (session.expiresAt <= at) {
+          continue;
+        }
+        // No role is a predecessor that predates roles, whose one token was
+        // the operator's: operator, under the same fingerprint rule.
+        if (session.role === undefined || session.role === 'operator') {
+          if (session.vouchedBy === vouchedBy) {
+            sessions.set(session.id, { expiresAt: session.expiresAt, holder: { role: 'operator' }, vouchedBy });
+          }
+          continue;
+        }
+        if (session.role === 'member' && typeof session.tokenId === 'string' && typeof session.tokenName === 'string') {
+          sessions.set(session.id, {
+            expiresAt: session.expiresAt,
+            holder: { role: 'member', tokenId: session.tokenId, tokenName: session.tokenName },
+            vouchedBy: session.vouchedBy,
+          });
         }
       }
     },

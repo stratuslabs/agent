@@ -77,6 +77,8 @@ export const callRunningGateway = async (
   pathname: string,
   body?: Record<string, unknown>,
   method: 'GET' | 'POST' = 'POST',
+  /** Gives up on the call — a probe must answer in bounded time even when the daemon cannot. */
+  signal?: AbortSignal,
 ): Promise<Response> => {
   const token = await gatewayToken(env, target.token);
   const fetchImpl = env.fetch ?? globalThis.fetch;
@@ -92,6 +94,7 @@ export const callRunningGateway = async (
         ...(body ? { 'content-type': 'application/json' } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
+      ...(signal !== undefined ? { signal } : {}),
     });
   } catch (error) {
     throw new Error(
@@ -99,8 +102,15 @@ export const callRunningGateway = async (
       + 'Is stratusd running, and does it have @stratusagent/control-api installed?',
     );
   }
-  if (response.status === 401 || response.status === 403) {
+  if (response.status === 401) {
     throw new Error(`The gateway at ${base} rejected this token. Check --token, STRATUS_GATEWAY_TOKEN, or ~/.stratus/gateway-token.`);
+  }
+  if (response.status === 403) {
+    // A token that authenticated and was refused this one route — a member
+    // token asking for an operator-only change. "Rejected this token" would
+    // send someone to replace a token that works; the API's own sentence
+    // says which route and why.
+    throw new Error(`The gateway at ${base} refused this call: ${await gatewayErrorMessage(response)}`);
   }
   return response;
 };

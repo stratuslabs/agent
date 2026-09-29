@@ -26,8 +26,12 @@ Usage:
   stratus plugins --format json
   stratus skill reload
   stratus restart
+  stratus health
   stratus schedules
   stratus schedules cancel <id>
+  stratus usage
+  stratus lease grant ava github.token --for 2h --reason "incident 412"
+  stratus lease revoke <id>
   stratus grants ava
   stratus grants revoke ava --tool web.fetch
   stratus memory list ava
@@ -38,6 +42,8 @@ Usage:
   stratus session rollover slack:ava:T01ABCDEF:D07GHIJKL
   printf %s "$BRAVE_KEY" | stratus credential set search.apiKey
   stratus credentials
+  stratus token create alice
+  stratus token revoke alice
   stratus doctor
   stratus update
   stratus update --check
@@ -70,10 +76,12 @@ Commands:
                    (--idle-timeout <seconds>, --approvals <headless|remote>,
                    --no-events, --no-log-file, --config <path>); everything it
                    says is also written to ~/.stratus/logs, which
-                   "stratus logs" reads. With @stratusagent/control-api
-                   installed it also serves the HTTP + WebSocket control API
-                   on 127.0.0.1:4123 (--no-api, --api-host, --api-port, or
-                   the config file's "api" block)
+                   "stratus logs" reads (--log-format json puts those same
+                   records on stdout as JSON lines instead of the human
+                   ones, for docker logs and journald). With
+                   @stratusagent/control-api installed it also serves the
+                   HTTP + WebSocket control API on 127.0.0.1:4123 (--no-api,
+                   --api-host, --api-port, or the config file's "api" block)
   service          Keep stratusd running under launchd (macOS) or systemd
                    (Linux): install, uninstall, status, start, stop.
                    Installing starts it now and at every login
@@ -126,6 +134,11 @@ Commands:
                    ones finish for up to --drain-timeout <seconds> (default
                    30), then comes back with sessions, schedules, and
                    channels intact, under the service manager or not
+  health           Ask the running daemon whether it is serving: exit 0 and
+                   one line (version, uptime, agents, sessions, pending
+                   approvals), or exit 1 and one sentence saying why not.
+                   For a container HEALTHCHECK, a Kubernetes probe, or a
+                   monitoring script (--gateway, --token, --format json)
   credential set   Store a named credential an agent can resolve — a search
                    backend asks for search.apiKey. The value is read from
                    stdin, never from a flag, so it stays out of your shell
@@ -137,6 +150,35 @@ Commands:
                    own — names only, never values (also: credential list)
   credential remove
                    Forget one (--agent <id> for that agent's own entry)
+  token create     Create a member token for the control API — for a
+                   teammate, a CI job, or a hosted tenant. Printed once, on
+                   stdout; only its hash is kept, in ~/.stratus/api-tokens.json
+                   (0600). A member manages the roster, talks to agents, reads
+                   sessions and events, and answers approvals, but cannot
+                   change the config or the provider sign-ins, or restart the
+                   daemon. The operator token stays ~/.stratus/gateway-token
+  token list       Member tokens: id, name, role, created — never the token
+                   (--format json; also: stratus tokens)
+  token revoke     Revoke one by id or name. A running daemon refuses it, and
+                   every dashboard session and event stream opened with it,
+                   without a restart
+  usage            Tokens this home has spent on models, per agent, provider,
+                   and model, from the ledger the daemon keeps in fleet.db —
+                   as the providers reported them, never priced — and where
+                   each budget limit stands (--since, --until, --agent,
+                   --config <path> — the daemon's, if it was given one —
+                   --format json). Default window: this UTC month
+  lease grant      Let one agent use a credential listed in the config's
+                   leases.credentials, for a while: stratus lease grant
+                   <agent> <credential> --for 2h [--uses 20] --reason "…".
+                   The agent must be on the roster (--config <path>: the
+                   daemon's, if it was given one). Every use is counted
+                   and logged; a sign-in is leased as
+                   provider:anthropic, provider:openai, or provider:codex
+  lease list       Active leases (--all adds ended ones, --agent, --format
+                   json; also: stratus leases)
+  lease revoke     End a lease now. The next use is refused, whether or not
+                   a daemon is serving
   schedules        List every schedule the fleet has set — cadence, prompt,
                    pre-authorized destination, next firing — straight from the
                    daemon's database (--format json). "stratus schedules
@@ -240,9 +282,9 @@ Options:
   --port           dashboard: port for a daemon it starts (default: 4123)
   --host           dashboard: host for a daemon it starts (default: 127.0.0.1)
   --no-open        Do not open the browser automatically
-  --gateway        agents / skill reload / restart / session rollover: a running
-                   daemon's control API (all but agents default to the daemon
-                   ~/.stratus/gateway.json names)
+  --gateway        agents / skill reload / restart / session rollover / health: a
+                   running daemon's control API (all but agents default to the
+                   daemon ~/.stratus/gateway.json names)
   --trust          memory list: show only this label; memory reassert: the
                    label to record (user, agent, unknown, external)
   --all-unknown    memory reassert: every live entry with no recorded origin
@@ -251,15 +293,23 @@ Options:
   --preserve-trust memory import: keep each entry's recorded trust label
                    instead of landing it external
   --token          Bearer token for --gateway (default: ~/.stratus/gateway-token)
+  --role           token create: member, the only role a created token has
   --no-reload      skill add: install without reloading a running daemon
   -y, --yes        template add: install without the review prompt
-  --reason         restart: why, for the daemon's log
+  --reason         restart: why, for the daemon's log; lease grant: why this
+                   agent may use this key (required)
+  --for            lease grant: how long — 30m, 2h, 7d (required, at most 90d)
+  --uses           lease grant: the most uses it pays for (default: no limit)
+  --all            lease list: include expired, used-up, and revoked leases
+  --since, --until usage: the window, as ISO dates (default: this UTC month)
   --drain-timeout  restart: seconds the daemon lets in-flight turns finish
                    before aborting them (default: 30)
   --no-api         serve: do not serve the control API
   --api            serve: serve it even where the config says api.enabled: false
   --api-host       serve: control API interface (default: 127.0.0.1)
   --api-port       serve: control API port (default: 4123, 0 for any free port)
+  --log-format     serve: text (default) or json — every structured log record
+                   as one JSON line on stdout, and no human lines
   --help, -h       Show this help message
   --version, -v    Print this build's version and exit
 

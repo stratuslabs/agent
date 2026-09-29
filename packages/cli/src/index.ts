@@ -92,6 +92,7 @@ export {
   type ParsedCredentialCommand,
   type ParsedSkillReloadCommand,
   type ParsedRestartCommand,
+  type ParsedHealthCommand,
   type ParsedAgentsCommand,
   type ParsedSchedulesCommand,
   type ParsedGrantsCommand,
@@ -168,6 +169,8 @@ export { runMemory } from './commands/memory.ts';
 export { runSessionRollover } from './commands/session.ts';
 
 export { runRestart } from './commands/restart.ts';
+
+export { runHealth } from './commands/health.ts';
 
 export { soulPinForNewAgent, runAgentNew } from './commands/agent-new.ts';
 

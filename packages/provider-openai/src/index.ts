@@ -123,7 +123,10 @@ export const createOpenAiProviderPlugin = (
               // The calling agent's key, every request — its own entry,
               // then the fleet's shared one — and refused, naming the
               // remedy, rather than read from the environment.
-              const apiKey = await credentials.resolve(request.session.agent, OPENAI_API_KEY_CREDENTIAL);
+              const apiKey = await credentials.resolve(request.session.agent, OPENAI_API_KEY_CREDENTIAL, {
+                sessionId: request.session.id,
+                use: 'provider',
+              });
               if (apiKey === undefined) {
                 throw new Error(
                   `No ${OPENAI_API_KEY_CREDENTIAL} credential resolves for agent ${request.session.agent.id}. `

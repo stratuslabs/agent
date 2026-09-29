@@ -13,7 +13,7 @@ import {
   isValidDelegateEntry,
 } from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
-import { LISTENS_MODES, isLanguageTag, isListensMode } from '@stratusagent/core';
+import { HostRefusalError, LISTENS_MODES, isLanguageTag, isListensMode } from '@stratusagent/core';
 import { describeAgentGrants, WhitelistUnreadableError, type AgentGrantStore } from '@stratusagent/permissions';
 import {
   isScheduleSessionId,
@@ -60,6 +60,9 @@ import {
   type RuntimeConfig,
   type StateEnvironment,
   type StratusConfigFile,
+  foldedAgentId,
+  leaseState,
+  parseLeaseDuration,
 } from '@stratusagent/state';
 
 import { requestScheme, type Principal } from './auth.ts';
@@ -78,10 +81,66 @@ import {
  * token, `dashboard` for a browser session. Never a bare string the caller
  * chose: channel-native ids are recorded bare, and the two must not be
  * spellable as each other.
+ *
+ * A member is recorded under its token's name, and the label it offered is
+ * dropped: the name is the one thing about a member the daemon vouches
+ * for, and a label would let one member record a decision as another.
  */
 const apiActorFor = (principal: Principal | undefined, label: string | undefined): string => {
   const source = principal?.kind === 'cookie' ? 'dashboard' : 'api';
+  if (principal?.role === 'member') {
+    return `${source}:${principal.tokenName}`;
+  }
   return label ? `${source}:${label}` : source;
+};
+
+/**
+ * What a member may add to a soul's `credentials:` list: only a name stored
+ * as *that agent's own* entry. A shared entry, or a name the daemon's
+ * environment supplies, is the operator's key — granted to the agents the
+ * operator chose — and a member listing it on another soul would hand that
+ * agent the key through a route that only exists to manage the roster.
+ * Removing names is always allowed; a member narrowing a soul takes nothing
+ * from the operator. An operator's edit is not checked: the operator owns
+ * every key there is.
+ */
+const assertMemberCredentialGrant = async (
+  context: RouteContext,
+  agentId: string,
+  current: readonly string[],
+  next: readonly string[],
+): Promise<void> => {
+  if (context.principal?.role !== 'member') {
+    return;
+  }
+  const added = next.filter((name) => !current.includes(name));
+  if (added.length === 0) {
+    return;
+  }
+  const named = await loadNamedCredentials(context.env);
+  const own = named.agents[agentId] ?? {};
+  const refused = added.filter((name) => own[name] === undefined);
+  if (refused.length > 0) {
+    throw new ApiError(
+      403,
+      'operator_required',
+      `A member can add only this agent's own stored credentials to its soul, and ${refused.join(', ')} ${refused.length === 1 ? 'is' : 'are'} not one. `
+      + `Store the agent's own key first (POST /credentials/named with agentId "${agentId}"), or ask the operator to grant a shared one.`,
+    );
+  }
+};
+
+/** An ISO timestamp query parameter, normalized, or undefined when absent. */
+const optionalIsoParam = (url: URL, name: string): string | undefined => {
+  const raw = url.searchParams.get(name);
+  if (raw === null) {
+    return undefined;
+  }
+  const parsed = Date.parse(raw);
+  if (Number.isNaN(parsed)) {
+    throw new ApiError(400, 'invalid_query', `Invalid ${name} ${JSON.stringify(raw)}: use an ISO date or timestamp, like 2026-09-01.`);
+  }
+  return new Date(parsed).toISOString();
 };
 
 export interface RouteContext {
@@ -101,8 +160,8 @@ export interface RouteContext {
   response: ServerResponse;
   /** When the daemon's API bound, for uptime. */
   startedAt: number;
-  /** Mint a one-time browser token. Bearer callers only. */
-  mintOneTimeToken: () => string;
+  /** Mint a one-time browser token carrying the caller's role. Bearer callers only. */
+  mintOneTimeToken: () => Promise<string>;
   /** Spend one, yielding a session id. */
   redeemOneTimeToken: (ott: string | undefined) => string | undefined;
   sessionCookie: (sessionId: string, secure?: boolean) => string;
@@ -146,6 +205,27 @@ interface Route {
    * unreachable.
    */
   selfAuthenticating?: boolean;
+  /**
+   * A member token (and a session minted from one) may call this.
+   *
+   * Opt-in and fail-closed: a route without it is operator-only, so a new
+   * route nobody decided about is refused to members rather than silently
+   * opened to them. A member route is one that works *within* the policy
+   * the operator set — the roster, conversations, approvals, the grants and
+   * leases it may only take back. What stays operator-only is what rewrites
+   * that policy or reaches past it: the trusted config, the provider
+   * sign-ins every agent bills to, lease grants, and the process itself.
+   *
+   * "Within the policy" is bounded by the plugins the operator loaded, and
+   * not by less: a member edits souls and answers approvals, so a member can
+   * make any agent use any loaded tool. Where the operator loaded a shell
+   * or filesystem tool, that reaches the machine, and a member token is no
+   * boundary against it; the hosted profile loads neither. The two routes
+   * that could still reach past the operator with no such tool check the
+   * member in their handlers: a soul may gain only the agent's own stored
+   * credentials, and a channel binding may be added but not replaced.
+   */
+  member?: true;
 }
 
 // ---- helpers ---------------------------------------------------------------
@@ -187,6 +267,16 @@ const CONFIG_KEYS = {
   // by the loader below like the other blocks; it is a trusted-config key,
   // and the only file this endpoint writes is a trusted one.
   principals: 'object',
+  // Spending limits and fenced credentials: GET returns them, so PUT takes
+  // them back — and this is how a hosting control plane sets a tenant's
+  // budget without a shell in its container. Operator-only like the rest of
+  // this route; the loader validates both below.
+  budget: 'object',
+  leases: 'object',
+  // The runaway guard, which the hosted profile sets: GET returns it, so a
+  // control plane changing a tenant's budget by the documented round trip
+  // has to be able to hand it back, or lose it by replacing the file.
+  maxTurns: 'number',
 } as const;
 
 /**
@@ -431,9 +521,10 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/auth/ott`,
+    member: true,
     bearerOnly: true,
     async handler(context) {
-      const ott = context.mintOneTimeToken();
+      const ott = await context.mintOneTimeToken();
       const path = `${API_PREFIX}/auth/session?ott=${encodeURIComponent(ott)}`;
       // Built from the address this caller reached the daemon on, not the one
       // it bound to. Every request URL is parsed against the bound origin, so
@@ -460,6 +551,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/auth/session`,
+    member: true,
     selfAuthenticating: true,
     async handler(context) {
       const sessionId = context.redeemOneTimeToken(context.url.searchParams.get('ott') ?? undefined);
@@ -488,6 +580,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/health`,
+    member: true,
     async handler(context) {
       // The roster the daemon is serving, enriched by the files — the same
       // source `GET /agents` uses, and for the same reason: a soul added or
@@ -555,6 +648,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/agents`,
+    member: true,
     async handler(context) {
       // The roster the daemon is *serving*, enriched with what the files
       // say — not the other way round.
@@ -608,6 +702,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/agents/:id`,
+    member: true,
     async handler(context) {
       // One agent in full, which the roster listing deliberately is not: it
       // carries `persona`, a one-line snippet for a table row. An editor that
@@ -630,6 +725,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/agents`,
+    member: true,
     async handler(context) {
       const body = await readJsonObject(context.request);
       const instructions = requireString(body, 'instructions');
@@ -669,6 +765,7 @@ export const routes: Route[] = [
   {
     method: 'PUT',
     pattern: `${API_PREFIX}/agents/:id`,
+    member: true,
     async handler(context) {
       const agentId = context.params.id ?? '';
       const body = await readJsonObject(context.request);
@@ -755,6 +852,7 @@ export const routes: Route[] = [
         if (!isValidAgentId(next.agent.id)) {
           throw new ApiError(400, 'invalid_agent_id', `${next.agent.id} is not a usable agent id.`);
         }
+        await assertMemberCredentialGrant(context, agentId, current.agent.credentials ?? [], next.agent.credentials ?? []);
 
         // A raw edit writes the bytes it was given.
         //
@@ -791,6 +889,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/roster/reload`,
+    member: true,
     async handler(context) {
       const agents = await context.gateway.reloadRoster();
       return { agents: agents.map((agent) => ({ id: agent.id, name: agent.name })) };
@@ -799,6 +898,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/skills/reload`,
+    member: true,
     async handler(context) {
       try {
         return { skills: await context.gateway.reloadSkills() };
@@ -813,6 +913,8 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/restart`,
+    // Operator-only: it drains every agent's turns, not just a member's own,
+    // and brings the process back on whatever config and plugins are on disk.
     async handler(context) {
       const body = await readJsonObject(context.request);
       const reason = optionalString(body, 'reason');
@@ -843,6 +945,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/sessions`,
+    member: true,
     async handler(context) {
       const agent = context.url.searchParams.get('agent') ?? undefined;
       const raw = context.url.searchParams.get('limit');
@@ -857,6 +960,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/sessions/:id`,
+    member: true,
     async handler(context) {
       const session = await context.gateway.store.get(context.params.id ?? '');
       if (!session) {
@@ -870,6 +974,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/sessions/:id/messages`,
+    member: true,
     async handler(context) {
       const sessionId = context.params.id ?? '';
       const body = await readJsonObject(context.request);
@@ -1009,6 +1114,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/sessions/:id/rollover`,
+    member: true,
     async handler(context) {
       const sessionId = context.params.id ?? '';
       const existing = await context.gateway.store.get(sessionId);
@@ -1039,6 +1145,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/agents/:id/grants`,
+    member: true,
     async handler(context) {
       const agentId = validGrantsAgentId(context.params.id);
       const store = grantStoreOf(context);
@@ -1068,6 +1175,9 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/agents/:id/grants/revoke`,
+    // A member's: taking a grant back only ever narrows what an agent may
+    // do unattended, so it cannot reach past the operator's policy.
+    member: true,
     async handler(context) {
       const agentId = validGrantsAgentId(context.params.id);
       const store = grantStoreOf(context);
@@ -1113,6 +1223,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/approvals`,
+    member: true,
     async handler(context) {
       return { approvals: context.gateway.pendingApprovals() };
     },
@@ -1120,6 +1231,7 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/approvals`,
+    member: true,
     async handler(context) {
       const body = await readJsonObject(context.request);
       const requestId = requireString(body, 'requestId');
@@ -1155,6 +1267,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/schedules`,
+    member: true,
     async handler(context) {
       // The whole fleet's, not one agent's: this is the audit list — an
       // agent that scheduled something an operator cannot see is a bug —
@@ -1166,6 +1279,7 @@ export const routes: Route[] = [
   {
     method: 'DELETE',
     pattern: `${API_PREFIX}/schedules/:id`,
+    member: true,
     async handler(context) {
       const cancelled = context.gateway.cancelSchedule(context.params.id ?? '');
       if (!cancelled) {
@@ -1177,10 +1291,141 @@ export const routes: Route[] = [
     },
   },
 
+  // ---- usage and budget ----------------------------------------------------
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/usage`,
+    // A tenant reads its own spend and where its budget stands; the limit
+    // itself is the operator's, set in the config a member cannot write.
+    member: true,
+    async handler(context) {
+      // The current UTC month by default: the window a monthly budget is
+      // judged over, and the one an invoice would be.
+      const now = new Date();
+      const since = optionalIsoParam(context.url, 'since')
+        ?? new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+      const until = optionalIsoParam(context.url, 'until');
+      const agentId = context.url.searchParams.get('agent') ?? undefined;
+      const rows = context.gateway.usage({
+        since,
+        ...(until !== undefined ? { until } : {}),
+        ...(agentId !== undefined ? { agentId } : {}),
+      });
+      let budget: Awaited<ReturnType<Gateway['budget']>>;
+      try {
+        budget = await context.gateway.budget();
+      } catch (error) {
+        // A budget that has never been readable, or spend that cannot be
+        // written, is unknown, not absent — the daemon is refusing budgeted
+        // calls over it, and this says why.
+        if (error instanceof HostRefusalError) {
+          throw new ApiError(503, 'budget_unavailable', error.message);
+        }
+        throw error;
+      }
+      const unrecorded = context.gateway.unrecordedUsage();
+      return {
+        since,
+        ...(until !== undefined ? { until } : {}),
+        ...(agentId !== undefined ? { agent: agentId } : {}),
+        // Provider-reported counts, bucket by bucket — never priced here.
+        usage: rows,
+        // Spent and not yet in the rows above: never silently missing.
+        ...(unrecorded.calls !== 0 || unrecorded.error !== undefined ? { unrecorded: { calls: Number.isNaN(unrecorded.calls) ? null : unrecorded.calls, ...(unrecorded.error ? { error: unrecorded.error } : {}) } } : {}),
+        ...(budget ? { budget } : {}),
+      };
+    },
+  },
+
+  // ---- credential leases ---------------------------------------------------
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/leases`,
+    // Who may use which fenced key, and why — nothing secret in it.
+    member: true,
+    async handler(context) {
+      const agentId = context.url.searchParams.get('agent') ?? undefined;
+      // Each with the state the gateway judged through its parent chain.
+      return { leases: context.gateway.leases(agentId !== undefined ? { agentId } : {}) };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: `${API_PREFIX}/leases`,
+    async handler(context) {
+      const body = await readJsonObject(context.request);
+      const agentId = requireString(body, 'agentId');
+      const credential = requireString(body, 'credential');
+      const reason = requireString(body, 'reason');
+      const expiresIn = optionalString(body, 'expiresIn');
+      const expiresAtRaw = optionalString(body, 'expiresAt');
+      if ((expiresIn === undefined) === (expiresAtRaw === undefined)) {
+        throw new ApiError(400, 'invalid_lease', 'Give exactly one of expiresIn (like "2h") or expiresAt (an ISO timestamp).');
+      }
+      let expiresAt: string;
+      if (expiresIn !== undefined) {
+        const ms = parseLeaseDuration(expiresIn);
+        if (ms === undefined) {
+          throw new ApiError(400, 'invalid_lease', `Invalid expiresIn ${JSON.stringify(expiresIn)}: use minutes, hours, or days, like 30m, 2h, or 7d.`);
+        }
+        expiresAt = new Date(Date.now() + ms).toISOString();
+      } else {
+        expiresAt = expiresAtRaw ?? '';
+      }
+      const maxUses = body.maxUses;
+      if (maxUses !== undefined && typeof maxUses !== 'number') {
+        throw new ApiError(400, 'invalid_lease', 'maxUses must be a whole number, 1 or more.');
+      }
+      const label = optionalString(body, 'actor');
+      // Matched the way agent identity is everywhere, folded: a lease for an
+      // id nothing runs as would report granted, sit in the audit trail as
+      // though it meant something, and leave the agent it was meant for
+      // still refused.
+      if (!context.gateway.agents().some((agent) => foldedAgentId(agent.id) === foldedAgentId(agentId))) {
+        throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}, so a lease granted to it would never be used. GET /agents lists the roster.`);
+      }
+      try {
+        const lease = context.gateway.grantLease({
+          agentId,
+          credential,
+          expiresAt,
+          reason,
+          ...(maxUses !== undefined ? { maxUses } : {}),
+          grantedBy: apiActorFor(context.principal, label),
+        });
+        return { lease: { ...lease, state: leaseState(lease, new Date()) } };
+      } catch (error) {
+        throw new ApiError(400, 'invalid_lease', error instanceof Error ? error.message : String(error));
+      }
+    },
+  },
+  {
+    method: 'POST',
+    pattern: `${API_PREFIX}/leases/:id/revoke`,
+    // Ending a lease only ever narrows what an agent can do, so anyone who
+    // may talk to the agents may take one back. Granting one widens it, and
+    // stays the operator's.
+    member: true,
+    async handler(context) {
+      const body = await readJsonObject(context.request);
+      const label = optionalString(body, 'actor');
+      const revoked = context.gateway.revokeLease(context.params.id ?? '', apiActorFor(context.principal, label));
+      if (!revoked) {
+        throw new ApiError(
+          404,
+          'lease_not_found',
+          `No active lease has id ${context.params.id}. GET /leases lists what exists; a lease already revoked stays revoked.`,
+        );
+      }
+      return { lease: { ...revoked, state: leaseState(revoked, new Date()) } };
+    },
+  },
+
   // ---- catalog -------------------------------------------------------------
   {
     method: 'GET',
     pattern: `${API_PREFIX}/catalog/models`,
+    member: true,
     async handler(context) {
       // The daemon's own config, not whatever the working directory holds:
       // otherwise the catalog probes a different provider or base URL than
@@ -1245,6 +1490,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/catalog/tools`,
+    member: true,
     async handler(context) {
       // All three halves, because any alone misleads. The tool list says
       // what an agent can be granted and at what risk; the skill list says
@@ -1269,6 +1515,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/credentials`,
+    member: true,
     async handler(context) {
       const credentials = await loadCredentials(context.env);
       const channels = await loadChannelCredentials(context.env);
@@ -1296,6 +1543,11 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/credentials/verify`,
+    // Operator-only, though it sends only the caller's own key: it makes the
+    // daemon fetch a URL the caller chose, from wherever the daemon sits on
+    // the network, and reports how that went. Its one purpose is checking a
+    // key before `PUT /credentials/:provider` stores it, which a member
+    // cannot do anyway.
     async handler(context) {
       const body = await readJsonObject(context.request);
       const provider = parseProviderParam(requireString(body, 'provider'));
@@ -1324,6 +1576,9 @@ export const routes: Route[] = [
   {
     method: 'PUT',
     pattern: `${API_PREFIX}/credentials/:provider`,
+    // Operator-only: a provider sign-in is what every agent bills to, and
+    // replacing it (with an endpoint of the caller's choosing) would move
+    // the whole fleet onto another account or send its traffic elsewhere.
     async handler(context) {
       const provider = parseProviderParam(context.params.provider ?? '');
       const body = await readJsonObject(context.request);
@@ -1379,6 +1634,7 @@ export const routes: Route[] = [
   {
     method: 'PUT',
     pattern: `${API_PREFIX}/credentials/channels/:channel`,
+    member: true,
     async handler(context) {
       const channel = context.params.channel ?? '';
       if (!CHANNEL_KIND_PATTERN.test(channel)) {
@@ -1408,6 +1664,20 @@ export const routes: Route[] = [
       // Same lock as the provider credentials: both halves live in one file,
       // and both are read-modify-write.
       await withCredentialsFileLock(async () => {
+        // Add-only for a member, the rule every remotely reachable
+        // credential surface follows: binding an agent that has no app yet
+        // is setup, while replacing a binding moves the agent — its
+        // conversations and every approval its channel carries — onto
+        // whatever workspace the new tokens belong to. That stays the
+        // operator's.
+        if (context.principal?.role === 'member'
+          && (await loadChannelTransportSecrets(context.env, channel))[agentId] !== undefined) {
+          throw new ApiError(
+            409,
+            'channel_bound',
+            `${agentId} already has a ${channel} app bound. A member can bind one only where none exists; replacing it moves the agent to another workspace, so the operator does that.`,
+          );
+        }
         await saveChannelTransportSecrets(context.env, channel, agentId, secrets);
       });
       return { channel, agentId, stored: true };
@@ -1417,6 +1687,9 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/credentials/named`,
+    // A member's because it is add-only (`addNamedCredential`): it can put a
+    // key where none was, never replace one an agent already resolves.
+    member: true,
     async handler(context) {
       const body = await readJsonObject(context.request);
       const name = requireString(body, 'name');
@@ -1453,6 +1726,7 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/config`,
+    member: true,
     async handler(context) {
       const configPath = await activeConfigPath(context);
       let config: StratusConfigFile = {};
@@ -1469,6 +1743,10 @@ export const routes: Route[] = [
   {
     method: 'PUT',
     pattern: `${API_PREFIX}/config`,
+    // Operator-only: this is the trusted config — `baseUrl` and `apiKeyEnv`
+    // decide where the operator's provider key is sent, `approvals` who may
+    // approve, `api` what the daemon binds. A member reads it (GET above)
+    // and never writes it.
     async handler(context) {
       const body = await readJsonObject(context.request);
       const incoming = body.config;

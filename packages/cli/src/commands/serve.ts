@@ -31,7 +31,7 @@ import {
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
 } from '@stratusagent/state';
-import { createLogWriter, truncateRedirectLogs, type LogWriter } from '../logs.ts';
+import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
 import { describePrincipals, describeApprovers } from '../approvals.ts';
 import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
@@ -140,22 +140,47 @@ const serveHeldHome = async (
   // Under a service manager the daemon's stdout is gone, so everything it
   // says is also written to ~/.stratus/logs — that file is what `stratus
   // logs` reads, and the only record of an overnight run.
+  const jsonOut = command.logFormat === 'json';
   const logWriter: LogWriter | undefined = command.logToFile === false
     ? undefined
     : createLogWriter({
         dir: logsDirPath(env),
-        onError: (error) => writeLine(
-          streams.stderr,
-          `Warning: could not write the log file (${error instanceof Error ? error.message : String(error)}); continuing.`,
-        ),
+        // Under `--log-format json` a failing file is reported as a record
+        // on stdout like every other warning: a full disk is exactly when a
+        // shipper must not be handed a line it cannot parse.
+        onError: (error) => {
+          const message = `could not write the log file (${error instanceof Error ? error.message : String(error)}); continuing.`;
+          if (jsonOut) {
+            writeLine(streams.stdout, JSON.stringify({ ts: new Date().toISOString(), level: 'warn', msg: message } satisfies LogRecord));
+          } else {
+            writeLine(streams.stderr, `Warning: ${message}`);
+          }
+        },
       });
+  // `--log-format json` puts the file's records on stdout as well — the
+  // same objects, built once, so what a log shipper sees can never say more
+  // than the file does (a trace, not a transcript). The human lines go:
+  // a container runtime or journald reads stdout line by line, and one line
+  // that is not JSON breaks the parser for everything after it. Warnings go
+  // with them rather than to stderr, because both streams land in the same
+  // `docker logs` and the warning is already a record.
+  const record = (entry: LogRecord): Promise<void> => {
+    if (jsonOut) {
+      writeLine(streams.stdout, JSON.stringify(entry));
+    }
+    return logWriter?.write(entry) ?? Promise.resolve();
+  };
   const log = (line: string): void => {
-    writeLine(streams.stdout, line);
-    void logWriter?.write({ ts: new Date().toISOString(), level: 'info', msg: line });
+    if (!jsonOut) {
+      writeLine(streams.stdout, line);
+    }
+    void record({ ts: new Date().toISOString(), level: 'info', msg: line });
   };
   const warn = (line: string): void => {
-    writeLine(streams.stderr, `Warning: ${line}`);
-    void logWriter?.write({ ts: new Date().toISOString(), level: 'warn', msg: line });
+    if (!jsonOut) {
+      writeLine(streams.stderr, `Warning: ${line}`);
+    }
+    void record({ ts: new Date().toISOString(), level: 'warn', msg: line });
   };
 
   // With the home claim in hand, this daemon is the exclusive holder of the
@@ -536,7 +561,7 @@ const serveHeldHome = async (
     warn,
   });
 
-  if (command.events) {
+  if (command.events && !jsonOut) {
     gateway.bus.subscribe((event) => {
       const line = formatEvent(event);
       if (line) {
@@ -545,7 +570,7 @@ const serveHeldHome = async (
     });
   }
 
-  if (logWriter) {
+  if (logWriter || jsonOut) {
     // Only session.created carries the agent id, so it seeds a map the
     // later events in that session read from. A session resumed after a
     // restart never re-creates, so an unmapped id falls back to the
@@ -575,7 +600,7 @@ const serveHeldHome = async (
       };
       const known = agentBySession.get(event.sessionId);
       if (known) {
-        void logWriter.write({ ...base, agentId: known });
+        void record({ ...base, agentId: known });
       } else {
         // A session resumed after a restart never re-creates, so its agent
         // is only in the store. That lookup is deferred off this path; the
@@ -586,9 +611,9 @@ const serveHeldHome = async (
             if (agentId) {
               agentBySession.set(event.sessionId, agentId);
             }
-            return logWriter.write({ ...base, ...(agentId ? { agentId } : {}) });
+            return record({ ...base, ...(agentId ? { agentId } : {}) });
           })
-          .catch(() => logWriter.write(base));
+          .catch(() => record(base));
       }
       if (event.type === 'session.completed' || event.type === 'session.failed') {
         agentBySession.delete(event.sessionId);
@@ -629,7 +654,9 @@ const serveHeldHome = async (
       }
     }
 
-    writeLine(streams.stdout, 'Press Ctrl+C to stop.');
+    if (!jsonOut) {
+      writeLine(streams.stdout, 'Press Ctrl+C to stop.');
+    }
 
     // And periodically, for a long-running daemon that warns steadily
     // without ever writing enough records to rotate. Unref'd, so it never
@@ -722,7 +749,7 @@ const serveHeldHome = async (
       } else {
         log(`restarting stratusd${restart.reason ? ` (${restart.reason})` : ''}`);
       }
-    } else {
+    } else if (!jsonOut) {
       writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
     }
   } finally {

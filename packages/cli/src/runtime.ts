@@ -20,6 +20,7 @@ import {
   type ProviderContribution,
   type Session,
   type StratusEvent,
+  type CredentialResolver,
 } from '@stratusagent/core';
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
@@ -51,6 +52,12 @@ import {
   type RuntimeSelection,
   type RuntimeConfig,
   type IgnoredUntrustedConfig,
+  createLeaseBroker,
+  reportLeaseUse,
+  createLeasePolicyRefresh,
+  createLeaseResolver,
+  fleetDbPath,
+  stratusHomePath,
 } from '@stratusagent/state';
 import { createApprovalPolicy } from './approvals.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
@@ -261,6 +268,55 @@ export const createAgentRuntime = async (
   const pluginsConfig = await loadServePlugins(runEnv, options.configPath, (line) => {
     writeLine(streams.stderr, `Warning: ${line}`);
   });
+  // Leases hold for a one-shot and a chat exactly as for the daemon: a
+  // fenced key is fenced wherever it is used, and `stratus run` reaching it
+  // freely would be the way around the fence. Same table, same atomic
+  // count — the daemon and this process may both be spending one lease —
+  // and the same live read of the leased list before every use, so a key
+  // fenced while a chat is open is fenced from its next use. The store is
+  // opened on its first use only: a run that never meets a fenced key
+  // never opens `fleet.db`.
+  const { SqliteLeaseStore } = await import('@stratusagent/gateway');
+  let openedLeaseStore: InstanceType<typeof SqliteLeaseStore> | undefined;
+  const leaseStore = (): InstanceType<typeof SqliteLeaseStore> => {
+    openedLeaseStore ??= new SqliteLeaseStore(fleetDbPath(runEnv), { stateHome: stratusHomePath(runEnv) });
+    return openedLeaseStore;
+  };
+  const leaseBroker = createLeaseBroker({
+    store: {
+      list: (filter) => leaseStore().list(filter),
+      get: (id) => leaseStore().get(id),
+      grant: (input) => leaseStore().grant(input),
+      revoke: (id, revokedBy, now) => leaseStore().revoke(id, revokedBy, now),
+      consume: (agentId, credential, now) => leaseStore().consume(agentId, credential, now),
+      consumeById: (id, now) => leaseStore().consumeById(id, now),
+    },
+    leased: [],
+    // Every use, allowed or refused, as the daemon records it: onto this
+    // run's bus, so `--events` and an `onEvent` consumer see which session
+    // and which tool spent each use of a lease.
+    onUse: (record) => {
+      reportLeaseUse(record, {
+        emit: (event) => void bus.emit(event),
+        note: (line, refused) => writeLine(streams.stderr, refused ? `Warning: ${line}` : line),
+      });
+    },
+  });
+  const refreshLeases = createLeasePolicyRefresh({
+    broker: leaseBroker,
+    env: runEnv,
+    ...(options.configPath !== undefined ? { configPath: options.configPath } : {}),
+    warn: (line) => writeLine(streams.stderr, `Warning: ${line}`),
+  });
+  await refreshLeases();
+  const leaseResolver = createLeaseResolver(createFileCredentialResolver(runEnv), leaseBroker);
+  const credentials: CredentialResolver = {
+    async resolve(agent, name, context) {
+      await refreshLeases();
+      return leaseResolver.resolve(agent, name, context);
+    },
+  };
+
   const loadedPlugins: LoadedPlugin[] = [];
   const providers = new ContributionRegistry<ProviderContribution>();
   const memoryStores = new ContributionRegistry<MemoryStoreContribution>();
@@ -282,7 +338,7 @@ export const createAgentRuntime = async (
       // channels, so a channel plugin's registration is recorded and goes
       // nowhere, and its request for its secrets is refused with a message
       // that says so rather than answered with an empty roster.
-      credentials: createFileCredentialResolver(runEnv),
+      credentials,
       workspaces: createAgentWorkspaces(runEnv),
     });
     loadedPlugins.push(...result.loaded);
@@ -298,7 +354,15 @@ export const createAgentRuntime = async (
   // provider factory that throws — has the same plugins to release and no
   // caller yet to release them: the callers' `finally` only begins once
   // this returns.
+  let leaseStoreClosed = false;
   const disposePlugins = async (): Promise<void> => {
+    // The lease store's connection goes with everything else this run
+    // acquired, on every path out — a failed start included — and once,
+    // since node:sqlite refuses a second close.
+    if (openedLeaseStore && !leaseStoreClosed) {
+      leaseStoreClosed = true;
+      openedLeaseStore.close();
+    }
     for (const plugin of loadedPlugins) {
       try {
         await plugin.instance.dispose?.();
@@ -367,6 +431,12 @@ export const createAgentRuntime = async (
       options.maxTurns,
       undefined,
       providers,
+      async (request, credential) => {
+        if (credential !== undefined) {
+          await refreshLeases();
+          leaseBroker.use(request.session.agent.id, credential, { sessionId: request.session.id, use: 'provider' });
+        }
+      },
     );
 
     const runner = new AgentRunner({

@@ -19,14 +19,14 @@ import {
   type HostedToolExecutor,
 } from '@stratusagent/providers';
 import { createAnthropicProvider, RAW_TURNS_METADATA_KEY } from '@stratusagent/provider-anthropic';
-import { ContextOverflowError } from '@stratusagent/core';
+import { ContextOverflowError, HostRefusalError } from '@stratusagent/core';
 import {
   createClaudeCodeProvider,
   SDK_SESSION_METADATA_KEY,
 } from '@stratusagent/provider-claude-code';
 import { createCodexProvider, CODEX_THREAD_METADATA_KEY } from '@stratusagent/provider-codex';
 import type { RuntimeConfig } from './config.ts';
-import { registeredProviderNameOf } from './provider-names.ts';
+import { CREDENTIAL_PROVIDER_NAMES, registeredProviderNameOf } from './provider-names.ts';
 
 export const createDemoTool = () =>
   defineLocalCommandTool({
@@ -182,6 +182,13 @@ export const createFallbackWrappedProvider = (
           if (error instanceof ContextOverflowError) {
             throw error;
           }
+          // Nor is a refusal the host made on purpose — a spent budget, an
+          // expired lease. The limit is the agent's, not the primary
+          // model's, so the fallback answering would spend exactly what it
+          // exists to stop and make the stop invisible besides.
+          if (error instanceof HostRefusalError) {
+            throw error;
+          }
           fallbackSessions.add(request.session.id);
           (request.session.metadata ??= {})[FALLBACK_ACTIVE_METADATA_KEY] = true;
           onFallback(error);
@@ -280,6 +287,50 @@ const attributeUsage = async (
  */
 export type RegisteredProviders = Pick<ContributionRegistry<ProviderContribution>, 'get' | 'names'>;
 
+/**
+ * A host's say over each provider call before it is made — a budget, a
+ * credential lease. Throwing refuses the call; a `HostRefusalError` is the
+ * refusal the kernel and the fallback wrapper know not to treat as a model
+ * failing.
+ *
+ * `credential` names the sign-in the call is about to spend, in the lease
+ * namespace (`providerCredentialName`), and is undefined for a provider
+ * that holds none of ours: the demo, or a plugin's, which resolves its own
+ * key through the agent's `CredentialResolver` and meets the lease there.
+ *
+ * Per call rather than per runner because that is the whole point of it: a
+ * runner is pooled for as long as its configuration holds, and its provider
+ * keeps the key it was built with for every request after — so a lease
+ * checked when the runner was built would be checked exactly once. Checked
+ * per `generate`, which is one model call for the kernel-loop adapters and
+ * one Stratus turn for a harness running its own inner loop.
+ */
+export type ProviderCallGuard = (request: ProviderRequest, credential: string | undefined) => Promise<void>;
+
+/**
+ * The name a built-in provider's sign-in goes by where a credential is
+ * named rather than resolved — a lease (`leases.credentials` in a trusted
+ * config) and its log lines. The colon keeps it out of the named-credential
+ * namespace, whose names cannot contain one, so `provider:anthropic` can
+ * never be a tool's key of the same spelling.
+ */
+export const providerCredentialName = (provider: string): string | undefined =>
+  (CREDENTIAL_PROVIDER_NAMES as readonly string[]).includes(provider) ? `provider:${provider}` : undefined;
+
+const guardedProvider = (
+  provider: ModelProvider,
+  credential: string | undefined,
+  guard: ProviderCallGuard | undefined,
+): ModelProvider => (guard
+  ? {
+      name: provider.name,
+      async generate(request) {
+        await guard(request, credential);
+        return provider.generate(request);
+      },
+    }
+  : provider);
+
 export const createRuntimeProvider = (
   config: RuntimeConfig,
   onFallback?: (error: unknown) => void,
@@ -287,14 +338,27 @@ export const createRuntimeProvider = (
   maxTurns?: number,
   persistSession?: (session: Session) => Promise<void>,
   registered?: RegisteredProviders,
+  guard?: ProviderCallGuard,
 ): ModelProvider => {
   if (config.provider === 'demo') {
-    return createDemoProvider();
+    return guardedProvider(createDemoProvider(), undefined, guard);
   }
 
-  if (config.fallback) {
+  // Each real provider is guarded on its own, inside the fallback wrapper
+  // rather than around it: a fallback spends its own sign-in, which may be
+  // leased when the primary's is not, and the wrapper decides which of the
+  // two a call goes to only once the call is under way.
+  if (!config.fallback) {
+    return guardedProvider(
+      buildRuntimeProvider(config, executeTool, maxTurns, registered),
+      providerCredentialName(config.provider),
+      guard,
+    );
+  }
+
+  {
     const { fallback, ...primaryConfig } = config;
-    const primary = createRuntimeProvider(primaryConfig, undefined, executeTool, maxTurns, undefined, registered);
+    const primary = createRuntimeProvider(primaryConfig, undefined, executeTool, maxTurns, undefined, registered, guard);
     const fallbackProvider = createRuntimeProvider({
       ...fallback,
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
@@ -311,8 +375,20 @@ export const createRuntimeProvider = (
       // The codex transport travels the same way, for the same reason.
       ...(config.provider === 'codex' && config.codexRunTurn ? { codexRunTurn: config.codexRunTurn } : {}),
       ...(fallback.codexRunTurn ? { codexRunTurn: fallback.codexRunTurn } : {}),
-    } as RuntimeConfig, undefined, executeTool, maxTurns, undefined, registered);
+    } as RuntimeConfig, undefined, executeTool, maxTurns, undefined, registered, guard);
     return createFallbackWrappedProvider(primary, fallbackProvider, onFallback ?? (() => {}), persistSession);
+  }
+};
+
+/** One real provider, unguarded and with no fallback — `createRuntimeProvider`'s leaves. */
+const buildRuntimeProvider = (
+  config: RuntimeConfig,
+  executeTool: HostedToolExecutor | undefined,
+  maxTurns: number | undefined,
+  registered: RegisteredProviders | undefined,
+): ModelProvider => {
+  if (config.provider === 'demo') {
+    return createDemoProvider();
   }
 
   if (config.provider === 'anthropic') {

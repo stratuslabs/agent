@@ -1,0 +1,17 @@
+{
+  "provider": "anthropic",
+  "approvals": { "mode": "headless" },
+  "api": { "host": "0.0.0.0", "port": 4123 },
+  "maxTurns": 20,
+  "plugins": {
+    "@stratusagent/tool-web": {
+      "enabled": true,
+      "toolRisks": { "web.fetch": "safe" }
+    }
+  },
+  "budget": {
+    "daily": 2000000,
+    "monthly": 30000000,
+    "weights": { "outputTokens": 5, "cacheReadTokens": 0.1, "cacheWriteTokens": 1.25 }
+  }
+}

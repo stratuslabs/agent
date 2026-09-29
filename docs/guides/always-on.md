@@ -22,7 +22,9 @@ stratus service uninstall
 ```
 
 `stratus setup` installs it for you at Save & finish unless you opt out, so
-most people never run these by hand. What they get:
+most people never run these by hand. (On a server nobody logs in to, run it
+as a system service or in Docker instead — [Deployment](./deployment.md).)
+What they get:
 
 - **macOS** — a LaunchAgent at
   `~/Library/LaunchAgents/com.stratusagent.stratusd.plist`
@@ -77,6 +79,8 @@ The question every operator asks on their second day:
 | Tools from an MCP server that reconnects | No | Discovered on reconnect |
 | A plugin enabled, disabled, upgraded, or reconfigured | **Yes** | `stratus restart` |
 | Credentials, or the `api`, `approvals`, and `maxTurns` settings | **Yes** | `stratus restart` — they come from a trusted config and decide who may approve, what the daemon binds, and how much one message may spend, so they are not re-read live |
+| The `budget` or `leases` block | No | Re-read from the trusted config before every model call and every leased credential use — see [Usage and budgets](./usage-and-budgets.md) and [Credential leases](./leases.md) |
+| A lease granted or revoked | No | `stratus lease grant` / `revoke` change the row the daemon reads on every use |
 | The `stratus` package itself | **Yes** | `stratus update`, which stops and starts the service around the upgrade |
 
 ### `stratus restart`: announced, drained, and back
@@ -133,7 +137,9 @@ start without a login, but it runs as a system user, which breaks
 LaunchAgent is the right choice.) The systemd equivalent is
 `loginctl enable-linger` on a machine you don't stay logged in to. Setup
 says both in the menu rather than leaving them to be discovered after a
-reboot.
+reboot. A server is better served by a unit that starts at boot as its own
+account: [`deploy/systemd/stratusd.service`](../../deploy/systemd/stratusd.service),
+or the Docker image — see [Deployment](./deployment.md).
 
 ## One daemon per home
 

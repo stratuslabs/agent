@@ -19,7 +19,8 @@ macOS app and a headless VM — want the API and not a web page.
 
 ## Authentication
 
-Two credentials, one check. Every endpoint requires one of them.
+Two credentials, one check. Every endpoint requires one of them, and what
+it may then do depends on its [role](#roles-operator-and-member).
 
 **Bearer token** — generated into `~/.stratus/gateway-token` (0600) the first
 time the API binds. Programmatic clients read the file and send it:
@@ -43,7 +44,7 @@ cannot read the token file, and a WebSocket upgrade cannot carry an
 opens the browser at it:
 
 ```
-POST /api/v1/auth/ott          → { ott, url }          (bearer only)
+POST /api/v1/auth/ott          → { ott, url }          (bearer only, either role)
 GET  /api/v1/auth/session?ott= → 302 /, Set-Cookie      (single use, 60s)
 ```
 
@@ -64,7 +65,9 @@ Sessions live in memory and are never written to disk. An announced restart
 (`stratus restart`, `POST /restart`) hands them from the stopping process to
 the one replacing it, so the browser stays signed in; a crash or a plain
 stop-and-start signs it out, and so does rotating the token (a handed session
-is adopted only under the token it was minted with). Run `stratus dashboard`
+is adopted only under the token it was minted with). A session minted by a
+member token crosses the restart as a member, and is judged against the
+member token file on its next request like any other. Run `stratus dashboard`
 again for a new link.
 
 **Origin binding.** `SameSite` matching ignores ports, so a page served from
@@ -85,9 +88,73 @@ from the page making the request, and cannot be made to send another one —
 `Host` is a forbidden header name for `fetch`, `XMLHttpRequest`, forms, and
 WebSockets alike. A page on another port, or another host, still fails.
 
+### Roles: operator and member
+
+Every credential above carries one of two roles, and every token a daemon
+accepts is one its own home issued — so each is bound to that daemon, and
+to that daemon's tenant, by construction. A hosted deployment runs one home
+and one daemon per tenant; nothing here takes a tenant id from a request.
+
+| Role | Credential | May | May not |
+| --- | --- | --- | --- |
+| `operator` | `~/.stratus/gateway-token`, and every browser session minted from it | Everything | — |
+| `member` | A token from `stratus token create` (`stm_…`), and every browser session minted from it | Manage the roster (create, edit, reload agents and skills), talk to agents, read sessions and the event stream, answer approvals, list and revoke grants, list and cancel schedules, read the catalogs, credentials (presence only), and config, bind a channel app to an agent, add a named credential (add-only), read usage and the budget, list credential leases and revoke one | `PUT /config`, `PUT /credentials/:provider`, `POST /credentials/verify`, `POST /restart`, `POST /leases` |
+
+The five operator-only routes are the ones that reach past the policy the
+operator set rather than working within it: the trusted config decides
+where the operator's provider key is sent (`baseUrl`, `apiKeyEnv`), who
+may approve, and how much may be spent (`budget`); a provider sign-in is
+what every agent bills to; the key check makes the daemon fetch a URL of
+the caller's choosing and exists only to precede a sign-in a member cannot
+store; a restart drains everyone's turns; and granting a lease widens what
+an agent may do with a fenced key, where revoking one only narrows it.
+A member calling one gets `403 operator_required` with a sentence saying
+so.
+
+Two member routes check the member inside the handler, because they could
+otherwise reach past the operator without changing any policy. A soul edit
+(`PUT /agents/:id`, fields or raw) may **add** to `credentials:` only names
+stored as that agent's own entry — never a shared one or one the daemon's
+environment supplies, which are the operator's keys for the agents the
+operator chose (`403 operator_required`; removing names is always
+allowed). And a channel binding (`PUT /credentials/channels/:channel`) is
+add-only for a member: replacing one moves the agent, its conversations,
+and every approval its channel carries onto another workspace
+(`409 channel_bound`).
+
+**What a member can reach is what the loaded tools can reach.** A member
+edits souls and answers approvals, so a member can have any agent use any
+tool the operator loaded. On an install with `tool-shell` or `tool-fs`
+loaded, that includes the machine, and a member token is not a boundary
+against it — hand one out there only to someone you would let run those
+tools. The [hosted profile](../../examples/profiles/hosted) loads neither,
+which is what makes a member token a tenant's token. The rule fails closed: a route is open to members only when it is
+marked for them, so an endpoint added later is operator-only until someone
+decides otherwise.
+
+The operator token behaves exactly as it always has. Member tokens live
+in `~/.stratus/api-tokens.json` (0600) as their sha256 — the token itself
+is printed once by `stratus token create` and stored nowhere. The daemon
+reads that file on **every member request** rather than caching it, so
+`stratus token revoke` takes effect on the next request with no restart,
+and so does it for every browser session the token minted. An open event
+stream held by a revoked member is closed (WebSocket code `1008`) within
+about a second, and so is one opened on a browser session, the operator's
+included, once that session's twelve hours are up. A file that will not parse authenticates no member and is
+reported in the daemon's log; the operator token does not depend on it.
+
+A member mints its own browser sessions through `POST /auth/ott` like the
+operator, and a session keeps the role of the token that minted it — a
+browser is never a way up. An approval a member answers is recorded as
+`api:<token name>` (or `dashboard:<token name>` from a browser session),
+and the `actor` label in the request is ignored for members: the token's
+name is the one thing about a member the daemon vouches for.
+
 Localhost binding is the posture. Remote access is the operator's tunnel
 decision — Tailscale is the pattern we recommend for reaching a machine at
-home. There are no user accounts; that belongs to a hosted deployment.
+home. There are no user accounts: a member token names who holds it, and
+anything richer (sign-up, SSO, billing) belongs to a hosted deployment's
+own service in front of this API.
 
 ## Endpoints
 
@@ -115,6 +182,10 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }`, where `answer` is `once`, `always`, or `deny` — see [below](#always-means-one-thing-and-the-request-says-which) |
 | GET | `/schedules` | Every schedule the fleet has set — cadence, prompt, pre-authorized destination, next firing. The audit list: each row with a destination is a standing permission to speak |
 | DELETE | `/schedules/:id` | Cancel a schedule. Also revokes the destination grant riding on the row — a still-running firing's next send is gated normally. 404 when no such schedule exists |
+| GET | `/usage?since=&until=&agent=` | Tokens spent, from the home's usage ledger in `fleet.db`: `usage` is one row per (agent, provider, model) with `calls` and the four token buckets summed as the providers reported them, never priced. `since`/`until` are ISO dates or timestamps (default: the start of this UTC month, open-ended); a bad one answers `400 invalid_query`. When a `budget` is configured, `budget` carries the block and `limits` — every limit with `spent`, `resetsAt`, and `reached` — see [Usage and budgets](../../docs/guides/usage-and-budgets.md). `unrecorded: { calls, error? }` appears when spend is held outside the ledger (a failed write), so the rows are missing it — or, with `calls: 0` and an `error`, when the last daemon stopped with spend it could write nowhere and the ledger has not yet been settled from the saved sessions. `503 budget_unavailable` while the config has never been readable, or while held spend cannot be written — both times budgeted model calls are being refused |
+| GET | `/leases?agent=` | Every credential lease this home has granted, with its `state` (`active`, `expired`, `exhausted`, `revoked`), then the live delegated sub-leases (`parentId`, `sessionId`), which exist only in the daemon that lent them. A sub-lease's `state` is judged through its parents, as a use is: one whose parent was revoked, expired, or used up reports that state, whatever its own fields say. Names, counts, and reasons — never a key |
+| POST | `/leases` | Operator-only. Grant one: `{ agentId, credential, expiresIn \| expiresAt, maxUses?, reason, actor? }` → `{ lease }`. `expiresIn` is `30m`, `2h`, `7d`; a lease must end within 90 days and give a reason, or `400 invalid_lease` says which. An `agentId` no agent on the roster has (matched case-insensitively) is `404 agent_not_found`, since nothing could ever use the lease. `grantedBy` records `api:<actor>` (or `dashboard:`) — see [Credential leases](../../docs/guides/leases.md) |
+| POST | `/leases/:id/revoke` | End a lease now: `{ actor? }` → `{ lease }` with `state: "revoked"`. The very next use is refused — the daemon reads the row on every use. `404 lease_not_found` for an unknown id or one already revoked, which stays revoked as it was |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
 | GET | `/catalog/tools` | Every registered tool with the risk a call will face, every skill a soul's `skills:` can name, the plugins that contributed them (with the providers, channels, memory stores, and executors each registered), and `providers` — every name a soul's `provider:` can select on this daemon, built-ins and plugin-registered alike |
 | GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value — `channels`: which agents have transport secrets stored on each channel kind, ids only, and `named`: `{ shared: [name…], agents: { id: [name…] } }`, names only |
@@ -123,7 +194,7 @@ log, and an address bar is one that gets noticed when it changes.
 | PUT | `/credentials/channels/:channel` | Store one agent's transport secrets for a channel kind, under `channels.<kind>.<agentId>`. `slack` takes `{ agentId, appToken, botToken }`; any other kind — one a [channel plugin](../../docs/guides/extending.md#channels) declares — takes `{ agentId, secrets: { name: value, … } }`, the names its README documents. A kind that is not a contribution name answers `400 unknown_channel`; an agent not on the roster `404 agent_not_found`. Saving one kind never disturbs another's |
 
 | POST | `/credentials/named` | Add a named credential — the `search.apiKey` kind an agent resolves through its soul's `credentials:` list: `{ name, value, agentId? }`, the fleet's shared entry without `agentId`, that agent's own with it. **Add-only**: a name already stored answers `409 credential_exists`, and so does an agent's own over a shared one of that name, since the agent's entry is read first, and so does a name the daemon's environment already supplies, since a stored one would replace it. A name outside the credential-name rule answers `400 invalid_credential_name`; an `agentId` not on the roster `404 agent_not_found` |
-| GET/PUT | `/config` | Settings, whitelisted to keys this API owns |
+| GET/PUT | `/config` | Settings, whitelisted to keys this API owns. `PUT` replaces the file and writes `provider`, `model`, `baseUrl`, `apiKeyEnv`, `systemPrompt`, `soul`, `fallbackModel`, `fallbackProvider`, `fallbackBaseUrl`, `vision`, `language`, `approvals`, `api`, `principals`, `budget`, `leases`, and `maxTurns`. Any other key is `400 unknown_config_key`, except `plugins`, `executor`, and `memoryStore`, which are ignored on input and carried over unchanged. `GET` is open to members; `PUT` is operator only |
 
 **Named credentials can be added here, never replaced or removed.** This API
 is reachable from away from the machine, and replacing a shared key would
@@ -148,7 +219,11 @@ the only file this endpoint writes is a trusted one — so the GET-modify-PUT
 round trip keeps it. The same goes for `vision`, the boolean that tells a
 text-only OpenAI-compatible model to take images as a note: `GET` returns
 it, so `PUT` takes it back, and for `language`, the fleet's writing
-language, which the loader refuses with a `400` unless it is a language tag. `PUT /config` does not write the `plugins` block, nor the `executor` and
+language, which the loader refuses with a `400` unless it is a language tag.
+`budget` and `leases` round-trip the same way, and this route is how a
+hosting control plane sets a tenant's spending limit without a shell in its
+container: the loader validates both, and the next provider call reads
+them — no restart. `PUT /config` does not write the `plugins` block, nor the `executor` and
 `memoryStore` selections. `GET` returns them, and a `PUT` carrying them back
 is accepted (the round trip has to work) but the values are ignored and the
 file's existing ones are preserved rather than deleted by the replace.
@@ -353,9 +428,9 @@ order the calls completed.
 ```jsonc
 {
   "usage": [
-    { "turnId": "s-42:turn:1", "provider": "anthropic", "model": "claude-opus-5",
+    { "id": "3f0c9a1e-…", "at": "2026-09-29T09:14:36.482Z", "turnId": "s-42:turn:1", "provider": "anthropic", "model": "claude-opus-5",
       "inputTokens": 40, "outputTokens": 210, "cacheReadTokens": 9100, "cacheWriteTokens": 300 },
-    { "turnId": "s-42:turn:2", "provider": "openai", "model": "gpt-5.5",
+    { "id": "8b27d4c0-…", "at": "2026-09-29T09:15:02.110Z", "turnId": "s-42:turn:2", "provider": "openai", "model": "gpt-5.5",
       "inputTokens": 12, "outputTokens": 88 }
   ]
 }
@@ -390,6 +465,13 @@ OpenAI-compatible server that omits `usage` produces a session with no
 records at all, and a turn that cost real money would look free if a consumer
 read that absence as a measurement. `usage` itself is absent until something
 reports.
+
+`id` is unique to one provider call, assigned when the record is made.
+The usage ledger (`GET /usage`) writes each call under it, so a call seen
+twice — announced on the event stream, then found again on the saved
+session after a crash — is counted once. `at` is when the call's usage
+was recorded, so one the ledger learns of late is still filed in the day
+and month it was spent. Records saved before either existed have neither.
 
 `turnId` is the Stratus turn the tokens belong to — one pass through the
 runner, which is one provider call for the API providers and several for a
@@ -427,7 +509,9 @@ endpoint records how the caller authenticated — `api` for a bearer token,
 `dashboard` for a browser session — with the optional `actor` from the body
 appended after a colon (`api:ops-bot`). The body never sets the recorded
 actor bare, so a request cannot spell a Slack approver's id and read as that
-approver's decision. A request that has already been decided, has expired,
+approver's decision. A [member](#roles-operator-and-member) is recorded under
+its token's name instead (`api:alice`, `dashboard:alice`) and its `actor` is
+ignored, so one member cannot record a decision as another. A request that has already been decided, has expired,
 or whose turn was cancelled answers `409 approval_not_pending` rather than
 silently doing nothing twice.
 
@@ -526,8 +610,10 @@ endpoint whose job is to say what the daemon is doing right now. `POST
 
 ## The event stream
 
-`WS /api/v1/events`, filterable at connect (`?session=`, `?agent=`) or with a
-frame:
+`WS /api/v1/events`, open to both [roles](#roles-operator-and-member) (a
+member's stream is closed with code `1008` once its token is revoked, and
+any stream opened on a browser session once that session expires),
+filterable at connect (`?session=`, `?agent=`) or with a frame:
 
 ```json
 { "type": "subscribe", "sessionId": "…", "agentId": "…" }
@@ -560,6 +646,18 @@ carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own
 deltas from the next caller's. The id is assigned at dispatch and returned by
 `POST /sessions/:id/messages`.
+
+Three more joined it with [deployment profiles](../../docs/roadmap/08-deployment-profiles.md).
+`session.usage` announces the records one provider call added, as it lands,
+with the `agentId` — the stream a meter reads, since `session.completed` is
+too late to stop the next call and is never sent for a failed turn.
+`credential.leased` records every use of a leased credential, `outcome`
+`allowed` (with the `leaseId` that paid, and `parentLeaseId` for a
+delegate's sub-lease) or `refused` (with the refusal's `reason`), plus the
+caller's `use` label — names and ids, never a key. And `session.failed`
+carries `refused: true` when the host stopped the turn on purpose — a spent
+budget, an expired lease — so its `error` is a sentence for the person in
+the conversation, to show as it is rather than as a malfunction.
 
 `session.completed` carries the session's `usage` records in the same shape
 `GET /sessions/:id` returns — the whole set, not just this run's, because that

@@ -13,8 +13,13 @@ what moves when you rename an agent.
 | `config.json` | The global [configuration](./config.md). The **trusted** config: `api`, `approvals`, `soul`, and `systemPrompt` are read only from here (or a `--config` file you named), never from a project-local one. |
 | `credentials.json` | Stored sign-ins and Slack channel tokens. `0600`. No endpoint ever returns a secret from it. |
 | `state.json` | The schema stamp: which format this home is in, and which migrations have run. See [Updating](../guides/updating.md). |
-| `fleet.db` | The schedules, and the session index that says which agent's store holds a given session id. Fleet infrastructure, deliberately not per agent — see below. |
+| `fleet.db` | The schedules, the session index that says which agent's store holds a given session id, the usage ledger, and the credential leases. Fleet infrastructure, deliberately not per agent — see below. |
 | `gateway-token`, `gateway.json` | The [control API](../../packages/control-api/README.md)'s bearer token and the address a running daemon bound. Both `0600`. |
+| `api-tokens.json` | [Member tokens](../guides/remote-access.md#member-tokens) for the control API: `{ version: 1, tokens: [{ id, name, role, hash, createdAt }] }`, where `hash` is the token's sha256 — the token itself is never stored. Written by `stratus token`, read by the daemon on every member request. `0600`. |
+| `usage-held.jsonl` | Usage the ledger in `fleet.db` could not write yet (a full disk), kept until it can be — model calls under a budget are refused while it exists. Usually absent. `0600`. See [Usage and budgets](../guides/usage-and-budgets.md). |
+| `usage-unsettled.armed` | 64 KiB of reserved space, made by the daemon at start while the disk has room, so that on a full disk it can still write which calls it holds into it and rename it into place. Found at start holding calls — a daemon killed between the two — it is treated as the marker. `0600`. |
+| `usage-unsettled` | Names, one JSON line each, the calls a daemon holds but could write nowhere; still there if it stops or crashes in that state, taken back once they are written. The next daemon writes them to the ledger at start and removes it — unless it could not name them all (a last line `{"complete":false}`, or empty), when it stays for the operator to remove once the rest is accounted for. Budgeted calls are refused while it exists. Usually absent. |
+| `api-tokens.json.lock` | Held while a `stratus token` command rewrites `api-tokens.json`, so two at once cannot drop each other's change — a revoked token written back, or a created one lost. Empty; safe to delete when no `stratus token` command is running. `0600`. |
 | `stratusd.lock` | Held by the daemon serving this home; how a second `stratus serve` is refused. |
 | `logs/` | `stratusd.jsonl`, the structured trace [`stratus logs`](../guides/logs.md) reads, plus the macOS LaunchAgent's stdout/stderr redirects. `0700`. |
 | `skills/` | Operator-installed [skills](../guides/skills.md), one directory each. |
@@ -112,7 +117,7 @@ that are worth knowing:
 
 ## What stays fleet-wide, and why
 
-Two things deliberately do not shard, and both live in `fleet.db`:
+Four things deliberately do not shard, and all of them live in `fleet.db`:
 
 - **Schedules.** The scheduler ticks once for the whole fleet, `stratus
   schedules` is the fleet's audit list, and cancelling by bare id revokes
@@ -126,13 +131,26 @@ Two things deliberately do not shard, and both live in `fleet.db`:
   is already held) and what such a lookup consults. It carries routing and
   status, never a message: nothing about a conversation can be read out of
   a fleet-wide file.
+- **The usage ledger.** One row per provider call — when, which agent and
+  session, which provider and model, and the four token counts — written as
+  the call completes. A [budget](../guides/usage-and-budgets.md) is the
+  home's, judged before every call across every agent, and `stratus usage`
+  reads it from another process. Counts only, never content.
+- **Credential leases.** Which agent may use which fenced credential, until
+  when, how many times, and why — with who granted and who revoked each.
+  The operator grants them for the home, and a use is counted in the same
+  row a `stratus lease revoke` ends, in one atomic statement. Ended leases
+  stay as the record. Never a key: the values stay in `credentials.json` or
+  the environment. See [Credential leases](../guides/leases.md).
 
 ## Moving or backing up a home
 
 Copy the whole directory. The SQLite files are in WAL mode, so copy them
 with the daemon stopped (`stratus service stop`) or copy `*-wal` and
 `*-shm` alongside each database; otherwise the newest turns are the ones
-you lose.
+you lose. On a server the home is a Docker volume or
+`/var/lib/stratus/.stratus`; [Deployment](../guides/deployment.md#back-up-and-restore)
+has the archive-and-restore procedure and a drill that proves it.
 
 An install upgrading from before this layout is migrated on first use — see
 [Updating](../guides/updating.md), which also says why the sessions,

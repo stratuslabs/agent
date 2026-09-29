@@ -7,6 +7,7 @@ linked own the full story.
 
 - `~/.stratus/credentials.json` is `0600` (owner-read-only), and so are
   `~/.stratus/gateway-token`, `~/.stratus/gateway.json`,
+  `~/.stratus/api-tokens.json` (member token hashes, never a token),
   `~/.stratus/logs/stratusd.jsonl`, and everything in each agent's own
   directory — its `sessions.db`, its `memory.jsonl`, and its
   `whitelist.json`. The directory itself is `0700`.
@@ -104,7 +105,25 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
   file with `--config <path>`, or move the base URL into
   `~/.stratus/config.json`.
 
+Nor does a clone get to decide **what may be spent, or which keys are
+fenced**: `budget` and `leases` are trusted-config blocks too, and a
+project-local file naming either is ignored, loudly. Both are read live —
+a budget before every model call, the leased list before every leased use
+— and a config that cannot be read keeps the last good answer, or, with
+none, refuses every leased credential rather than freeing them.
+([Usage and budgets](../guides/usage-and-budgets.md),
+[Credential leases](../guides/leases.md))
+
 ## What an agent can reach
+
+- **A leased credential costs a live lease per use.** Listing a key under
+  `leases.credentials` means holding it (the soul's `credentials:`) is no
+  longer enough: each use needs an unexpired, unrevoked, not-used-up lease
+  granted by an operator with a reason, and each use — allowed or refused
+  — is a `credential.leased` record naming the lease, never the key. A
+  delegated agent borrows its delegator's lease only as a sub-lease that
+  cannot outlast it, cannot use more than it had left, works in one
+  sub-session, and ends with the task.
 
 - **A plugin resolves only the credentials its own manifest declares.**
   Installing two plugins does not let one read the other's key, even when
@@ -166,3 +185,15 @@ installed. Cookie-authenticated requests are origin-bound; bearer ones are
 not, because a browser never attaches a bearer token on a page's behalf.
 Reaching a machine from outside goes through a tunnel, not a public bind.
 ([Remote access](../guides/remote-access.md))
+
+Two roles hold the API. The **operator** token (`~/.stratus/gateway-token`)
+can do everything; a **member** token (`stratus token create`) works within
+the operator's policy — roster, conversations, events, approvals — and is
+refused the routes that rewrite it: the config, the provider sign-ins, the
+key check, and restart. The rule fails closed, so an endpoint added later
+is operator-only until marked otherwise, and a browser session keeps the
+role of the token that minted it. A revoked member token stops, with its
+sessions and event streams, on the next request — no restart. Every token
+a daemon accepts was issued by its own home, which is what makes one home
+and one daemon per tenant an isolation boundary for a hosted deployment.
+([Control API](../../packages/control-api/README.md#roles-operator-and-member))

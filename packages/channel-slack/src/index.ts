@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 
 import {
+  HostRefusalError,
   filePathsOf,
   latestTurnReply,
   SENDER_TRUST_METADATA_KEY,
@@ -1157,7 +1158,13 @@ class ReplyRenderer {
     return true;
   }
 
-  async fail(message: string): Promise<ReplyOutcome> {
+  /**
+   * `refused` is a turn the host stopped on purpose (`HostRefusalError`) —
+   * a spent budget, an expired lease — whose message is already a sentence
+   * for the person reading it. Framed as something having gone wrong, it
+   * would read as a fault to report when it is a limit working.
+   */
+  async fail(message: string, refused = false): Promise<ReplyOutcome> {
     // The same wait `finalize` takes, for the same reason: a lazy turn's
     // first text may be opening its placeholder right now, and a failure
     // read as "before saying anything" would leave that placeholder saying
@@ -1174,7 +1181,7 @@ class ReplyRenderer {
       this.warn(`a turn nobody asked for failed before saying anything: ${message}`);
       return this.finalize('');
     }
-    return this.finalize(`Something went wrong: ${message}`);
+    return this.finalize(refused ? message : `Something went wrong: ${message}`);
   }
 
   /**
@@ -3091,7 +3098,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connection,
       channel,
       thread,
-      messageChunks(`Something went wrong: ${event.error}`),
+      messageChunks(event.refused ? event.error : `Something went wrong: ${event.error}`),
       () => uploadUnrenderedFiles(connection, channel, thread, files),
     );
   };
@@ -4332,7 +4339,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       renderers.get(sessionId)?.[0]?.refreshLoading();
       await heard;
     } else {
-      const { spoke, spokeAt } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+      const { spoke, spokeAt } = await renderer.fail(
+        failure instanceof Error ? failure.message : String(failure),
+        failure instanceof HostRefusalError,
+      );
       if (spoke && threadKey !== undefined) {
         // A file it posted before breaking is still the last thing said.
         rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);

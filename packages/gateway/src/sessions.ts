@@ -161,7 +161,7 @@ const shardFileExists = async (filePath: string): Promise<boolean> => {
  * second writer — `stratus schedules cancel` opens its own connection —
  * and WAL serializes writers file-wide), and owner-only throughout.
  */
-const openStratusDatabase = (filePath: string, options: SqliteSessionStoreOptions = {}): DatabaseSync => {
+export const openStratusDatabase = (filePath: string, options: SqliteSessionStoreOptions = {}): DatabaseSync => {
   const dir = path.dirname(filePath);
   if (options.stateHome !== undefined) {
     // Never through a symlink, at any component below the home — see

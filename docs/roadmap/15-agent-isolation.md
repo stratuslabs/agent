@@ -395,4 +395,8 @@ step needs, which is the evidence the seams were right.
   of agent runtimes plus a namespaced supervisor looks strictly simpler
   than a parallel mechanism — decide when 08 starts, against real tenant
   counts, but this step should leave a note in `08-deployment-profiles.md`
-  when it lands.
+  when it lands. *Settled from 08's side:* 08 shipped a tenant as a whole
+  cell — one home, one daemon, one container — without waiting for this
+  layer, because layer A had already keyed every resource by the home.
+  Layer B would narrow what one agent *within* a cell holds; it no longer
+  carries any tenant boundary.

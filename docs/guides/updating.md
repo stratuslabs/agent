@@ -246,7 +246,9 @@ The reverse direction refuses instead of guessing: against state stamped by
 a **newer** build than itself, anything that *writes* under `~/.stratus` —
 `serve`, `setup`, `chat`, `run`, `skill add`, `dashboard`,
 `schedules cancel`, `memory reassert`, `session rollover`, `credential`
-writes, `service install`/`start` — refuses with a line naming
+writes, `service install`/`start`, and `lease` and `usage` (reports, but
+through stores that create their tables in `fleet.db` when they open it) —
+refuses with a line naming
 the fix, because a downgraded build writing into a newer format is the one
 way to corrupt it. Read-only commands (`logs`, `agents`, `doctor`,
 `service status`/`stop`) warn and continue: reading is how you diagnose
@@ -263,6 +265,11 @@ stratus update            # stop stratusd → upgrade from npm → migrate →
 stratus update --check    # report all of it, change nothing (exits 1 when
                           # something is actionable, for scripts and cron)
 ```
+
+(It manages the npm install and the user service that `stratus service
+install` wrote. A Docker image or a system unit is upgraded by replacing the
+image or the packages instead — [Deployment](./deployment.md#upgrade) has
+both.)
 
 The service stop comes first so no daemon holds a session database while
 state changes, and the unit rewrite is the step nothing else performs: the
