@@ -884,7 +884,9 @@ export interface Gateway {
   /**
    * The budget in force — the trusted config's `budget` block as the next
    * provider call would read it — with every limit's spend so far, or
-   * undefined when none is configured.
+   * undefined when none is configured. Throws a `HostRefusalError` while
+   * the config has never been readable: then whether a limit exists is
+   * unknown, and model calls are refused over it.
    */
   budget(): Promise<GatewayBudgetStatus | undefined>;
   /** Every credential lease this home has granted, oldest first, then the live delegated sub-leases. */
@@ -1152,6 +1154,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * with no earlier read there was never a limit to keep.
    */
   let lastGoodBudget: BudgetConfig | undefined;
+  let budgetKnown = false;
   const currentBudget = async (): Promise<BudgetConfig | undefined> => {
     let block = await readTrustedConfigBlock('budget', env, options.selection?.configPath);
     if (block.status === 'untrusted') {
@@ -1159,10 +1162,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       block = await readGlobalConfigBlock('budget', env);
     }
     if (block.status === 'unreadable') {
-      warn(`could not read the budget (${block.error instanceof Error ? block.error.message : String(block.error)}); using the last one read`);
+      const reason = block.error instanceof Error ? block.error.message : String(block.error);
+      if (!budgetKnown) {
+        // Never read: whether a limit exists is unknown, and unknown must
+        // not read as "no limit" — the same fail-closed rule as the leased
+        // list. The config's own error stays in the warning; the refusal
+        // can reach a chat.
+        warn(`could not read the budget (${reason}); refusing model calls until it can be read`);
+        throw new HostRefusalError(
+          'The spending limit could not be read, so the model was not called. The operator can fix the config, and calls resume once it reads.',
+        );
+      }
+      warn(`could not read the budget (${reason}); using the last one read`);
       return lastGoodBudget;
     }
     lastGoodBudget = block.status === 'present' ? block.value : undefined;
+    budgetKnown = true;
     return lastGoodBudget;
   };
 

@@ -389,3 +389,27 @@ test('usage totals are one row per agent, however the id was cased when each cal
     ledger.close();
   }
 });
+
+test('a budget that has never been readable refuses model calls rather than reading as no limit', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await writeFile(configPath, '{ "budget": { "daily": 100 }');
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => openAiText('ok')) as typeof fetch },
+    idleTimeoutMs: 0,
+  });
+  await gateway.start();
+  try {
+    await assert.rejects(gateway.budget(), /The spending limit could not be read, so the model was not called/);
+    // Once it reads, the limit it names is the one in force — and a later
+    // unreadable spell keeps it rather than lifting it.
+    await writeFile(configPath, JSON.stringify({ budget: { daily: 100 } }));
+    assert.equal((await gateway.budget())?.budget.daily, 100);
+    await writeFile(configPath, '{ "budget": ');
+    assert.equal((await gateway.budget())?.budget.daily, 100);
+  } finally {
+    await gateway.stop();
+  }
+});

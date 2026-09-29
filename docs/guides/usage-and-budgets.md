@@ -81,7 +81,9 @@ raised or lowered limit applies to the very next one — no restart. Under the
 trust rule every policy block has: a project-local `stratus.config.json`
 naming a budget is ignored, loudly, in favour of `~/.stratus/config.json`.
 A config that cannot be read keeps the last budget that could, so an edit
-in progress never lifts every limit.
+in progress never lifts every limit — and before one has ever been read,
+model calls are refused until it can be, since an unknown limit is not the
+same as none.
 
 ## What an agent that runs out sees
 

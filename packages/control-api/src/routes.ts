@@ -13,7 +13,7 @@ import {
   isValidDelegateEntry,
 } from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
-import { LISTENS_MODES, isLanguageTag, isListensMode } from '@stratusagent/core';
+import { HostRefusalError, LISTENS_MODES, isLanguageTag, isListensMode } from '@stratusagent/core';
 import { describeAgentGrants, WhitelistUnreadableError, type AgentGrantStore } from '@stratusagent/permissions';
 import {
   isScheduleSessionId,
@@ -1306,7 +1306,17 @@ export const routes: Route[] = [
         ...(until !== undefined ? { until } : {}),
         ...(agentId !== undefined ? { agentId } : {}),
       });
-      const budget = await context.gateway.budget();
+      let budget: Awaited<ReturnType<Gateway['budget']>>;
+      try {
+        budget = await context.gateway.budget();
+      } catch (error) {
+        // A budget that has never been readable is unknown, not absent —
+        // the daemon is refusing model calls over it, and this says why.
+        if (error instanceof HostRefusalError) {
+          throw new ApiError(503, 'budget_unreadable', error.message);
+        }
+        throw error;
+      }
       return {
         since,
         ...(until !== undefined ? { until } : {}),
