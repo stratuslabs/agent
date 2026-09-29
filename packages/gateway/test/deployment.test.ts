@@ -135,8 +135,8 @@ test('the ledger totals match what the providers reported, call for call', async
     assert.equal(row?.agentId, 'ava');
     assert.equal(row?.calls, 2);
     const total = totalTokenUsage(records);
-    assert.equal(row?.inputTokens, total.inputTokens);
-    assert.equal(row?.outputTokens, total.outputTokens);
+    assert.equal(row?.inputTokens, total?.inputTokens);
+    assert.equal(row?.outputTokens, total?.outputTokens);
     assert.equal(row?.inputTokens, 300);
     assert.equal(row?.outputTokens, 21);
   } finally {

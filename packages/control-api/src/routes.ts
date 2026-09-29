@@ -1238,6 +1238,9 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/usage`,
+    // A tenant reads its own spend and where its budget stands; the limit
+    // itself is the operator's, set in the config a member cannot write.
+    member: true,
     async handler(context) {
       // The current UTC month by default: the window a monthly budget is
       // judged over, and the one an invoice would be.
@@ -1267,6 +1270,8 @@ export const routes: Route[] = [
   {
     method: 'GET',
     pattern: `${API_PREFIX}/leases`,
+    // Who may use which fenced key, and why — nothing secret in it.
+    member: true,
     async handler(context) {
       const agentId = context.url.searchParams.get('agent') ?? undefined;
       const now = new Date();
@@ -1322,6 +1327,10 @@ export const routes: Route[] = [
   {
     method: 'POST',
     pattern: `${API_PREFIX}/leases/:id/revoke`,
+    // Ending a lease only ever narrows what an agent can do, so anyone who
+    // may talk to the agents may take one back. Granting one widens it, and
+    // stays the operator's.
+    member: true,
     async handler(context) {
       const body = await readJsonObject(context.request);
       const label = optionalString(body, 'actor');
