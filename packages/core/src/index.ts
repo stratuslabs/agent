@@ -3350,6 +3350,44 @@ export type StratusEvent =
       use?: string;
       reason?: string;
     }
+  /**
+   * An agent asked for a lease on a credential that needs one
+   * (`lease.request`), and the channel it asked in has already put the
+   * question in front of someone who can answer it — delivered first and
+   * announced after, as `credential.requested` is. `duration` is how long
+   * the lease would run once approved, as the agent asked for it (`2h`);
+   * `maxUses` its use limit, absent for none.
+   */
+  | {
+      type: 'lease.requested';
+      sessionId: string;
+      agentId: string;
+      requestId: string;
+      credential: string;
+      duration: string;
+      maxUses?: number;
+      /** The agent's own words on what it needs the key for. Untrusted text. */
+      reason?: string;
+      metadata?: JsonObject;
+    }
+  /**
+   * A person answered a `lease.requested`. Approved, it names the lease
+   * that was granted, which is then an ordinary lease: listed, spent, and
+   * revoked like one granted at the machine. Denied, nothing was granted.
+   */
+  | {
+      type: 'lease.decided';
+      sessionId: string;
+      agentId: string;
+      requestId: string;
+      credential: string;
+      decision: 'approved' | 'denied';
+      /** Who decided. Channel-native id (a Slack user). */
+      actor?: string;
+      leaseId?: string;
+      expiresAt?: string;
+      maxUses?: number;
+    }
   | {
       type: 'session.completed';
       sessionId: string;

@@ -26,6 +26,11 @@ export const formatEvent = (event: StratusEvent): string | null => {
     case 'credential.provided':
       return `• credential.provided ${event.name} (${event.scope}) for ${event.agentId}${event.actor ? ` by ${event.actor}` : ''}`
         + (event.grantError !== undefined ? ' — stored, not granted' : '');
+    case 'lease.requested':
+      return `• lease.requested ${event.credential} for ${event.duration}${event.maxUses !== undefined ? ` (${String(event.maxUses)} uses)` : ''} by ${event.agentId}`;
+    case 'lease.decided':
+      return `• lease.decided ${event.decision} ${event.credential} for ${event.agentId}${event.actor ? ` by ${event.actor}` : ''}`
+        + (event.leaseId !== undefined ? ` (${event.leaseId})` : '');
     case 'session.completed':
       return `• session.completed ${event.sessionId}`;
     case 'credential.leased':
@@ -111,6 +116,27 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
         requestId: event.requestId,
         ...(event.actor ? { actor: event.actor } : {}),
         ...(event.grantError !== undefined ? { grantError: event.grantError } : {}),
+      };
+    // A lease asked for and decided from a chat is a grant of access with no
+    // other record of who made it, so the pair names the actor and the
+    // lease, as the credential pair does. The agent's reason is its own
+    // text and stays out; it is kept on the lease, in `fleet.db`.
+    case 'lease.requested':
+      return {
+        credential: event.credential,
+        duration: event.duration,
+        requestId: event.requestId,
+        ...(event.maxUses !== undefined ? { maxUses: event.maxUses } : {}),
+      };
+    case 'lease.decided':
+      return {
+        credential: event.credential,
+        decision: event.decision,
+        requestId: event.requestId,
+        ...(event.actor ? { actor: event.actor } : {}),
+        ...(event.leaseId !== undefined ? { leaseId: event.leaseId } : {}),
+        ...(event.expiresAt !== undefined ? { expiresAt: event.expiresAt } : {}),
+        ...(event.maxUses !== undefined ? { maxUses: event.maxUses } : {}),
       };
     // Every leased use, allowed or refused — the audit trail a lease
     // exists to leave. The lease that paid, never the key; `use` is the

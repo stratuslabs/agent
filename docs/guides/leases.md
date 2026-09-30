@@ -84,6 +84,13 @@ fix:
 > Agent ava's lease on github.token (lease_3f9c0a1b2c3d4e5f) expired at
 > 2026-09-29T16:00:00.000Z, so the key was not used. An operator can grant a
 > new one with `stratus lease grant ava github.token --for 1h --reason "…"`.
+> If you have the lease.request tool, you can ask an approver for one in
+> this conversation.
+
+The last sentence is the daemon's, on a named credential's refusal; a
+`stratus run` or `stratus chat` has no approver to ask and leaves it out,
+and so does a refused sign-in, since a turn whose model call was refused
+cannot call a tool.
 
 A leased sign-in that runs out is not a model failing, so a configured
 fallback model does not answer instead.
@@ -99,6 +106,52 @@ refused. The key never is.
 
 A restart neither resets a lease's count nor extends it: uses are counted in
 `fleet.db` as they happen.
+
+## Asking for one from Slack
+
+An agent refused for want of a lease can ask for one in the conversation
+it is in, with the `lease.request` tool (a daemon tool, so the soul lists
+it under `tools:` like `credential.request`, or lists no `tools:` at all).
+It names the credential, how long (`30m`, `2h`, `7d`; an hour if it does
+not say), an optional use limit, and why:
+
+```
+Ava is asking for a lease on github.token, for 2h, up to 3 uses.
+Ava says: To open one pull request.
+[Approve] [Deny]
+```
+
+- **Only an approver decides.** The buttons answer only to the agent's
+  `approvals.slackApprovers`, the same list that decides
+  [approval buttons](./approvals.md); a click by anyone else is told so and
+  settles nothing, either way.
+- **Approving grants exactly what the message shows**, counted from the
+  click: the credential, the duration, the use limit. The buttons carry
+  only the request's id, so no click can widen the terms. The grant is an
+  ordinary lease in `fleet.db`, listed, spent, and revoked like one granted
+  at the machine, with `grantedBy` set to `slack:<user id>` and the agent's
+  reason on it (control characters spelled out, since `stratus lease list`
+  prints it). The agent can use the key from its next reply.
+- **Denying grants nothing.** Either answer settles the request once; the
+  message is rewritten with the outcome and who gave it, and a
+  `lease.requested` / `lease.decided` pair is in [`stratus logs`](./logs.md)
+  with the approver's id and the lease's.
+- **It asks only when it could be granted and used.** A credential that is
+  not on `leases.credentials`, one the agent's soul does not list, one that
+  is not stored, a duration past the 90-day ceiling, a live lease the agent
+  already holds, or a request of its already waiting: each is refused
+  before anyone is asked, with what to do instead.
+- **Where it asks** follows the rules of the
+  [credential form](./slack.md#adding-a-credential-from-slack): only a turn
+  the Slack adapter started from a Slack message, in that message's
+  thread, and only where an approver can see it — not a direct message
+  with someone who is not one, nor a private channel with none of them in
+  it. Anywhere else, the agent is told the `stratus lease grant` command
+  that grants one at the machine instead. The agent hears that an approver
+  was asked only once the message is posted.
+
+Requests live in memory. After a restart a pending one is gone: its
+buttons say so on the first click, and the agent asks again.
 
 ## Delegation: a sub-lease, never more than the parent
 
@@ -127,8 +180,9 @@ borrowed lease has ended is told that, not that it holds none.
 ## When to use this, and when not
 
 Leases answer "this agent may use this key, for this long, and I want every
-use on the record". They are pre-granted by an operator — at the machine or
-through the API — rather than requested mid-turn. For keys an agent should
+use on the record". An operator grants them ahead of time — at the machine
+or through the API — or an approver grants one when the agent asks
+[from Slack](#asking-for-one-from-slack). For keys an agent should
 simply always hold, leave them off the list: the soul's `credentials:` list
 is that grant. For deciding whether a *tool call* may run at all, see
 [Approvals](./approvals.md); a lease is about the key, not the call.

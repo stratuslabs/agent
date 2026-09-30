@@ -126,8 +126,14 @@ credential still needs the delegate's own soul to list it, since the
 allowlist runs before any lease.
 
 Of the open questions: **cells, not namespaces** (above). **Leases are
-pre-granted** at provisioning or at the machine, by an operator, and
-runtime grants from Slack wait for a deployment that asks for them.
+pre-granted** at provisioning or at the machine, by an operator — and,
+since, **granted at runtime from Slack** too: an agent refused for want of
+one asks with `lease.request`, and one of its approvers approves or denies
+the exact terms shown ([Leases](../guides/leases.md#asking-for-one-from-slack)).
+The agent asks, rather than the refused use waiting on a human the way an
+approval does: a lease is refused inside a credential resolution, below the
+permission engine that parks tool calls, and the explicit request is the
+same shape `credential.request` already gave agents.
 
 ## Why now
 

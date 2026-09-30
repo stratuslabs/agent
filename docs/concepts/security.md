@@ -62,6 +62,14 @@ linked own the full story.
   grants the name to the requesting agent's soul and to no other agent,
   whatever scope the key was stored under.
   ([Slack](../guides/slack.md#adding-a-credential-from-slack))
+- **A lease an agent asks for is the approver's grant, on the terms they
+  were shown.** `lease.request` only asks; a lease exists once one of the
+  agent's approvers clicks **Approve**, checked by *who clicked*, and it is
+  exactly the credential, duration, and use limit in the message — the
+  button carries only the request's id. It pays only for a key the agent's
+  soul already lists and the store already holds, so no lease can widen
+  what an agent holds, only when it may use it.
+  ([Leases](../guides/leases.md#asking-for-one-from-slack))
 
 ## What a cloned repo cannot decide
 

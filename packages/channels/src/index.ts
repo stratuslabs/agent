@@ -248,6 +248,24 @@ export interface GatewayLike {
     value: string;
     actor?: string;
   }): Promise<{ ok: true } | { ok: false; message: string; retired?: boolean }>;
+  /**
+   * Answers a `lease.requested`: approved, the gateway grants the lease the
+   * request described, on the terms the request carried and nothing a
+   * click can add; denied, nothing is granted. Either way the request is
+   * settled and `lease.decided` says how. `ok: false` carries a sentence
+   * for whoever clicked; `retired` means no answer can ever land on this
+   * request, so the adapter should take its buttons down.
+   *
+   * Who may answer is the adapter's question, as it is for approvals.
+   *
+   * Optional: a host that omits it gives up approving leases from a
+   * channel, and an adapter says so to whoever tried.
+   */
+  answerLeaseRequest?(input: {
+    requestId: string;
+    decision: 'approve' | 'deny';
+    actor?: string;
+  }): Promise<{ ok: true } | { ok: false; message: string; retired?: boolean }>;
 }
 
 /**
@@ -289,6 +307,27 @@ export interface ChannelCredentialRequest {
   metadata: JsonObject;
 }
 
+/**
+ * A lease an agent asked for, handed to the channel its conversation is in
+ * so a person there can approve or deny it. As with a credential request,
+ * the terms live with the gateway under `requestId`; these copies are for
+ * showing, and an answer quotes back only the id.
+ */
+export interface ChannelLeaseRequest {
+  sessionId: string;
+  agentId: string;
+  requestId: string;
+  credential: string;
+  /** How long the lease runs once approved, as asked: `30m`, `2h`, `7d`. */
+  duration: string;
+  /** The use limit asked for; absent for none inside the time. */
+  maxUses?: number;
+  /** The agent's own words for why; show them as the agent's. */
+  reason: string;
+  /** The session's routing metadata: where the conversation is. */
+  metadata: JsonObject;
+}
+
 export interface ChannelAdapter {
   name: string;
   start(gateway: GatewayLike): Promise<void>;
@@ -323,6 +362,14 @@ export interface ChannelAdapter {
    * tells its user the operator was asked.
    */
   requestCredential?(request: ChannelCredentialRequest): Promise<void>;
+  /**
+   * Asks a person in the conversation to approve a lease the agent asked
+   * for. Optional, and under the same contract as `requestCredential`:
+   * resolve once the question is in front of someone who can answer it,
+   * and reject otherwise with a sentence for the agent, which the gateway
+   * hands it in place of "an approver was asked".
+   */
+  requestLease?(request: ChannelLeaseRequest): Promise<void>;
 }
 
 export interface ChannelSessionKeyParts {

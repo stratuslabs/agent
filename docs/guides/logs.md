@@ -110,7 +110,11 @@ the four token counts, the same rows [`stratus usage`](./usage-and-budgets.md)
 sums — so a spend can be followed to the turn that made it. Every use of a
 [leased credential](./leases.md) is a `credential.leased` record, allowed or
 refused, with the credential's name, the lease that paid, and what it was
-used for — never the key. A turn stopped by a spent budget or a missing
+used for — never the key. A lease an agent asked for
+[from Slack](./leases.md#asking-for-one-from-slack) is a `lease.requested`
+record (the credential, duration, and use limit, not the agent's reason)
+and a `lease.decided` one (approved or denied, by whom, and the lease
+granted). A turn stopped by a spent budget or a missing
 lease is `session.failed` with `refused: true`, its error the sentence the
 person in the conversation was shown.
 

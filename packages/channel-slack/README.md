@@ -345,6 +345,24 @@ never logs it, posts it, or dispatches it. Modals need no scope beyond the bot's
 and arrive over the same Socket Mode connection as clicks. The full flow is
 in [Slack](../../docs/guides/slack.md#adding-a-credential-from-slack).
 
+### Lease requests
+
+The same approvers answer an agent's `lease.request`, through the channel
+contract's `requestLease`. The adapter decides where to post and whether an
+approver can see it by exactly the rules above — the helper is shared, so
+the two cannot drift — and rejects, posting nothing, in the same cases. The
+message states the credential, the duration, the use limit, and the agent's
+reason, with **Approve** and **Deny** buttons carrying only the request id.
+A click is acked first, checked against the approvers (anyone else is told
+privately, and nothing is decided), and handed to the gateway's
+`answerLeaseRequest`, which grants the lease on the terms it recorded.
+The message is rewritten from `lease.decided` with the outcome, the
+approver, and the lease id; a refusal the gateway marks `retired` takes the
+buttons down with the reason. Forgotten buttons after a restart, and clicks
+that land while the post is still in flight, are handled as they are for
+credential forms. The full flow is in
+[Leases](../../docs/guides/leases.md#asking-for-one-from-slack).
+
 ## Who counts as the operator
 
 Everything above decides *which agent* a message is for. None of it decides

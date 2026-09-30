@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { EventBus, HostRefusalError, type ApprovalAnswer, type ImageAttachment, type JsonObject, type Session, type StratusEvent } from '@stratusagent/core';
-import type { ChannelCredentialRequest, GatewayLike } from '@stratusagent/channels';
+import type { ChannelCredentialRequest, ChannelLeaseRequest, GatewayLike } from '@stratusagent/channels';
 import {
   createSlackChannelAdapter as createAdapterAsShipped,
   createSlackFileFetcher,
@@ -7970,5 +7970,229 @@ test('a click that lands while the credential post is still in flight leaves the
   await asked;
   await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN'));
   assert.equal(web.views_opened.at(-1)?.view.private_metadata, 'cred-1', 'the button still opens the form');
+  await adapter.stop();
+});
+
+// ---- lease requests --------------------------------------------------------
+
+const leaseRequest = (overrides: Partial<ChannelLeaseRequest> = {}): ChannelLeaseRequest => ({
+  sessionId: 'slack:ava:T1:C1:100.1',
+  agentId: 'ava',
+  requestId: 'lease-req-1',
+  credential: 'github.token',
+  duration: '2h',
+  reason: 'To open one pull request.',
+  metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+  ...overrides,
+});
+
+const leaseClick = (requestId: string, user: string, decision: 'approve' | 'deny', blocks?: Array<Record<string, unknown>>) => ({
+  body: {
+    type: 'block_actions',
+    team_id: 'T1',
+    user: { id: user },
+    channel: { id: 'C1' },
+    message: { ts: 'bot-ts-1', thread_ts: '100.1', ...(blocks !== undefined ? { blocks } : {}) },
+    actions: [{ action_id: decision === 'approve' ? 'stratus_lease_approve' : 'stratus_lease_deny', value: requestId }],
+  },
+});
+
+/**
+ * A stub gateway that answers lease requests the way the real one does:
+ * once per pending request, with the outcome carried back as
+ * `lease.decided`. `ask` makes the request from inside a turn the adapter
+ * dispatched for a Slack message, as `lease.request` does.
+ */
+const leaseAdapter = (approvers: string[]) => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let next: Partial<ChannelLeaseRequest> = {};
+  let settleAsked: (outcome: unknown) => void = () => {};
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    assert.ok(adapter.requestLease, 'the Slack adapter asks for leases');
+    const outcome = await adapter.requestLease({ ...leaseRequest(next), sessionId }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    settleAsked(outcome);
+    return sessionWithReply(sessionId, 'asked');
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers }] as never,
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  web.knownConversations.set('C1', { is_member: true });
+  const answered: Array<{ requestId: string; decision: 'approve' | 'deny'; actor?: string }> = [];
+  const pending = new Set<string>();
+  let refuseWith: string | undefined;
+  gateway.answerLeaseRequest = async (input) => {
+    answered.push(input);
+    if (!pending.has(input.requestId)) {
+      return { ok: false, retired: true, message: 'That lease request is no longer pending.' };
+    }
+    pending.delete(input.requestId);
+    if (refuseWith !== undefined) {
+      return { ok: false, retired: true, message: refuseWith };
+    }
+    await gateway.bus.emit({
+      type: 'lease.decided',
+      sessionId: 'slack:ava:T1:C1:100.1',
+      agentId: 'ava',
+      requestId: input.requestId,
+      credential: 'github.token',
+      ...(input.actor !== undefined ? { actor: input.actor } : {}),
+      ...(input.decision === 'approve'
+        ? { decision: 'approved' as const, leaseId: 'lease_abc', expiresAt: '2026-09-30T14:00:00.000Z', maxUses: 3 }
+        : { decision: 'denied' as const }),
+    });
+    return { ok: true };
+  };
+  let asks = 0;
+  const ask = async (overrides: Partial<ChannelLeaseRequest> = {}, dmFrom?: string): Promise<void> => {
+    next = overrides;
+    const asked = new Promise<unknown>((resolve) => {
+      settleAsked = resolve;
+    });
+    asks += 1;
+    await (dmFrom !== undefined
+      ? socket.deliver('message', mention(`use the token (${asks})`, {
+          type: 'message', ts: `300.${asks}`, channel: 'D1', channel_type: 'im', user: dmFrom,
+        }))
+      : socket.deliver('app_mention', mention(
+          `<@B-AVA> use the token (${asks})`,
+          asks === 1 ? {} : { ts: `100.${asks}`, thread_ts: '100.1' },
+        )));
+    const outcome = await asked;
+    if (outcome !== undefined) {
+      throw outcome;
+    }
+  };
+  const leasePosts = () => web.posts.filter((post) => buttonIds(post.blocks).includes('stratus_lease_approve'));
+  return { socket, web, gateway, adapter, answered, pending, ask, leasePosts, refuse: (message: string) => {
+    refuseWith = message;
+  } };
+};
+
+test('a lease request is posted in the thread with the terms, and only an approver\'s click decides it', async () => {
+  const { socket, web, gateway, adapter, answered, pending, ask, leasePosts } = leaseAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('lease-req-1');
+  // Metadata naming another conversation changes nothing: where to post is
+  // the turn's, not the session bag's.
+  await ask({ maxUses: 3, metadata: { channel: 'slack', slackChannel: 'C-ELSEWHERE' } });
+
+  const posted = leasePosts().at(-1);
+  assert.equal(posted?.channel, 'C1');
+  assert.equal(posted?.thread_ts, '100.1');
+  const blocks = JSON.stringify(posted?.blocks);
+  assert.match(blocks, /\*Ava\* is asking for a lease on `github.token`, for 2h, up to 3 uses\./);
+  assert.match(blocks, /_Ava says:_ To open one pull request\./);
+  assert.deepEqual(buttonIds(posted?.blocks), ['stratus_lease_approve', 'stratus_lease_deny']);
+
+  // A bystander's click decides nothing, either way.
+  await socket.deliver('interactive', leaseClick('lease-req-1', 'U-STRANGER', 'deny'));
+  assert.deepEqual(answered, []);
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /You are not an approver for Ava, so that decision was not recorded\./);
+
+  await socket.deliver('interactive', leaseClick('lease-req-1', 'U-DYLAN', 'approve'));
+  assert.deepEqual(answered, [{ requestId: 'lease-req-1', decision: 'approve', actor: 'U-DYLAN' }]);
+  await adapter.stop();
+  const update = web.updates.at(-1);
+  assert.match(
+    update?.text ?? '',
+    /Approved by <@U-DYLAN>: Ava holds a lease on `github.token` until 2026-09-30T14:00:00\.000Z, for up to 3 uses \(`lease_abc`\)\. It works from Ava's next reply\./,
+  );
+  assert.equal(buttonIds(update?.blocks).length, 0);
+});
+
+test('a denied lease request says so and takes its buttons down', async () => {
+  const { socket, web, gateway, adapter, answered, pending, ask, leasePosts } = leaseAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('lease-req-1');
+  await ask({ duration: '30m' });
+  // No use limit: the terms name only the duration.
+  assert.match(JSON.stringify(leasePosts().at(-1)?.blocks), /is asking for a lease on `github.token`, for 30m\./);
+  await socket.deliver('interactive', leaseClick('lease-req-1', 'U-DYLAN', 'deny'));
+  assert.deepEqual(answered, [{ requestId: 'lease-req-1', decision: 'deny', actor: 'U-DYLAN' }]);
+  await adapter.stop();
+  const update = web.updates.at(-1);
+  assert.match(update?.text ?? '', /Denied by <@U-DYLAN>: Ava was not granted a lease on `github.token`\./);
+  assert.equal(buttonIds(update?.blocks).length, 0);
+});
+
+test('a lease request the gateway can no longer settle is taken down, with the reason for whoever clicked', async () => {
+  const { socket, web, gateway, adapter, pending, ask, refuse } = leaseAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('lease-req-1');
+  await ask();
+  refuse('The lease could not be granted (disk full). Ask the agent to request it again.');
+  await socket.deliver('interactive', leaseClick('lease-req-1', 'U-DYLAN', 'approve'));
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /could not be granted \(disk full\)/);
+  const update = web.updates.at(-1);
+  assert.match(update?.text ?? '', /No lease on `github.token` was granted: The lease could not be granted \(disk full\)/);
+  assert.equal(buttonIds(update?.blocks).length, 0);
+  await adapter.stop();
+});
+
+test('a lease request nobody in Slack could answer is refused back to the gateway instead of posted', async () => {
+  const unanswerable = leaseAdapter([]);
+  await unanswerable.adapter.start(unanswerable.gateway);
+  await assert.rejects(unanswerable.ask(), /Nobody can approve it from Slack, because no approver is configured for Ava \(approvals\.slackApprovers\)\./);
+  assert.equal(unanswerable.leasePosts().length, 0);
+  await unanswerable.adapter.stop();
+
+  const { gateway, adapter, ask, leasePosts, web } = leaseAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  // A DM with someone who is not an approver, and a private channel with none in it.
+  await assert.rejects(ask({}, 'U-STRANGER'), /Nobody who can approve it can see this conversation: it is a direct message with someone who is not an approver for Ava\./);
+  web.knownConversations.set('C1', { is_member: true, is_private: true });
+  web.conversationMembers.set('C1', [['U-STRANGER', 'B-AVA']]);
+  await assert.rejects(ask({ requestId: 'lease-private' }), /none of Ava's approvers is a member of this private conversation/);
+  // A turn the adapter did not dispatch has nobody in Slack to ask.
+  assert.ok(adapter.requestLease);
+  await assert.rejects(adapter.requestLease(leaseRequest({ requestId: 'lease-http' })), /did not come from a Slack message, so there is nobody in Slack to show the request to/);
+  assert.equal(leasePosts().length, 0);
+  await adapter.stop();
+});
+
+test('a lease button a restarted daemon forgot is taken down on the first click, and one still posting is left live', async () => {
+  const { socket, web, gateway, adapter, pending, ask, answered } = leaseAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  const liveBlocks = [{ type: 'actions', elements: [{ type: 'button', action_id: 'stratus_lease_approve', value: 'lease-from-before' }] }];
+  await socket.deliver('interactive', leaseClick('lease-from-before', 'U-DYLAN', 'approve', liveBlocks));
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /no longer pending/);
+  assert.match(web.updates.at(-1)?.text ?? '', /no longer pending/);
+  assert.deepEqual(answered, []);
+
+  // Slack can show the message, and take a click on it, before postMessage answers.
+  pending.add('lease-req-1');
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered!: () => void;
+  const posting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const post = web.chat.postMessage.bind(web.chat);
+  web.chat.postMessage = async (args) => {
+    if (buttonIds(args.blocks).includes('stratus_lease_approve')) {
+      entered();
+      await held;
+    }
+    return post(args);
+  };
+  const updatesBefore = web.updates.length;
+  const asked = ask();
+  await posting;
+  await socket.deliver('interactive', leaseClick('lease-req-1', 'U-DYLAN', 'approve', liveBlocks));
+  assert.equal(web.updates.length, updatesBefore, 'the live request was not retired as an orphan');
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /still being posted/);
+  release();
+  await asked;
+  await socket.deliver('interactive', leaseClick('lease-req-1', 'U-DYLAN', 'approve'));
+  assert.deepEqual(answered, [{ requestId: 'lease-req-1', decision: 'approve', actor: 'U-DYLAN' }]);
   await adapter.stop();
 });

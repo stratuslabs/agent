@@ -127,7 +127,10 @@ for. An agent that needs one it does not hold is told to ask for it with
 ([Slack](../guides/slack.md#adding-a-credential-from-slack)), or otherwise to
 ask its operator to store one and grant it. A stored credential reaches only a plugin tool that
 declares it ([Tools](../guides/tools.md#searching-the-web)); an agent that
-went searching for a shared key is what this line is for.
+went searching for a shared key is what this line is for. A key it holds
+but may use only under a [lease](../guides/leases.md) is refused without
+one, and the refusal says it can ask an approver for one with
+`lease.request`.
 
 A conversation a channel started also tells the agent where it is
 happening ("this conversation is happening in Slack"), after its persona,

@@ -183,7 +183,7 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/schedules` | Every schedule the fleet has set — cadence, prompt, pre-authorized destination, next firing. The audit list: each row with a destination is a standing permission to speak |
 | DELETE | `/schedules/:id` | Cancel a schedule. Also revokes the destination grant riding on the row — a still-running firing's next send is gated normally. 404 when no such schedule exists |
 | GET | `/usage?since=&until=&agent=` | Tokens spent, from the home's usage ledger in `fleet.db`: `usage` is one row per (agent, provider, model) with `calls` and the four token buckets summed as the providers reported them, never priced. `since`/`until` are ISO dates or timestamps (default: the start of this UTC month, open-ended); a bad one answers `400 invalid_query`. When a `budget` is configured, `budget` carries the block and `limits` — every limit with `spent`, `resetsAt`, and `reached` — see [Usage and budgets](../../docs/guides/usage-and-budgets.md). `unrecorded: { calls, error? }` appears when spend is held outside the ledger (a failed write), so the rows are missing it — or, with `calls: 0` and an `error`, when the last daemon stopped with spend it could write nowhere and the ledger has not yet been settled from the saved sessions. `503 budget_unavailable` while the config has never been readable, or while held spend cannot be written — both times budgeted model calls are being refused |
-| GET | `/leases?agent=` | Every credential lease this home has granted, with its `state` (`active`, `expired`, `exhausted`, `revoked`), then the live delegated sub-leases (`parentId`, `sessionId`), which exist only in the daemon that lent them. A sub-lease's `state` is judged through its parents, as a use is: one whose parent was revoked, expired, or used up reports that state, whatever its own fields say. Names, counts, and reasons — never a key |
+| GET | `/leases?agent=` | Every credential lease this home has granted, with its `state` (`active`, `expired`, `exhausted`, `revoked`), then the live delegated sub-leases (`parentId`, `sessionId`), which exist only in the daemon that lent them. A sub-lease's `state` is judged through its parents, as a use is: one whose parent was revoked, expired, or used up reports that state, whatever its own fields say. A lease approved from Slack is listed like the rest, `grantedBy: "slack:<user id>"`, its `reason` the agent's own words. Names, counts, and reasons — never a key |
 | POST | `/leases` | Operator-only. Grant one: `{ agentId, credential, expiresIn \| expiresAt, maxUses?, reason, actor? }` → `{ lease }`. `expiresIn` is `30m`, `2h`, `7d`; a lease must end within 90 days and give a reason, or `400 invalid_lease` says which. An `agentId` no agent on the roster has (matched case-insensitively) is `404 agent_not_found`, since nothing could ever use the lease. `grantedBy` records `api:<actor>` (or `dashboard:`) — see [Credential leases](../../docs/guides/leases.md) |
 | POST | `/leases/:id/revoke` | End a lease now: `{ actor? }` → `{ lease }` with `state: "revoked"`. The very next use is refused — the daemon reads the row on every use. `404 lease_not_found` for an unknown id or one already revoked, which stays revoked as it was |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
@@ -658,6 +658,15 @@ caller's `use` label — names and ids, never a key. And `session.failed`
 carries `refused: true` when the host stopped the turn on purpose — a spent
 budget, an expired lease — so its `error` is a sentence for the person in
 the conversation, to show as it is rather than as a malfunction.
+
+`lease.requested` and `lease.decided` are an agent asking for a lease from
+a channel (`lease.request`) and a person answering it. The request carries
+the `credential`, the `duration` asked for (`2h`), `maxUses` when there is
+a limit, the agent's `reason`, and the session's routing `metadata`; it is
+sent only once the channel has put the question in front of an approver.
+The answer carries `decision` (`approved` or `denied`), the `actor` who
+gave it, and for an approval the `leaseId`, `expiresAt`, and `maxUses` of
+the lease granted, which `GET /leases` then lists like any other.
 
 `session.completed` carries the session's `usage` records in the same shape
 `GET /sessions/:id` returns — the whole set, not just this run's, because that

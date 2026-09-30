@@ -102,6 +102,11 @@ own approver in the shared `C07OPS` fallback channel. An explicit
 agent's gated calls are then denied outright — while omitting the key
 inherits.
 
+The same list answers the agent's other questions in Slack: a
+[credential form](./slack.md#adding-a-credential-from-slack) and a
+[lease request](./leases.md#asking-for-one-from-slack). An agent with no
+approvers is told nobody can answer either, instead of being left waiting.
+
 **Only a config you chose is allowed to set this block** — `--config`,
 `STRATUS_CONFIG`, or the global `~/.stratus/config.json`. An
 auto-discovered project-local `stratus.config.json` outranks the global one
