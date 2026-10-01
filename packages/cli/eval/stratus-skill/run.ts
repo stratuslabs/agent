@@ -63,20 +63,24 @@ type Check = (
    *   no switch and nothing to roll over.
    * - `tool`: the agent's `tools:` allow it, as the runner reads them. An
    *   agent with no credential.request has no link to move to a DM.
+   * - `notGranted`: the agent's `credentials:` do not already list it. An
+   *   agent told it holds search.apiKey is right to say nothing is needed.
    */
-  when?: { primary?: true; fallbackConfigured?: true; tool?: string };
+  when?: { primary?: true; fallbackConfigured?: true; tool?: string; notGranted?: string };
 };
 
 interface Served {
   onFallback: boolean;
   fallbackConfigured: boolean;
   tools: readonly string[] | undefined;
+  credentials: readonly string[] | undefined;
 }
 
 const applies = (check: Check, served: Served): boolean =>
   !(check.when?.primary === true && served.onFallback)
   && !(check.when?.fallbackConfigured === true && !served.fallbackConfigured)
-  && !(check.when?.tool !== undefined && served.tools !== undefined && !matchesToolAllowlist(check.when.tool, served.tools));
+  && !(check.when?.tool !== undefined && served.tools !== undefined && !matchesToolAllowlist(check.when.tool, served.tools))
+  && !(check.when?.notGranted !== undefined && served.credentials?.includes(check.when.notGranted) === true);
 
 interface Corpus {
   agent: { name: string; instructions: string };
@@ -155,6 +159,12 @@ const main = async (): Promise<void> => {
   // Kai stands in for one at the path it would have: told where its soul is
   // and that an edit reaches its next reply, and able to have a credential
   // granted in it. The file is named, never read or written.
+  // The checks read English, so the run is in English whatever the soul
+  // or config prefers: a correct answer in another language would fail
+  // every pattern, and the routing decision under test does not depend on it.
+  if (config.language !== undefined) {
+    console.error(`Note: running in English, not the configured language (${config.language}); the checks match English replies.`);
+  }
   const servedSoulPath = soulPath !== undefined ? path.resolve(soulPath) : path.join(agentsDirPath({}), `${agent.id}.md`);
   // The demo provider answers from a script, so a pass against it would be
   // a pass nobody earned. Refuse, and say what is missing.
@@ -307,7 +317,6 @@ const main = async (): Promise<void> => {
         soulPath: servedSoulPath,
         soulReloads: true,
         workspace: createAgentWorkspaces({}).forAgent(agent.id),
-        ...(config.language !== undefined ? { language: config.language } : {}),
         model: describeServingModel(config, false),
         ...(conversation !== undefined ? { conversation } : {}),
       };
@@ -327,6 +336,7 @@ const main = async (): Promise<void> => {
           onFallback: fellBack !== undefined,
           fallbackConfigured: config.fallback !== undefined,
           tools: agent.tools,
+          credentials: agent.credentials,
         })).filter((failure) => failure !== undefined)
         : [`the turn failed: ${threw}`];
       if (failures.length === 0) {
