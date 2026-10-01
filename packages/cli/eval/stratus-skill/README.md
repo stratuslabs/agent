@@ -71,7 +71,7 @@ it: the shipped skill, then the skills installed in `~/.stratus/skills/`
 soul's `skills:`, and the memory tools. The plugins the trusted config
 enables are loaded, so a provider a plugin contributes (`openai-compatible`
 is one) runs here as it does in production, and the trusted config's
-`maxTurns` is the budget here too. Four things are deliberately
+`maxTurns` is the budget here too. Five things are deliberately
 different:
 
 - **Memory is a throwaway store, one per case**, not the soul's own: the
@@ -91,6 +91,12 @@ different:
   A soul whose own instructions ask for another language still wins over
   that, as the prompt says it should, so such a soul is not one this eval
   can score: its failures are the language, not the answer.
+- **The gateway's own tools are offered inert.** A soul with no `tools:`
+  sees what the gateway registers, in its order: `demo.echo`, the memory
+  tools, the `schedule.*` tools, `message.send`, `credential.request`, and
+  `agent.delegate`. The ones whose effect leaves the turn are the real
+  definitions over backends that refuse, so nothing is scheduled, sent, or
+  delegated.
 - **Plugin tools are not offered.** This runner has no approval policy, so
   a plugin tool would run unattended, `shell.run` included. A soul with
   many plugin tools therefore routes against a shorter list here than in

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  AgentRegistry,
   AgentRunner,
   CONVERSATION_METADATA_KEY,
   ContributionRegistry,
@@ -27,16 +28,20 @@ import {
 import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
   createCredentialRequestTool,
+  createDelegateTool,
   createForgetTool,
+  createMessageSendTool,
   createPinTool,
   createRecallTool,
   createRememberTool,
+  createScheduleTools,
   loadStratusSkill,
 } from '@stratusagent/agents';
 import {
   CREDENTIAL_NAME_PATTERN,
   agentsDirPath,
   createAgentWorkspaces,
+  createDemoTool,
   createFileCredentialResolver,
   createRuntimeProvider,
   describeServingModel,
@@ -312,10 +317,29 @@ const main = async (): Promise<void> => {
     const runnerFor = (): AgentRunner => {
       const memory = new InMemoryAgentMemoryStore();
       const tools = new ToolRegistry();
+      // The catalog the gateway registers, in its order, so a soul with no
+      // tools: routes against the list production shows it, not a shorter
+      // one the stratus skill would find easier to win. The tools whose
+      // effect leaves the turn (a schedule, a message, another agent's run)
+      // are the real definitions over backends that refuse: the model sees
+      // the same names, descriptions and schemas, and nothing is scheduled,
+      // sent or delegated.
+      const refuse = (what: string) => (): never => {
+        throw new Error(`This eval does not ${what}; nothing happened.`);
+      };
+      tools.register(createDemoTool());
       tools.register(createRememberTool(memory));
       tools.register(createRecallTool(memory));
       tools.register(createForgetTool(memory));
       tools.register(createPinTool(memory));
+      for (const scheduleTool of createScheduleTools({
+        create: refuse('create schedules'),
+        list: async () => [],
+        cancel: async () => false,
+      })) {
+        tools.register(scheduleTool);
+      }
+      tools.register(createMessageSendTool(refuse('send messages')));
       // The real credential.request, for a soul whose tools: allow it as
       // the daemon's do, over a requester that asks nobody. It answers the
       // way the gateway does when no form can be shown here (the riskiest
@@ -363,6 +387,8 @@ const main = async (): Promise<void> => {
           ...(request.via === undefined ? { formUnavailable } : {}),
         };
       }));
+      // After credential.request, as the gateway registers it.
+      tools.register(createDelegateTool({ registry: new AgentRegistry(), dispatch: refuse('delegate to other agents') }));
       const runner = new AgentRunner({
         provider,
         tools,
