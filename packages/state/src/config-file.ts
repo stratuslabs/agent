@@ -294,21 +294,23 @@ const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined
   if (source.publicUrl !== undefined) {
     // Checked here, not when the first link is built: a link to an address
     // that is not one would reach the person asked for a key and fail there.
+    // No error repeats the value: it may carry a proxy sign-in, and this
+    // message goes to the daemon's log.
+    const invalid = (why: string): Error => new Error(`Invalid api.publicUrl in config ${configPath}: ${why}`);
     const parsed = typeof source.publicUrl === 'string' ? URL.parse(source.publicUrl.trim()) : null;
-    if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || parsed.search !== '' || parsed.hash !== '') {
-      throw new Error(
-        `Invalid api.publicUrl in config ${configPath}: ${String(source.publicUrl)}. `
-        + 'Use the http(s) address this daemon is reached on from elsewhere, like https://mac-mini.example.ts.net, with no query or fragment.',
-      );
+    if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) {
+      throw invalid('use the http(s) address this daemon is reached on from elsewhere, like https://mac-mini.example.ts.net.');
     }
     // Every link is built on this and handed to the agent, so a password in
-    // it would reach the model and the conversation. Refused without echoing
-    // the value, which is the secret.
+    // it would reach the model and the conversation.
     if (parsed.username !== '' || parsed.password !== '') {
-      throw new Error(
-        `Invalid api.publicUrl in config ${configPath}: it carries a username or password, and every credential link `
-        + 'is built on it and shown to the agent. Use the bare address, and put any proxy sign-in in the proxy itself.',
-      );
+      throw invalid('it carries a username or password, and every credential link is built on it and shown to the agent. '
+        + 'Use the bare address, and put any proxy sign-in in the proxy itself.');
+    }
+    // The serialized form, not `search`/`hash`: those read empty for a bare
+    // trailing `?` or `#`, which would still put every link's path after it.
+    if (parsed.href.includes('?') || parsed.href.includes('#')) {
+      throw invalid('links are built by appending a path to it, so it can carry no query or fragment, not even an empty one.');
     }
     api.publicUrl = parsed.href.replace(/\/+$/, '');
   }

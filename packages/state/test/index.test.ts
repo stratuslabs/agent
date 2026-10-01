@@ -1607,16 +1607,20 @@ test('api.publicUrl loads as an http(s) address without a trailing slash, and an
 
   // Credential links are built on it, so a bad one is caught where it was
   // written rather than in the hands of the person asked for a key.
-  for (const publicUrl of ['mac-mini:4123', 'ftp://mac-mini', 'https://mac-mini/?x=1', 42]) {
+  for (const publicUrl of ['mac-mini:4123', 'ftp://mac-mini', 'https://mac-mini/?x=1', 'https://mac-mini/?', 'https://mac-mini#', 42]) {
     await writeFile(file, JSON.stringify({ api: { publicUrl } }));
     await assert.rejects(() => loadConfigFile(file), /Invalid api\.publicUrl/);
   }
 
   // A sign-in in the address would ride every link into the model's view,
-  // so it is refused, and the refusal does not repeat it.
-  await writeFile(file, JSON.stringify({ api: { publicUrl: 'https://proxy-user:hunter2@mac-mini.example' } }));
-  await assert.rejects(
-    () => loadConfigFile(file),
-    (error: Error) => /carries a username or password/.test(error.message) && !error.message.includes('hunter2'),
-  );
+  // so it is refused, and no refusal repeats it, whatever else is wrong.
+  for (const publicUrl of ['https://proxy-user:hunter2@mac-mini.example', 'https://proxy-user:hunter2@mac-mini.example/?x=1']) {
+    await writeFile(file, JSON.stringify({ api: { publicUrl } }));
+    await assert.rejects(
+      () => loadConfigFile(file),
+      (error: Error) => /carries a username or password/.test(error.message) && !error.message.includes('hunter2'),
+    );
+  }
+  await writeFile(file, JSON.stringify({ api: { publicUrl: 'proxy-user:hunter2 not a url' } }));
+  await assert.rejects(() => loadConfigFile(file), (error: Error) => !error.message.includes('hunter2'));
 });
