@@ -174,6 +174,32 @@ test('a leased credential costs a use of a live lease, and says exactly why when
   assert.deepEqual(records, ['refused github.token', 'allowed github.token', 'allowed github.token', 'refused github.token', 'refused github.token']);
 });
 
+test('a refusal says whether a lease of the agent\'s own would answer it', () => {
+  const store = createLeaseStore();
+  const broker = createLeaseBroker({ store, leased: ['github.token'] });
+  const grantable = (use: () => unknown): boolean | undefined => {
+    try {
+      use();
+    } catch (error) {
+      return error instanceof CredentialLeaseError ? error.grantable : undefined;
+    }
+    return undefined;
+  };
+  // None held, or the one held has ended: a new grant answers it.
+  assert.equal(grantable(() => broker.use('ava', 'github.token')), true);
+  const parent = store.grant({ agentId: 'ava', credential: 'github.token', expiresAt: inAnHour(), maxUses: 1, reason: 'once' });
+  const [sub] = broker.mintSubLeases({ parentAgentId: 'ava', parentSessionId: 's-1', child: agent('bea'), childSessionId: 's-1:delegate:bea:1:x' });
+  assert.ok(sub);
+  broker.use('ava', 'github.token');
+  assert.equal(grantable(() => broker.use('ava', 'github.token')), true);
+  // A borrowed lease that ended above the delegate is the delegator's to fix.
+  assert.equal(grantable(() => broker.use('bea', 'github.token', { sessionId: 's-1:delegate:bea:1:x' })), false);
+  store.revoke(parent.id, 'cli');
+  // An unknown list is the config's to fix.
+  broker.setLeased(new Error('unreadable'));
+  assert.equal(grantable(() => broker.use('ava', 'github.token')), false);
+});
+
 test('an expired lease refuses at its expiry, however many uses it had left', () => {
   const store = createLeaseStore();
   let now = new Date('2026-09-29T12:00:00Z');

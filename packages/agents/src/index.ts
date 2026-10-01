@@ -113,4 +113,9 @@ export {
   type CredentialRequester,
   createCredentialRequestTool,
 } from './tools/credentials.ts';
+export {
+  LEASE_REQUEST_TOOL_NAME,
+  type LeaseRequester,
+  createLeaseRequestTool,
+} from './tools/leases.ts';
 export { GATEWAY_ONLY_TOOL_NAMES } from './tools/gateway-only.ts';

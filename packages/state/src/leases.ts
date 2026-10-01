@@ -152,12 +152,21 @@ export interface LeaseStore {
 export class CredentialLeaseError extends HostRefusalError {
   readonly agentId: string;
   readonly credential: string;
+  /**
+   * Whether a new lease of the agent's own would answer this refusal: it
+   * held none, or the one it held has ended. False when the leased list is
+   * unknown, or a borrowed sub-lease ended above it — no grant to this
+   * agent fixes either — so a host offering a way to ask for one offers it
+   * only when asking could help.
+   */
+  readonly grantable: boolean;
 
-  constructor(message: string, agentId: string, credential: string) {
+  constructor(message: string, agentId: string, credential: string, grantable = false) {
     super(message);
     this.name = 'CredentialLeaseError';
     this.agentId = agentId;
     this.credential = credential;
+    this.grantable = grantable;
   }
 }
 
@@ -462,7 +471,7 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
         ? `The lease ${agentId} borrowed for ${credential} (${borrowed.id}, from ${borrowed.parentId ?? 'its delegator'}) has ended — revoked, expired, or used up above it — so the key was not used. The delegating agent needs a live lease of its own.`
         : refusalFor(agentId, credential, at);
       report({ ...base, outcome: 'refused', reason });
-      throw new CredentialLeaseError(reason, agentId, credential);
+      throw new CredentialLeaseError(reason, agentId, credential, borrowed === undefined);
     },
 
     mintSubLeases({ parentAgentId, parentSessionId, child, childSessionId }) {

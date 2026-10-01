@@ -31,6 +31,8 @@ import {
   CREDENTIAL_REQUEST_TOOL_NAME,
   GATEWAY_ONLY_TOOL_NAMES,
   createCredentialRequestTool,
+  LEASE_REQUEST_TOOL_NAME,
+  createLeaseRequestTool,
 } from '../src/index.ts';
 
 test('generateAgentName is a human-ish first name, deterministic for a seed', () => {
@@ -885,4 +887,35 @@ test('credential.request passes a name, a scope defaulting to the agent, and a r
   // A human decides everything after the question, so asking is safe.
   assert.equal(tool.risk, 'safe');
   assert.ok(GATEWAY_ONLY_TOOL_NAMES.includes(CREDENTIAL_REQUEST_TOOL_NAME));
+});
+
+test('lease.request passes a credential, a duration defaulting to an hour, a use limit, and a reason, and refuses anything else', async () => {
+  const asked: Array<{ credential: string; duration: string; maxUses?: number; reason: string }> = [];
+  const tool = createLeaseRequestTool(async (request) => {
+    asked.push(request);
+    return { requestId: 'req-1' };
+  });
+  const session = {
+    id: 's1',
+    agent: { id: 'kai', name: 'Kai' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  const output = await tool.execute({ credential: ' github.token ', reason: ' To open a PR. ' }, session);
+  assert.deepEqual(asked[0], { credential: 'github.token', duration: '1h', reason: 'To open a PR.' });
+  assert.match(JSON.stringify(output), /Nothing is granted until they approve/);
+  await tool.execute({ credential: 'github.token', duration: '30m', uses: 3, reason: 'Three API calls.' }, session);
+  assert.deepEqual(asked[1], { credential: 'github.token', duration: '30m', maxUses: 3, reason: 'Three API calls.' });
+
+  await assert.rejects(tool.execute({ reason: 'x' }, session), /needs "credential"/);
+  await assert.rejects(tool.execute({ credential: 'github.token' }, session), /needs "reason"/);
+  await assert.rejects(tool.execute({ credential: 'github.token', reason: 'x', uses: 0 }, session), /"uses" is a whole number/);
+  await assert.rejects(tool.execute({ credential: 'github.token', reason: 'x', uses: 1.5 }, session), /"uses" is a whole number/);
+  assert.equal(asked.length, 2);
+  // A human decides whether anything is granted, so asking is safe.
+  assert.equal(tool.risk, 'safe');
+  assert.ok(GATEWAY_ONLY_TOOL_NAMES.includes(LEASE_REQUEST_TOOL_NAME));
 });

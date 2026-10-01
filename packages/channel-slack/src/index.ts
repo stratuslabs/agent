@@ -29,6 +29,7 @@ import {
   channelSessionKey,
   type ChannelAdapter,
   type ChannelCredentialRequest,
+  type ChannelLeaseRequest,
   type GatewayLike,
   type OutboundAddress,
   type OutboundConnection,
@@ -2072,6 +2073,64 @@ interface PendingCredentialPost {
   approvers: Set<string>;
 }
 
+const LEASE_APPROVE_ACTION = 'stratus_lease_approve';
+const LEASE_DENY_ACTION = 'stratus_lease_deny';
+
+/** "for 2h" or "for 2h, up to 5 uses": the terms an approval grants. */
+const leaseTerms = (duration: string, maxUses: number | undefined): string =>
+  `for ${duration}${maxUses !== undefined ? `, up to ${String(maxUses)} use${maxUses === 1 ? '' : 's'}` : ''}`;
+
+/**
+ * The request as it appears in the conversation. The terms are the
+ * gateway's record of the request, shown so an approver knows exactly what
+ * a click grants; the buttons carry only the request id.
+ */
+const leaseRequestBlocks = (
+  agentName: string,
+  credential: string,
+  duration: string,
+  maxUses: number | undefined,
+  reason: string,
+  requestId: string,
+): SlackBlock[] => {
+  const shortReason = reason.length > CREDENTIAL_REASON_LIMIT ? `${reason.slice(0, CREDENTIAL_REASON_LIMIT)}…` : reason;
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*${escapeSlackText(agentName)}* is asking for a lease on \`${escapeSlackText(credential)}\`, ${escapeSlackText(leaseTerms(duration, maxUses))}.`,
+      },
+    },
+    { type: 'section', text: { type: 'mrkdwn', text: `_${escapeSlackText(agentName)} says:_ ${escapeSlackText(shortReason)}` } },
+    {
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: 'Only an approver can decide. Approving grants the lease from now, on these terms; `stratus lease revoke` ends it early.',
+      }],
+    },
+    {
+      type: 'actions',
+      elements: [
+        { type: 'button', action_id: LEASE_APPROVE_ACTION, style: 'primary', value: requestId, text: { type: 'plain_text', text: 'Approve' } },
+        { type: 'button', action_id: LEASE_DENY_ACTION, style: 'danger', value: requestId, text: { type: 'plain_text', text: 'Deny' } },
+      ],
+    },
+  ];
+};
+
+interface PendingLeasePost {
+  connection: AgentConnection;
+  channel: string;
+  ts: string;
+  agentId: string;
+  agentName: string;
+  credential: string;
+  /** Bound at render time, as an approval request's are. */
+  approvers: Set<string>;
+}
+
 interface PendingApprovalPost {
   connection: AgentConnection;
   channel: string;
@@ -2279,6 +2338,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const credentialsPosting = new Set<string>();
   // Credential requests with a live button, keyed by the gateway's request id.
   const credentialPosts = new Map<string, PendingCredentialPost>();
+  // Lease requests, the same two ways: mid-post, and posted with live buttons.
+  const leasesPosting = new Set<string>();
+  const leasePosts = new Map<string, PendingLeasePost>();
   // Requests whose message is mid-post. A request can settle — expire, or
   // its turn be cancelled — while the postMessage that announces it is
   // still in flight, and the retraction would then find nothing to retract
@@ -3169,7 +3231,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * reason, when Slack will not say, so the caller refuses rather than
    * guesses.
    */
-  const approverCanSee = async (connection: AgentConnection, channel: string, approvers: Set<string>): Promise<boolean> => {
+  const approverCanSee = async (
+    connection: AgentConnection,
+    channel: string,
+    approvers: Set<string>,
+    thing: string,
+  ): Promise<boolean> => {
     try {
       const info = (await connection.web.conversations.info({ channel })).channel;
       if (info?.is_private !== true && info?.is_mpim !== true) {
@@ -3186,20 +3253,33 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return false;
     } catch (error) {
       throw new Error(
-        `Slack would not say who can see this conversation (${error instanceof Error ? error.message : String(error)}), so the form was not posted. `
+        `Slack would not say who can see this conversation (${error instanceof Error ? error.message : String(error)}), so the ${thing} was not posted. `
         + 'The app needs the conversations read scopes (channels:read, groups:read, mpim:read); see the app manifest.',
       );
     }
   };
 
   /**
-   * The channel contract's `requestCredential`: posts the form and resolves
-   * only once it is up with a button an approver can press. Every refusal
-   * rejects with a sentence for the agent, which the gateway hands it in
-   * place of "your operator was asked": a request nobody can answer would
-   * otherwise sit pending while the agent says it is waiting on someone.
+   * Where a question for an agent's approvers is asked, and the proof that
+   * one of them will see it there — the rules a credential form and a lease
+   * request share, so the two cannot drift. Rejects with a sentence for the
+   * agent whenever nobody who can answer would be shown it.
+   *
+   * `thing` is what is being posted ("form", "request"), `act` what an
+   * approver would do with it ("add it", "approve it"), and `answerable`
+   * whether the gateway can take the answer at all.
    */
-  const requestCredential = async (request: ChannelCredentialRequest): Promise<void> => {
+  const approverAudience = async (
+    request: { sessionId: string; agentId: string },
+    ask: { thing: string; act: string; answerable: (gateway: GatewayLike) => boolean },
+  ): Promise<{
+    gateway: GatewayLike;
+    connection: AgentConnection;
+    channel: string;
+    thread?: string;
+    approvers: Set<string>;
+    agentName: string;
+  }> => {
     const gateway = gatewayRef;
     const connection = connectionFor(request.agentId);
     if (!gateway || !connection) {
@@ -3219,16 +3299,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ? undefined
       : (renderers.get(request.sessionId) ?? []).find((renderer) => renderer.turnId === active);
     if (!turn) {
-      throw new Error('This turn did not come from a Slack message, so there is nobody in Slack to show the form to.');
+      throw new Error(`This turn did not come from a Slack message, so there is nobody in Slack to show the ${ask.thing} to.`);
     }
     const channel = turn.channel;
     const thread = turn.threadTs;
-    const unseen = `Nobody who can add it can see this conversation`;
+    const unseen = `Nobody who can ${ask.act} can see this conversation`;
     const approvers = new Set((connection.config.approvers ?? []).filter((id) => id.length > 0));
     const agentName = gateway.agents().find((agent) => agent.id === request.agentId)?.name ?? request.agentId;
-    if (approvers.size === 0 || gateway.provideCredential === undefined) {
+    if (approvers.size === 0 || !ask.answerable(gateway)) {
       throw new Error(
-        `Nobody can add it from Slack, because no approver is configured for ${agentName} (approvals.slackApprovers).`,
+        `Nobody can ${ask.act} from Slack, because no approver is configured for ${agentName} (approvals.slackApprovers).`,
       );
     }
     // A DM has one person in it besides the app. Posted there for someone
@@ -3243,9 +3323,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // A public channel is open to anyone in the workspace, approvers
     // included, and is not checked. Unknown is refused, not assumed fine:
     // a form posted where nobody can answer it waits forever.
-    if (turn.dmWith === undefined && !(await approverCanSee(connection, channel, approvers))) {
+    if (turn.dmWith === undefined && !(await approverCanSee(connection, channel, approvers, ask.thing))) {
       throw new Error(`${unseen}: none of ${agentName}'s approvers is a member of this private conversation. ${elsewhere}`);
     }
+    return { gateway, connection, channel, ...(thread !== undefined ? { thread } : {}), approvers, agentName };
+  };
+
+  /**
+   * The channel contract's `requestCredential`: posts the form and resolves
+   * only once it is up with a button an approver can press. Every refusal
+   * rejects with a sentence for the agent, which the gateway hands it in
+   * place of "your operator was asked": a request nobody can answer would
+   * otherwise sit pending while the agent says it is waiting on someone.
+   */
+  const requestCredential = async (request: ChannelCredentialRequest): Promise<void> => {
+    const { connection, channel, thread, approvers, agentName } = await approverAudience(request, {
+      thing: 'form',
+      act: 'add it',
+      answerable: (gateway) => gateway.provideCredential !== undefined,
+    });
     let posted: { ts?: string; channel?: string };
     credentialsPosting.add(request.requestId);
     try {
@@ -3315,6 +3411,129 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       await post.connection.web.chat.update({ channel: post.channel, ts: post.ts, text, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] });
     } catch (error) {
       warn(`slack: could not retire the credential request for ${post.agentId} (${error instanceof Error ? error.message : String(error)})`);
+    }
+  };
+
+  /**
+   * The channel contract's `requestLease`: posts the question and resolves
+   * only once it is up with buttons an approver can press, under the rules
+   * a credential form follows (`approverAudience`).
+   */
+  const requestLease = async (request: ChannelLeaseRequest): Promise<void> => {
+    const { connection, channel, thread, approvers, agentName } = await approverAudience(request, {
+      thing: 'request',
+      act: 'approve it',
+      answerable: (gateway) => gateway.answerLeaseRequest !== undefined,
+    });
+    let posted: { ts?: string; channel?: string };
+    leasesPosting.add(request.requestId);
+    try {
+      posted = await connection.web.chat.postMessage({
+        channel,
+        text: escapeSlackText(`${agentName} is asking for a lease on ${request.credential}, ${leaseTerms(request.duration, request.maxUses)}.`),
+        ...(thread ? { thread_ts: thread } : {}),
+        blocks: leaseRequestBlocks(agentName, request.credential, request.duration, request.maxUses, request.reason, request.requestId),
+      });
+    } catch (error) {
+      leasesPosting.delete(request.requestId);
+      warn(`slack: could not post a lease request for ${request.agentId} to ${channel} (${error instanceof Error ? error.message : String(error)})`);
+      throw new Error(`Slack refused the post (${error instanceof Error ? error.message : String(error)}).`);
+    }
+    leasesPosting.delete(request.requestId);
+    if (!posted.ts) {
+      throw new Error('Slack accepted the post but returned no message to attach the buttons to.');
+    }
+    leasePosts.set(request.requestId, {
+      connection,
+      channel: posted.channel ?? channel,
+      ts: posted.ts,
+      agentId: request.agentId,
+      agentName,
+      credential: request.credential,
+      approvers,
+    });
+  };
+
+  /** Rewrites a lease request with its outcome, from `lease.decided` — the one path every answer goes through. */
+  const settleLeasePost = async (event: Extract<StratusEvent, { type: 'lease.decided' }>): Promise<void> => {
+    const post = leasePosts.get(event.requestId);
+    if (!post) {
+      return;
+    }
+    leasePosts.delete(event.requestId);
+    const by = event.actor !== undefined && post.approvers.has(event.actor) ? ` by <@${event.actor}>` : '';
+    const text = event.decision === 'approved'
+      ? `Approved${by}: ${escapeSlackText(post.agentName)} holds a lease on \`${escapeSlackText(post.credential)}\` until ${escapeSlackText(event.expiresAt ?? 'it expires')}`
+        + `${event.maxUses !== undefined ? `, for up to ${String(event.maxUses)} use${event.maxUses === 1 ? '' : 's'}` : ''}`
+        + `${event.leaseId !== undefined ? ` (\`${escapeSlackText(event.leaseId)}\`)` : ''}. It works from ${escapeSlackText(post.agentName)}'s next reply.`
+      : `Denied${by}: ${escapeSlackText(post.agentName)} was not granted a lease on \`${escapeSlackText(post.credential)}\`.`;
+    try {
+      await post.connection.web.chat.update({ channel: post.channel, ts: post.ts, text, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] });
+    } catch (error) {
+      warn(`slack: could not update the lease request for ${post.agentId} (${error instanceof Error ? error.message : String(error)})`);
+    }
+  };
+
+  /** Takes down a request no answer can land on any more, as `retireCredentialPost` does. */
+  const retireLeasePost = async (requestId: string, post: PendingLeasePost, reason: string): Promise<void> => {
+    if (leasePosts.get(requestId) !== post) {
+      return;
+    }
+    leasePosts.delete(requestId);
+    const text = `No lease on \`${escapeSlackText(post.credential)}\` was granted: ${escapeSlackText(reason)}`;
+    try {
+      await post.connection.web.chat.update({ channel: post.channel, ts: post.ts, text, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] });
+    } catch (error) {
+      warn(`slack: could not retire the lease request for ${post.agentId} (${error instanceof Error ? error.message : String(error)})`);
+    }
+  };
+
+  const handleLeaseClick = async (
+    connection: AgentConnection,
+    args: SlackSocketEventArgs,
+    requestId: string,
+    decision: 'approve' | 'deny',
+  ): Promise<void> => {
+    // Ack first: a grant is one local write, and Slack retries an unacked
+    // click, which would arrive as a second answer to a settled request.
+    await args.ack();
+    const post = leasePosts.get(requestId);
+    if (!post && leasesPosting.has(requestId)) {
+      await tellClicker(connection, args, 'That lease request is still being posted. Try the button again in a moment.');
+      return;
+    }
+    if (!post || post.connection !== connection) {
+      await tellClicker(connection, args, 'That lease request is no longer pending. Ask the agent to request it again.');
+      if (!post) {
+        await retireOrphanedPrompt(connection, args);
+      }
+      return;
+    }
+    // By actor, as approvals are: anyone in the thread can see the buttons,
+    // and a click by someone else must not settle the request either way —
+    // a denial by a bystander would be as wrong as a grant.
+    const clicker = args.body?.user?.id;
+    if (!clicker || !post.approvers.has(clicker)) {
+      await tellClicker(connection, args, `You are not an approver for ${post.agentName}, so that decision was not recorded.`);
+      return;
+    }
+    const gateway = gatewayRef;
+    if (!gateway?.answerLeaseRequest) {
+      await tellClicker(connection, args, 'This daemon cannot take a lease decision from Slack.');
+      return;
+    }
+    const result = await gateway.answerLeaseRequest({ requestId, decision, actor: clicker }).catch(
+      (error: unknown): { ok: false; message: string; retired?: boolean } => ({
+        ok: false,
+        message: `It could not be recorded: ${error instanceof Error ? error.message : String(error)}`,
+      }),
+    );
+    if (result.ok) {
+      return;
+    }
+    await tellClicker(connection, args, result.message);
+    if (result.retired === true) {
+      await retireLeasePost(requestId, post, result.message);
     }
   };
 
@@ -3444,6 +3663,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const first = args.body?.actions?.[0];
     if (first?.action_id === CREDENTIAL_ADD_ACTION && first.value) {
       await handleCredentialClick(connection, args, first.value);
+      return;
+    }
+    if ((first?.action_id === LEASE_APPROVE_ACTION || first?.action_id === LEASE_DENY_ACTION) && first.value) {
+      await handleLeaseClick(connection, args, first.value, first.action_id === LEASE_APPROVE_ACTION ? 'approve' : 'deny');
       return;
     }
     // Ack first and unconditionally: Slack retries an unacked interaction,
@@ -4355,6 +4578,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     name: 'slack',
     resolveOutbound,
     requestCredential,
+    requestLease,
 
     async start(gateway) {
       gatewayRef = gateway;
@@ -4368,6 +4592,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         }
         if (event.type === 'credential.provided') {
           track(settleCredentialPost(event));
+          return;
+        }
+        if (event.type === 'lease.decided') {
+          track(settleLeasePost(event));
           return;
         }
         if (event.type === 'tool.approval-resolved') {
@@ -4561,6 +4789,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       rendering.clear();
       resolvedWhileRendering.clear();
       credentialsPosting.clear();
+      leasesPosting.clear();
     },
   };
 };

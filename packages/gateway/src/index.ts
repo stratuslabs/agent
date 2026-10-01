@@ -45,11 +45,13 @@ import {
   type StratusEvent,
   type ToolRisk,
   type CredentialResolver,
+  escapeControlCharacters,
   HostRefusalError,
 } from '@stratusagent/core';
 import {
   createCredentialRequestTool,
   createDelegateTool,
+  createLeaseRequestTool,
   createForgetTool,
   createPinTool,
   createMessageSendTool,
@@ -181,6 +183,9 @@ import {
   readGlobalConfigBlock,
   readTrustedConfigBlock,
   validateLeaseGrant,
+  CredentialLeaseError,
+  isLeasableCredentialName,
+  parseLeaseDuration,
   type BudgetConfig,
   type BudgetLimitStatus,
   type CredentialLease,
@@ -276,6 +281,22 @@ export interface GatewayChannelAdapter {
     name: string;
     scope: CredentialScope;
     reason?: string;
+    metadata: JsonObject;
+  }): Promise<void>;
+  /**
+   * Asks a person to approve a lease an agent asked for, mirroring
+   * `@stratusagent/channels`' `ChannelAdapter.requestLease`, under the same
+   * contract as `requestCredential`: reject when nobody who can answer was
+   * shown it, with a sentence for the agent.
+   */
+  requestLease?(request: {
+    sessionId: string;
+    agentId: string;
+    requestId: string;
+    credential: string;
+    duration: string;
+    maxUses?: number;
+    reason: string;
     metadata: JsonObject;
   }): Promise<void>;
 }
@@ -892,6 +913,18 @@ export interface Gateway {
    */
   provideCredential(input: ProvideCredentialInput): Promise<ProvideCredentialResult>;
   /**
+   * Answers a `lease.requested`. Approved, it grants the lease the request
+   * described — the credential, duration, and use limit the approver was
+   * shown, counted from the approval — as an ordinary lease in `fleet.db`,
+   * granted by `<channel>:<actor>`. Denied, nothing is granted. Either way
+   * the request is settled, once, and `lease.decided` records it — except
+   * a grant the lease table refused, which settles nothing and leaves the
+   * request pending for another answer.
+   *
+   * Who may answer is the channel's question, as it is for approvals.
+   */
+  answerLeaseRequest(input: AnswerLeaseRequestInput): Promise<AnswerLeaseRequestResult>;
+  /**
    * Token usage from the home's ledger (`fleet.db`), summed per agent,
    * provider, and model over the window asked for. The rows are the
    * providers' own counts, bucket by bucket, never priced.
@@ -944,6 +977,25 @@ export interface ProvideCredentialInput {
  */
 export type ProvideCredentialResult =
   | { ok: true; name: string; scope: CredentialScope; agentId: string; granted: boolean }
+  | { ok: false; message: string; retired?: boolean };
+
+export interface AnswerLeaseRequestInput {
+  requestId: string;
+  decision: 'approve' | 'deny';
+  /** Who decided. Channel-native id (a Slack user). */
+  actor?: string;
+}
+
+/**
+ * `ok: false` carries a sentence for whoever answered. `retired` means the
+ * request is gone — already settled, or forgotten by a restart — so a
+ * channel should take its buttons down. Without it the grant itself failed
+ * (the lease table would not take the row), the request is still pending,
+ * and the same buttons can try again.
+ */
+export type AnswerLeaseRequestResult =
+  | { ok: true; decision: 'approved'; lease: CredentialLease }
+  | { ok: true; decision: 'denied' }
   | { ok: false; message: string; retired?: boolean };
 
 interface AgentSource {
@@ -1319,7 +1371,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const leasedCredentials: CredentialResolver = {
     async resolve(agent, name, context) {
       await refreshLeases();
-      return leaseResolver.resolve(agent, name, context);
+      try {
+        return await leaseResolver.resolve(agent, name, context);
+      } catch (error) {
+        throw await withLeaseRequestHint(error, agent.id, context?.sessionId);
+      }
     },
   };
 
@@ -1528,6 +1584,32 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     };
     const adapter = candidates.find(carries);
     return adapter ? { adapter, carriesOthers: false } : { carriesOthers: candidates.length > 0 };
+  };
+
+  /**
+   * A lease refusal the agent could answer by asking, told so — but only
+   * where asking can reach someone: the agent's own lease is what is
+   * missing (`grantable`), and the conversation is in a channel that can
+   * put a lease request in front of a person. Anywhere else (a scheduled or
+   * HTTP turn, a channel with no request to show) the sentence would send
+   * the agent to a tool that can only refuse, so the refusal stays as the
+   * broker wrote it. Whether an approver can see this particular thread is
+   * the channel's question, answered when the agent asks.
+   */
+  const withLeaseRequestHint = async (error: unknown, agentId: string, sessionId: string | undefined): Promise<unknown> => {
+    if (!(error instanceof CredentialLeaseError) || !error.grantable || sessionId === undefined) {
+      return error;
+    }
+    const kind = (await store.get(sessionId).catch(() => undefined))?.metadata?.channel;
+    if (typeof kind !== 'string' || !channelCarrying(kind, agentId, (candidate) => candidate.requestLease !== undefined).adapter) {
+      return error;
+    }
+    return new CredentialLeaseError(
+      `${error.message} If you have the lease.request tool, you can use it to ask an approver for one; it says so if nobody here can be asked.`,
+      error.agentId,
+      error.credential,
+      true,
+    );
   };
 
   /**
@@ -2547,6 +2629,211 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       };
     }
     return { ok: true, name: request.name, scope: request.scope, agentId: request.agentId, granted };
+  };
+
+  /**
+   * Lease requests waiting on a person, by request id. In memory for the
+   * reason credential requests are: a restart only means the agent asks
+   * again. The entry holds the terms the approver is shown, so an answer
+   * quoting the id back decides only yes or no, never for how long.
+   */
+  const leaseRequests = new Map<string, {
+    agentId: string;
+    sessionId: string;
+    credential: string;
+    duration: string;
+    durationMs: number;
+    maxUses?: number;
+    reason: string;
+    /** The channel kind that asked, for the lease's `grantedBy`. */
+    channel: string;
+  }>();
+
+  tools.register(createLeaseRequestTool(async (request, session) => {
+    const agentId = session.agent.id;
+    const { credential } = request;
+    if (!isLeasableCredentialName(credential)) {
+      throw new Error(
+        `${JSON.stringify(credential)} cannot be leased. Name the credential the refusal named, as it is stored: github.token, search.apiKey.`,
+      );
+    }
+    // A sign-in is not asked for here. Which one a turn spends is the
+    // agent's resolved runtime's choice, not the agent's, so a request
+    // could have an approver grant a lease on a sign-in no call of this
+    // agent ever uses; and the one it does use, refused, ends the turn
+    // before any tool runs. An operator grants those.
+    if (credential.startsWith('provider:')) {
+      throw new Error(
+        `${credential} is a model sign-in, and a lease on one is granted by your operator, not asked for here. `
+        + `They can grant one on the machine with \`stratus lease grant ${quoteShellArg(agentId)} ${credential} --for 1h --reason "…"\`.`,
+      );
+    }
+    await refreshLeases();
+    if (!leaseBroker.isLeased(credential)) {
+      throw new Error(`${credential} does not need a lease here, so there is nothing to ask for.`);
+    }
+    // A lease pays for a use of a key the agent already holds; it grants
+    // nothing else. Asking to lease a key the soul does not list, or one
+    // that is not stored, would have an approver grant a lease no use can
+    // ever spend.
+    if (session.agent.credentials?.includes(credential) !== true) {
+      throw new Error(
+        `You do not hold ${credential}, and a lease only covers a key you hold. `
+        + 'Ask for the key itself with credential.request if you have it, or ask your operator to grant it to you.',
+      );
+    }
+    if (await namedCredentialSource(env, agentId, credential) === undefined) {
+      throw new Error(
+        `${credential} is not stored, so a lease on it could never be used. `
+        + 'Ask for the key itself with credential.request if you have it, or ask your operator to store it.',
+      );
+    }
+    const now = new Date();
+    const live = leaseStore.list({ agentId })
+      .find((lease) => lease.credential === credential && leaseBroker.stateOf(lease, now) === 'active');
+    if (live) {
+      throw new Error(
+        `You already hold a live lease on ${credential} (${live.id}, until ${live.expiresAt}`
+        + `${live.maxUses !== undefined ? `, ${String(live.maxUses - live.uses)} uses left` : ''}). There is nothing to ask for.`,
+      );
+    }
+    const waiting = [...leaseRequests.entries()]
+      .find(([, pending]) => pending.agentId === agentId && pending.credential === credential);
+    if (waiting) {
+      throw new Error(`Your request for a lease on ${credential} (${waiting[0]}) is already waiting on an approver. Ask again once it is answered.`);
+    }
+    const durationMs = parseLeaseDuration(request.duration);
+    if (durationMs === undefined) {
+      throw new Error(`${JSON.stringify(request.duration)} is not a duration. Give one like 30m, 2h, or 7d.`);
+    }
+    // The terms are checked by the rule every grant goes through, now, so
+    // an approver is never shown a request that could only fail to grant.
+    validateLeaseGrant({
+      agentId,
+      credential,
+      expiresAt: new Date(now.getTime() + durationMs).toISOString(),
+      ...(request.maxUses !== undefined ? { maxUses: request.maxUses } : {}),
+      reason: request.reason,
+    }, now);
+    // Built only now: the credential and duration are the agent's text, and
+    // are quoted into a command for an operator only once both are valid.
+    const onMachine = `\`stratus lease grant ${quoteShellArg(agentId)} ${credential} --for ${request.duration} --reason "…"\``;
+    // Only a conversation a channel started has anyone to ask, and only a
+    // channel that can ask — the credential form's rule, for its reason.
+    const kind = session.metadata?.channel;
+    const { adapter } = typeof kind === 'string'
+      ? channelCarrying(kind, agentId, (candidate) => candidate.requestLease !== undefined)
+      : { adapter: undefined };
+    if (!adapter?.requestLease || !session.metadata || typeof kind !== 'string') {
+      throw new Error(
+        (typeof kind === 'string'
+          ? `This conversation's channel (${kind}) cannot ask an approver for a lease here.`
+          : 'This conversation is not in a channel that can ask an approver.')
+        + ` Ask your operator to grant one on the machine with ${onMachine}.`,
+      );
+    }
+    const requestId = randomUUID();
+    leaseRequests.set(requestId, {
+      agentId,
+      sessionId: session.id,
+      credential,
+      duration: request.duration,
+      durationMs,
+      ...(request.maxUses !== undefined ? { maxUses: request.maxUses } : {}),
+      reason: request.reason,
+      channel: kind,
+    });
+    // Delivered before it is announced, and dropped if delivery fails, for
+    // the reason a credential request is.
+    try {
+      await adapter.requestLease({
+        sessionId: session.id,
+        agentId,
+        requestId,
+        credential,
+        duration: request.duration,
+        ...(request.maxUses !== undefined ? { maxUses: request.maxUses } : {}),
+        reason: request.reason,
+        metadata: session.metadata,
+      });
+    } catch (error) {
+      leaseRequests.delete(requestId);
+      throw new Error(
+        `Your request for a lease on ${credential} could not be shown to an approver: ${error instanceof Error ? error.message : String(error)} `
+        + `Nothing is pending. Ask again later, or ask your operator to grant one on the machine with ${onMachine}.`,
+      );
+    }
+    await bus.emit({
+      type: 'lease.requested',
+      sessionId: session.id,
+      agentId,
+      requestId,
+      credential,
+      duration: request.duration,
+      ...(request.maxUses !== undefined ? { maxUses: request.maxUses } : {}),
+      reason: request.reason,
+      metadata: session.metadata,
+    });
+    return { requestId };
+  }));
+
+  const answerLeaseRequest = async (input: AnswerLeaseRequestInput): Promise<AnswerLeaseRequestResult> => {
+    const request = leaseRequests.get(input.requestId);
+    if (!request) {
+      return { ok: false, retired: true, message: 'That lease request is no longer pending. Ask the agent to request it again.' };
+    }
+    // Claimed before anything else: two approvers answering at once would
+    // otherwise both be granted a lease, or one granted and one denied.
+    leaseRequests.delete(input.requestId);
+    const decided = {
+      type: 'lease.decided' as const,
+      sessionId: request.sessionId,
+      agentId: request.agentId,
+      requestId: input.requestId,
+      credential: request.credential,
+      ...(input.actor !== undefined ? { actor: input.actor } : {}),
+    };
+    if (input.decision === 'deny') {
+      await bus.emit({ ...decided, decision: 'denied' });
+      return { ok: true, decision: 'denied' };
+    }
+    // Counted from the approval, not the request: the approver was shown
+    // "for 2h", and a request that waited an hour must not be granted one.
+    const now = new Date();
+    const grant: LeaseGrant = {
+      agentId: request.agentId,
+      credential: request.credential,
+      expiresAt: new Date(now.getTime() + request.durationMs).toISOString(),
+      ...(request.maxUses !== undefined ? { maxUses: request.maxUses } : {}),
+      // The agent's own words, kept on a record `stratus lease list` prints
+      // to a terminal: escaped, so they cannot draw over what is around them.
+      reason: `Asked for by ${request.agentId}: ${escapeControlCharacters(request.reason)}`,
+      grantedBy: `${request.channel}:${input.actor ?? 'unknown'}`,
+    };
+    let lease: CredentialLease;
+    try {
+      validateLeaseGrant(grant, now);
+      lease = leaseStore.grant(grant);
+    } catch (error) {
+      // Put back, not dropped: nothing was granted, and a request retired
+      // here would leave `lease.requested` with no outcome on record while
+      // the approver's answer went nowhere. Nothing awaited since the claim,
+      // so no other answer can have landed in between; the next click
+      // tries again, with the same terms.
+      leaseRequests.set(input.requestId, request);
+      return {
+        ok: false,
+        message: `The lease could not be granted (${error instanceof Error ? error.message : String(error)}), so nothing changed and the request is still pending. Try again in a moment.`,
+      };
+    }
+    await bus.emit({
+      ...decided,
+      decision: 'approved',
+      leaseId: lease.id,
+      expiresAt: lease.expiresAt,
+      ...(lease.maxUses !== undefined ? { maxUses: lease.maxUses } : {}),
+    });
+    return { ok: true, decision: 'approved', lease };
   };
 
   tools.register(createDelegateTool({
@@ -4467,6 +4754,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     resolveApproval,
     provideCredential,
+    answerLeaseRequest,
     // Both drain held usage before answering, so a report never trails the
     // spend the daemon itself is judging by.
     usage(query) {

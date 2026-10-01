@@ -249,6 +249,17 @@ pending and takes the button down for everyone, and the agent asks again. The fo
 the [`@stratusagent/channel-slack` README](../../packages/channel-slack/README.md)
 already turns on for approval buttons; no scope is added.
 
+## Approving a lease from Slack
+
+When a key needs a [lease](./leases.md) and the agent holds none, the agent
+can ask for one in the conversation with `lease.request`. The request is
+posted with **Approve** and **Deny** buttons that answer only to the
+agent's approvers, where the credential form would be posted and under the
+same rules about who can see it; approving grants the lease the message
+describes. The full flow is
+[Leases → Asking for one from Slack](./leases.md#asking-for-one-from-slack).
+It uses the same interactivity as approval buttons; no scope is added.
+
 ## Worth knowing
 
 - **Tokens are gateway infrastructure secrets.** They live under
