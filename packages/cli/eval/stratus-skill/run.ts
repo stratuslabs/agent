@@ -43,6 +43,7 @@ import {
   loadOperatorSkills,
   loadSoulFile,
   namedCredentialSource,
+  quoteShellArg,
   resolveRuntimeConfig,
   servedRuntimes,
 } from '@stratusagent/state';
@@ -322,8 +323,11 @@ const main = async (): Promise<void> => {
             + 'Ask your operator to add it to the credentials list in your soul; a form would only refuse to store it again.',
           );
         }
+        // The command as the gateway builds it: an agent-scoped request names
+        // the agent, or the advice would store the key for the whole fleet.
+        const onMachine = `\`stratus credential set ${request.name}${request.scope === 'agent' ? ` --agent ${quoteShellArg(agent.id)}` : ''}\``;
         if (request.via === 'form') {
-          throw new Error(`${formUnavailable} Nothing is pending. Ask for a link instead (via: "link"), or ask your operator to store ${request.name} on the machine with \`stratus credential set ${request.name}\` and grant it to you.`);
+          throw new Error(`${formUnavailable} Nothing is pending. Ask for a link instead (via: "link"), or ask your operator to store ${request.name} on the machine with ${onMachine} and grant it to you.`);
         }
         return {
           requestId: 'eval-request',
