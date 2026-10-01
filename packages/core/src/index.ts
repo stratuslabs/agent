@@ -4016,7 +4016,7 @@ export interface Skill extends SkillDescriptor {
   /**
    * Ships with Stratus and is enabled for every agent, whatever its soul's
    * `skills:` says. Reserved for the system's own documentation (the
-   * `stratus` skill): a skill from anywhere else changing how an agent
+   * `stratus` skill; `SkillRegistry.register` refuses it on any other id): a skill from anywhere else changing how an agent
    * behaves is opted into, but an agent that cannot read how the system it
    * runs in works guesses instead, the way one suggested `passEnv` for a
    * secret after reading the install around it.
@@ -4070,6 +4070,12 @@ export class SkillRegistry {
   register(skill: Skill): void {
     if (this.skills.has(skill.id) || this.aliases.has(skill.id)) {
       throw new DuplicateSkillIdError(skill.id);
+    }
+    // Refused here rather than trusted at the gates: `builtin` skips every
+    // soul's `skills:`, so a host that set it on anything else (by mistake,
+    // or from data) would hand that skill to every agent.
+    if (skill.builtin === true && skill.id !== STRATUS_SKILL_ID) {
+      throw new Error(`Skill ${skill.id} is marked builtin, which only the ${STRATUS_SKILL_ID} skill may be. Drop the flag and enable it through skills: in the souls that should have it.`);
     }
     this.skills.set(skill.id, skill);
   }

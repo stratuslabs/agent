@@ -330,6 +330,17 @@ test('a built-in skill is listed and readable for an agent that names no skills,
   assert.equal(results[1]?.ok, false);
 });
 
+test('only the stratus skill can be built in: the flag on any other id is refused at registration', () => {
+  const skills = new SkillRegistry();
+  assert.throws(
+    () => skills.register(skill('code-review', { builtin: true })),
+    /Skill code-review is marked builtin, which only the stratus skill may be/,
+  );
+  assert.equal(skills.resolve('code-review'), undefined);
+  skills.register(skill(STRATUS_SKILL_ID, { builtin: true }));
+  assert.equal(skills.resolve(STRATUS_SKILL_ID)?.builtin, true);
+});
+
 test('an empty skills list is the same as none', async () => {
   const skills = new SkillRegistry();
   skills.register(skill('code-review'));
