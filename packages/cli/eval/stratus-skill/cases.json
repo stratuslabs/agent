@@ -32,7 +32,7 @@
         { "kind": "notMatches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not)\\s+(?:\\w+\\s+){0,2})\\b(?:run|use|try|(?:add|store|set|save) it (?:with|via|using))\\s+[`\"]?stratus credential set\\b|(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not)\\s+(?:\\w+\\s+){0,2})\\b(?:call|use|run)\\s+[`\"]?credential\\.request\\b" },
         { "kind": "notMatches", "pattern": "sk-proj-abc123XYZ" },
         { "kind": "matches", "pattern": "(?i)rotat|revok|regenerat|exposed|compromised" },
-        { "kind": "matches", "pattern": "(?i)stratus setup|providers|dashboard" }
+        { "kind": "matches", "pattern": "(?i)\\bstratus setup\\b|\\bstratus(?:'s)? (?:dashboard|providers?)\\b|\\b(?:providers?|dashboard)\\b[^.\\n]{0,30}\\b(?:in|of|on) stratus\\b|\\bproviders? (?:row|section|page|tab)\\b" }
       ]
     },
     {

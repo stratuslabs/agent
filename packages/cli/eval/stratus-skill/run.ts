@@ -166,7 +166,30 @@ const argValue = (flag: string): string | undefined => {
   return value;
 };
 
+// Anything else on the command line is a typo, not an option this ignores:
+// `--cas pasted-secret` read as no flag would run every case on a paid model.
+const KNOWN_FLAGS = new Set(['--soul', '--case']);
+const unknownArgument = (): string | undefined => {
+  const args = process.argv.slice(2);
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at];
+    if (arg === '--') {
+      continue;
+    }
+    if (arg !== undefined && KNOWN_FLAGS.has(arg)) {
+      at += 1;
+      continue;
+    }
+    return arg;
+  }
+  return undefined;
+};
+
 const main = async (): Promise<void> => {
+  const unknown = unknownArgument();
+  if (unknown !== undefined) {
+    throw new Error(`Unknown argument ${JSON.stringify(unknown)}. The eval takes --soul <path> and --case <id>, both optional.`);
+  }
   const here = path.dirname(fileURLToPath(import.meta.url));
   const corpus = JSON.parse(await readFile(path.join(here, 'cases.json'), 'utf8')) as Corpus;
 
