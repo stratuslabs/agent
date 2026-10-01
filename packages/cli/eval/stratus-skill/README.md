@@ -102,7 +102,10 @@ different:
 - **Plugin tools are not offered.** This runner has no approval policy, so
   a plugin tool would run unattended, `shell.run` included. A soul with
   many plugin tools therefore routes against a shorter list here than in
-  production, and a pass on one is a little less evidence.
+  production, and a pass on one is a little less evidence. Plugins still
+  load against the gateway's own tools, as the daemon loads them, so a
+  plugin whose tool collides with one (`memory.remember`, say) is refused
+  whole here too, its provider and skills with it.
 
 It prints each case with its reply and a total, and exits non-zero when a
 case fails. A case the `fallbackModel` answered, because the primary
