@@ -2358,6 +2358,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Set at a text-only provider.response: the turn is wrapping up
     // (saves, completion events); nothing left for the timer to guard.
     let turnSettling = false;
+    /**
+     * What the watchdog last heard, for the warning it logs when it fires.
+     *
+     * "No activity for 120000ms" alone could not tell a provider that went
+     * quiet mid-stream from one whose progress never reached the bus at
+     * all, and that is the first question every abort raised. Event and
+     * delta types only, never content: this lands in the daemon log.
+     */
+    let lastHeard = 'nothing since the turn began';
+    let deltasHeard = 0;
 
     const suspendTimer = (): void => {
       if (timer) {
@@ -2374,7 +2384,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Deliberately not unref'd: while a provider await is in flight, this
       // timer is what guarantees the process can always make progress on it.
       timer = setTimeout(() => {
-        warn(`watchdog: no activity on session ${sessionId} for ${effectiveIdleMs}ms; aborting the turn`);
+        warn(
+          `watchdog: no activity on session ${sessionId} for ${effectiveIdleMs}ms; aborting the turn `
+          + `(last heard: ${lastHeard}; ${deltasHeard} provider deltas this turn)`,
+        );
         // The reason rides on the signal, because the runner is what fails
         // the session: it writes `lastError` and emits `session.failed`
         // before this wrapper ever sees the rejection. Rethrowing a better
@@ -2397,6 +2410,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const unsubscribeObserver = bus.subscribe((event: StratusEvent) => {
       if (!('sessionId' in event) || event.sessionId !== sessionId) {
         return;
+      }
+      if (event.type === 'provider.delta') {
+        deltasHeard += 1;
+        lastHeard = `provider.delta ${event.delta.type}`;
+      } else {
+        lastHeard = event.type;
       }
       switch (event.type) {
         case 'provider.delta':

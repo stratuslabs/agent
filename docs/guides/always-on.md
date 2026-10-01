@@ -185,6 +185,16 @@ bounds.
   aborted: no activity for 120000ms` — so it reads differently from a turn
   a person cancelled, whose reason is the bare `Run aborted`.
 
+  Silence means the provider reported nothing at all, not that it showed
+  nothing. A Claude subscription agent counts as active while it thinks
+  (current models stream no thinking text), while the SDK waits out an API
+  retry, and while it compacts a long conversation. The watchdog stays off
+  while a tool runs or waits for an approval. When it does abort, its
+  warning in [`stratus logs`](./logs.md) names the last thing it heard and
+  how many provider deltas the turn produced: `(last heard: tool.completed;
+  0 provider deltas this turn)` is a provider that never reported back,
+  where a count above zero is one that went quiet partway through.
+
 ## How many turns one message may spend
 
 A turn calls the provider, runs the tools it asked for, and calls the

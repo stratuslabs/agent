@@ -413,7 +413,8 @@ test('the watchdog aborts a stalled streaming turn and fails the session cleanly
     })) as typeof fetch;
 
   const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-test' }, fetch: fetchImpl };
-  const gateway = createGateway({ env, idleTimeoutMs: 300, warn: () => {} });
+  const warnings: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 300, warn: (line) => warnings.push(line) });
   const failed = nextEvent(gateway.bus, 'session.failed');
   await gateway.start();
 
@@ -422,6 +423,12 @@ test('the watchdog aborts a stalled streaming turn and fails the session cleanly
       () => gateway.dispatch({ sessionId: 'stalled-1', agentId: 'slow', userMessage: 'hang' }),
       (error: Error) => error instanceof RunAbortedError && /no activity/.test(error.message),
     );
+
+    // The log line says what was last heard and whether the provider had
+    // reported anything at all — the difference between a stream that went
+    // quiet and progress that never reached the bus.
+    const line = warnings.find((warning) => warning.startsWith('watchdog:'));
+    assert.match(line ?? '', /no activity on session stalled-1 for 300ms; aborting the turn \(last heard: \S+; 0 provider deltas this turn\)$/);
 
     // The reason reaches the record and the event, not only the dispatcher:
     // an operator reading the session, or a surface on the bus, can tell a
@@ -3107,6 +3114,72 @@ test('a stalled subscription fallback is cut loose by the gateway idle timeout',
     assert.match(outcome, /no activity/);
   } finally {
     clearTimeout(timer);
+    await gateway.stop();
+  }
+});
+
+test('a subscription turn thinking past the idle timeout after a tool is not aborted', async () => {
+  // The incident: Slack agents on a subscription failed with "Run aborted:
+  // no activity for 120000ms" after every tool they called had completed.
+  // The watchdog re-arms once the tool settles, and on current models a
+  // long think streams no thinking text — the SDK reports it as
+  // `thinking_tokens` instead, which used to stop at the provider's own
+  // idle timer and never reach the bus.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', [
+    '---', 'name: Ava', 'provider: anthropic',
+    'tools:', '  - demo.echo', '---', '', 'You are Ava.', '',
+  ].join('\n'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat' } }),
+  );
+
+  // Ten reports, each well inside the window and together twice its length:
+  // a healthy think the watchdog has to hear to leave alone.
+  const IDLE_MS = 500;
+  const REPORTS = 10;
+  const queryFn = ((params: { options?: unknown }) => {
+    const options = params.options as {
+      abortController?: AbortController;
+      mcpServers?: Record<string, {
+        instance?: { _registeredTools?: Record<string, { handler: (a: unknown, b: unknown) => Promise<unknown> }> };
+      }>;
+    };
+    return (async function* () {
+      yield { type: 'system', subtype: 'init', session_id: 'sdk-1' };
+      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.demo_echo?.handler;
+      if (!handler) {
+        throw new Error('the tool was not bridged');
+      }
+      await handler({ text: 'hi' }, {});
+      for (let report = 0; report < REPORTS; report += 1) {
+        await new Promise((resolve) => setTimeout(resolve, (IDLE_MS * 2) / REPORTS));
+        // A real query stops when its controller fires; without this the
+        // abort would be invisible here and the test would pass either way.
+        if (options.abortController?.signal.aborted) {
+          throw new Error('aborted');
+        }
+        yield { type: 'system', subtype: 'thinking_tokens', session_id: 'sdk-1' };
+      }
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'all done', session_id: 'sdk-1' };
+    })();
+  }) as never;
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {}, queryFn },
+    idleTimeoutMs: IDLE_MS,
+    approvals: { approve: async () => true },
+    warn: () => {},
+  });
+  await gateway.start();
+
+  try {
+    const session = await gateway.dispatch({ sessionId: 'thinking-1', agentId: 'ava', userMessage: 'echo, then think' });
+    assert.equal(session.status, 'completed', `session failed: ${session.lastError ?? ''}`);
+    assert.match(session.messages.at(-1)?.content ?? '', /all done/);
+  } finally {
     await gateway.stop();
   }
 });

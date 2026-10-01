@@ -823,6 +823,8 @@ test('SDK partial messages become kernel deltas, in the kernel\'s own tool namin
   });
 
   assert.deepEqual(deltas, [
+    // The init message: the harness is up, with nothing to show yet.
+    { type: 'progress' },
     { type: 'text', text: 'Hel' },
     { type: 'thinking' },
     { type: 'tool-call', toolName: 'demo.echo' },
@@ -831,6 +833,52 @@ test('SDK partial messages become kernel deltas, in the kernel\'s own tool namin
 
   // Partial messages are only requested when someone is listening.
   assert.equal((calls[0]!.options as { includePartialMessages?: boolean }).includePartialMessages, true);
+});
+
+test('every SDK message the harness reports while it works reaches the delta sink', async () => {
+  // The gateway watchdog hears nothing but deltas. These are the phases in
+  // which the SDK is busy and streams no text, thinking text, or tool
+  // input — a long think on a model whose thinking display is omitted, a
+  // retry being waited out, a compaction — and each used to reach this
+  // provider's own idle timer and stop there, so the watchdog aborted a
+  // turn the provider knew was healthy.
+  const { queryFn } = createFakeQuery([
+    { type: 'stream_event', event: { type: 'message_start' } },
+    { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } } },
+    { type: 'system', subtype: 'thinking_tokens' },
+    { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } },
+    { type: 'system', subtype: 'api_retry' },
+    { type: 'system', subtype: 'status' },
+    { type: 'system', subtype: 'compact_boundary' },
+    { type: 'assistant' },
+    { type: 'rate_limit_event' },
+    { type: 'result', subtype: 'success', is_error: false, result: 'Done.', session_id: 'sdk-1' },
+  ]);
+
+  const deltas: unknown[] = [];
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+
+  const response = await provider.generate({
+    session: createSession(),
+    memory: [],
+    onDelta: (delta) => {
+      deltas.push(delta);
+    },
+  });
+
+  assert.deepEqual(deltas, [
+    { type: 'progress' },
+    { type: 'thinking' },
+    { type: 'thinking' },
+    { type: 'progress' },
+    { type: 'progress' },
+    { type: 'progress' },
+    { type: 'progress' },
+    { type: 'progress' },
+    { type: 'progress' },
+  ]);
+  // Content-free signals add nothing to the answer.
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Done.' }]);
 });
 
 test('partial messages are not requested when nothing consumes them', async () => {

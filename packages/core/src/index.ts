@@ -595,7 +595,8 @@ export type ProviderPart =
 /**
  * A streamed fragment of an in-progress provider response. Text deltas carry
  * output as it is generated; tool-call deltas announce that the model has
- * started emitting a call (input may still be incomplete). A reset delta
+ * started emitting a call (input may still be incomplete); thinking and
+ * progress deltas carry nothing but the fact of activity. A reset delta
  * tells consumers to DISCARD every fragment streamed so far for this
  * response — emitted when a provider abandons a partial attempt (e.g. a
  * fallback wrapper retrying after the primary failed mid-stream), so
@@ -610,6 +611,14 @@ export type ProviderDelta =
    * reasoning itself is deliberately never carried here.
    */
   | { type: 'thinking' }
+  /**
+   * The provider is working on this response and has nothing to show for
+   * it yet: a retry it is waiting out, a context compaction, a message
+   * boundary. Content-free like `thinking`, and for the same reader — an
+   * activity watchdog that would otherwise take a busy provider for a
+   * stalled one. A renderer has nothing to draw for it.
+   */
+  | { type: 'progress' }
   | {
       type: 'reset';
       /**
