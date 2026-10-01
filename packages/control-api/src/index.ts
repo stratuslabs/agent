@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import type { Gateway, GatewayChannelAdapter } from '@stratusagent/gateway';
 import type { AgentGrantStore } from '@stratusagent/permissions';
-import { gatewayInfoPath, type StateEnvironment } from '@stratusagent/state';
+import { gatewayInfoPath, normalizePublicUrl, type StateEnvironment } from '@stratusagent/state';
 import { WebSocketServer } from 'ws';
 
 import {
@@ -155,6 +155,16 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   const log = options.log ?? (() => {});
   const warn = options.warn ?? (() => {});
   const host = options.host ?? DEFAULT_CONTROL_API_HOST;
+  // The config loader's rule, applied again for a host passing the option
+  // directly: a sign-in or a query here would ride every link to the agent.
+  let publicUrl: string | undefined;
+  if (options.publicUrl !== undefined) {
+    try {
+      publicUrl = normalizePublicUrl(options.publicUrl);
+    } catch (error) {
+      throw new Error(`Invalid publicUrl for the control API: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
   let server: Server | undefined;
   let wss: WebSocketServer | undefined;
@@ -397,13 +407,13 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
         scope: request.scope,
         ...(request.reason !== undefined ? { reason: request.reason } : {}),
       });
-      const base = (options.publicUrl ?? url).replace(/\/+$/, '');
+      const base = (publicUrl ?? url).replace(/\/+$/, '');
       return {
         url: `${base}${API_PREFIX}/credential-links/${token}`,
         expiresAt: new Date(expiresAt).toISOString(),
         // Said so the agent can say it: a bound address handed to someone
         // on their phone is a link that silently fails to open.
-        ...(options.publicUrl === undefined ? { localOnly: true } : {}),
+        ...(publicUrl === undefined ? { localOnly: true } : {}),
       };
     },
 

@@ -156,6 +156,7 @@ export {
 export {
   ConfigFileError,
   loadConfigFile,
+  normalizePublicUrl,
   validateConfigFile,
   resolveAgentApprovals,
   resolveAgentPrincipals,

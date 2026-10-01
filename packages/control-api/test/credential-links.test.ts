@@ -161,3 +161,13 @@ test('without api.publicUrl a link is built on the bound address and says it ope
     await api.stop();
   }
 });
+
+test('a publicUrl passed straight to createControlApi is held to the config rule', () => {
+  // A host skipping the config file must not be a way to put a sign-in in
+  // every link, and the refusal must not repeat it.
+  assert.throws(
+    () => createControlApi({ port: 0, publicUrl: 'https://proxy-user:hunter2@mac-mini.example' }),
+    (error: Error) => /Invalid publicUrl.*username or password/.test(error.message) && !error.message.includes('hunter2'),
+  );
+  assert.throws(() => createControlApi({ port: 0, publicUrl: 'https://mac-mini.example/?' }), /no query or fragment/);
+});
