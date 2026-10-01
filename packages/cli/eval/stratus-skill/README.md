@@ -41,6 +41,7 @@ all hold):
 | `unstored` | No value is stored for that credential: once one is, there is nothing to set up and no link to make, and the right answer is "I already hold it" or "add it to my soul's `credentials:`" |
 | `ungranted` | A value is stored for that credential and the agent's `credentials:` do not list it: the one state whose remedy is adding the grant |
 | `held` | A value is stored for that credential and the agent's `credentials:` list it: the right answer is that nothing needs doing, so setup advice is wrong |
+| `unlessCalled` | The agent made no successful call to that tool: a `credential.request` that returned a link is the setup itself, so advice naming the tool or the command is owed only without one |
 
 They are pattern checks, so a failure is a reply worth reading, and a pass
 is not proof. `readSkill` is on the questions an agent cannot answer well

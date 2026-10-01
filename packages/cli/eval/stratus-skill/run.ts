@@ -94,8 +94,11 @@ type Check = (
    *   do not list it, the one state whose remedy is adding the grant.
    * - `held`: a value is stored and the agent's `credentials:` list it, the
    *   state whose right answer is that nothing needs doing.
+   * - `unlessCalled`: the agent made no successful call to that tool. A
+   *   credential.request that returned a link is the setup path itself, so
+   *   advice naming the tool or the command is owed only without one.
    */
-  when?: { primary?: true; fallbackConfigured?: true; tool?: string; withoutTool?: string; unstored?: string; ungranted?: string; held?: string };
+  when?: { primary?: true; fallbackConfigured?: true; tool?: string; withoutTool?: string; unstored?: string; ungranted?: string; held?: string; unlessCalled?: string };
 };
 
 interface Served {
@@ -185,6 +188,11 @@ const calledTool = (session: Session, tool: string): boolean => toolCalls(sessio
 
 const failureOf = (check: Check, reply: string, session: Session, served: Served): string | undefined => {
   if (!applies(check, served)) {
+    return undefined;
+  }
+  const unlessCalled = check.when?.unlessCalled;
+  if (unlessCalled !== undefined && session.messages.some((message) =>
+    message.toolResult?.toolName === unlessCalled && message.toolResult.ok)) {
     return undefined;
   }
   switch (check.kind) {
