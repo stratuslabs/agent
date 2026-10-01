@@ -37,6 +37,7 @@ all hold):
 | `fallbackConfigured` | A fallback model exists: without one there is nothing to roll over |
 | `tool` | The agent's `tools:` allow that tool: an agent with no `credential.request` has no link to move to a DM |
 | `unstored` | No value is stored for that credential: once one is, there is nothing to set up and no link to make, and the right answer is "I already hold it" or "add it to my soul's `credentials:`" |
+| `ungranted` | A value is stored for that credential and the agent's `credentials:` do not list it: the one state whose remedy is adding the grant |
 
 They are pattern checks, so a failure is a reply worth reading, and a pass
 is not proof. `readSkill` is on the questions an agent cannot answer well
@@ -86,6 +87,9 @@ different:
 - **The run is in English.** A `language` from the soul or config is left
   out of the prompt, with a note saying so, because the checks match
   English replies and a correct answer in another language would fail them.
+  A soul whose own instructions ask for another language still wins over
+  that, as the prompt says it should, so such a soul is not one this eval
+  can score: its failures are the language, not the answer.
 - **Plugin tools are not offered.** This runner has no approval policy, so
   a plugin tool would run unattended, `shell.run` included. A soul with
   many plugin tools therefore routes against a shorter list here than in

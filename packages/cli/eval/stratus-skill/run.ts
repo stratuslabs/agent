@@ -73,8 +73,10 @@ type Check = (
    *   the soul grants it and "add it to your soul's credentials" when not.
    *   A grant with nothing stored is only permission, so setup advice is
    *   still the right answer there.
+   * - `ungranted`: a value is stored for it and the agent's `credentials:`
+   *   do not list it, the one state whose remedy is adding the grant.
    */
-  when?: { primary?: true; fallbackConfigured?: true; tool?: string; unstored?: string };
+  when?: { primary?: true; fallbackConfigured?: true; tool?: string; unstored?: string; ungranted?: string };
 };
 
 interface Served {
@@ -83,13 +85,16 @@ interface Served {
   tools: readonly string[] | undefined;
   /** Credential names with a value stored for this agent, granted or not. */
   stored: ReadonlySet<string>;
+  /** The agent's `credentials:` grants. */
+  granted: readonly string[];
 }
 
 const applies = (check: Check, served: Served): boolean =>
   !(check.when?.primary === true && served.onFallback)
   && !(check.when?.fallbackConfigured === true && !served.fallbackConfigured)
   && !(check.when?.tool !== undefined && served.tools !== undefined && !matchesToolAllowlist(check.when.tool, served.tools))
-  && !(check.when?.unstored !== undefined && served.stored.has(check.when.unstored));
+  && !(check.when?.unstored !== undefined && served.stored.has(check.when.unstored))
+  && !(check.when?.ungranted !== undefined && !(served.stored.has(check.when.ungranted) && !served.granted.includes(check.when.ungranted)));
 
 interface Corpus {
   agent: { name: string; instructions: string };
@@ -342,7 +347,7 @@ const main = async (): Promise<void> => {
     // Resolved once, through the lookup the gateway uses, for each name a
     // check is conditioned on: a read of the credentials file, never a write.
     const stored = new Set<string>();
-    for (const name of new Set(cases.flatMap((scenario) => scenario.checks.map((check) => check.when?.unstored)))) {
+    for (const name of new Set(cases.flatMap((scenario) => scenario.checks.flatMap((check) => [check.when?.unstored, check.when?.ungranted])))) {
       if (name !== undefined && await namedCredentialSource({}, agent.id, name) !== undefined) {
         stored.add(name);
       }
@@ -385,6 +390,7 @@ const main = async (): Promise<void> => {
           fallbackConfigured: config.fallback !== undefined,
           tools: agent.tools,
           stored,
+          granted: agent.credentials ?? [],
         })).filter((failure) => failure !== undefined)
         : [`the turn failed: ${threw}`];
       if (failures.length === 0) {
