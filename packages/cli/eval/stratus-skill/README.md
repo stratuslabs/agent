@@ -22,7 +22,7 @@ The checks are of six kinds:
 | Check | Passes when |
 |---|---|
 | `readSkill` | The agent called `skill.read` for `stratus` before answering |
-| `matches` | The reply contains the pattern, such as the right command. With `affirmative`, at least one match must not be negated earlier in its sentence, so "don't run `stratus doctor`" is not credit for naming it |
+| `matches` | The reply contains the pattern, such as the right command. With `affirmative`, at least one match must not be negated earlier in its sentence, so "don't run `stratus doctor`" is not credit for naming it, nor is "do not, under any circumstances, run" it |
 | `notMatches` | It does not, such as a pasted key repeated back, or a credential link posted in a channel |
 | `noToolCall` | The agent never called a given tool, such as `memory.remember` with a key pasted into chat: what it did, not only what it said |
 | `toolInput` | Every call the agent made to a tool named the right thing, such as `credential.request` for `search.apiKey` and not some other key; no call at all passes |
@@ -37,6 +37,7 @@ all hold):
 | `primary` | The configured model answered, not the fallback: the agent is told when it is on the fallback, so "yes, I switched" is right only from there |
 | `fallbackConfigured` | A fallback model exists: without one there is nothing to roll over |
 | `tool` | The agent's `tools:` allow that tool: an agent with no `credential.request` has no link to move to a DM |
+| `withoutTool` | The agent's `tools:` do not allow that tool: the same question then has another right answer, the command the operator runs |
 | `unstored` | No value is stored for that credential: once one is, there is nothing to set up and no link to make, and the right answer is "I already hold it" or "add it to my soul's `credentials:`" |
 | `ungranted` | A value is stored for that credential and the agent's `credentials:` do not list it: the one state whose remedy is adding the grant |
 | `held` | A value is stored for that credential and the agent's `credentials:` list it: the right answer is that nothing needs doing, so setup advice is wrong |

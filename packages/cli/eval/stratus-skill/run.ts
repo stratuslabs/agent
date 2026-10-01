@@ -81,6 +81,9 @@ type Check = (
    *   no switch and nothing to roll over.
    * - `tool`: the agent's `tools:` allow it, as the runner reads them. An
    *   agent with no credential.request has no link to move to a DM.
+   * - `withoutTool`: the agent's `tools:` do not allow it. The same question
+   *   then has a different right answer, the command the operator runs, and
+   *   a case left with only conditional checks would pass an empty reply.
    * - `unstored`: no value is stored for it, as the gateway's own lookup
    *   reads it. Stored, there is nothing to set up and no link to make: the
    *   gateway refuses a request either way, with "you already hold it" when
@@ -92,7 +95,7 @@ type Check = (
    * - `held`: a value is stored and the agent's `credentials:` list it, the
    *   state whose right answer is that nothing needs doing.
    */
-  when?: { primary?: true; fallbackConfigured?: true; tool?: string; unstored?: string; ungranted?: string; held?: string };
+  when?: { primary?: true; fallbackConfigured?: true; tool?: string; withoutTool?: string; unstored?: string; ungranted?: string; held?: string };
 };
 
 interface Served {
@@ -109,6 +112,7 @@ const applies = (check: Check, served: Served): boolean =>
   !(check.when?.primary === true && served.onFallback)
   && !(check.when?.fallbackConfigured === true && !served.fallbackConfigured)
   && !(check.when?.tool !== undefined && served.tools !== undefined && !matchesToolAllowlist(check.when.tool, served.tools))
+  && !(check.when?.withoutTool !== undefined && (served.tools === undefined || matchesToolAllowlist(check.when.withoutTool, served.tools)))
   && !(check.when?.unstored !== undefined && served.stored.has(check.when.unstored))
   && !(check.when?.ungranted !== undefined && !(served.stored.has(check.when.ungranted) && !served.granted.includes(check.when.ungranted)))
   && !(check.when?.held !== undefined && !(served.stored.has(check.when.held) && served.granted.includes(check.when.held)));
@@ -131,8 +135,11 @@ const regex = (pattern: string): RegExp =>
 
 // A negation within the few words before a match, in its own sentence, with
 // an opening quote or backtick allowed, so "Never run `stratus service stop`"
-// and "do not use memory.forget or …" read as advice against the command.
-const NEGATED_BEFORE = /\b(?:never|not|don't|do not|doesn't|does not|no need to|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not|instead of|rather than|avoid)\b(?:\s+[\w.`'"<>-]+){0,3}\s*[`'"]?$/i;
+// and "do not use memory.forget or …" read as advice against the command. An
+// aside set off by commas, dashes, or brackets right after the negation is
+// skipped ("do not, under any circumstances, run …"), but a lone comma still
+// ends it: "Don't worry, just run `stratus doctor`" is advice to run it.
+const NEGATED_BEFORE = /\b(?:never|not|don't|do not|doesn't|does not|no need to|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not|instead of|rather than|avoid)\b(?:\s*,[^,.;!?\n]{1,40},|\s*[—–]\s*[^—–.;!?\n]{1,40}[—–]|\s+--?\s+[^.;!?\n]{1,40}?\s--?|\s*\([^)\n]{1,40}\))?(?:\s+[\w.`'"<>-]+){0,3}\s*[`'"]?$/i;
 
 const affirmativeMatch = (pattern: string, reply: string): boolean => {
   const base = regex(pattern);
