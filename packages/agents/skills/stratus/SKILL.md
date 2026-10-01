@@ -13,7 +13,7 @@ Four rules for using what follows:
 
 - **Say what you can check, and check it.** When a question is about this install (is a plugin enabled, is a key stored, why a setting isn't taking), the answer is in a command your operator can run. Give the command rather than a guess, and never promise an ability you do not have yet: say what you will be able to do once the step is done.
 - **Never ask anyone to paste a secret into a conversation**, and never offer to store one you were given in chat. If someone pastes one anyway, do not repeat it and never `memory.remember` it. Tell them it is now in the conversation, your transcript, and the model provider's request, so it should be rotated, and give them the safe way to store the new one.
-- **Mind the room.** Everyone in a channel reads what you post. A credential link, someone's private settings, or a command with a key in it goes to the one person it is for, in a direct message, never into a shared channel.
+- **Mind the room.** Your instructions say whether this is a direct message or a channel, and everyone in a channel reads what you post. A credential link, someone's private settings, or anything else meant for one person never goes into a shared channel. You cannot open a direct message yourself, so ask the person to message you directly and give it to them there.
 - **Your tools run on the machine the daemon runs on**, not necessarily the computer of the person you are talking to. You cannot tell which from inside, so ask before promising access to "my laptop" or "my files".
 
 ## Where things live
@@ -39,7 +39,7 @@ Deleting a soul file takes the agent off the roster but keeps its `agents/<id>/`
 
 A soul is a markdown file: frontmatter for identity and allowlists, then the persona as prose.
 
-- `name`; `id` (derived from the name when absent; changing it re-keys everything the agent owns); `provider` and `model`; `language` (for example `en-GB`; the default is American English); `listens` (see "Slack").
+- `name`; `id` (derived from the name when absent; changing it starts the agent fresh, and its old history, memories, and grants stay under the old id); `provider` and `model`; `language` (for example `en-GB`); `listens` (see "Slack").
 - `tools:` is the allowlist of what you may call: exact names (`fs.read`) or toolset globs (`fs.*`). Omitted means every registered tool and `tools: []` means none. When you lack a tool, ask for that one name to be added. Never suggest deleting the list to fix it, because that grants every tool, the shell included.
 - `skills:` enables skills. Omitted means none, except built-in skills like this one, which every agent has.
 - `credentials:` names the credentials you may use. Omitted means none.
@@ -53,9 +53,13 @@ The config decides which provider and model run, which plugins load, and how app
 
 Which provider and model a turn uses: for `stratus run` and `stratus chat`, command-line flags beat `STRATUS_*` environment variables, which beat the soul's `provider`/`model`, which beat the file. Under `stratus serve` a soul's `provider`/`model` beats all of those, because each agent in a roster runs on its own. A changed `provider` or `model` in the config reaches the next turn without a restart.
 
-A project-local `stratus.config.json` ships inside repositories, so it is **untrusted**. It cannot set `plugins`, `approvals`, `principals`, `slack`, `api`, `maxTurns`, `apiKeyEnv`, `soul`, `systemPrompt`, `executor`, or `memoryStore`. Those are read only from `~/.stratus/config.json` or a file named by `--config` or `STRATUS_CONFIG`. When a project-local file is the one in use, it gets no `plugins`, `approvals`, or `api` at all; the global file's blocks are not used in their place.
+A project-local `stratus.config.json` ships inside repositories, so it is **untrusted**. It cannot set `plugins`, `approvals`, `principals`, `slack`, `api`, `maxTurns`, `apiKeyEnv`, `soul`, `systemPrompt`, `executor`, or `memoryStore`. Those are read only from `~/.stratus/config.json` or a file named by `--config` or `STRATUS_CONFIG`. A project-local file that sets one of them has that block ignored, with a warning, and the global file's is not used in its place. One that says nothing about a block leaves the global block in force.
 
-`stratus doctor` shows what a run would use and which file or variable decided each value. It is the first thing to suggest when a setting "isn't taking".
+When a setting "isn't taking", these say why:
+
+- `stratus doctor` shows what `stratus run` and `stratus chat` would use, and which file or variable decided each value.
+- `stratus agents` shows what each agent on the roster runs on.
+- `stratus plugins` shows the approvals mode with each tool. `stratus serve --approvals` overrides the config's mode, and the daemon's startup lines in `stratus logs` say which mode it is in.
 
 ## Credentials and API keys
 
@@ -63,14 +67,21 @@ This is the question you will be asked most. A secret reaches Stratus in one of 
 
 - **Provider sign-ins** (the model's own key or subscription): `stratus setup` → Providers, or the dashboard. There is no `stratus login`.
 - **Channel tokens** (a Slack app's tokens): `stratus setup` → Channels, or the dashboard. No agent can read them, yours included.
-- **Named credentials**, such as `search.apiKey` or `github.token`, are for tools whose plugin declares that name. A web search backend is the common one: its key is always `search.apiKey`, whatever the vendor. These are the only secrets you can ask for yourself.
-- **A shell command's or an MCP server's token** is not a named credential: `shell.run` and MCP servers never read the credential store. It goes in that plugin's `env` (or an MCP server's `headers`) in the trusted config, under `agents.<id>` to keep it to one agent. Your operator edits that file at the machine, and the daemon needs a restart. `passEnv` beside it forwards variables, values included, from the daemon's own environment, and only ones that are not secret belong on it.
+- **Named credentials**, such as `search.apiKey`, are for tools whose plugin declares that name. A web search backend is the common one: its key is always `search.apiKey`, whatever the vendor. These are the only secrets you can ask for yourself.
+- **A shell command's or an MCP server's token** is not a named credential: `shell.run` and MCP servers never read the credential store. Your operator puts it in the trusted config at the machine, and the daemon needs a restart:
+  - for the shell, in `@stratusagent/tool-shell`'s `env`, under `agents.<id>` to keep it to one agent (whose commands can then read it);
+  - for an MCP server, in `servers.<name>.headers` (HTTP) or `servers.<name>.env` (stdio), which every agent granted `mcp.<name>.*` uses.
+
+  `passEnv` beside them forwards variables, values included, from the daemon's own environment, and only ones that are not secret belong on it.
 
 For a named credential to reach you, three things must all be true. It is **stored**, your soul's `credentials:` **lists its name**, and a tool you have **declares it**. Storing grants nothing by itself. You never see the value, and there is no file or variable for you to look in. Stored entries are read before an environment variable of the same name, and your own entry before a shared one.
 
-When you need a named credential you do not hold:
+When you need a named credential you do not hold, first make sure a tool you have uses that name. A key no tool reads does nothing once stored; if what you need is a tool, say which plugin or tool is missing instead. Then:
 
-1. **Ask with `credential.request`**, if your `tools:` covers it (a daemon tool; the built-in `stratus` agent, which has no soul, cannot use it). Give the `name` the tool expects, a one-sentence `reason`, and a `scope`: `agent` (yours alone, the default) or `shared` (one value stored for the whole fleet, but still granted only to you; another agent needs the name in its own soul). In Slack, someone in `approvals.slackApprovers` gets a form in this conversation. Elsewhere, or with `via: "link"`, you get a one-time link instead, which needs the control API. Without `api.publicUrl` that link opens only on the daemon's machine. Anyone holding the link can fill it in once, within 30 minutes, so give it only to the person who should, in a direct message. Either way the key goes straight to the store and the name into your soul, and you can use it from your next reply.
+1. **Ask with `credential.request`**, if your `tools:` covers it (a daemon tool; the built-in `stratus` agent, which has no soul, cannot use it). Give the `name` the tool expects, a one-sentence `reason`, and a `scope`: `agent` (yours alone, the default) or `shared` (one value stored for the whole fleet, but still granted only to you; another agent needs the name in its own soul).
+   - **A form**, in Slack, goes up in this conversation when one of `approvals.slackApprovers` can see it: a public channel, a private one with an approver in it, or a direct message with an approver.
+   - **A link** comes back otherwise, or when you pass `via: "link"`. It needs the control API, and without `api.publicUrl` it opens only on the daemon's machine. Whoever opens it first can set the key, once, within 30 minutes. So in a shared channel, do not post it: ask your operator to message you directly, and ask again there. Pass `via: "form"` to get a form or nothing.
+   - Either way the key goes straight to the store and the name into your soul, and you can use it from your next reply. A restart cancels a request still waiting.
 2. **Otherwise, ask your operator to run, on the machine:**
 
    ```
@@ -79,15 +90,19 @@ When you need a named credential you do not hold:
 
    (leave out `--agent` for a shared one), and to add `<name>` to `credentials:` in your soul.
 
-Away from the machine, named credentials are **add-only**: the dashboard, the control API, the Slack form, and the link can add a name nobody has stored, and refuse one already stored or supplied by the daemon's environment. Replacing or removing one is `stratus credential set` or `stratus credential remove` at the machine, because a replaced shared key moves every agent using it onto another account. `stratus credentials` lists the names stored and who may use them, never the values.
+Away from the machine, named credentials are **add-only**: the control API, the Slack form, and the link can add a name nobody has stored, and refuse one already stored or supplied by the daemon's environment. Replacing or removing one is `stratus credential set` or `stratus credential remove` at the machine, because a replaced shared key moves every agent using it onto another account. `stratus credentials` lists the names stored, shared and per agent, never the values.
 
 A stored named credential or provider key takes effect on the next turn, with no restart. One that comes from an environment variable is fixed when the daemon starts, and the background service does not read a shell profile.
 
-When a stored key "isn't found", check in this order: is the name in your `credentials:`, does a tool you have declare it (`stratus plugins`), and is it stored under that exact name and for you (`stratus credentials`).
+When a stored key "isn't found", check in this order:
+
+1. Is the name in your `credentials:`?
+2. Does a tool you have use it? The plugin's README names what it reads.
+3. Is it stored under that exact name, shared or for you (`stratus credentials`)?
 
 ## Tools, plugins, and approvals
 
-- **Built in everywhere:** `memory.*` (remember, recall, forget, pin) and, with `skills:`, `skill.read`. **Only under the daemon:** `schedule.*`, `message.send`, `agent.delegate`, and `credential.request`, so `stratus run` and `stratus chat` cannot call them.
+- **Built in everywhere:** `memory.*` (remember, recall, forget, pin) and `skill.read`, which every agent has because this skill counts. **Only under the daemon:** `schedule.*`, `message.send`, `agent.delegate`, and `credential.request`, so `stratus run` and `stratus chat` cannot call them.
 - **Plugins** add the rest, each installed with `npm install -g <package>` and enabled under `plugins` in the trusted config:
   - `@stratusagent/tool-fs` gives `fs.*`, inside configured roots only, so with no roots there is no filesystem. Roots go in `"@stratusagent/tool-fs": { "enabled": true, "roots": ["~/notes"] }`, or under `"agents": { "<id>": { "roots": [...] } }` for one agent.
   - `@stratusagent/tool-shell` gives `shell.run`.
@@ -96,10 +111,13 @@ When a stored key "isn't found", check in this order: is the name in your `crede
   - `@stratusagent/plugin-mcp` gives an MCP server's tools as `mcp.<server>.<tool>`.
 - `stratus setup` → Plugins installs, enables, and asks for settings like roots in one step.
 - Enabled is not granted: your soul's `tools:` must also cover a plugin's tools. `stratus plugins` walks the whole chain for each tool (installed, enabled, granted to which agents, and what approvals do with a call), so it answers "why can't you use X" in one command.
-- **Risk.** Every tool is `safe`, `gated`, or `dangerous`. The daemon runs `safe` tools unattended. `schedule.every`, `schedule.at`, and `message.send` are gated.
-  - What happens to a gated call depends on the approvals mode. Under `headless` (the default) it is refused. Under `remote` the people in `approvals.slackApprovers` are asked in Slack (or through the control API's `/approvals`) with **Allow once**, **Always allow**, and **Deny**.
-  - Either way, what was already approved still runs unattended. For `shell.run` that is a command scope plus a built-in safe list of read-only commands (`git status`, `git log`, `git diff`, `pwd`, and a few more). For `browser.*` it is an approved site, and for other gated tools a standing grant.
-  - **Always allow** writes one of those to `agents/<id>/whitelist.json`. A `dangerous` call is never offered it.
+- **Risk.** Every tool is `safe`, `gated`, or `dangerous`. The daemon runs `safe` tools unattended: `memory.*`, `skill.read`, and `fs.read`, `fs.list`, and `fs.search`. Gated tools include:
+  - `web.fetch`, `fs.write`, `shell.run`, `browser.*`, and `mcp.*`;
+  - `schedule.every`, `schedule.at`, and `message.send`;
+  - every third-party tool, `web.search` included.
+  - What happens to a gated call depends on the approvals mode. Under `headless` (the default) it is refused. Under `remote` the people in `approvals.slackApprovers` are asked in Slack (or through the control API's `/approvals`) with **Allow once**, **Always allow**, and **Deny**. Under `remote` with nobody to ask, it is refused too.
+  - Either way, what was already approved still runs unattended. For `shell.run` that is a command scope plus a built-in safe list of read-only commands (`git status`, `git log`, `git diff`, `pwd`, and a few more; not `ls`). For `browser.act` it is an approved site, and for other gated tools a standing grant.
+  - **Always allow** writes one of those to `agents/<id>/whitelist.json`, except for a tool that names a destination, such as `message.send`, where it lasts for the conversation. A `dangerous` call is never offered it.
   - `stratus grants <id>` lists the grants, and `stratus grants revoke <id> --tool|--scope|--origin` takes one back.
 
 ## Slack
@@ -108,13 +126,16 @@ When a stored key "isn't found", check in this order: is the name in your `crede
 - **"Sending messages to this app has been turned off"** in a DM is a Slack setting, not Stratus. In the app's settings go to App Home → Messages Tab, turn on *Allow users to send Slash commands and messages from the messages tab*, then reopen the DM.
 - **What reaches you.** In a DM, every message. In a channel, a message that mentions you, which starts a thread. In that thread, what happens to a reply that does not name you depends on your soul's `listens:`:
   - `thread`, the default, hears every such reply.
-  - `mentions` hears only messages that name you.
+  - `mentions` answers only messages that name you, though it still hears the rest of the thread.
   - `judge` hears them and decides whether to answer.
 - With several agents in one thread, an untagged reply goes to whoever spoke last. You hear a thread from the mention onward, never what came before it.
 - **Answering only when mentioned**, never to thread replies, has three causes, and they are worth checking in this order:
   1. `listens: mentions` in your soul.
   2. Another agent spoke last in that thread.
   3. The app is missing the history scopes (`channels:history`, `groups:history`, `mpim:history`) and their `message.*` events, which means adding them and reinstalling the app.
+
+  Not answering at all also happens when the daemon is down, the app was removed from the channel, or `admit: "principals"` turned the person away.
+- **Another agent on Slack** needs its own soul on the roster first, then its own Slack app through `stratus setup` → Channels, and a restart to connect it.
 - **Who counts as your operator** is `principals.slackUsers` in the trusted config. Everyone else's messages reach you labelled as from someone unknown, and `admit: "principals"` turns them away entirely.
 - **Images** need the `files:read` scope. Text files are read up to a size limit, and anything else reaches you by name only, with the reason. The message says which.
 
@@ -164,7 +185,10 @@ When a stored key "isn't found", check in this order: is the name in your `crede
 
 You can use the tools your soul grants, remember and recall, delegate to the agents you may delegate to, schedule turns and send messages if you have those tools, read your enabled skills, and ask for a named credential.
 
-Your operator can do more from anywhere they can reach the dashboard or control API. That covers approvals, principals, the `api` block, the provider and model, provider sign-ins and Slack tokens, restarting the daemon, revoking a grant, and adding a named credential.
+Your operator can do more from anywhere they reach the dashboard or the control API:
+
+- **From the dashboard:** edit souls (your `tools:`, `credentials:`, and `listens:` included), create agents, answer approvals, change the provider, model, and other settings, and store provider sign-ins and Slack tokens.
+- **Through the control API as well:** restart the daemon, revoke a grant, cancel a schedule, add a named credential, and edit `approvals`, `principals`, and `api`.
 
 Only at the machine can someone:
 
@@ -173,7 +197,7 @@ Only at the machine can someone:
 - replace or remove a named credential;
 - raise a memory's trust (`stratus memory reassert`).
 
-When you need one of those, ask for it precisely, once: the exact command, the file and the line to change, and what it will let you do. For example: "Run `stratus credential set search.apiKey --agent kai` with the key on stdin, and add `search.apiKey` under `credentials:` in my soul. Once a search plugin is enabled and `web.search` is in my `tools:`, I can search." Not a list of possibilities, and not a guess presented as a step.
+When you need one of those, ask for it precisely, once: the exact command, the file and the line to change, and what it will let you do. For example: "Run `stratus credential set search.apiKey --agent kai` with the key on stdin, and add `search.apiKey` under `credentials:` in my soul. Once a search plugin is enabled, `web.search` is in my `tools:`, and approvals let it run, I can search." Not a list of possibilities, and not a guess presented as a step.
 
 ## Going further
 
