@@ -295,12 +295,17 @@ These are deliberate. Changing one is a decision, not a refactor.
   interface a daemon binds, who may approve its tool calls, and what the
   agent is told it is, are not decisions a cloned repo gets to make.
 - **Named credentials are add-only away from the machine.** Every surface
-  reachable remotely (the control API and the Slack credential form today,
-  and whatever is built next) goes through `addNamedCredential`, which refuses a name already
+  reachable remotely (the control API, the Slack credential form, and the
+  credential link today, and whatever is built next) goes through `addNamedCredential`, which refuses a name already
   stored, an agent's own entry over a shared one of that name, and any
   name the daemon's environment supplies (a stored entry is read before it).
   Replacing or removing one is `stratus credential` at the machine, because
   a replaced shared key moves every agent that uses it onto another account.
+- **A credential link is a bearer capability, and that was the operator's
+  call.** Its token answers one request, once, within 30 minutes, with no
+  sign-in, so it stays exactly that narrow: one request, spent on a final
+  answer, never on a `GET`, and the page loads nothing that could carry the
+  token elsewhere. Widening what a token can do is a decision, not a refactor.
 - **No endpoint returns a secret.** Credential reads report presence, type,
   and bound endpoint. Session reads strip the Anthropic raw-turn cache
   (`redactAnthropicRawTurns`), which exists for replay and carries raw model

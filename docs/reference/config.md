@@ -240,7 +240,7 @@ set.
 | `approvals` | Who may authorize an agent's tool calls, and how | [Approvals](../guides/approvals.md) |
 | `principals` | Whose messages an agent takes as its operator's; everyone else's arrive as `unknown` | [Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator), [Memory](../concepts/memory.md#where-a-fact-came-from) |
 | `slack` | How the daemon's agents post into your workspace | [Slack](../guides/slack.md#how-replies-appear) |
-| `api` | Which interface and port a daemon binds | [Remote access](../guides/remote-access.md) |
+| `api` | Which interface and port a daemon binds, and the address credential links point at | [Remote access](../guides/remote-access.md) |
 | `maxTurns` | How long a loop one message can buy, which is both a runaway guard and a spending limit | [Always on](../guides/always-on.md#how-many-turns-one-message-may-spend) |
 | `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
 | `soul`, `systemPrompt` | What the agent is told it is and what it may do — a persona in a cloned repo is a system prompt written by whoever pushed it. `--soul` and `STRATUS_SOUL` still name one; the run says once, on stderr, what the file asked for and did not get, and `stratus serve` says it once at startup, whether or not its runtime resolves | [Security](../concepts/security.md) |
@@ -249,8 +249,8 @@ Each block's keys and shape are documented in its own guide. `approvals`,
 `principals`, `slack`, and each plugin's entry also take a per-agent `agents`
 sub-block, where an agent's entry overrides the defaults above it key by key
 (an explicit `"slackUsers": []` excludes an agent from a shared list); the `api` block
-has no per-agent form — its keys are exactly `enabled`, `host`, and
-`port`.
+has no per-agent form — its keys are exactly `enabled`, `host`, `port`, and
+`publicUrl`.
 
 `baseUrl` is the one setting a project config may still set and have
 honoured — pointing a repository at a local model is the reason it exists —

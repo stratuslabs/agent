@@ -256,6 +256,34 @@ const parsePluginsConfig = (raw: unknown, configPath: string): PluginsConfig | u
   return plugins;
 };
 
+/**
+ * `api.publicUrl` as credential links are built on it, or a plain Error
+ * saying what is wrong with it. The one rule for that address: the config
+ * loader applies it, and so does `createControlApi` for a host passing the
+ * option directly, since either way every link is handed to an agent.
+ *
+ * No message repeats the value: it may carry a proxy sign-in, and these
+ * messages reach the daemon's log.
+ */
+export const normalizePublicUrl = (value: unknown): string => {
+  const parsed = typeof value === 'string' ? URL.parse(value.trim()) : null;
+  if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) {
+    throw new Error('use the http(s) address this daemon is reached on from elsewhere, like https://mac-mini.example.ts.net.');
+  }
+  // Every link is built on this and handed to the agent, so a password in
+  // it would reach the model and the conversation.
+  if (parsed.username !== '' || parsed.password !== '') {
+    throw new Error('it carries a username or password, and every credential link is built on it and shown to the agent. '
+      + 'Use the bare address, and put any proxy sign-in in the proxy itself.');
+  }
+  // The serialized form, not `search`/`hash`: those read empty for a bare
+  // trailing `?` or `#`, which would still put every link's path after it.
+  if (parsed.href.includes('?') || parsed.href.includes('#')) {
+    throw new Error('links are built by appending a path to it, so it can carry no query or fragment, not even an empty one.');
+  }
+  return parsed.href.replace(/\/+$/, '');
+};
+
 const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined => {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
@@ -290,6 +318,15 @@ const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined
       );
     }
     api.port = source.port;
+  }
+  if (source.publicUrl !== undefined) {
+    // Checked here, not when the first link is built: a link to an address
+    // that is not one would reach the person asked for a key and fail there.
+    try {
+      api.publicUrl = normalizePublicUrl(source.publicUrl);
+    } catch (error) {
+      throw new Error(`Invalid api.publicUrl in config ${configPath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   return api;
 };

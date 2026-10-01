@@ -19,7 +19,9 @@ macOS app and a headless VM — want the API and not a web page.
 
 ## Authentication
 
-Two credentials, one check. Every endpoint requires one of them.
+Two credentials, one check. Every endpoint requires one of them, except two
+that carry a single-use token of their own in their address: the one-time
+sign-in exchange below, and a [credential link](#credential-links).
 
 **Bearer token** — generated into `~/.stratus/gateway-token` (0600) the first
 time the API binds. Programmatic clients read the file and send it:
@@ -123,6 +125,8 @@ log, and an address bar is one that gets noticed when it changes.
 | PUT | `/credentials/channels/:channel` | Store one agent's transport secrets for a channel kind, under `channels.<kind>.<agentId>`. `slack` takes `{ agentId, appToken, botToken }`; any other kind — one a [channel plugin](../../docs/guides/extending.md#channels) declares — takes `{ agentId, secrets: { name: value, … } }`, the names its README documents. A kind that is not a contribution name answers `400 unknown_channel`; an agent not on the roster `404 agent_not_found`. Saving one kind never disturbs another's |
 
 | POST | `/credentials/named` | Add a named credential — the `search.apiKey` kind an agent resolves through its soul's `credentials:` list: `{ name, value, agentId? }`, the fleet's shared entry without `agentId`, that agent's own with it. **Add-only**: a name already stored answers `409 credential_exists`, and so does an agent's own over a shared one of that name, since the agent's entry is read first, and so does a name the daemon's environment already supplies, since a stored one would replace it. A name outside the credential-name rule answers `400 invalid_credential_name`; an `agentId` not on the roster `404 agent_not_found` |
+| GET | `/credential-links/:token` | The form behind a credential link, as an HTML page. No bearer or cookie: the token is the credential. Showing it spends nothing. `404` once the link is spent or expired |
+| POST | `/credential-links/:token` | Answer it: an `application/x-www-form-urlencoded` body with `value`, answered as an HTML page. `200` added, `400` a refusal a corrected value can clear (the form again, reason beside the field), `409` a final one (the link is spent), `404` spent or expired |
 | GET/PUT | `/config` | Settings, whitelisted to keys this API owns |
 
 **Named credentials can be added here, never replaced or removed.** This API
@@ -524,6 +528,34 @@ daemon refuses to run, and omit the pins it is really billing — in the one
 endpoint whose job is to say what the daemon is doing right now. `POST
 /roster/reload` is what closes the gap.
 
+### Credential links
+
+`credential.request` falls back to a link where the agent's conversation
+cannot show a form, and gives one whenever the agent asks with
+`via: "link"`. This API issues it (the adapter's `requestCredentialLink`):
+a 256-bit token, kept in memory, minted for one pending request, and built
+on `api.publicUrl`, or on the bound address when that is unset.
+
+- **The token is the whole credential.** The operator chose a link that
+  works by itself over one that also asks for a dashboard session, so the
+  person asked can open it on whatever device they have. It answers one
+  request, once, through the gateway's `provideCredential`: add-only,
+  granted only to the agent that asked, the value going to the credential
+  store and nowhere else. The submission's actor is recorded as `link`.
+- **Spent on a final answer, never on a look.** A `GET` renders the form and
+  changes nothing, so a chat app unfurling the link does not use it up. A
+  submission that adds the key, or is refused for good (`retired`: the name
+  was stored since, the agent's soul moved), spends it. An empty value does
+  not.
+- **Dies on its own.** 30 minutes after it was minted, or at a restart.
+- **The page keeps its address to itself.** No script, nothing loaded from
+  elsewhere, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, and a
+  CSP of `default-src 'none'; style-src 'unsafe-inline'; form-action 'self';
+  frame-ancestors 'none'; base-uri 'none'`.
+
+The full flow is in
+[Remote access](../../docs/guides/remote-access.md#adding-a-credential-from-a-link).
+
 ## The event stream
 
 `WS /api/v1/events`, filterable at connect (`?session=`, `?agent=`) or with a
@@ -586,7 +618,8 @@ reason to send comes near either.
   "api": {
     "enabled": true,        // false, or `stratus serve --no-api`, to turn it off
     "host": "127.0.0.1",
-    "port": 4123
+    "port": 4123,
+    "publicUrl": "https://mac-mini.example.ts.net"  // optional: what credential links are built on
   }
 }
 ```

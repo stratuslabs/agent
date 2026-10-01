@@ -266,6 +266,7 @@ const serveHeldHome = async (
         ...(apiHost !== undefined ? { host: apiHost } : {}),
         ...(apiPort !== undefined ? { port: apiPort } : {}),
         ...(command.configPath ? { configPath: command.configPath } : {}),
+        ...(apiConfig.publicUrl !== undefined ? { publicUrl: apiConfig.publicUrl } : {}),
         grants: grantStore,
         log,
         warn,

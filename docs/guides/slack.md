@@ -240,7 +240,10 @@ only once the form is posted. With no approver configured for it, or a post
 Slack refused, or a conversation no approver can see (a direct message with
 someone who is not one, or a private channel or group DM with none of them
 in it), nothing is posted or left pending, and the agent is told why,
-so it never says it is waiting on someone who cannot see the question. A
+so it never says it is waiting on someone who cannot see the question.
+Where the daemon serves the control API, the agent is handed a one-time
+link to a form instead, and it can ask for one directly with `via: "link"`
+([Remote access](./remote-access.md#adding-a-credential-from-a-link)). A
 key that is already stored, or supplied by the daemon's environment, but not
 granted is not asked for either: the agent is told to have it added to its
 soul. Requests live in the daemon's memory, so after a restart

@@ -27,6 +27,7 @@ import {
   readPendingApproval,
   type AgentDefinition,
   type AgentRuntimeContext,
+  type CredentialDelivery,
   type CredentialScope,
   type AgentMemoryStore,
   type AlwaysMeans,
@@ -237,6 +238,31 @@ export interface GatewayChannelAdapter {
     reason?: string;
     metadata: JsonObject;
   }): Promise<void>;
+  /**
+   * Issues a one-time link to a form for a credential request, for the
+   * agent to pass on: what a request falls back to when its conversation
+   * cannot show a form, and what an agent asking `via: 'link'` gets. The
+   * control API implements it. Optional: a host with no adapter carrying it
+   * refuses such requests with the machine-side command instead.
+   *
+   * The link is the whole credential: whoever opens it can answer the
+   * request once, through `provideCredential`, which stays add-only and
+   * grants only the agent that asked.
+   */
+  requestCredentialLink?(request: {
+    sessionId: string;
+    agentId: string;
+    agentName: string;
+    requestId: string;
+    name: string;
+    scope: CredentialScope;
+    reason?: string;
+  }): Promise<{
+    url: string;
+    expiresAt: string;
+    /** The link is on an address only the machine itself can open (no `api.publicUrl`). */
+    localOnly?: boolean;
+  }>;
 }
 
 /**
@@ -1897,56 +1923,102 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       );
     }
     const onMachine = `\`stratus credential set ${request.name}${request.scope === 'agent' ? ` --agent ${quoteShellArg(agentId)}` : ''}\``;
-    // Only a conversation a channel started has anywhere to show a form,
-    // and only a channel that renders one can show it: a scheduled or HTTP
-    // turn, or a channel with no form, would record a request nobody sees
-    // while the agent tells its user the operator was asked.
-    const kind = session.metadata?.channel;
-    const { adapter } = typeof kind === 'string'
-      ? channelCarrying(kind, agentId, (candidate) => candidate.requestCredential !== undefined)
-      : { adapter: undefined };
-    if (!adapter?.requestCredential || !session.metadata) {
-      throw new Error(
-        (typeof kind === 'string'
-          ? `This conversation's channel (${kind}) cannot show your operator a credential form here.`
-          : 'This conversation is not in a channel that can show your operator a form.')
-        + ` Ask them to store ${request.name} on the machine with ${onMachine} and grant it to you.`,
-      );
-    }
-    const requestId = randomUUID();
-    credentialRequests.set(requestId, { agentId, sessionId: session.id, name: request.name, scope: request.scope, soulPath });
-    // Delivered before it is announced, and dropped if delivery fails: a
-    // request whose post never landed has no button to answer it, so
-    // keeping it would leave it pending for good behind a tool result
-    // saying the operator was asked.
-    try {
-      await adapter.requestCredential({
+    const record = { agentId, sessionId: session.id, name: request.name, scope: request.scope, soulPath };
+    const announce = async (requestId: string, via: CredentialDelivery): Promise<void> => {
+      await bus.emit({
+        type: 'credential.requested',
         sessionId: session.id,
         agentId,
         requestId,
         name: request.name,
         scope: request.scope,
         ...(request.reason !== undefined ? { reason: request.reason } : {}),
-        metadata: session.metadata,
+        via,
+        ...(session.metadata ? { metadata: session.metadata } : {}),
+      });
+    };
+    // Why no form went up, said to the agent beside the link that replaces
+    // it, so it can tell the person why they are getting a link instead.
+    let formUnavailable: string | undefined;
+    if (request.via !== 'link') {
+      // Only a conversation a channel started has anywhere to show a form,
+      // and only a channel that renders one can show it: a scheduled or
+      // HTTP turn, or a channel with no form, would record a request nobody
+      // sees while the agent tells its user the operator was asked.
+      const kind = session.metadata?.channel;
+      const { adapter } = typeof kind === 'string'
+        ? channelCarrying(kind, agentId, (candidate) => candidate.requestCredential !== undefined)
+        : { adapter: undefined };
+      if (!adapter?.requestCredential || !session.metadata) {
+        formUnavailable = typeof kind === 'string'
+          ? `This conversation's channel (${kind}) cannot show your operator a credential form here.`
+          : 'This conversation is not in a channel that can show your operator a form.';
+      } else {
+        const requestId = randomUUID();
+        credentialRequests.set(requestId, record);
+        // Delivered before it is announced, and dropped if delivery fails: a
+        // request whose post never landed has no button to answer it, so
+        // keeping it would leave it pending for good behind a tool result
+        // saying the operator was asked.
+        try {
+          await adapter.requestCredential({
+            sessionId: session.id,
+            agentId,
+            requestId,
+            name: request.name,
+            scope: request.scope,
+            ...(request.reason !== undefined ? { reason: request.reason } : {}),
+            metadata: session.metadata,
+          });
+          await announce(requestId, 'form');
+          return { requestId, via: 'form' };
+        } catch (error) {
+          credentialRequests.delete(requestId);
+          formUnavailable = `The form could not be shown here: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+      if (request.via === 'form') {
+        throw new Error(`${formUnavailable} Nothing is pending. Ask for a link instead (via: "link"), or ask your operator to store ${request.name} on the machine with ${onMachine} and grant it to you.`);
+      }
+    }
+    // A link where no form can go, from whichever adapter issues them: the
+    // control API, which is not tied to any one agent's transport.
+    const linker = startedChannels.find((candidate) => candidate.requestCredentialLink !== undefined);
+    if (!linker?.requestCredentialLink) {
+      throw new Error(
+        `${formUnavailable !== undefined ? `${formUnavailable} ` : ''}No control API is running to issue a link either. `
+        + `Ask your operator to store ${request.name} on the machine with ${onMachine} and grant it to you.`,
+      );
+    }
+    const requestId = randomUUID();
+    credentialRequests.set(requestId, record);
+    let link: { url: string; expiresAt: string; localOnly?: boolean };
+    try {
+      link = await linker.requestCredentialLink({
+        sessionId: session.id,
+        agentId,
+        agentName: session.agent.name,
+        requestId,
+        name: request.name,
+        scope: request.scope,
+        ...(request.reason !== undefined ? { reason: request.reason } : {}),
       });
     } catch (error) {
       credentialRequests.delete(requestId);
       throw new Error(
-        `Your request for ${request.name} could not be shown to your operator: ${error instanceof Error ? error.message : String(error)} `
-        + `Nothing is pending. Ask again later, or ask them to store it on the machine with ${onMachine}.`,
+        `A link for ${request.name} could not be issued: ${error instanceof Error ? error.message : String(error)} `
+        + `Nothing is pending. Ask your operator to store it on the machine with ${onMachine}.`,
       );
     }
-    await bus.emit({
-      type: 'credential.requested',
-      sessionId: session.id,
-      agentId,
+    await announce(requestId, 'link');
+    return {
       requestId,
-      name: request.name,
-      scope: request.scope,
-      ...(request.reason !== undefined ? { reason: request.reason } : {}),
-      metadata: session.metadata,
-    });
-    return { requestId };
+      via: 'link',
+      url: link.url,
+      expiresAt: link.expiresAt,
+      ...(link.localOnly === true ? { localOnly: true } : {}),
+      ...(formUnavailable !== undefined ? { formUnavailable } : {}),
+    };
   }));
 
   /**
