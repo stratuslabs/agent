@@ -66,9 +66,9 @@
         { "kind": "matches", "pattern": "(?i)tool-shell|shell plugin" },
         { "kind": "matches", "pattern": "(?i)[`\"]env[`\"]|\\benv\\b (setting|block|key|field)|plugin'?s env" },
         { "kind": "matches", "pattern": "(?i)passEnv (?:is not|isn't|is never|shouldn't|should not|must not|mustn't|can't|cannot)(?: be)?(?: (?:for|used for|meant for|a place for|the place for))?[^.\\n]{0,20}\\b(?:secrets?|tokens?|keys?|credentials?)\\b|\\bnot (?:for|meant for) (?:a )?(?:secrets?|tokens?)\\b|\\bnever (?:put|carry|use|pass)[^.\\n]{0,30}\\b(?:secrets?|tokens?)\\b|passEnv[^.\\n]{0,40}\\bnon-secrets?\\b" },
-        { "kind": "notMatches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not)\\s+(?:\\w+\\s+){0,2})\\b(?:add|put|list|include|forward|append|set|configure|use)\\b[^.\\n]{0,40}?[`\"]?passEnv\\b[^.\\n]{0,20}\\b(?:to|=|:)?[^.\\n]{0,20}(?:TOKEN|KEY|SECRET|token|key)|(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not)\\s+(?:\\w+\\s+){0,2})\\b(?:add|put|list|include|append)\\b[^.\\n]{0,40}\\b(?:to|in|under|on)\\s+[`\"]?passEnv" },
-        { "kind": "matches", "pattern": "(?i)restart" },
-        { "kind": "notMatches", "pattern": "(?i)\\bno restart\\b|\\b(?:don't|do not|doesn't|does not|won't|will not|shouldn't|should not)(?: even)? (?:need|require|have)(?: a| to)? restart|\\bwithout (?:a )?restart|\\bno need (?:to|for a) restart|\\brestart(?:ing)? (?:isn't|is not|is never) (?:needed|required|necessary)|\\brestart(?:ing)? (?:is|'s) (?:optional|not (?:needed|required|necessary)|unnecessary)\\b|\\b(?:optional(?:ly)?|if you like,?) restart\\b" }
+        { "kind": "notMatches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not)\\s+(?:\\w+\\s+){0,2})\\b(?:add|put|list|include|forward|append|set|configure|use)\\b[^.;\\n]{0,40}?[`\"]?passEnv\\b[^.;\\n]{0,20}\\b(?:to|=|:)?[^.;\\n]{0,20}(?:TOKEN|KEY|SECRET|token|key)|(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not)\\s+(?:\\w+\\s+){0,2})\\b(?:add|put|list|include|append)\\b[^.;\\n]{0,40}\\b(?:to|in|under|on)\\s+[`\"]?passEnv" },
+        { "kind": "matches", "pattern": "(?i)\\brestart", "affirmative": true },
+        { "kind": "notMatches", "pattern": "(?i)\\bno restart\\b|\\b(?:don't|do not|doesn't|does not|won't|will not|shouldn't|should not)(?: even)? (?:need|require|have)(?: a| to)? restart|\\b(?:don't|do not|never|no need to|shouldn't|should not)\\s+(?:\\w+\\s+)?restart|\\bwithout (?:a )?restart|\\bno need (?:to|for a) restart|\\brestart(?:ing)? (?:isn't|is not|is never) (?:needed|required|necessary)|\\brestart(?:ing)? (?:is|'s) (?:optional|not (?:needed|required|necessary)|unnecessary)\\b|\\b(?:optional(?:ly)?|if you like,?) restart\\b" }
       ]
     },
     {
@@ -110,7 +110,8 @@
         { "kind": "readSkill" },
         { "kind": "matches", "pattern": "listens" },
         { "kind": "matches", "pattern": "(?i)spoke last|another agent\\b[^.\\n]{0,40}\\b(?:replied|spoke|answered|last)|last (?:agent|speaker)" },
-        { "kind": "matches", "pattern": "(?i)(?:channels|groups|mpim):history|history scopes?|message\\.(?:channels|groups|im|mpim)|reinstall" }
+        { "kind": "matches", "pattern": "(?i)(?:channels|groups|mpim):history|history scopes?|message\\.(?:channels|groups|im|mpim)|\\bmessage(?:\\.\\*)? events?\\b" },
+        { "kind": "matches", "pattern": "(?i)\\breinstall", "affirmative": true }
       ]
     },
     {
@@ -131,7 +132,8 @@
       "checks": [
         { "kind": "readSkill" },
         { "kind": "matches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not|instead of|rather than|avoid)\\s+(?:\\w+\\s+){0,2}[`\"']?)\\bstratus restart\\b" },
-        { "kind": "matches", "pattern": "(?i)service stop\\b[\\s\\S]{0,120}?\\bservice start\\b", "affirmative": true }
+        { "kind": "matches", "pattern": "(?i)service stop\\b[\\s\\S]{0,120}?\\bservice start\\b", "affirmative": true },
+        { "kind": "matches", "pattern": "(?i)\\bservice start\\b", "affirmative": true }
       ]
     },
     {
