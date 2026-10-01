@@ -44,6 +44,7 @@ import {
   uninstallService,
   type ServiceRunner,
   HELP_TEXT,
+  runSkills,
   parseCommand,
   resolveRuntimeConfig,
   RESTART_EXIT_CODE,
@@ -790,6 +791,17 @@ test('runCli skills lists the built-in stratus skill first, enabled for every ag
   assert.equal(exitCode, 0);
   assert.match(output.stdout.split('\n')[0] ?? '', /^stratus\s+How Stratus itself works.*enabled for every agent/);
   assert.match(output.stdout, /No skills installed in/);
+});
+
+test('runSkills reports a built-in skill that will not load instead of listing it as enabled', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillbroken-'));
+  const { streams, output } = createStreams();
+  const exitCode = await runSkills(streams, { cwd: home, homeDir: home, processEnv: {} }, async () => {
+    throw new Error('ENOENT: no such file');
+  });
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /enabled for every agent/);
+  assert.match(output.stderr, /built-in stratus skill did not load .*ENOENT: no such file.*so no agent has it\. Reinstall Stratus\./);
 });
 
 test('the built-in stratus skill is a valid skill that names every command the help text lists', async () => {

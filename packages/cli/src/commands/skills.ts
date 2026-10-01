@@ -2,7 +2,7 @@ import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { SkillRegistry, STRATUS_SKILL_ID, matchesSkillAllowlist } from '@stratusagent/core';
-import { formatSoul, isLoadableSkillId, STRATUS_SKILL_PATH, type ParsedSoul } from '@stratusagent/agents';
+import { formatSoul, isLoadableSkillId, loadStratusSkill, STRATUS_SKILL_PATH, type ParsedSoul } from '@stratusagent/agents';
 import {
   agentsDirPath,
   discoverSkillsInDirectory,
@@ -273,10 +273,21 @@ export const runSkillReload = async (
 export const runSkills = async (
   streams: CliStreams,
   env: CliEnvironment = {},
+  loadBuiltin: () => Promise<unknown> = loadStratusSkill,
 ): Promise<number> => {
   // First, because an agent with no skills: still has it, and an operator
   // reading this to learn what an agent can read would otherwise not know.
-  writeLine(streams.stdout, `${STRATUS_SKILL_ID.padEnd(24)}How Stratus itself works and how to set it up — built in, enabled for every agent (${STRATUS_SKILL_PATH})`);
+  // Loaded the way the daemon loads it, so a broken install is said here
+  // too rather than listed as serving.
+  try {
+    await loadBuiltin();
+    writeLine(streams.stdout, `${STRATUS_SKILL_ID.padEnd(24)}How Stratus itself works and how to set it up — built in, enabled for every agent (${STRATUS_SKILL_PATH})`);
+  } catch (error) {
+    writeLine(
+      streams.stderr,
+      `Warning: the built-in ${STRATUS_SKILL_ID} skill did not load from ${STRATUS_SKILL_PATH} (${error instanceof Error ? error.message : String(error)}), so no agent has it. Reinstall Stratus.`,
+    );
+  }
   const registry = new SkillRegistry();
   const skills = await loadOperatorSkills(env, registry, (line) => {
     writeLine(streams.stderr, `Warning: ${line}`);
