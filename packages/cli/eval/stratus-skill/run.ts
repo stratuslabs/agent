@@ -274,6 +274,19 @@ const main = async (): Promise<void> => {
       // is a link, and no choice falls back to a link that says why.
       const formUnavailable = 'The form could not be shown here: nobody who can add it can see this conversation.';
       tools.register(createCredentialRequestTool(async (request) => {
+        // A key already stored is refused before any form or link, granted or
+        // not, as the gateway refuses it: the form only adds, so it could only
+        // fail, and an agent holding the key has nothing to ask for.
+        const source = await namedCredentialSource({}, agent.id, request.name);
+        if (source !== undefined && agent.credentials?.includes(request.name) === true) {
+          throw new Error(`You already hold ${request.name}; the tools that need it use it for you. There is nothing to ask for.`);
+        }
+        if (source !== undefined) {
+          throw new Error(
+            `${request.name} is already ${source === 'environment' ? "supplied by the daemon's environment" : 'stored'} but not granted to you. `
+            + 'Ask your operator to add it to the credentials list in your soul; a form would only refuse to store it again.',
+          );
+        }
         if (request.via === 'form') {
           throw new Error(`${formUnavailable} Nothing is pending. Ask for a link instead (via: "link"), or ask your operator to store ${request.name} on the machine with \`stratus credential set ${request.name}\` and grant it to you.`);
         }

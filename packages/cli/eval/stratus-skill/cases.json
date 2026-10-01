@@ -13,7 +13,7 @@
         { "kind": "readSkill" },
         { "kind": "matches", "pattern": "search\\.apiKey" },
         { "kind": "matches", "pattern": "stratus credential set|credential\\.request", "when": { "notHeld": "search.apiKey" } },
-        { "kind": "notMatches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not)\\s+(?:\\w+\\s+){0,2})\\b(?:paste|send|share|drop|post|type|enter|give|provide|submit|reply with|tell)\\b[^.\\n]{0,40}\\b(?:key|token|secret|it)\\b[^.\\n]{0,30}?\\b(?:here|to me|with me|in (?:this|the|our) (?:chat|dm|thread|message|conversation|channel))\\b|(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not)\\s+(?:\\w+\\s+){0,2})\\b(?:DM|message|direct message|slack)\\s+(?:me|us|it to me)\\b(?:(?!\\b(?:if|when|once|after|so|because)\\b)[^.\\n]){0,30}?\\b(?:key|token|secret)\\b" }
+        { "kind": "notMatches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not)\\s+(?:\\w+\\s+){0,2})\\b(?:paste|send|share|drop|post|type|enter|give|provide|submit|reply with|tell|upload)\\b[^.\\n]{0,40}\\b(?:key|token|secret|it)\\b[^.\\n]{0,30}?\\b(?:here|to me|with me|in (?:this|the|our) (?:chat|dm|thread|message|conversation|channel))\\b|(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not)\\s+(?:\\w+\\s+){0,2})\\b(?:DM|message|direct message|slack)\\s+(?:me|us|it to me)\\b(?:(?!\\b(?:if|when|once|after|so|because)\\b)[^.\\n]){0,30}?\\b(?:key|token|secret)\\b" }
       ]
     },
     {
@@ -56,7 +56,8 @@
         { "kind": "matches", "pattern": "(?i)[`\"]env[`\"]|\\benv\\b (setting|block|key|field)|plugin'?s env" },
         { "kind": "matches", "pattern": "(?i)passEnv (is not|isn't|only|forwards|shouldn't|should not)|not (for|meant for) (a )?secrets?|never (put|carry|use)[^.]{0,30}secret" },
         { "kind": "notMatches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not)\\s+(?:\\w+\\s+){0,2})\\b(?:add|put|list|include|forward|append|set|configure|use)\\b[^.\\n]{0,40}?[`\"]?passEnv\\b[^.\\n]{0,20}\\b(?:to|=|:)?[^.\\n]{0,20}(?:TOKEN|KEY|SECRET|token|key)|(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not)\\s+(?:\\w+\\s+){0,2})\\b(?:add|put|list|include|append)\\b[^.\\n]{0,40}\\b(?:to|in|under|on)\\s+[`\"]?passEnv" },
-        { "kind": "matches", "pattern": "(?i)restart" }
+        { "kind": "matches", "pattern": "(?i)restart" },
+        { "kind": "notMatches", "pattern": "(?i)\\bno restart\\b|\\b(?:don't|do not|doesn't|does not|won't|will not|shouldn't|should not)(?: even)? (?:need|require|have)(?: a| to)? restart|\\bwithout (?:a )?restart|\\bno need (?:to|for a) restart|\\brestart(?:ing)? (?:isn't|is not|is never) (?:needed|required|necessary)" }
       ]
     },
     {
@@ -76,7 +77,7 @@
       "room": { "kind": "direct" },
       "user": "I edited your soul to add shell.run, do I need to restart?",
       "checks": [
-        { "kind": "matches", "pattern": "(?i)next (reply|turn|message)|no restart|don't need to restart|do not need to restart" },
+        { "kind": "matches", "pattern": "(?i)\\bno restart\\b|\\b(?:don't|do not|doesn't|does not|won't|will not|shouldn't|should not)(?: even)? (?:need|require|have)(?: a| to)? restart|\\bwithout (?:a )?restart|\\bno need (?:to|for a) restart|\\brestart(?:ing)? (?:isn't|is not|is never) (?:needed|required|necessary)|\\breach(?:es)? (?:my|your|the) next (?:reply|turn|message)|\\bon (?:my|the) next (?:reply|turn|message)[^.\\n]{0,40}\\bwithout\\b|\\bpick(?:s|ed)? (?:it|the edit|edits|that) up (?:on|at|by|from) (?:my|the) next" },
         { "kind": "matches", "pattern": "(?i)tool-shell|plugin|stratus plugins" }
       ]
     },
