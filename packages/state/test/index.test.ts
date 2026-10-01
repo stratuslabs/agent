@@ -1611,4 +1611,12 @@ test('api.publicUrl loads as an http(s) address without a trailing slash, and an
     await writeFile(file, JSON.stringify({ api: { publicUrl } }));
     await assert.rejects(() => loadConfigFile(file), /Invalid api\.publicUrl/);
   }
+
+  // A sign-in in the address would ride every link into the model's view,
+  // so it is refused, and the refusal does not repeat it.
+  await writeFile(file, JSON.stringify({ api: { publicUrl: 'https://proxy-user:hunter2@mac-mini.example' } }));
+  await assert.rejects(
+    () => loadConfigFile(file),
+    (error: Error) => /carries a username or password/.test(error.message) && !error.message.includes('hunter2'),
+  );
 });

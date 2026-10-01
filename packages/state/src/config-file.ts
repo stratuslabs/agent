@@ -301,6 +301,15 @@ const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined
         + 'Use the http(s) address this daemon is reached on from elsewhere, like https://mac-mini.example.ts.net, with no query or fragment.',
       );
     }
+    // Every link is built on this and handed to the agent, so a password in
+    // it would reach the model and the conversation. Refused without echoing
+    // the value, which is the secret.
+    if (parsed.username !== '' || parsed.password !== '') {
+      throw new Error(
+        `Invalid api.publicUrl in config ${configPath}: it carries a username or password, and every credential link `
+        + 'is built on it and shown to the agent. Use the bare address, and put any proxy sign-in in the proxy itself.',
+      );
+    }
     api.publicUrl = parsed.href.replace(/\/+$/, '');
   }
   return api;

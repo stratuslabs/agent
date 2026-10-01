@@ -135,7 +135,8 @@ the model, the event stream, or the daemon log.
   use the address the API bound (`http://127.0.0.1:4123` by default), which
   works only on the machine itself, and the agent is told to say so. The key is read only from a trusted
   config, like the rest of the `api` block, and has to be an `http(s)`
-  address with no query or fragment.
+  address with no query, fragment, or username and password: every link is
+  built on it and shown to the agent.
 - **No control API, no link.** A daemon started with `--no-api`, or without
   `@stratusagent/control-api` installed, has nothing to serve one from; the
   agent is told to have its operator run `stratus credential set`.
