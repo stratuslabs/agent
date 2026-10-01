@@ -412,6 +412,11 @@ const main = async (): Promise<void> => {
         memory,
         store: new InMemorySessionStore(),
         bus: new EventBus(),
+        // As the gateway runs it: a streaming provider (Anthropic, a plugin
+        // declaring streams) takes its streaming transport only when the
+        // runner asks for deltas, so without this the eval would measure
+        // another request path than the one that serves a turn.
+        streaming: true,
         ...(maxTurns !== undefined ? { maxTurns } : {}),
       });
       hostedRunner = runner;

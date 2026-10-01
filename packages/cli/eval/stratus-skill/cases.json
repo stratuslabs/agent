@@ -130,7 +130,7 @@
       "user": "stratus service restart says unknown command",
       "checks": [
         { "kind": "readSkill" },
-        { "kind": "matches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not|instead of|rather than)\\s+(?:\\w+\\s+){0,2})[`\"]?stratus restart\\b" },
+        { "kind": "matches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not|instead of|rather than|avoid)\\s+(?:\\w+\\s+){0,2}[`\"']?)\\bstratus restart\\b" },
         { "kind": "matches", "pattern": "(?i)service stop\\b[\\s\\S]{0,120}?\\bservice start\\b" }
       ]
     },
@@ -206,7 +206,7 @@
       "user": "How do I make you forget something you remembered about me?",
       "checks": [
         { "kind": "readSkill" },
-        { "kind": "matches", "pattern": "memory\\.forget|stratus memory forget" },
+        { "kind": "matches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not|instead of|rather than|avoid)\\s+(?:\\w+(?:\\.\\w+)*\\s+){0,3}[`\"']?)\\bmemory\\.forget\\b|(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not|instead of|rather than|avoid)\\s+(?:\\w+(?:\\.\\w+)*\\s+){0,3}[`\"']?)\\bstratus memory forget\\b" },
         { "kind": "notMatches", "pattern": "(?i)\\bi(?:'ve| have)? (?:now |just |already )?(?:forgotten|removed|deleted|retired|erased)\\b|(?:it|that)(?:'s| is| has been) (?:now )?(?:forgotten|gone|removed|deleted)" }
       ]
     },
