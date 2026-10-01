@@ -2393,17 +2393,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * way whether one person or a thousand will read it. Never the channel's
    * name, which whoever made the channel chose (`ConversationContext`).
    *
-   * The event's `channel_type` says the kind for free on a message; a
-   * mention carries none, and only `conversations.info` has the count. The
-   * count is kept per app and conversation for ten minutes, so a busy
-   * thread costs one lookup; the kind never is (see below), so a mention
-   * is looked up each time. A lookup that fails (an
-   * app missing the read scopes) leaves the kind the event gave, or
+   * Looked up on every turn outside a DM, and never cached: who can read a
+   * channel is the point, and a cached answer described a channel made
+   * public, or shared with another workspace, as it was before. Lookups
+   * for one conversation that overlap share one call. A lookup that fails
+   * (an app missing the read scopes) leaves the kind the event gave, or
    * nothing: the prompt then says only that the conversation is in Slack,
    * as it always did.
    */
-  const roomCache = new Map<string, { at: number; room: Promise<JsonObject | undefined> }>();
-  const ROOM_CACHE_MS = 10 * 60_000;
+  const roomLookups = new Map<string, Promise<JsonObject | undefined>>();
   const KIND_BY_CHANNEL_TYPE: Record<string, string> = { im: 'direct', mpim: 'group', group: 'private', channel: 'public' };
   const roomFor = async (
     connection: AgentConnection,
@@ -2411,52 +2409,38 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     channelType: string | undefined,
   ): Promise<JsonObject | undefined> => {
     const fromEvent = channelType !== undefined ? KIND_BY_CHANNEL_TYPE[channelType] : undefined;
-    // A DM's name is the person, and its count is two: nothing to look up.
+    // A DM is two people, the app and the sender: nothing to look up.
     if (fromEvent === 'direct') {
       return { kind: 'direct' };
     }
-    // Who can read the channel is the point of all this, and a channel made
-    // public a minute ago must not be described as private: the kind is the
-    // event's when it carries one, and a fresh lookup's when it does not.
     const key = `${connection.config.agentId}:${channel}`;
-    const cached = roomCache.get(key);
-    const room = cached && fromEvent !== undefined && now() - cached.at < ROOM_CACHE_MS
-      ? cached.room
-      : lookupRoom(connection, channel, key);
-    const looked = await room;
-    if (fromEvent === undefined) {
-      return looked;
+    let lookup = roomLookups.get(key);
+    if (!lookup) {
+      lookup = lookupRoom(connection, channel).finally(() => roomLookups.delete(key));
+      roomLookups.set(key, lookup);
     }
-    return {
-      kind: fromEvent,
-      ...(typeof looked?.members === 'number' ? { members: looked.members } : {}),
-      ...(looked?.shared === true ? { shared: true } : {}),
-    };
+    return (await lookup) ?? (fromEvent !== undefined ? { kind: fromEvent } : undefined);
   };
 
-  const lookupRoom = (connection: AgentConnection, channel: string, key: string): Promise<JsonObject | undefined> => {
-    const room = (async (): Promise<JsonObject | undefined> => {
-      try {
-        const info = (await connection.web.conversations.info({ channel, include_num_members: true })).channel;
-        if (info === undefined) {
-          return undefined;
-        }
-        const kind = info.is_im === true
-          ? 'direct'
-          : info.is_mpim === true
-            ? 'group'
-            : info.is_private === true ? 'private' : 'public';
-        return {
-          kind,
-          ...(kind !== 'direct' && typeof info.num_members === 'number' ? { members: info.num_members } : {}),
-          ...(kind !== 'direct' && (info.is_ext_shared === true || info.is_org_shared === true) ? { shared: true } : {}),
-        };
-      } catch {
+  const lookupRoom = async (connection: AgentConnection, channel: string): Promise<JsonObject | undefined> => {
+    try {
+      const info = (await connection.web.conversations.info({ channel, include_num_members: true })).channel;
+      if (info === undefined) {
         return undefined;
       }
-    })();
-    roomCache.set(key, { at: now(), room });
-    return room;
+      const kind = info.is_im === true
+        ? 'direct'
+        : info.is_mpim === true
+          ? 'group'
+          : info.is_private === true ? 'private' : 'public';
+      return {
+        kind,
+        ...(kind !== 'direct' && typeof info.num_members === 'number' ? { members: info.num_members } : {}),
+        ...(kind !== 'direct' && (info.is_ext_shared === true || info.is_org_shared === true) ? { shared: true } : {}),
+      };
+    } catch {
+      return undefined;
+    }
   };
 
   // Mentions arrive as <@U123> markup; the model should read names.
@@ -4267,9 +4251,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           ...room,
           ...(room.kind === 'direct' && senderTrust === 'user' ? { with: author } : {}),
           ...(thread !== undefined && room.kind !== 'direct' ? { thread: true } : {}),
-          // People outside this workspace read a Slack Connect channel. The
-          // event says so on every turn, which covers a channel shared
-          // since the count was cached.
+          // People outside this workspace read a Slack Connect channel, and
+          // the event says so itself, even when the lookup failed.
           ...(room.kind !== 'direct' && args.body?.is_ext_shared_channel === true ? { shared: true } : {}),
         };
       const metadata = {

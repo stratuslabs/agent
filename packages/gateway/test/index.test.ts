@@ -378,6 +378,10 @@ test('each turn tells the agent the room it is in now, a resumed conversation in
     await turn(13);
     assert.match(prompts[0] ?? '', /a public Slack channel with 12 members/);
     assert.match(prompts[1] ?? '', /a public Slack channel with 13 members/);
+    // Kept on the session too, for a parked turn recovered after a restart
+    // and a turn that brings no room of its own.
+    const stored = await gateway.store.get('slack:ava:T1:C1:100.1');
+    assert.deepEqual(stored?.metadata?.conversation, { kind: 'public', members: 13 });
   } finally {
     await gateway.stop();
   }

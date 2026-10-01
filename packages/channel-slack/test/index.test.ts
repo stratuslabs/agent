@@ -7980,7 +7980,7 @@ test('with no principals configured, a DM names nobody: a display name never rea
   await adapter.stop();
 });
 
-test('each turn says what kind of room it came from and how many are in it, never its name, and never trusts a cached kind', async () => {
+test('each turn says what kind of room it is in now and how many are in it, never its name', async () => {
   // An agent in a DM told the person they were "talking on the terminal",
   // and would have answered a thousand-person channel the same way.
   const socket = createFakeSocket();
@@ -8018,22 +8018,14 @@ test('each turn says what kind of room it came from and how many are in it, neve
   assert.deepEqual(rooms.at(-1), { kind: 'direct' });
   assert.equal(infoCalls, 0);
 
-  // A mention carries no channel type, so the channel is looked up.
+  // Outside a DM the room is looked up on every turn, never cached: a
+  // channel made private, or shared with another workspace, since the last
+  // message is described as it is now.
   await socket.deliver('app_mention', mention('<@B-AVA> status?'));
   assert.deepEqual(rooms.at(-1), { kind: 'public', members: 1042, thread: true });
-  assert.equal(infoCalls, 1);
-  // A thread reply says its kind, so the name and count are reused.
-  await socket.deliver('message', mention('and now?', { type: 'message', channel_type: 'channel', ts: '100.2', thread_ts: '100.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 1042, thread: true });
-  assert.equal(infoCalls, 1, 'a reply in the conversation reuses the lookup');
-
-  // Made private while the name was cached: the reply's own kind wins, and
-  // the next mention looks it up again rather than trusting the cache.
-  await socket.deliver('message', mention('still there?', { type: 'message', channel_type: 'group', ts: '100.3', thread_ts: '100.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 1042, thread: true });
-  web.knownConversations.set('C1', { is_member: true, is_private: true, name: 'general', num_members: 12 });
-  await socket.deliver('app_mention', mention('<@B-AVA> who is here?', { ts: '100.4' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 12, thread: true });
+  web.knownConversations.set('C1', { is_member: true, is_private: true, name: 'general', num_members: 12, is_org_shared: true });
+  await socket.deliver('message', mention('and now?', { type: 'message', channel_type: 'group', ts: '100.2', thread_ts: '100.1' }));
+  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 12, thread: true, shared: true });
   assert.equal(infoCalls, 2);
 
   await socket.deliver('app_mention', mention('<@B-AVA> review this', { channel: 'G1', ts: '200.1' }));

@@ -26,6 +26,7 @@ import {
   latestTurnReply,
   readPendingApproval,
   conversationContextFrom,
+  CONVERSATION_METADATA_KEY,
   STRATUS_SKILL_ID,
   type AgentDefinition,
   type AgentRuntimeContext,
@@ -2731,6 +2732,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // gets one now rather than never.
         if (existing.metadata?.[EXECUTOR_METADATA_KEY] !== executorRecord) {
           existing.metadata = { ...existing.metadata, [EXECUTOR_METADATA_KEY]: executorRecord };
+        }
+        // The room rides on the turn, but two readers have only the
+        // session's: a turn parked on approval and recovered after a
+        // restart, and a turn that brings no room of its own (a schedule
+        // firing into the thread). Both get the latest room this way, not
+        // the first turn's, which a channel made public since would make
+        // read as more private than it is.
+        const room = input.metadata?.[CONVERSATION_METADATA_KEY];
+        if (room !== undefined) {
+          existing.metadata = { ...existing.metadata, [CONVERSATION_METADATA_KEY]: room };
         }
         await store.save(existing);
         // The turn's metadata rides along for the sender's trust: without
