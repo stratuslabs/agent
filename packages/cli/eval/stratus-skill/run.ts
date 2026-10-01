@@ -16,6 +16,7 @@ import {
   ToolRegistry,
   conversationContextFrom,
   latestTurnReply,
+  matchesToolAllowlist,
   type AgentDefinition,
   type ExecutorContribution,
   type JsonObject,
@@ -53,12 +54,29 @@ type Check = (
   | { kind: 'notMatches'; pattern: string }
 ) & {
   /**
-   * Score this check only when the configured model answered. The agent is
-   * told when it is on the fallback, so "yes, I switched" is wrong from the
-   * primary and right from the fallback.
+   * Score this check only where it has a right answer. A case runs against
+   * whatever is configured, so an answer can be correct for one setup and
+   * wrong for another:
+   * - `primary`: the configured model answered. The agent is told when it
+   *   is on the fallback, so "yes, I switched" is right only from there.
+   * - `fallbackConfigured`: a fallback model exists. Without one there is
+   *   no switch and nothing to roll over.
+   * - `tool`: the agent's `tools:` allow it, as the runner reads them. An
+   *   agent with no credential.request has no link to move to a DM.
    */
-  primaryOnly?: boolean;
+  when?: { primary?: true; fallbackConfigured?: true; tool?: string };
 };
+
+interface Served {
+  onFallback: boolean;
+  fallbackConfigured: boolean;
+  tools: readonly string[] | undefined;
+}
+
+const applies = (check: Check, served: Served): boolean =>
+  !(check.when?.primary === true && served.onFallback)
+  && !(check.when?.fallbackConfigured === true && !served.fallbackConfigured)
+  && !(check.when?.tool !== undefined && served.tools !== undefined && !matchesToolAllowlist(check.when.tool, served.tools));
 
 interface Corpus {
   agent: { name: string; instructions: string };
@@ -88,8 +106,8 @@ const readTheSkill = (session: Session): boolean =>
 const calledTool = (session: Session, tool: string): boolean =>
   session.messages.some((message) => (message.toolCalls ?? []).some((call) => call.toolName === tool));
 
-const failureOf = (check: Check, reply: string, session: Session, onFallback: boolean): string | undefined => {
-  if (check.primaryOnly === true && onFallback) {
+const failureOf = (check: Check, reply: string, session: Session, served: Served): string | undefined => {
+  if (!applies(check, served)) {
     return undefined;
   }
   switch (check.kind) {
@@ -286,7 +304,11 @@ const main = async (): Promise<void> => {
       }
       const reply = session !== undefined ? latestTurnReply(session) ?? '' : '';
       const failures = session !== undefined
-        ? scenario.checks.map((check) => failureOf(check, reply, session, fellBack !== undefined)).filter((failure) => failure !== undefined)
+        ? scenario.checks.map((check) => failureOf(check, reply, session, {
+          onFallback: fellBack !== undefined,
+          fallbackConfigured: config.fallback !== undefined,
+          tools: agent.tools,
+        })).filter((failure) => failure !== undefined)
         : [`the turn failed: ${threw}`];
       if (failures.length === 0) {
         passed += 1;
