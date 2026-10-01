@@ -187,6 +187,10 @@ already pointed at the built-in under that name.
 
 The text is the CLI's in prose, so it is kept in step the way the help text
 is: a test fails when a command `stratus help` lists is missing from it.
+Whether a model reads it, and answers right when it does, is a model's
+behavior rather than something a unit test can settle: `pnpm eval:skill`
+asks the configured model the questions the skill was written against
+([the eval](../../packages/cli/eval/stratus-skill/README.md)).
 
 ## What portability means
 
