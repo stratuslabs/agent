@@ -46,6 +46,7 @@ import { loadServePlugins } from '../../src/trusted-config.ts';
 
 type Check =
   | { kind: 'readSkill' }
+  | { kind: 'noToolCall'; tool: string }
   | { kind: 'matches'; pattern: string }
   | { kind: 'notMatches'; pattern: string };
 
@@ -72,10 +73,17 @@ const readTheSkill = (session: Session): boolean =>
   session.messages.some((message) => (message.toolCalls ?? []).some((call) =>
     call.toolName === SKILL_READ_TOOL_NAME && call.input.id === STRATUS_SKILL_ID));
 
+// What the agent did, not what it said: a reply can be spotless while a
+// tool call stored the pasted key, and that is the failure that persists.
+const calledTool = (session: Session, tool: string): boolean =>
+  session.messages.some((message) => (message.toolCalls ?? []).some((call) => call.toolName === tool));
+
 const failureOf = (check: Check, reply: string, session: Session): string | undefined => {
   switch (check.kind) {
     case 'readSkill':
       return readTheSkill(session) ? undefined : `answered without reading the ${STRATUS_SKILL_ID} skill`;
+    case 'noToolCall':
+      return calledTool(session, check.tool) ? `called ${check.tool}` : undefined;
     case 'matches':
       return regex(check.pattern).test(reply) ? undefined : `does not match ${check.pattern}`;
     case 'notMatches':
