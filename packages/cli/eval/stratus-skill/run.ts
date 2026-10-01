@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import {
   AgentRunner,
   CONVERSATION_METADATA_KEY,
+  ContributionRegistry,
   EventBus,
   InMemoryAgentMemoryStore,
   InMemorySessionStore,
@@ -16,9 +17,13 @@ import {
   conversationContextFrom,
   latestTurnReply,
   type AgentDefinition,
+  type ExecutorContribution,
   type JsonObject,
+  type MemoryStoreContribution,
+  type ProviderContribution,
   type Session,
 } from '@stratusagent/core';
+import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
   createForgetTool,
   createPinTool,
@@ -27,7 +32,16 @@ import {
   loadStratusSkill,
   parseSoul,
 } from '@stratusagent/agents';
-import { createRuntimeProvider, describeServingModel, loadOperatorSkills, resolveRuntimeConfig } from '@stratusagent/state';
+import {
+  createAgentWorkspaces,
+  createFileCredentialResolver,
+  createRuntimeProvider,
+  describeServingModel,
+  loadOperatorSkills,
+  resolveRuntimeConfig,
+} from '@stratusagent/state';
+
+import { loadServePlugins } from '../../src/trusted-config.ts';
 
 type Check =
   | { kind: 'readSkill' }
@@ -99,64 +113,103 @@ const main = async (): Promise<void> => {
   await loadOperatorSkills({}, skills, (line) => console.error(`Warning: ${line}`));
   // The memory tools every agent has, over a store that dies with the run:
   // a case like forget-me would otherwise recall and retire a real fact
-  // from the soul's own memory. Plugins are not loaded, because a plugin is
-  // code with side effects; README.md says what that leaves out.
+  // from the soul's own memory.
   const memory = new InMemoryAgentMemoryStore();
   const tools = new ToolRegistry();
   tools.register(createRememberTool(memory));
   tools.register(createRecallTool(memory));
   tools.register(createForgetTool(memory));
   tools.register(createPinTool(memory));
-  // Hosted runtimes (Codex, a Claude subscription) reach kernel tools only
-  // through this callback, late-bound because the runner needs the provider
-  // first, as the CLI runtime and the gateway bind it. Without it they have
-  // no skill.read, and every readSkill case fails whatever the model does.
-  let hostedRunner: AgentRunner | undefined;
-  const provider = createRuntimeProvider(config, undefined, async (session, call, context) => {
-    if (!hostedRunner) {
-      throw new Error('The eval runner is not ready to execute tools yet.');
-    }
-    return hostedRunner.executeHostedToolCall(session, call, context);
-  });
-  const runner = new AgentRunner({ provider, tools, skills, memory, store: new InMemorySessionStore(), bus: new EventBus() });
-  hostedRunner = runner;
 
-  const cases = only !== undefined ? corpus.cases.filter((scenario) => scenario.id === only) : corpus.cases;
-  if (cases.length === 0) {
-    console.error(`No case has id ${JSON.stringify(only)}. cases.json lists them.`);
-    process.exitCode = 2;
-    return;
+  // The plugins the daemon would load, from the same trusted config, for
+  // two of the three things they contribute: a provider the config names
+  // (`openai-compatible` is one), which nothing else can construct, and the
+  // skills the soul may enable, which the routing decision is made among.
+  // Their tools go to a registry nothing reads: this runner has no approval
+  // policy, so a plugin tool here would run unattended, shell.run included.
+  const pluginsConfig = await loadServePlugins({}, undefined, (line) => console.error(`Warning: ${line}`));
+  const providers = new ContributionRegistry<ProviderContribution>();
+  const loadedPlugins: LoadedPlugin[] = [];
+  if (Object.keys(pluginsConfig).length > 0) {
+    const result = await loadPlugins({
+      config: pluginsConfig,
+      host: {
+        resolve: (specifier) => import.meta.resolve(specifier),
+        import: (specifier) => import(specifier),
+      },
+      tools: new ToolRegistry(),
+      skills,
+      bus: new EventBus(),
+      providers,
+      memory: new ContributionRegistry<MemoryStoreContribution>(),
+      executors: new ContributionRegistry<ExecutorContribution>(),
+      credentials: createFileCredentialResolver({}),
+      workspaces: createAgentWorkspaces({}),
+    });
+    loadedPlugins.push(...result.loaded);
+    for (const failure of result.failures) {
+      console.error(`Warning: plugin ${failure.package} did not load: ${failure.reason}`);
+    }
   }
+  const disposePlugins = async (): Promise<void> => {
+    for (const plugin of loadedPlugins) {
+      await plugin.instance.dispose?.();
+    }
+  };
+  try {
+    // Hosted runtimes (Codex, a Claude subscription) reach kernel tools only
+    // through this callback, late-bound because the runner needs the provider
+    // first, as the CLI runtime and the gateway bind it. Without it they have
+    // no skill.read, and every readSkill case fails whatever the model does.
+    let hostedRunner: AgentRunner | undefined;
+    const provider = createRuntimeProvider(config, undefined, async (session, call, context) => {
+      if (!hostedRunner) {
+        throw new Error('The eval runner is not ready to execute tools yet.');
+      }
+      return hostedRunner.executeHostedToolCall(session, call, context);
+    }, undefined, undefined, providers);
+    const runner = new AgentRunner({ provider, tools, skills, memory, store: new InMemorySessionStore(), bus: new EventBus() });
+    hostedRunner = runner;
 
-  let passed = 0;
-  let failed = 0;
-  for (const scenario of cases) {
-    // The room a Slack turn carries, on the session and on the runtime
-    // alike, so the room line under test is the one production renders.
-    const metadata: JsonObject = { channel: 'slack', [CONVERSATION_METADATA_KEY]: scenario.room };
-    const conversation = conversationContextFrom(metadata);
-    const runtime = {
-      ...(config.language !== undefined ? { language: config.language } : {}),
-      model: describeServingModel(config, false),
-      ...(conversation !== undefined ? { conversation } : {}),
-    };
-    const session = await runner.run({ sessionId: `eval:${scenario.id}`, agent, userMessage: scenario.user, metadata, runtime });
-    const reply = latestTurnReply(session) ?? '';
-    const failures = scenario.checks.map((check) => failureOf(check, reply, session)).filter((failure) => failure !== undefined);
-    if (failures.length === 0) {
-      passed += 1;
-    } else {
-      failed += 1;
+    const cases = only !== undefined ? corpus.cases.filter((scenario) => scenario.id === only) : corpus.cases;
+    if (cases.length === 0) {
+      console.error(`No case has id ${JSON.stringify(only)}. cases.json lists them.`);
+      process.exitCode = 2;
+      return;
     }
-    console.log(`${failures.length === 0 ? '✓' : '✗'} ${scenario.id} — ${scenario.title}`);
-    if (failures.length > 0) {
-      console.log(`  ${failures.join('; ')}`);
+
+    let passed = 0;
+    let failed = 0;
+    for (const scenario of cases) {
+      // The room a Slack turn carries, on the session and on the runtime
+      // alike, so the room line under test is the one production renders.
+      const metadata: JsonObject = { channel: 'slack', [CONVERSATION_METADATA_KEY]: scenario.room };
+      const conversation = conversationContextFrom(metadata);
+      const runtime = {
+        ...(config.language !== undefined ? { language: config.language } : {}),
+        model: describeServingModel(config, false),
+        ...(conversation !== undefined ? { conversation } : {}),
+      };
+      const session = await runner.run({ sessionId: `eval:${scenario.id}`, agent, userMessage: scenario.user, metadata, runtime });
+      const reply = latestTurnReply(session) ?? '';
+      const failures = scenario.checks.map((check) => failureOf(check, reply, session)).filter((failure) => failure !== undefined);
+      if (failures.length === 0) {
+        passed += 1;
+      } else {
+        failed += 1;
+      }
+      console.log(`${failures.length === 0 ? '✓' : '✗'} ${scenario.id} — ${scenario.title}`);
+      if (failures.length > 0) {
+        console.log(`  ${failures.join('; ')}`);
+      }
+      console.log(`    → ${reply.replace(/\s+/g, ' ').slice(0, 200)}`);
     }
-    console.log(`    → ${reply.replace(/\s+/g, ' ').slice(0, 200)}`);
-  }
-  console.log(`\nTOTAL: ${passed} passed, ${failed} failed, on ${config.provider}${'model' in config && config.model ? ` ${config.model}` : ''}`);
-  if (failed > 0) {
-    process.exitCode = 1;
+    console.log(`\nTOTAL: ${passed} passed, ${failed} failed, on ${config.provider}${'model' in config && config.model ? ` ${config.model}` : ''}`);
+    if (failed > 0) {
+      process.exitCode = 1;
+    }
+  } finally {
+    await disposePlugins();
   }
 };
 
