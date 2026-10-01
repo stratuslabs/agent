@@ -35,7 +35,9 @@ saying an edit reaches its next reply, so neither is required to read
 anything.
 
 Run it against whatever `stratus` is configured to run on, optionally as a
-particular soul, or one case at a time:
+particular soul, or one case at a time. A soul resolves the way the daemon
+resolves it, so a `provider` or `model` it pins wins over `STRATUS_PROVIDER`
+and `STRATUS_MODEL` here too:
 
 ```bash
 pnpm eval:skill
@@ -70,7 +72,7 @@ different:
 It prints each case with its reply and a total, and exits non-zero when a
 case fails. A case the `fallbackModel` answered, because the primary
 failed, says so, and so does the total: its pass or failure is the
-fallback's, not the primary's. It refuses to run on the demo provider, which would answer
+fallback's, not the primary's. A case where both failed says that instead. It refuses to run on the demo provider, which would answer
 from a script.
 
 When the skill changes, run this before and after: a rewrite that reads

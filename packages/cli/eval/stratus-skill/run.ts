@@ -40,6 +40,7 @@ import {
   describeServingModel,
   loadOperatorSkills,
   resolveRuntimeConfig,
+  servedRuntimes,
 } from '@stratusagent/state';
 
 import { loadServeMaxTurns, loadServePlugins } from '../../src/trusted-config.ts';
@@ -102,10 +103,21 @@ const main = async (): Promise<void> => {
 
   const soulPath = argValue('--soul');
   const only = argValue('--case');
-  const agent: AgentDefinition = soulPath
-    ? parseSoul(await readFile(soulPath, 'utf8'), { seed: soulPath }).agent
+  const soul = soulPath !== undefined ? parseSoul(await readFile(soulPath, 'utf8'), { seed: soulPath }) : undefined;
+  const agent: AgentDefinition = soul
+    ? soul.agent
     : { id: 'kai', name: corpus.agent.name, instructions: corpus.agent.instructions };
-  const config = await resolveRuntimeConfig(soulPath ? { soul: soulPath } : {});
+  // A soul resolves the way a dispatch resolves it, through applySoulPins
+  // (servedRuntimes runs it): a soul pinning a provider or model beats
+  // STRATUS_PROVIDER and STRATUS_MODEL there, where a direct
+  // resolveRuntimeConfig would let the shell win and score another model.
+  const served = soul ? await servedRuntimes({}, undefined, [soul]) : undefined;
+  if (served !== undefined && served.length === 0) {
+    console.error(`Not run: the runtime for ${soulPath} does not resolve. \`stratus doctor\` says which provider or key it is missing.`);
+    process.exitCode = 2;
+    return;
+  }
+  const config = served?.[0]?.runtime ?? await resolveRuntimeConfig({});
   // The demo provider answers from a script, so a pass against it would be
   // a pass nobody earned. Refuse, and say what is missing.
   if (config.provider === 'demo') {
@@ -160,8 +172,10 @@ const main = async (): Promise<void> => {
   // needs skill.read and then credential.request spends two calls, and a
   // pass on the kernel's default says nothing about a daemon set lower.
   const maxTurns = await loadServeMaxTurns({}, undefined, (line) => console.error(`Warning: ${line}`));
-  // Which cases the fallback answered. The wrapper switches silently
+  // Which cases the fallback was tried on. The wrapper switches silently
   // unless told, and a pass it earned must not be scored as the primary's.
+  // It reports the switch before trying the fallback, so only a turn that
+  // then completed was answered by it.
   let fellBack: string | undefined;
   try {
     // Hosted runtimes (Codex, a Claude subscription) reach kernel tools only
@@ -265,9 +279,11 @@ const main = async (): Promise<void> => {
       if (failures.length > 0) {
         console.log(`  ${failures.join('; ')}`);
       }
-      if (fellBack !== undefined) {
+      if (fellBack !== undefined && session !== undefined) {
         onFallback += 1;
         console.log(`  answered by the fallback, ${config.fallback?.provider} ${config.fallback?.model}: ${fellBack}`);
+      } else if (fellBack !== undefined) {
+        console.log(`  the primary failed (${fellBack}), and the fallback, ${config.fallback?.provider} ${config.fallback?.model}, failed too`);
       }
       console.log(`    → ${reply.replace(/\s+/g, ' ').slice(0, 200)}`);
     }
