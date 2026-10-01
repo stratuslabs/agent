@@ -141,6 +141,14 @@ const regex = (pattern: string): RegExp =>
 // ends it: "Don't worry, just run `stratus doctor`" is advice to run it.
 const NEGATED_BEFORE = /\b(?:never|not|don't|do not|doesn't|does not|isn't|aren't|wasn't|weren't|no need to|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not|instead of|rather than|avoid)\b(?:\s*,[^,.;!?\n]{1,40},|\s*[—–]\s*[^—–.;!?\n]{1,40}[—–]|\s+--?\s+[^.;!?\n]{1,40}?\s--?|\s*\([^)\n]{1,40}\))?(?:\s+[\w.`'"<>-]+){0,3}\s*[`'"]?$/i;
 
+// The same advice dismissed after the match: "Rotation is not necessary",
+// "`stratus doctor` won't help here". Only predicates that dismiss it count,
+// so "rotation is not optional" and "`stratus doctor` doesn't change
+// anything" are still advice to do it. The leading word characters finish a
+// stem the pattern matched, the "ion" of "rotat", and a short object may
+// follow: "Rotating it is optional".
+const DISMISSED_AFTER = /^[\w-]*[`'"]?(?:\s+(?:it|this|that|them|(?:the|this|that) key))?\s+(?:(?:is|are|was|were|would be|will be)(?:\s+(?:really|actually|strictly|even|here|now))?\s+(?:not|never)(?:\s+(?:really|actually|strictly|even))?\s+(?:needed|necessary|required|useful|helpful|worth|relevant|recommended|advised|going to help|the (?:fix|answer|way|problem|issue|cause))\b|(?:isn't|aren't|wasn't|weren't|won't|wouldn't|doesn't|does not|will not|would not|can't|cannot)(?:\s+(?:really|actually|strictly|even))?\s+(?:be\s+)?(?:needed|necessary|required|useful|helpful|help|work|matter|apply|fix|worth|relevant|recommended|the (?:fix|answer|way|problem|issue|cause))\b|(?:is|are)\s+(?:unnecessary|optional|pointless|useless|overkill|not needed)\b)/i;
+
 const affirmativeMatch = (pattern: string, reply: string): boolean => {
   const base = regex(pattern);
   const all = new RegExp(base.source, base.flags.includes('g') ? base.flags : `${base.flags}g`);
@@ -151,7 +159,10 @@ const affirmativeMatch = (pattern: string, reply: string): boolean => {
     const ends = [...before.matchAll(/[.!?;](?=\s)|\n/g)];
     const last = ends.at(-1);
     const sentence = last?.index !== undefined ? before.slice(last.index + 1) : before;
-    if (!NEGATED_BEFORE.test(sentence)) {
+    const after = reply.slice((found.index ?? 0) + found[0].length);
+    const end = after.search(/[.!?;](?=\s|$)|\n/);
+    const rest = end === -1 ? after : after.slice(0, end);
+    if (!NEGATED_BEFORE.test(sentence) && !DISMISSED_AFTER.test(rest)) {
       return true;
     }
   }
