@@ -2587,7 +2587,81 @@ export interface AgentRuntimeContext {
    * model that took over is not told it is the default.
    */
   model?: AgentModelContext;
+  /**
+   * Who can read this conversation, as the channel that carried the turn
+   * reported it on the turn's metadata (`conversationContextFrom`). Per
+   * turn rather than read off the session, so a thread that started before
+   * this existed, or a channel that grew since, is described as it is now.
+   */
+  conversation?: ConversationContext;
 }
+
+/**
+ * What kind of room a conversation is: one person, a few, a closed
+ * channel, or one the whole workspace can read. An agent that did not
+ * know told a person in a Slack DM they were "talking on the terminal",
+ * and would have posted the same reply to a thousand-person channel.
+ */
+export type ConversationKind = 'direct' | 'group' | 'private' | 'public';
+
+export interface ConversationContext {
+  kind: ConversationKind;
+  /** Members as the channel counts them, the agent included. */
+  members?: number;
+  /**
+   * Who a direct message is with. It reaches the system prompt, so a
+   * channel sets it only for someone the operator vouched for (a Slack
+   * principal), never from a name anyone could have typed.
+   */
+  with?: string;
+  /** The turn is a reply in a thread rather than the channel itself. */
+  thread?: boolean;
+  /**
+   * People outside this workspace read it too: a Slack Connect channel,
+   * or one shared across an organization's workspaces. Never set for a
+   * direct message.
+   */
+  shared?: boolean;
+  // No channel name, deliberately: anyone who can create or rename a
+  // channel chooses it, and this reaches the system prompt, where a name
+  // like `ignore-all-previous-instructions` would outrank the soul. The
+  // kind and the count are what decide how to write, and neither is text.
+}
+
+/**
+ * The metadata key a channel adapter records a turn's room under: a
+ * `ConversationContext`-shaped object, read back by
+ * `conversationContextFrom`.
+ */
+export const CONVERSATION_METADATA_KEY = 'conversation';
+
+const CONVERSATION_KINDS: readonly string[] = ['direct', 'group', 'private', 'public'];
+// A principal's display name, which is what a channel may put in `with`:
+// vouched for, but still typed, so anything that is not plainly a name is
+// dropped rather than quoted.
+const CONVERSATION_WITH_PATTERN = /^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} .'\u2019-]{0,63}$/u;
+
+/**
+ * The room a turn's metadata describes, keeping only what is safe to put
+ * in front of the model, or undefined when it describes none.
+ */
+export const conversationContextFrom = (metadata: JsonObject | undefined): ConversationContext | undefined => {
+  const raw = metadata?.[CONVERSATION_METADATA_KEY];
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const { kind, members, with: withWhom, thread, shared } = raw as Record<string, unknown>;
+  if (typeof kind !== 'string' || !CONVERSATION_KINDS.includes(kind)) {
+    return undefined;
+  }
+  return {
+    kind: kind as ConversationKind,
+    ...(typeof members === 'number' && Number.isInteger(members) && members > 0 && members <= 10_000_000 ? { members } : {}),
+    ...(kind === 'direct' && typeof withWhom === 'string' && CONVERSATION_WITH_PATTERN.test(withWhom.trim()) ? { with: withWhom.trim() } : {}),
+    ...(thread === true ? { thread: true } : {}),
+    ...(kind !== 'direct' && shared === true ? { shared: true } : {}),
+  };
+};
 
 export interface AgentModelContext {
   provider: string;
@@ -3959,6 +4033,15 @@ export interface SkillDescriptor {
  */
 export interface Skill extends SkillDescriptor {
   /**
+   * Ships with Stratus and is enabled for every agent, whatever its soul's
+   * `skills:` says. Reserved for the system's own documentation (the
+   * `stratus` skill; `SkillRegistry.register` refuses it on any other id): a skill from anywhere else changing how an agent
+   * behaves is opted into, but an agent that cannot read how the system it
+   * runs in works guesses instead, the way one suggested `passEnv` for a
+   * secret after reading the install around it.
+   */
+  builtin?: boolean;
+  /**
    * Toolset globs this skill expects (`browser.*`, `fs.read`). Advisory: a
    * skill is prose and degrades, so an agent enabling one without the tools
    * gets a load-time warning, never a hard failure.
@@ -4006,6 +4089,12 @@ export class SkillRegistry {
   register(skill: Skill): void {
     if (this.skills.has(skill.id) || this.aliases.has(skill.id)) {
       throw new DuplicateSkillIdError(skill.id);
+    }
+    // Refused here rather than trusted at the gates: `builtin` skips every
+    // soul's `skills:`, so a host that set it on anything else (by mistake,
+    // or from data) would hand that skill to every agent.
+    if (skill.builtin === true && skill.id !== STRATUS_SKILL_ID) {
+      throw new Error(`Skill ${skill.id} is marked builtin, which only the ${STRATUS_SKILL_ID} skill may be. Drop the flag and enable it through skills: in the souls that should have it.`);
     }
     this.skills.set(skill.id, skill);
   }
@@ -4090,8 +4179,20 @@ export class SkillRegistry {
    * A read already underway keeps the promise it holds either way. `next`
    * is consumed — emptied, not shared — so nothing can go on mutating this
    * registry through it.
+   *
+   * A built-in skill serving now is never dropped by the swap: a `next`
+   * without one (its file unreadable mid-reload) keeps the one serving,
+   * and a bare alias `next` gave its id yields to it. A reload is
+   * all-or-nothing for what it read; it must not take away from every
+   * agent the one skill no soul can opt back into.
    */
   replaceWith(next: SkillRegistry): void {
+    for (const skill of this.skills.values()) {
+      if (skill.builtin === true && !next.skills.has(skill.id)) {
+        next.aliases.delete(skill.id);
+        next.skills.set(skill.id, skill);
+      }
+    }
     const kept = new Map<string, Promise<string>>();
     for (const [id, body] of this.bodies) {
       if (next.skills.get(id) === this.skills.get(id)) {
@@ -4145,6 +4246,13 @@ export class SkillRegistry {
 
 export const SKILL_READ_TOOL_NAME = 'skill.read';
 
+/**
+ * The built-in skill's id: how Stratus works, enabled for every agent.
+ * Reserved, so an operator directory or a plugin cannot put a different
+ * procedure under the name every agent is pointed at.
+ */
+export const STRATUS_SKILL_ID = 'stratus';
+
 export interface SkillReadToolOptions {
   /**
    * Which `skills:` entries the session's agent is held to. Defaults to the
@@ -4197,8 +4305,8 @@ export const createSkillReadTool = (
     // is settled before existence so an agent with no grant learns
     // nothing about what is installed.
     const addressable = skill ? skills.idsFor(skill.id) : [id];
-    const permitted = allowlist !== undefined
-      && addressable.some((candidate) => matchesSkillAllowlist(candidate, allowlist));
+    const permitted = skill?.builtin === true
+      || (allowlist !== undefined && addressable.some((candidate) => matchesSkillAllowlist(candidate, allowlist)));
     if (!permitted) {
       throw new Error(`Skill not permitted for agent ${session.agent.id}: ${id}`);
     }
@@ -4501,8 +4609,11 @@ export const renderReplySection = (language: string | undefined): string => {
  * dispatches (`slack` today). Without this the agent could not tell: an
  * agent with no Slack tool, asked about an attachment in a Slack DM, told
  * the person it had "no Slack connection at all" and argued the point.
- * Rendered from the session rather than handed in per turn so sessions
- * opened before this existed get it too. The name must look like a channel
+ * The channel is read from the session, so sessions opened before this
+ * existed get it too; the room (`ConversationContext`) comes per turn from
+ * the runtime, falling back to what the session's first turn recorded, so
+ * an agent in a Slack DM no longer tells the person they are "talking on
+ * the terminal". The name must look like a channel
  * id, since it is interpolated into the prompt.
  *
  * What it says about attachments is what the adapter writes into the
@@ -4512,13 +4623,55 @@ export const renderReplySection = (language: string | undefined): string => {
  * file as read, shown, or unread with its reason; the section sends the
  * model to that note and nowhere else.
  */
-export const renderChannelSection = (session: Pick<Session, 'metadata'>): string | undefined => {
+export const renderChannelSection = (
+  session: Pick<Session, 'metadata'>,
+  conversation?: ConversationContext,
+): string | undefined => {
   const channel = session.metadata?.channel;
   if (typeof channel !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(channel)) {
     return undefined;
   }
   const name = `${channel.charAt(0).toUpperCase()}${channel.slice(1)}`;
-  return `Where you are: this conversation is happening in ${name}. The people in it are writing to you there and your replies are posted back to them there, so you are talking in ${name} whether or not you have any ${name} tools. Their message says what became of each file they attach: its text follows, the image itself is shown to you, or only its name reached you, with the reason it was not read. That is everything you have of it, and a file the message does not mention did not reach you, so never guess at a file's contents, location, or why it failed beyond what the message says.`;
+  // Checked again whoever handed it in: a host can build the runtime by
+  // hand, and an unknown kind would otherwise render as nothing at all.
+  const room = conversation !== undefined
+    ? conversationContextFrom({ [CONVERSATION_METADATA_KEY]: conversation as unknown as JsonObject })
+    : conversationContextFrom(session.metadata);
+  const where = room ? describeRoom(room, name) : `this conversation is happening in ${name}.`;
+  return `Where you are: ${where} The people in it are writing to you there and your replies are posted back to them there, `
+    + `so you are talking in ${name}, not in a terminal or a local chat, whether or not you have any ${name} tools. `
+    + 'Their message says what became of each file they attach: its text follows, the image itself is shown to you, or only its name reached you, with the reason it was not read. '
+    + 'That is everything you have of it, and a file the message does not mention did not reach you, so never guess at a file\'s contents, location, or why it failed beyond what the message says.';
+};
+
+/**
+ * One room, said plainly, with who can read it and what that asks of a
+ * reply. The audience is the point: what fits a direct message does not
+ * fit a channel a whole company reads, and what someone said in private
+ * does not belong in either kind of channel.
+ */
+const describeRoom = (room: ConversationContext, channel: string): string => {
+  const count = room.members !== undefined ? room.members.toLocaleString('en-US') : undefined;
+  const inThread = room.thread === true ? ' You are replying in a thread there, which everyone who can read the channel can open.' : '';
+  const outside = room.shared === true
+    ? ' It is shared with people outside this workspace, through Slack Connect or another workspace of the organization, and they read it too.'
+    : '';
+  const forEveryone = 'Everyone here reads what you post, so write for all of them, and keep out of it what came to you in a direct message or another conversation '
+    + 'unless the people there meant it to be shared, and anything meant for one person only, such as a secret or a link only they should use.';
+  switch (room.kind) {
+    case 'direct':
+      return `this is a direct message in ${channel}${room.with !== undefined ? ` with ${room.with}` : ''}. `
+        + 'Only the two of you can read it, so you are talking to one person.';
+    case 'group':
+      return `this is a group direct message in ${channel}${count !== undefined ? ` with ${count} members, you included` : ''}. `
+        + `Only they can read it.${outside}${inThread} ${forEveryone}`;
+    case 'private':
+      return `this is a private ${channel} channel${count !== undefined ? ` with ${count} members, you included` : ''}. `
+        + `Only its members can read it.${outside}${inThread} ${forEveryone}`;
+    case 'public':
+      return `this is a public ${channel} channel${count !== undefined ? ` with ${count} members` : ''}. `
+        + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${outside}${inThread} ${forEveryone}`;
+  }
 };
 
 // A provider or model name as the prompt may carry it. A model name can
@@ -4648,7 +4801,7 @@ export const renderSystemPromptParts = (
     { kind: 'replies', text: renderReplySection(request.runtime?.language) },
     { kind: 'persona', text: renderPersonaSection(request.session.agent, { fallback: options.fallbackPersona ?? false }) },
     { kind: 'runtime', text: renderRuntimeSection(request.runtime, request.session.agent) },
-    { kind: 'channel', text: renderChannelSection(request.session) },
+    { kind: 'channel', text: renderChannelSection(request.session, request.runtime?.conversation) },
     { kind: 'memory', text: renderMemorySection(request.memory) },
     { kind: 'skills', text: renderSkillsSection(request.skills) },
   ];
@@ -5534,22 +5687,22 @@ export class AgentRunner {
    * the allowlist actually granted (canonical before alias) — the id the
    * model is told is the id `skill.read` will accept.
    *
-   * Empty for an agent whose soul has no `skills:` key, which is what keys
-   * both `skill.read` gates: no skills, no reader.
+   * A built-in skill is in it for every agent; otherwise it is empty for
+   * an agent whose soul has no `skills:` key, which is what keys both
+   * `skill.read` gates: no skills, no reader.
    */
   private enabledSkillsFor(session: Session): SkillDescriptor[] {
     if (!this.skills) {
       return [];
     }
-    const allowlist = this.skillAllowlistFor(session);
-    if (!allowlist || allowlist.length === 0) {
-      return [];
-    }
+    const allowlist = this.skillAllowlistFor(session) ?? [];
     const enabled: SkillDescriptor[] = [];
     for (const skill of this.skills.list()) {
-      const grantedId = this.skills
-        .idsFor(skill.id)
-        .find((candidate) => matchesSkillAllowlist(candidate, allowlist));
+      const grantedId = skill.builtin === true
+        ? skill.id
+        : this.skills
+          .idsFor(skill.id)
+          .find((candidate) => matchesSkillAllowlist(candidate, allowlist));
       if (grantedId !== undefined) {
         enabled.push({ id: grantedId, name: skill.name, description: skill.description });
       }

@@ -44,6 +44,7 @@ import {
   uninstallService,
   type ServiceRunner,
   HELP_TEXT,
+  runSkills,
   parseCommand,
   resolveRuntimeConfig,
   RESTART_EXIT_CODE,
@@ -58,7 +59,8 @@ import {
   tailLog,
   npmNeedsShell,
 } from '../src/index.ts';
-import { agentMemoryFilePath, fleetDbPath, stateFilePath } from '@stratusagent/state';
+import { agentMemoryFilePath, fleetDbPath, stateFilePath, validateSkillDirectory } from '@stratusagent/state';
+import { loadStratusSkill, STRATUS_SKILL_PATH } from '@stratusagent/agents';
 import type { Session, Tool } from '@stratusagent/core';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -780,6 +782,44 @@ test('runCli skills withholds enablement claims when the roster cannot load', as
   assert.match(output.stdout, /code-review\s+Use when reviewing\./);
   // Unreadable is not "unused": no enablement claim either way.
   assert.ok(!output.stdout.includes('enabled by'), 'made an enablement claim from an unreadable roster');
+});
+
+test('runCli skills lists the built-in stratus skill first, enabled for every agent, even with nothing installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillbuiltin-'));
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['skills'], streams, env: { cwd: home, homeDir: home, processEnv: {} } });
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout.split('\n')[0] ?? '', /^stratus\s+How Stratus itself works.*enabled for every agent/);
+  assert.match(output.stdout, /No skills installed in/);
+});
+
+test('runSkills reports a built-in skill that will not load instead of listing it as enabled', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillbroken-'));
+  const { streams, output } = createStreams();
+  const exitCode = await runSkills(streams, { cwd: home, homeDir: home, processEnv: {} }, async () => {
+    throw new Error('ENOENT: no such file');
+  });
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /enabled for every agent/);
+  assert.match(output.stderr, /built-in stratus skill did not load .*ENOENT: no such file.*so no agent has it\. Reinstall Stratus\./);
+});
+
+test('the built-in stratus skill is a valid skill that names every command the help text lists', async () => {
+  // The skill is what an agent reads to answer "how do I…" about Stratus,
+  // so a command added to HELP_TEXT and not to it is an answer the agent
+  // will get wrong. Keep the two in step here rather than by memory.
+  const report = await validateSkillDirectory(path.dirname(STRATUS_SKILL_PATH), { directoryName: 'stratus' });
+  assert.deepEqual([...report.errors, ...report.warnings], []);
+  const skill = await loadStratusSkill();
+  assert.equal(skill.id, 'stratus');
+  assert.equal(skill.builtin, true);
+  assert.ok(skill.description.length <= 1024, 'the spec caps a description at 1024 characters');
+
+  const body = await skill.load();
+  const commands = HELP_TEXT.split('\nCommands:\n')[1]?.split(/\n\n[A-Z]/)[0] ?? '';
+  const names = [...commands.matchAll(/^ {2}([a-z][a-z-]*(?: [a-z][a-z-]*)?)(?: {2,}|$)/gm)].map((match) => match[1] ?? '');
+  assert.ok(names.length > 20, 'read the Commands section');
+  assert.deepEqual(names.filter((name) => !body.includes(`stratus ${name}`)), []);
 });
 
 test('parseCommand reads skill validate', () => {

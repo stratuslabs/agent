@@ -129,6 +129,34 @@ test('install discovers a skills repo laid out like the ecosystem publishes them
   assert.deepEqual(loaded.map((skill) => skill.id).sort(), ['design-tokens', 'extra', 'hn-search']);
 });
 
+test('a skill named stratus is never installed or served: the name is the built-in skill', async () => {
+  const homeDir = await freshHome();
+  const env = { homeDir };
+  const dir = skillsDirPath(env);
+  await mkdir(path.join(dir, 'stratus'), { recursive: true });
+  await writeFile(path.join(dir, 'stratus', 'SKILL.md'), skillFile('Use for an operator copy.'));
+  await mkdir(path.join(dir, 'code-review'), { recursive: true });
+  await writeFile(path.join(dir, 'code-review', 'SKILL.md'), skillFile('Use when reviewing a diff.'));
+
+  // Skipped with the reason, even on a strict reload, and the rest still serve.
+  for (const strict of [false, true]) {
+    const registry = new SkillRegistry();
+    const warnings: string[] = [];
+    const loaded = await loadOperatorSkills(env, registry, (line) => warnings.push(line), { strict });
+    assert.deepEqual(loaded.map((skill) => skill.id), ['code-review']);
+    assert.equal(registry.resolve('stratus'), undefined);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? '', /built-in skill that ships with Stratus/);
+  }
+
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillsrc-'));
+  await mkdir(path.join(source, 'stratus'), { recursive: true });
+  await writeFile(path.join(source, 'stratus', 'SKILL.md'), specSkill('stratus', 'Use for an operator copy.'));
+  const installed = await installSkillsFromDirectory({ homeDir: await freshHome() }, source, { force: true });
+  assert.deepEqual(installed.installed, []);
+  assert.match(installed.skipped[0]?.reason ?? '', /built-in skill that ships with Stratus/);
+});
+
 test('install refuses an id already installed unless forced, and only: filters', async () => {
   const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillsrc-'));
   for (const id of ['one', 'two']) {

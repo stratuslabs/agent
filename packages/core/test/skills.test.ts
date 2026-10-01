@@ -6,6 +6,7 @@ import {
   DuplicateSkillIdError,
   InMemorySessionStore,
   SKILL_READ_TOOL_NAME,
+  STRATUS_SKILL_ID,
   SkillRegistry,
   ToolRegistry,
   createSkillReadTool,
@@ -27,6 +28,7 @@ const skill = (id: string, overrides: Partial<Skill> = {}): Skill => ({
   name: overrides.name ?? id,
   description: overrides.description ?? `Use when the task is ${id}.`,
   ...(overrides.requires ? { requires: overrides.requires } : {}),
+  ...(overrides.builtin !== undefined ? { builtin: overrides.builtin } : {}),
   load: overrides.load ?? (async () => `# ${id}\n\nThe full procedure for ${id}.`),
 });
 
@@ -297,6 +299,73 @@ test('an agent with no skills key sees no reader, no skills, and gets refused if
   const result = session.messages.find((message) => message.role === 'tool')?.toolResult;
   assert.equal(result?.ok, false);
   assert.match(result?.error ?? '', /Tool not permitted for agent kai: skill\.read/);
+});
+
+test('a built-in skill is listed and readable for an agent that names no skills, and nothing else is', async () => {
+  const skills = new SkillRegistry();
+  skills.register(skill(STRATUS_SKILL_ID, { builtin: true, load: async () => '# How Stratus works' }));
+  skills.register(skill('code-review'));
+
+  const { provider, requests } = capturingProvider((turn) => {
+    if (turn === 1) return { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: SKILL_READ_TOOL_NAME, input: { id: STRATUS_SKILL_ID } } }] };
+    if (turn === 2) return { parts: [{ type: 'tool-call', call: { id: 'c2', toolName: SKILL_READ_TOOL_NAME, input: { id: 'code-review' } } }] };
+    return { parts: [{ type: 'text', text: 'done' }] };
+  });
+  const runner = new AgentRunner({ provider, tools: new ToolRegistry(), skills, store: new InMemorySessionStore() });
+  await runner.initialize();
+
+  const session = await runner.run({
+    sessionId: 'builtin',
+    agent: { id: 'kai', name: 'Kai', tools: ['*'] },
+    userMessage: 'how do I give you a GitHub token?',
+  });
+
+  assert.deepEqual(requests[0]?.skills?.map((entry) => entry.id), [STRATUS_SKILL_ID]);
+  assert.ok((requests[0]?.tools ?? []).some((entry: ToolDescriptor) => entry.name === SKILL_READ_TOOL_NAME));
+
+  const results = session.messages.filter((message) => message.role === 'tool').map((message) => message.toolResult);
+  assert.equal(results[0]?.ok, true);
+  assert.match(JSON.stringify(results[0]?.output), /How Stratus works/);
+  // The built-in opens the reader; it does not open every other skill.
+  assert.equal(results[1]?.ok, false);
+});
+
+test('only the stratus skill can be built in: the flag on any other id is refused at registration', () => {
+  const skills = new SkillRegistry();
+  assert.throws(
+    () => skills.register(skill('code-review', { builtin: true })),
+    /Skill code-review is marked builtin, which only the stratus skill may be/,
+  );
+  assert.equal(skills.resolve('code-review'), undefined);
+  skills.register(skill(STRATUS_SKILL_ID, { builtin: true }));
+  assert.equal(skills.resolve(STRATUS_SKILL_ID)?.builtin, true);
+});
+
+test('a swap never drops the built-in skill serving now, and its id outranks a bare alias the next set gave it', async () => {
+  const registry = new SkillRegistry();
+  const builtin = skill(STRATUS_SKILL_ID, { builtin: true, load: async () => 'How Stratus works.' });
+  registry.register(builtin);
+  assert.equal(await registry.read(STRATUS_SKILL_ID), 'How Stratus works.');
+
+  // The next set could not read the built-in's file, and a plugin's bare
+  // alias took the free id.
+  const next = new SkillRegistry();
+  next.register(skill('acme:stratus'));
+  next.registerAlias(STRATUS_SKILL_ID, 'acme:stratus');
+  next.register(skill('code-review'));
+  registry.replaceWith(next);
+
+  assert.equal(registry.resolve(STRATUS_SKILL_ID), builtin);
+  assert.deepEqual(registry.idsFor('acme:stratus'), ['acme:stratus']);
+  assert.ok(registry.has('code-review'));
+
+  // A next set that did read it serves its own copy.
+  const fresh = skill(STRATUS_SKILL_ID, { builtin: true, load: async () => 'Edited.' });
+  const after = new SkillRegistry();
+  after.register(fresh);
+  registry.replaceWith(after);
+  assert.equal(registry.resolve(STRATUS_SKILL_ID), fresh);
+  assert.equal(await registry.read(STRATUS_SKILL_ID), 'Edited.');
 });
 
 test('an empty skills list is the same as none', async () => {

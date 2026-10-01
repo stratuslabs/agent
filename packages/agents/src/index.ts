@@ -114,3 +114,4 @@ export {
   createCredentialRequestTool,
 } from './tools/credentials.ts';
 export { GATEWAY_ONLY_TOOL_NAMES } from './tools/gateway-only.ts';
+export { loadStratusSkill, STRATUS_SKILL_PATH } from './builtin-skills.ts';

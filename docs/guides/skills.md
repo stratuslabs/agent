@@ -124,7 +124,8 @@ the file through the canonical formatter, like the API's field edits do).
 
 An agent gets a skill only when its soul asks — same allowlist shape as
 `tools:`, except that omitting it means **none** (a skill silently changing
-how an agent behaves is worse than an agent that has to be told):
+how an agent behaves is worse than an agent that has to be told), apart from
+[the one built in](#the-built-in-stratus-skill):
 
 ```markdown
 ---
@@ -149,8 +150,9 @@ and description reach the system prompt; the agent loads the full procedure
 with the built-in `skill.read` tool when the description says it is
 relevant. That is what lets a fleet carry thirty procedures without every
 turn paying for all thirty. `skill.read` is part of the skills mechanism —
-never list it under `tools:`; it appears (and works) for exactly the agents
-whose soul enables any skill, and reads only the skills that soul allows.
+never list it under `tools:`; it appears (and works) for every agent,
+because every agent has the built-in skill below, and reads only that and
+the skills its soul allows.
 
 **Write the description for routing.** It is the only thing the model sees
 before deciding to load the body, so it says *when to reach for this*, not
@@ -163,6 +165,28 @@ not cover is a warning when the daemon loads the roster, never a refusal —
 a skill is prose, and can degrade. `stratus run` and `stratus chat` serve
 the same skills directory the daemon does, so a skill that routes locally
 routes in Slack.
+
+## The built-in `stratus` skill
+
+Every agent has one skill its soul never names: `stratus`, which ships
+inside `@stratusagent/agents` and describes Stratus itself — where the
+config, credentials, souls, and logs live, how a key reaches a tool, what
+needs a restart, how Slack and approvals behave, which command does what,
+and what an agent can do itself versus what to ask its operator for. It is
+there because an agent asked "how do I give you an API key?" otherwise
+answers from whatever other agent runtime it has read about, or searches
+the filesystem, and is confidently wrong
+([#201](https://github.com/stratuslabs/agent/issues/201)).
+
+It costs what any enabled skill costs: one line per turn, and the body only
+when the agent reads it. `stratus skills` lists it first, and
+`/catalog/tools` marks it `builtin`. The id is reserved: a directory named
+`stratus` under `~/.stratus/skills/` is skipped with a warning, and
+`stratus skill add` refuses one, even with `--force`, because every agent is
+already pointed at the built-in under that name.
+
+The text is the CLI's in prose, so it is kept in step the way the help text
+is: a test fails when a command `stratus help` lists is missing from it.
 
 ## What portability means
 

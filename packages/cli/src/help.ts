@@ -107,7 +107,8 @@ Commands:
                    installed skill id against the Agent Skills spec — the
                    same check "skill add" runs, so what validates installs.
                    Exit 1 if anything would be refused
-  skills           List installed skills and which agents enable each
+  skills           List installed skills and which agents enable each, after
+                   the built-in stratus skill every agent has
                    (also: stratus skill list)
   plugins          What this machine's plugins are, and where the chain from
                    installed to callable breaks: whether the package resolves,

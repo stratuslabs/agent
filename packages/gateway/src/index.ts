@@ -25,6 +25,9 @@ import {
   SESSION_TRUST_METADATA_KEY,
   latestTurnReply,
   readPendingApproval,
+  conversationContextFrom,
+  CONVERSATION_METADATA_KEY,
+  STRATUS_SKILL_ID,
   type AgentDefinition,
   type AgentRuntimeContext,
   type CredentialDelivery,
@@ -66,6 +69,8 @@ import {
   type ParsedSoul,
   type ScheduleDestination,
   type ScheduleRecord,
+  loadStratusSkill,
+  STRATUS_SKILL_PATH,
 } from '@stratusagent/agents';
 import {
   createSchedulerRuntime,
@@ -438,6 +443,8 @@ export interface GatewaySkill {
   package?: string;
   /** Where the SKILL.md lives. */
   path?: string;
+  /** Ships with Stratus and is enabled for every agent, whatever its soul's `skills:` says. */
+  builtin?: boolean;
 }
 
 /** What a turn cut short by an announced restart records as its failure. */
@@ -1697,6 +1704,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const loadSkills = async (): Promise<void> => {
     const next = new SkillRegistry();
+    await registerBuiltinSkills(next, true);
     const operator = await loadOperatorSkills(env, next, warn, { strict: true });
     for (const plugin of loadedPlugins) {
       for (const record of plugin.skills) {
@@ -1821,12 +1829,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     source: AgentSource,
     config: RuntimeConfig,
     onFallback: boolean,
-  ): AgentRuntimeContext => ({
-    ...(source.soulPath !== undefined ? { soulPath: source.soulPath, soulReloads: true } : {}),
-    workspace: agentWorkspaces.forAgent(source.definition.id),
-    ...(config.language !== undefined ? { language: config.language } : {}),
-    model: describeServingModel(config, onFallback),
-  });
+    // The turn's own metadata, where a channel records who can read the
+    // conversation now; a recovered turn has none and passes the session's.
+    metadata: JsonObject | undefined,
+  ): AgentRuntimeContext => {
+    const conversation = conversationContextFrom(metadata);
+    return {
+      ...(source.soulPath !== undefined ? { soulPath: source.soulPath, soulReloads: true } : {}),
+      workspace: agentWorkspaces.forAgent(source.definition.id),
+      ...(config.language !== undefined ? { language: config.language } : {}),
+      model: describeServingModel(config, onFallback),
+      ...(conversation !== undefined ? { conversation } : {}),
+    };
+  };
 
   // ---- runner pool --------------------------------------------------------
 
@@ -1850,6 +1865,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   let pluginFailures: PluginLoadFailure[] = [];
   const skillCatalog = new SkillRegistry();
   let operatorSkills: OperatorSkillInfo[] = [];
+  /**
+   * The skills that ship with Stratus, first into every catalog, so the id
+   * is theirs before an operator directory or a plugin can claim it. A file
+   * missing from a broken install is said once and costs the agents their
+   * reference, never the daemon its start.
+   */
+  const registerBuiltinSkills = async (registry: SkillRegistry, reloading = false): Promise<void> => {
+    try {
+      registry.register(await loadStratusSkill());
+    } catch (error) {
+      // On a reload the swap keeps the copy already serving
+      // (`SkillRegistry.replaceWith`), so only a start goes without it.
+      const consequence = reloading ? 'the copy loaded at start keeps serving' : 'agents will not have it';
+      warn(`the built-in stratus skill did not load (${error instanceof Error ? error.message : String(error)}); ${consequence}. Reinstall Stratus.`);
+    }
+  };
   tools.register(createDemoTool());
   tools.register(createRememberTool(memory));
   tools.register(createRecallTool(memory));
@@ -2721,6 +2752,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         if (existing.metadata?.[EXECUTOR_METADATA_KEY] !== executorRecord) {
           existing.metadata = { ...existing.metadata, [EXECUTOR_METADATA_KEY]: executorRecord };
         }
+        // The room rides on the turn, but two readers have only the
+        // session's: a turn parked on approval and recovered after a
+        // restart, and a turn that brings no room of its own (a schedule
+        // firing into the thread). Both get the latest room this way, not
+        // the first turn's, which a channel made public since would make
+        // read as more private than it is. A turn from a channel that
+        // could not tell the room (its lookup failed) clears it instead:
+        // no room is the generic line, and an old one is a claim.
+        if (typeof input.metadata?.channel === 'string') {
+          const room = input.metadata[CONVERSATION_METADATA_KEY];
+          const { [CONVERSATION_METADATA_KEY]: _stale, ...rest } = existing.metadata ?? {};
+          existing.metadata = room !== undefined ? { ...rest, [CONVERSATION_METADATA_KEY]: room } : rest;
+        }
         await store.save(existing);
         // The turn's metadata rides along for the sender's trust: without
         // it a resumed turn has no way to say who sent it, and a stranger
@@ -2732,7 +2776,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           ...(input.images !== undefined ? { images: input.images } : {}),
           ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
-          runtime: runtimeContextFor(source, config, switchedToFallback),
+          runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
           signal,
         });
       }
@@ -2744,7 +2788,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(input.images !== undefined ? { images: input.images } : {}),
         ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
         metadata,
-        runtime: runtimeContextFor(source, config, switchedToFallback),
+        runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
         signal,
       });
     });
@@ -2908,7 +2952,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         try {
           await runner.recoverPendingApproval(sessionId, {
             denyPending: expired,
-            runtime: runtimeContextFor(source, recoveredConfig, session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true),
+            runtime: runtimeContextFor(source, recoveredConfig, session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true, session.metadata),
             signal: controller.signal,
           });
         } finally {
@@ -3281,6 +3325,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * qualified `<package>:<skill>` form.
    */
   const startSkills = async (): Promise<void> => {
+    await registerBuiltinSkills(skillCatalog);
     operatorSkills = await loadOperatorSkills(env, skillCatalog, warn);
     for (const skill of operatorSkills) {
       log(`skill ${skill.id} loaded from ${skill.path}`);
@@ -3886,7 +3931,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // From the registry, not from the load records: the registry is the
       // live answer for which bare aliases still resolve — a plugin loaded
       // later can have retired one a record still remembers.
-      const provenance = new Map<string, { package?: string; path: string }>();
+      const provenance = new Map<string, { package?: string; path: string }>([[STRATUS_SKILL_ID, { path: STRATUS_SKILL_PATH }]]);
       for (const info of operatorSkills) {
         provenance.set(info.id, { path: info.path });
       }
@@ -3905,6 +3950,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           ...(alias !== undefined ? { alias } : {}),
           ...(from?.package !== undefined ? { package: from.package } : {}),
           ...(from !== undefined ? { path: from.path } : {}),
+          ...(skill.builtin === true ? { builtin: true } : {}),
         };
       });
     },

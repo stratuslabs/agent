@@ -113,7 +113,7 @@ test('a skill installed while the daemon runs is readable on the next turn, and 
   const gateway = createGateway({ env, idleTimeoutMs: 0, log: (line) => log.push(line), warn: () => {} });
   await gateway.start();
   try {
-    assert.deepEqual(gateway.skills().map((skill) => skill.id), ['code-review']);
+    assert.deepEqual(gateway.skills().map((skill) => skill.id), ['stratus', 'code-review']);
 
     // Before the reload the soul lists triage, but nothing serves it: the
     // read fails the way any missing skill fails.
@@ -122,9 +122,9 @@ test('a skill installed while the daemon runs is readable on the next turn, and 
 
     await writeSkill(home, 'triage', skillFile('triage', 'Sort by severity first.'));
     const reloaded = await gateway.reloadSkills();
-    assert.deepEqual(reloaded.map((skill) => skill.id), ['code-review', 'triage']);
+    assert.deepEqual(reloaded.map((skill) => skill.id), ['stratus', 'code-review', 'triage']);
     assert.equal(reloaded.find((skill) => skill.id === 'triage')?.path, path.join(home, '.stratus', 'skills', 'triage', 'SKILL.md'));
-    assert.ok(log.some((line) => /skills reloaded — 2 skill\(s\): added triage/.test(line)), log.join('\n'));
+    assert.ok(log.some((line) => /skills reloaded — 3 skill\(s\): added triage/.test(line)), log.join('\n'));
 
     // No restart happened and the same daemon carries on; the new skill
     // reaches the agent because its soul already listed it — loaded is
@@ -135,14 +135,14 @@ test('a skill installed while the daemon runs is readable on the next turn, and 
 
     // Twice with nothing changed is a no-op, said so.
     await gateway.reloadSkills();
-    assert.ok(log.some((line) => /skills reloaded — 2 skill\(s\) \(no change\)/.test(line)), log.join('\n'));
+    assert.ok(log.some((line) => /skills reloaded — 3 skill\(s\) \(no change\)/.test(line)), log.join('\n'));
 
     // Removed while running: gone from the catalog, and the agent whose
     // soul still lists it fails its read like any missing skill.
     await rm(path.join(home, '.stratus', 'skills', 'triage'), { recursive: true });
     const shrunk = await gateway.reloadSkills();
-    assert.deepEqual(shrunk.map((skill) => skill.id), ['code-review']);
-    assert.ok(log.some((line) => /skills reloaded — 1 skill\(s\): removed triage/.test(line)), log.join('\n'));
+    assert.deepEqual(shrunk.map((skill) => skill.id), ['stratus', 'code-review']);
+    assert.ok(log.some((line) => /skills reloaded — 2 skill\(s\): removed triage/.test(line)), log.join('\n'));
     const gone = await gateway.dispatch({ sessionId: 'gone', agentId: 'ava', userMessage: 'triage this' });
     assert.equal(readResult(gone)?.ok, false);
   } finally {
@@ -169,7 +169,7 @@ test('a skill that will not load refuses the reload, names the file, and leaves 
       (error: Error) => error.message.includes(brokenPath) && /previously loaded skills are still serving/.test(error.message),
     );
     assert.ok(warnings.some((line) => line.startsWith('skills reload refused') && line.includes(brokenPath)), warnings.join('\n'));
-    assert.deepEqual(gateway.skills().map((skill) => skill.id), ['code-review']);
+    assert.deepEqual(gateway.skills().map((skill) => skill.id), ['stratus', 'code-review']);
 
     // The old set really is serving, not just listed.
     const session = await gateway.dispatch({ sessionId: 'still', agentId: 'ava', userMessage: 'review' });
@@ -177,7 +177,7 @@ test('a skill that will not load refuses the reload, names the file, and leaves 
 
     // A failed reload does not block the next one.
     await rm(path.join(home, '.stratus', 'skills', 'broken'), { recursive: true });
-    assert.deepEqual((await gateway.reloadSkills()).map((skill) => skill.id), ['code-review', 'triage']);
+    assert.deepEqual((await gateway.reloadSkills()).map((skill) => skill.id), ['stratus', 'code-review', 'triage']);
   } finally {
     await gateway.stop();
   }
@@ -287,7 +287,7 @@ test('operator precedence and contested aliases survive a reload', async () => {
     const reloaded = await gateway.reloadSkills();
     assert.deepEqual(
       reloaded.map((skill) => skill.id).sort(),
-      ['stratus-plugin-acme:pr-review', 'stratus-plugin-acme:triage', 'stratus-plugin-zephyr:pr-review', 'triage'],
+      ['stratus', 'stratus-plugin-acme:pr-review', 'stratus-plugin-acme:triage', 'stratus-plugin-zephyr:pr-review', 'triage'],
     );
     assert.equal(aliasOf('stratus-plugin-acme:triage'), undefined, 'the operator outranks the bare alias');
     assert.equal(reloaded.find((skill) => skill.id === 'triage')?.package, undefined);

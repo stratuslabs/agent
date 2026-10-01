@@ -103,9 +103,10 @@ as prose, often with a plausible-looking result attached. It reads like the
 thing happened. Nothing ran.
 
 **`skill.read` is not one of the tools this key grants.** It rides on the
-`skills:` gate — an agent with a skill enabled has the reader whether or not
-`tools:` mentions it, and an agent with no skills does not have it however
-permissive `tools:` is. So listing it here does nothing, and gets its own
+skills mechanism — every agent has it for the
+[built-in `stratus` skill](./skills.md#the-built-in-stratus-skill), and it
+reads that and whatever the soul's `skills:` enables, however permissive or
+narrow `tools:` is. So listing it here does nothing, and gets its own
 line saying which key does grant it:
 
 ```

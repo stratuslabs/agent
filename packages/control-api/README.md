@@ -216,6 +216,9 @@ ignored for the same reason).
     { "name": "notes.read", "risk": "gated", "package": "stratus-plugin-notes", "trusted": false }
   ],
   "skills": [
+    { "id": "stratus", "name": "stratus", "builtin": true,
+      "description": "Use whenever someone asks how Stratus itself works or how to set something up in it, …",
+      "path": "…/@stratusagent/agents/skills/stratus/SKILL.md" },
     { "id": "code-review", "name": "code-review",
       "description": "Use when reviewing a diff or a pull request.",
       "path": "/home/me/.stratus/skills/code-review/SKILL.md" },
@@ -234,7 +237,8 @@ ignored for the same reason).
 
 All three halves, because any alone misleads. The **tools** say what an agent
 can be granted and at what risk; the **skills** say which procedures a soul's
-`skills:` can name; the **plugins** say what this daemon was *asked* to load —
+`skills:` can name (and which one, marked `builtin`, every agent has
+without naming it); the **plugins** say what this daemon was *asked* to load —
 including one that failed, which is invisible in the other two and is usually
 why somebody opened the screen.
 

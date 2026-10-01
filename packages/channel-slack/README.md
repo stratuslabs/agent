@@ -180,6 +180,29 @@ answering; teaching it to choose — to answer only when it has something to
 add, and to let "thanks, we've got it" be a sentence it read — is the rest
 of [roadmap step 31](../../docs/roadmap/31-reading-the-room.md).
 
+### What the agent is told about the room
+
+Every turn says which kind of conversation it came from — a direct message
+(and with whom, when that is one of the operator's principals: a display
+name is text anyone can set, and this lands in the system prompt), a group DM, a private channel, or a public channel — with
+its member count, whether the message is in a thread, and whether the
+channel is shared with people outside the workspace (`is_ext_shared` /
+`is_org_shared` from the lookup, or the event's own `is_ext_shared_channel`,
+which is current on every turn). Never the
+channel's name, for the same reason: whoever created or renamed the
+channel chose it. The agent writes for that audience: a public channel of a thousand
+people is not the DM it was in a minute ago, and what it was told in one does
+not belong in the other. The kind comes from the event; the count
+comes from `conversations.info` with `include_num_members`, the same call and
+the same `channels:read` / `groups:read` / `mpim:read` scopes
+[outbound destinations](#speaking-first-the-outbound-seam) use. It is made on every turn outside a DM and never cached, so a channel
+made public, or shared with another workspace, since the last message is
+described as it is now; turns in one conversation that overlap share one
+call. A DM needs no lookup. An app
+without those scopes still tells the agent the kind when the event carries
+it, and otherwise only that it is in Slack. The words it is told are in
+[Agents](../../docs/concepts/agents.md#soul-files).
+
 ## Installing
 
 This package is an **optional peer** of the CLI — `stratus` ships without any

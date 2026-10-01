@@ -29,6 +29,7 @@ import {
   createRecallTool,
   createRememberTool,
   GATEWAY_ONLY_TOOL_NAMES,
+  loadStratusSkill,
 } from '@stratusagent/agents';
 import {
   BUILTIN_EXECUTOR_NAME,
@@ -231,6 +232,13 @@ export const createAgentRuntime = async (
   // broken (and warned about) in both. The runner registers `skill.read`
   // itself, gated on the soul enabling any skill.
   const skills = new SkillRegistry();
+  // The built-in `stratus` skill first, as the daemon registers it, so a
+  // local run's agent can read how its own install works too.
+  try {
+    skills.register(await loadStratusSkill());
+  } catch (error) {
+    writeLine(streams.stderr, `Warning: the built-in stratus skill did not load (${error instanceof Error ? error.message : String(error)}). Reinstall Stratus.`);
+  }
   await loadOperatorSkills(runEnv, skills, (line) => {
     writeLine(streams.stderr, `Warning: ${line}`);
   });

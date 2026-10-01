@@ -91,7 +91,7 @@ test('a soul with skills: gets the one-liner, the reader, and the body — end t
   const gateway = createGateway({ env, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
   await gateway.start();
 
-  assert.deepEqual(gateway.skills().map((skill) => skill.id), ['code-review']);
+  assert.deepEqual(gateway.skills().map((skill) => skill.id), ['stratus', 'code-review']);
   assert.ok(gateway.tools().some((tool) => tool.name === 'skill.read'));
 
   const session = await gateway.dispatch({ sessionId: 'review-1', agentId: 'ava', userMessage: 'review this' });
@@ -114,7 +114,7 @@ test('a soul with skills: gets the one-liner, the reader, and the body — end t
   assert.match(JSON.stringify(result?.output), /Lead with the verdict/);
 });
 
-test('a soul with no skills: key gets no skills — not every installed one', async () => {
+test('a soul with no skills: key gets the built-in stratus skill and nothing else installed', async () => {
   const home = await newHome();
   await writeSkill(home, 'code-review', CODE_REVIEW);
   await writeSoul(home, 'kai.md', '---\nname: Kai\nprovider: openai\nmodel: model-a\n---\n\nYou are Kai.\n');
@@ -122,24 +122,32 @@ test('a soul with no skills: key gets no skills — not every installed one', as
   const captured: CapturedRequest[] = [];
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
     captured.push(JSON.parse(String(init?.body)) as CapturedRequest);
+    if (captured.length === 1) return openAiToolCall('skill_read', { id: 'stratus' });
+    if (captured.length === 2) return openAiToolCall('skill_read', { id: 'code-review' });
     return openAiText('hello');
   }) as typeof fetch;
 
   const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
   const gateway = createGateway({ env, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
   await gateway.start();
-  await gateway.dispatch({ sessionId: 'plain-1', agentId: 'kai', userMessage: 'hi' });
+  const session = await gateway.dispatch({ sessionId: 'plain-1', agentId: 'kai', userMessage: 'how do I give you a key?' });
+  const listed = gateway.skills().find((skill) => skill.id === 'stratus');
   await gateway.stop();
 
   const systemText = (captured[0]?.messages ?? [])
     .filter((message) => message.role === 'system')
     .map((message) => message.content)
     .join('\n');
+  assert.match(systemText, /- stratus: Use whenever someone asks how Stratus itself works/);
   assert.ok(!systemText.includes('code-review'), 'an unenabled skill reached the prompt');
-  assert.ok(
-    !(captured[0]?.tools ?? []).some((tool) => tool.function.name === 'skill_read'),
-    'an agent with no skills was shown the reader',
-  );
+  assert.ok((captured[0]?.tools ?? []).some((tool) => tool.function.name === 'skill_read'), 'the built-in brings the reader');
+  assert.equal(listed?.builtin, true);
+  assert.match(listed?.path ?? '', /skills[\\/]stratus[\\/]SKILL\.md$/);
+
+  const results = session.messages.filter((message) => message.role === 'tool').map((message) => message.toolResult);
+  assert.equal(results[0]?.ok, true);
+  assert.match(JSON.stringify(results[0]?.output), /# How Stratus works/);
+  assert.equal(results[1]?.ok, false, 'the built-in opened an installed skill the soul never enabled');
 });
 
 test('enabling a skill whose requires: the tools list does not cover warns at load, never refuses', async () => {

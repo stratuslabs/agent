@@ -27,6 +27,12 @@ Where things are documented:
   paths, and it renders this file only on publish.
 - `HELP_TEXT` in `packages/cli/src/help.ts` — every command and flag.
 - `packages/channel-slack/README.md` — the Slack app setup.
+- `packages/agents/skills/stratus/SKILL.md` — the built-in skill every agent
+  reads to answer "how do I…" about Stratus itself. It restates on purpose,
+  because an agent cannot follow a link mid-answer, so a change to anything
+  it describes (a command, a path, what needs a restart, how a key reaches a
+  tool) changes it in the same PR. A test fails when a command in
+  `HELP_TEXT` is missing from it; nothing catches the rest.
 - `packages/control-api/README.md` — the HTTP + WS surface: every endpoint,
   the auth model, the event envelope, the `api` config block. Both other
   surfaces (the macOS app, a hosted deployment) are written against this

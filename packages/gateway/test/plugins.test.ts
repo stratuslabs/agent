@@ -290,7 +290,7 @@ test('a contested bare alias disappears from every listing, plugins() included',
     const catalog = gateway.skills();
     assert.deepEqual(
       catalog.map((skill) => skill.id).sort(),
-      ['stratus-plugin-acme:pr-review', 'stratus-plugin-zephyr:pr-review'],
+      ['stratus', 'stratus-plugin-acme:pr-review', 'stratus-plugin-zephyr:pr-review'],
     );
     assert.ok(catalog.every((skill) => skill.alias === undefined));
 

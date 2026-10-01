@@ -352,6 +352,48 @@ test('agents pinned to different models run through their own provider config', 
   assert.match(fromBea.messages.at(-1)?.content ?? '', /model-b/);
 });
 
+test('each turn tells the agent the room it is in now, a resumed conversation included', async () => {
+  // The room rides on the turn, not the session's first metadata: a thread
+  // that started before this existed, or a channel that has grown since,
+  // is described as it is on this turn.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const prompts: string[] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+    prompts.push(body.messages.filter((message) => message.role === 'system').map((message) => message.content).join('\n'));
+    return openAiText('ok');
+  }) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  try {
+    const turn = (members: number) => gateway.dispatch({
+      sessionId: 'slack:ava:T1:C1:100.1',
+      agentId: 'ava',
+      userMessage: 'hi',
+      metadata: { channel: 'slack', conversation: { kind: 'public', members } },
+    });
+    await turn(12);
+    await turn(13);
+    assert.match(prompts[0] ?? '', /a public Slack channel with 12 members/);
+    assert.match(prompts[1] ?? '', /a public Slack channel with 13 members/);
+    // Kept on the session too, for a parked turn recovered after a restart
+    // and a turn that brings no room of its own.
+    const stored = await gateway.store.get('slack:ava:T1:C1:100.1');
+    assert.deepEqual(stored?.metadata?.conversation, { kind: 'public', members: 13 });
+
+    // A channel turn that could not tell the room clears the stored one:
+    // the generic line, never the last room passed off as current.
+    await gateway.dispatch({ sessionId: 'slack:ava:T1:C1:100.1', agentId: 'ava', userMessage: 'hi', metadata: { channel: 'slack' } });
+    assert.match(prompts[2] ?? '', /this conversation is happening in Slack\./);
+    assert.doesNotMatch(prompts[2] ?? '', /13 members/);
+    assert.equal((await gateway.store.get('slack:ava:T1:C1:100.1'))?.metadata?.conversation, undefined);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('delegation runs the target on the target\'s own provider config', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', [

@@ -2234,11 +2234,11 @@ test('reloading skills serves a skill installed behind the daemon\'s back, and r
     const reloaded = await harness.call('/api/v1/skills/reload', { method: 'POST' });
     assert.equal(reloaded.status, 200);
     const { skills } = await json<{ skills: Array<{ id: string; path: string }> }>(reloaded);
-    assert.deepEqual(skills.map((skill) => skill.id), ['triage']);
+    assert.deepEqual(skills.map((skill) => skill.id), ['stratus', 'triage']);
     // The same listing the catalog serves, so a surface can swap one for
     // the other without a second fetch.
     const catalog = await json<{ skills: Array<{ id: string }> }>(await harness.call('/api/v1/catalog/tools'));
-    assert.deepEqual(catalog.skills.map((skill) => skill.id), ['triage']);
+    assert.deepEqual(catalog.skills.map((skill) => skill.id), ['stratus', 'triage']);
 
     // A file that will not load names itself and changes nothing — and it
     // is not the daemon that is broken, so not a 500.
@@ -2249,7 +2249,7 @@ test('reloading skills serves a skill installed behind the daemon\'s back, and r
     const { error } = await json<{ error: { code: string; message: string } }>(refused);
     assert.equal(error.code, 'skills_reload_refused');
     assert.ok(error.message.includes(path.join(skillsDir, 'broken', 'SKILL.md')), error.message);
-    assert.deepEqual(harness.gateway.skills().map((skill) => skill.id), ['triage']);
+    assert.deepEqual(harness.gateway.skills().map((skill) => skill.id), ['stratus', 'triage']);
   } finally {
     await harness.stop();
   }

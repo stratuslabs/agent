@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   filePathsOf,
   latestTurnReply,
+  CONVERSATION_METADATA_KEY,
   SENDER_TRUST_METADATA_KEY,
   sessionWriteTrust,
   imageDimensions,
@@ -179,6 +180,8 @@ export interface SlackSocketEventArgs {
   body?: {
     team_id?: string;
     event_id?: string;
+    /** Events API: the conversation is shared with another organization (Slack Connect). Current on every event. */
+    is_ext_shared_channel?: boolean;
     /** `block_actions` or `view_submission`, for the interactions this adapter handles. */
     type?: string;
     /** block_actions only: what `views.open` needs to put a form in front of the clicker. */
@@ -340,8 +343,20 @@ export interface SlackWebLike {
      * conversations read scopes (`channels:read`, `groups:read`,
      * `im:read`, `mpim:read`) — see the README's app manifest.
      */
-    info(args: { channel: string }): Promise<{
-      channel?: { id?: string; is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean };
+    info(args: { channel: string; include_num_members?: boolean }): Promise<{
+      channel?: {
+        id?: string;
+        name?: string;
+        is_member?: boolean;
+        is_im?: boolean;
+        is_private?: boolean;
+        is_mpim?: boolean;
+        num_members?: number;
+        /** Shared with another organization through Slack Connect. */
+        is_ext_shared?: boolean;
+        /** Shared across workspaces of an Enterprise Grid organization. */
+        is_org_shared?: boolean;
+      };
     }>;
     /**
      * Who is in a conversation, a page at a time. Asked before a credential
@@ -2371,6 +2386,63 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return boundedDisplayName(await displayNameFor(connection, userId));
   };
 
+  /**
+   * What kind of room a conversation is and how many are in it, for the
+   * turn's `conversation` metadata: an agent that did not know told
+   * someone in a DM they were "talking on the terminal", and answers the same
+   * way whether one person or a thousand will read it. Never the channel's
+   * name, which whoever made the channel chose (`ConversationContext`).
+   *
+   * Looked up on every turn outside a DM, and never cached: who can read a
+   * channel is the point, and a cached answer described a channel made
+   * public, or shared with another workspace, as it was before. Lookups
+   * for one conversation that overlap share one call. A lookup that fails
+   * (an app missing the read scopes) leaves the kind the event gave, or
+   * nothing: the prompt then says only that the conversation is in Slack,
+   * as it always did.
+   */
+  const roomLookups = new Map<string, Promise<JsonObject | undefined>>();
+  const KIND_BY_CHANNEL_TYPE: Record<string, string> = { im: 'direct', mpim: 'group', group: 'private', channel: 'public' };
+  const roomFor = async (
+    connection: AgentConnection,
+    channel: string,
+    channelType: string | undefined,
+  ): Promise<JsonObject | undefined> => {
+    const fromEvent = channelType !== undefined ? KIND_BY_CHANNEL_TYPE[channelType] : undefined;
+    // A DM is two people, the app and the sender: nothing to look up.
+    if (fromEvent === 'direct') {
+      return { kind: 'direct' };
+    }
+    const key = `${connection.config.agentId}:${channel}`;
+    let lookup = roomLookups.get(key);
+    if (!lookup) {
+      lookup = lookupRoom(connection, channel).finally(() => roomLookups.delete(key));
+      roomLookups.set(key, lookup);
+    }
+    return (await lookup) ?? (fromEvent !== undefined ? { kind: fromEvent } : undefined);
+  };
+
+  const lookupRoom = async (connection: AgentConnection, channel: string): Promise<JsonObject | undefined> => {
+    try {
+      const info = (await connection.web.conversations.info({ channel, include_num_members: true })).channel;
+      if (info === undefined) {
+        return undefined;
+      }
+      const kind = info.is_im === true
+        ? 'direct'
+        : info.is_mpim === true
+          ? 'group'
+          : info.is_private === true ? 'private' : 'public';
+      return {
+        kind,
+        ...(kind !== 'direct' && typeof info.num_members === 'number' ? { members: info.num_members } : {}),
+        ...(kind !== 'direct' && (info.is_ext_shared === true || info.is_org_shared === true) ? { shared: true } : {}),
+      };
+    } catch {
+      return undefined;
+    }
+  };
+
   // Mentions arrive as <@U123> markup; the model should read names.
   /**
    * `<@U…>` mentions become `@name` — for principals only. A display name
@@ -4167,6 +4239,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // whether the agent answers or only hears: the text is in its
       // transcript either way.
       const senderTrust = (connection.config.principals ?? []).includes(userId) ? 'user' : 'unknown';
+      // Who can read this, so the agent writes for them, and a thread says
+      // it is one. A DM names the other person only when they are one of
+      // the operator's principals: this lands in the system prompt, and
+      // anyone else's display name is text they chose, which a pattern
+      // cannot tell from an instruction phrased as a name.
+      const room = await roomFor(connection, event.channel, isDm ? 'im' : event.channel_type);
+      const conversation = room === undefined
+        ? undefined
+        : {
+          ...room,
+          ...(room.kind === 'direct' && senderTrust === 'user' ? { with: author } : {}),
+          ...(thread !== undefined && room.kind !== 'direct' ? { thread: true } : {}),
+          // People outside this workspace read a Slack Connect channel, and
+          // the event says so itself, even when the lookup failed.
+          ...(room.kind !== 'direct' && args.body?.is_ext_shared_channel === true ? { shared: true } : {}),
+        };
       const metadata = {
         channel: 'slack',
         team,
@@ -4175,6 +4263,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // Carried so a mid-turn approval question is asked in the thread
         // the turn belongs to rather than at the top of a busy channel.
         ...(thread ? { slackThread: thread } : {}),
+        ...(conversation !== undefined ? { [CONVERSATION_METADATA_KEY]: conversation } : {}),
         [SENDER_TRUST_METADATA_KEY]: senderTrust,
       };
 
