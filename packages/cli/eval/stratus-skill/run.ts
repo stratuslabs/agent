@@ -16,6 +16,7 @@ import {
   SkillRegistry,
   ToolRegistry,
   conversationContextFrom,
+  createSkillReadTool,
   latestTurnReply,
   matchesToolAllowlist,
   type AgentDefinition,
@@ -343,6 +344,10 @@ const main = async (): Promise<void> => {
       tools.register(createRecallTool(memory));
       tools.register(createForgetTool(memory));
       tools.register(createPinTool(memory));
+      // Here, not left to the runner, which would append it after every
+      // other tool: the reader is the routing target this eval measures, and
+      // the gateway lists it in this position, so the model meets it here.
+      tools.register(createSkillReadTool(skills, { allowlistFor: (session) => session.agent.skills }));
       for (const scheduleTool of createScheduleTools({
         create: refuse('create schedules'),
         list: async () => [],
