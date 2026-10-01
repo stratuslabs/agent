@@ -148,9 +148,18 @@ const failureOf = (check: Check, reply: string, session: Session, served: Served
   }
 };
 
+// A flag given without a value is a mistake, not an absent flag: a bare
+// `--case` read as no flag runs all eighteen cases against a paid model.
 const argValue = (flag: string): string | undefined => {
   const at = process.argv.indexOf(flag);
-  return at >= 0 ? process.argv[at + 1] : undefined;
+  if (at < 0) {
+    return undefined;
+  }
+  const value = process.argv[at + 1];
+  if (value === undefined || value.startsWith('--')) {
+    throw new Error(`${flag} needs a value: ${flag === '--soul' ? '--soul ~/.stratus/agents/<id>.md' : '--case <id from cases.json>'}.`);
+  }
+  return value;
 };
 
 const main = async (): Promise<void> => {
