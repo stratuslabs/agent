@@ -7,18 +7,27 @@ import {
   AgentRunner,
   CONVERSATION_METADATA_KEY,
   EventBus,
+  InMemoryAgentMemoryStore,
   InMemorySessionStore,
   SKILL_READ_TOOL_NAME,
   STRATUS_SKILL_ID,
   SkillRegistry,
+  ToolRegistry,
   conversationContextFrom,
   latestTurnReply,
   type AgentDefinition,
   type JsonObject,
   type Session,
 } from '@stratusagent/core';
-import { loadStratusSkill, parseSoul } from '@stratusagent/agents';
-import { createRuntimeProvider, describeServingModel, resolveRuntimeConfig } from '@stratusagent/state';
+import {
+  createForgetTool,
+  createPinTool,
+  createRecallTool,
+  createRememberTool,
+  loadStratusSkill,
+  parseSoul,
+} from '@stratusagent/agents';
+import { createRuntimeProvider, describeServingModel, loadOperatorSkills, resolveRuntimeConfig } from '@stratusagent/state';
 
 type Check =
   | { kind: 'readSkill' }
@@ -81,10 +90,23 @@ const main = async (): Promise<void> => {
     process.exitCode = 2;
     return;
   }
-  // The shipped skill, registered the way the daemon registers it, so the
-  // description that has to win the routing decision is the real one.
+  // The shipped skill first, then the operator's installed skills, the way
+  // the daemon loads them: the routing decision is the model choosing this
+  // description among the others its soul enables, and a lone skill would
+  // make that choice easier than production does. Read, never written.
   const skills = new SkillRegistry();
   skills.register(await loadStratusSkill());
+  await loadOperatorSkills({}, skills, (line) => console.error(`Warning: ${line}`));
+  // The memory tools every agent has, over a store that dies with the run:
+  // a case like forget-me would otherwise recall and retire a real fact
+  // from the soul's own memory. Plugins are not loaded, because a plugin is
+  // code with side effects; README.md says what that leaves out.
+  const memory = new InMemoryAgentMemoryStore();
+  const tools = new ToolRegistry();
+  tools.register(createRememberTool(memory));
+  tools.register(createRecallTool(memory));
+  tools.register(createForgetTool(memory));
+  tools.register(createPinTool(memory));
   // Hosted runtimes (Codex, a Claude subscription) reach kernel tools only
   // through this callback, late-bound because the runner needs the provider
   // first, as the CLI runtime and the gateway bind it. Without it they have
@@ -96,7 +118,7 @@ const main = async (): Promise<void> => {
     }
     return hostedRunner.executeHostedToolCall(session, call, context);
   });
-  const runner = new AgentRunner({ provider, skills, store: new InMemorySessionStore(), bus: new EventBus() });
+  const runner = new AgentRunner({ provider, tools, skills, memory, store: new InMemorySessionStore(), bus: new EventBus() });
   hostedRunner = runner;
 
   const cases = only !== undefined ? corpus.cases.filter((scenario) => scenario.id === only) : corpus.cases;

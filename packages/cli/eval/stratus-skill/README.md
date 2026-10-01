@@ -39,10 +39,22 @@ pnpm eval:skill -- --soul ~/.stratus/agents/kai.md
 pnpm eval:skill -- --case pasted-secret
 ```
 
-It registers the shipped skill the way the daemon does, sends the prompt
-production sends with the room each case names, prints each case with its
-reply and a total, and exits non-zero when a case fails. It refuses to run
-on the demo provider, which would answer from a script.
+It sends the prompt production sends, with the room each case names, and
+the catalog the model has to choose from built the way the daemon builds
+it: the shipped skill, then the skills installed in `~/.stratus/skills/`
+(read, never changed), filtered by the soul's `skills:`, and the memory
+tools. Two things are deliberately left out:
+
+- **Memory is a throwaway store**, not the soul's own: the `forget-me`
+  case would otherwise recall and retire a real fact.
+- **Plugins are not loaded**, because a plugin is code with side effects
+  (a fetch, a command). Their tools are absent from the prompt, so a soul
+  with many plugin tools routes against a shorter list here than in
+  production; a pass on a plugin-heavy soul is a little less evidence.
+
+It prints each case with its reply and a total, and exits non-zero when a
+case fails. It refuses to run on the demo provider, which would answer
+from a script.
 
 When the skill changes, run this before and after: a rewrite that reads
 better and routes worse is a regression no other test sees.
