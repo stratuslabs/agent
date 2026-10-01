@@ -37,7 +37,7 @@ stratus template add owner/repo --yes  # …from GitHub, without the review prom
 stratus skill add owner/repo           # install skills from GitHub or a local path
 stratus skill add owner/repo --skill hn-search --agent ava
 stratus skill validate ./my-skill      # check a skill (or a repo of them, or an installed id) against the Agent Skills spec
-stratus skills                         # what is installed, who enables it (also: stratus skill list)
+stratus skills                         # the built-in skill, then what is installed and who enables it (also: stratus skill list)
 stratus skill reload                   # a running daemon re-reads ~/.stratus/skills — no restart
 stratus plugins                        # installed → enabled → granted → what approvals does with it (also: stratus plugin list)
 stratus plugins --format json          # the same chain as data

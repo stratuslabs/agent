@@ -52,6 +52,15 @@ before — say what it needs in that message. The full set of rules, and the
 two edges around them, is [Who a message is
 for](../../packages/channel-slack/README.md#who-a-message-is-for).
 
+**It knows which room it is in.** Each turn tells the agent whether it is in
+a direct message (and with whom), a group DM, a private channel, or a public
+channel, with the channel's name and how many people are in it — so a
+conversation that moves from a DM into `#general` is not answered as though
+it were still a DM, and something said to it privately stays out of a
+channel. The lookup behind it uses scopes the app manifest already asks for
+([What the agent is told about the
+room](../../packages/channel-slack/README.md#what-the-agent-is-told-about-the-room)).
+
 ### How an agent listens
 
 That rule is a rule and not judgement: in a thread where people are mostly

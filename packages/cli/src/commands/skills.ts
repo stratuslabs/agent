@@ -1,8 +1,8 @@
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { SkillRegistry, matchesSkillAllowlist } from '@stratusagent/core';
-import { formatSoul, isLoadableSkillId, type ParsedSoul } from '@stratusagent/agents';
+import { SkillRegistry, STRATUS_SKILL_ID, matchesSkillAllowlist } from '@stratusagent/core';
+import { formatSoul, isLoadableSkillId, STRATUS_SKILL_PATH, type ParsedSoul } from '@stratusagent/agents';
 import {
   agentsDirPath,
   discoverSkillsInDirectory,
@@ -274,6 +274,9 @@ export const runSkills = async (
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
+  // First, because an agent with no skills: still has it, and an operator
+  // reading this to learn what an agent can read would otherwise not know.
+  writeLine(streams.stdout, `${STRATUS_SKILL_ID.padEnd(24)}How Stratus itself works and how to set it up — built in, enabled for every agent (${STRATUS_SKILL_PATH})`);
   const registry = new SkillRegistry();
   const skills = await loadOperatorSkills(env, registry, (line) => {
     writeLine(streams.stderr, `Warning: ${line}`);

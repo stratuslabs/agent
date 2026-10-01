@@ -86,7 +86,7 @@ interface FakeWeb extends SlackWebLike {
   /** Held by chat.postMessage, so a test can act while a post is in flight. */
   postGate?: Promise<void>;
   /** What conversations.info answers for; anything else rejects channel_not_found. */
-  knownConversations: Map<string, { is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean }>;
+  knownConversations: Map<string, { is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean; name?: string; num_members?: number }>;
   /** What conversations.members answers, one page per entry; unknown channels have no members. */
   conversationMembers: Map<string, string[][]>;
   /**
@@ -7950,5 +7950,55 @@ test('a click that lands while the credential post is still in flight leaves the
   await asked;
   await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN'));
   assert.equal(web.views_opened.at(-1)?.view.private_metadata, 'cred-1', 'the button still opens the form');
+  await adapter.stop();
+});
+
+// ---- the room a turn is in -------------------------------------------------
+
+test('each turn says what kind of room it came from, named and counted, looked up once per conversation', async () => {
+  // An agent in a DM told the person they were "talking on the terminal",
+  // and would have answered a thousand-person channel the same way.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C1', { is_member: true, name: 'general', num_members: 1042 });
+  web.knownConversations.set('G1', { is_member: true, is_private: true, name: 'design-crit', num_members: 6 });
+  let infoCalls = 0;
+  const info = web.conversations.info.bind(web.conversations);
+  web.conversations.info = async (args) => {
+    infoCalls += 1;
+    return info(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const rooms: unknown[] = [];
+  const dispatch = gateway.dispatch.bind(gateway);
+  gateway.dispatch = async (input) => {
+    rooms.push(input.metadata?.conversation);
+    return dispatch(input);
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }] as never,
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  // A DM needs no lookup: the event says what it is, and who it is with.
+  await socket.deliver('message', mention('hi', { type: 'message', ts: '300.1', channel: 'D1', channel_type: 'im' }));
+  assert.deepEqual(rooms.at(-1), { kind: 'direct', with: 'Dylan' });
+  assert.equal(infoCalls, 0);
+
+  // A mention carries no channel type, so the channel is looked up, once.
+  await socket.deliver('app_mention', mention('<@B-AVA> status?'));
+  assert.deepEqual(rooms.at(-1), { kind: 'public', name: 'general', members: 1042, thread: true });
+  await socket.deliver('app_mention', mention('<@B-AVA> and now?', { ts: '100.2' }));
+  assert.equal(infoCalls, 1, 'a second message in the conversation reuses the lookup');
+
+  await socket.deliver('app_mention', mention('<@B-AVA> review this', { channel: 'G1', ts: '200.1' }));
+  assert.deepEqual(rooms.at(-1), { kind: 'private', name: 'design-crit', members: 6, thread: true });
+
+  // A lookup that fails keeps what the event said, and nothing more.
+  await socket.deliver('message', mention('<@B-AVA> hello', { type: 'message', channel: 'C9', channel_type: 'channel', ts: '400.1' }));
+  assert.deepEqual(rooms.at(-1), { kind: 'public', thread: true });
   await adapter.stop();
 });

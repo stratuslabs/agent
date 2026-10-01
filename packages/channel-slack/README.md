@@ -180,6 +180,22 @@ answering; teaching it to choose — to answer only when it has something to
 add, and to let "thanks, we've got it" be a sentence it read — is the rest
 of [roadmap step 31](../../docs/roadmap/31-reading-the-room.md).
 
+### What the agent is told about the room
+
+Every turn says which kind of conversation it came from — a direct message
+(and with whom), a group DM, a private channel, or a public channel — with
+the channel's name and member count, and whether the message is in a
+thread. The agent writes for that audience: a public channel of a thousand
+people is not the DM it was in a minute ago, and what it was told in one does
+not belong in the other. The kind comes from the event; the name and count
+come from `conversations.info` with `include_num_members`, the same call and
+the same `channels:read` / `groups:read` / `mpim:read` scopes
+[outbound destinations](#speaking-first-the-outbound-seam) use, made once
+per conversation and kept for ten minutes. A DM needs no lookup. An app
+without those scopes still tells the agent the kind when the event carries
+it, and otherwise only that it is in Slack. The words it is told are in
+[Agents](../../docs/concepts/agents.md#soul-files).
+
 ## Installing
 
 This package is an **optional peer** of the CLI — `stratus` ships without any

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { cp, mkdir, readdir, readFile, readlink, realpath, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
-import type { SkillRegistry } from '@stratusagent/core';
+import { STRATUS_SKILL_ID, type SkillRegistry } from '@stratusagent/core';
 import {
   createLazySkill,
   isLoadableSkillId,
@@ -41,6 +41,9 @@ export interface LoadOperatorSkillsOptions {
    */
   strict?: boolean;
 }
+
+/** Why an operator skill named `stratus` is not installed or served. */
+const RESERVED_SKILL_REASON = `"${STRATUS_SKILL_ID}" is the built-in skill that ships with Stratus, enabled for every agent. Rename the directory, and its name:, to install this one.`;
 
 /**
  * Load `~/.stratus/skills/` into a skill registry: each subdirectory with a
@@ -85,6 +88,13 @@ export const loadOperatorSkills = async (
     }
     const id = entry.name;
     const skillPath = path.join(skillsDirPath(env), id, 'SKILL.md');
+    // Said and skipped even on a strict reload: the name belongs to the
+    // skill that ships with Stratus, and refusing the whole reload over a
+    // directory that could never be served would only take the rest away.
+    if (id === STRATUS_SKILL_ID) {
+      warn(`skipping ${skillPath}: ${RESERVED_SKILL_REASON}`);
+      continue;
+    }
     if (!isLoadableSkillId(id)) {
       skip(skillPath, `${JSON.stringify(id)} is not a skill id. ${SKILL_ID_RULE}`);
       continue;
@@ -400,6 +410,12 @@ export const installSkillsFromDirectory = async (
   const warnings: SkillInstallWarning[] = [];
   const alreadyInstalled: OperatorSkillInfo[] = [];
   for (const candidate of wanted) {
+    if (candidate.id === STRATUS_SKILL_ID) {
+      // Even with force: every agent is pointed at the built-in skill under
+      // this name, and a copy here would never be served in its place.
+      skipped.push({ id: candidate.id, reason: RESERVED_SKILL_REASON });
+      continue;
+    }
     const destination = path.join(skillsDirPath(env), candidate.id);
     let exists = false;
     try {

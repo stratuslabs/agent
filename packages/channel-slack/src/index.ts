@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   filePathsOf,
   latestTurnReply,
+  CONVERSATION_METADATA_KEY,
   SENDER_TRUST_METADATA_KEY,
   sessionWriteTrust,
   imageDimensions,
@@ -340,8 +341,16 @@ export interface SlackWebLike {
      * conversations read scopes (`channels:read`, `groups:read`,
      * `im:read`, `mpim:read`) — see the README's app manifest.
      */
-    info(args: { channel: string }): Promise<{
-      channel?: { id?: string; is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean };
+    info(args: { channel: string; include_num_members?: boolean }): Promise<{
+      channel?: {
+        id?: string;
+        name?: string;
+        is_member?: boolean;
+        is_im?: boolean;
+        is_private?: boolean;
+        is_mpim?: boolean;
+        num_members?: number;
+      };
     }>;
     /**
      * Who is in a conversation, a page at a time. Asked before a credential
@@ -2371,6 +2380,63 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return boundedDisplayName(await displayNameFor(connection, userId));
   };
 
+  /**
+   * What kind of room a conversation is, its name, and how many are in it,
+   * for the turn's `conversation` metadata: an agent that did not know told
+   * someone in a DM they were "talking on the terminal", and answers the same
+   * way whether one person or a thousand will read it.
+   *
+   * The event's `channel_type` says the kind for free on a message; a
+   * mention carries none, and only `conversations.info` has the name and
+   * the count. Cached per app and conversation for ten minutes, so a busy
+   * thread costs one lookup, and a lookup that fails (an app missing the
+   * read scopes) leaves the kind the event gave, or nothing: the prompt then
+   * says only that the conversation is in Slack, as it always did.
+   */
+  const roomCache = new Map<string, { at: number; room: Promise<JsonObject | undefined> }>();
+  const ROOM_CACHE_MS = 10 * 60_000;
+  const KIND_BY_CHANNEL_TYPE: Record<string, string> = { im: 'direct', mpim: 'group', group: 'private', channel: 'public' };
+  const roomFor = async (
+    connection: AgentConnection,
+    channel: string,
+    channelType: string | undefined,
+  ): Promise<JsonObject | undefined> => {
+    const fromEvent = channelType !== undefined ? KIND_BY_CHANNEL_TYPE[channelType] : undefined;
+    // A DM's name is the person, and its count is two: nothing to look up.
+    if (fromEvent === 'direct') {
+      return { kind: 'direct' };
+    }
+    const key = `${connection.config.agentId}:${channel}`;
+    const cached = roomCache.get(key);
+    if (cached && now() - cached.at < ROOM_CACHE_MS) {
+      return cached.room;
+    }
+    const room = (async (): Promise<JsonObject | undefined> => {
+      try {
+        const info = (await connection.web.conversations.info({ channel, include_num_members: true })).channel;
+        const kind = info?.is_im === true
+          ? 'direct'
+          : info?.is_mpim === true
+            ? 'group'
+            : info?.is_private === true
+              ? 'private'
+              : info !== undefined ? 'public' : fromEvent;
+        if (kind === undefined) {
+          return undefined;
+        }
+        return {
+          kind,
+          ...((kind === 'private' || kind === 'public') && typeof info?.name === 'string' ? { name: info.name } : {}),
+          ...(kind !== 'direct' && typeof info?.num_members === 'number' ? { members: info.num_members } : {}),
+        };
+      } catch {
+        return fromEvent !== undefined ? { kind: fromEvent } : undefined;
+      }
+    })();
+    roomCache.set(key, { at: now(), room });
+    return room;
+  };
+
   // Mentions arrive as <@U123> markup; the model should read names.
   /**
    * `<@U…>` mentions become `@name` — for principals only. A display name
@@ -4167,6 +4233,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // whether the agent answers or only hears: the text is in its
       // transcript either way.
       const senderTrust = (connection.config.principals ?? []).includes(userId) ? 'user' : 'unknown';
+      // Who can read this, so the agent writes for them: a DM is with the
+      // sender, named the way the turn names them (a principal's display
+      // name, anyone else's id), and a thread says it is one.
+      const room = await roomFor(connection, event.channel, isDm ? 'im' : event.channel_type);
+      const conversation = room === undefined
+        ? undefined
+        : { ...room, ...(room.kind === 'direct' ? { with: author } : {}), ...(thread !== undefined && room.kind !== 'direct' ? { thread: true } : {}) };
       const metadata = {
         channel: 'slack',
         team,
@@ -4175,6 +4248,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // Carried so a mid-turn approval question is asked in the thread
         // the turn belongs to rather than at the top of a busy channel.
         ...(thread ? { slackThread: thread } : {}),
+        ...(conversation !== undefined ? { [CONVERSATION_METADATA_KEY]: conversation } : {}),
         [SENDER_TRUST_METADATA_KEY]: senderTrust,
       };
 
