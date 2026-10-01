@@ -34,6 +34,7 @@ import {
   loadStratusSkill,
 } from '@stratusagent/agents';
 import {
+  CREDENTIAL_NAME_PATTERN,
   agentsDirPath,
   createAgentWorkspaces,
   createFileCredentialResolver,
@@ -275,6 +276,15 @@ const main = async (): Promise<void> => {
       // is a link, and no choice falls back to a link that says why.
       const formUnavailable = 'The form could not be shown here: nobody who can add it can see this conversation.';
       tools.register(createCredentialRequestTool(async (request) => {
+        // The gateway's checks, in its order: a name nothing could store
+        // under is refused first, so a request for "Brave API key" never
+        // reaches a link it could not have produced.
+        if (!CREDENTIAL_NAME_PATTERN.test(request.name)) {
+          throw new Error(
+            `${JSON.stringify(request.name)} is not a credential name. Use letters, digits, dots, dashes, or underscores, `
+            + 'starting with a letter, the way the tool that needs it spells it: search.apiKey, github.token.',
+          );
+        }
         // A key already stored is refused before any form or link, granted or
         // not, as the gateway refuses it: the form only adds, so it could only
         // fail, and an agent holding the key has nothing to ask for.
