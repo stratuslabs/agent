@@ -185,7 +185,10 @@ of [roadmap step 31](../../docs/roadmap/31-reading-the-room.md).
 Every turn says which kind of conversation it came from — a direct message
 (and with whom, when that is one of the operator's principals: a display
 name is text anyone can set, and this lands in the system prompt), a group DM, a private channel, or a public channel — with
-its member count, and whether the message is in a thread. Never the
+its member count, whether the message is in a thread, and whether the
+channel is shared with people outside the workspace (`is_ext_shared` /
+`is_org_shared` from the lookup, or the event's own `is_ext_shared_channel`,
+which is current on every turn). Never the
 channel's name, for the same reason: whoever created or renamed the
 channel chose it. The agent writes for that audience: a public channel of a thousand
 people is not the DM it was in a minute ago, and what it was told in one does

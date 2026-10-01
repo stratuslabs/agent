@@ -180,6 +180,8 @@ export interface SlackSocketEventArgs {
   body?: {
     team_id?: string;
     event_id?: string;
+    /** Events API: the conversation is shared with another organization (Slack Connect). Current on every event. */
+    is_ext_shared_channel?: boolean;
     /** `block_actions` or `view_submission`, for the interactions this adapter handles. */
     type?: string;
     /** block_actions only: what `views.open` needs to put a form in front of the clicker. */
@@ -350,6 +352,10 @@ export interface SlackWebLike {
         is_private?: boolean;
         is_mpim?: boolean;
         num_members?: number;
+        /** Shared with another organization through Slack Connect. */
+        is_ext_shared?: boolean;
+        /** Shared across workspaces of an Enterprise Grid organization. */
+        is_org_shared?: boolean;
       };
     }>;
     /**
@@ -2424,6 +2430,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return {
       kind: fromEvent,
       ...(typeof looked?.members === 'number' ? { members: looked.members } : {}),
+      ...(looked?.shared === true ? { shared: true } : {}),
     };
   };
 
@@ -2442,6 +2449,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         return {
           kind,
           ...(kind !== 'direct' && typeof info.num_members === 'number' ? { members: info.num_members } : {}),
+          ...(kind !== 'direct' && (info.is_ext_shared === true || info.is_org_shared === true) ? { shared: true } : {}),
         };
       } catch {
         return undefined;
@@ -4259,6 +4267,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           ...room,
           ...(room.kind === 'direct' && senderTrust === 'user' ? { with: author } : {}),
           ...(thread !== undefined && room.kind !== 'direct' ? { thread: true } : {}),
+          // People outside this workspace read a Slack Connect channel. The
+          // event says so on every turn, which covers a channel shared
+          // since the count was cached.
+          ...(room.kind !== 'direct' && args.body?.is_ext_shared_channel === true ? { shared: true } : {}),
         };
       const metadata = {
         channel: 'slack',

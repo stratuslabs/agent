@@ -144,7 +144,9 @@ Slack that is the room itself, worked out again on every turn:
 | A public channel | How many members it has, and that anyone in the workspace can find it and read it, later as well as now |
 
 In a thread it is told that too, and that everyone who can read the
-channel can open the thread. Anywhere but a direct message it is told to
+channel can open the thread. A channel shared beyond the workspace (Slack
+Connect, or another workspace of the same organization) says so, because
+its readers are not only the workspace's. Anywhere but a direct message it is told to
 write for everyone there, and to keep out of it what it learned in a
 direct message or another conversation, and anything meant for one
 person, such as a secret or a credential link. A person is named only

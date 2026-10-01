@@ -254,6 +254,12 @@ test('the agent is told what kind of room it is in, and who can read what it pos
   assert.match(everyone, /anything meant for one person only, such as a secret or a link only they should use/);
   assert.doesNotMatch(everyone, /—/);
 
+  // A Slack Connect channel's readers are not only the workspace's.
+  const connect = roomOf({ kind: 'public', members: 40, shared: true });
+  assert.match(connect, /It is shared with people outside this workspace, through Slack Connect or another workspace of the organization, and they read it too\./);
+  assert.doesNotMatch(everyone, /outside this workspace/);
+  assert.deepEqual(conversationContextFrom({ conversation: { kind: 'direct', shared: true } }), { kind: 'direct' });
+
   // Without a room the line is the one it always was.
   assert.match(roomOf({ kind: 'nowhere' }), /Where you are: this conversation is happening in Slack\./);
 

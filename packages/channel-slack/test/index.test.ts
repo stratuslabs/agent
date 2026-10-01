@@ -86,7 +86,7 @@ interface FakeWeb extends SlackWebLike {
   /** Held by chat.postMessage, so a test can act while a post is in flight. */
   postGate?: Promise<void>;
   /** What conversations.info answers for; anything else rejects channel_not_found. */
-  knownConversations: Map<string, { is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean; name?: string; num_members?: number }>;
+  knownConversations: Map<string, { is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean; name?: string; num_members?: number; is_ext_shared?: boolean; is_org_shared?: boolean }>;
   /** What conversations.members answers, one page per entry; unknown channels have no members. */
   conversationMembers: Map<string, string[][]>;
   /**
@@ -8038,6 +8038,16 @@ test('each turn says what kind of room it came from and how many are in it, neve
 
   await socket.deliver('app_mention', mention('<@B-AVA> review this', { channel: 'G1', ts: '200.1' }));
   assert.deepEqual(rooms.at(-1), { kind: 'private', members: 6, thread: true });
+
+  // Shared beyond the workspace: said by the lookup, or by the event itself.
+  web.knownConversations.set('C7', { is_member: true, num_members: 40, is_ext_shared: true });
+  await socket.deliver('app_mention', mention('<@B-AVA> hi partners', { channel: 'C7', ts: '500.1' }));
+  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 40, thread: true, shared: true });
+  await socket.deliver('message', {
+    ...mention('<@B-AVA> hello', { type: 'message', channel: 'C1', channel_type: 'channel', ts: '600.1' }),
+    body: { team_id: 'T1', event_id: 'evt-connect', is_ext_shared_channel: true },
+  });
+  assert.equal((rooms.at(-1) as { shared?: boolean }).shared, true);
 
   // A lookup that fails keeps what the event said, and nothing more.
   await socket.deliver('message', mention('<@B-AVA> hello', { type: 'message', channel: 'C9', channel_type: 'channel', ts: '400.1' }));

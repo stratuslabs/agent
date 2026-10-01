@@ -2607,6 +2607,12 @@ export interface ConversationContext {
   with?: string;
   /** The turn is a reply in a thread rather than the channel itself. */
   thread?: boolean;
+  /**
+   * People outside this workspace read it too: a Slack Connect channel,
+   * or one shared across an organization's workspaces. Never set for a
+   * direct message.
+   */
+  shared?: boolean;
   // No channel name, deliberately: anyone who can create or rename a
   // channel chooses it, and this reaches the system prompt, where a name
   // like `ignore-all-previous-instructions` would outrank the soul. The
@@ -2635,7 +2641,7 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
   }
-  const { kind, members, with: withWhom, thread } = raw as Record<string, unknown>;
+  const { kind, members, with: withWhom, thread, shared } = raw as Record<string, unknown>;
   if (typeof kind !== 'string' || !CONVERSATION_KINDS.includes(kind)) {
     return undefined;
   }
@@ -2644,6 +2650,7 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
     ...(typeof members === 'number' && Number.isInteger(members) && members > 0 && members <= 10_000_000 ? { members } : {}),
     ...(kind === 'direct' && typeof withWhom === 'string' && CONVERSATION_WITH_PATTERN.test(withWhom.trim()) ? { with: withWhom.trim() } : {}),
     ...(thread === true ? { thread: true } : {}),
+    ...(kind !== 'direct' && shared === true ? { shared: true } : {}),
   };
 };
 
@@ -4637,7 +4644,10 @@ export const renderChannelSection = (
 const describeRoom = (room: ConversationContext, channel: string): string => {
   const count = room.members !== undefined ? room.members.toLocaleString('en-US') : undefined;
   const inThread = room.thread === true ? ' You are replying in a thread there, which everyone who can read the channel can open.' : '';
-  const shared = 'Everyone here reads what you post, so write for all of them, and keep out of it what came to you in a direct message or another conversation '
+  const outside = room.shared === true
+    ? ' It is shared with people outside this workspace, through Slack Connect or another workspace of the organization, and they read it too.'
+    : '';
+  const forEveryone = 'Everyone here reads what you post, so write for all of them, and keep out of it what came to you in a direct message or another conversation '
     + 'unless the people there meant it to be shared, and anything meant for one person only, such as a secret or a link only they should use.';
   switch (room.kind) {
     case 'direct':
@@ -4645,13 +4655,13 @@ const describeRoom = (room: ConversationContext, channel: string): string => {
         + 'Only the two of you can read it, so you are talking to one person.';
     case 'group':
       return `this is a group direct message in ${channel}${count !== undefined ? ` with ${count} members, you included` : ''}. `
-        + `Only they can read it.${inThread} ${shared}`;
+        + `Only they can read it.${outside}${inThread} ${forEveryone}`;
     case 'private':
       return `this is a private ${channel} channel${count !== undefined ? ` with ${count} members, you included` : ''}. `
-        + `Only its members can read it.${inThread} ${shared}`;
+        + `Only its members can read it.${outside}${inThread} ${forEveryone}`;
     case 'public':
       return `this is a public ${channel} channel${count !== undefined ? ` with ${count} members` : ''}. `
-        + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${inThread} ${shared}`;
+        + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${outside}${inThread} ${forEveryone}`;
   }
 };
 
