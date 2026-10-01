@@ -76,8 +76,10 @@ type Check = (
    *   still the right answer there.
    * - `ungranted`: a value is stored for it and the agent's `credentials:`
    *   do not list it, the one state whose remedy is adding the grant.
+   * - `held`: a value is stored and the agent's `credentials:` list it, the
+   *   state whose right answer is that nothing needs doing.
    */
-  when?: { primary?: true; fallbackConfigured?: true; tool?: string; unstored?: string; ungranted?: string };
+  when?: { primary?: true; fallbackConfigured?: true; tool?: string; unstored?: string; ungranted?: string; held?: string };
 };
 
 interface Served {
@@ -95,7 +97,8 @@ const applies = (check: Check, served: Served): boolean =>
   && !(check.when?.fallbackConfigured === true && !served.fallbackConfigured)
   && !(check.when?.tool !== undefined && served.tools !== undefined && !matchesToolAllowlist(check.when.tool, served.tools))
   && !(check.when?.unstored !== undefined && served.stored.has(check.when.unstored))
-  && !(check.when?.ungranted !== undefined && !(served.stored.has(check.when.ungranted) && !served.granted.includes(check.when.ungranted)));
+  && !(check.when?.ungranted !== undefined && !(served.stored.has(check.when.ungranted) && !served.granted.includes(check.when.ungranted)))
+  && !(check.when?.held !== undefined && !(served.stored.has(check.when.held) && served.granted.includes(check.when.held)));
 
 interface Corpus {
   agent: { name: string; instructions: string };
@@ -360,7 +363,7 @@ const main = async (): Promise<void> => {
     // Resolved once, through the lookup the gateway uses, for each name a
     // check is conditioned on: a read of the credentials file, never a write.
     const stored = new Set<string>();
-    for (const name of new Set(cases.flatMap((scenario) => scenario.checks.flatMap((check) => [check.when?.unstored, check.when?.ungranted])))) {
+    for (const name of new Set(cases.flatMap((scenario) => scenario.checks.flatMap((check) => [check.when?.unstored, check.when?.ungranted, check.when?.held])))) {
       if (name !== undefined && await namedCredentialSource({}, agent.id, name) !== undefined) {
         stored.add(name);
       }
