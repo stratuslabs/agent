@@ -2654,7 +2654,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const { credential } = request;
     if (!isLeasableCredentialName(credential)) {
       throw new Error(
-        `${JSON.stringify(credential)} cannot be leased. Name the credential the refusal named: a stored one like github.token, or a sign-in like provider:anthropic.`,
+        `${JSON.stringify(credential)} cannot be leased. Name the credential the refusal named, as it is stored: github.token, search.apiKey.`,
+      );
+    }
+    // A sign-in is not asked for here. Which one a turn spends is the
+    // agent's resolved runtime's choice, not the agent's, so a request
+    // could have an approver grant a lease on a sign-in no call of this
+    // agent ever uses; and the one it does use, refused, ends the turn
+    // before any tool runs. An operator grants those.
+    if (credential.startsWith('provider:')) {
+      throw new Error(
+        `${credential} is a model sign-in, and a lease on one is granted by your operator, not asked for here. `
+        + `They can grant one on the machine with \`stratus lease grant ${quoteShellArg(agentId)} ${credential} --for 1h --reason "…"\`.`,
       );
     }
     await refreshLeases();
@@ -2665,19 +2676,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // nothing else. Asking to lease a key the soul does not list, or one
     // that is not stored, would have an approver grant a lease no use can
     // ever spend.
-    if (!credential.startsWith('provider:')) {
-      if (session.agent.credentials?.includes(credential) !== true) {
-        throw new Error(
-          `You do not hold ${credential}, and a lease only covers a key you hold. `
-          + 'Ask for the key itself with credential.request if you have it, or ask your operator to grant it to you.',
-        );
-      }
-      if (await namedCredentialSource(env, agentId, credential) === undefined) {
-        throw new Error(
-          `${credential} is not stored, so a lease on it could never be used. `
-          + 'Ask for the key itself with credential.request if you have it, or ask your operator to store it.',
-        );
-      }
+    if (session.agent.credentials?.includes(credential) !== true) {
+      throw new Error(
+        `You do not hold ${credential}, and a lease only covers a key you hold. `
+        + 'Ask for the key itself with credential.request if you have it, or ask your operator to grant it to you.',
+      );
+    }
+    if (await namedCredentialSource(env, agentId, credential) === undefined) {
+      throw new Error(
+        `${credential} is not stored, so a lease on it could never be used. `
+        + 'Ask for the key itself with credential.request if you have it, or ask your operator to store it.',
+      );
     }
     const now = new Date();
     const live = leaseStore.list({ agentId })

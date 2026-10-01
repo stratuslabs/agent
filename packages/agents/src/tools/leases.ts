@@ -33,7 +33,7 @@ export const createLeaseRequestTool = (requestLease: LeaseRequester): Tool => ({
   parameters: {
     type: 'object',
     properties: {
-      credential: { type: 'string', description: 'The credential, as the refusal named it: github.token, or provider:anthropic for a sign-in.' },
+      credential: { type: 'string', description: 'The credential, as the refusal named it: github.token, search.apiKey. Not a model sign-in (provider:…), which only your operator grants.' },
       duration: { type: 'string', description: `How long the lease should run once approved: 30m, 2h, 7d. Default ${DEFAULT_LEASE_REQUEST_DURATION}. Ask for no longer than the task needs.` },
       uses: { type: 'integer', minimum: 1, description: 'How many uses of the key the task needs. Leave out for no limit inside the time.' },
       reason: { type: 'string', description: 'One sentence on what you need it for, shown to the person asked and kept on the lease.' },

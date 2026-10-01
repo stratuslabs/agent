@@ -113,11 +113,11 @@ A restart neither resets a lease's count nor extends it: uses are counted in
 
 ## Asking for one from Slack
 
-An agent refused for want of a lease can ask for one in the conversation
-it is in, with the `lease.request` tool (a daemon tool, so the soul lists
-it under `tools:` like `credential.request`, or lists no `tools:` at all).
-It names the credential, how long (`30m`, `2h`, `7d`; an hour if it does
-not say), an optional use limit, and why:
+An agent refused a named credential for want of a lease can ask for one in
+the conversation it is in, with the `lease.request` tool (a daemon tool, so
+the soul lists it under `tools:` like `credential.request`, or lists no
+`tools:` at all). It names the credential, how long (`30m`, `2h`, `7d`; an
+hour if it does not say), an optional use limit, and why:
 
 ```
 Ava is asking for a lease on github.token, for 2h, up to 3 uses.
@@ -143,6 +143,11 @@ Ava says: To open one pull request.
   message is rewritten with the outcome and who gave it, and a
   `lease.requested` / `lease.decided` pair is in [`stratus logs`](./logs.md)
   with the approver's id and the lease's.
+- **Named credentials only.** A model sign-in (`provider:…`) is not asked
+  for this way: which one a turn spends is the agent's runtime's choice,
+  so a request could be approved for a sign-in no call of the agent's ever
+  uses, and the one it does use, refused, ends the turn before any tool
+  runs. The operator grants those, and the agent is told so.
 - **It asks only when it could be granted and used.** A credential that is
   not on `leases.credentials`, one the agent's soul does not list, one that
   is not stored, a duration past the 90-day ceiling, a live lease the agent

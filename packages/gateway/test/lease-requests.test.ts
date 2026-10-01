@@ -207,6 +207,8 @@ test('a request that could never be granted or used is refused before anyone is 
     { label: 'not a duration', options: { request: { credential: 'github.token', duration: 'a while', reason: 'x' } }, expect: /"a while" is not a duration\. Give one like 30m, 2h, or 7d/ },
     { label: 'too long', options: { request: { credential: 'github.token', duration: '91d', reason: 'x' } }, expect: /at most 90 days/ },
     { label: 'not leasable', options: { request: { credential: 'no spaces allowed', reason: 'x' } }, expect: /cannot be leased/ },
+    // Fenced and well-formed, but a sign-in: which one a turn spends is the runtime's choice.
+    { label: 'a sign-in', options: { leased: ['github.token', 'provider:anthropic'], request: { credential: 'provider:anthropic', reason: 'x' } }, expect: /provider:anthropic is a model sign-in, and a lease on one is granted by your operator.*stratus lease grant kai provider:anthropic/ },
   ];
   for (const { label, options, expect } of cases) {
     const { gateway, events, delivered } = await startAsking(options);
