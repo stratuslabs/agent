@@ -382,6 +382,13 @@ test('each turn tells the agent the room it is in now, a resumed conversation in
     // and a turn that brings no room of its own.
     const stored = await gateway.store.get('slack:ava:T1:C1:100.1');
     assert.deepEqual(stored?.metadata?.conversation, { kind: 'public', members: 13 });
+
+    // A channel turn that could not tell the room clears the stored one:
+    // the generic line, never the last room passed off as current.
+    await gateway.dispatch({ sessionId: 'slack:ava:T1:C1:100.1', agentId: 'ava', userMessage: 'hi', metadata: { channel: 'slack' } });
+    assert.match(prompts[2] ?? '', /this conversation is happening in Slack\./);
+    assert.doesNotMatch(prompts[2] ?? '', /13 members/);
+    assert.equal((await gateway.store.get('slack:ava:T1:C1:100.1'))?.metadata?.conversation, undefined);
   } finally {
     await gateway.stop();
   }

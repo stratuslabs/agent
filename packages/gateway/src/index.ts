@@ -2738,10 +2738,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // restart, and a turn that brings no room of its own (a schedule
         // firing into the thread). Both get the latest room this way, not
         // the first turn's, which a channel made public since would make
-        // read as more private than it is.
-        const room = input.metadata?.[CONVERSATION_METADATA_KEY];
-        if (room !== undefined) {
-          existing.metadata = { ...existing.metadata, [CONVERSATION_METADATA_KEY]: room };
+        // read as more private than it is. A turn from a channel that
+        // could not tell the room (its lookup failed) clears it instead:
+        // no room is the generic line, and an old one is a claim.
+        if (typeof input.metadata?.channel === 'string') {
+          const room = input.metadata[CONVERSATION_METADATA_KEY];
+          const { [CONVERSATION_METADATA_KEY]: _stale, ...rest } = existing.metadata ?? {};
+          existing.metadata = room !== undefined ? { ...rest, [CONVERSATION_METADATA_KEY]: room } : rest;
         }
         await store.save(existing);
         // The turn's metadata rides along for the sender's trust: without
