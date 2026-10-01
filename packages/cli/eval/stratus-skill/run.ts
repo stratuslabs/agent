@@ -41,6 +41,7 @@ import {
   describeServingModel,
   loadOperatorSkills,
   loadSoulFile,
+  namedCredentialSource,
   resolveRuntimeConfig,
   servedRuntimes,
 } from '@stratusagent/state';
@@ -63,24 +64,28 @@ type Check = (
    *   no switch and nothing to roll over.
    * - `tool`: the agent's `tools:` allow it, as the runner reads them. An
    *   agent with no credential.request has no link to move to a DM.
-   * - `notGranted`: the agent's `credentials:` do not already list it. An
-   *   agent told it holds search.apiKey is right to say nothing is needed.
+   * - `notHeld`: the agent does not already hold it, granted in its
+   *   `credentials:` and stored, as the gateway checks both. A grant alone
+   *   is permission for a key nobody has supplied yet, so setup advice is
+   *   still the right answer; only an agent that holds the key is right to
+   *   say nothing is needed.
    */
-  when?: { primary?: true; fallbackConfigured?: true; tool?: string; notGranted?: string };
+  when?: { primary?: true; fallbackConfigured?: true; tool?: string; notHeld?: string };
 };
 
 interface Served {
   onFallback: boolean;
   fallbackConfigured: boolean;
   tools: readonly string[] | undefined;
-  credentials: readonly string[] | undefined;
+  /** Credential names this agent holds: granted and stored. */
+  held: ReadonlySet<string>;
 }
 
 const applies = (check: Check, served: Served): boolean =>
   !(check.when?.primary === true && served.onFallback)
   && !(check.when?.fallbackConfigured === true && !served.fallbackConfigured)
   && !(check.when?.tool !== undefined && served.tools !== undefined && !matchesToolAllowlist(check.when.tool, served.tools))
-  && !(check.when?.notGranted !== undefined && served.credentials?.includes(check.when.notGranted) === true);
+  && !(check.when?.notHeld !== undefined && served.held.has(check.when.notHeld));
 
 interface Corpus {
   agent: { name: string; instructions: string };
@@ -300,6 +305,15 @@ const main = async (): Promise<void> => {
       return;
     }
 
+    // Resolved once, through the lookup the gateway uses, for each name a
+    // check is conditioned on: a read of the credentials file, never a write.
+    const held = new Set<string>();
+    for (const name of new Set(cases.flatMap((scenario) => scenario.checks.map((check) => check.when?.notHeld)))) {
+      if (name !== undefined && agent.credentials?.includes(name) === true && await namedCredentialSource({}, agent.id, name) !== undefined) {
+        held.add(name);
+      }
+    }
+
     let passed = 0;
     let failed = 0;
     let onFallback = 0;
@@ -336,7 +350,7 @@ const main = async (): Promise<void> => {
           onFallback: fellBack !== undefined,
           fallbackConfigured: config.fallback !== undefined,
           tools: agent.tools,
-          credentials: agent.credentials,
+          held,
         })).filter((failure) => failure !== undefined)
         : [`the turn failed: ${threw}`];
       if (failures.length === 0) {

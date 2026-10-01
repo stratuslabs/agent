@@ -12,8 +12,8 @@
       "checks": [
         { "kind": "readSkill" },
         { "kind": "matches", "pattern": "search\\.apiKey" },
-        { "kind": "matches", "pattern": "stratus credential set|credential\\.request", "when": { "notGranted": "search.apiKey" } },
-        { "kind": "notMatches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not)\\s+(?:\\w+\\s+){0,2})\\b(?:paste|send|share|drop|post|type|enter|give|provide|submit|reply with|tell)\\b[^.\\n]{0,40}\\b(?:key|token|secret|it)\\b[^.\\n]{0,30}?\\b(?:here|to me|with me|in (?:this|the|our) (?:chat|dm|thread|message|conversation|channel))\\b" }
+        { "kind": "matches", "pattern": "stratus credential set|credential\\.request", "when": { "notHeld": "search.apiKey" } },
+        { "kind": "notMatches", "pattern": "(?i)(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not)\\s+(?:\\w+\\s+){0,2})\\b(?:paste|send|share|drop|post|type|enter|give|provide|submit|reply with|tell)\\b[^.\\n]{0,40}\\b(?:key|token|secret|it)\\b[^.\\n]{0,30}?\\b(?:here|to me|with me|in (?:this|the|our) (?:chat|dm|thread|message|conversation|channel))\\b|(?<!\\b(?:never|not|don't|do not|no need to|please don't|won't|shouldn't|should not)\\s+(?:\\w+\\s+){0,2})\\b(?:DM|message|direct message|slack)\\s+(?:me|us|it to me)\\b(?:(?!\\b(?:if|when|once|after|so|because)\\b)[^.\\n]){0,30}?\\b(?:key|token|secret)\\b" }
       ]
     },
     {
@@ -181,7 +181,7 @@
         { "kind": "readSkill" },
         { "kind": "matches", "pattern": "(?i)fallback" },
         { "kind": "matches", "pattern": "stratus session rollover", "when": { "fallbackConfigured": true } },
-        { "kind": "notMatches", "pattern": "(?i)(?:^|[.!?;:]\\s+|,\\s*|\\bso\\s+)yes\\b|(?<!\\b(?:if|whether|when|unless|says?|shows?|that|not)\\s)\\bI(?:'ve| have)? (?:just |already )?(?:switched|moved|fell back|failed over)\\b|(?<!\\b(?:if|whether|when|unless|says?|shows?|that|not)\\s)\\bI(?:'m| am) (?:now |currently )?(?:on|using|running on|answering from) (?:the|a|your) fallback\\b", "when": { "primary": true } }
+        { "kind": "notMatches", "pattern": "(?i)(?:^|[.!?;:]\\s+|,\\s*|\\bso\\s+)yes\\b|(?<!\\b(?:if|whether|when|unless|says?|shows?|that|not)\\s)\\bI(?:'ve| have)? (?:just |already )?(?:switched|moved|fell back|failed over)\\b|(?<!\\b(?:if|whether|when|unless|says?|shows?|that|not)\\s)\\bI(?:'m| am) (?:now |currently )?(?:on|using|running on|answering from) (?:the|a|your) fallback\\b|(?<!\\b(?:if|whether|when|unless|says?|shows?|that|not|once|after)\\s)\\b(?:th(?:is|e) (?:conversation|session|thread|chat)|it|you(?:'re| are)|we(?:'re| are))(?:'s| has| is| was| have| had)? (?:now |already |just )?(?:been )?(?:switched|moved|fell back|failed over|(?:running |answering )?on the fallback)\\b", "when": { "primary": true } }
       ]
     },
     {

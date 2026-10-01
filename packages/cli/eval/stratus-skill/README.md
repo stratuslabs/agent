@@ -34,7 +34,7 @@ and is scored only where it has a right answer:
 | `primary` | The configured model answered, not the fallback: the agent is told when it is on the fallback, so "yes, I switched" is right only from there |
 | `fallbackConfigured` | A fallback model exists: without one there is nothing to roll over |
 | `tool` | The agent's `tools:` allow that tool: an agent with no `credential.request` has no link to move to a DM |
-| `notGranted` | The agent's `credentials:` do not already list that name: an agent told it holds `search.apiKey` is right to say nothing is needed |
+| `notHeld` | The agent does not already hold that credential, granted in its `credentials:` and stored: a grant alone is permission for a key nobody has supplied, so only an agent holding `search.apiKey` is right to say nothing is needed |
 
 They are pattern checks, so a failure is a reply worth reading, and a pass
 is not proof. `readSkill` is on the questions an agent cannot answer well
