@@ -42,7 +42,7 @@ import {
   resolveRuntimeConfig,
 } from '@stratusagent/state';
 
-import { loadServePlugins } from '../../src/trusted-config.ts';
+import { loadServeMaxTurns, loadServePlugins } from '../../src/trusted-config.ts';
 
 type Check =
   | { kind: 'readSkill' }
@@ -156,18 +156,27 @@ const main = async (): Promise<void> => {
       await plugin.instance.dispose?.();
     }
   };
+  // The daemon's turn budget, from the same trusted config: a case that
+  // needs skill.read and then credential.request spends two calls, and a
+  // pass on the kernel's default says nothing about a daemon set lower.
+  const maxTurns = await loadServeMaxTurns({}, undefined, (line) => console.error(`Warning: ${line}`));
+  // Which cases the fallback answered. The wrapper switches silently
+  // unless told, and a pass it earned must not be scored as the primary's.
+  let fellBack: string | undefined;
   try {
     // Hosted runtimes (Codex, a Claude subscription) reach kernel tools only
     // through this callback, late-bound because the runner needs the provider
     // first, as the CLI runtime and the gateway bind it. Without it they have
     // no skill.read, and every readSkill case fails whatever the model does.
     let hostedRunner: AgentRunner | undefined;
-    const provider = createRuntimeProvider(config, undefined, async (session, call, context) => {
+    const provider = createRuntimeProvider(config, (error) => {
+      fellBack = error instanceof Error ? error.message : String(error);
+    }, async (session, call, context) => {
       if (!hostedRunner) {
         throw new Error('The eval runner is not ready to execute tools yet.');
       }
       return hostedRunner.executeHostedToolCall(session, call, context);
-    }, undefined, undefined, providers);
+    }, maxTurns, undefined, providers);
     // A runner per case, each with the memory tools every agent has over a
     // store of its own: never the soul's (a case like forget-me would
     // recall and retire a real fact), and never the last case's (a key the
@@ -193,7 +202,15 @@ const main = async (): Promise<void> => {
         expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
         formUnavailable: 'The form could not be shown here: nobody who can add it can see this conversation.',
       })));
-      const runner = new AgentRunner({ provider, tools, skills, memory, store: new InMemorySessionStore(), bus: new EventBus() });
+      const runner = new AgentRunner({
+        provider,
+        tools,
+        skills,
+        memory,
+        store: new InMemorySessionStore(),
+        bus: new EventBus(),
+        ...(maxTurns !== undefined ? { maxTurns } : {}),
+      });
       hostedRunner = runner;
       return runner;
     };
@@ -207,7 +224,9 @@ const main = async (): Promise<void> => {
 
     let passed = 0;
     let failed = 0;
+    let onFallback = 0;
     for (const scenario of cases) {
+      fellBack = undefined;
       // The room a Slack turn carries, on the session and on the runtime
       // alike, so the room line under test is the one production renders.
       const metadata: JsonObject = { channel: 'slack', [CONVERSATION_METADATA_KEY]: scenario.room };
@@ -223,9 +242,20 @@ const main = async (): Promise<void> => {
         model: describeServingModel(config, false),
         ...(conversation !== undefined ? { conversation } : {}),
       };
-      const session = await runnerFor().run({ sessionId: `eval:${scenario.id}`, agent, userMessage: scenario.user, metadata, runtime });
-      const reply = latestTurnReply(session) ?? '';
-      const failures = scenario.checks.map((check) => failureOf(check, reply, session)).filter((failure) => failure !== undefined);
+      // A turn that throws (the budget spent, the provider down) is this
+      // case's failure, not the end of the run: the cases after it still
+      // say something, and the total has to count it.
+      let session: Session | undefined;
+      let threw: string | undefined;
+      try {
+        session = await runnerFor().run({ sessionId: `eval:${scenario.id}`, agent, userMessage: scenario.user, metadata, runtime });
+      } catch (error) {
+        threw = error instanceof Error ? error.message : String(error);
+      }
+      const reply = session !== undefined ? latestTurnReply(session) ?? '' : '';
+      const failures = session !== undefined
+        ? scenario.checks.map((check) => failureOf(check, reply, session)).filter((failure) => failure !== undefined)
+        : [`the turn failed: ${threw}`];
       if (failures.length === 0) {
         passed += 1;
       } else {
@@ -235,9 +265,13 @@ const main = async (): Promise<void> => {
       if (failures.length > 0) {
         console.log(`  ${failures.join('; ')}`);
       }
+      if (fellBack !== undefined) {
+        onFallback += 1;
+        console.log(`  answered by the fallback, ${config.fallback?.provider} ${config.fallback?.model}: ${fellBack}`);
+      }
       console.log(`    → ${reply.replace(/\s+/g, ' ').slice(0, 200)}`);
     }
-    console.log(`\nTOTAL: ${passed} passed, ${failed} failed, on ${config.provider}${'model' in config && config.model ? ` ${config.model}` : ''}`);
+    console.log(`\nTOTAL: ${passed} passed, ${failed} failed, on ${config.provider}${'model' in config && config.model ? ` ${config.model}` : ''}${onFallback > 0 ? ` (${onFallback} answered by the fallback, ${config.fallback?.provider} ${config.fallback?.model})` : ''}`);
     if (failed > 0) {
       process.exitCode = 1;
     }

@@ -49,7 +49,8 @@ it: the shipped skill, then the skills installed in `~/.stratus/skills/`
 (read, never changed), then the plugins' skills, all filtered by the
 soul's `skills:`, and the memory tools. The plugins the trusted config
 enables are loaded, so a provider a plugin contributes (`openai-compatible`
-is one) runs here as it does in production. Two things are deliberately
+is one) runs here as it does in production, and the trusted config's
+`maxTurns` is the budget here too. Three things are deliberately
 different:
 
 - **Memory is a throwaway store, one per case**, not the soul's own: the
@@ -67,7 +68,9 @@ different:
   production, and a pass on one is a little less evidence.
 
 It prints each case with its reply and a total, and exits non-zero when a
-case fails. It refuses to run on the demo provider, which would answer
+case fails. A case the `fallbackModel` answered, because the primary
+failed, says so, and so does the total: its pass or failure is the
+fallback's, not the primary's. It refuses to run on the demo provider, which would answer
 from a script.
 
 When the skill changes, run this before and after: a rewrite that reads
