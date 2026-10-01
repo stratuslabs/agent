@@ -2381,16 +2381,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
-   * What kind of room a conversation is, its name, and how many are in it,
-   * for the turn's `conversation` metadata: an agent that did not know told
+   * What kind of room a conversation is and how many are in it, for the
+   * turn's `conversation` metadata: an agent that did not know told
    * someone in a DM they were "talking on the terminal", and answers the same
-   * way whether one person or a thousand will read it.
+   * way whether one person or a thousand will read it. Never the channel's
+   * name, which whoever made the channel chose (`ConversationContext`).
    *
    * The event's `channel_type` says the kind for free on a message; a
-   * mention carries none, and only `conversations.info` has the name and
-   * the count. The name and count are kept per app and conversation for
-   * ten minutes, so a busy thread costs one lookup; the kind never is (see
-   * below), so a mention is looked up each time. A lookup that fails (an
+   * mention carries none, and only `conversations.info` has the count. The
+   * count is kept per app and conversation for ten minutes, so a busy
+   * thread costs one lookup; the kind never is (see below), so a mention
+   * is looked up each time. A lookup that fails (an
    * app missing the read scopes) leaves the kind the event gave, or
    * nothing: the prompt then says only that the conversation is in Slack,
    * as it always did.
@@ -2422,7 +2423,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     return {
       kind: fromEvent,
-      ...((fromEvent === 'private' || fromEvent === 'public') && typeof looked?.name === 'string' ? { name: looked.name } : {}),
       ...(typeof looked?.members === 'number' ? { members: looked.members } : {}),
     };
   };
@@ -2441,7 +2441,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
             : info.is_private === true ? 'private' : 'public';
         return {
           kind,
-          ...((kind === 'private' || kind === 'public') && typeof info.name === 'string' ? { name: info.name } : {}),
           ...(kind !== 'direct' && typeof info.num_members === 'number' ? { members: info.num_members } : {}),
         };
       } catch {

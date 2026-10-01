@@ -2597,8 +2597,6 @@ export type ConversationKind = 'direct' | 'group' | 'private' | 'public';
 
 export interface ConversationContext {
   kind: ConversationKind;
-  /** The channel's own name, without its `#`. Never set for a direct message. */
-  name?: string;
   /** Members as the channel counts them, the agent included. */
   members?: number;
   /**
@@ -2609,6 +2607,10 @@ export interface ConversationContext {
   with?: string;
   /** The turn is a reply in a thread rather than the channel itself. */
   thread?: boolean;
+  // No channel name, deliberately: anyone who can create or rename a
+  // channel chooses it, and this reaches the system prompt, where a name
+  // like `ignore-all-previous-instructions` would outrank the soul. The
+  // kind and the count are what decide how to write, and neither is text.
 }
 
 /**
@@ -2619,11 +2621,9 @@ export interface ConversationContext {
 export const CONVERSATION_METADATA_KEY = 'conversation';
 
 const CONVERSATION_KINDS: readonly string[] = ['direct', 'group', 'private', 'public'];
-// Channel names and display names are text people type, and they are
-// interpolated into the system prompt, so anything that is not plainly a
-// name is dropped rather than quoted: a channel named like an instruction
-// is a channel described without its name.
-const CONVERSATION_NAME_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,79}$/u;
+// A principal's display name, which is what a channel may put in `with`:
+// vouched for, but still typed, so anything that is not plainly a name is
+// dropped rather than quoted.
 const CONVERSATION_WITH_PATTERN = /^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} .'\u2019-]{0,63}$/u;
 
 /**
@@ -2635,13 +2635,12 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
   }
-  const { kind, name, members, with: withWhom, thread } = raw as Record<string, unknown>;
+  const { kind, members, with: withWhom, thread } = raw as Record<string, unknown>;
   if (typeof kind !== 'string' || !CONVERSATION_KINDS.includes(kind)) {
     return undefined;
   }
   return {
     kind: kind as ConversationKind,
-    ...(kind !== 'direct' && typeof name === 'string' && CONVERSATION_NAME_PATTERN.test(name) ? { name } : {}),
     ...(typeof members === 'number' && Number.isInteger(members) && members > 0 && members <= 10_000_000 ? { members } : {}),
     ...(kind === 'direct' && typeof withWhom === 'string' && CONVERSATION_WITH_PATTERN.test(withWhom.trim()) ? { with: withWhom.trim() } : {}),
     ...(thread === true ? { thread: true } : {}),
@@ -4637,7 +4636,6 @@ export const renderChannelSection = (
  */
 const describeRoom = (room: ConversationContext, channel: string): string => {
   const count = room.members !== undefined ? room.members.toLocaleString('en-US') : undefined;
-  const titled = room.name !== undefined ? `#${room.name}` : undefined;
   const inThread = room.thread === true ? ' You are replying in a thread there, which everyone who can read the channel can open.' : '';
   const shared = 'Everyone here reads what you post, so write for all of them, and keep out of it what came to you in a direct message or another conversation '
     + 'unless the people there meant it to be shared, and anything meant for one person only, such as a secret or a link only they should use.';
@@ -4649,10 +4647,10 @@ const describeRoom = (room: ConversationContext, channel: string): string => {
       return `this is a group direct message in ${channel}${count !== undefined ? ` with ${count} members, you included` : ''}. `
         + `Only they can read it.${inThread} ${shared}`;
     case 'private':
-      return `this is ${titled ?? 'a channel'}, a private ${channel} channel${count !== undefined ? ` with ${count} members, you included` : ''}. `
+      return `this is a private ${channel} channel${count !== undefined ? ` with ${count} members, you included` : ''}. `
         + `Only its members can read it.${inThread} ${shared}`;
     case 'public':
-      return `this is ${titled ?? 'a channel'}, a public ${channel} channel${count !== undefined ? ` with ${count} members` : ''}. `
+      return `this is a public ${channel} channel${count !== undefined ? ` with ${count} members` : ''}. `
         + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${inThread} ${shared}`;
   }
 };

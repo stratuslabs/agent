@@ -372,12 +372,12 @@ test('each turn tells the agent the room it is in now, a resumed conversation in
       sessionId: 'slack:ava:T1:C1:100.1',
       agentId: 'ava',
       userMessage: 'hi',
-      metadata: { channel: 'slack', conversation: { kind: 'public', name: 'general', members } },
+      metadata: { channel: 'slack', conversation: { kind: 'public', members } },
     });
     await turn(12);
     await turn(13);
-    assert.match(prompts[0] ?? '', /#general, a public Slack channel with 12 members/);
-    assert.match(prompts[1] ?? '', /#general, a public Slack channel with 13 members/);
+    assert.match(prompts[0] ?? '', /a public Slack channel with 12 members/);
+    assert.match(prompts[1] ?? '', /a public Slack channel with 13 members/);
   } finally {
     await gateway.stop();
   }

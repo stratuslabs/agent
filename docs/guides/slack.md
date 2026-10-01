@@ -54,7 +54,7 @@ for](../../packages/channel-slack/README.md#who-a-message-is-for).
 
 **It knows which room it is in.** Each turn tells the agent whether it is in
 a direct message (with whom, when they are a principal), a group DM, a private channel, or a public
-channel, with the channel's name and how many people are in it — so a
+channel, and how many people are in it — so a
 conversation that moves from a DM into `#general` is not answered as though
 it were still a DM, and something said to it privately stays out of a
 channel. The lookup behind it uses scopes the app manifest already asks for

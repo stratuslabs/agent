@@ -185,14 +185,15 @@ of [roadmap step 31](../../docs/roadmap/31-reading-the-room.md).
 Every turn says which kind of conversation it came from — a direct message
 (and with whom, when that is one of the operator's principals: a display
 name is text anyone can set, and this lands in the system prompt), a group DM, a private channel, or a public channel — with
-the channel's name and member count, and whether the message is in a
-thread. The agent writes for that audience: a public channel of a thousand
+its member count, and whether the message is in a thread. Never the
+channel's name, for the same reason: whoever created or renamed the
+channel chose it. The agent writes for that audience: a public channel of a thousand
 people is not the DM it was in a minute ago, and what it was told in one does
-not belong in the other. The kind comes from the event; the name and count
-come from `conversations.info` with `include_num_members`, the same call and
+not belong in the other. The kind comes from the event; the count
+comes from `conversations.info` with `include_num_members`, the same call and
 the same `channels:read` / `groups:read` / `mpim:read` scopes
-[outbound destinations](#speaking-first-the-outbound-seam) use. The name
-and count are kept for ten minutes, so a thread's replies reuse them, but
+[outbound destinations](#speaking-first-the-outbound-seam) use. The count
+is kept for ten minutes, so a thread's replies reuse it, but
 the kind never is: a reply says its own, and a mention, which does not, is
 looked up each time, so a channel made public is not described as private.
 A DM needs no lookup. An app

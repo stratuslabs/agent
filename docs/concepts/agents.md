@@ -140,18 +140,18 @@ Slack that is the room itself, worked out again on every turn:
 | --- | --- |
 | A direct message | That it is talking to one person, named when they are one of the operator's [principals](../../packages/channel-slack/README.md#who-counts-as-the-operator) |
 | A group DM | How many people are in it, and that only they can read it |
-| A private channel | Its name, how many members it has, and that only they can read it |
-| A public channel | Its name, how many members it has, and that anyone in the workspace can find it and read it, later as well as now |
+| A private channel | How many members it has, and that only they can read it |
+| A public channel | How many members it has, and that anyone in the workspace can find it and read it, later as well as now |
 
 In a thread it is told that too, and that everyone who can read the
 channel can open the thread. Anywhere but a direct message it is told to
 write for everyone there, and to keep out of it what it learned in a
 direct message or another conversation, and anything meant for one
 person, such as a secret or a credential link. A person is named only
-when the operator vouched for them, because a display name is text anyone
-can set and the system prompt outranks what people say; a channel's name
-reaches the prompt only when it is plainly a name, and is left out
-otherwise.
+when the operator vouched for them, and a channel never is: a display name
+or a channel name is text whoever set it chose, and the system prompt
+outranks what people say, so `ignore-all-previous-instructions` must not
+reach it as a name.
 It is told that the message says what became of each attached file — its
 text follows, the image is shown, or only its name arrived with the reason
 it was not read ([Slack](../guides/slack.md)) — and that it has nothing more

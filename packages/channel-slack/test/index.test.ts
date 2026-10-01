@@ -7980,7 +7980,7 @@ test('with no principals configured, a DM names nobody: a display name never rea
   await adapter.stop();
 });
 
-test('each turn says what kind of room it came from, named and counted, and never trusts a cached kind', async () => {
+test('each turn says what kind of room it came from and how many are in it, never its name, and never trusts a cached kind', async () => {
   // An agent in a DM told the person they were "talking on the terminal",
   // and would have answered a thousand-person channel the same way.
   const socket = createFakeSocket();
@@ -8020,24 +8020,24 @@ test('each turn says what kind of room it came from, named and counted, and neve
 
   // A mention carries no channel type, so the channel is looked up.
   await socket.deliver('app_mention', mention('<@B-AVA> status?'));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', name: 'general', members: 1042, thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 1042, thread: true });
   assert.equal(infoCalls, 1);
   // A thread reply says its kind, so the name and count are reused.
   await socket.deliver('message', mention('and now?', { type: 'message', channel_type: 'channel', ts: '100.2', thread_ts: '100.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', name: 'general', members: 1042, thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 1042, thread: true });
   assert.equal(infoCalls, 1, 'a reply in the conversation reuses the lookup');
 
   // Made private while the name was cached: the reply's own kind wins, and
   // the next mention looks it up again rather than trusting the cache.
   await socket.deliver('message', mention('still there?', { type: 'message', channel_type: 'group', ts: '100.3', thread_ts: '100.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', name: 'general', members: 1042, thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 1042, thread: true });
   web.knownConversations.set('C1', { is_member: true, is_private: true, name: 'general', num_members: 12 });
   await socket.deliver('app_mention', mention('<@B-AVA> who is here?', { ts: '100.4' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', name: 'general', members: 12, thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 12, thread: true });
   assert.equal(infoCalls, 2);
 
   await socket.deliver('app_mention', mention('<@B-AVA> review this', { channel: 'G1', ts: '200.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', name: 'design-crit', members: 6, thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 6, thread: true });
 
   // A lookup that fails keeps what the event said, and nothing more.
   await socket.deliver('message', mention('<@B-AVA> hello', { type: 'message', channel: 'C9', channel_type: 'channel', ts: '400.1' }));
