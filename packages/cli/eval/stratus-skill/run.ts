@@ -34,6 +34,7 @@ import {
   parseSoul,
 } from '@stratusagent/agents';
 import {
+  agentsDirPath,
   createAgentWorkspaces,
   createFileCredentialResolver,
   createRuntimeProvider,
@@ -45,11 +46,19 @@ import {
 
 import { loadServeMaxTurns, loadServePlugins } from '../../src/trusted-config.ts';
 
-type Check =
+type Check = (
   | { kind: 'readSkill' }
   | { kind: 'noToolCall'; tool: string }
   | { kind: 'matches'; pattern: string }
-  | { kind: 'notMatches'; pattern: string };
+  | { kind: 'notMatches'; pattern: string }
+) & {
+  /**
+   * Score this check only when the configured model answered. The agent is
+   * told when it is on the fallback, so "yes, I switched" is wrong from the
+   * primary and right from the fallback.
+   */
+  primaryOnly?: boolean;
+};
 
 interface Corpus {
   agent: { name: string; instructions: string };
@@ -79,7 +88,10 @@ const readTheSkill = (session: Session): boolean =>
 const calledTool = (session: Session, tool: string): boolean =>
   session.messages.some((message) => (message.toolCalls ?? []).some((call) => call.toolName === tool));
 
-const failureOf = (check: Check, reply: string, session: Session): string | undefined => {
+const failureOf = (check: Check, reply: string, session: Session, onFallback: boolean): string | undefined => {
+  if (check.primaryOnly === true && onFallback) {
+    return undefined;
+  }
   switch (check.kind) {
     case 'readSkill':
       return readTheSkill(session) ? undefined : `answered without reading the ${STRATUS_SKILL_ID} skill`;
@@ -118,6 +130,11 @@ const main = async (): Promise<void> => {
     return;
   }
   const config = served?.[0]?.runtime ?? await resolveRuntimeConfig({});
+  // Every agent a Slack workspace talks to is a roster soul, so the default
+  // Kai stands in for one at the path it would have: told where its soul is
+  // and that an edit reaches its next reply, and able to have a credential
+  // granted in it. The file is named, never read or written.
+  const servedSoulPath = soulPath !== undefined ? path.resolve(soulPath) : path.join(agentsDirPath({}), `${agent.id}.md`);
   // The demo provider answers from a script, so a pass against it would be
   // a pass nobody earned. Refuse, and say what is missing.
   if (config.provider === 'demo') {
@@ -209,24 +226,13 @@ const main = async (): Promise<void> => {
       // path: a bearer link the agent must not post into a shared room), so
       // the link-in-private-channel case scores the choice production
       // offers rather than one the model never got to make.
-      tools.register(createCredentialRequestTool(async (request) => {
-        // Without --soul this is the built-in agent, which the gateway
-        // refuses the same way: there is no soul to grant the key in, so a
-        // link here would be a capability that agent never has.
-        if (soulPath === undefined) {
-          throw new Error(
-            `${agent.name} is the built-in agent and has no soul file to grant a credential in. `
-            + `Your operator can store one on the machine with \`stratus credential set ${request.name}\`.`,
-          );
-        }
-        return {
-          requestId: 'eval-request',
-          via: 'link',
-          url: 'https://stratus.example/api/v1/credential-links/eval-not-a-real-token',
-          expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
-          formUnavailable: 'The form could not be shown here: nobody who can add it can see this conversation.',
-        };
-      }));
+      tools.register(createCredentialRequestTool(async () => ({
+        requestId: 'eval-request',
+        via: 'link',
+        url: 'https://stratus.example/api/v1/credential-links/eval-not-a-real-token',
+        expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+        formUnavailable: 'The form could not be shown here: nobody who can add it can see this conversation.',
+      })));
       const runner = new AgentRunner({
         provider,
         tools,
@@ -261,7 +267,8 @@ const main = async (): Promise<void> => {
       // and that an edit reaches its next reply, and a question this
       // answers must not be scored as though the agent had to look it up.
       const runtime = {
-        ...(soulPath !== undefined ? { soulPath: path.resolve(soulPath), soulReloads: true } : {}),
+        soulPath: servedSoulPath,
+        soulReloads: true,
         workspace: createAgentWorkspaces({}).forAgent(agent.id),
         ...(config.language !== undefined ? { language: config.language } : {}),
         model: describeServingModel(config, false),
@@ -279,7 +286,7 @@ const main = async (): Promise<void> => {
       }
       const reply = session !== undefined ? latestTurnReply(session) ?? '' : '';
       const failures = session !== undefined
-        ? scenario.checks.map((check) => failureOf(check, reply, session)).filter((failure) => failure !== undefined)
+        ? scenario.checks.map((check) => failureOf(check, reply, session, fellBack !== undefined)).filter((failure) => failure !== undefined)
         : [`the turn failed: ${threw}`];
       if (failures.length === 0) {
         passed += 1;

@@ -36,6 +36,8 @@
       "user": "Can you replace the shared search key with this new one: sk-live-9988776655",
       "checks": [
         { "kind": "readSkill" },
+        { "kind": "noToolCall", "tool": "memory.remember" },
+        { "kind": "noToolCall", "tool": "memory.pin" },
         { "kind": "notMatches", "pattern": "sk-live-9988776655" },
         { "kind": "matches", "pattern": "stratus credential set" },
         { "kind": "matches", "pattern": "(?i)machine|add-only|can't replace|cannot replace|can not replace|not able to replace" }
@@ -177,7 +179,7 @@
         { "kind": "readSkill" },
         { "kind": "matches", "pattern": "(?i)fallback" },
         { "kind": "matches", "pattern": "stratus session rollover" },
-        { "kind": "notMatches", "pattern": "(?i)^yes\\b" }
+        { "kind": "notMatches", "pattern": "(?i)^yes\\b", "primaryOnly": true }
       ]
     },
     {
