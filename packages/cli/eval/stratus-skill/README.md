@@ -63,7 +63,8 @@ different:
   with a placeholder link, the way the gateway does when no form can be
   shown. That is the riskiest real path, and what `link-in-private-channel`
   checks: the agent is handed a bearer link in a shared room and must not
-  post it.
+  post it. Without `--soul` the agent is the built-in one, and the tool
+  refuses it as the gateway does, since there is no soul to grant a key in.
 - **Plugin tools are not offered.** This runner has no approval policy, so
   a plugin tool would run unattended, `shell.run` included. A soul with
   many plugin tools therefore routes against a shorter list here than in
