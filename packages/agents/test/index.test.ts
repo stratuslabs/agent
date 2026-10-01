@@ -858,11 +858,13 @@ test('a session id may open a conversation only when it is a single addressable 
   assert.equal(isValidAgentId('a'.repeat(MAX_SESSION_ID_LENGTH + 1)), true);
 });
 
-test('credential.request passes a name, a scope defaulting to the agent, and a reason, and refuses anything else', async () => {
-  const asked: Array<{ name: string; scope: string; reason?: string }> = [];
+test('credential.request passes a name, a scope defaulting to the agent, a reason, and a delivery, and refuses anything else', async () => {
+  const asked: Array<{ name: string; scope: string; reason?: string; via?: string }> = [];
   const tool = createCredentialRequestTool(async (request) => {
     asked.push(request);
-    return { requestId: 'req-1' };
+    return request.via === 'link'
+      ? { requestId: 'req-2', via: 'link', url: 'http://127.0.0.1:4123/l/abc', expiresAt: '2026-10-01T12:30:00.000Z', localOnly: true }
+      : { requestId: 'req-1', via: 'form' };
   });
   const session = {
     id: 's1',
@@ -879,9 +881,18 @@ test('credential.request passes a name, a scope defaulting to the agent, and a r
   await tool.execute({ name: 'search.apiKey', scope: 'shared' }, session);
   assert.deepEqual(asked[1], { name: 'search.apiKey', scope: 'shared' });
 
+  // A link is handed to the agent to pass on, with what holding it means.
+  const linked = await tool.execute({ name: 'github.token', via: 'link' }, session) as { link?: string; note?: string };
+  assert.deepEqual(asked[2], { name: 'github.token', scope: 'agent', via: 'link' });
+  assert.equal(linked.link, 'http://127.0.0.1:4123/l/abc');
+  assert.match(linked.note ?? '', /works once, and expires at 2026-10-01T12:30:00\.000Z\. Anyone holding it can add the key/);
+  // A link only the machine can open is one the agent has to say is.
+  assert.match(linked.note ?? '', /opens only on the machine the daemon runs on/);
+
   await assert.rejects(tool.execute({}, session), /needs "name"/);
   await assert.rejects(tool.execute({ name: 'x', scope: 'everyone' }, session), /"scope" is "agent".*or "shared"/);
-  assert.equal(asked.length, 2);
+  await assert.rejects(tool.execute({ name: 'x', via: 'email' }, session), /"via" is "form".*or "link"/);
+  assert.equal(asked.length, 3);
   // A human decides everything after the question, so asking is safe.
   assert.equal(tool.risk, 'safe');
   assert.ok(GATEWAY_ONLY_TOOL_NAMES.includes(CREDENTIAL_REQUEST_TOOL_NAME));

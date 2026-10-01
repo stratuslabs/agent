@@ -1598,3 +1598,17 @@ test('the slack block sets each agent\'s reply mode, per agent over the default,
     /Invalid slack\.agents\.ava\.replies/,
   );
 });
+
+test('api.publicUrl loads as an http(s) address without a trailing slash, and anything else is refused', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cfg-public-'));
+  const file = path.join(home, 'config.json');
+  await writeFile(file, JSON.stringify({ api: { publicUrl: ' https://mac-mini.example.ts.net:4123/ ' } }));
+  assert.equal((await loadConfigFile(file)).api?.publicUrl, 'https://mac-mini.example.ts.net:4123');
+
+  // Credential links are built on it, so a bad one is caught where it was
+  // written rather than in the hands of the person asked for a key.
+  for (const publicUrl of ['mac-mini:4123', 'ftp://mac-mini', 'https://mac-mini/?x=1', 42]) {
+    await writeFile(file, JSON.stringify({ api: { publicUrl } }));
+    await assert.rejects(() => loadConfigFile(file), /Invalid api\.publicUrl/);
+  }
+});

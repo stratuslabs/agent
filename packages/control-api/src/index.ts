@@ -16,6 +16,7 @@ import {
   type Authenticator,
   type DashboardSession,
 } from './auth.ts';
+import { createCredentialLinkStore } from './credential-links.ts';
 import { createEventStream, type EventFilter } from './events.ts';
 import { API_PREFIX, ApiError, MAX_BODY_BYTES, isStateChanging, sendError, sendJson } from './http.ts';
 import { allowedMethodsFor, resolveRoute, type RouteContext } from './routes.ts';
@@ -94,6 +95,14 @@ export interface ControlApiOptions {
    * and nothing a revoke could reach.
    */
   grants?: AgentGrantStore;
+  /**
+   * The address people reach this daemon on from elsewhere (a Tailscale
+   * name, a tunnel), from `api.publicUrl`. Credential links are built on
+   * it; without it they use the bound address, which works only on the
+   * machine itself. Nothing else reads it: requests are still judged by
+   * the origin they actually arrive on.
+   */
+  publicUrl?: string;
   log?: (line: string) => void;
   warn?: (line: string) => void;
 }
@@ -168,6 +177,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   let pendingSessions: DashboardSession[] = [];
   /** What the last stop() found live, for the replacement. */
   let sessionsWhenStopped: DashboardSession[] = [];
+  const credentialLinks = createCredentialLinkStore();
 
   const handleApiRequest = async (
     gateway: Gateway,
@@ -234,6 +244,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       withTurn: (sessionId, turnId, work) => stream?.withTurn(sessionId, turnId, work) ?? work(),
       watchTurn: (sessionId, turnId) => stream?.watchTurn(sessionId, turnId)
         ?? { reported: () => false, release: () => {} },
+      credentialLinks,
       version: CONTROL_API_VERSION,
     };
 
@@ -372,6 +383,28 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
 
     sessionsAtStop() {
       return sessionsWhenStopped;
+    },
+
+    async requestCredentialLink(request) {
+      if (!url) {
+        throw new Error('The control API is not serving yet.');
+      }
+      const { token, expiresAt } = credentialLinks.mint({
+        requestId: request.requestId,
+        agentId: request.agentId,
+        agentName: request.agentName,
+        name: request.name,
+        scope: request.scope,
+        ...(request.reason !== undefined ? { reason: request.reason } : {}),
+      });
+      const base = (options.publicUrl ?? url).replace(/\/+$/, '');
+      return {
+        url: `${base}${API_PREFIX}/credential-links/${token}`,
+        expiresAt: new Date(expiresAt).toISOString(),
+        // Said so the agent can say it: a bound address handed to someone
+        // on their phone is a link that silently fails to open.
+        ...(options.publicUrl === undefined ? { localOnly: true } : {}),
+      };
     },
 
     async start(gateway: Gateway) {

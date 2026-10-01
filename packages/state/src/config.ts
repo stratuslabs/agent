@@ -136,6 +136,12 @@ export interface ApiConfig {
   host?: string;
   /** Port to bind. Default 4123. */
   port?: number;
+  /**
+   * Where people reach this daemon from elsewhere (a Tailscale name, a
+   * tunnel URL): the base credential links are built on. Unset, links use
+   * the bound address and work only on the machine itself.
+   */
+  publicUrl?: string;
 }
 
 /**

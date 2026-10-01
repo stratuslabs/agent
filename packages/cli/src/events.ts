@@ -22,7 +22,7 @@ export const formatEvent = (event: StratusEvent): string | null => {
     case 'tool.approval-resolved':
       return `• tool.approval-resolved ${event.answer} (${event.reason})${event.actor ? ` by ${event.actor}` : ''}`;
     case 'credential.requested':
-      return `• credential.requested ${event.name} (${event.scope}) for ${event.agentId}`;
+      return `• credential.requested ${event.name} (${event.scope}) for ${event.agentId}${event.via === 'link' ? ' by link' : ''}`;
     case 'credential.provided':
       return `• credential.provided ${event.name} (${event.scope}) for ${event.agentId}${event.actor ? ` by ${event.actor}` : ''}`
         + (event.grantError !== undefined ? ' — stored, not granted' : '');
@@ -101,7 +101,7 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
     // record. The agent's reason is its own text and stays out; the value
     // never reaches the bus at all.
     case 'credential.requested':
-      return { name: event.name, scope: event.scope, requestId: event.requestId };
+      return { name: event.name, scope: event.scope, requestId: event.requestId, ...(event.via !== undefined ? { via: event.via } : {}) };
     case 'credential.provided':
       return {
         name: event.name,

@@ -63,11 +63,13 @@ import {
 } from '@stratusagent/state';
 
 import { requestScheme, type Principal } from './auth.ts';
+import { sendCredentialPage, type CredentialLinkStore } from './credential-links.ts';
 import {
   API_PREFIX,
   ApiError,
   matchPath,
   optionalString,
+  readBody,
   readJsonObject,
   requireString,
 } from './http.ts';
@@ -117,6 +119,8 @@ export interface RouteContext {
    * one that never reached the runner.
    */
   watchTurn: (sessionId: string, turnId: string) => { reported: () => boolean; release: () => void };
+  /** The tokens behind credential links. See `createCredentialLinkStore`. */
+  credentialLinks: CredentialLinkStore;
   version: string;
 }
 
@@ -139,11 +143,12 @@ interface Route {
   /**
    * Carries its own credential, so the bearer/cookie gate does not apply.
    *
-   * Exactly one route can be this: the one-time-token exchange, which exists
-   * because a browser has neither of the other two credentials yet. The token
-   * in its query string is single-use and short-lived, and the handler judges
-   * it. Requiring a session to get a session would make the dashboard
-   * unreachable.
+   * Two routes are this, each judging a single-use, short-lived token in
+   * its own address. The one-time-token exchange exists because a browser
+   * has neither of the other two credentials yet: requiring a session to
+   * get a session would make the dashboard unreachable. A credential link
+   * exists for a person who may have neither, and its token can do exactly
+   * one thing: answer the one credential request it was minted for, add-only.
    */
   selfAuthenticating?: boolean;
 }
@@ -480,6 +485,59 @@ export const routes: Route[] = [
       context.response.setHeader('location', '/');
       context.response.setHeader('cache-control', 'no-store');
       context.response.end();
+      return null;
+    },
+  },
+
+  // ---- credential links ----------------------------------------------------
+  // The form behind a link an agent was handed by `credential.request`. The
+  // token in the path is the link's whole credential, by the operator's
+  // choice: whoever holds the link answers the request once, through the
+  // gateway's add-only `provideCredential`, and the value goes to the store
+  // and nowhere else. A GET only shows the form, so a chat app unfurling the
+  // link spends nothing.
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/credential-links/:token`,
+    selfAuthenticating: true,
+    async handler(context) {
+      const record = context.credentialLinks.get(context.params.token ?? '');
+      sendCredentialPage(context.response, record ? 200 : 404, record
+        ? { record }
+        : { error: 'This link has expired or was already used. Ask the agent to request the credential again.' });
+      return null;
+    },
+  },
+  {
+    method: 'POST',
+    pattern: `${API_PREFIX}/credential-links/:token`,
+    selfAuthenticating: true,
+    async handler(context) {
+      const token = context.params.token ?? '';
+      const record = context.credentialLinks.get(token);
+      if (!record) {
+        sendCredentialPage(context.response, 404, {
+          error: 'This link has expired or was already used. Ask the agent to request the credential again.',
+        });
+        return null;
+      }
+      const value = new URLSearchParams(await readBody(context.request)).get('value') ?? '';
+      const result = await context.gateway.provideCredential({ requestId: record.requestId, value, actor: 'link' });
+      if (result.ok) {
+        context.credentialLinks.retire(token);
+        sendCredentialPage(context.response, 200, {
+          done: `Added ${record.name} for ${record.agentName}${record.scope === 'shared' ? ' as a shared credential' : ''}. `
+            + `${record.agentName} can use it from its next reply. You can close this page.`,
+        });
+        return null;
+      }
+      if (result.retired === true) {
+        // Final: no value typed here could land, so the link is spent too.
+        context.credentialLinks.retire(token);
+        sendCredentialPage(context.response, 409, { error: result.message });
+        return null;
+      }
+      sendCredentialPage(context.response, 400, { record, error: result.message });
       return null;
     },
   },

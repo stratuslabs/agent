@@ -364,8 +364,9 @@ Three things are worth knowing, and the
   what makes a swap free: a backend asking for `BRAVE_API_KEY` would mean
   changing vendors edits every soul in the fleet. Store it with
   `stratus credential set` — never as a literal in a config file people
-  commit — or let the agent ask for it from Slack with `credential.request`
-  ([Slack](./slack.md#adding-a-credential-from-slack)). A self-hosted
+  commit — or let the agent ask for it with `credential.request`, from Slack
+  ([Slack](./slack.md#adding-a-credential-from-slack)) or by a one-time link
+  ([Remote access](./remote-access.md#adding-a-credential-from-a-link)). A self-hosted
   backend that needs no key at all is legitimate and asks for nothing.
 - **`credentials:` is a second, separate gate.** `tools: [web.*]` picks up
   search with no soul edit, but without `credentials: [search.apiKey]` every

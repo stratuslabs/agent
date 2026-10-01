@@ -61,6 +61,15 @@ linked own the full story.
   grants the name to the requesting agent's soul and to no other agent,
   whatever scope the key was stored under.
   ([Slack](../guides/slack.md#adding-a-credential-from-slack))
+- **A credential link is a bearer capability, by choice.** Where no form
+  can be shown, the agent is handed a one-time link to a form the control
+  API serves, and holding the link is all it takes to answer that one
+  request once, within 30 minutes: no sign-in. It goes through the same
+  add-only rule and grants only the requesting agent, so its worst case is
+  a key someone else chose under that one name, not a replaced one. The
+  page loads nothing from elsewhere and sends no referrer, so the token in
+  its address goes nowhere it was not sent.
+  ([Remote access](../guides/remote-access.md#adding-a-credential-from-a-link))
 
 ## What a cloned repo cannot decide
 

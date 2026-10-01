@@ -26,7 +26,10 @@ open port, so presence of this package is the operator's declaration — and
   "api": {
     "enabled": true,
     "host": "127.0.0.1",
-    "port": 4123
+    "port": 4123,
+    // Optional: where you reach this daemon from elsewhere. Credential
+    // links are built on it; see "Adding a credential from a link" below.
+    "publicUrl": "https://mac-mini.example.ts.net"
   }
 }
 ```
@@ -91,3 +94,48 @@ token, so pass it with `--token` or `STRATUS_GATEWAY_TOKEN`.
 **Localhost is the posture.** To reach a machine at home, put it behind a
 tunnel (Tailscale is the pattern we recommend) rather than binding a public
 interface.
+
+## Adding a credential from a link
+
+An agent that needs a key it does not hold asks for it with
+`credential.request`. Where its conversation can show a form, that is a
+[Slack form](./slack.md#adding-a-credential-from-slack). Where it cannot (a
+scheduled or HTTP turn, a direct message with someone who is not an
+approver, a private channel with no approver in it), or where the agent is
+asked for one with `via: "link"`, the control API issues a **one-time link**
+instead, and the agent is handed it to pass on:
+
+```
+https://mac-mini.example.ts.net/api/v1/credential-links/<token>
+```
+
+Opening it shows what is asked for, whose it would be, and the agent's
+reason, with one field. What a submission does is what the Slack form does:
+the value is stored **add-only** (a name already stored, or supplied by the
+daemon's environment, is refused), the name is granted in the requesting
+agent's soul and in no other agent's, and the value goes to
+`~/.stratus/credentials.json` and nowhere else, never into the conversation,
+the model, the event stream, or the daemon log.
+
+- **The link is the credential.** No sign-in is asked for: whoever opens it
+  can answer that one request, once. It sits in the conversation the agent
+  passes it on in, so anyone who can read that conversation can use it
+  first. They can only add a key under that one name for that one agent,
+  never replace one, but the key they add is one they chose, so send the
+  link only to the person who should fill it in.
+- **It is short-lived.** It works until the request is answered, or can no
+  longer be (the name was stored since, the agent's soul moved), and for 30
+  minutes at most. Links live in the daemon's memory, so a restart ends
+  them; the agent asks again.
+- **Opening it spends nothing.** Only a submission does, so a chat app
+  previewing the link does not use it up, and an empty value can be
+  corrected and sent again.
+- **It points at `api.publicUrl`.** Set that to the address you reach this
+  daemon on from elsewhere, such as its Tailscale name. Without it, links
+  use the address the API bound (`http://127.0.0.1:4123` by default), which
+  works only on the machine itself, and the agent is told to say so. The key is read only from a trusted
+  config, like the rest of the `api` block, and has to be an `http(s)`
+  address with no query or fragment.
+- **No control API, no link.** A daemon started with `--no-api`, or without
+  `@stratusagent/control-api` installed, has nothing to serve one from; the
+  agent is told to have its operator run `stratus credential set`.

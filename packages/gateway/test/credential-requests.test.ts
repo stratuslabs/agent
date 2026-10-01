@@ -52,6 +52,26 @@ const createFormChannel = (options: { refuse?: string } = {}) => {
   return { adapter, delivered };
 };
 
+type LinkRequest = Parameters<NonNullable<GatewayChannelAdapter['requestCredentialLink']>>[0];
+
+/** An adapter that issues credential links the way the control API does, or fails to. */
+const createLinkIssuer = (options: { fail?: string } = {}) => {
+  const issued: LinkRequest[] = [];
+  const adapter: GatewayChannelAdapter = {
+    name: 'control-api',
+    start: async () => {},
+    stop: async () => {},
+    requestCredentialLink: async (request) => {
+      if (options.fail !== undefined) {
+        throw new Error(options.fail);
+      }
+      issued.push(request);
+      return { url: `https://daemon.example/link/${request.requestId}`, expiresAt: '2026-10-01T12:30:00.000Z' };
+    },
+  };
+  return { adapter, issued };
+};
+
 /**
  * A daemon whose model asks for a credential on its first call and answers
  * in words on every call after, with the events it emitted collected.
@@ -62,6 +82,8 @@ const startRequesting = async (options: {
   agentless?: boolean;
   processEnv?: Record<string, string>;
   channel?: GatewayChannelAdapter;
+  /** Started beside the channel, the way the control API is. */
+  also?: GatewayChannelAdapter[];
   /** Serve Kai as the configured default soul, from outside the roster. */
   configSoul?: boolean;
 } = {}) => {
@@ -86,7 +108,7 @@ const startRequesting = async (options: {
   }) as typeof fetch;
   const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test', ...options.processEnv }, fetch: fetchImpl };
   const form = createFormChannel();
-  const gateway = createGateway({ env, idleTimeoutMs: 0, log: () => {}, warn: () => {}, channels: [options.channel ?? form.adapter] });
+  const gateway = createGateway({ env, idleTimeoutMs: 0, log: () => {}, warn: () => {}, channels: [options.channel ?? form.adapter, ...(options.also ?? [])] });
   const events: StratusEvent[] = [];
   gateway.bus.subscribe(async (event) => {
     events.push(event);
@@ -268,7 +290,7 @@ test('a form the channel failed to post is reported to the agent and leaves noth
     const session = await gateway.dispatch({ sessionId: 'kai-10', agentId: 'kai', userMessage: 'go', metadata: SLACK });
     const result = session.messages.find((message) => message.role === 'tool')?.toolResult;
     assert.equal(result?.ok, false);
-    assert.match(result?.error ?? '', /could not be shown to your operator: Slack refused the post \(ratelimited\)\. Nothing is pending/);
+    assert.match(result?.error ?? '', /The form could not be shown here: Slack refused the post \(ratelimited\)\. No control API is running to issue a link either/);
     assert.equal(requestedIn(events), undefined, 'a request that reached nobody is not announced');
     assert.ok(seen);
     const late = await gateway.provideCredential({ requestId: seen, value: 'ghp-1' });
@@ -439,6 +461,66 @@ test('a roster reload waits for a soul write holding the lock, so a grant\'s ser
     await held;
     await reload;
     assert.equal(before, 'still waiting', 'the reload queued behind the held soul lock');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a request whose form cannot go up gets a link instead, and says why', async () => {
+  const links = createLinkIssuer();
+  const refusing = createFormChannel({ refuse: 'Nobody who can add it can see this conversation.' });
+  const { gateway, events } = await startRequesting({ channel: refusing.adapter, also: [links.adapter] });
+  try {
+    const session = await gateway.dispatch({ sessionId: 'kai-17', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const result = session.messages.find((message) => message.role === 'tool')?.toolResult;
+    assert.equal(result?.ok, true);
+    const output = result?.output as { via?: string; link?: string; note?: string };
+    assert.equal(output.via, 'link');
+    assert.equal(output.link, `https://daemon.example/link/${links.issued[0]?.requestId}`);
+    assert.match(output.note ?? '', /^The form could not be shown here: Nobody who can add it can see this conversation\. Give this link/);
+    assert.equal(links.issued[0]?.agentName, 'Kai');
+    assert.equal(requestedIn(events)?.via, 'link');
+    // The link answers the same pending request a form would have.
+    assert.equal((await gateway.provideCredential({ requestId: links.issued[0]?.requestId ?? '', value: 'ghp-1', actor: 'link' })).ok, true);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('an agent asking for a link gets one even where a form could go, and one asking for a form gets no link', async () => {
+  const links = createLinkIssuer();
+  const viaLink = await startRequesting({ request: { name: 'github.token', via: 'link' }, also: [links.adapter] });
+  try {
+    await viaLink.gateway.dispatch({ sessionId: 'kai-18', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    assert.equal(viaLink.delivered.length, 0, 'no form was posted');
+    assert.equal(links.issued.length, 1);
+  } finally {
+    await viaLink.gateway.stop();
+  }
+
+  const formless: GatewayChannelAdapter = { name: 'slack', start: async () => {}, stop: async () => {} };
+  const viaForm = await startRequesting({ request: { name: 'github.token', via: 'form' }, channel: formless, also: [links.adapter] });
+  try {
+    const session = await viaForm.gateway.dispatch({ sessionId: 'kai-19', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const result = session.messages.find((message) => message.role === 'tool')?.toolResult;
+    assert.equal(result?.ok, false);
+    assert.match(result?.error ?? '', /cannot show your operator a credential form here\. Nothing is pending\. Ask for a link instead/);
+    assert.equal(links.issued.length, 1, 'no second link');
+    assert.equal(requestedIn(viaForm.events), undefined);
+  } finally {
+    await viaForm.gateway.stop();
+  }
+});
+
+test('a link that could not be issued leaves nothing pending', async () => {
+  const links = createLinkIssuer({ fail: 'The control API is not serving yet.' });
+  const { gateway, events } = await startRequesting({ also: [links.adapter] });
+  try {
+    const session = await gateway.dispatch({ sessionId: 'kai-20', agentId: 'kai', userMessage: 'go' });
+    const result = session.messages.find((message) => message.role === 'tool')?.toolResult;
+    assert.equal(result?.ok, false);
+    assert.match(result?.error ?? '', /A link for github\.token could not be issued: The control API is not serving yet\. Nothing is pending/);
+    assert.equal(requestedIn(events), undefined);
   } finally {
     await gateway.stop();
   }

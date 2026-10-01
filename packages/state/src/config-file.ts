@@ -291,6 +291,18 @@ const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined
     }
     api.port = source.port;
   }
+  if (source.publicUrl !== undefined) {
+    // Checked here, not when the first link is built: a link to an address
+    // that is not one would reach the person asked for a key and fail there.
+    const parsed = typeof source.publicUrl === 'string' ? URL.parse(source.publicUrl.trim()) : null;
+    if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || parsed.search !== '' || parsed.hash !== '') {
+      throw new Error(
+        `Invalid api.publicUrl in config ${configPath}: ${String(source.publicUrl)}. `
+        + 'Use the http(s) address this daemon is reached on from elsewhere, like https://mac-mini.example.ts.net, with no query or fragment.',
+      );
+    }
+    api.publicUrl = parsed.href.replace(/\/+$/, '');
+  }
   return api;
 };
 
