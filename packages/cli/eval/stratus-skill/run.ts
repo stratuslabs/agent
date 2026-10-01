@@ -85,8 +85,19 @@ const main = async (): Promise<void> => {
   // description that has to win the routing decision is the real one.
   const skills = new SkillRegistry();
   skills.register(await loadStratusSkill());
-  const provider = createRuntimeProvider(config);
+  // Hosted runtimes (Codex, a Claude subscription) reach kernel tools only
+  // through this callback, late-bound because the runner needs the provider
+  // first, as the CLI runtime and the gateway bind it. Without it they have
+  // no skill.read, and every readSkill case fails whatever the model does.
+  let hostedRunner: AgentRunner | undefined;
+  const provider = createRuntimeProvider(config, undefined, async (session, call, context) => {
+    if (!hostedRunner) {
+      throw new Error('The eval runner is not ready to execute tools yet.');
+    }
+    return hostedRunner.executeHostedToolCall(session, call, context);
+  });
   const runner = new AgentRunner({ provider, skills, store: new InMemorySessionStore(), bus: new EventBus() });
+  hostedRunner = runner;
 
   const cases = only !== undefined ? corpus.cases.filter((scenario) => scenario.id === only) : corpus.cases;
   if (cases.length === 0) {

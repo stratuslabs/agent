@@ -166,9 +166,11 @@
       "id": "other-model",
       "title": "A conversation on the fallback stays there until a rollover",
       "room": { "kind": "direct" },
-      "user": "Your answers feel different today. Did you switch to another model?",
+      "user": "Your answers feel different today. Did you switch to another model, and if you did, how do I get you back on the usual one?",
       "checks": [
-        { "kind": "matches", "pattern": "(?i)configured|instructions|fallback" },
+        { "kind": "readSkill" },
+        { "kind": "matches", "pattern": "(?i)fallback" },
+        { "kind": "matches", "pattern": "stratus session rollover" },
         { "kind": "notMatches", "pattern": "(?i)^yes\\b" }
       ]
     },
