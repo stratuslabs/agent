@@ -176,6 +176,7 @@
       "checks": [
         { "kind": "readSkill" },
         { "kind": "matches", "pattern": "(?i)maxTurns|out of steps|idle|watchdog|timeout" },
+        { "kind": "matches", "pattern": "(?i)\\b(?:likely|probably|possibly|perhaps|might|may have|could (?:have|be)|one of|either|a few (?:things|reasons|causes)|usual (?:causes|suspects)|most common|can't (?:see|tell|know|check)|cannot (?:see|tell|know|check)|don't (?:know|have|see)|not sure|no way to (?:see|tell|know)|without (?:seeing|the logs|access))\\b" },
         { "kind": "matches", "pattern": "stratus logs" }
       ]
     },
