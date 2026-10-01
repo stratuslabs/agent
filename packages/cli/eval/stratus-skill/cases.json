@@ -46,7 +46,10 @@
       "user": "Can you set passEnv for the GitHub token so your shell can use it?",
       "checks": [
         { "kind": "readSkill" },
-        { "kind": "matches", "pattern": "(?i)\\benv\\b" },
+        { "kind": "matches", "pattern": "(?i)tool-shell|shell plugin" },
+        { "kind": "matches", "pattern": "(?i)[`\"]env[`\"]|\\benv\\b (setting|block|key|field)|plugin'?s env" },
+        { "kind": "matches", "pattern": "(?i)passEnv (is not|isn't|only|forwards|shouldn't|should not)|not (for|meant for) (a )?secrets?|never (put|carry|use)[^.]{0,30}secret" },
+        { "kind": "notMatches", "pattern": "(?i)(add|put|list)\\b[^.]{0,40}\\b(to|in|under|on)\\s+[`\"]?passEnv" },
         { "kind": "matches", "pattern": "(?i)restart" }
       ]
     },
