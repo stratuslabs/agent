@@ -64,28 +64,29 @@ type Check = (
    *   no switch and nothing to roll over.
    * - `tool`: the agent's `tools:` allow it, as the runner reads them. An
    *   agent with no credential.request has no link to move to a DM.
-   * - `notHeld`: the agent does not already hold it, granted in its
-   *   `credentials:` and stored, as the gateway checks both. A grant alone
-   *   is permission for a key nobody has supplied yet, so setup advice is
-   *   still the right answer; only an agent that holds the key is right to
-   *   say nothing is needed.
+   * - `unstored`: no value is stored for it, as the gateway's own lookup
+   *   reads it. Stored, there is nothing to set up and no link to make: the
+   *   gateway refuses a request either way, with "you already hold it" when
+   *   the soul grants it and "add it to your soul's credentials" when not.
+   *   A grant with nothing stored is only permission, so setup advice is
+   *   still the right answer there.
    */
-  when?: { primary?: true; fallbackConfigured?: true; tool?: string; notHeld?: string };
+  when?: { primary?: true; fallbackConfigured?: true; tool?: string; unstored?: string };
 };
 
 interface Served {
   onFallback: boolean;
   fallbackConfigured: boolean;
   tools: readonly string[] | undefined;
-  /** Credential names this agent holds: granted and stored. */
-  held: ReadonlySet<string>;
+  /** Credential names with a value stored for this agent, granted or not. */
+  stored: ReadonlySet<string>;
 }
 
 const applies = (check: Check, served: Served): boolean =>
   !(check.when?.primary === true && served.onFallback)
   && !(check.when?.fallbackConfigured === true && !served.fallbackConfigured)
   && !(check.when?.tool !== undefined && served.tools !== undefined && !matchesToolAllowlist(check.when.tool, served.tools))
-  && !(check.when?.notHeld !== undefined && served.held.has(check.when.notHeld));
+  && !(check.when?.unstored !== undefined && served.stored.has(check.when.unstored));
 
 interface Corpus {
   agent: { name: string; instructions: string };
@@ -320,10 +321,10 @@ const main = async (): Promise<void> => {
 
     // Resolved once, through the lookup the gateway uses, for each name a
     // check is conditioned on: a read of the credentials file, never a write.
-    const held = new Set<string>();
-    for (const name of new Set(cases.flatMap((scenario) => scenario.checks.map((check) => check.when?.notHeld)))) {
-      if (name !== undefined && agent.credentials?.includes(name) === true && await namedCredentialSource({}, agent.id, name) !== undefined) {
-        held.add(name);
+    const stored = new Set<string>();
+    for (const name of new Set(cases.flatMap((scenario) => scenario.checks.map((check) => check.when?.unstored)))) {
+      if (name !== undefined && await namedCredentialSource({}, agent.id, name) !== undefined) {
+        stored.add(name);
       }
     }
 
@@ -363,7 +364,7 @@ const main = async (): Promise<void> => {
           onFallback: fellBack !== undefined,
           fallbackConfigured: config.fallback !== undefined,
           tools: agent.tools,
-          held,
+          stored,
         })).filter((failure) => failure !== undefined)
         : [`the turn failed: ${threw}`];
       if (failures.length === 0) {

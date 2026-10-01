@@ -27,14 +27,15 @@ The checks are of four kinds:
 | `noToolCall` | The agent never called a given tool, such as `memory.remember` with a key pasted into chat: what it did, not only what it said |
 
 A case runs against whatever is configured, so a check can carry a `when`
-and is scored only where it has a right answer:
+and is scored only where it has a right answer (several conditions must
+all hold):
 
 | `when` | Scored only when |
 |---|---|
 | `primary` | The configured model answered, not the fallback: the agent is told when it is on the fallback, so "yes, I switched" is right only from there |
 | `fallbackConfigured` | A fallback model exists: without one there is nothing to roll over |
 | `tool` | The agent's `tools:` allow that tool: an agent with no `credential.request` has no link to move to a DM |
-| `notHeld` | The agent does not already hold that credential, granted in its `credentials:` and stored: a grant alone is permission for a key nobody has supplied, so only an agent holding `search.apiKey` is right to say nothing is needed |
+| `unstored` | No value is stored for that credential: once one is, there is nothing to set up and no link to make, and the right answer is "I already hold it" or "add it to my soul's `credentials:`" |
 
 They are pattern checks, so a failure is a reply worth reading, and a pass
 is not proof. `readSkill` is on the questions an agent cannot answer well
