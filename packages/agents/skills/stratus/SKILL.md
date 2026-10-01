@@ -39,7 +39,7 @@ Deleting a soul file takes the agent off the roster but keeps its `agents/<id>/`
 
 A soul is a markdown file: frontmatter for identity and allowlists, then the persona as prose.
 
-- `name`; `id` (derived from the name when absent; changing it starts the agent fresh, and its old history, memories, and grants stay under the old id); `provider` and `model`; `language` (for example `en-GB`); `listens` (see "Slack").
+- `name`; `id` (derived from the name when absent, so renaming a soul with no `id:` changes it too; a changed id starts the agent fresh, and its old history, memories, and grants stay under the old id); `provider` and `model`; `language` (for example `en-GB`); `listens` (see "Slack").
 - `tools:` is the allowlist of what you may call: exact names (`fs.read`) or toolset globs (`fs.*`). Omitted means every registered tool and `tools: []` means none. When you lack a tool, ask for that one name to be added. Never suggest deleting the list to fix it, because that grants every tool, the shell included.
 - `skills:` enables skills. Omitted means none, except built-in skills like this one, which every agent has.
 - `credentials:` names the credentials you may use. Omitted means none.
@@ -53,13 +53,13 @@ The config decides which provider and model run, which plugins load, and how app
 
 Which provider and model a turn uses: for `stratus run` and `stratus chat`, command-line flags beat `STRATUS_*` environment variables, which beat the soul's `provider`/`model`, which beat the file. Under `stratus serve` a soul's `provider`/`model` beats all of those, because each agent in a roster runs on its own. A changed `provider` or `model` in the config reaches the next turn without a restart.
 
-A project-local `stratus.config.json` ships inside repositories, so it is **untrusted**. It cannot set `plugins`, `approvals`, `principals`, `slack`, `api`, `maxTurns`, `apiKeyEnv`, `soul`, `systemPrompt`, `executor`, or `memoryStore`. Those are read only from `~/.stratus/config.json` or a file named by `--config` or `STRATUS_CONFIG`. A project-local file that sets one of them has that block ignored, with a warning, and the global file's is not used in its place. One that says nothing about a block leaves the global block in force.
+A project-local `stratus.config.json` ships inside repositories, so it is **untrusted**. It cannot set `plugins`, `approvals`, `principals`, `slack`, `api`, `maxTurns`, `apiKeyEnv`, `soul`, `systemPrompt`, `executor`, or `memoryStore`. Those are read only from `~/.stratus/config.json` or a file named by `--config` or `STRATUS_CONFIG`. A project-local file that sets one of them has it ignored, with a warning. For `principals`, `slack`, `maxTurns`, `executor`, and `memoryStore` the daemon uses `~/.stratus/config.json`'s instead; for `plugins`, `approvals`, and `api` it uses none. A project-local file that says nothing about one of those eight leaves the global one in force.
 
 When a setting "isn't taking", these say why:
 
 - `stratus doctor` shows what `stratus run` and `stratus chat` would use, and which file or variable decided each value.
 - `stratus agents` shows what each agent on the roster runs on.
-- `stratus plugins` shows the approvals mode with each tool. `stratus serve --approvals` overrides the config's mode, and the daemon's startup lines in `stratus logs` say which mode it is in.
+- `stratus plugins` shows what the config's approvals mode does with each tool. `stratus serve --approvals` overrides that mode. A daemon in `remote` logs an `approvals: remote` line at startup, so a `stratus logs` with no such line since the last start means `headless`.
 
 ## Credentials and API keys
 
@@ -80,7 +80,7 @@ When you need a named credential you do not hold, first make sure a tool you hav
 
 1. **Ask with `credential.request`**, if your `tools:` covers it (a daemon tool; the built-in `stratus` agent, which has no soul, cannot use it). Give the `name` the tool expects, a one-sentence `reason`, and a `scope`: `agent` (yours alone, the default) or `shared` (one value stored for the whole fleet, but still granted only to you; another agent needs the name in its own soul).
    - **A form**, in Slack, goes up in this conversation when one of `approvals.slackApprovers` can see it: a public channel, a private one with an approver in it, or a direct message with an approver.
-   - **A link** comes back otherwise, or when you pass `via: "link"`. It needs the control API, and without `api.publicUrl` it opens only on the daemon's machine. Whoever opens it first can set the key, once, within 30 minutes. So in a shared channel, do not post it: ask your operator to message you directly, and ask again there. Pass `via: "form"` to get a form or nothing.
+   - **A link** comes back otherwise, or when you pass `via: "link"`. It needs the control API, and without `api.publicUrl` it opens only on the daemon's machine. Anyone who has the link can set the key, once, within 30 minutes, with no approver involved, and opening it spends nothing. So give it only to your operator. In a shared channel, or a direct message with anyone else, do not post it: ask your operator to message you directly, and ask again there. Pass `via: "form"` to get a form or nothing.
    - Either way the key goes straight to the store and the name into your soul, and you can use it from your next reply. A restart cancels a request still waiting.
 2. **Otherwise, ask your operator to run, on the machine:**
 
@@ -111,14 +111,14 @@ When a stored key "isn't found", check in this order:
   - `@stratusagent/plugin-mcp` gives an MCP server's tools as `mcp.<server>.<tool>`.
 - `stratus setup` → Plugins installs, enables, and asks for settings like roots in one step.
 - Enabled is not granted: your soul's `tools:` must also cover a plugin's tools. `stratus plugins` walks the whole chain for each tool (installed, enabled, granted to which agents, and what approvals do with a call), so it answers "why can't you use X" in one command.
-- **Risk.** Every tool is `safe`, `gated`, or `dangerous`. The daemon runs `safe` tools unattended: `memory.*`, `skill.read`, and `fs.read`, `fs.list`, and `fs.search`. Gated tools include:
+- **Risk.** Every tool is `safe`, `gated`, or `dangerous`. The daemon runs `safe` tools unattended, among them `memory.*`, `skill.read`, `credential.request`, `agent.delegate`, `schedule.list`, `schedule.cancel`, and `fs.read`, `fs.list`, and `fs.search`. Gated tools include:
   - `web.fetch`, `fs.write`, `shell.run`, `browser.*`, and `mcp.*`;
   - `schedule.every`, `schedule.at`, and `message.send`;
   - every third-party tool, `web.search` included.
   - What happens to a gated call depends on the approvals mode. Under `headless` (the default) it is refused. Under `remote` the people in `approvals.slackApprovers` are asked in Slack (or through the control API's `/approvals`) with **Allow once**, **Always allow**, and **Deny**. Under `remote` with nobody to ask, it is refused too.
   - Either way, what was already approved still runs unattended. For `shell.run` that is a command scope plus a built-in safe list of read-only commands (`git status`, `git log`, `git diff`, `pwd`, and a few more; not `ls`). For `browser.act` it is an approved site, and for other gated tools a standing grant.
   - **Always allow** writes one of those to `agents/<id>/whitelist.json`, except for a tool that names a destination, such as `message.send`, where it lasts for the conversation. A `dangerous` call is never offered it.
-  - `stratus grants <id>` lists the grants, and `stratus grants revoke <id> --tool|--scope|--origin` takes one back.
+  - `stratus grants <id>` lists the grants, and `stratus grants revoke <id> --tool|--scope|--origin` takes one back. There is no command to add one: a headless daemon asks nobody, so it never creates a grant, and a call nobody has approved yet needs `remote` mode first.
 
 ## Slack
 
