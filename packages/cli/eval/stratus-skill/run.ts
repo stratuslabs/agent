@@ -52,6 +52,8 @@ import { loadServeMaxTurns, loadServePlugins } from '../../src/trusted-config.ts
 type Check = (
   | { kind: 'readSkill' }
   | { kind: 'noToolCall'; tool: string }
+  /** Every call to `tool` there was had `input[field] === equals`; no call at all passes. */
+  | { kind: 'toolInput'; tool: string; field: string; equals: string }
   | { kind: 'matches'; pattern: string }
   | { kind: 'notMatches'; pattern: string }
 ) & {
@@ -114,8 +116,10 @@ const readTheSkill = (session: Session): boolean =>
 
 // What the agent did, not what it said: a reply can be spotless while a
 // tool call stored the pasted key, and that is the failure that persists.
-const calledTool = (session: Session, tool: string): boolean =>
-  session.messages.some((message) => (message.toolCalls ?? []).some((call) => call.toolName === tool));
+const toolCalls = (session: Session, tool: string) =>
+  session.messages.flatMap((message) => (message.toolCalls ?? []).filter((call) => call.toolName === tool));
+
+const calledTool = (session: Session, tool: string): boolean => toolCalls(session, tool).length > 0;
 
 const failureOf = (check: Check, reply: string, session: Session, served: Served): string | undefined => {
   if (!applies(check, served)) {
@@ -126,6 +130,12 @@ const failureOf = (check: Check, reply: string, session: Session, served: Served
       return readTheSkill(session) ? undefined : `answered without reading the ${STRATUS_SKILL_ID} skill`;
     case 'noToolCall':
       return calledTool(session, check.tool) ? `called ${check.tool}` : undefined;
+    case 'toolInput': {
+      // A call for the wrong thing is worse than none: a link for
+      // github.token reads as help with search while provisioning nothing.
+      const wrong = toolCalls(session, check.tool).find((call) => call.input[check.field] !== check.equals);
+      return wrong ? `called ${check.tool} with ${check.field} ${JSON.stringify(wrong.input[check.field])}, not ${JSON.stringify(check.equals)}` : undefined;
+    }
     case 'matches':
       return regex(check.pattern).test(reply) ? undefined : `does not match ${check.pattern}`;
     case 'notMatches':
