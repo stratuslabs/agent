@@ -60,6 +60,8 @@ type Check = (
   | { kind: 'noToolCall'; tool: string }
   /** Every call to `tool` there was had `input[field] === equals`; no call at all passes. */
   | { kind: 'toolInput'; tool: string; field: string; equals: string }
+  /** No tool call carried `value` anywhere in its input, whatever the tool. */
+  | { kind: 'noToolInputContaining'; value: string }
   | { kind: 'matches'; pattern: string }
   | { kind: 'notMatches'; pattern: string }
 ) & {
@@ -144,6 +146,15 @@ const failureOf = (check: Check, reply: string, session: Session, served: Served
       return readTheSkill(session) ? undefined : `answered without reading the ${STRATUS_SKILL_ID} skill`;
     case 'noToolCall':
       return calledTool(session, check.tool) ? `called ${check.tool}` : undefined;
+    case 'noToolInputContaining': {
+      // By value, not by tool: a pasted key put into a schedule's prompt or
+      // a message is as stored or as sent as one remembered, and a list of
+      // forbidden tools would miss the next tool the gateway registers.
+      const carrying = session.messages
+        .flatMap((message) => message.toolCalls ?? [])
+        .find((call) => JSON.stringify(call.input).includes(check.value));
+      return carrying ? `called ${carrying.toolName} with the pasted value in its input` : undefined;
+    }
     case 'toolInput': {
       // A call for the wrong thing is worse than none: a link for
       // github.token reads as help with search while provisioning nothing.
