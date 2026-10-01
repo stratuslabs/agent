@@ -4248,13 +4248,19 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // whether the agent answers or only hears: the text is in its
       // transcript either way.
       const senderTrust = (connection.config.principals ?? []).includes(userId) ? 'user' : 'unknown';
-      // Who can read this, so the agent writes for them: a DM is with the
-      // sender, named the way the turn names them (a principal's display
-      // name, anyone else's id), and a thread says it is one.
+      // Who can read this, so the agent writes for them, and a thread says
+      // it is one. A DM names the other person only when they are one of
+      // the operator's principals: this lands in the system prompt, and
+      // anyone else's display name is text they chose, which a pattern
+      // cannot tell from an instruction phrased as a name.
       const room = await roomFor(connection, event.channel, isDm ? 'im' : event.channel_type);
       const conversation = room === undefined
         ? undefined
-        : { ...room, ...(room.kind === 'direct' ? { with: author } : {}), ...(thread !== undefined && room.kind !== 'direct' ? { thread: true } : {}) };
+        : {
+          ...room,
+          ...(room.kind === 'direct' && senderTrust === 'user' ? { with: author } : {}),
+          ...(thread !== undefined && room.kind !== 'direct' ? { thread: true } : {}),
+        };
       const metadata = {
         channel: 'slack',
         team,

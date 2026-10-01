@@ -2601,7 +2601,11 @@ export interface ConversationContext {
   name?: string;
   /** Members as the channel counts them, the agent included. */
   members?: number;
-  /** Who a direct message is with, as the channel names them. */
+  /**
+   * Who a direct message is with. It reaches the system prompt, so a
+   * channel sets it only for someone the operator vouched for (a Slack
+   * principal), never from a name anyone could have typed.
+   */
   with?: string;
   /** The turn is a reply in a thread rather than the channel itself. */
   thread?: boolean;

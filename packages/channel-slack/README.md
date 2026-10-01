@@ -183,7 +183,8 @@ of [roadmap step 31](../../docs/roadmap/31-reading-the-room.md).
 ### What the agent is told about the room
 
 Every turn says which kind of conversation it came from — a direct message
-(and with whom), a group DM, a private channel, or a public channel — with
+(and with whom, when that is one of the operator's principals: a display
+name is text anyone can set, and this lands in the system prompt), a group DM, a private channel, or a public channel — with
 the channel's name and member count, and whether the message is in a
 thread. The agent writes for that audience: a public channel of a thousand
 people is not the DM it was in a minute ago, and what it was told in one does
