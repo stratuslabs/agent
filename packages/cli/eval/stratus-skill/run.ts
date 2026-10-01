@@ -139,7 +139,7 @@ const regex = (pattern: string): RegExp =>
 // aside set off by commas, dashes, or brackets right after the negation is
 // skipped ("do not, under any circumstances, run …"), but a lone comma still
 // ends it: "Don't worry, just run `stratus doctor`" is advice to run it.
-const NEGATED_BEFORE = /\b(?:never|not|don't|do not|doesn't|does not|no need to|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not|instead of|rather than|avoid)\b(?:\s*,[^,.;!?\n]{1,40},|\s*[—–]\s*[^—–.;!?\n]{1,40}[—–]|\s+--?\s+[^.;!?\n]{1,40}?\s--?|\s*\([^)\n]{1,40}\))?(?:\s+[\w.`'"<>-]+){0,3}\s*[`'"]?$/i;
+const NEGATED_BEFORE = /\b(?:never|not|don't|do not|doesn't|does not|isn't|aren't|wasn't|weren't|no need to|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not|instead of|rather than|avoid)\b(?:\s*,[^,.;!?\n]{1,40},|\s*[—–]\s*[^—–.;!?\n]{1,40}[—–]|\s+--?\s+[^.;!?\n]{1,40}?\s--?|\s*\([^)\n]{1,40}\))?(?:\s+[\w.`'"<>-]+){0,3}\s*[`'"]?$/i;
 
 const affirmativeMatch = (pattern: string, reply: string): boolean => {
   const base = regex(pattern);
