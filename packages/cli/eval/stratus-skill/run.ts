@@ -111,15 +111,6 @@ const main = async (): Promise<void> => {
   const skills = new SkillRegistry();
   skills.register(await loadStratusSkill());
   await loadOperatorSkills({}, skills, (line) => console.error(`Warning: ${line}`));
-  // The memory tools every agent has, over a store that dies with the run:
-  // a case like forget-me would otherwise recall and retire a real fact
-  // from the soul's own memory.
-  const memory = new InMemoryAgentMemoryStore();
-  const tools = new ToolRegistry();
-  tools.register(createRememberTool(memory));
-  tools.register(createRecallTool(memory));
-  tools.register(createForgetTool(memory));
-  tools.register(createPinTool(memory));
 
   // The plugins the daemon would load, from the same trusted config, for
   // two of the three things they contribute: a provider the config names
@@ -168,8 +159,22 @@ const main = async (): Promise<void> => {
       }
       return hostedRunner.executeHostedToolCall(session, call, context);
     }, undefined, undefined, providers);
-    const runner = new AgentRunner({ provider, tools, skills, memory, store: new InMemorySessionStore(), bus: new EventBus() });
-    hostedRunner = runner;
+    // A runner per case, each with the memory tools every agent has over a
+    // store of its own: never the soul's (a case like forget-me would
+    // recall and retire a real fact), and never the last case's (a key the
+    // pasted-secret case remembered would reach every later prompt, and the
+    // cases would stop being independent).
+    const runnerFor = (): AgentRunner => {
+      const memory = new InMemoryAgentMemoryStore();
+      const tools = new ToolRegistry();
+      tools.register(createRememberTool(memory));
+      tools.register(createRecallTool(memory));
+      tools.register(createForgetTool(memory));
+      tools.register(createPinTool(memory));
+      const runner = new AgentRunner({ provider, tools, skills, memory, store: new InMemorySessionStore(), bus: new EventBus() });
+      hostedRunner = runner;
+      return runner;
+    };
 
     const cases = only !== undefined ? corpus.cases.filter((scenario) => scenario.id === only) : corpus.cases;
     if (cases.length === 0) {
@@ -196,7 +201,7 @@ const main = async (): Promise<void> => {
         model: describeServingModel(config, false),
         ...(conversation !== undefined ? { conversation } : {}),
       };
-      const session = await runner.run({ sessionId: `eval:${scenario.id}`, agent, userMessage: scenario.user, metadata, runtime });
+      const session = await runnerFor().run({ sessionId: `eval:${scenario.id}`, agent, userMessage: scenario.user, metadata, runtime });
       const reply = latestTurnReply(session) ?? '';
       const failures = scenario.checks.map((check) => failureOf(check, reply, session)).filter((failure) => failure !== undefined);
       if (failures.length === 0) {

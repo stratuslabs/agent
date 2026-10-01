@@ -51,8 +51,9 @@ enables are loaded, so a provider a plugin contributes (`openai-compatible`
 is one) runs here as it does in production. Two things are deliberately
 different:
 
-- **Memory is a throwaway store**, not the soul's own: the `forget-me`
-  case would otherwise recall and retire a real fact.
+- **Memory is a throwaway store, one per case**, not the soul's own: the
+  `forget-me` case would otherwise recall and retire a real fact, and a
+  fact one case remembered would reach every later case's prompt.
 - **Plugin tools are not offered.** This runner has no approval policy, so
   a plugin tool would run unattended, `shell.run` included. A soul with
   many plugin tools therefore routes against a shorter list here than in
