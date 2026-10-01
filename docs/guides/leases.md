@@ -84,13 +84,17 @@ fix:
 > Agent ava's lease on github.token (lease_3f9c0a1b2c3d4e5f) expired at
 > 2026-09-29T16:00:00.000Z, so the key was not used. An operator can grant a
 > new one with `stratus lease grant ava github.token --for 1h --reason "…"`.
-> If you have the lease.request tool, you can ask an approver for one in
-> this conversation.
+> If you have the lease.request tool, you can use it to ask an approver for
+> one; it says so if nobody here can be asked.
 
-The last sentence is the daemon's, on a named credential's refusal; a
-`stratus run` or `stratus chat` has no approver to ask and leaves it out,
-and so does a refused sign-in, since a turn whose model call was refused
-cannot call a tool.
+The last sentence is the daemon's, and only where asking can reach someone:
+a named credential the agent's own lease would unlock, in a conversation
+whose channel can show a [lease request](#asking-for-one-from-slack) —
+Slack, today. A scheduled or HTTP turn, a channel that cannot ask, a
+`stratus run` or `stratus chat`, and a refused sign-in (a turn whose model
+call was refused cannot call a tool) all leave it out, and so does a
+refusal no new lease would answer: a borrowed sub-lease that ended above
+the delegate, or a leased list the config could not supply.
 
 A leased sign-in that runs out is not a model failing, so a configured
 fallback model does not answer instead.
@@ -132,6 +136,9 @@ Ava says: To open one pull request.
   at the machine, with `grantedBy` set to `slack:<user id>` and the agent's
   reason on it (control characters spelled out, since `stratus lease list`
   prints it). The agent can use the key from its next reply.
+- **A grant that fails changes nothing.** If the lease table will not take
+  the row (a full or read-only disk), the approver is told privately, the
+  request stays pending with its buttons, and the next click tries again.
 - **Denying grants nothing.** Either answer settles the request once; the
   message is rewritten with the outcome and who gave it, and a
   `lease.requested` / `lease.decided` pair is in [`stratus logs`](./logs.md)

@@ -254,7 +254,9 @@ export interface GatewayLike {
    * click can add; denied, nothing is granted. Either way the request is
    * settled and `lease.decided` says how. `ok: false` carries a sentence
    * for whoever clicked; `retired` means no answer can ever land on this
-   * request, so the adapter should take its buttons down.
+   * request, so the adapter should take its buttons down. Without it the
+   * request is still pending (the grant itself failed), and the buttons
+   * stay for another try.
    *
    * Who may answer is the adapter's question, as it is for approvals.
    *

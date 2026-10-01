@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-import type { StratusEvent } from '@stratusagent/core';
+import type { AgentDefinition, CredentialResolver, Session, StratusEvent } from '@stratusagent/core';
 import { addNamedCredential } from '@stratusagent/state';
 import { createGateway, type GatewayChannelAdapter } from '../src/index.ts';
 
@@ -301,5 +303,110 @@ test('a request the channel failed to post is reported to the agent and leaves n
     assert.deepEqual(gateway.leases({ agentId: 'kai' }), []);
   } finally {
     await gateway.stop();
+  }
+});
+
+test('an approval whose grant fails leaves the request pending, with nothing recorded as decided, and the next click grants it', async () => {
+  const { home, gateway, events } = await startAsking();
+  try {
+    await gateway.dispatch({ sessionId: 'kai-full', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    // The lease table refuses the row, the way a full or read-only disk does.
+    const db = new DatabaseSync(path.join(home, '.stratus', 'fleet.db'));
+    db.exec("CREATE TRIGGER refuse_leases BEFORE INSERT ON leases BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;");
+    const failed = await gateway.answerLeaseRequest({ requestId, decision: 'approve', actor: 'U-DYLAN' });
+    assert.equal(failed.ok, false);
+    assert.equal(!failed.ok && failed.retired, undefined, 'not retired: the same buttons can try again');
+    assert.match(!failed.ok ? failed.message : '', /could not be granted \(.*database or disk is full\), so nothing changed and the request is still pending/);
+    assert.deepEqual(gateway.leases({ agentId: 'kai' }), []);
+    assert.deepEqual(decidedIn(events), [], 'no outcome is recorded for an answer that changed nothing');
+
+    db.exec('DROP TRIGGER refuse_leases');
+    db.close();
+    const retried = await gateway.answerLeaseRequest({ requestId, decision: 'approve', actor: 'U-DYLAN' });
+    assert.equal(retried.ok, true);
+    assert.equal(gateway.leases({ agentId: 'kai' }).length, 1);
+    assert.deepEqual(decidedIn(events).map((event) => event.decision), ['approved']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+/**
+ * A daemon whose model calls `gh.open` — a plugin tool that resolves the
+ * leased `github.token` — and reports what the tool was told.
+ */
+const startUsingKey = async (channel?: GatewayChannelAdapter) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-leasehint-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'kai.md'), HOLDING);
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    leases: { credentials: ['github.token'] },
+    toolRisks: { 'gh.open': 'safe' },
+  }));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-leasehint-pkg-'));
+  await mkdir(path.join(root, 'dist'), { recursive: true });
+  await writeFile(path.join(root, 'package.json'), JSON.stringify({
+    name: 'stratus-plugin-gh',
+    stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'gh.open', risk: 'safe' }] }, credentials: ['github.token'] },
+  }));
+  let calls = 0;
+  const fetchImpl = (async () => {
+    calls += 1;
+    return calls % 2 === 1 ? openAiToolCall('gh_open', {}) : openAiText('done');
+  }) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  await addNamedCredential(env, { name: 'github.token', value: 'ghp-stored', agentId: 'kai' });
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    log: () => {},
+    warn: () => {},
+    channels: channel ? [channel] : [],
+    plugins: { 'stratus-plugin-gh': { enabled: true } },
+    pluginHost: {
+      resolve: () => pathToFileURL(path.join(root, 'dist', 'index.js')).href,
+      import: async () => ({
+        createPlugin: () => ({
+          name: 'gh',
+          setup(context: { tools: { register(tool: unknown): void }; credentials?: CredentialResolver }) {
+            context.tools.register({
+              name: 'gh.open',
+              description: 'Open a pull request.',
+              risk: 'safe',
+              parameters: { type: 'object', properties: {} },
+              async execute(_input: unknown, session: Session) {
+                await context.credentials?.resolve(session.agent as AgentDefinition, 'github.token', { sessionId: session.id, use: 'gh.open' });
+                return 'opened';
+              },
+            });
+          },
+        }),
+      }),
+    },
+  });
+  await gateway.start();
+  return { gateway };
+};
+
+test('a refused key mentions lease.request only in a conversation whose channel can ask for one', async () => {
+  const asking = await startUsingKey(createLeaseChannel().adapter);
+  try {
+    const error = await toolErrorOf(asking.gateway, 'kai-slack', SLACK);
+    assert.match(error, /agent kai holds none\. An operator can grant one with `stratus lease grant kai github\.token --for 1h --reason "…"`\. If you have the lease\.request tool, you can use it to ask an approver for one/);
+    // A turn no channel started has nobody to ask.
+    assert.doesNotMatch(await toolErrorOf(asking.gateway, 'kai-headless'), /lease\.request/);
+  } finally {
+    await asking.gateway.stop();
+  }
+  // A channel that cannot show a lease request is no place to ask either.
+  const askless = await startUsingKey({ name: 'slack', start: async () => {}, stop: async () => {} });
+  try {
+    const error = await toolErrorOf(askless.gateway, 'kai-askless', SLACK);
+    assert.match(error, /holds none/);
+    assert.doesNotMatch(error, /lease\.request/);
+  } finally {
+    await askless.gateway.stop();
   }
 });

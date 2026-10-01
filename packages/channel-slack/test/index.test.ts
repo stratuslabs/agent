@@ -8026,16 +8026,20 @@ const leaseAdapter = (approvers: string[]) => {
   web.knownConversations.set('C1', { is_member: true });
   const answered: Array<{ requestId: string; decision: 'approve' | 'deny'; actor?: string }> = [];
   const pending = new Set<string>();
-  let refuseWith: string | undefined;
+  let refuseWith: { message: string; retired: boolean } | undefined;
   gateway.answerLeaseRequest = async (input) => {
     answered.push(input);
     if (!pending.has(input.requestId)) {
       return { ok: false, retired: true, message: 'That lease request is no longer pending.' };
     }
-    pending.delete(input.requestId);
     if (refuseWith !== undefined) {
-      return { ok: false, retired: true, message: refuseWith };
+      if (refuseWith.retired) {
+        pending.delete(input.requestId);
+        return { ok: false, retired: true, message: refuseWith.message };
+      }
+      return { ok: false, message: refuseWith.message };
     }
+    pending.delete(input.requestId);
     await gateway.bus.emit({
       type: 'lease.decided',
       sessionId: 'slack:ava:T1:C1:100.1',
@@ -8070,8 +8074,8 @@ const leaseAdapter = (approvers: string[]) => {
     }
   };
   const leasePosts = () => web.posts.filter((post) => buttonIds(post.blocks).includes('stratus_lease_approve'));
-  return { socket, web, gateway, adapter, answered, pending, ask, leasePosts, refuse: (message: string) => {
-    refuseWith = message;
+  return { socket, web, gateway, adapter, answered, pending, ask, leasePosts, refuse: (message: string, options: { retired?: boolean } = {}) => {
+    refuseWith = { message, retired: options.retired === true };
   } };
 };
 
@@ -8122,16 +8126,22 @@ test('a denied lease request says so and takes its buttons down', async () => {
   assert.equal(buttonIds(update?.blocks).length, 0);
 });
 
-test('a lease request the gateway can no longer settle is taken down, with the reason for whoever clicked', async () => {
+test('a lease request the gateway can no longer settle is taken down, and one whose grant failed is left to try again', async () => {
   const { socket, web, gateway, adapter, pending, ask, refuse } = leaseAdapter(['U-DYLAN']);
   await adapter.start(gateway);
   pending.add('lease-req-1');
   await ask();
-  refuse('The lease could not be granted (disk full). Ask the agent to request it again.');
+  // A grant that failed leaves the request pending: the clicker is told, and the buttons stay.
+  refuse('The lease could not be granted (disk full), so nothing changed and the request is still pending.');
+  const updatesBefore = web.updates.length;
   await socket.deliver('interactive', leaseClick('lease-req-1', 'U-DYLAN', 'approve'));
   assert.match(web.ephemerals.at(-1)?.text ?? '', /could not be granted \(disk full\)/);
+  assert.equal(web.updates.length, updatesBefore, 'the request is still answerable');
+
+  refuse('That lease request is no longer pending.', { retired: true });
+  await socket.deliver('interactive', leaseClick('lease-req-1', 'U-DYLAN', 'approve'));
   const update = web.updates.at(-1);
-  assert.match(update?.text ?? '', /No lease on `github.token` was granted: The lease could not be granted \(disk full\)/);
+  assert.match(update?.text ?? '', /No lease on `github.token` was granted: That lease request is no longer pending\./);
   assert.equal(buttonIds(update?.blocks).length, 0);
   await adapter.stop();
 });

@@ -129,8 +129,8 @@ ask its operator to store one and grant it. A stored credential reaches only a p
 declares it ([Tools](../guides/tools.md#searching-the-web)); an agent that
 went searching for a shared key is what this line is for. A key it holds
 but may use only under a [lease](../guides/leases.md) is refused without
-one, and the refusal says it can ask an approver for one with
-`lease.request`.
+one; in a conversation whose channel can ask, the refusal says it can ask
+an approver for one with `lease.request`.
 
 A conversation a channel started also tells the agent where it is
 happening ("this conversation is happening in Slack"), after its persona,

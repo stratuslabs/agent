@@ -358,7 +358,8 @@ privately, and nothing is decided), and handed to the gateway's
 `answerLeaseRequest`, which grants the lease on the terms it recorded.
 The message is rewritten from `lease.decided` with the outcome, the
 approver, and the lease id; a refusal the gateway marks `retired` takes the
-buttons down with the reason. Forgotten buttons after a restart, and clicks
+buttons down with the reason, and one it does not (the grant itself failed,
+and the request is still pending) is told to the clicker and leaves them. Forgotten buttons after a restart, and clicks
 that land while the post is still in flight, are handled as they are for
 credential forms. The full flow is in
 [Leases](../../docs/guides/leases.md#asking-for-one-from-slack).

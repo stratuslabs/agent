@@ -183,6 +183,7 @@ import {
   readGlobalConfigBlock,
   readTrustedConfigBlock,
   validateLeaseGrant,
+  CredentialLeaseError,
   isLeasableCredentialName,
   parseLeaseDuration,
   type BudgetConfig,
@@ -916,7 +917,9 @@ export interface Gateway {
    * described — the credential, duration, and use limit the approver was
    * shown, counted from the approval — as an ordinary lease in `fleet.db`,
    * granted by `<channel>:<actor>`. Denied, nothing is granted. Either way
-   * the request is settled, once, and `lease.decided` records it.
+   * the request is settled, once, and `lease.decided` records it — except
+   * a grant the lease table refused, which settles nothing and leaves the
+   * request pending for another answer.
    *
    * Who may answer is the channel's question, as it is for approvals.
    */
@@ -984,15 +987,16 @@ export interface AnswerLeaseRequestInput {
 }
 
 /**
- * `ok: false` carries a sentence for whoever answered. Every refusal is
- * `retired`: a lease request is settled by its first answer, so one that
- * could not be answered now never can be, and a channel should take its
- * buttons down.
+ * `ok: false` carries a sentence for whoever answered. `retired` means the
+ * request is gone — already settled, or forgotten by a restart — so a
+ * channel should take its buttons down. Without it the grant itself failed
+ * (the lease table would not take the row), the request is still pending,
+ * and the same buttons can try again.
  */
 export type AnswerLeaseRequestResult =
   | { ok: true; decision: 'approved'; lease: CredentialLease }
   | { ok: true; decision: 'denied' }
-  | { ok: false; message: string; retired: true };
+  | { ok: false; message: string; retired?: boolean };
 
 interface AgentSource {
   definition: AgentDefinition;
@@ -1153,7 +1157,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const leaseBroker = createLeaseBroker({
     store: leaseStore,
     leased: [],
-    requestHint: 'If you have the lease.request tool, you can ask an approver for one in this conversation.',
     onUse: (record) => {
       // Every leased resolution is recorded, allowed or refused. On the
       // bus when there is a session to attribute it to, which is what puts
@@ -1368,7 +1371,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const leasedCredentials: CredentialResolver = {
     async resolve(agent, name, context) {
       await refreshLeases();
-      return leaseResolver.resolve(agent, name, context);
+      try {
+        return await leaseResolver.resolve(agent, name, context);
+      } catch (error) {
+        throw await withLeaseRequestHint(error, agent.id, context?.sessionId);
+      }
     },
   };
 
@@ -1577,6 +1584,32 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     };
     const adapter = candidates.find(carries);
     return adapter ? { adapter, carriesOthers: false } : { carriesOthers: candidates.length > 0 };
+  };
+
+  /**
+   * A lease refusal the agent could answer by asking, told so — but only
+   * where asking can reach someone: the agent's own lease is what is
+   * missing (`grantable`), and the conversation is in a channel that can
+   * put a lease request in front of a person. Anywhere else (a scheduled or
+   * HTTP turn, a channel with no request to show) the sentence would send
+   * the agent to a tool that can only refuse, so the refusal stays as the
+   * broker wrote it. Whether an approver can see this particular thread is
+   * the channel's question, answered when the agent asks.
+   */
+  const withLeaseRequestHint = async (error: unknown, agentId: string, sessionId: string | undefined): Promise<unknown> => {
+    if (!(error instanceof CredentialLeaseError) || !error.grantable || sessionId === undefined) {
+      return error;
+    }
+    const kind = (await store.get(sessionId).catch(() => undefined))?.metadata?.channel;
+    if (typeof kind !== 'string' || !channelCarrying(kind, agentId, (candidate) => candidate.requestLease !== undefined).adapter) {
+      return error;
+    }
+    return new CredentialLeaseError(
+      `${error.message} If you have the lease.request tool, you can use it to ask an approver for one; it says so if nobody here can be asked.`,
+      error.agentId,
+      error.credential,
+      true,
+    );
   };
 
   /**
@@ -2773,10 +2806,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       validateLeaseGrant(grant, now);
       lease = leaseStore.grant(grant);
     } catch (error) {
+      // Put back, not dropped: nothing was granted, and a request retired
+      // here would leave `lease.requested` with no outcome on record while
+      // the approver's answer went nowhere. Nothing awaited since the claim,
+      // so no other answer can have landed in between; the next click
+      // tries again, with the same terms.
+      leaseRequests.set(input.requestId, request);
       return {
         ok: false,
-        retired: true,
-        message: `The lease could not be granted (${error instanceof Error ? error.message : String(error)}). Ask the agent to request it again.`,
+        message: `The lease could not be granted (${error instanceof Error ? error.message : String(error)}), so nothing changed and the request is still pending. Try again in a moment.`,
       };
     }
     await bus.emit({

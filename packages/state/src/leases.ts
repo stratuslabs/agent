@@ -152,12 +152,21 @@ export interface LeaseStore {
 export class CredentialLeaseError extends HostRefusalError {
   readonly agentId: string;
   readonly credential: string;
+  /**
+   * Whether a new lease of the agent's own would answer this refusal: it
+   * held none, or the one it held has ended. False when the leased list is
+   * unknown, or a borrowed sub-lease ended above it — no grant to this
+   * agent fixes either — so a host offering a way to ask for one offers it
+   * only when asking could help.
+   */
+  readonly grantable: boolean;
 
-  constructor(message: string, agentId: string, credential: string) {
+  constructor(message: string, agentId: string, credential: string, grantable = false) {
     super(message);
     this.name = 'CredentialLeaseError';
     this.agentId = agentId;
     this.credential = credential;
+    this.grantable = grantable;
   }
 }
 
@@ -278,13 +287,6 @@ export interface LeaseBrokerOptions {
   leased: Iterable<string>;
   now?: () => Date;
   onUse?: (record: LeaseUseRecord) => void;
-  /**
-   * A sentence added to a refusal for want of the agent's own lease on a
-   * named credential, naming a way to get one besides the operator's
-   * command — the daemon's `lease.request`. A host without one leaves it
-   * out, so no refusal points an agent at a tool its host never registered.
-   */
-  requestHint?: string;
 }
 
 export interface LeaseBroker {
@@ -400,10 +402,6 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
 
   const refusalFor = (agentId: string, credential: string, at: Date): string => {
     const grant = `\`stratus lease grant ${agentId} ${credential} --for 1h --reason "…"\``;
-    // Not for a sign-in: a turn whose own model call was refused never
-    // reaches a tool, so the sentence would point at something it cannot
-    // do, in a message its user reads.
-    const ask = options.requestHint !== undefined && !credential.startsWith('provider:') ? ` ${options.requestHint}` : '';
     // The most recent grant is the one worth explaining — the lease the
     // operator will think of. Later in the listing wins a tie, since two
     // grants can share a millisecond and the listing is in grant order.
@@ -411,7 +409,7 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
       .filter((lease) => lease.credential === credential)
       .reduce<CredentialLease | undefined>((found, lease) => (!found || lease.grantedAt >= found.grantedAt ? lease : found), undefined);
     if (!latest) {
-      return `${credential} may only be used under a lease, and agent ${agentId} holds none. An operator can grant one with ${grant}.${ask}`;
+      return `${credential} may only be used under a lease, and agent ${agentId} holds none. An operator can grant one with ${grant}.`;
     }
     const state = leaseState(latest, at);
     const why = state === 'revoked'
@@ -419,7 +417,7 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
       : state === 'exhausted'
         ? `has used all ${String(latest.maxUses)} of its uses`
         : `expired at ${latest.expiresAt}`;
-    return `Agent ${agentId}'s lease on ${credential} (${latest.id}) ${why}, so the key was not used. An operator can grant a new one with ${grant}.${ask}`;
+    return `Agent ${agentId}'s lease on ${credential} (${latest.id}) ${why}, so the key was not used. An operator can grant a new one with ${grant}.`;
   };
 
   return {
@@ -473,7 +471,7 @@ export const createLeaseBroker = (options: LeaseBrokerOptions): LeaseBroker => {
         ? `The lease ${agentId} borrowed for ${credential} (${borrowed.id}, from ${borrowed.parentId ?? 'its delegator'}) has ended — revoked, expired, or used up above it — so the key was not used. The delegating agent needs a live lease of its own.`
         : refusalFor(agentId, credential, at);
       report({ ...base, outcome: 'refused', reason });
-      throw new CredentialLeaseError(reason, agentId, credential);
+      throw new CredentialLeaseError(reason, agentId, credential, borrowed === undefined);
     },
 
     mintSubLeases({ parentAgentId, parentSessionId, child, childSessionId }) {
