@@ -74,8 +74,9 @@ different:
   fact one case remembered would reach every later case's prompt.
 - **`credential.request` asks nobody.** The real tool is offered to any
   soul whose `tools:` allow it, as the daemon offers it, but it answers
-  with a placeholder link, the way the gateway does when no form can be
-  shown. That is the riskiest real path, and what `link-in-private-channel`
+  the way the gateway does when no form can be shown: a form asked for
+  outright is refused with nothing pending, and a link, asked for or fallen
+  back to, is a placeholder. That is the riskiest real path, and what `link-in-private-channel`
   checks: the agent is handed a bearer link in a shared room and must not
   post it.
 - **Plugin tools are not offered.** This runner has no approval policy, so
