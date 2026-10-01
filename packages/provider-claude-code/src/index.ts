@@ -372,12 +372,25 @@ const rememberSdkSessionId = (session: ProviderRequest['session'], id: string): 
  * sign-in.
  */
 /**
- * One SDK `stream_event` as kernel deltas.
+ * One SDK message, short of the final `result`, as kernel deltas.
  *
- * The SDK forwards the provider's own stream events, so this is the same
- * mapping the API provider performs on the same shapes — kept here rather
- * than shared because the two consume different transports to reach it,
- * and a shared helper would have to be generic over both.
+ * A `stream_event` is the provider's own stream event forwarded, so it gets
+ * the same mapping the API provider performs on the same shapes — kept here
+ * rather than shared because the two consume different transports to reach
+ * it, and a shared helper would have to be generic over both.
+ *
+ * Everything else the SDK yields still becomes a delta, a content-free one,
+ * because every one of them is the harness reporting that it is working.
+ * This used to forward only text, thinking text, and tool input, while this
+ * provider's own idle timer counted every message — so the gateway's
+ * watchdog, which sees nothing but deltas, aborted turns this provider knew
+ * were healthy. Three phases stream none of those fragments: a long think on
+ * a model whose thinking display defaults to omitted (the SDK reports it as
+ * `thinking_tokens`, not as `thinking_delta`), the SDK waiting out an API
+ * retry (`api_retry`), and an automatic compaction (`status`). Slack agents
+ * on a subscription failed with `Run aborted: no activity for 120000ms`
+ * after their tools had all completed — the watchdog re-arms there — and
+ * any of the three would do that while the SDK was still reporting in.
  */
 const forwardDelta = async (
   message: ClaudeCodeStreamMessage,
@@ -385,8 +398,14 @@ const forwardDelta = async (
   toolNamesByIndex: Map<number, string>,
   kernelNameFor: (wireName: string) => string,
 ): Promise<void> => {
+  if (!onDelta) {
+    return;
+  }
   const event = message.event;
-  if (!onDelta || !event) {
+  if (message.type !== 'stream_event' || !event) {
+    await onDelta(message.type === 'system' && message.subtype === 'thinking_tokens'
+      ? { type: 'thinking' }
+      : { type: 'progress' });
     return;
   }
   if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
@@ -397,25 +416,30 @@ const forwardDelta = async (
     await onDelta({ type: 'tool-call', toolName });
     return;
   }
-  if (event.type !== 'content_block_delta' || !event.delta) {
-    return;
-  }
-  if (event.delta.type === 'text_delta' && typeof event.delta.text === 'string') {
+  if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && typeof event.delta.text === 'string') {
     await onDelta({ type: 'text', text: event.delta.text });
     return;
   }
-  if (event.delta.type === 'thinking_delta' || event.delta.type === 'signature_delta') {
+  if (
+    (event.type === 'content_block_delta'
+      && (event.delta?.type === 'thinking_delta' || event.delta?.type === 'signature_delta'))
+    || (event.type === 'content_block_start' && event.content_block?.type === 'thinking')
+  ) {
     // Content-free on purpose: a watchdog needs to see a long thinking
     // stretch as progress, and the reasoning itself is never carried.
     await onDelta({ type: 'thinking' });
     return;
   }
-  if (event.delta.type === 'input_json_delta' && typeof event.delta.partial_json === 'string') {
+  if (event.type === 'content_block_delta' && event.delta?.type === 'input_json_delta' && typeof event.delta.partial_json === 'string') {
     const toolName = typeof event.index === 'number' ? toolNamesByIndex.get(event.index) : undefined;
     if (toolName !== undefined) {
       await onDelta({ type: 'tool-call', toolName, inputFragment: event.delta.partial_json });
+      return;
     }
   }
+  // A message boundary, a ping, a block closing: no fragment to forward, and
+  // still the stream moving.
+  await onDelta({ type: 'progress' });
 };
 
 export const createClaudeCodeProvider = ({
@@ -645,7 +669,7 @@ export const createClaudeCodeProvider = ({
           if (message.session_id) {
             rememberSdkSessionId(request.session, message.session_id);
           }
-          if (message.type === 'stream_event') {
+          if (message.type !== 'result') {
             // AWAIT the sink per fragment, the same backpressure the API
             // provider gives it: a throttled consumer pauses this loop
             // rather than queueing the rest of the turn behind itself.
@@ -661,9 +685,6 @@ export const createClaudeCodeProvider = ({
             } finally {
               resetIdleTimer();
             }
-            continue;
-          }
-          if (message.type !== 'result') {
             continue;
           }
           // Captured before the failure branch below: an error result carries
@@ -706,16 +727,13 @@ export const createClaudeCodeProvider = ({
           options: { ...options, resume: sdkSessionId, maxTurns: 1 },
         })) {
           resetIdleTimer();
-          if (message.type === 'stream_event') {
+          if (message.type !== 'result') {
             suspendIdleTimer();
             try {
               await forwardDelta(message, request.onDelta, toolNamesByIndex, kernelNameFor);
             } finally {
               resetIdleTimer();
             }
-            continue;
-          }
-          if (message.type !== 'result') {
             continue;
           }
           if (message.modelUsage) {

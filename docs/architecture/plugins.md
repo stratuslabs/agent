@@ -365,7 +365,11 @@ What each contribution is, and why it is not the bare interface:
   `session.agent`, as it always has. `streams` says whether the providers
   built here report progress through `onDelta` — the host arms its stall
   watchdog only for those, and reads silence from a provider that did not
-  say as "not streaming". A soul selects the provider by its registered
+  say as "not streaming". A provider that says it streams reports every
+  stretch of work, including the ones with nothing to show — a retry it is
+  waiting out, a compaction — as a content-free `{ type: 'progress' }`
+  delta, because the watchdog cannot tell unreported work from a stall.
+  A soul selects the provider by its registered
   name; resolution carries it as `plugin:<name>` (which is what keeps the
   resolved config a discriminated union) and looks it up when the provider
   is built, since a config file is parsed by processes that load no
