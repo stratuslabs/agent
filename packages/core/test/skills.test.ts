@@ -341,6 +341,33 @@ test('only the stratus skill can be built in: the flag on any other id is refuse
   assert.equal(skills.resolve(STRATUS_SKILL_ID)?.builtin, true);
 });
 
+test('a swap never drops the built-in skill serving now, and its id outranks a bare alias the next set gave it', async () => {
+  const registry = new SkillRegistry();
+  const builtin = skill(STRATUS_SKILL_ID, { builtin: true, load: async () => 'How Stratus works.' });
+  registry.register(builtin);
+  assert.equal(await registry.read(STRATUS_SKILL_ID), 'How Stratus works.');
+
+  // The next set could not read the built-in's file, and a plugin's bare
+  // alias took the free id.
+  const next = new SkillRegistry();
+  next.register(skill('acme:stratus'));
+  next.registerAlias(STRATUS_SKILL_ID, 'acme:stratus');
+  next.register(skill('code-review'));
+  registry.replaceWith(next);
+
+  assert.equal(registry.resolve(STRATUS_SKILL_ID), builtin);
+  assert.deepEqual(registry.idsFor('acme:stratus'), ['acme:stratus']);
+  assert.ok(registry.has('code-review'));
+
+  // A next set that did read it serves its own copy.
+  const fresh = skill(STRATUS_SKILL_ID, { builtin: true, load: async () => 'Edited.' });
+  const after = new SkillRegistry();
+  after.register(fresh);
+  registry.replaceWith(after);
+  assert.equal(registry.resolve(STRATUS_SKILL_ID), fresh);
+  assert.equal(await registry.read(STRATUS_SKILL_ID), 'Edited.');
+});
+
 test('an empty skills list is the same as none', async () => {
   const skills = new SkillRegistry();
   skills.register(skill('code-review'));

@@ -4160,8 +4160,20 @@ export class SkillRegistry {
    * A read already underway keeps the promise it holds either way. `next`
    * is consumed — emptied, not shared — so nothing can go on mutating this
    * registry through it.
+   *
+   * A built-in skill serving now is never dropped by the swap: a `next`
+   * without one (its file unreadable mid-reload) keeps the one serving,
+   * and a bare alias `next` gave its id yields to it. A reload is
+   * all-or-nothing for what it read; it must not take away from every
+   * agent the one skill no soul can opt back into.
    */
   replaceWith(next: SkillRegistry): void {
+    for (const skill of this.skills.values()) {
+      if (skill.builtin === true && !next.skills.has(skill.id)) {
+        next.aliases.delete(skill.id);
+        next.skills.set(skill.id, skill);
+      }
+    }
     const kept = new Map<string, Promise<string>>();
     for (const [id, body] of this.bodies) {
       if (next.skills.get(id) === this.skills.get(id)) {

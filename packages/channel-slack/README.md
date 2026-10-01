@@ -190,8 +190,11 @@ people is not the DM it was in a minute ago, and what it was told in one does
 not belong in the other. The kind comes from the event; the name and count
 come from `conversations.info` with `include_num_members`, the same call and
 the same `channels:read` / `groups:read` / `mpim:read` scopes
-[outbound destinations](#speaking-first-the-outbound-seam) use, made once
-per conversation and kept for ten minutes. A DM needs no lookup. An app
+[outbound destinations](#speaking-first-the-outbound-seam) use. The name
+and count are kept for ten minutes, so a thread's replies reuse them, but
+the kind never is: a reply says its own, and a mention, which does not, is
+looked up each time, so a channel made public is not described as private.
+A DM needs no lookup. An app
 without those scopes still tells the agent the kind when the event carries
 it, and otherwise only that it is in Slack. The words it is told are in
 [Agents](../../docs/concepts/agents.md#soul-files).

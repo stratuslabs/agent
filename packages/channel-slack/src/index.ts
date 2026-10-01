@@ -2388,10 +2388,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    *
    * The event's `channel_type` says the kind for free on a message; a
    * mention carries none, and only `conversations.info` has the name and
-   * the count. Cached per app and conversation for ten minutes, so a busy
-   * thread costs one lookup, and a lookup that fails (an app missing the
-   * read scopes) leaves the kind the event gave, or nothing: the prompt then
-   * says only that the conversation is in Slack, as it always did.
+   * the count. The name and count are kept per app and conversation for
+   * ten minutes, so a busy thread costs one lookup; the kind never is (see
+   * below), so a mention is looked up each time. A lookup that fails (an
+   * app missing the read scopes) leaves the kind the event gave, or
+   * nothing: the prompt then says only that the conversation is in Slack,
+   * as it always did.
    */
   const roomCache = new Map<string, { at: number; room: Promise<JsonObject | undefined> }>();
   const ROOM_CACHE_MS = 10 * 60_000;
@@ -2406,31 +2408,44 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (fromEvent === 'direct') {
       return { kind: 'direct' };
     }
+    // Who can read the channel is the point of all this, and a channel made
+    // public a minute ago must not be described as private: the kind is the
+    // event's when it carries one, and a fresh lookup's when it does not.
     const key = `${connection.config.agentId}:${channel}`;
     const cached = roomCache.get(key);
-    if (cached && now() - cached.at < ROOM_CACHE_MS) {
-      return cached.room;
+    const room = cached && fromEvent !== undefined && now() - cached.at < ROOM_CACHE_MS
+      ? cached.room
+      : lookupRoom(connection, channel, key);
+    const looked = await room;
+    if (fromEvent === undefined) {
+      return looked;
     }
+    return {
+      kind: fromEvent,
+      ...((fromEvent === 'private' || fromEvent === 'public') && typeof looked?.name === 'string' ? { name: looked.name } : {}),
+      ...(typeof looked?.members === 'number' ? { members: looked.members } : {}),
+    };
+  };
+
+  const lookupRoom = (connection: AgentConnection, channel: string, key: string): Promise<JsonObject | undefined> => {
     const room = (async (): Promise<JsonObject | undefined> => {
       try {
         const info = (await connection.web.conversations.info({ channel, include_num_members: true })).channel;
-        const kind = info?.is_im === true
-          ? 'direct'
-          : info?.is_mpim === true
-            ? 'group'
-            : info?.is_private === true
-              ? 'private'
-              : info !== undefined ? 'public' : fromEvent;
-        if (kind === undefined) {
+        if (info === undefined) {
           return undefined;
         }
+        const kind = info.is_im === true
+          ? 'direct'
+          : info.is_mpim === true
+            ? 'group'
+            : info.is_private === true ? 'private' : 'public';
         return {
           kind,
-          ...((kind === 'private' || kind === 'public') && typeof info?.name === 'string' ? { name: info.name } : {}),
-          ...(kind !== 'direct' && typeof info?.num_members === 'number' ? { members: info.num_members } : {}),
+          ...((kind === 'private' || kind === 'public') && typeof info.name === 'string' ? { name: info.name } : {}),
+          ...(kind !== 'direct' && typeof info.num_members === 'number' ? { members: info.num_members } : {}),
         };
       } catch {
-        return fromEvent !== undefined ? { kind: fromEvent } : undefined;
+        return undefined;
       }
     })();
     roomCache.set(key, { at: now(), room });

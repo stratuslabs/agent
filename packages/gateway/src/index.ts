@@ -1703,7 +1703,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const loadSkills = async (): Promise<void> => {
     const next = new SkillRegistry();
-    await registerBuiltinSkills(next);
+    await registerBuiltinSkills(next, true);
     const operator = await loadOperatorSkills(env, next, warn, { strict: true });
     for (const plugin of loadedPlugins) {
       for (const record of plugin.skills) {
@@ -1870,11 +1870,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * missing from a broken install is said once and costs the agents their
    * reference, never the daemon its start.
    */
-  const registerBuiltinSkills = async (registry: SkillRegistry): Promise<void> => {
+  const registerBuiltinSkills = async (registry: SkillRegistry, reloading = false): Promise<void> => {
     try {
       registry.register(await loadStratusSkill());
     } catch (error) {
-      warn(`the built-in stratus skill did not load (${error instanceof Error ? error.message : String(error)}); agents will not have it. Reinstall Stratus.`);
+      // On a reload the swap keeps the copy already serving
+      // (`SkillRegistry.replaceWith`), so only a start goes without it.
+      const consequence = reloading ? 'the copy loaded at start keeps serving' : 'agents will not have it';
+      warn(`the built-in stratus skill did not load (${error instanceof Error ? error.message : String(error)}); ${consequence}. Reinstall Stratus.`);
     }
   };
   tools.register(createDemoTool());
