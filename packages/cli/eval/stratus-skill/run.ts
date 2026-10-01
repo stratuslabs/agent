@@ -63,7 +63,12 @@ type Check = (
   | { kind: 'toolInput'; tool: string; field: string; equals: string }
   /** No tool call carried `value` anywhere in its input, whatever the tool. */
   | { kind: 'noToolInputContaining'; value: string }
-  | { kind: 'matches'; pattern: string }
+  /**
+   * `affirmative`: at least one match must not be negated earlier in its own
+   * sentence ("don't run `stratus doctor`" is advice against it). For checks
+   * that ask for an instruction; a check for a description leaves it off.
+   */
+  | { kind: 'matches'; pattern: string; affirmative?: true }
   | { kind: 'notMatches'; pattern: string }
 ) & {
   /**
@@ -124,6 +129,28 @@ interface Corpus {
 const regex = (pattern: string): RegExp =>
   pattern.startsWith('(?i)') ? new RegExp(pattern.slice(4), 'i') : new RegExp(pattern);
 
+// A negation within the few words before a match, in its own sentence, with
+// an opening quote or backtick allowed, so "Never run `stratus service stop`"
+// and "do not use memory.forget or …" read as advice against the command.
+const NEGATED_BEFORE = /\b(?:never|not|don't|do not|doesn't|does not|no need to|won't|shouldn't|should not|can't|cannot|can not|mustn't|must not|instead of|rather than|avoid)\b(?:\s+[\w.`'"<>-]+){0,3}\s*[`'"]?$/i;
+
+const affirmativeMatch = (pattern: string, reply: string): boolean => {
+  const base = regex(pattern);
+  const all = new RegExp(base.source, base.flags.includes('g') ? base.flags : `${base.flags}g`);
+  for (const found of reply.matchAll(all)) {
+    const before = reply.slice(0, found.index);
+    // A sentence ends at punctuation followed by a space, or a line break: a
+    // dot inside search.apiKey or memory.recall is not the end of one.
+    const ends = [...before.matchAll(/[.!?;](?=\s)|\n/g)];
+    const last = ends.at(-1);
+    const sentence = last?.index !== undefined ? before.slice(last.index + 1) : before;
+    if (!NEGATED_BEFORE.test(sentence)) {
+      return true;
+    }
+  }
+  return false;
+};
+
 // Read means the model asked for this skill, not merely that the reader
 // was advertised: an answer from memory of other agent runtimes is the
 // failure the skill exists to prevent, and it can read fluently.
@@ -163,6 +190,9 @@ const failureOf = (check: Check, reply: string, session: Session, served: Served
       return wrong ? `called ${check.tool} with ${check.field} ${JSON.stringify(wrong.input[check.field])}, not ${JSON.stringify(check.equals)}` : undefined;
     }
     case 'matches':
+      if (check.affirmative === true) {
+        return affirmativeMatch(check.pattern, reply) ? undefined : `has no unnegated match for ${check.pattern}`;
+      }
       return regex(check.pattern).test(reply) ? undefined : `does not match ${check.pattern}`;
     case 'notMatches':
       return regex(check.pattern).test(reply) ? `matches ${check.pattern}` : undefined;
