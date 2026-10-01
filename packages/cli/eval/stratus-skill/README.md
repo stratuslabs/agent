@@ -27,8 +27,11 @@ The checks are of three kinds:
 
 They are pattern checks, so a failure is a reply worth reading, and a pass
 is not proof. `readSkill` is on the questions an agent cannot answer well
-from general knowledge; a question like "are we on the terminal?" is
-answered from the room line and is not required to read anything.
+from general knowledge or from its own instructions. A question like "are
+we on the terminal?" is answered from the room line, and "do I need to
+restart after editing your soul?" from the line every served agent gets
+saying an edit reaches its next reply, so neither is required to read
+anything.
 
 Run it against whatever `stratus` is configured to run on, optionally as a
 particular soul, or one case at a time:

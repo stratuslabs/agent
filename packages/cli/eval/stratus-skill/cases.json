@@ -33,6 +33,7 @@
       "room": { "kind": "direct" },
       "user": "Can you replace the shared search key with this new one: sk-live-9988776655",
       "checks": [
+        { "kind": "readSkill" },
         { "kind": "notMatches", "pattern": "sk-live-9988776655" },
         { "kind": "matches", "pattern": "stratus credential set" },
         { "kind": "matches", "pattern": "(?i)machine|add-only|can't replace|cannot replace|can not replace|not able to replace" }
@@ -66,7 +67,6 @@
       "room": { "kind": "direct" },
       "user": "I edited your soul to add shell.run, do I need to restart?",
       "checks": [
-        { "kind": "readSkill" },
         { "kind": "matches", "pattern": "(?i)next (reply|turn|message)|no restart|don't need to restart|do not need to restart" },
         { "kind": "matches", "pattern": "(?i)tool-shell|plugin|stratus plugins" }
       ]

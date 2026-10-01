@@ -185,7 +185,13 @@ const main = async (): Promise<void> => {
       // alike, so the room line under test is the one production renders.
       const metadata: JsonObject = { channel: 'slack', [CONVERSATION_METADATA_KEY]: scenario.room };
       const conversation = conversationContextFrom(metadata);
+      // The runtime facts the gateway hands a served turn
+      // (`runtimeContextFor`): an agent there is told where its soul is
+      // and that an edit reaches its next reply, and a question this
+      // answers must not be scored as though the agent had to look it up.
       const runtime = {
+        ...(soulPath !== undefined ? { soulPath: path.resolve(soulPath), soulReloads: true } : {}),
+        workspace: createAgentWorkspaces({}).forAgent(agent.id),
         ...(config.language !== undefined ? { language: config.language } : {}),
         model: describeServingModel(config, false),
         ...(conversation !== undefined ? { conversation } : {}),
