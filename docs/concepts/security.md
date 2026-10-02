@@ -140,7 +140,9 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
   cannot walk an agent into a metadata endpoint. ([Tools](../guides/tools.md))
 - **Third-party text is labelled as such, end to end.** Every tool result
   carries a trust label — `web.fetch`, the four `browser.*` tools,
-  `web.search`, and every MCP-bridged tool declare their output `external`,
+  `web.search`, and every MCP-bridged tool declare their output `external`
+  (an MCP server you run yourself can be labelled `agent` or `unknown` by
+  you, in trusted config, and never `user`),
   and `fs.read` marks a file a tainted session wrote — and the label follows
   the content: into the session (which only ever gets less trusted), across a
   restart, across a delegation in both directions, and into every fact the

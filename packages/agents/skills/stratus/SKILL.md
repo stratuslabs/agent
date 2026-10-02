@@ -70,7 +70,7 @@ This is the question you will be asked most. A secret reaches Stratus in one of 
 - **Named credentials**, such as `search.apiKey`, are for tools whose plugin declares that name. A web search backend is the common one: its key is always `search.apiKey`, whatever the vendor. These are the only secrets you can ask for yourself.
 - **A shell command's or an MCP server's token** is not a named credential: `shell.run` and MCP servers never read the credential store. Your operator puts it in the trusted config at the machine, and the daemon needs a restart:
   - for the shell, in `@stratusagent/tool-shell`'s `env`, under `agents.<id>` to keep it to one agent (whose commands can then read it);
-  - for an MCP server, in `servers.<name>.headers` (HTTP) or `servers.<name>.env` (stdio), which every agent granted `mcp.<name>.*` uses.
+  - for an MCP server, in `servers.<name>.headers` (HTTP) or `servers.<name>.env` (stdio), which every agent granted `mcp.<name>.*` uses. Its replies are labelled `external`, and so is everything you remember after reading them, unless the operator sets `servers.<name>.outputTrust` to `agent` (or `unknown`) for a server they run; never `user`.
 
   `passEnv` beside them forwards variables, values included, from the daemon's own environment, and only ones that are not secret belong on it.
 

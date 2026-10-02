@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { mkdir, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
-import { BIDI_CONTROL_CHARACTERS, type JsonObject, type JsonValue } from '@stratusagent/core';
+import { BIDI_CONTROL_CHARACTERS, type JsonObject, type JsonValue, type TrustLevel } from '@stratusagent/core';
 import { nameIdentifiesHandle, type TaintedWriteLedger } from '@stratusagent/plugins';
 
 /**
@@ -729,12 +729,19 @@ export interface NormalizeOptions {
   /**
    * The filesystem provenance ledger for `workspace`. A binary block
    * is a server's bytes written to disk without going through `fs.write`,
-   * so the write records itself here at `external` before the bytes land —
+   * so the write records itself here at `trust` before the bytes land —
    * a later `fs.read` of the file then carries the label the tool result
    * did. Without a ledger the file is written unrecorded, which is what
    * the loader-less host case gets.
    */
   ledger?: TaintedWriteLedger;
+  /**
+   * The label this server's output carries — the operator's
+   * `servers.<name>.outputTrust`, `external` unless they said otherwise.
+   * The same one as the tool result's, so a file read back never claims
+   * more or less than the result that wrote it.
+   */
+  trust?: TrustLevel;
   /**
    * The operator's cap on this result, in characters. Defaults to
    * {@link BRIDGED_RESULT_MAX_LENGTH}; a server cannot raise it, because
@@ -924,7 +931,7 @@ const normalizeAdmittedResult = async (
     // Recorded before the bytes land, like a tainted `fs.write`: a crash
     // between the two leaves a labelled path with no file, never a file
     // with no label.
-    await options.ledger?.recordWrite(options.agentId, file, 'external');
+    await options.ledger?.recordWrite(options.agentId, file, options.trust ?? 'external');
     // Created exclusively, never through a link: the record above names
     // the exact path, and a link planted there between the record and the
     // write would carry a server's bytes to a target the ledger never saw
