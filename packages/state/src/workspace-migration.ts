@@ -1079,7 +1079,10 @@ export const surveyLegacyWorkspaces = async (
  * rather than a lost label.
  */
 export const workspaceRepairPending = async (env: StateEnvironment): Promise<boolean> =>
-  (await surveyLegacyWorkspaces(env)).present;
+  (await surveyLegacyWorkspaces(env)).present
+  // Or a link record still pending: `workspaces/` can be gone while one of
+  // its entries is away, and the record may then have a link to repair.
+  || !(await pathIsFree(linkRecordPath(env)));
 
 /**
  * The names still sitting in `workspaces/` that a repair would fold, or an
@@ -1302,14 +1305,19 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // `ENOTDIR` is a regular file somebody left at that name — aborting
     // over it would refuse every `stratus serve` for good, since the
     // migration that would clear the obstacle is the one failing.
-    if (code === 'ENOENT' || code === 'ENOTDIR') {
+    if (code === 'ENOENT' && !(await pathIsFree(linkRecordPath(env)))) {
+      // Gone, with a link record still pending: nothing to move, but the
+      // record may have a link to repair, which is asked below.
+      entries = [];
+    } else if (code === 'ENOENT' || code === 'ENOTDIR') {
       // The link record stays, if there is one: `workspaces/` can be gone for
       // a moment while a command of an older build is between removing an
       // entry and making it again, and an entry it remakes is a target that
       // stays put after all. Only a finished move retires a record entry.
       return finished > 0 ? `finished ${finished} interrupted workspace move(s)` : undefined;
+    } else {
+      throw error;
     }
-    throw error;
   }
   // In name order, so a run is reproducible: the report reads the same on
   // every machine, and which member of a cycle moves first is not up to
@@ -1989,6 +1997,24 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     emptied.add(agentId);
     report.moved += 1;
   };
+
+  // A recorded peer whose target's legacy entry has gone without this
+  // migration moving it — every move of ours marks its workspace first, so
+  // no unproven marker means no move of ours — while something holds the
+  // target's new path. That something is not the cycle's, and the peer is
+  // pointed back at the legacy path now rather than left reaching it. That
+  // path may lead nowhere for the moment, which is the side to err on, and
+  // is right again the moment the entry returns.
+  for (const owner of new Set([...written.values()].map(workspaceOwnerOf))) {
+    if (owner === undefined || record.moving.has(owner)) {
+      continue;
+    }
+    const ownerFrom = path.join(legacy, owner);
+    const ownerTarget = agentWorkspacePath(env, owner);
+    if (await pathIsFree(ownerFrom) && !(await pathIsFree(ownerTarget))) {
+      await repointPeersNamingNewPath(owner, ownerFrom, ownerTarget);
+    }
+  }
 
   // Real workspaces first: a link can only be pointed at where its target
   // ended up once that is known.

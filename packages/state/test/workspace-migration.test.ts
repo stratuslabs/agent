@@ -1950,6 +1950,25 @@ test('a move proof naming somewhere outside the home reads back, rather than sto
   await applyPerAgentWorkspaces(env);
 });
 
+test('a recorded peer is pointed back even while workspaces/ itself is gone', async () => {
+  // The run stopped after recreating ava naming bea's new path. Then the
+  // last legacy entry, bea, went away with `workspaces/` and something took
+  // bea's new path. No move of ours did that, since every one is marked
+  // first, so ava must not start the daemon reaching it: it is pointed at
+  // bea's legacy path, which leads nowhere until bea is back.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await rm(legacyDir, { recursive: true });
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'bea'), 'theirs.md'), 'not ava\'s');
+
+  assert.equal(await workspaceRepairPending(env), true, 'serve has to run the pass for this');
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there
