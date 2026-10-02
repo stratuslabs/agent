@@ -1856,6 +1856,35 @@ test('a pending link record outlives a pass that found workspaces/ itself gone',
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+/** stoppedAtBea, wound back to the instant before ava's link was written: the entry saved, still pending. */
+const stoppedBeforeAvasLink = async (home: string): Promise<string> => {
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await rm(agentWorkspacePath(env, 'ava'));
+  await symlink('bea', path.join(legacyDir, 'ava'));
+  await writeFile(path.join(home, '.stratus', 'workspace-links.json'), JSON.stringify({
+    links: {},
+    pending: { ava: path.join('agents', 'bea', 'workspace') },
+    moving: {},
+  }));
+  return legacyDir;
+};
+
+test('a link the operator made where a stopped run was about to write the same one is not taken for the run\'s', async () => {
+  // The run saved ava's entry and stopped before its `symlink`. The operator
+  // then made that very link on purpose. Nothing on disk tells the two
+  // apart, and bea staying put would point theirs back at the legacy path,
+  // so the start is refused and the link left as they made it.
+  const home = await newHome();
+  await stoppedBeforeAvasLink(home);
+  const env = { homeDir: home };
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await symlink(path.join('..', 'bea', 'workspace'), agentWorkspacePath(env, 'ava'));
+
+  await assert.rejects(applyPerAgentWorkspaces(env), /cannot be told whether this one is that start's or yours/);
+  assert.equal(await readlink(agentWorkspacePath(env, 'ava')), path.join('..', 'bea', 'workspace'));
+});
+
 test('a link record survives the home being moved to another path', async () => {
   // A home restored from backup, or moved to a new disk, keeps its relative
   // links resolving. The record has to keep matching them, or the next

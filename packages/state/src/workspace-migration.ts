@@ -1172,7 +1172,12 @@ const linkRecordPath = (env: StateEnvironment): string =>
  */
 /**
  * `links`: each retargeted link, by agent, and the path it was written
- * naming. `moving`: the workspaces whose move had begun while an entry named
+ * naming. `pending`: the same for a link about to be written, promoted to
+ * `links` once it has been. Kept apart because an entry saved before its
+ * `symlink` is intent, not ownership: a run that stops between the two
+ * leaves no link, and one the operator makes there afterwards with the same
+ * text would otherwise read as this migration's and be pointed back.
+ * `moving`: the workspaces whose move had begun while an entry named
  * them, each with what its destination holds once the move is done — the
  * marker that lets a run that stopped between finishing a move and retiring
  * its entries be finished by the next one.
@@ -1187,6 +1192,7 @@ type MoveProof = { inode: string } | { link: string };
 
 interface LinkRecord {
   links: Map<string, string>;
+  pending: Map<string, string>;
   moving: Map<string, MoveProof>;
 }
 
@@ -1236,7 +1242,7 @@ const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { links: new Map(), moving: new Map() };
+      return { links: new Map(), pending: new Map(), moving: new Map() };
     }
     reason = (error as Error).message;
   }
@@ -1249,19 +1255,23 @@ const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
   } catch (error) {
     throw unreadable((error as Error).message);
   }
-  const { links, moving } = (parsed ?? {}) as { links?: unknown; moving?: unknown };
-  if (links === null || typeof links !== 'object' || Array.isArray(links)
-    || Object.entries(links).some(([agentId, named]) => !isValidAgentId(agentId) || !isHomeRelative(named))
+  const { links, pending = {}, moving } = (parsed ?? {}) as { links?: unknown; pending?: unknown; moving?: unknown };
+  const isLinkMap = (value: unknown): boolean => value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Object.entries(value).every(([agentId, named]) => isValidAgentId(agentId) && isHomeRelative(named));
+  if (!isLinkMap(links) || !isLinkMap(pending)
     || moving === null || typeof moving !== 'object' || Array.isArray(moving)
     || Object.entries(moving).some(([agentId, proof]) => !isValidAgentId(agentId) || !isMoveProof(proof))) {
     throw unreadable(
-      'it is not `links`, a map of agent ids to paths inside the home, beside `moving`, a map of agent ids to move proofs',
+      'it is not `links` and `pending`, maps of agent ids to paths inside the home, beside `moving`, a map of agent ids '
+      + 'to move proofs',
     );
   }
   const home = stratusHomePath(env);
+  const resolved = (map: unknown): Map<string, string> => new Map(Object.entries(map as Record<string, string>)
+    .map(([agentId, named]) => [agentId, path.resolve(home, named)]));
   return {
-    links: new Map(Object.entries(links as Record<string, string>)
-      .map(([agentId, named]) => [agentId, path.resolve(home, named)])),
+    links: resolved(links),
+    pending: resolved(pending),
     moving: new Map(Object.entries(moving as Record<string, MoveProof>)
       .map(([agentId, proof]) => [agentId, 'link' in proof ? { link: path.resolve(home, proof.link) } : proof])),
   };
@@ -1270,7 +1280,7 @@ const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
 /** Replaced in one step, never rewritten in place, and removed once empty. */
 const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promise<void> => {
   const file = linkRecordPath(env);
-  if (record.links.size === 0) {
+  if (record.links.size === 0 && record.pending.size === 0) {
     await rm(file, { force: true });
     return;
   }
@@ -1278,6 +1288,7 @@ const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promis
   const home = stratusHomePath(env);
   const body = {
     links: Object.fromEntries([...record.links].map(([agentId, named]) => [agentId, path.relative(home, named)])),
+    pending: Object.fromEntries([...record.pending].map(([agentId, named]) => [agentId, path.relative(home, named)])),
     moving: Object.fromEntries([...record.moving].map(([agentId, proof]) =>
       [agentId, 'link' in proof ? { link: asStored(home, proof.link) } : proof])),
   };
@@ -1568,6 +1579,42 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     }
     return matches ? 'proven' : 'refuted';
   };
+  // A link a stopped run was about to write. Missing, it never was, and the
+  // entry goes. Naming exactly what was to be written, it is that run's — or
+  // one the operator made since with the same text, which nothing on disk
+  // tells apart, and pointing the operator's back at a legacy path is the
+  // harm the whole record exists to avoid. So the start is refused, naming
+  // the two ways out. Anything else there is not this migration's, and the
+  // entry goes too. Read only through a steady `agents/<id>`, for the reason
+  // the scan of `links` below gives; otherwise kept for a later start.
+  for (const [peer, wrote] of [...record.pending]) {
+    const peerTarget = agentWorkspacePath(env, peer);
+    const parent = path.dirname(peerTarget);
+    const before = await steadyDirectory(parent);
+    if (before === undefined) {
+      continue;
+    }
+    let names: string | undefined;
+    try {
+      const stats = await lstat(peerTarget);
+      names = stats.isSymbolicLink() ? path.resolve(parent, await readlink(peerTarget)) : '';
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        continue;
+      }
+    }
+    if (await steadyDirectory(parent) !== before) {
+      continue;
+    }
+    if (names === wrote) {
+      throw new Error(
+        `${peerTarget} names ${wrote}, and an earlier start stopped while writing exactly that link, so it cannot `
+        + `be told whether this one is that start's or yours. If you made it, remove ${JSON.stringify(peer)} from `
+        + `\`pending\` in ${linkRecordPath(env)}; if not, remove the link and it will be written again. Then start again.`,
+      );
+    }
+    record.pending.delete(peer);
+  }
   // What a stopped run marked: its move happened, and its entries are
   // retired now, or that cannot be seen yet. A destination renamed away or
   // failing to stat for a moment is not a move that never happened, so the
@@ -2041,14 +2088,21 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           // that can still stay put. A link carried across as it stood names
           // what its operator chose, and one retargeted at a workspace that
           // has already moved is right for good; neither is ever pointed
-          // back.
+          // back. Pending until the `symlink` has returned, and only then
+          // evidence of anything: see `LinkRecord`.
           const owner = resolved !== undefined ? workspaceOwnerOf(path.resolve(resolved)) : undefined;
-          if (owner !== undefined && moved.has(owner) && !completed.has(owner)) {
-            written.set(agentId, path.resolve(names));
+          const recorded = owner !== undefined && moved.has(owner) && !completed.has(owner);
+          if (recorded) {
+            record.pending.set(agentId, path.resolve(names));
             await saveLinkRecord(env, record);
           }
           await markMoving(agentId, { link: path.resolve(names) });
           await symlink(path.relative(path.dirname(target), names), target);
+          if (recorded) {
+            record.pending.delete(agentId);
+            written.set(agentId, path.resolve(names));
+            await saveLinkRecord(env, record);
+          }
           // Both exist for an instant. A run killed here finds the source
           // again next time and the destination resolving to the same
           // directory, which `sameEntry` above reads as finished.
