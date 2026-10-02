@@ -157,9 +157,18 @@ export const collectDoctorReport = async (
   // shadows for this run still holds its secrets on disk. Asked of the
   // candidates themselves rather than of what discovery reached, since a
   // project file that cannot be read stops discovery before the global one.
-  // Windows has no mode bits to read.
+  // The global one even when --config or STRATUS_CONFIG names another: the
+  // selection decides what a run reads, not what sits on disk, so someone
+  // who always runs doctor that way would otherwise never hear about it.
+  // Once per file, so an explicit path that is the global one (or links to
+  // it) is not reported twice. Windows has no mode bits to read.
   if (process.platform !== 'win32') {
-    for (const candidate of candidates.filter((entry) => entry.label !== 'project')) {
+    const audited = [
+      ...candidates.filter((entry) => entry.label !== 'project'),
+      ...(explicitSource ? [{ path: globalConfigPath(env), label: 'global' }] : []),
+    ];
+    const seen = new Set<string>();
+    for (const candidate of audited) {
       let mode: number;
       try {
         const stats = await stat(candidate.path);
@@ -168,6 +177,11 @@ export const collectDoctorReport = async (
         if (!stats.isFile()) {
           continue;
         }
+        const identity = `${stats.dev}:${stats.ino}`;
+        if (seen.has(identity)) {
+          continue;
+        }
+        seen.add(identity);
         mode = stats.mode & 0o777;
       } catch {
         // Not there, or not something to stat: reported above if it matters.

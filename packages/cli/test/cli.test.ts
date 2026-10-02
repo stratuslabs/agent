@@ -4688,6 +4688,28 @@ test('doctor flags a trusted config other users can read, and not a project-loca
     env: { cwd: blocked, homeDir: home, processEnv: {} },
   });
   assert.match(unreadable.output.stdout, /can be read by other users/);
+
+  // And when --config names another file: the selection decides what a run
+  // reads, not what sits on disk.
+  const elsewhere = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-explicit-')), 'config.json');
+  await writeFile(elsewhere, JSON.stringify({ provider: 'demo' }), { mode: 0o600 });
+  await chmod(elsewhere, 0o600);
+  const selected = createStreams();
+  await runCli({
+    argv: ['doctor', '--config', elsewhere],
+    streams: selected.streams,
+    env: { cwd: project, homeDir: home, processEnv: {} },
+  });
+  assert.match(selected.output.stdout, new RegExp(`${configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} can be read by other users`));
+
+  // Named once when --config names the global file itself.
+  const same = createStreams();
+  await runCli({
+    argv: ['doctor', '--config', configPath],
+    streams: same.streams,
+    env: { cwd: project, homeDir: home, processEnv: {} },
+  });
+  assert.equal(same.output.stdout.match(/can be read by other users/g)?.length, 1);
 });
 
 test('doctor suggests no chmod for a config path that is a directory', async () => {
