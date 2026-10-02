@@ -25,6 +25,8 @@ export interface CliEnvironment {
   fetch?: typeof fetch;
   openExternal?: (url: string) => Promise<void> | void;
   dashboardAutoShutdownMs?: number;
+  /** How long a file-fallback `stratus grants revoke` waits for the grants lock (tests). */
+  grantsLockWaitMs?: number;
   /** Shuts down `stratus serve` the way SIGTERM would (tests). */
   shutdownSignal?: AbortSignal;
   /**
