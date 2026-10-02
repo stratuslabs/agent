@@ -8522,6 +8522,34 @@ test('a config that exists but cannot be read blocks the install', async () => {
   assert.match(output.stderr, /Not installing:/);
 });
 
+test('a broken global config blocks the install even behind a valid project config', async () => {
+  // The project file is fine, so validating only what discovery picks
+  // installed a daemon that then refused to start on the global file its
+  // trusted blocks fall back to, and exited 78 under the service manager.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /Not installing: Could not use config .*config\.json/);
+});
+
 test('the unit keeps the node flags the entrypoint needs', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await installService({
