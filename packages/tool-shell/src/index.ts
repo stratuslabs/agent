@@ -79,7 +79,10 @@ const settingsFor = (
   workspaces: AgentWorkspaces | undefined,
   home: string | undefined,
 ) => {
-  const resolved = resolvePluginAgentConfig(config, session.agent.id);
+  // `env` merges rather than replacing: an agent given its own token keeps
+  // the fleet's PATH (#205). A `null` withholds a shared variable from one
+  // agent, since only strings are set below.
+  const resolved = resolvePluginAgentConfig(config, session.agent.id, { mergeKeys: ['env'] });
   const workspaceRoot = typeof resolved.workspaceRoot === 'string' ? resolved.workspaceRoot : undefined;
   // Expanded here because nothing upstream does: this README's own example
   // is `"cwd": "~/work/ava"`, and unexpanded that is a relative path whose

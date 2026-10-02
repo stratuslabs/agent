@@ -35,6 +35,12 @@ sub-block over the defaults above them — the same shape
 `tool-fs` those values are an access boundary between agents rather than a
 preference.
 
+An agent's entry replaces each key it sets, with one exception: tool-shell's
+`env`, where an agent's variables are added to the shared ones (its names
+win, and `null` withholds a shared one from that agent). Giving one agent a
+token no longer costs it the `PATH` everyone else gets. See
+[tool-shell](../../packages/tool-shell/README.md).
+
 **Only a config you chose may list plugins** — `--config`, `STRATUS_CONFIG`,
 or the global `~/.stratus/config.json`. A plugin runs in the daemon's own
 process, so this list is a list of code, and an auto-discovered

@@ -96,6 +96,25 @@ test('an operator can grant a variable, and only what they granted arrives', asy
   assert.equal(String((await runCommand(tools, 'echo "[$HOME]"')).stdout).trim(), '[]');
 });
 
+test('an agent\'s own env adds to the fleet\'s, and a null withholds a shared variable', async () => {
+  // Blair's config from #205: her token replaced the shared env wholesale,
+  // so her commands had no PATH and could not find node.
+  const tools = await registryFor(
+    {
+      passEnv: [],
+      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', SHARED_TOKEN: 'fleet' },
+      agents: { blair: { env: { AGENTBOARD_TOKEN: 'blairs', SHARED_TOKEN: null } } },
+    },
+    {},
+  );
+
+  const blair = String((await runCommand(tools, 'echo "[$PATH][$AGENTBOARD_TOKEN][$SHARED_TOKEN]"', 'blair')).stdout).trim();
+  assert.equal(blair, `[${process.env.PATH ?? '/usr/bin:/bin'}][blairs][]`);
+  // Another agent sees only the fleet's — never blair's token.
+  const ava = String((await runCommand(tools, 'echo "[$AGENTBOARD_TOKEN][$SHARED_TOKEN]"', 'ava')).stdout).trim();
+  assert.equal(ava, '[][fleet]');
+});
+
 test('commands start in the pinned working directory', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-'));
   await writeFile(path.join(workspace, 'marker.txt'), 'here');
