@@ -1530,8 +1530,17 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    * run that stops after it and before the retirement leaves the next one
    * something to finish from.
    */
+  /**
+   * Whether an entry, recorded or still pending, names this workspace. A
+   * pending one counts: a start that could not inspect it keeps it, and the
+   * move of what it names has to leave the same marker for it to be retired
+   * by, or a stop between that move and its retirement leaves it refusing
+   * every start after.
+   */
+  const entryNames = (agentId: string): boolean =>
+    [...written.values(), ...record.pending.values()].some((wrote) => workspaceOwnerOf(wrote) === agentId);
   const markMoving = async (agentId: string, proof: MoveProof): Promise<void> => {
-    if ([...written.values()].some((wrote) => workspaceOwnerOf(wrote) === agentId)) {
+    if (entryNames(agentId)) {
       record.moving.set(agentId, proof);
       await saveLinkRecord(env, record);
     }
@@ -1584,8 +1593,21 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     }
     return matches ? 'proven' : 'refuted';
   };
-  // A link a stopped run was about to write. Missing, it never was, and the
-  // entry goes. Naming exactly what was to be written, it is that run's — or
+  // What a stopped run marked: its move happened, and its entries are
+  // retired now, or that cannot be seen yet. A destination renamed away or
+  // failing to stat for a moment is not a move that never happened, so the
+  // marker stays until it is proven, until a retry of the move marks it
+  // afresh, or until no entry names that workspace any more.
+  for (const [agentId, proof] of [...record.moving]) {
+    if (await judgeMove(agentId, proof) === 'proven') {
+      await retireRecordsNaming(agentId);
+    }
+  }
+  // A link a stopped run was about to write — asked after the markers above
+  // are settled, since one whose target's move is proven was retired with
+  // it, and is right for good rather than ambiguous. Missing, it never was,
+  // and the entry goes. Naming exactly what was to be written, it is that
+  // run's — or
   // one the operator made since with the same text, which nothing on disk
   // tells apart, and pointing the operator's back at a legacy path is the
   // harm the whole record exists to avoid. So the start is refused, naming
@@ -1619,16 +1641,6 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       );
     }
     record.pending.delete(peer);
-  }
-  // What a stopped run marked: its move happened, and its entries are
-  // retired now, or that cannot be seen yet. A destination renamed away or
-  // failing to stat for a moment is not a move that never happened, so the
-  // marker stays until it is proven, until a retry of the move marks it
-  // afresh, or until no entry names that workspace any more.
-  for (const [agentId, proof] of [...record.moving]) {
-    if (await judgeMove(agentId, proof) === 'proven') {
-      await retireRecordsNaming(agentId);
-    }
   }
   // And an entry whose link no longer names what was written is nobody's
   // evidence any more — repaired by a run that stopped before saving so, or
@@ -1667,7 +1679,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     }
   }
   for (const agentId of [...record.moving.keys()]) {
-    if (![...written.values()].some((wrote) => workspaceOwnerOf(wrote) === agentId)) {
+    if (!entryNames(agentId)) {
       record.moving.delete(agentId);
     }
   }

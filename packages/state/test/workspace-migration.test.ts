@@ -1909,6 +1909,60 @@ test('a pending link entry that could not be inspected is settled when the works
   assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
 });
 
+test('a pending link entry whose target\'s move is proven by a marker is retired, not refused', async () => {
+  // ava's link was written with its entry still pending, bea's move then
+  // finished, and the run stopped before retiring either. The marker proves
+  // bea moved, so ava's link is right for good: settled, not ambiguous.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as { links: Record<string, string> };
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  const moved = await lstat(agentWorkspacePath(env, 'bea'));
+  await writeFile(recordFile, JSON.stringify({
+    links: {},
+    pending: record.links,
+    moving: { bea: { inode: `${moved.dev}:${moved.ino}` } },
+  }));
+  await rm(path.join(legacyDir, 'bea'));
+
+  await applyPerAgentWorkspaces(env);
+  assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
+  await assert.rejects(lstat(recordFile), { code: 'ENOENT' });
+});
+
+test('a move marker named only by a pending link entry is kept while neither can be seen', async () => {
+  // As above, but the next start can see neither ava's link nor bea's new
+  // path. The marker is all that will prove bea moved once both are back,
+  // and a pending entry is what it is kept for.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as { links: Record<string, string> };
+  const beaWorkspace = agentWorkspacePath(env, 'bea');
+  await mkdir(beaWorkspace, { recursive: true });
+  const moved = await lstat(beaWorkspace);
+  await writeFile(recordFile, JSON.stringify({
+    links: {},
+    pending: record.links,
+    moving: { bea: { inode: `${moved.dev}:${moved.ino}` } },
+  }));
+  await rm(path.join(legacyDir, 'bea'));
+  const avaDir = path.dirname(agentWorkspacePath(env, 'ava'));
+  await rename(avaDir, `${avaDir}-aside`);
+  await symlink(`${path.basename(avaDir)}-aside`, avaDir);
+  await rename(beaWorkspace, `${beaWorkspace}-aside`);
+  await applyPerAgentWorkspaces(env).catch(() => undefined);
+  await rm(avaDir);
+  await rename(`${avaDir}-aside`, avaDir);
+  await rename(`${beaWorkspace}-aside`, beaWorkspace);
+
+  await applyPerAgentWorkspaces(env);
+  assert.equal(await reachedFrom(env, 'ava'), beaWorkspace);
+});
+
 test('a link record survives the home being moved to another path', async () => {
   // A home restored from backup, or moved to a new disk, keeps its relative
   // links resolving. The record has to keep matching them, or the next
