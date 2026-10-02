@@ -239,8 +239,8 @@ const serveHeldHome = async (
     directory: agentsDirPath(env),
     stateHome: stratusHomePath(env),
     warn,
-    serializeRead: grantReadSerializer(env, warn),
-    serializeWrite: grantWriteSerializer(env, warn),
+    serializeRead: grantReadSerializer(env),
+    serializeWrite: grantWriteSerializer(env),
   });
 
   // The control API is a channel adapter like any other: started after the

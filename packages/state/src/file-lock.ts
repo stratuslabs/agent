@@ -211,30 +211,23 @@ const writeQueues = new Map<string, Promise<unknown>>();
  * lock, the read comes either wholly before the revoke or wholly after it.
  *
  * `read` must be synchronous; see `claimFileLock` for why. A lock still
- * held after the wait is read through rather than refused, with a line
- * saying so: that is how every read went before this lock existed, and an
- * agent's grants failing to load over a stuck CLI would be worse.
+ * held after the wait throws `FileLockHeldError` rather than reading
+ * without it: reading through is the race this lock exists to close, so
+ * the store takes that read as no grants this once, caches nothing, and
+ * asks again on the next call.
  */
-export const grantReadSerializer = (env: StateEnvironment, warn?: (line: string) => void) =>
+export const grantReadSerializer = (env: StateEnvironment, options: { waitMs?: number } = {}) =>
   <T>(read: () => T): T => {
     // Inside this process's own write, which already holds the lock: claiming
     // it again would wait on ourselves for the whole wait.
     if (heldHere.has(grantsLockPath(env))) {
       return read();
     }
-    let lock: FileLock | undefined;
-    try {
-      lock = claimFileLock(grantsLockPath(env), { waitMs: GRANTS_LOCK_WAIT_MS });
-    } catch (error) {
-      if (!(error instanceof FileLockHeldError)) {
-        throw error;
-      }
-      warn?.(`${error.lockPath} was still held after ${GRANTS_LOCK_WAIT_MS}ms; reading grants without it.`);
-    }
+    const lock = claimFileLock(grantsLockPath(env), { waitMs: options.waitMs ?? GRANTS_LOCK_WAIT_MS });
     try {
       return read();
     } finally {
-      lock?.release();
+      lock.release();
     }
   };
 
@@ -251,31 +244,20 @@ export const grantReadSerializer = (env: StateEnvironment, warn?: (line: string)
  * here: a grant read inside it, the fresh one included, then runs without
  * claiming the lock again, rather than blocking the thread on a lock this
  * process holds. Another process still waits for it. A lock still held
- * after the wait is written through with a warning, as a read is.
+ * after the wait throws `FileLockHeldError` and writes nothing, as a revoke
+ * does: writing through is the race.
  */
-export const grantWriteSerializer = (env: StateEnvironment, warn?: (line: string) => void) =>
+export const grantWriteSerializer = (env: StateEnvironment, options: { waitMs?: number } = {}) =>
   <T>(write: () => Promise<T>): Promise<T> => {
     const lockPath = grantsLockPath(env);
     const run = async (): Promise<T> => {
-      let lock: FileLock | undefined;
-      try {
-        lock = claimFileLock(lockPath, { waitMs: GRANTS_LOCK_WAIT_MS });
-      } catch (error) {
-        if (!(error instanceof FileLockHeldError)) {
-          throw error;
-        }
-        warn?.(`${error.lockPath} was still held after ${GRANTS_LOCK_WAIT_MS}ms; writing grants without it.`);
-      }
-      if (lock) {
-        heldHere.add(lockPath);
-      }
+      const lock = claimFileLock(lockPath, { waitMs: options.waitMs ?? GRANTS_LOCK_WAIT_MS });
+      heldHere.add(lockPath);
       try {
         return await write();
       } finally {
-        if (lock) {
-          heldHere.delete(lockPath);
-          lock.release();
-        }
+        heldHere.delete(lockPath);
+        lock.release();
       }
     };
     const queued = (writeQueues.get(lockPath) ?? Promise.resolve()).then(run, run);

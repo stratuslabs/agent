@@ -273,8 +273,11 @@ the revoke or after it, never halfway, and can't cache a grant the command
 then reports as gone. The daemon's own grant writes (an "always" answer)
 take the lock too, and apply to the file as it is rather than to what the
 daemon cached, so one landing after a revoke doesn't bring the revoked
-grant back, and one landing before it isn't lost. A revoke that can't get the lock within 5 seconds
-revokes nothing and says so; run it again. One case is unchanged: a daemon
+grant back, and one landing before it isn't lost. Nothing goes ahead
+without the lock. A revoke that can't get it within 5 seconds revokes
+nothing and says so; run it again. A daemon that can't treats that agent
+as having no grants for that one call, so it asks rather than acting, and
+an "always" answer it can't save holds only until the daemon restarts. One case is unchanged: a daemon
 that is already running, and whose control API doesn't answer, keeps
 whatever it read until it restarts. The command still writes the file
 then, because refusing would leave no way to revoke at all, and the next

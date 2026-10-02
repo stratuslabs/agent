@@ -14,6 +14,7 @@ import {
   findMatchingToolGrant,
   parseToolGrant,
   whitelistPathFor,
+  WhitelistUnreadableError,
   type PermissionDecision,
   type ToolGrant,
 } from '../src/index.ts';
@@ -171,6 +172,53 @@ test('a grant change under the host\'s write serializer starts from the file, no
   assert.deepEqual(onDisk.tools.map((grant) => grant.tool).sort(), ['shell.run', 'web.search']);
   // And the daemon's view caught up with the file it just wrote.
   assert.deepEqual((await daemon.grantsFor('ava')).tools.map((grant) => grant.tool).sort(), ['shell.run', 'web.search']);
+});
+
+test('a grant read the host could not serialize is no grants this once, and is not cached', async () => {
+  // Reading through a lock still held is the race the lock exists to close.
+  // No grants is the safe answer — the call asks a human — and caching it
+  // would strip the agent's grants until a restart over one slow revoke.
+  const directory = await newDirectory();
+  const writer = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
+  await writer.rememberTool('ava', { tool: 'web.fetch', package: 'p', grantedAt: '2026-09-07T01:00:00.000Z' });
+
+  let busy = true;
+  const warnings: string[] = [];
+  const reader = createFileCommandWhitelist({
+    directory,
+    stateHome: path.dirname(directory),
+    warn: (line) => warnings.push(line),
+    serializeRead: (read) => {
+      if (busy) {
+        throw new Error('grants.lock is held by another process.');
+      }
+      return read();
+    },
+  });
+
+  assert.deepEqual((await reader.grantsFor('ava')).tools, []);
+  assert.match(warnings.join('\n'), /was not read \(grants\.lock is held by another process\.\)/);
+  busy = false;
+  assert.deepEqual((await reader.grantsFor('ava')).tools.map((grant) => grant.tool), ['web.fetch']);
+});
+
+test('a grant change the host could not serialize is refused as unsaved, and writes nothing', async () => {
+  // Writing through is the other half of the race. The refusal is a
+  // WhitelistUnreadableError because every caller already handles that one
+  // right: an "always" holds for the process, a revoke reports a conflict.
+  const directory = await newDirectory();
+  const store = createFileCommandWhitelist({
+    directory,
+    stateHome: path.dirname(directory),
+    serializeWrite: () => Promise.reject(new Error('grants.lock is held by another process.')),
+  });
+
+  await assert.rejects(
+    store.rememberTool('ava', { tool: 'web.fetch', package: 'p', grantedAt: '2026-09-07T01:00:00.000Z' }),
+    (error: unknown) => error instanceof WhitelistUnreadableError
+      && /ava's grants were not changed: grants\.lock is held by another process\. Try again/.test(error.message),
+  );
+  await assert.rejects(readFile(whitelistPathFor(directory, 'ava'), 'utf8'), { code: 'ENOENT' });
 });
 
 test('a revoked grant stops working on the next call, with no restart', async () => {

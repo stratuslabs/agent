@@ -245,6 +245,35 @@ export class WhitelistUnreadableError extends Error {
 }
 
 /**
+ * Thrown by a grant change when the host's `serializeWrite` could not take
+ * its lock: nothing was changed. A `WhitelistUnreadableError` because the
+ * bargain is the same one — an "always" answer holds for this process and
+ * is not saved, a revoke reports a conflict — and every caller already
+ * makes it by that type. Its own message, because there is nothing to fix
+ * in the file, only something to wait for.
+ */
+class WhitelistBusyError extends WhitelistUnreadableError {
+  constructor(agentId: string, cause: unknown) {
+    super('', '');
+    this.name = 'WhitelistBusyError';
+    this.message = `${agentId}'s grants were not changed: ${cause instanceof Error ? cause.message : String(cause)} `
+      + 'Try again; if it keeps happening, look for a `stratus grants` that is stuck.';
+  }
+}
+
+/** A read the host's `serializeRead` could not serialize: transient, never cached. */
+class GrantReadDeferred extends Error {
+  readonly reason: string;
+
+  constructor(cause: unknown) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    super(reason);
+    this.name = 'GrantReadDeferred';
+    this.reason = reason;
+  }
+}
+
+/**
  * The persistent tier of the scope resolution, on disk — every kind of
  * grant, in one file per agent: command scopes, origins, and the standing
  * tool grants an operator's "always allow" answers with.
@@ -290,6 +319,10 @@ export const createFileCommandWhitelist = (options: {
    * caches the grant the CLI then reports as revoked (#184). Under the same
    * lock the revoke takes, the read is wholly before or wholly after it.
    * A host that omits it reads without one, as every host did before.
+   *
+   * If it throws without running the read, that read is taken as no grants
+   * — the safe answer, which asks a human — and is not cached, so the next
+   * call reads again. Reading through instead is the race.
    */
   serializeRead?: <T>(read: () => T) => T;
   /**
@@ -302,7 +335,8 @@ export const createFileCommandWhitelist = (options: {
    * rewrote the file, it restored the revoked grant, and landing before it,
    * the revoke's write dropped this one (#184). A host that omits it keeps
    * the cached read-modify-write, which is right when nothing else writes
-   * the file.
+   * the file. If it throws without running the change, the change is
+   * refused with a `WhitelistUnreadableError`, and nothing is written.
    */
   serializeWrite?: <T>(write: () => Promise<T>) => Promise<T>;
 }): AgentGrantStore => {
@@ -341,16 +375,24 @@ export const createFileCommandWhitelist = (options: {
    * report, because it means the grants exist and could not be read.
    */
   const serialize = options.serializeRead ?? (<T>(read: () => T): T => read());
-  const readAt = (file: string): string | undefined => serialize(() => {
+  const readAt = (file: string): string | undefined => {
+    let ran = false;
     try {
-      return readFileSync(file, 'utf8');
+      return serialize(() => {
+        ran = true;
+        try {
+          return readFileSync(file, 'utf8');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            return undefined;
+          }
+          throw error;
+        }
+      });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return undefined;
-      }
-      throw error;
+      throw ran ? error : new GrantReadDeferred(error);
     }
-  });
+  };
 
   const readFresh = async (agentId: string): Promise<Grants> => {
     let scopes: CommandScope[] = [];
@@ -393,6 +435,16 @@ export const createFileCommandWhitelist = (options: {
           : [];
       }
     } catch (error) {
+      if (error instanceof GrantReadDeferred) {
+        // Nothing wrong with the file, so nothing marked against it, and
+        // not cached: an agent must not lose its grants until a restart
+        // over one read that had to wait too long.
+        cache.delete(agentId);
+        options.warn?.(
+          `${file} was not read (${error.reason}); ${agentId} is treated as having no grants until the next call reads it.`,
+        );
+        return { scopes: [], origins: [], tools: [] };
+      }
       // No whitelist means no stored scopes, and is not worth failing a
       // turn over: the fallback is asking a human, which is where an agent
       // with no whitelist starts anyway — that case reaches here as an
@@ -534,8 +586,19 @@ export const createFileCommandWhitelist = (options: {
   const writes = new Map<string, Promise<unknown>>();
 
   const serialized = <T>(agentId: string, work: () => Promise<T>): Promise<T> => {
-    const guarded = options.serializeWrite
-      ? () => options.serializeWrite!(work)
+    const serializeWrite = options.serializeWrite;
+    const guarded = serializeWrite
+      ? async (): Promise<T> => {
+        let ran = false;
+        try {
+          return await serializeWrite(() => {
+            ran = true;
+            return work();
+          });
+        } catch (error) {
+          throw ran ? error : new WhitelistBusyError(agentId, error);
+        }
+      }
       : work;
     const queued = (writes.get(agentId) ?? Promise.resolve()).then(guarded, guarded);
     writes.set(agentId, queued.then(() => undefined, () => undefined));

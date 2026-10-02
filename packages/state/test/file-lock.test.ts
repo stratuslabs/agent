@@ -86,16 +86,37 @@ test('a grant write holds the lock against others, and reads inside it do not wa
   // The daemon's write re-reads the file under the lock; that read runs
   // in the same process and must not block on the lock its own write holds.
   const env = { homeDir: await newHome() };
-  const warnings: string[] = [];
-  const write = grantWriteSerializer(env, (line) => warnings.push(line));
-  const read = grantReadSerializer(env, (line) => warnings.push(line));
+  const write = grantWriteSerializer(env);
+  // No wait, so a read that did try to claim the held lock fails here
+  // rather than blocking the thread for the whole default wait.
+  const read = grantReadSerializer(env, { waitMs: 0 });
   const seen = await write(async () => {
     assert.throws(() => claimFileLock(grantsLockPath(env)), FileLockHeldError);
     await Promise.resolve();
     return read(() => 'read inside');
   });
   assert.equal(seen, 'read inside');
-  assert.deepEqual(warnings, []);
   // Let go afterwards.
   claimFileLock(grantsLockPath(env)).release();
+});
+
+test('a grant read or write whose lock is still held after the wait is refused, never run without it', async () => {
+  // Running through is the race the lock closes: a read caching the grant
+  // a revoke is removing, a write landing over the revoke's (#184).
+  const env = { homeDir: await newHome() };
+  const holder = claimFileLock(grantsLockPath(env));
+  let ran = false;
+  try {
+    assert.throws(
+      () => grantReadSerializer(env, { waitMs: 0 })(() => { ran = true; }),
+      FileLockHeldError,
+    );
+    await assert.rejects(
+      grantWriteSerializer(env, { waitMs: 0 })(async () => { ran = true; }),
+      FileLockHeldError,
+    );
+  } finally {
+    holder.release();
+  }
+  assert.equal(ran, false);
 });
