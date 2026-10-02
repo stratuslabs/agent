@@ -2017,7 +2017,11 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     }
     const ownerFrom = path.join(legacy, owner);
     const ownerTarget = agentWorkspacePath(env, owner);
-    if (!(await pathIsFree(ownerFrom))) {
+    // Left to the pass below only if that pass will reach it: an entry in
+    // the snapshot it walks. One an older command made after the snapshot is
+    // there now but never visited, and deferring to a pass that will not
+    // come would start the daemon with the peer still naming the new path.
+    if (snapshot.has(owner) && !(await pathIsFree(ownerFrom))) {
       continue;
     }
     const proof = record.moving.get(owner);
