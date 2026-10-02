@@ -1555,6 +1555,11 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // it is back.
   for (const [peer, wrote] of [...written]) {
     const peerTarget = agentWorkspacePath(env, peer);
+    // Through a linked `agents/<id>` this would look at another tree, and
+    // what it found there says nothing about the link this entry is for.
+    if (await linkedDerivedComponent(stratusHomePath(env), path.dirname(peerTarget)) !== undefined) {
+      continue;
+    }
     let names: string | undefined;
     try {
       const stats = await lstat(peerTarget);

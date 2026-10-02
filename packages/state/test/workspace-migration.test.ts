@@ -2092,6 +2092,29 @@ test('a link record is retired when the old path already resolves to the new one
   assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
 });
 
+test('a link record entry is kept while its peer\'s agent directory is a link', async () => {
+  // `agents/ava` is briefly a link to another tree whose `workspace` is
+  // something else entirely. That says nothing about ava's own link, so the
+  // entry stays, and ava is repaired once its directory is back.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  const avaDir = path.join(agentsDirPath(env), 'ava');
+  const aside = path.join(agentsDirPath(env), 'ava-aside');
+  await rename(avaDir, aside);
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await mkdir(path.join(elsewhere, 'workspace'), { recursive: true });
+  await symlink(elsewhere, avaDir);
+  await applyPerAgentWorkspaces(env);
+
+  await rm(avaDir);
+  await rename(aside, avaDir);
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there
