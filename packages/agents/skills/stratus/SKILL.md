@@ -69,7 +69,7 @@ This is the question you will be asked most. A secret reaches Stratus in one of 
 - **Channel tokens** (a Slack app's tokens): `stratus setup` → Channels, or the dashboard. No agent can read them, yours included.
 - **Named credentials**, such as `search.apiKey`, are for tools whose plugin declares that name. A web search backend is the common one: its key is always `search.apiKey`, whatever the vendor. These are the only secrets you can ask for yourself.
 - **A shell command's or an MCP server's token** is not a named credential: `shell.run` and MCP servers never read the credential store. Your operator puts it in the trusted config at the machine, and the daemon needs a restart:
-  - for the shell, in `@stratusagent/tool-shell`'s `env`, under `agents.<id>` to keep it to one agent (whose commands can then read it);
+  - for the shell, in `@stratusagent/tool-shell`'s `env`, under `agents.<id>` to keep it to one agent (whose commands can then read it). An agent's `env` is added to the shared one rather than replacing it, its own names win, and a name set to `null` there is withheld from that agent;
   - for an MCP server, in `servers.<name>.headers` (HTTP) or `servers.<name>.env` (stdio), which every agent granted `mcp.<name>.*` uses.
 
   `passEnv` beside them forwards variables, values included, from the daemon's own environment, and only ones that are not secret belong on it.
