@@ -2019,6 +2019,22 @@ test('a move marker the destination visibly contradicts does not hold back the r
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+test('a recorded peer is pointed back when its target\'s legacy name holds a plain file', async () => {
+  // The pass skips anything at `workspaces/<id>` that is not a directory or
+  // a link, so a file there is no workspace it will visit, and deferring
+  // ava's repair to it would leave ava naming what took bea's new path.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await rm(path.join(legacyDir, 'bea'));
+  await writeFile(path.join(legacyDir, 'bea'), 'not a workspace');
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there
