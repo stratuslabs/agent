@@ -1552,6 +1552,15 @@ test('a recovered turn\'s failure counts toward the repeated-failure stop', asyn
   assert.equal(recovered?.status, 'completed');
   assert.equal(asked, 3, 'the recovered denial is the first of the three');
   assert.equal(recovered?.messages.at(-1)?.content, 'It keeps being refused.');
+
+  // The same when the parked call's deadline passed while the daemon was
+  // down: recovery refuses it without asking, and that refusal counts too,
+  // so only two more are asked about.
+  await parkAndAbandon(store, tools, provider, 'recover-expired');
+  asked = 0;
+  const expired = await revived.recoverPendingApproval('recover-expired', { denyPending: true });
+  assert.equal(expired?.status, 'completed');
+  assert.equal(asked, 2, 'the expired denial is the first of the three');
 });
 
 test('a recovery that denies the parked call still drains the queue behind it', async () => {

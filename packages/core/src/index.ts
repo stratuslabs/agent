@@ -5777,7 +5777,18 @@ export class AgentRunner {
      * the session — replaying it would duplicate the assistant messages and
      * re-ask the model — so recovery picks up exactly where the wait was.
      */
-    resumeFrom?: { pending: ToolCall | undefined; remaining: ToolCall[]; parkedAt?: string; turn?: number },
+    resumeFrom?: {
+      pending: ToolCall | undefined;
+      remaining: ToolCall[];
+      parkedAt?: string;
+      turn?: number;
+      /**
+       * The parked call when recovery already answered it — a deadline that
+       * passed while the process was down — so the recovered turn is
+       * counted whole toward the repeated-failure stop.
+       */
+      answered?: { call: ToolCall; result: ToolResult };
+    },
     /** See `RunInput.runtime`. */
     runtime?: AgentRuntimeContext,
   ): Promise<Session> {
@@ -5847,8 +5858,13 @@ export class AgentRunner {
           // meaningful when the parked call itself is being re-asked;
           // a denied one is already answered.
           const carriedParkedAt = pendingEntry.pending ? pendingEntry.parkedAt : undefined;
+          const answered = pendingEntry.answered;
           pendingEntry = undefined;
-          countFailures(recovered, await this.runToolCalls(session, recovered, signal, carriedParkedAt, turn));
+          const ran = await this.runToolCalls(session, recovered, signal, carriedParkedAt, turn);
+          countFailures(
+            answered ? [answered.call, ...recovered] : recovered,
+            answered ? [answered.result, ...ran] : ran,
+          );
           continue;
         }
 
@@ -6194,7 +6210,12 @@ export class AgentRunner {
       // Result and retirement in one write: a crash between them would
       // either re-deny an answered call or lose the denial.
       await this.recordToolResult(session, result);
-        return this.executeTurns(session, options.signal, { pending: undefined, remaining, turn: record.turn }, options.runtime);
+        return this.executeTurns(session, options.signal, {
+          pending: undefined,
+          remaining,
+          turn: record.turn,
+          answered: { call: pending, result },
+        }, options.runtime);
     }
 
     return this.executeTurns(session, options.signal, {
