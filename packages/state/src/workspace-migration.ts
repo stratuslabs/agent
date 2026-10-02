@@ -1657,6 +1657,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     try {
       const stats = await lstat(peerTarget);
       names = stats.isSymbolicLink() ? path.resolve(parent, await readlink(peerTarget)) : '';
+      // Asked again, for the reason the scan of `links` below gives.
+      if (inodeOf(await lstat(peerTarget)) !== inodeOf(stats)) {
+        continue;
+      }
     } catch {
       continue;
     }
@@ -1697,6 +1701,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     try {
       const stats = await lstat(peerTarget);
       names = stats.isSymbolicLink() ? path.resolve(parent, await readlink(peerTarget)) : '';
+      // The entry itself as well as its directory: one swapped and swapped
+      // back between the `lstat` and the `readlink` reads as something else,
+      // and this entry is the only thing that repairs the link once it is back.
+      if (inodeOf(await lstat(peerTarget)) !== inodeOf(stats)) {
+        continue;
+      }
     } catch {
       continue;
     }
@@ -2259,7 +2269,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // and an ordinary command can take a free one a moment later. A marked
   // owner is repaired too once its new path visibly holds something its
   // proof does not describe.
-  for (const owner of new Set([...written.values()].map(workspaceOwnerOf))) {
+  // Pending entries' owners too: one kept because its link could not be
+  // seen is exactly the case `repointPeersNamingNewPath` refuses for, and an
+  // owner reached only through it would otherwise never get there.
+  for (const owner of new Set([...written.values(), ...record.pending.values()].map(workspaceOwnerOf))) {
     if (owner === undefined) {
       continue;
     }

@@ -2011,6 +2011,27 @@ test('a pending link entry whose link is missing for a moment is kept, not taken
   await assert.rejects(applyPerAgentWorkspaces(env), /cannot be told whether this one is that start's or yours/);
 });
 
+test('a pending link entry is refused for when the workspace it names is gone from its legacy path but not moved', async () => {
+  // ava's link was written, and the run stopped before promoting its entry
+  // or unlinking ava's source. Now the link is aside for a backup, bea's
+  // legacy entry is gone without a move of ours, and bea's new path holds
+  // something else. Reached only through the pending entry, bea must still
+  // be asked about, or ava's source is carried across naming that path.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as { links: Record<string, string> };
+  await writeFile(recordFile, JSON.stringify({ links: {}, pending: record.links, moving: {} }));
+  await symlink('bea', path.join(legacyDir, 'ava'));
+  const avaLink = agentWorkspacePath(env, 'ava');
+  await rename(avaLink, `${avaLink}.bak`);
+  await rm(path.join(legacyDir, 'bea'));
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+
+  await assert.rejects(applyPerAgentWorkspaces(env), /could not be checked, and an earlier start stopped/);
+});
+
 test('a link record survives the home being moved to another path', async () => {
   // A home restored from backup, or moved to a new disk, keeps its relative
   // links resolving. The record has to keep matching them, or the next
