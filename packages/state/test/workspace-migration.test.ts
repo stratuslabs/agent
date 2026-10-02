@@ -2115,6 +2115,28 @@ test('a link record entry is kept while its peer\'s agent directory is a link', 
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+test('a move proof is not accepted from beneath a linked agent directory', async () => {
+  // bea was marked as moving to a link naming `agents/bea/target`, and then
+  // `agents/bea` became a link to another tree whose `workspace` happens to
+  // read `target`. By text that matches the proof; it proves nothing, and
+  // taking it would retire the entry ava needs to be pointed back.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as Record<string, unknown>;
+  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { link: path.join('agents', 'bea', 'target') } } }));
+  await rm(path.join(legacyDir, 'bea'));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await symlink('target', path.join(elsewhere, 'workspace'));
+  await rm(path.join(agentsDirPath(env), 'bea'), { recursive: true, force: true });
+  await symlink(elsewhere, path.join(agentsDirPath(env), 'bea'));
+
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there

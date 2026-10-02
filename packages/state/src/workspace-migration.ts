@@ -1523,6 +1523,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   /** Whether the destination holds what only the marked move puts there. */
   const moveProven = async (agentId: string, proof: MoveProof): Promise<boolean> => {
     const destination = agentWorkspacePath(env, agentId);
+    // Never through a linked `agents/<id>`: what is found in another tree
+    // proves nothing about a move this migration made here, and a link's
+    // text read there can match the proof by accident.
+    if (await linkedDerivedComponent(stratusHomePath(env), path.dirname(destination)) !== undefined) {
+      return false;
+    }
     try {
       const stats = await lstat(destination);
       if ('inode' in proof) {
