@@ -6,7 +6,7 @@ import { mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { claimFileLock, FileLockHeldError, grantReadSerializer, grantsLockPath } from '../src/index.ts';
+import { claimFileLock, FileLockHeldError, grantReadSerializer, grantsLockPath, grantWriteSerializer } from '../src/index.ts';
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-file-lock-'));
 
@@ -80,4 +80,22 @@ test('a lock file that is a symlink is refused, and what it points at is left al
 
   assert.throws(() => claimFileLock(lockPath), /is a symbolic link/);
   assert.equal(await readFile(victim, 'utf8'), 'keep me');
+});
+
+test('a grant write holds the lock against others, and reads inside it do not wait on it', async () => {
+  // The daemon's write re-reads the file under the lock; that read runs
+  // in the same process and must not block on the lock its own write holds.
+  const env = { homeDir: await newHome() };
+  const warnings: string[] = [];
+  const write = grantWriteSerializer(env, (line) => warnings.push(line));
+  const read = grantReadSerializer(env, (line) => warnings.push(line));
+  const seen = await write(async () => {
+    assert.throws(() => claimFileLock(grantsLockPath(env)), FileLockHeldError);
+    await Promise.resolve();
+    return read(() => 'read inside');
+  });
+  assert.equal(seen, 'read inside');
+  assert.deepEqual(warnings, []);
+  // Let go afterwards.
+  claimFileLock(grantsLockPath(env)).release();
 });

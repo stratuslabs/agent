@@ -196,6 +196,11 @@ export const claimFileLock = (lockPath: string, options: { waitMs?: number } = {
  */
 export const GRANTS_LOCK_WAIT_MS = 5_000;
 
+/** Lock paths this process holds across an async write, so its own reads do not wait on it. */
+const heldHere = new Set<string>();
+/** One grant write at a time per lock path, in this process. */
+const writeQueues = new Map<string, Promise<unknown>>();
+
 /**
  * Run a grant file's read under the grants lock, for the daemon's store.
  *
@@ -212,6 +217,11 @@ export const GRANTS_LOCK_WAIT_MS = 5_000;
  */
 export const grantReadSerializer = (env: StateEnvironment, warn?: (line: string) => void) =>
   <T>(read: () => T): T => {
+    // Inside this process's own write, which already holds the lock: claiming
+    // it again would wait on ourselves for the whole wait.
+    if (heldHere.has(grantsLockPath(env))) {
+      return read();
+    }
     let lock: FileLock | undefined;
     try {
       lock = claimFileLock(grantsLockPath(env), { waitMs: GRANTS_LOCK_WAIT_MS });
@@ -226,4 +236,49 @@ export const grantReadSerializer = (env: StateEnvironment, warn?: (line: string)
     } finally {
       lock?.release();
     }
+  };
+
+/**
+ * Run a grant write — its fresh read, its change, and its save — under the
+ * grants lock, for the daemon's store.
+ *
+ * The daemon used to write its cached view back: a write landing after a
+ * file-fallback revoke restored the revoked grant, and one landing before it
+ * lost whatever the revoke's own write left in the file. Under the lock the
+ * store re-reads the file and applies its change to what is there (#184).
+ *
+ * The section is async, so it is queued in this process and recorded as held
+ * here: a grant read inside it, the fresh one included, then runs without
+ * claiming the lock again, rather than blocking the thread on a lock this
+ * process holds. Another process still waits for it. A lock still held
+ * after the wait is written through with a warning, as a read is.
+ */
+export const grantWriteSerializer = (env: StateEnvironment, warn?: (line: string) => void) =>
+  <T>(write: () => Promise<T>): Promise<T> => {
+    const lockPath = grantsLockPath(env);
+    const run = async (): Promise<T> => {
+      let lock: FileLock | undefined;
+      try {
+        lock = claimFileLock(lockPath, { waitMs: GRANTS_LOCK_WAIT_MS });
+      } catch (error) {
+        if (!(error instanceof FileLockHeldError)) {
+          throw error;
+        }
+        warn?.(`${error.lockPath} was still held after ${GRANTS_LOCK_WAIT_MS}ms; writing grants without it.`);
+      }
+      if (lock) {
+        heldHere.add(lockPath);
+      }
+      try {
+        return await write();
+      } finally {
+        if (lock) {
+          heldHere.delete(lockPath);
+          lock.release();
+        }
+      }
+    };
+    const queued = (writeQueues.get(lockPath) ?? Promise.resolve()).then(run, run);
+    writeQueues.set(lockPath, queued.then(() => undefined, () => undefined));
+    return queued;
   };

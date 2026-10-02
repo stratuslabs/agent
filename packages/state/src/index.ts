@@ -71,6 +71,7 @@ export {
   type FileLock,
   GRANTS_LOCK_WAIT_MS,
   grantReadSerializer,
+  grantWriteSerializer,
 } from './file-lock.ts';
 
 export {

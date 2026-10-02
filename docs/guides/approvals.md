@@ -270,7 +270,10 @@ A file-fallback revoke holds `~/.stratus/grants.lock` from the read it
 decides on until its write lands, and a daemon reads each grant file under
 the same lock. So a daemon starting during a revoke reads the file before
 the revoke or after it, never halfway, and can't cache a grant the command
-then reports as gone. A revoke that can't get the lock within 5 seconds
+then reports as gone. The daemon's own grant writes (an "always" answer)
+take the lock too, and apply to the file as it is rather than to what the
+daemon cached, so one landing after a revoke doesn't bring the revoked
+grant back, and one landing before it isn't lost. A revoke that can't get the lock within 5 seconds
 revokes nothing and says so; run it again. One case is unchanged: a daemon
 that is already running, and whose control API doesn't answer, keeps
 whatever it read until it restarts. The command still writes the file

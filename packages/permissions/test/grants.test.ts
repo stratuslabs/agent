@@ -146,6 +146,33 @@ test('a grant file is read inside the host\'s serializer, so a revoke holding it
   assert.ok(held > 0, 'the read went through the serializer');
 });
 
+test('a grant change under the host\'s write serializer starts from the file, not the cache', async () => {
+  // The daemon caches each agent's grants. When `stratus grants revoke`
+  // rewrote the file behind it, the daemon's next "always" wrote its cache
+  // back: the revoked grant returned, and anything the revoke's write held
+  // was lost (#184).
+  const directory = await newDirectory();
+  const daemon = createFileCommandWhitelist({
+    directory,
+    stateHome: path.dirname(directory),
+    serializeWrite: (write) => write(),
+  });
+  await daemon.rememberTool('ava', { tool: 'web.fetch', package: 'p', grantedAt: '2026-09-07T01:00:00.000Z' });
+  assert.deepEqual((await daemon.grantsFor('ava')).tools.map((grant) => grant.tool), ['web.fetch']);
+
+  // A revoke elsewhere: web.fetch gone, another grant there instead.
+  const elsewhere = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
+  assert.equal(await elsewhere.forgetTool('ava', 'web.fetch'), true);
+  await elsewhere.rememberTool('ava', { tool: 'web.search', package: 'p', grantedAt: '2026-09-07T02:00:00.000Z' });
+
+  await daemon.rememberTool('ava', { tool: 'shell.run', package: 'p', grantedAt: '2026-09-07T03:00:00.000Z' });
+
+  const onDisk = await createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }).grantsFor('ava');
+  assert.deepEqual(onDisk.tools.map((grant) => grant.tool).sort(), ['shell.run', 'web.search']);
+  // And the daemon's view caught up with the file it just wrote.
+  assert.deepEqual((await daemon.grantsFor('ava')).tools.map((grant) => grant.tool).sort(), ['shell.run', 'web.search']);
+});
+
 test('a revoked grant stops working on the next call, with no restart', async () => {
   const directory = await newDirectory();
   const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
