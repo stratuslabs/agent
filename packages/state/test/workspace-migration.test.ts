@@ -1751,6 +1751,47 @@ test('a pending link record outlives a pass that found its target briefly missin
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+test('a move that finished just before a run stopped still retires its link record', async () => {
+  // The run marks bea as moving, moves it, and stops before retiring the
+  // entry naming bea. That moment cannot be reached without stopping a
+  // process between two writes, so the state it leaves is built here: a
+  // run that stopped at bea, then bea's move done as `move` does it and
+  // the marker it writes first.
+  const home = await newHome();
+  const legacyDir = legacyWorkspacesDirPath({ homeDir: home });
+  await mkdir(legacyDir, { recursive: true });
+  await symlink('bea', path.join(legacyDir, 'ava'));
+  await symlink('ava', path.join(legacyDir, 'bea'));
+  await writeFile(path.join(legacyDir, 'README'), 'the operator\'s');
+  const dying = {
+    homeDir: home,
+    async beforeWorkspaceMove(agentId: string): Promise<void> {
+      if (agentId === 'bea') {
+        throw new Error('the process stopped here');
+      }
+    },
+  };
+  await runStateMigrations(dying, { exclusive: true }).catch(() => undefined);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as { links: Record<string, string>; moving: string[] };
+  assert.deepEqual(Object.keys(record.links), ['ava']);
+  await writeFile(recordFile, JSON.stringify({ ...record, moving: ['bea'] }));
+  // A directory at bea's new path rather than the link its move would
+  // write: the record does not care which, and the link would close a cycle
+  // in the new layout that a later pass cannot walk.
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await rm(path.join(legacyDir, 'bea'));
+
+  // The next start finishes the retirement; a stale `workspaces/bea`
+  // appearing after it then finds nothing recorded.
+  await applyPerAgentWorkspaces(env);
+  await symlink('zed', path.join(legacyDir, 'bea'));
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
+});
+
 test('a legacy link carried across as it stood is never pointed back', async () => {
   // `workspaces/ava -> ../agents/bea/workspace` names a live path the
   // operator chose; nothing retargeted it. bea's own legacy entry is stale

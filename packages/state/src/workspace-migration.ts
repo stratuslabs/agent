@@ -1166,7 +1166,18 @@ const linkRecordPath = (env: StateEnvironment): string =>
  * evidence a link points at somebody else's files, and starting without it
  * leaves that link in place with nothing to say so.
  */
-const readLinkRecord = async (env: StateEnvironment): Promise<Map<string, string>> => {
+/**
+ * `links`: each retargeted link, by agent, and the path it was written
+ * naming. `moving`: the workspaces whose move had begun while an entry named
+ * them — the marker that lets a run that stopped between finishing a move
+ * and retiring its entries be finished by the next one.
+ */
+interface LinkRecord {
+  links: Map<string, string>;
+  moving: Set<string>;
+}
+
+const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
   const file = linkRecordPath(env);
   const unreadable = (reason: string): Error => new Error(
     `${file} could not be read (${reason}). It records which workspace links the upgrade move pointed `
@@ -1182,7 +1193,7 @@ const readLinkRecord = async (env: StateEnvironment): Promise<Map<string, string
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return new Map();
+      return { links: new Map(), moving: new Set() };
     }
     reason = (error as Error).message;
   }
@@ -1195,24 +1206,28 @@ const readLinkRecord = async (env: StateEnvironment): Promise<Map<string, string
   } catch (error) {
     throw unreadable((error as Error).message);
   }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
-    || Object.entries(parsed).some(([agentId, named]) =>
-      !isValidAgentId(agentId) || typeof named !== 'string' || !path.isAbsolute(named))) {
-    throw unreadable('it is not a map of agent ids to absolute paths');
+  const { links, moving } = (parsed ?? {}) as { links?: unknown; moving?: unknown };
+  if (links === null || typeof links !== 'object' || Array.isArray(links)
+    || Object.entries(links).some(([agentId, named]) =>
+      !isValidAgentId(agentId) || typeof named !== 'string' || !path.isAbsolute(named))
+    || !Array.isArray(moving)
+    || moving.some((agentId) => typeof agentId !== 'string' || !isValidAgentId(agentId))) {
+    throw unreadable('it is not `links`, a map of agent ids to absolute paths, beside `moving`, a list of agent ids');
   }
-  return new Map(Object.entries(parsed as Record<string, string>));
+  return { links: new Map(Object.entries(links as Record<string, string>)), moving: new Set(moving as string[]) };
 };
 
 /** Replaced in one step, never rewritten in place, and removed once empty. */
-const saveLinkRecord = async (env: StateEnvironment, written: ReadonlyMap<string, string>): Promise<void> => {
+const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promise<void> => {
   const file = linkRecordPath(env);
-  if (written.size === 0) {
+  if (record.links.size === 0) {
     await rm(file, { force: true });
     return;
   }
   const replacement = `${file}.${randomUUID()}.tmp`;
+  const body = { links: Object.fromEntries(record.links), moving: [...record.moving] };
   try {
-    await writeFile(replacement, `${JSON.stringify(Object.fromEntries(written), null, 2)}\n`, { mode: 0o600 });
+    await writeFile(replacement, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
     await rename(replacement, file);
   } catch (error) {
     await rm(replacement, { force: true });
@@ -1397,7 +1412,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // ordinary command happened to create.
   const moved = new Set<string>();
   /** See `linkRecordPath`: this run's retargeted links and every earlier run's. */
-  const written = await readLinkRecord(env);
+  const record = await readLinkRecord(env);
+  const written = record.links;
   /**
    * The workspaces this run finished moving — positive evidence, unlike a
    * legacy pathname found absent, which an ordinary command holding no lock
@@ -1418,7 +1434,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    */
   const retireRecordsNaming = async (agentId: string): Promise<void> => {
     completed.add(agentId);
-    let changed = false;
+    let changed = record.moving.delete(agentId);
     for (const [peer, wrote] of written) {
       if (workspaceOwnerOf(wrote) === agentId) {
         written.delete(peer);
@@ -1426,9 +1442,32 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       }
     }
     if (changed) {
-      await saveLinkRecord(env, written);
+      await saveLinkRecord(env, record);
     }
   };
+  /**
+   * Marked before the step that cannot be taken back — the rename, or the
+   * unlink of a link's source — when an entry names this workspace, so a
+   * run that stops after it and before the retirement leaves the next one
+   * something to finish from.
+   */
+  const markMoving = async (agentId: string): Promise<void> => {
+    if ([...written.values()].some((wrote) => workspaceOwnerOf(wrote) === agentId)) {
+      record.moving.add(agentId);
+      await saveLinkRecord(env, record);
+    }
+  };
+  // What a stopped run marked: its move either happened — a rename is
+  // atomic, so the legacy entry is gone and the destination holds it — and
+  // its entries are retired now, or it did not, and the move is simply
+  // retried below with the entries still in force.
+  for (const agentId of [...record.moving]) {
+    if (await pathIsFree(path.join(legacy, agentId)) && !(await pathIsFree(agentWorkspacePath(env, agentId)))) {
+      await retireRecordsNaming(agentId);
+    } else {
+      record.moving.delete(agentId);
+    }
+  }
   /** The names this run left free, as opposed to deliberately left alone. */
   const emptied = new Set<string>();
   /**
@@ -1527,7 +1566,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       }
       await repointPeer(agentId, peer, peerTarget, path.join(from, below), wrote);
       written.delete(peer);
-      await saveLinkRecord(env, written);
+      await saveLinkRecord(env, record);
     }
   };
 
@@ -1726,6 +1765,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // it dangling whichever order the two are reached in. Such a target is
     // followed to where its workspace is going instead.
     const moveIntoPlace = async (): Promise<void> => {
+      await markMoving(agentId);
       if (entry.isSymbolicLink()) {
         const text = await readlink(from);
         const direct = path.resolve(path.dirname(from), text);
@@ -1750,7 +1790,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           const owner = resolved !== undefined ? workspaceOwnerOf(path.resolve(resolved)) : undefined;
           if (owner !== undefined && moved.has(owner) && !completed.has(owner)) {
             written.set(agentId, path.resolve(names));
-            await saveLinkRecord(env, written);
+            await saveLinkRecord(env, record);
           }
           await symlink(path.relative(path.dirname(target), names), target);
           // Both exist for an instant. A run killed here finds the source
