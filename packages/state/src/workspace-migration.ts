@@ -1390,45 +1390,49 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    * path. A cycle has no files of its own, so whatever is at that path is
    * never the cycle's.
    *
-   * Every such peer, found by what it names rather than by what this
-   * member names. In `ava -> bea -> cyd -> ava`, the link left naming
-   * `cyd`'s new path is `bea`'s, the member before `cyd`, not `ava`, the
-   * one `cyd` names. Following this member's own link only ever found the
-   * stale peer in a cycle of two.
+   * Found by walking the cycle from this member's own link, which is the
+   * evidence the peer belongs to it: each step is a member that moved (its
+   * legacy entry is gone) and whose new link names the next member's new
+   * path, the links this migration writes. In `ava -> bea -> cyd -> ava`
+   * with `cyd` staying, the walk goes `cyd` to `ava` to `bea`, and `bea`
+   * is the one naming `cyd`'s new path. A link an operator made in the new
+   * layout, `agents/ava/workspace -> ../bea/workspace` to share a live
+   * workspace, is never reached unless this member's own chain leads there,
+   * so an unrelated stale legacy link cannot have it rewritten.
    */
   const repointPeerNamingNewPath = async (agentId: string, from: string, target: string): Promise<void> => {
-    let entries: Dirent[];
-    try {
-      entries = await readdir(agentsDirPath(env), { withFileTypes: true });
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') {
-        return;
-      }
-      throw error;
-    }
-    for (const entry of entries) {
-      const peer = entry.name;
-      if (!entry.isDirectory() || peer === agentId || !isValidAgentId(peer)) {
-        continue;
-      }
+    const nextAfter = (resolved: string, root: string): string | undefined => {
+      const [segment] = path.relative(root, resolved).split(path.sep);
+      return segment !== undefined && segment !== '..' && segment !== '' && isValidAgentId(segment)
+        ? segment
+        : undefined;
+    };
+    const ownText = await linkText(from);
+    let peer = ownText === undefined
+      ? undefined
+      : insideLegacy(path.resolve(path.dirname(from), ownText))?.split(path.sep)[0];
+    const visited = new Set<string>([agentId]);
+    while (peer !== undefined && isValidAgentId(peer) && !visited.has(peer)) {
+      visited.add(peer);
       if (!(await pathIsFree(path.join(legacy, peer)))) {
-        continue;
+        return;
       }
       const peerTarget = agentWorkspacePath(env, peer);
       const peerText = await linkText(peerTarget);
       if (peerText === undefined) {
-        continue;
+        return;
       }
       // The path itself, or one below it: `ava -> bea/subdir` is recreated as
       // `agents/bea/workspace/subdir`, the suffix `migratedTarget` carries
       // across, and is pointed back with the same suffix below `from`.
       const named = path.resolve(path.dirname(peerTarget), peerText);
       const below = path.relative(target, named);
-      if (named !== target && (below.startsWith('..') || path.isAbsolute(below))) {
-        continue;
+      if (named === target || !(below.startsWith('..') || path.isAbsolute(below))) {
+        await repointPeer(agentId, peer, peerTarget, path.join(from, below), named);
+        return;
       }
-      await repointPeer(agentId, peer, peerTarget, path.join(from, below), named);
+      const next = nextAfter(named, agentsDirPath(env));
+      peer = next !== undefined && named.startsWith(agentWorkspacePath(env, next)) ? next : undefined;
     }
   };
 

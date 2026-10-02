@@ -1639,6 +1639,25 @@ test('a cycle peer that named a path below the member that stayed is pointed bac
   );
 });
 
+test('a link an operator made in the new layout is not taken for a cycle peer', async () => {
+  // A stale legacy link with an occupied destination, and elsewhere an
+  // operator's own `agents/ava/workspace -> ../bea/workspace` sharing bea's
+  // live workspace. ava is not reached from bea's link, so nothing proves
+  // it a cycle peer, and it must be left alone.
+  const home = await newHome();
+  const env = { homeDir: home };
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink('zed', path.join(legacyWorkspacesDirPath(env), 'bea'));
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await mkdir(path.join(agentsDirPath(env), 'ava'), { recursive: true });
+  await symlink(path.join('..', 'bea', 'workspace'), agentWorkspacePath(env, 'ava'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const avaTarget = agentWorkspacePath(env, 'ava');
+  assert.equal(path.resolve(path.dirname(avaTarget), await readlink(avaTarget)), agentWorkspacePath(env, 'bea'));
+});
+
 test('a cycle whose destination is occupied is quarantined, not an aborted upgrade', async () => {
   const home = await newHome();
   const env = { homeDir: home };
