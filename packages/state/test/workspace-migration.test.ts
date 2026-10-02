@@ -1914,6 +1914,25 @@ test('a recorded peer is repaired when the member that stays has a link that res
   assert.notEqual(await realpath(agentWorkspacePath(env, 'ava')), await realpath(agentWorkspacePath(env, 'bea')));
 });
 
+test('a recorded link that is briefly missing keeps its entry', async () => {
+  // ava's link is renamed aside for a pass — a backup, a mount that is
+  // briefly gone — and then put back while bea stays with its destination
+  // taken. Absence is not a different link, so ava is still repaired.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  const avaLink = agentWorkspacePath(env, 'ava');
+  const aside = path.join(agentsDirPath(env), 'ava', 'aside');
+  await rename(avaLink, aside);
+  await applyPerAgentWorkspaces(env);
+  await rename(aside, avaLink);
+
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there

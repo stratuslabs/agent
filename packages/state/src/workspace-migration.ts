@@ -1529,10 +1529,21 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // evidence any more — repaired by a run that stopped before saving so, or
   // changed by the operator. Kept, it would match a link the operator later
   // points at that same path, and rewrite theirs.
+  //
+  // Only on seeing something else there, though: a link renamed aside for a
+  // backup, or under a mount that is briefly gone, is not one that changed,
+  // and dropping its entry then would leave nothing to repair it from once
+  // it is back.
   for (const [peer, wrote] of [...written]) {
     const peerTarget = agentWorkspacePath(env, peer);
-    const peerText = await linkText(peerTarget);
-    if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
+    let names: string | undefined;
+    try {
+      const stats = await lstat(peerTarget);
+      names = stats.isSymbolicLink() ? path.resolve(path.dirname(peerTarget), await readlink(peerTarget)) : '';
+    } catch {
+      continue;
+    }
+    if (names !== wrote) {
       written.delete(peer);
     }
   }
