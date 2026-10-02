@@ -1201,8 +1201,17 @@ const isMoveProof = (value: unknown): value is MoveProof => {
     return false;
   }
   const { inode, link } = value as { inode?: unknown; link?: unknown };
+  // A link proof can name somewhere outside the home — a legacy link to
+  // `../../data/ava` keeps that target — and that one stays absolute, since
+  // no relative spelling of it survives the home moving either.
   return (typeof inode === 'string' && link === undefined)
-    || (isHomeRelative(link) && inode === undefined);
+    || ((isHomeRelative(link) || (typeof link === 'string' && path.isAbsolute(link))) && inode === undefined);
+};
+
+/** Relative to the home when inside it, absolute when not; `path.resolve(home, …)` reads either. */
+const asStored = (home: string, absolute: string): string => {
+  const relative = path.relative(home, absolute);
+  return isHomeRelative(relative) ? relative : absolute;
 };
 
 const inodeOf = (stats: { dev: number; ino: number }): string => `${stats.dev}:${stats.ino}`;
@@ -1266,7 +1275,7 @@ const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promis
   const body = {
     links: Object.fromEntries([...record.links].map(([agentId, named]) => [agentId, path.relative(home, named)])),
     moving: Object.fromEntries([...record.moving].map(([agentId, proof]) =>
-      [agentId, 'link' in proof ? { link: path.relative(home, proof.link) } : proof])),
+      [agentId, 'link' in proof ? { link: asStored(home, proof.link) } : proof])),
   };
   try {
     await writeFile(replacement, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });

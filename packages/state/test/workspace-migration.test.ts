@@ -1933,6 +1933,23 @@ test('a recorded link that is briefly missing keeps its entry', async () => {
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+test('a move proof naming somewhere outside the home reads back, rather than stopping every start', async () => {
+  // A legacy link to a directory outside `~/.stratus` keeps that target
+  // when it is recreated, and its move proof names it. Stored as a path
+  // relative to the home it would start with `..`, which the reader refuses
+  // as escaping the home, so a run that stopped before retiring it would have
+  // left every later `serve` and `update` refusing to start.
+  const home = await newHome();
+  await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'stratus-outside-'));
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as Record<string, unknown>;
+  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { link: outside } } }));
+
+  await applyPerAgentWorkspaces(env);
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there
