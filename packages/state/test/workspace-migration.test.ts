@@ -2003,7 +2003,9 @@ test('a pending link entry whose link is missing for a moment is kept, not taken
   await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
   const avaLink = agentWorkspacePath(env, 'ava');
   await rename(avaLink, `${avaLink}.bak`);
-  await applyPerAgentWorkspaces(env);
+  // Refused already: bea is known to stay put, and ava's link cannot be
+  // seen to be pointed back.
+  await assert.rejects(applyPerAgentWorkspaces(env), /could not be checked, and an earlier start stopped/);
   await rename(`${avaLink}.bak`, avaLink);
 
   await assert.rejects(applyPerAgentWorkspaces(env), /cannot be told whether this one is that start's or yours/);

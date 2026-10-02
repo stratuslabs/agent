@@ -1797,6 +1797,24 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   /** Enough for an occasional replacement; a link that keeps changing is something to stop, not race. */
   const REPOINT_ATTEMPTS = 3;
   const repointPeersNamingNewPath = async (agentId: string, from: string, target: string): Promise<void> => {
+    // A pending entry still here is one the scan at the start could not
+    // settle — its link missing or unreadable then — and it names the path of
+    // a member now known to stay put. Nothing can be repointed that cannot be
+    // seen, and finishing the start would let it come back naming whatever
+    // is at that path, so the start is refused just as for a missing
+    // confirmed link below.
+    for (const [peer, wrote] of record.pending) {
+      const below = path.relative(target, wrote);
+      if (below === '..' || below.startsWith(`..${path.sep}`) || path.isAbsolute(below)) {
+        continue;
+      }
+      throw new Error(
+        `${agentWorkspacePath(env, peer)} could not be checked, and an earlier start stopped while writing it as `
+        + `a link to ${wrote}, where ${JSON.stringify(agentId)} is not moving. Put the link back so it can be `
+        + `pointed at ${from}, or remove ${JSON.stringify(peer)} from \`pending\` in ${linkRecordPath(env)} if it `
+        + 'was never written, and start again.',
+      );
+    }
     for (const [peer, wrote] of written) {
       // The path itself, or one below it: `ava -> bea/subdir` is recreated as
       // `agents/bea/workspace/subdir`, the suffix `migratedTarget` carries
