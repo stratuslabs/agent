@@ -1363,6 +1363,54 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       === path.join(agentWorkspacePath(env, other), ...rest);
   };
 
+  /**
+   * Point a cycle peer back at where this member stayed, when it was
+   * recreated naming where this member was going.
+   *
+   * A cycle batch announces every member as moving before any of it moves,
+   * so that each can be recreated naming where its peer is going. The
+   * announcement checks that each destination is free; the move fills it
+   * later. An ordinary command holds no home lock and can take the
+   * destination in between. That member then stays put, as it should, but
+   * the peer already recreated naming its new path resolves to whatever
+   * took it: somebody else's files, with nothing left to say so (#220).
+   *
+   * Corrected to what a link to a target that stays put should name: the
+   * legacy path, where this member still is. The peer then leads nowhere,
+   * because this member is a link back to a path that has moved. That is
+   * what a cycle of links always did, and nowhere is safe where somebody
+   * else's workspace is not.
+   *
+   * Asked of what is on disk, not of what this run announced, so a home an
+   * earlier build left in this state is repaired on the next start: the
+   * pass that calls this runs every time, whatever the schema stamp says.
+   * The shape is precise. This member's own link names the peer, the
+   * peer's legacy entry is gone, and the peer's new link names this
+   * member's new path. A cycle has no files of its own, so whatever is at
+   * that path is never the cycle's.
+   */
+  const repointPeerNamingNewPath = async (agentId: string, from: string, target: string): Promise<void> => {
+    const text = await linkText(from);
+    const peer = text === undefined ? undefined : insideLegacy(path.resolve(path.dirname(from), text))?.split(path.sep)[0];
+    if (peer === undefined || peer === agentId || !isValidAgentId(peer)) {
+      return;
+    }
+    if (!(await pathIsFree(path.join(legacy, peer)))) {
+      return;
+    }
+    const peerTarget = agentWorkspacePath(env, peer);
+    const peerText = await linkText(peerTarget);
+    if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== target) {
+      return;
+    }
+    await unlink(peerTarget);
+    await symlink(path.relative(path.dirname(peerTarget), from), peerTarget);
+    report.quarantined.push(
+      `${peer} — named ${path.relative(stratusHomePath(env), target)}, where ${JSON.stringify(agentId)} was due to `
+      + `move and did not, so it names ${path.relative(stratusHomePath(env), from)} instead`,
+    );
+  };
+
   const move = async (entry: Dirent): Promise<void> => {
     if (!isWorkspaceEntry(entry)) {
       return;
@@ -1403,6 +1451,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // nothing to fold and nothing at risk in not folding it.
       const leadsNowhere = entry.isSymbolicLink() && !(await resolves(from));
       if (leadsNowhere && !(await destinationIsOurRecreate(from, target))) {
+        // Staying put, whatever was announced: a cycle batch adds every
+        // member to `moved` before any of it moves, and a member found here
+        // is one that will not. A dependent still to come must keep naming
+        // where it is.
+        moved.delete(agentId);
+        await repointPeerNamingNewPath(agentId, from, target);
         report.quarantined.push(
           `${agentId} — ${here} leads nowhere and ${there} is already there, so both were left as they are`,
         );

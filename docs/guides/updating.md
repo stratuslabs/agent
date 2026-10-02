@@ -142,6 +142,13 @@ as `workspaces/ava -> /srv/stratus/shared -> workspaces/bea`, since the
 alias is not this migration's to rewrite and keeping it would leave `ava`
 naming nothing. That agent's link is retargeted at the workspace itself, so
 repointing the alias afterwards no longer moves it.
+Two links that name each other (`ava -> bea`, `bea -> ava`) move together,
+each pointed at where the other is going. If something takes one member's
+new path before that member moves, the member stays put, and its peer is
+pointed back at where it stayed rather than at what took its place. The
+pair then leads nowhere, as it did before, instead of reaching somebody
+else's files. The report names the peer, and every later start repairs a
+home left that way.
 The ledger's own records follow the move — they are absolute paths, and
 every binary an MCP server returned was written and recorded *inside* the
 workspace, so leaving them would strip the label off each one. They are

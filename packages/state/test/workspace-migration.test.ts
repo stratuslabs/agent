@@ -1553,6 +1553,44 @@ test('a link at the legacy directory itself keeps it, rather than having it swep
   assert.deepEqual(await readdir(legacyWorkspacesDirPath(env)), []);
 });
 
+test('a cycle peer left naming a member that never moved is pointed back at where it stayed', async () => {
+  // A cycle batch announces every member as moving, then moves them one at
+  // a time. If something takes bea's destination after the announcement
+  // and before bea's own move, bea rightly stays put, but ava has already
+  // been recreated naming bea's new path, and resolves to whatever took it:
+  // somebody else's files (#220).
+  //
+  // The window is two adjacent operations inside one run, and nothing here
+  // asserts timing, so the state that window leaves is built directly. The
+  // pass runs again on every start, so this is also the repair a home in
+  // that state gets.
+  const home = await newHome();
+  const env = { homeDir: home };
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  // bea stayed: its legacy link still names ava's legacy path, which ava's
+  // move unlinked.
+  await symlink('ava', path.join(legacyWorkspacesDirPath(env), 'bea'));
+  // ava moved, recreated naming where bea was going.
+  await mkdir(path.join(agentsDirPath(env), 'ava'), { recursive: true });
+  await symlink(path.join('..', 'bea', 'workspace'), agentWorkspacePath(env, 'ava'));
+  // And what took bea's destination, which is not ava's to read.
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'bea'), 'theirs.md'), 'not ava\'s');
+
+  const results = await runStateMigrations(env, { exclusive: true });
+  const line = results.find((result) => result.id === MIGRATION)?.detail ?? '';
+
+  const avaTarget = agentWorkspacePath(env, 'ava');
+  assert.equal(
+    path.resolve(path.dirname(avaTarget), await readlink(avaTarget)),
+    path.join(legacyWorkspacesDirPath(env), 'bea'),
+  );
+  // Nothing of bea's side is touched, and the report says what changed.
+  assert.equal(await readlink(path.join(legacyWorkspacesDirPath(env), 'bea')), 'ava');
+  assert.equal(await readFile(path.join(agentWorkspacePath(env, 'bea'), 'theirs.md'), 'utf8'), 'not ava\'s');
+  assert.match(line, /ava — named agents\/bea\/workspace, where "bea" was due to move and did not/);
+});
+
 test('a cycle whose destination is occupied is quarantined, not an aborted upgrade', async () => {
   const home = await newHome();
   const env = { homeDir: home };
