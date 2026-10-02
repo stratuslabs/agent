@@ -4690,6 +4690,20 @@ test('doctor flags a trusted config other users can read, and not a project-loca
   assert.match(unreadable.output.stdout, /can be read by other users/);
 });
 
+test('doctor suggests no chmod for a config path that is a directory', async () => {
+  // Reported as unreadable instead; `chmod 600` on a directory would only
+  // strip its search bit.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus', 'config.json'), { recursive: true, mode: 0o755 });
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+  assert.doesNotMatch(output.stdout, /chmod 600/);
+});
+
 test('doctor quotes the path in the chmod it suggests', async () => {
   // Pasted into a shell, an unquoted home with a space in it chmods the
   // wrong paths.

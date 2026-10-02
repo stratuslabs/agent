@@ -162,7 +162,13 @@ export const collectDoctorReport = async (
     for (const candidate of candidates.filter((entry) => entry.label !== 'project')) {
       let mode: number;
       try {
-        mode = (await stat(candidate.path)).mode & 0o777;
+        const stats = await stat(candidate.path);
+        // A directory where the file belongs is reported above as
+        // unreadable; `chmod 600` on it would only take away its search bit.
+        if (!stats.isFile()) {
+          continue;
+        }
+        mode = stats.mode & 0o777;
       } catch {
         // Not there, or not something to stat: reported above if it matters.
         continue;
