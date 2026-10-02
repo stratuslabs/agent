@@ -1653,22 +1653,33 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    */
   const repointPeersNamingNewPath = async (agentId: string, from: string, target: string): Promise<void> => {
     for (const [peer, wrote] of written) {
-      const peerTarget = agentWorkspacePath(env, peer);
-      // Its identity as well as its text, so the swap below can tell whether
-      // the entry it replaces is still the one checked here.
-      const observed = await lstat(peerTarget).catch(() => undefined);
-      const peerText = await linkText(peerTarget);
-      // Still naming what this run wrote: anything else is not ours to touch.
-      if (observed === undefined || peerText === undefined
-        || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
-        continue;
-      }
       // The path itself, or one below it: `ava -> bea/subdir` is recreated as
       // `agents/bea/workspace/subdir`, the suffix `migratedTarget` carries
       // across, and is pointed back with the same suffix below `from`. By
       // segment: `..cache` is a name inside the workspace, not a way out.
       const below = path.relative(target, wrote);
       if (below === '..' || below.startsWith(`..${path.sep}`) || path.isAbsolute(below)) {
+        continue;
+      }
+      const peerTarget = agentWorkspacePath(env, peer);
+      // Its identity as well as its text, so the swap below can tell whether
+      // the entry it replaces is still the one checked here.
+      const observed = await lstat(peerTarget).catch(() => undefined);
+      // Missing now — renamed aside for a backup, under a mount that is away
+      // — but recorded naming the path of a member that is staying put. Put
+      // back after this pass, it would name that path again until the next
+      // restart, so the start is refused until it can be seen.
+      if (observed === undefined) {
+        throw new Error(
+          `${peerTarget} is missing, and it was last ${JSON.stringify(peer)}'s link to ${wrote}, where `
+          + `${JSON.stringify(agentId)} is not moving. Put the link back so it can be pointed at ${from}, `
+          + `or remove ${JSON.stringify(peer)} from ${linkRecordPath(env)} if you replaced it on purpose, `
+          + 'and start again.',
+        );
+      }
+      const peerText = await linkText(peerTarget);
+      // Still naming what this run wrote: anything else is not ours to touch.
+      if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
         continue;
       }
       if (await repointPeer(agentId, peer, peerTarget, path.join(from, below), wrote, inodeOf(observed))) {

@@ -1916,7 +1916,7 @@ test('a recorded peer is repaired when the member that stays has a link that res
   assert.notEqual(await realpath(agentWorkspacePath(env, 'ava')), await realpath(agentWorkspacePath(env, 'bea')));
 });
 
-test('a recorded link that is briefly missing keeps its entry', async () => {
+test('a recorded link that is briefly missing keeps its entry, and the start is refused until it is back', async () => {
   // ava's link is renamed aside for a pass — a backup, a mount that is
   // briefly gone — and then put back while bea stays with its destination
   // taken. Absence is not a different link, so ava is still repaired.
@@ -1927,7 +1927,9 @@ test('a recorded link that is briefly missing keeps its entry', async () => {
   const avaLink = agentWorkspacePath(env, 'ava');
   const aside = path.join(agentsDirPath(env), 'ava', 'aside');
   await rename(avaLink, aside);
-  await applyPerAgentWorkspaces(env);
+  // bea stays and ava cannot be seen to repair, so the start is refused
+  // rather than leaving ava to name bea's new path once it is back.
+  await assert.rejects(applyPerAgentWorkspaces(env), /is missing, and it was last "ava"'s link/);
   await rename(aside, avaLink);
 
   await applyPerAgentWorkspaces(env);

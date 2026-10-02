@@ -152,10 +152,12 @@ one. Only links the move itself pointed somewhere new are corrected, and
 it keeps a record of those in `~/.stratus/workspace-links.json` until each
 one's target has moved, so a start that was interrupted is finished by the
 next one. A chain of links you made yourself in the new layout is never
-rewritten. One case stops a start instead: a workspace that was being
-moved when Stratus stopped, whose old and new paths are both missing. It
-cannot tell then whether the move finished, so it names both paths and
-refuses to start until you put back whichever one you moved.
+rewritten. Two cases stop a start instead, each naming the paths
+involved: a workspace that was being moved when Stratus stopped, whose old
+and new paths are both missing, so it cannot tell whether the move
+finished; and a link the move had pointed somewhere new that is missing
+when it needs pointing back. Put back whatever you moved aside, and start
+again.
 The ledger's own records follow the move — they are absolute paths, and
 every binary an MCP server returned was written and recorded *inside* the
 workspace, so leaving them would strip the label off each one. They are
