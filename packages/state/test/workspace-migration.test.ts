@@ -2055,6 +2055,24 @@ test('a recorded peer is pointed back when its target\'s agent directory is refu
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+test('a recorded peer whose agent directory became a link is left alone, not rewritten outside the home', async () => {
+  // `agents/ava` was moved to another tree and linked back. Its workspace
+  // link reads `../bea/workspace` just as before, so by text it still names
+  // bea's new path, but it lives outside the home now: repointing it would
+  // rename over a file there.
+  const home = await newHome();
+  await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await rename(path.join(agentsDirPath(env), 'ava'), path.join(elsewhere, 'ava'));
+  await symlink(path.join(elsewhere, 'ava'), path.join(agentsDirPath(env), 'ava'));
+
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await readlink(path.join(elsewhere, 'ava', 'workspace')), path.join('..', 'bea', 'workspace'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there

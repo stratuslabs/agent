@@ -20,6 +20,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { isValidAgentId } from '@stratusagent/agents';
+import { linkedDerivedComponent } from '@stratusagent/permissions';
 import { LEDGER_FILENAME } from '@stratusagent/plugins';
 
 import { type StateEnvironment } from './environment.ts';
@@ -1662,6 +1663,19 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         continue;
       }
       const peerTarget = agentWorkspacePath(env, peer);
+      // Derived state is never followed through a link, and an `agents/<id>`
+      // that became one since the record was written puts this link in
+      // another tree: `lstat` would follow it there, its relative text would
+      // read against the wrong directory, and the rename would land outside
+      // the home. Not ours to touch — the daemon refuses that agent anyway.
+      const linked = await linkedDerivedComponent(stratusHomePath(env), path.dirname(peerTarget));
+      if (linked !== undefined) {
+        report.quarantined.push(
+          `${peer} — ${path.relative(stratusHomePath(env), linked)} is a symbolic link, so its workspace link was `
+          + `left as it is rather than pointed at ${path.relative(stratusHomePath(env), from)}`,
+        );
+        continue;
+      }
       // Its identity as well as its text, so the swap below can tell whether
       // the entry it replaces is still the one checked here.
       const observed = await lstat(peerTarget).catch(() => undefined);
