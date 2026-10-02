@@ -1509,10 +1509,15 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   const retireRecordsNaming = async (agentId: string): Promise<void> => {
     completed.add(agentId);
     let changed = record.moving.delete(agentId);
-    for (const [peer, wrote] of written) {
-      if (workspaceOwnerOf(wrote) === agentId) {
-        written.delete(peer);
-        changed = true;
+    // A pending entry too: one a start could not inspect, kept for a later
+    // one, would otherwise outlive the move that made its link right and
+    // read as ambiguous on every start after.
+    for (const entries of [written, record.pending]) {
+      for (const [peer, wrote] of entries) {
+        if (workspaceOwnerOf(wrote) === agentId) {
+          entries.delete(peer);
+          changed = true;
+        }
       }
     }
     if (changed) {
