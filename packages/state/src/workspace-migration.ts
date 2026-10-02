@@ -1652,6 +1652,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    * `cyd -> ava`, all three wait on one another, so all are announced, and
    * both `ava` and `bea` are recreated naming `cyd`'s new path.
    */
+  /** Enough for an occasional replacement; a link that keeps changing is something to stop, not race. */
+  const REPOINT_ATTEMPTS = 3;
   const repointPeersNamingNewPath = async (agentId: string, from: string, target: string): Promise<void> => {
     for (const [peer, wrote] of written) {
       // The path itself, or one below it: `ava -> bea/subdir` is recreated as
@@ -1676,29 +1678,42 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         );
         continue;
       }
-      // Its identity as well as its text, so the swap below can tell whether
-      // the entry it replaces is still the one checked here.
-      const observed = await lstat(peerTarget).catch(() => undefined);
-      // Missing now — renamed aside for a backup, under a mount that is away
-      // — but recorded naming the path of a member that is staying put. Put
-      // back after this pass, it would name that path again until the next
-      // restart, so the start is refused until it can be seen.
-      if (observed === undefined) {
+      // Checked and swapped as one attempt, asked again whenever the entry is
+      // replaced between the two: a copy of the very same link is still the
+      // link this repair is for, and returning without it would start the
+      // daemon with that copy naming the path of a member that stays put.
+      let settled = false;
+      for (let attempt = 0; attempt < REPOINT_ATTEMPTS && !settled; attempt += 1) {
+        // Its identity as well as its text, so the swap can tell whether the
+        // entry it replaces is still the one checked here.
+        const observed = await lstat(peerTarget).catch(() => undefined);
+        // Missing now — renamed aside for a backup, under a mount that is
+        // away — but recorded naming the path of a member that is staying
+        // put. Put back after this pass, it would name that path again until
+        // the next restart, so the start is refused until it can be seen.
+        if (observed === undefined) {
+          throw new Error(
+            `${peerTarget} is missing, and it was last ${JSON.stringify(peer)}'s link to ${wrote}, where `
+            + `${JSON.stringify(agentId)} is not moving. Put the link back so it can be pointed at ${from}, `
+            + `or remove ${JSON.stringify(peer)} from ${linkRecordPath(env)} if you replaced it on purpose, `
+            + 'and start again.',
+          );
+        }
+        const peerText = await linkText(peerTarget);
+        // Still naming what this run wrote: anything else is not ours to touch.
+        if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
+          settled = true;
+        } else if (await repointPeer(agentId, peer, peerTarget, path.join(from, below), wrote, inodeOf(observed))) {
+          written.delete(peer);
+          await saveLinkRecord(env, record);
+          settled = true;
+        }
+      }
+      if (!settled) {
         throw new Error(
-          `${peerTarget} is missing, and it was last ${JSON.stringify(peer)}'s link to ${wrote}, where `
-          + `${JSON.stringify(agentId)} is not moving. Put the link back so it can be pointed at ${from}, `
-          + `or remove ${JSON.stringify(peer)} from ${linkRecordPath(env)} if you replaced it on purpose, `
-          + 'and start again.',
+          `${peerTarget} kept being replaced while it was being pointed at ${from}, each time still naming `
+          + `${wrote}, where ${JSON.stringify(agentId)} is not moving. Stop whatever is rewriting it, and start again.`,
         );
-      }
-      const peerText = await linkText(peerTarget);
-      // Still naming what this run wrote: anything else is not ours to touch.
-      if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
-        continue;
-      }
-      if (await repointPeer(agentId, peer, peerTarget, path.join(from, below), wrote, inodeOf(observed))) {
-        written.delete(peer);
-        await saveLinkRecord(env, record);
       }
     }
   };
