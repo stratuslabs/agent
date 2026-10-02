@@ -26,6 +26,7 @@ import {
   legacyWorkspacesDirPath,
   surveyLegacyWorkspaces,
   type LegacyWorkspaceState,
+  quoteShellArg,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
 import { serviceEnvFor } from '../daemon.ts';
@@ -153,16 +154,24 @@ export const collectDoctorReport = async (
   // trusted config: a project-local one sits in a checkout at whatever mode
   // git gave it, and cannot set a plugin's config anyway. Every trusted one
   // that is there, not only the one in use: a global config a project file
-  // shadows for this run still holds its secrets on disk. Windows has no
-  // mode bits to read.
+  // shadows for this run still holds its secrets on disk. Asked of the
+  // candidates themselves rather than of what discovery reached, since a
+  // project file that cannot be read stops discovery before the global one.
+  // Windows has no mode bits to read.
   if (process.platform !== 'win32') {
-    for (const candidate of present.filter((entry) => entry.label !== 'project')) {
-      const mode = (await stat(candidate.path)).mode & 0o777;
+    for (const candidate of candidates.filter((entry) => entry.label !== 'project')) {
+      let mode: number;
+      try {
+        mode = (await stat(candidate.path)).mode & 0o777;
+      } catch {
+        // Not there, or not something to stat: reported above if it matters.
+        continue;
+      }
       if ((mode & 0o077) !== 0) {
         problems.push(
           `${candidate.path} can be read by other users on this machine (mode ${mode.toString(8)}), and it holds `
           + "any secret in your plugin config, such as tool-shell's env block. "
-          + `Run \`chmod 600 ${candidate.path}\`; Stratus writes it that way from now on.`,
+          + `Run \`chmod 600 ${quoteShellArg(candidate.path)}\`; Stratus writes it that way from now on.`,
         );
       }
     }

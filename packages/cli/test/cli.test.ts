@@ -4676,6 +4676,35 @@ test('doctor flags a trusted config other users can read, and not a project-loca
     env: { cwd: project, homeDir: home, processEnv: {} },
   });
   assert.match(shadowed.output.stdout, new RegExp(`${configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} can be read by other users`));
+
+  // Even when the project candidate cannot be read, which stops discovery
+  // before it ever reaches the global file.
+  const blocked = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await mkdir(path.join(blocked, 'stratus.config.json'));
+  const unreadable = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: unreadable.streams,
+    env: { cwd: blocked, homeDir: home, processEnv: {} },
+  });
+  assert.match(unreadable.output.stdout, /can be read by other users/);
+});
+
+test('doctor quotes the path in the chmod it suggests', async () => {
+  // Pasted into a shell, an unquoted home with a space in it chmods the
+  // wrong paths.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus home with space-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await writeFile(configPath, JSON.stringify({ provider: 'demo' }), { mode: 0o644 });
+  await chmod(configPath, 0o644);
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+  assert.ok(output.stdout.includes(`chmod 600 '${configPath}'`), output.stdout);
 });
 
 test('doctor explains a demo provider instead of leaving it a mystery', async () => {
