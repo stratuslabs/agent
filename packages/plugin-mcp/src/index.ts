@@ -16,6 +16,7 @@ import {
   type Session,
   type Tool,
   type ToolRegistry,
+  type TrustLevel,
 } from '@stratusagent/core';
 import { createFileLedger, workspacePreparer, workspaceResolver, type TaintedWriteLedger } from '@stratusagent/plugins';
 
@@ -125,6 +126,11 @@ export interface McpServerSpec {
    * cap up for the rest.
    */
   maxResultChars: number;
+  /**
+   * The label this server's results carry: `servers.<name>.outputTrust`,
+   * `external` by default. See `resolveOutputTrust`.
+   */
+  outputTrust: TrustLevel;
 }
 
 export interface McpPluginOptions {
@@ -261,6 +267,39 @@ const pathGrant = (
   return value !== undefined && value.length > 0 ? value : undefined;
 };
 
+/**
+ * What an operator may say about a server's output, read from
+ * `servers.<name>.outputTrust`.
+ *
+ * Every bridged result was `external` unconditionally, and memory written
+ * after one is capped at the session's lowest label — so an agent doing
+ * real work through an operator's own internal server labelled every fact
+ * it remembered afterwards as a stranger's, and the label stopped telling
+ * anything apart (#224). The operator can now vouch for a server they
+ * run: `agent` for one whose output is as good as the agent's own work,
+ * `unknown` for one that is theirs but relays text from elsewhere.
+ *
+ * Never `user`: that label means a person said it, which no server's
+ * output is. And it is the operator's word only — the `plugins` block is
+ * read from a trusted config alone, so neither a cloned repository nor
+ * the server itself can raise it.
+ */
+const resolveOutputTrust = (value: unknown, where: string): TrustLevel => {
+  if (value === undefined) {
+    return 'external';
+  }
+  if (value === 'agent' || value === 'unknown' || value === 'external') {
+    return value;
+  }
+  if (value === 'user') {
+    throw new McpConfigError(
+      `${where}.outputTrust cannot be "user": that label means a person said it, and a server's output never is. `
+      + 'Use "agent" for a server whose output you trust as much as the agent\'s own work.',
+    );
+  }
+  throw new McpConfigError(`${where}.outputTrust must be "agent", "unknown", or "external" (the default).`);
+};
+
 const resolveServerSpec = (
   name: string,
   block: unknown,
@@ -354,6 +393,7 @@ const resolveServerSpec = (
     // spec feeds, the protocol-error path included — that one bounds its
     // message directly and never passes through `normalizeCallResult`.
     maxResultChars: boundedResultLimit(asPositiveInteger(block.maxResultChars, BRIDGED_RESULT_MAX_LENGTH)),
+    outputTrust: resolveOutputTrust(block.outputTrust, where),
   };
 };
 
@@ -819,11 +859,12 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     // the manifest-bound view — the server's opinion of itself never
     // enters, and neither does this package's.
     //
-    // Provenance is a different question with one answer: whatever comes
-    // back is the server's text, written by a party the operator did not
-    // author — so every bridged result is `external`, and no per-call
-    // judgement of the response shape could make it otherwise.
-    outputTrust: 'external',
+    // Provenance is a different question, and the operator's to answer, not
+    // the server's: whatever comes back is the server's text, so it is
+    // `external` unless the operator vouched for this server in trusted
+    // config (see `resolveOutputTrust`). No per-call judgement of the
+    // response shape could make it otherwise.
+    outputTrust: state.spec.outputTrust,
     async execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue> {
       const client = state.connected ? state.client : undefined;
       if (!client) {
@@ -885,6 +926,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         tool: info.mcpName,
         agentId: session.agent.id,
         maxResultChars: state.spec.maxResultChars,
+        trust: state.spec.outputTrust,
         ...(resolve !== undefined ? { workspace: () => resolve(session.agent.id) } : {}),
         ...(ledger !== undefined ? { ledger } : {}),
       });
