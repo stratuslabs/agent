@@ -1588,7 +1588,7 @@ test('a cycle peer left naming a member that never moved is pointed back at wher
   // Nothing of bea's side is touched, and the report says what changed.
   assert.equal(await readlink(path.join(legacyWorkspacesDirPath(env), 'bea')), 'ava');
   assert.equal(await readFile(path.join(agentWorkspacePath(env, 'bea'), 'theirs.md'), 'utf8'), 'not ava\'s');
-  assert.match(line, /ava — named agents\/bea\/workspace, where "bea" was due to move and did not/);
+  assert.match(line, /ava — named agents\/bea\/workspace, below where "bea" was due to move and did not/);
   // Replaced in one step: nothing left beside it from the swap.
   assert.deepEqual(await readdir(path.join(agentsDirPath(env), 'ava')), ['workspace']);
 });
@@ -1616,6 +1616,27 @@ test('in a longer cycle, the member left naming the one that stayed is the one p
   assert.equal(await reached('bea'), path.join(legacyWorkspacesDirPath(env), 'cyd'));
   // ava named bea's new path, where bea really is, and is left alone.
   assert.equal(await reached('ava'), agentWorkspacePath(env, 'bea'));
+});
+
+test('a cycle peer that named a path below the member that stayed is pointed back with that path', async () => {
+  // `ava -> bea/subdir` is recreated as `agents/bea/workspace/subdir`. If bea
+  // then stays because its destination was taken, ava resolves into what
+  // took it, and an exact match on bea's new path never found it.
+  const home = await newHome();
+  const env = { homeDir: home };
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink('ava', path.join(legacyWorkspacesDirPath(env), 'bea'));
+  await mkdir(path.join(agentsDirPath(env), 'ava'), { recursive: true });
+  await symlink(path.join('..', 'bea', 'workspace', 'subdir'), agentWorkspacePath(env, 'ava'));
+  await mkdir(path.join(agentWorkspacePath(env, 'bea'), 'subdir'), { recursive: true });
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const avaTarget = agentWorkspacePath(env, 'ava');
+  assert.equal(
+    path.resolve(path.dirname(avaTarget), await readlink(avaTarget)),
+    path.join(legacyWorkspacesDirPath(env), 'bea', 'subdir'),
+  );
 });
 
 test('a cycle whose destination is occupied is quarantined, not an aborted upgrade', async () => {

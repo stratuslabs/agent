@@ -1417,10 +1417,18 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       }
       const peerTarget = agentWorkspacePath(env, peer);
       const peerText = await linkText(peerTarget);
-      if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== target) {
+      if (peerText === undefined) {
         continue;
       }
-      await repointPeer(agentId, peer, peerTarget, from, target);
+      // The path itself, or one below it: `ava -> bea/subdir` is recreated as
+      // `agents/bea/workspace/subdir`, the suffix `migratedTarget` carries
+      // across, and is pointed back with the same suffix below `from`.
+      const named = path.resolve(path.dirname(peerTarget), peerText);
+      const below = path.relative(target, named);
+      if (named !== target && (below.startsWith('..') || path.isAbsolute(below))) {
+        continue;
+      }
+      await repointPeer(agentId, peer, peerTarget, path.join(from, below), named);
     }
   };
 
@@ -1445,7 +1453,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       throw error;
     }
     report.quarantined.push(
-      `${peer} — named ${path.relative(stratusHomePath(env), target)}, where ${JSON.stringify(agentId)} was due to `
+      `${peer} — named ${path.relative(stratusHomePath(env), target)}, below where ${JSON.stringify(agentId)} was due to `
       + `move and did not, so it names ${path.relative(stratusHomePath(env), from)} instead`,
     );
   };
