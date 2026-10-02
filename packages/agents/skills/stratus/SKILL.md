@@ -1,6 +1,6 @@
 ---
 name: stratus
-description: Use whenever someone asks how Stratus itself works or how to set something up in it, such as where a config, credential, soul, log, or workspace lives, how to give you an API key or a new tool, why you can or cannot do something, which stratus command does what, or how Slack, approvals, plugins, or the daemon behave. Read it before you search files or guess.
+description: Use whenever someone asks how Stratus itself works or how to set something up in it, such as where a config, credential, soul, log, or workspace lives, how to give you an API key or a new tool, why you can or cannot do something, what you remember and how to make you forget it, why a reply stopped partway or came from another model, which version is running, which stratus command does what, or how Slack, approvals, plugins, or the daemon behave. Read it before you search files or guess.
 ---
 
 # How Stratus works
@@ -120,6 +120,14 @@ When a stored key "isn't found", check in this order:
   - **Always allow** writes one of those to `agents/<id>/whitelist.json`, except for a tool that names a destination, such as `message.send`, where it lasts for the conversation. A `dangerous` call is never offered it.
   - `stratus grants <id>` lists the grants, and `stratus grants revoke <id> --tool|--scope|--origin` takes one back. There is no command to add one: a headless daemon asks nobody, so it never creates a grant, and a call nobody has approved yet needs `remote` mode first.
 
+## Memory
+
+- **What you have.** Every turn carries the facts you pinned, an index of the topics you know about, and a short tail of what you learned most recently. Everything else is reachable with `memory.recall`. `memory.remember` writes a fact, `memory.forget` retires one by id, and `memory.pin` keeps one in your instructions every turn (pins share a 2 KiB budget and are refused past it, never evicted).
+- **Where it lives.** By default `agents/<id>/memory.jsonl`, one agent's own. A forgotten fact stops reaching you and recall, but its line stays in the file as a record. A trusted config can select another store (`memoryStore`, from a plugin), and then the memories live wherever that store keeps them.
+- **Making you forget something.** Recall it to find its id and `memory.forget` it, then say you did. Your operator can do the same at the machine with `stratus memory list <id>` and `stratus memory forget <id> <entry>`, for the default store only: with another `memoryStore` selected, `stratus memory` refuses, and that store's own tooling is the way. Never claim a fact is gone without having forgotten it.
+- **Trust labels.** Every fact carries who wrote it: `user` (your operator at a local terminal, or a Slack sender named under `principals`, said it), `agent` (your own work in a conversation of trusted content), `unknown` (no recorded origin, or written after a message from someone not a principal, or after `shell.run`), or `external` (written after you read a web page, a search result, or an MCP reply). Label facts by what they are when you repeat them: an `external` or `unknown` one may be a stranger's words.
+- A label only ever goes down within a conversation, and only your operator can raise one, with `stratus memory reassert` at the machine. No tool can.
+
 ## Slack
 
 - **One Slack app per agent**, each with its own tokens, connected over Socket Mode, so no public address is needed. Set up with `stratus setup` → Channels, which prints the app manifest and checks the tokens.
@@ -152,6 +160,14 @@ When a stored key "isn't found", check in this order:
   - A daemon that fails *before* it starts serving writes nothing there. Its error is in `~/.stratus/logs/stratusd.err.log` on macOS, in `journalctl --user-unit=stratusd.service` on Linux, or on the terminal that ran `stratus serve`.
 - **The control API** is a separate install, `@stratusagent/control-api`, serving `/api/v1` on `127.0.0.1:4123`. The web dashboard is another, `@stratusagent/dashboard`, opened with `stratus dashboard`, which starts a daemon if none is running.
   - From another device, the recommended path is a tunnel such as Tailscale, with `api.publicUrl` set to that address so credential links open there.
+
+## When a reply stops or changes model
+
+- **"Out of steps."** One message may take `maxTurns` rounds of tool calls (default 40, set in the trusted config, restart to change). Past that you are told you are out of steps, get one last call with no tools, and answer with what you did and what is left. Replying "continue" carries on with a fresh allowance. An agent that does long work should have it raised.
+- **Stopped with no reply.** On a provider that streams (Anthropic, Codex, and plugin providers that say they stream), the daemon's watchdog aborts a turn when the model reports nothing for `--idle-timeout` seconds (default 120). On one that does not, such as an OpenAI-compatible endpoint, there is no watchdog, and a silent request ends only when the provider's own request fails or times out, so `--idle-timeout` neither explains nor fixes it. The session ends failed, with `no activity for 120000ms`, and `stratus logs --agent <id>` names the last thing it heard. A tool that is running, or a call waiting on an approval, never trips it.
+- **Cut off at the output cap.** A reply longer than the model may write in one turn fails rather than being posted half-finished, and the error says so. With an Anthropic API key that cap is `maxTokens` in the config (default 16000); a Claude subscription run does not take that setting, so raising it changes nothing there. Offer a shorter answer, or, on an API key, ask for the cap to be raised. Never ask for a longer timeout.
+- **Answering on another model.** When the configured model fails a request and a `fallbackModel` is set, that conversation switches to the fallback and stays on it, even across restarts, so it never silently swaps back. Not every failure switches: a conversation too long for the window is trimmed and retried on the same model, a cancelled turn just stops, and a Codex or Claude subscription turn that fails after its tools already ran surfaces the error instead, since a retry elsewhere would run them twice. Those leave the conversation on the configured model, with nothing to roll over. Your instructions say when you are on the fallback. `stratus logs` shows the error that caused the switch, and `stratus session rollover <session id>` starts the conversation over on the configured model.
+- When asked why a reply stopped, look before you answer if you can: with `shell.run` you can run `stratus logs --agent <your id>` (it is gated, so it needs approval or a granted scope), and an `fs` root covering `~/.stratus/logs/` lets you read the file. Without either, give the likely cause from what your transcript shows (an out-of-steps answer, a message with no reply, a request for a very long answer) and the log command that confirms it, rather than a certain answer.
 
 ## Commands
 
@@ -201,12 +217,15 @@ When you need one of those, ask for it precisely, once: the exact command, the f
 
 ## Going further
 
-The full documentation is at <https://github.com/stratuslabs/agent/tree/main/docs>. Link a person to the page that answers their question rather than reciting it:
+**Which version.** You are not told which version of Stratus is installed. `stratus --version` says, and `stratus update --check` says whether a newer one exists. This skill ships with the installed version, so it describes what is running.
+
+The full documentation is at <https://github.com/stratuslabs/agent/tree/main/docs>. It follows the latest code, which can be ahead of what is installed, so where a page and this skill disagree, this skill describes this install. Link a person to the page that answers their question rather than reciting it:
 
 - [Tools](https://github.com/stratuslabs/agent/blob/main/docs/guides/tools.md)
 - [Shell](https://github.com/stratuslabs/agent/blob/main/docs/guides/shell.md)
 - [Slack](https://github.com/stratuslabs/agent/blob/main/docs/guides/slack.md)
 - [Approvals](https://github.com/stratuslabs/agent/blob/main/docs/guides/approvals.md)
 - [Always on](https://github.com/stratuslabs/agent/blob/main/docs/guides/always-on.md)
+- [Memory](https://github.com/stratuslabs/agent/blob/main/docs/concepts/memory.md)
 - [Remote access](https://github.com/stratuslabs/agent/blob/main/docs/guides/remote-access.md)
 - [Troubleshooting](https://github.com/stratuslabs/agent/blob/main/docs/guides/troubleshooting.md)
