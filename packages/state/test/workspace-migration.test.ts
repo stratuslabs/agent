@@ -1720,6 +1720,37 @@ test('a cycle torn by a run that stopped is still repaired by the next one', asy
   await assert.rejects(lstat(path.join(home, '.stratus', 'workspace-links.json')), { code: 'ENOENT' });
 });
 
+test('a pending link record outlives a pass that found its target briefly missing', async () => {
+  // Ordinary commands hold no home lock, so a legacy entry can be absent for
+  // one pass and back for the next. Absence is not evidence the workspace
+  // moved; only a move this migration completed is, and here none did.
+  const home = await newHome();
+  const legacyDir = legacyWorkspacesDirPath({ homeDir: home });
+  await mkdir(legacyDir, { recursive: true });
+  await symlink('bea', path.join(legacyDir, 'ava'));
+  await symlink('ava', path.join(legacyDir, 'bea'));
+  // Keeps `workspaces/` from emptying while bea is away.
+  await writeFile(path.join(legacyDir, 'README'), 'the operator\'s');
+  const dying = {
+    homeDir: home,
+    async beforeWorkspaceMove(agentId: string): Promise<void> {
+      if (agentId === 'bea') {
+        throw new Error('the process stopped here');
+      }
+    },
+  };
+  await runStateMigrations(dying, { exclusive: true }).catch(() => undefined);
+  const env = { homeDir: home };
+
+  await rm(path.join(legacyDir, 'bea'));
+  await applyPerAgentWorkspaces(env);
+  await symlink('ava', path.join(legacyDir, 'bea'));
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
 test('a legacy link carried across as it stood is never pointed back', async () => {
   // `workspaces/ava -> ../agents/bea/workspace` names a live path the
   // operator chose; nothing retargeted it. bea's own legacy entry is stale

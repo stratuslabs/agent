@@ -1399,17 +1399,28 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   /** See `linkRecordPath`: this run's retargeted links and every earlier run's. */
   const written = await readLinkRecord(env);
   /**
-   * Drop what is settled: an entry is evidence only while the workspace its
-   * link names has a legacy entry, that is, while it may yet stay put. Once
-   * that one has moved, its link is right for good, and an entry kept past
-   * that would have a stale `workspaces/<id>` appearing later point a live
-   * link back at nothing.
+   * The workspaces this run finished moving — positive evidence, unlike a
+   * legacy pathname found absent, which an ordinary command holding no lock
+   * can make true for a moment and false again.
    */
-  const settleLinkRecord = async (): Promise<void> => {
+  const completed = new Set<string>();
+  /** The agent whose new workspace path `named` is, or one below it. */
+  const workspaceOwnerOf = (named: string): string | undefined => {
+    const [owner, segment] = path.relative(agentsDirPath(env), named).split(path.sep);
+    return owner !== undefined && segment === 'workspace' && isValidAgentId(owner) ? owner : undefined;
+  };
+  /**
+   * An entry is evidence only until the workspace its link names has moved:
+   * that link is then right for good, and an entry kept past it would have
+   * a stale `workspaces/<id>` appearing later point a live link back at
+   * nothing. Retired the moment the move completes, from this run's own
+   * knowledge that it did.
+   */
+  const retireRecordsNaming = async (agentId: string): Promise<void> => {
+    completed.add(agentId);
     let changed = false;
     for (const [peer, wrote] of written) {
-      const [other] = path.relative(agentsDirPath(env), wrote).split(path.sep);
-      if (other === undefined || !isValidAgentId(other) || await pathIsFree(path.join(legacy, other))) {
+      if (workspaceOwnerOf(wrote) === agentId) {
         written.delete(peer);
         changed = true;
       }
@@ -1418,7 +1429,6 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       await saveLinkRecord(env, written);
     }
   };
-  await settleLinkRecord();
   /** The names this run left free, as opposed to deliberately left alone. */
   const emptied = new Set<string>();
   /**
@@ -1630,6 +1640,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // there when the volume came back.
       if (leadsNowhere) {
         moved.add(agentId);
+        await retireRecordsNaming(agentId);
         report.quarantined.push(
           `${agentId} — ${here} leads nowhere and ${there} is already there, so the new path is taken as `
           + 'this workspace and the stale link left for you to remove',
@@ -1730,10 +1741,14 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           ?? (alias !== undefined ? await migratedTarget(alias) : undefined);
         const names = resolved ?? direct;
         if (!path.isAbsolute(text) || resolved !== undefined) {
-          // Recorded before it is written, and only when retargeted: a link
-          // carried across as it stood names what its operator chose, and
-          // is never one to point back.
-          if (resolved !== undefined) {
+          // Recorded before it is written, and only while what it names is
+          // announced and not yet moved — a cycle member, the one target
+          // that can still stay put. A link carried across as it stood names
+          // what its operator chose, and one retargeted at a workspace that
+          // has already moved is right for good; neither is ever pointed
+          // back.
+          const owner = resolved !== undefined ? workspaceOwnerOf(path.resolve(resolved)) : undefined;
+          if (owner !== undefined && moved.has(owner) && !completed.has(owner)) {
             written.set(agentId, path.resolve(names));
             await saveLinkRecord(env, written);
           }
@@ -1806,6 +1821,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       );
     }
     moved.add(agentId);
+    await retireRecordsNaming(agentId);
     // The one place a source stops existing. Anything wearing this name
     // afterwards was put there by somebody else, which is what the sweep
     // below has to be able to tell.
@@ -1940,9 +1956,6 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       + 'left where it is and folded on the next start',
     );
   }
-  // Settled now, while this run knows which workspaces moved: a stale
-  // legacy entry that appears before the next start must find nothing here.
-  await settleLinkRecord();
   try {
     if (!(await anyWorkspaceNamesLegacy(env, legacy))) {
       await rmdir(legacy);
