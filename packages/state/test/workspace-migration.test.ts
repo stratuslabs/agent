@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -1854,6 +1854,47 @@ test('a pending link record outlives a pass that found workspaces/ itself gone',
   await applyPerAgentWorkspaces(env);
 
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
+test('a link record survives the home being moved to another path', async () => {
+  // A home restored from backup, or moved to a new disk, keeps its relative
+  // links resolving. The record has to keep matching them, or the next
+  // start throws away the only evidence that ava needs repairing.
+  const home = await newHome();
+  await stoppedAtBea(home);
+  const moved = `${home}-moved`;
+  await rename(home, moved);
+  const env = { homeDir: moved };
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyWorkspacesDirPath(env), 'bea'));
+});
+
+test('a move marker whose proof cannot be seen for a moment is kept, not dropped', async () => {
+  // bea's move finished and the run stopped before retiring. On the next
+  // start bea's new path is briefly elsewhere, so the proof cannot be seen.
+  // Dropping the marker then would leave ava's entry with nothing to retire
+  // it, and a stale `workspaces/bea` appearing later would point ava back.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as Record<string, unknown>;
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  const done = await lstat(agentWorkspacePath(env, 'bea'));
+  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${done.dev}:${done.ino}` } } }));
+  await rm(path.join(legacyDir, 'bea'));
+
+  const away = path.join(agentsDirPath(env), 'bea', 'elsewhere');
+  await rename(agentWorkspacePath(env, 'bea'), away);
+  await applyPerAgentWorkspaces(env);
+  await rename(away, agentWorkspacePath(env, 'bea'));
+  await applyPerAgentWorkspaces(env);
+  await symlink('zed', path.join(legacyDir, 'bea'));
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
 });
 
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {

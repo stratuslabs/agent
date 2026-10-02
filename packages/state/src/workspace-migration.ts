@@ -1186,13 +1186,23 @@ interface LinkRecord {
   moving: Map<string, MoveProof>;
 }
 
+/**
+ * Paths are kept relative to `~/.stratus`, never absolute: a home restored
+ * or moved somewhere else keeps its relative links resolving, and an
+ * absolute path in here would stop matching them and throw the evidence
+ * away (#220).
+ */
+const isHomeRelative = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0 && !path.isAbsolute(value)
+  && value !== '..' && !value.startsWith(`..${path.sep}`);
+
 const isMoveProof = (value: unknown): value is MoveProof => {
   if (value === null || typeof value !== 'object') {
     return false;
   }
   const { inode, link } = value as { inode?: unknown; link?: unknown };
   return (typeof inode === 'string' && link === undefined)
-    || (typeof link === 'string' && path.isAbsolute(link) && inode === undefined);
+    || (isHomeRelative(link) && inode === undefined);
 };
 
 const inodeOf = (stats: { dev: number; ino: number }): string => `${stats.dev}:${stats.ino}`;
@@ -1228,15 +1238,19 @@ const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
   }
   const { links, moving } = (parsed ?? {}) as { links?: unknown; moving?: unknown };
   if (links === null || typeof links !== 'object' || Array.isArray(links)
-    || Object.entries(links).some(([agentId, named]) =>
-      !isValidAgentId(agentId) || typeof named !== 'string' || !path.isAbsolute(named))
+    || Object.entries(links).some(([agentId, named]) => !isValidAgentId(agentId) || !isHomeRelative(named))
     || moving === null || typeof moving !== 'object' || Array.isArray(moving)
     || Object.entries(moving).some(([agentId, proof]) => !isValidAgentId(agentId) || !isMoveProof(proof))) {
-    throw unreadable('it is not `links`, a map of agent ids to absolute paths, beside `moving`, a map of agent ids to move proofs');
+    throw unreadable(
+      'it is not `links`, a map of agent ids to paths inside the home, beside `moving`, a map of agent ids to move proofs',
+    );
   }
+  const home = stratusHomePath(env);
   return {
-    links: new Map(Object.entries(links as Record<string, string>)),
-    moving: new Map(Object.entries(moving as Record<string, MoveProof>)),
+    links: new Map(Object.entries(links as Record<string, string>)
+      .map(([agentId, named]) => [agentId, path.resolve(home, named)])),
+    moving: new Map(Object.entries(moving as Record<string, MoveProof>)
+      .map(([agentId, proof]) => [agentId, 'link' in proof ? { link: path.resolve(home, proof.link) } : proof])),
   };
 };
 
@@ -1248,7 +1262,12 @@ const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promis
     return;
   }
   const replacement = `${file}.${randomUUID()}.tmp`;
-  const body = { links: Object.fromEntries(record.links), moving: Object.fromEntries(record.moving) };
+  const home = stratusHomePath(env);
+  const body = {
+    links: Object.fromEntries([...record.links].map(([agentId, named]) => [agentId, path.relative(home, named)])),
+    moving: Object.fromEntries([...record.moving].map(([agentId, proof]) =>
+      [agentId, 'link' in proof ? { link: path.relative(home, proof.link) } : proof])),
+  };
   try {
     await writeFile(replacement, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
     await rename(replacement, file);
@@ -1496,14 +1515,14 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       return false;
     }
   };
-  // What a stopped run marked: its move either happened, and its entries
-  // are retired now, or it did not, and the move is simply retried below
-  // with the entries still in force.
+  // What a stopped run marked: its move happened, and its entries are
+  // retired now, or that cannot be seen yet. A destination renamed away or
+  // failing to stat for a moment is not a move that never happened, so the
+  // marker stays until it is proven, until a retry of the move marks it
+  // afresh, or until no entry names that workspace any more.
   for (const [agentId, proof] of [...record.moving]) {
     if (await moveProven(agentId, proof)) {
       await retireRecordsNaming(agentId);
-    } else {
-      record.moving.delete(agentId);
     }
   }
   // And an entry whose link no longer names what was written is nobody's
@@ -1515,6 +1534,11 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     const peerText = await linkText(peerTarget);
     if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
       written.delete(peer);
+    }
+  }
+  for (const agentId of [...record.moving.keys()]) {
+    if (![...written.values()].some((wrote) => workspaceOwnerOf(wrote) === agentId)) {
+      record.moving.delete(agentId);
     }
   }
   await saveLinkRecord(env, record);
