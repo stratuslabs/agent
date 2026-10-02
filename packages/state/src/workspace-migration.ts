@@ -1359,6 +1359,11 @@ export const applyPerAgentWorkspaces = async (
   const finished = await finishInterruptedMoves(env);
   const legacy = legacyWorkspacesDirPath(env);
   const legacySpellings = await spellingsOf(legacy);
+  // Whether the link record has been seen, by the caller's gate or by the
+  // check below: once it has, gone when it is read is a rename aside rather
+  // than "nothing recorded" — this pass is also run directly, as migration
+  // 0004, where the check below is the only sight of it before the read.
+  let linkRecordSeen = options.linkRecordSeen === true;
   let entries: Dirent[];
   try {
     entries = await readdir(legacy, { withFileTypes: true });
@@ -1368,10 +1373,13 @@ export const applyPerAgentWorkspaces = async (
     // `ENOTDIR` is a regular file somebody left at that name — aborting
     // over it would refuse every `stratus serve` for good, since the
     // migration that would clear the obstacle is the one failing.
-    if ((code === 'ENOENT' || code === 'ENOTDIR') && !(await pathIsFree(linkRecordPath(env)))) {
+    if ((code === 'ENOENT' || code === 'ENOTDIR')
+      && (linkRecordSeen || !(await pathIsFree(linkRecordPath(env))))) {
       // Gone, or a file where it belongs, with a link record still pending:
       // nothing to move, but the record may have a link to repair, which is
-      // asked below.
+      // asked below. Seen by the gate and gone now, it is asked too, and
+      // refused as unreadable rather than skipped.
+      linkRecordSeen = true;
       entries = [];
     } else if (code === 'ENOENT' || code === 'ENOTDIR') {
       // The link record stays, if there is one: `workspaces/` can be gone for
@@ -1537,7 +1545,7 @@ export const applyPerAgentWorkspaces = async (
   // ordinary command happened to create.
   const moved = new Set<string>();
   /** See `linkRecordPath`: this run's retargeted links and every earlier run's. */
-  const record = await readLinkRecord(env, options.linkRecordSeen === true);
+  const record = await readLinkRecord(env, linkRecordSeen);
   const written = record.links;
   /**
    * The workspaces this run finished moving — positive evidence, unlike a

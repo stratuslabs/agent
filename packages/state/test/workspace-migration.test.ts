@@ -2045,6 +2045,20 @@ test('a link record the gate saw is not read as nothing recorded when the pass f
   await assert.rejects(applyPerAgentWorkspaces(env, { linkRecordSeen: true }), /workspace-links\.json could not be read/);
 });
 
+test('a link record the gate saw is asked for even once workspaces/ itself is gone', async () => {
+  // With `workspaces/` gone, the pass returns early unless a record is
+  // pending. One the gate saw and a backup then renamed aside must stop it,
+  // not read as "nothing pending" and skip the repair it holds.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  await rm(legacyDir, { recursive: true });
+  await rename(recordFile, `${recordFile}.bak`);
+
+  await assert.rejects(applyPerAgentWorkspaces(env, { linkRecordSeen: true }), /workspace-links\.json could not be read/);
+});
+
 test('a link record survives the home being moved to another path', async () => {
   // A home restored from backup, or moved to a new disk, keeps its relative
   // links resolving. The record has to keep matching them, or the next
