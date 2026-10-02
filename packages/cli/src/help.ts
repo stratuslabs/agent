@@ -65,7 +65,8 @@ Commands:
   serve            Run stratusd, the always-on gateway: durable sessions, the
                    whole roster live at once (each agent on its own provider),
                    delegation, and a watchdog — one per home (it refuses to
-                   start over a daemon already serving ~/.stratus), and
+                   start over a daemon already serving ~/.stratus, and exits
+                   78 on a trusted config that will not load), and
                    Ctrl+C / SIGTERM drains cleanly
                    (--idle-timeout <seconds>, --approvals <headless|remote>,
                    --no-events, --no-log-file, --config <path>); everything it

@@ -55,6 +55,41 @@ cannot ask to be revived either. `stratus service install --no-login` says
 so when it finishes. On Linux the two are independent, and
 `Restart=on-failure` applies either way.
 
+## A config that will not load stops the daemon
+
+`stratus serve` refuses to start when the trusted config it reads
+(`~/.stratus/config.json`, or the file `--config` names) does not parse or
+fails validation. It names the file and the error on stderr and exits with
+status 78. It used to start anyway, with each part of the config falling
+back on its own: no plugins, the built-in soul, no approvers, every Slack
+sender refused. The result was an agent with no persona and no tools
+answering in Slack, which looks like it's working.
+
+A broken auto-discovered project config (`stratus.config.json` in the
+directory you started from) does not stop it: that file cannot set the
+trusted blocks anyway. A daemon that is **already running** is not stopped
+either. A file broken mid-edit keeps it on the last config that loaded,
+until the file is fixed.
+
+The error reaches stderr, never `stratus logs` (see
+[When the log is empty](./logs.md#when-the-log-is-empty)), and the two
+service managers handle the exit differently:
+
+- **Linux** — the unit sets `RestartPreventExitStatus=78`, so systemd stops
+  retrying and the unit shows as failed. Fix the file, then
+  `stratus service start`. A unit installed before this release gets the
+  line when `stratus update` (or `stratus service install`) rewrites it.
+- **macOS** — launchd has no equivalent, so `KeepAlive` restarts the job
+  until the file is fixed. Each attempt fails at once, and the redirect
+  logs are truncated so the loop cannot fill the disk.
+
+`stratus service install`, `stratus service start`, and `stratus update`
+check the config the unit runs with before they start anything, and refuse
+with the same error instead. A service manager reports a start as soon as
+the process exists, so without the check they would say the daemon was
+running while it was already exiting. `stratus update` refuses before it
+stops the running daemon, which keeps serving on its last good config.
+
 `status` asks the service manager, not the unit file, whether the daemon is
 alive, and exits non-zero when it isn't — so it works in a health check:
 
