@@ -1521,24 +1521,41 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     }
   };
   /** Whether the destination holds what only the marked move puts there. */
+  /**
+   * The identity of an `agents/<id>` while it is a real directory inside the
+   * home, or undefined when it is missing, a link, or below one. Taken
+   * before a read through it and compared after, so a directory swapped for
+   * a link in between is caught rather than read through.
+   */
+  const steadyDirectory = async (directory: string): Promise<string | undefined> => {
+    const stats = await lstat(directory).catch(() => undefined);
+    if (stats === undefined || stats.isSymbolicLink()
+      || await linkedDerivedComponent(stratusHomePath(env), directory) !== undefined) {
+      return undefined;
+    }
+    return inodeOf(stats);
+  };
   const moveProven = async (agentId: string, proof: MoveProof): Promise<boolean> => {
     const destination = agentWorkspacePath(env, agentId);
-    // Never through a linked `agents/<id>`: what is found in another tree
-    // proves nothing about a move this migration made here, and a link's
-    // text read there can match the proof by accident.
-    if (await linkedDerivedComponent(stratusHomePath(env), path.dirname(destination)) !== undefined) {
+    // Never through a linked `agents/<id>`, nor one that became a link while
+    // the proof was read: what is found in another tree proves nothing
+    // about a move this migration made here, and a link's text read there
+    // can match the proof by accident.
+    const parent = path.dirname(destination);
+    const before = await steadyDirectory(parent);
+    if (before === undefined) {
       return false;
     }
+    let proven: boolean;
     try {
       const stats = await lstat(destination);
-      if ('inode' in proof) {
-        return inodeOf(stats) === proof.inode;
-      }
-      return stats.isSymbolicLink()
-        && path.resolve(path.dirname(destination), await readlink(destination)) === proof.link;
+      proven = 'inode' in proof
+        ? inodeOf(stats) === proof.inode
+        : stats.isSymbolicLink() && path.resolve(parent, await readlink(destination)) === proof.link;
     } catch {
       return false;
     }
+    return proven && await steadyDirectory(parent) === before;
   };
   // What a stopped run marked: its move happened, and its entries are
   // retired now, or that cannot be seen yet. A destination renamed away or
@@ -1685,25 +1702,29 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         continue;
       }
       const peerTarget = agentWorkspacePath(env, peer);
-      // Derived state is never followed through a link, and an `agents/<id>`
-      // that became one since the record was written puts this link in
-      // another tree: `lstat` would follow it there, its relative text would
-      // read against the wrong directory, and the rename would land outside
-      // the home. Not ours to touch — the daemon refuses that agent anyway.
-      const linked = await linkedDerivedComponent(stratusHomePath(env), path.dirname(peerTarget));
-      if (linked !== undefined) {
-        report.quarantined.push(
-          `${peer} — ${path.relative(stratusHomePath(env), linked)} is a symbolic link, so its workspace link was `
-          + `left as it is rather than pointed at ${path.relative(stratusHomePath(env), from)}`,
-        );
-        continue;
-      }
+      const peerParent = path.dirname(peerTarget);
       // Checked and swapped as one attempt, asked again whenever the entry is
       // replaced between the two: a copy of the very same link is still the
       // link this repair is for, and returning without it would start the
       // daemon with that copy naming the path of a member that stays put.
       let settled = false;
       for (let attempt = 0; attempt < REPOINT_ATTEMPTS && !settled; attempt += 1) {
+        // Derived state is never followed through a link, and an `agents/<id>`
+        // that became one since the record was written puts this link in
+        // another tree: `lstat` would follow it there, its relative text
+        // would read against the wrong directory, and the rename would land
+        // outside the home. Not ours to touch — the daemon refuses that agent
+        // anyway — and asked on every attempt, not once before them.
+        const linked = await linkedDerivedComponent(stratusHomePath(env), peerParent);
+        if (linked !== undefined) {
+          report.quarantined.push(
+            `${peer} — ${path.relative(stratusHomePath(env), linked)} is a symbolic link, so its workspace link was `
+            + `left as it is rather than pointed at ${path.relative(stratusHomePath(env), from)}`,
+          );
+          settled = true;
+          break;
+        }
+        const parentBefore = await lstat(peerParent).catch(() => undefined);
         // Its identity as well as its text, so the swap can tell whether the
         // entry it replaces is still the one checked here.
         const observed = await lstat(peerTarget).catch(() => undefined);
@@ -1720,15 +1741,21 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           );
         }
         const peerText = await linkText(peerTarget);
+        // Read through the directory it was checked in, or asked again.
+        if (parentBefore === undefined || await steadyDirectory(peerParent) !== inodeOf(parentBefore)) {
+          continue;
+        }
         // Still naming what this run wrote: anything else is not ours to
         // touch, and the entry is forgotten now that something else is seen
         // there — kept, it would match a link the operator later points at
         // that same path, and rewrite theirs.
-        if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
+        if (peerText === undefined || path.resolve(peerParent, peerText) !== wrote) {
           written.delete(peer);
           await saveLinkRecord(env, record);
           settled = true;
-        } else if (await repointPeer(agentId, peer, peerTarget, path.join(from, below), wrote, inodeOf(observed))) {
+        } else if (await repointPeer(
+          agentId, peer, peerTarget, path.join(from, below), wrote, inodeOf(observed), inodeOf(parentBefore),
+        )) {
           written.delete(peer);
           await saveLinkRecord(env, record);
           settled = true;
@@ -1750,6 +1777,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     from: string,
     target: string,
     observed: string,
+    parentObserved: string,
   ): Promise<boolean> => {
     // Made beside it and renamed over it, never unlinked first: a run that
     // dies between an unlink and its symlink leaves the peer with no link at
@@ -1767,7 +1795,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     try {
       await symlink(path.relative(path.dirname(peerTarget), from), replacement);
       const now = await lstat(peerTarget).catch(() => undefined);
-      if (now === undefined || inodeOf(now) !== observed) {
+      if (now === undefined || inodeOf(now) !== observed
+        || await steadyDirectory(path.dirname(peerTarget)) !== parentObserved) {
         await rm(replacement, { force: true });
         return false;
       }
