@@ -25,8 +25,7 @@ import {
   resolveAgentApprovals,
   resolveAgentPrincipals,
   resolveAgentSlack,
-  applyPerAgentWorkspaces,
-  workspaceRepairPending,
+  repairWorkspacesIfPending,
   runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
@@ -187,11 +186,9 @@ const serveHeldHome = async (
   // on every start. The gate asks whether anything is actually pending
   // rather than whether the directory exists: an ordinary home keeps it
   // forever, since a collision leaves a workspace's files in it by design.
-  if (await workspaceRepairPending(env)) {
-    const repaired = await applyPerAgentWorkspaces(env);
-    if (repaired !== undefined) {
-      log(`workspace layout: ${repaired}`);
-    }
+  const repaired = await repairWorkspacesIfPending(env);
+  if (repaired !== undefined) {
+    log(`workspace layout: ${repaired}`);
   }
 
   // Agents with stored Slack tokens go live in Slack automatically — the

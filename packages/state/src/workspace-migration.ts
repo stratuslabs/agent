@@ -1087,6 +1087,22 @@ export const workspaceRepairPending = async (env: StateEnvironment): Promise<boo
   || !(await pathIsFree(linkRecordPath(env)));
 
 /**
+ * {@link workspaceRepairPending}, then the pass if it says so — as one call,
+ * because the gate's answer is evidence the pass needs. A link record the
+ * gate saw and the pass then finds gone was renamed aside in between, by a
+ * backup say, and read as "nothing recorded" the start would go on without
+ * repairing the links it holds. Asked separately, that observation is lost
+ * between the two awaits.
+ */
+export const repairWorkspacesIfPending = async (env: StateEnvironment): Promise<string | undefined> => {
+  const linkRecordSeen = !(await pathIsFree(linkRecordPath(env)));
+  if (!linkRecordSeen && !(await surveyLegacyWorkspaces(env)).present) {
+    return undefined;
+  }
+  return applyPerAgentWorkspaces(env, { linkRecordSeen });
+};
+
+/**
  * The names still sitting in `workspaces/` that a repair would fold, or an
  * empty list once the layout has finished moving.
  *
@@ -1235,7 +1251,7 @@ const asStored = (home: string, absolute: string): string => {
 
 const inodeOf = (stats: { dev: number; ino: number }): string => `${stats.dev}:${stats.ino}`;
 
-const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
+const readLinkRecord = async (env: StateEnvironment, seenBefore: boolean): Promise<LinkRecord> => {
   const file = linkRecordPath(env);
   const unreadable = (reason: string): Error => new Error(
     `${file} could not be read (${reason}). It records which workspace links the upgrade move pointed `
@@ -1244,7 +1260,10 @@ const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
   );
   let raw: string | undefined;
   let reason = 'it is a symbolic link';
-  let seen = false;
+  // Seen by the gate that decided to run this pass, or by the `lstat` below:
+  // either way it was there, and gone now is a rename aside, not "nothing
+  // recorded".
+  let seen = seenBefore;
   try {
     // Derived state under the home is never read through a link.
     const stats = await lstat(file);
@@ -1330,7 +1349,10 @@ const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promis
   }
 };
 
-export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<string | undefined> => {
+export const applyPerAgentWorkspaces = async (
+  env: StateEnvironment,
+  options: { linkRecordSeen?: boolean } = {},
+): Promise<string | undefined> => {
   // Before anything else: a previous run may have moved a workspace and
   // died before its ledger followed, and there is nothing in `workspaces/`
   // left to say so.
@@ -1515,7 +1537,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // ordinary command happened to create.
   const moved = new Set<string>();
   /** See `linkRecordPath`: this run's retargeted links and every earlier run's. */
-  const record = await readLinkRecord(env);
+  const record = await readLinkRecord(env, options.linkRecordSeen === true);
   const written = record.links;
   /**
    * The workspaces this run finished moving — positive evidence, unlike a

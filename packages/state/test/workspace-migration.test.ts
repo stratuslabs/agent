@@ -2032,6 +2032,19 @@ test('a pending link entry is refused for when the workspace it names is gone fr
   await assert.rejects(applyPerAgentWorkspaces(env), /could not be checked, and an earlier start stopped/);
 });
 
+test('a link record the gate saw is not read as nothing recorded when the pass finds it gone', async () => {
+  // The gate decided to run the pass because the record was there, and a
+  // backup renamed it aside before the pass read it. Taken for "nothing
+  // recorded", the start would repair none of the links it holds.
+  const home = await newHome();
+  await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  await rename(recordFile, `${recordFile}.bak`);
+
+  await assert.rejects(applyPerAgentWorkspaces(env, { linkRecordSeen: true }), /workspace-links\.json could not be read/);
+});
+
 test('a link record survives the home being moved to another path', async () => {
   // A home restored from backup, or moved to a new disk, keeps its relative
   // links resolving. The record has to keep matching them, or the next
