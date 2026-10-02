@@ -2010,8 +2010,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // Whether or not the new path is held yet: `serve` asks only as it starts,
   // and an ordinary command can take a free one a moment later. A marked
   // owner is repaired too once its new path visibly holds something its
-  // proof does not describe; one whose new path is merely not there is left
-  // to the marker, which may yet be proven.
+  // proof does not describe.
   for (const owner of new Set([...written.values()].map(workspaceOwnerOf))) {
     if (owner === undefined) {
       continue;
@@ -2022,8 +2021,22 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       continue;
     }
     const proof = record.moving.get(owner);
-    if (proof !== undefined && (await pathIsFree(ownerTarget) || await moveProven(owner, proof))) {
+    if (proof !== undefined && await moveProven(owner, proof)) {
       continue;
+    }
+    // A move of ours was under way and neither end of it can be seen: the
+    // legacy entry is gone and so is the new path. That is a move that never
+    // happened or one whose destination is briefly away, and the two need
+    // opposite answers — so neither is given. Starting anyway would leave the
+    // new path free for an ordinary command to take while a recorded link
+    // still names it.
+    if (proof !== undefined && await pathIsFree(ownerTarget)) {
+      const peers = [...written].filter(([, wrote]) => workspaceOwnerOf(wrote) === owner).map(([peer]) => peer);
+      throw new Error(
+        `${JSON.stringify(owner)}'s workspace was being moved when Stratus last stopped, and neither ${ownerFrom} `
+        + `nor ${ownerTarget} is there now, so whether ${peers.map((peer) => JSON.stringify(peer)).join(', ')} `
+        + 'should follow it cannot be told. Put back whichever of the two you moved, and start again.',
+      );
     }
     await repointPeersNamingNewPath(owner, ownerFrom, ownerTarget);
   }

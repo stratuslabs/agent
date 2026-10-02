@@ -1871,7 +1871,7 @@ test('a link record survives the home being moved to another path', async () => 
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyWorkspacesDirPath(env), 'bea'));
 });
 
-test('a move marker whose proof cannot be seen for a moment is kept, not dropped', async () => {
+test('a move marker whose proof cannot be seen for a moment is kept, and the start refused until it can', async () => {
   // bea's move finished and the run stopped before retiring. On the next
   // start bea's new path is briefly elsewhere, so the proof cannot be seen.
   // Dropping the marker then would leave ava's entry with nothing to retire
@@ -1886,9 +1886,11 @@ test('a move marker whose proof cannot be seen for a moment is kept, not dropped
   await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${done.dev}:${done.ino}` } } }));
   await rm(path.join(legacyDir, 'bea'));
 
+  // Neither end of the move can be seen, so the start is refused rather
+  // than guessed at; the marker survives it.
   const away = path.join(agentsDirPath(env), 'bea', 'elsewhere');
   await rename(agentWorkspacePath(env, 'bea'), away);
-  await applyPerAgentWorkspaces(env);
+  await assert.rejects(applyPerAgentWorkspaces(env), /was being moved when Stratus last stopped.*Put back whichever/);
   await rename(away, agentWorkspacePath(env, 'bea'));
   await applyPerAgentWorkspaces(env);
   await symlink('zed', path.join(legacyDir, 'bea'));
