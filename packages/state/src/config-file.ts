@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   BUILTIN_EXECUTOR_NAME,
@@ -606,12 +606,20 @@ export const saveConfigFile = async (
   config: StratusConfigFile,
 ): Promise<void> => {
   await mkdir(path.dirname(configPath), { recursive: true });
+  // Only a file is tightened ahead of the write. A directory where the
+  // config belongs (setup reads past an unreadable config and saves anyway)
+  // would lose its search bit to the chmod and then fail the write with
+  // EISDIR, left worse than it was found; the write alone fails cleanly.
+  let existing: Awaited<ReturnType<typeof stat>> | undefined;
   try {
-    await chmod(configPath, 0o600);
+    existing = await stat(configPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw error;
     }
+  }
+  if (existing?.isFile()) {
+    await chmod(configPath, 0o600);
   }
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   await chmod(configPath, 0o600);

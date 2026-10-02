@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ContextOverflowError, type Session } from '@stratusagent/core';
-import { mkdir, mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -87,6 +87,14 @@ test('config file is written owner-read-only, and a loose one is tightened on th
   await writeFile(existing, '{}\n', { mode: 0o644 });
   await saveConfigFile(existing, { provider: 'demo' });
   assert.equal((await stat(existing)).mode & 0o777, 0o600);
+
+  // A directory where the file belongs fails the save and is left as it
+  // was: tightening it first would strip its search bit.
+  const directory = path.join(dir, 'is-a-directory.json');
+  await mkdir(directory, { mode: 0o755 });
+  await chmod(directory, 0o755);
+  await assert.rejects(saveConfigFile(directory, { provider: 'demo' }), /EISDIR/);
+  assert.equal((await stat(directory)).mode & 0o777, 0o755);
 });
 
 test('runtime config defaults to the demo provider with no configuration', async () => {
