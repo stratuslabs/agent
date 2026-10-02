@@ -1535,7 +1535,15 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     }
     return inodeOf(stats);
   };
-  const moveProven = async (agentId: string, proof: MoveProof): Promise<boolean> => {
+  /**
+   * What the destination says about a marked move: `proven` when it holds
+   * what only the move leaves, `refuted` when it was read through a steady
+   * directory and holds something else, `inconclusive` when it could not be
+   * read that way — missing, failing to stat, under a linked or swapped
+   * `agents/<id>`. Only `refuted` is evidence the move never happened; the
+   * other two must not be taken for it.
+   */
+  const judgeMove = async (agentId: string, proof: MoveProof): Promise<'proven' | 'refuted' | 'inconclusive'> => {
     const destination = agentWorkspacePath(env, agentId);
     // Never through a linked `agents/<id>`, nor one that became a link while
     // the proof was read: what is found in another tree proves nothing
@@ -1544,18 +1552,21 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     const parent = path.dirname(destination);
     const before = await steadyDirectory(parent);
     if (before === undefined) {
-      return false;
+      return 'inconclusive';
     }
-    let proven: boolean;
+    let matches: boolean;
     try {
       const stats = await lstat(destination);
-      proven = 'inode' in proof
+      matches = 'inode' in proof
         ? inodeOf(stats) === proof.inode
         : stats.isSymbolicLink() && path.resolve(parent, await readlink(destination)) === proof.link;
     } catch {
-      return false;
+      return 'inconclusive';
     }
-    return proven && await steadyDirectory(parent) === before;
+    if (await steadyDirectory(parent) !== before) {
+      return 'inconclusive';
+    }
+    return matches ? 'proven' : 'refuted';
   };
   // What a stopped run marked: its move happened, and its entries are
   // retired now, or that cannot be seen yet. A destination renamed away or
@@ -1563,7 +1574,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // marker stays until it is proven, until a retry of the move marks it
   // afresh, or until no entry names that workspace any more.
   for (const [agentId, proof] of [...record.moving]) {
-    if (await moveProven(agentId, proof)) {
+    if (await judgeMove(agentId, proof) === 'proven') {
       await retireRecordsNaming(agentId);
     }
   }
@@ -2131,21 +2142,26 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       continue;
     }
     const proof = record.moving.get(owner);
-    if (proof !== undefined && await moveProven(owner, proof)) {
+    const verdict = proof === undefined ? undefined : await judgeMove(owner, proof);
+    if (verdict === 'proven') {
       continue;
     }
-    // A move of ours was under way and neither end of it can be seen: the
-    // legacy entry is gone and so is the new path. That is a move that never
-    // happened or one whose destination is briefly away, and the two need
-    // opposite answers — so neither is given. Starting anyway would leave the
-    // new path free for an ordinary command to take while a recorded link
-    // still names it.
-    if (proof !== undefined && await pathIsFree(ownerTarget)) {
+    // A move of ours was under way and its destination cannot be read as
+    // either what the move left or something else: gone, failing to stat,
+    // under a linked `agents/<id>`. That is a move that never happened or
+    // one whose destination is briefly away, and the two need opposite
+    // answers — so neither is given. Repairing would point valid links at a
+    // legacy path that has moved on; starting anyway would leave the new
+    // path free for an ordinary command to take while a recorded link still
+    // names it.
+    if (verdict === 'inconclusive') {
       const peers = [...written].filter(([, wrote]) => workspaceOwnerOf(wrote) === owner).map(([peer]) => peer);
       throw new Error(
-        `${JSON.stringify(owner)}'s workspace was being moved when Stratus last stopped, and neither ${ownerFrom} `
-        + `nor ${ownerTarget} is there now, so whether ${peers.map((peer) => JSON.stringify(peer)).join(', ')} `
-        + 'should follow it cannot be told. Put back whichever of the two you moved, and start again.',
+        `${JSON.stringify(owner)}'s workspace was being moved when Stratus last stopped, ${ownerFrom} is gone, `
+        + `and ${ownerTarget} cannot be read as a plain path inside the home, so whether `
+        + `${peers.map((peer) => JSON.stringify(peer)).join(', ')} should follow it cannot be told. `
+        + `Put back whichever of the two you moved, or make ${path.dirname(ownerTarget)} a plain directory again, `
+        + 'and start again.',
       );
     }
     await repointPeersNamingNewPath(owner, ownerFrom, ownerTarget);

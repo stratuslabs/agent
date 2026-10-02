@@ -2115,7 +2115,7 @@ test('a link record entry is kept while its peer\'s agent directory is a link', 
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
-test('a move proof is not accepted from beneath a linked agent directory', async () => {
+test('a move proof beneath a linked agent directory is inconclusive: the start is refused and the entry kept', async () => {
   // bea was marked as moving to a link naming `agents/bea/target`, and then
   // `agents/bea` became a link to another tree whose `workspace` happens to
   // read `target`. By text that matches the proof; it proves nothing, and
@@ -2132,6 +2132,14 @@ test('a move proof is not accepted from beneath a linked agent directory', async
   await rm(path.join(agentsDirPath(env), 'bea'), { recursive: true, force: true });
   await symlink(elsewhere, path.join(agentsDirPath(env), 'bea'));
 
+  // Neither proven nor refuted from there, so the start is refused and the
+  // entry kept, rather than retired or acted on.
+  await assert.rejects(applyPerAgentWorkspaces(env), /cannot be read as a plain path inside the home/);
+
+  // Once `agents/bea` is a plain directory holding something else, the
+  // proof is refuted and ava is pointed back.
+  await rm(path.join(agentsDirPath(env), 'bea'));
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
   await applyPerAgentWorkspaces(env);
 
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));

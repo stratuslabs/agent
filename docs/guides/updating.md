@@ -154,8 +154,8 @@ one's target has moved, so a start that was interrupted is finished by the
 next one. A chain of links you made yourself in the new layout is never
 rewritten. Two cases stop a start instead, each naming the paths
 involved: a workspace that was being moved when Stratus stopped, whose old
-and new paths are both missing, so it cannot tell whether the move
-finished; and a link the move had pointed somewhere new that is missing
+path is gone and whose new one is missing or not a plain directory inside
+the home, so it cannot tell whether the move finished; and a link the move had pointed somewhere new that is missing
 when it needs pointing back. Put back whatever you moved aside, and start
 again.
 The ledger's own records follow the move — they are absolute paths, and
