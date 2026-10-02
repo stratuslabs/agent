@@ -1969,6 +1969,21 @@ test('a recorded peer is pointed back even while workspaces/ itself is gone', as
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+test('a recorded peer is pointed back while workspaces is a file, too', async () => {
+  // The same as `workspaces/` being gone, with a regular file at its name:
+  // a pending record still has a link to repair.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await rm(legacyDir, { recursive: true });
+  await writeFile(legacyDir, 'not a directory');
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there

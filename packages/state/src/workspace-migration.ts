@@ -1305,9 +1305,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // `ENOTDIR` is a regular file somebody left at that name — aborting
     // over it would refuse every `stratus serve` for good, since the
     // migration that would clear the obstacle is the one failing.
-    if (code === 'ENOENT' && !(await pathIsFree(linkRecordPath(env)))) {
-      // Gone, with a link record still pending: nothing to move, but the
-      // record may have a link to repair, which is asked below.
+    if ((code === 'ENOENT' || code === 'ENOTDIR') && !(await pathIsFree(linkRecordPath(env)))) {
+      // Gone, or a file where it belongs, with a link record still pending:
+      // nothing to move, but the record may have a link to repair, which is
+      // asked below.
       entries = [];
     } else if (code === 'ENOENT' || code === 'ENOTDIR') {
       // The link record stays, if there is one: `workspaces/` can be gone for
