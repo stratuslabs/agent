@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, truncateSync } from 'node:fs';
+import { chmodSync, closeSync, constants, ftruncateSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { StateEnvironment } from './environment.ts';
@@ -109,8 +109,53 @@ const claimAt = (lockPath: string, waitMs: number): DatabaseSync => {
  * Lifted from the gateway's home claim (#184), whose policy `claimHome`
  * still is, when the grant file gained a lock of its own.
  */
+/**
+ * A lock file is opened, locked, chmodded, and when damaged emptied — all of
+ * which follow a symlink. One planted at the lock's path would aim those at
+ * another file: a damaged-looking target would be truncated, a database
+ * locked and chmodded. Derived state under the home is never followed
+ * through a link, so neither is this. `~/.stratus` itself may be a link;
+ * only the lock file is asked about.
+ */
+const refuseSymlink = (lockPath: string): void => {
+  let linked = false;
+  try {
+    linked = lstatSync(lockPath).isSymbolicLink();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  if (linked) {
+    throw new Error(
+      `${lockPath} is a symbolic link, and a lock file is never followed somewhere else. `
+      + 'Remove the link; the next start creates the lock file afresh.',
+    );
+  }
+};
+
+/** Empty the file in place, never through a link swapped in since the check above. */
+const emptyInPlace = (lockPath: string): void => {
+  let fd: number;
+  try {
+    fd = openSync(lockPath, constants.O_WRONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    // Gone meanwhile: the claim that follows creates it afresh.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  try {
+    ftruncateSync(fd, 0);
+  } finally {
+    closeSync(fd);
+  }
+};
+
 export const claimFileLock = (lockPath: string, options: { waitMs?: number } = {}): FileLock => {
   mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+  refuseSymlink(lockPath);
   const waitMs = options.waitMs ?? 0;
   let held: DatabaseSync | undefined;
   // At most twice: the file as found, then the file emptied in place.
@@ -125,14 +170,7 @@ export const claimFileLock = (lockPath: string, options: { waitMs?: number } = {
       if (emptied || !isNotADatabase(error)) {
         throw error;
       }
-      try {
-        truncateSync(lockPath, 0);
-      } catch (truncateError) {
-        // Gone meanwhile: the claim below creates it afresh.
-        if ((truncateError as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw truncateError;
-        }
-      }
+      emptyInPlace(lockPath);
     }
   }
   if (!held) {

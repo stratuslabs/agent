@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -64,4 +64,20 @@ test('a lock taken with a wait waits for another process\'s holder to let go', a
   const lock = claimFileLock(lockPath, { waitMs: 10_000 });
   lock.release();
   await once(holder, 'exit');
+});
+
+test('a lock file that is a symlink is refused, and what it points at is left alone', async () => {
+  // Opening, locking, chmodding and the damaged-file reclaim all follow a
+  // link, so one planted at the lock's path would have emptied whatever it
+  // named: here, a file that is not a database, exactly the case the
+  // reclaim truncates.
+  const home = await newHome();
+  const victim = path.join(home, 'precious.txt');
+  await writeFile(victim, 'keep me');
+  const lockPath = path.join(home, '.stratus', 'grants.lock');
+  claimFileLock(path.join(home, '.stratus', 'other.lock')).release();
+  await symlink(victim, lockPath);
+
+  assert.throws(() => claimFileLock(lockPath), /is a symbolic link/);
+  assert.equal(await readFile(victim, 'utf8'), 'keep me');
 });
