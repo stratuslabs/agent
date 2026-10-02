@@ -1,4 +1,5 @@
-import { chmod, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { chmod, mkdir, open, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { assertDerivedStatePath } from './state-directory.ts';
 
@@ -279,6 +280,18 @@ export const createFileCommandWhitelist = (options: {
    * no line about it.
    */
   warn?: (line: string) => void;
+  /**
+   * Runs each read of a grant file's bytes, which is synchronous on
+   * purpose: the daemon passes a cross-process lock here, and a lock other
+   * code in the process can wait on must not be held across an `await`.
+   *
+   * The store caches what it reads for the life of the process, so a read
+   * that lands in the middle of `stratus grants revoke` rewriting the file
+   * caches the grant the CLI then reports as revoked (#184). Under the same
+   * lock the revoke takes, the read is wholly before or wholly after it.
+   * A host that omits it reads without one, as every host did before.
+   */
+  serializeRead?: <T>(read: () => T) => T;
 }): AgentGrantStore => {
   /**
    * One read per agent per process, shared by everyone who asks — as a
@@ -314,16 +327,17 @@ export const createFileCommandWhitelist = (options: {
    * else — a permission, a directory in the way — is the caller's to
    * report, because it means the grants exist and could not be read.
    */
-  const readAt = async (file: string): Promise<string | undefined> => {
+  const serialize = options.serializeRead ?? (<T>(read: () => T): T => read());
+  const readAt = (file: string): string | undefined => serialize(() => {
     try {
-      return await readFile(file, 'utf8');
+      return readFileSync(file, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return undefined;
       }
       throw error;
     }
-  };
+  });
 
   const readFresh = async (agentId: string): Promise<Grants> => {
     let scopes: CommandScope[] = [];
@@ -334,7 +348,7 @@ export const createFileCommandWhitelist = (options: {
     // at the parse boundary, so this does not re-check it.
     let file = await resolveWhitelistPath(options.stateHome, options.directory, agentId);
     try {
-      let raw = await readAt(file);
+      let raw = readAt(file);
       if (raw === undefined) {
         // Resolved, then gone: the exclusive migration renames the legacy
         // `<id>.whitelist.json` into the agent's own directory, and a read
@@ -350,7 +364,7 @@ export const createFileCommandWhitelist = (options: {
         const moved = await resolveWhitelistPath(options.stateHome, options.directory, agentId);
         if (moved !== file) {
           file = moved;
-          raw = await readAt(file);
+          raw = readAt(file);
         }
       }
       if (raw !== undefined) {

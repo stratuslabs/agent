@@ -30,6 +30,7 @@ import {
   runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
+  grantReadSerializer,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogWriter } from '../logs.ts';
 import { describePrincipals, describeApprovers } from '../approvals.ts';
@@ -230,7 +231,14 @@ const serveHeldHome = async (
   // restart. A whitelist that exists and will not read is said here, once,
   // and never written over — the daemon's log is where a grant list going
   // quiet would otherwise go unnoticed.
-  const grantStore = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env), warn });
+  // Each grant file read under the lock a file-fallback revoke takes, so a
+  // daemon never caches a grant mid-revoke (#184).
+  const grantStore = createFileCommandWhitelist({
+    directory: agentsDirPath(env),
+    stateHome: stratusHomePath(env),
+    warn,
+    serializeRead: grantReadSerializer(env, warn),
+  });
 
   // The control API is a channel adapter like any other: started after the
   // roster loads, stopped before the store drains. It is optional because

@@ -62,7 +62,16 @@ export {
   foldedAgentId,
   gatewayTokenPath,
   gatewayInfoPath,
+  grantsLockPath,
 } from './paths.ts';
+
+export {
+  claimFileLock,
+  FileLockHeldError,
+  type FileLock,
+  GRANTS_LOCK_WAIT_MS,
+  grantReadSerializer,
+} from './file-lock.ts';
 
 export {
   REGISTERED_PROVIDER_PREFIX,

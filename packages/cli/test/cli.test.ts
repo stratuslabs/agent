@@ -9424,6 +9424,40 @@ test('parseCommand reads the grants command and its revoke form', () => {
   }
 });
 
+test('a file-fallback revoke takes the grants lock, and refuses rather than racing a holder', async () => {
+  // A daemon reads grant files under this lock, so holding it from the
+  // revoke's read to its write is what stops a daemon caching the grant
+  // in between (#184). Held here by the test, the revoke has to wait and
+  // then refuse, leaving the grant where it was.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-lock-'));
+  const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
+  const { claimFileLock, grantsLockPath } = await import('@stratusagent/state');
+  const store = createFileCommandWhitelist({
+    directory: path.join(home, '.stratus', 'agents'),
+    stateHome: path.join(home, '.stratus'),
+  });
+  await store.rememberTool('ava', { tool: 'web.fetch', package: 'stratus-plugin-web', grantedAt: '2026-09-07T01:00:00.000Z' });
+  const env = { cwd: home, homeDir: home, processEnv: {}, grantsLockWaitMs: 50 };
+
+  const held = claimFileLock(grantsLockPath(env));
+  const refused = createStreams();
+  try {
+    assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: refused.streams, env }), 1);
+  } finally {
+    held.release();
+  }
+  assert.match(refused.output.stderr, /grants\.lock was held by another process.*nothing was revoked/);
+  const still = await createFileCommandWhitelist({
+    directory: path.join(home, '.stratus', 'agents'),
+    stateHome: path.join(home, '.stratus'),
+  }).grantsFor('ava');
+  assert.deepEqual(still.tools.map((grant) => grant.tool), ['web.fetch']);
+
+  // Free, it goes through and lets the lock go again.
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: createStreams().streams, env }), 0);
+  claimFileLock(grantsLockPath(env)).release();
+});
+
 test('stratus grants reads and revokes from the whitelist file when no daemon is serving', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-cli-'));
   const env = { cwd: home, homeDir: home, processEnv: {} };

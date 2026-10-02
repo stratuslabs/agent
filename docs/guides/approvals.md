@@ -266,6 +266,17 @@ until that daemon restarts; the command falls back to the file, and says
 so, only when the daemon `~/.stratus/gateway.json` names does not answer.
 With no daemon at all, the file is edited directly.
 
+A file-fallback revoke holds `~/.stratus/grants.lock` from the read it
+decides on until its write lands, and a daemon reads each grant file under
+the same lock. So a daemon starting during a revoke reads the file before
+the revoke or after it, never halfway, and can't cache a grant the command
+then reports as gone. A revoke that can't get the lock within 5 seconds
+revokes nothing and says so; run it again. One case is unchanged: a daemon
+that is already running, and whose control API doesn't answer, keeps
+whatever it read until it restarts. The command still writes the file
+then, because refusing would leave no way to revoke at all, and the next
+daemon to start reads the file.
+
 A grant can outlive its agent: delete a soul and its `whitelist.json`
 stays, and an agent created later under the same id inherits it.
 `stratus grants <id>` shows it whether or not a soul exists, so revoke the
