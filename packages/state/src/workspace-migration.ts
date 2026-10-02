@@ -1187,8 +1187,15 @@ const linkRecordPath = (env: StateEnvironment): string =>
  * It is what only the move produces. A rename carries the entry's inode to
  * the destination; a recreated link is a link naming exactly what the move
  * wrote. A directory an ordinary command makes there is neither.
+ *
+ * The inode with its birth time, not alone: an inode names an entry only
+ * while that entry is linked, so a legacy directory deleted after it was
+ * marked frees its number for the next directory made — at the destination,
+ * say — and that one would read as the move. A rename keeps the birth time
+ * and a new directory gets its own. On a filesystem that keeps none, Node
+ * reports the same placeholder for both and this is the inode alone again.
  */
-type MoveProof = { inode: string } | { link: string };
+type MoveProof = { inode: string; born: number } | { link: string };
 
 interface LinkRecord {
   links: Map<string, string>;
@@ -1210,12 +1217,13 @@ const isMoveProof = (value: unknown): value is MoveProof => {
   if (value === null || typeof value !== 'object') {
     return false;
   }
-  const { inode, link } = value as { inode?: unknown; link?: unknown };
+  const { inode, born, link } = value as { inode?: unknown; born?: unknown; link?: unknown };
   // A link proof can name somewhere outside the home — a legacy link to
   // `../../data/ava` keeps that target — and that one stays absolute, since
   // no relative spelling of it survives the home moving either.
-  return (typeof inode === 'string' && link === undefined)
-    || ((isHomeRelative(link) || (typeof link === 'string' && path.isAbsolute(link))) && inode === undefined);
+  return (typeof inode === 'string' && typeof born === 'number' && link === undefined)
+    || ((isHomeRelative(link) || (typeof link === 'string' && path.isAbsolute(link)))
+      && inode === undefined && born === undefined);
 };
 
 /** Relative to the home when inside it, absolute when not; `path.resolve(home, …)` reads either. */
@@ -1583,7 +1591,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     try {
       const stats = await lstat(destination);
       matches = 'inode' in proof
-        ? inodeOf(stats) === proof.inode
+        ? inodeOf(stats) === proof.inode && stats.birthtimeMs === proof.born
         : stats.isSymbolicLink() && path.resolve(parent, await readlink(destination)) === proof.link;
     } catch {
       return 'inconclusive';
@@ -2147,7 +2155,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           + 'will be merged.',
         );
       }
-      await markMoving(agentId, { inode: inodeOf(await lstat(from)) });
+      const source = await lstat(from);
+      await markMoving(agentId, { inode: inodeOf(source), born: source.birthtimeMs });
       await rename(from, target);
     };
     try {

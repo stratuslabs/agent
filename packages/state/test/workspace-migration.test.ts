@@ -1782,7 +1782,7 @@ test('a move that finished just before a run stopped still retires its link reco
   // inode a rename keeps, which is what the move would have written.
   await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
   const moved = await lstat(agentWorkspacePath(env, 'bea'));
-  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${moved.dev}:${moved.ino}` } } }));
+  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${moved.dev}:${moved.ino}`, born: moved.birthtimeMs } } }));
   await rm(path.join(legacyDir, 'bea'));
 
   // The next start finishes the retirement; a stale `workspaces/bea`
@@ -1813,6 +1813,31 @@ const stoppedAtBea = async (home: string): Promise<string> => {
   return legacyDir;
 };
 
+test('a move marker is not proven by a recycled inode', async () => {
+  // bea was marked and its legacy directory then deleted, not moved. Its
+  // inode number is free for the next directory made, here the one at bea's
+  // new path: same number, born later. Taken for the move, it would retire
+  // ava's entry and leave ava naming that unrelated directory for good.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as Record<string, unknown>;
+  await rm(path.join(legacyDir, 'bea'));
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  const recycled = await lstat(agentWorkspacePath(env, 'bea'));
+  await writeFile(recordFile, JSON.stringify({
+    ...record,
+    moving: { bea: { inode: `${recycled.dev}:${recycled.ino}`, born: recycled.birthtimeMs - 1000 } },
+  }));
+  await applyPerAgentWorkspaces(env);
+
+  await symlink('ava', path.join(legacyDir, 'bea'));
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
 test('a move marker is settled only by what the move itself leaves, not by paths others can change', async () => {
   // The run marked bea and stopped before renaming it. Then, with no lock
   // held, bea's legacy entry went away and something made bea's new path.
@@ -1824,7 +1849,7 @@ test('a move marker is settled only by what the move itself leaves, not by paths
   const recordFile = path.join(home, '.stratus', 'workspace-links.json');
   const record = JSON.parse(await readFile(recordFile, 'utf8')) as Record<string, unknown>;
   const unmoved = await lstat(path.join(legacyDir, 'bea'));
-  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${unmoved.dev}:${unmoved.ino}` } } }));
+  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${unmoved.dev}:${unmoved.ino}`, born: unmoved.birthtimeMs } } }));
   await rm(path.join(legacyDir, 'bea'));
   await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
   await applyPerAgentWorkspaces(env);
@@ -1923,7 +1948,7 @@ test('a pending link entry whose target\'s move is proven by a marker is retired
   await writeFile(recordFile, JSON.stringify({
     links: {},
     pending: record.links,
-    moving: { bea: { inode: `${moved.dev}:${moved.ino}` } },
+    moving: { bea: { inode: `${moved.dev}:${moved.ino}`, born: moved.birthtimeMs } },
   }));
   await rm(path.join(legacyDir, 'bea'));
 
@@ -1947,7 +1972,7 @@ test('a move marker named only by a pending link entry is kept while neither can
   await writeFile(recordFile, JSON.stringify({
     links: {},
     pending: record.links,
-    moving: { bea: { inode: `${moved.dev}:${moved.ino}` } },
+    moving: { bea: { inode: `${moved.dev}:${moved.ino}`, born: moved.birthtimeMs } },
   }));
   await rm(path.join(legacyDir, 'bea'));
   const avaDir = path.dirname(agentWorkspacePath(env, 'ava'));
@@ -1990,7 +2015,7 @@ test('a move marker whose proof cannot be seen for a moment is kept, and the sta
   const record = JSON.parse(await readFile(recordFile, 'utf8')) as Record<string, unknown>;
   await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
   const done = await lstat(agentWorkspacePath(env, 'bea'));
-  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${done.dev}:${done.ino}` } } }));
+  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${done.dev}:${done.ino}`, born: done.birthtimeMs } } }));
   await rm(path.join(legacyDir, 'bea'));
 
   // Neither end of the move can be seen, so the start is refused rather
@@ -2119,7 +2144,7 @@ test('a move marker the destination visibly contradicts does not hold back the r
   const recordFile = path.join(home, '.stratus', 'workspace-links.json');
   const record = JSON.parse(await readFile(recordFile, 'utf8')) as Record<string, unknown>;
   const unmoved = await lstat(path.join(legacyDir, 'bea'));
-  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${unmoved.dev}:${unmoved.ino}` } } }));
+  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${unmoved.dev}:${unmoved.ino}`, born: unmoved.birthtimeMs } } }));
   await rm(path.join(legacyDir, 'bea'));
   await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
 
