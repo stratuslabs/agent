@@ -1688,6 +1688,55 @@ test('a cycle closed through an alias outside the home is walked from that alias
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyWorkspacesDirPath(env), 'cyd'));
 });
 
+test('a cycle torn by a run that stopped is still repaired by the next one', async () => {
+  // The first run recreates ava naming bea's new path and stops before bea:
+  // a crash, or a destination that appeared under the move itself. The
+  // next run finds bea's destination taken and bea staying, and ava's
+  // legacy entry is long gone, so only a record kept on disk says this
+  // migration wrote ava's link.
+  const home = await newHome();
+  const legacyDir = legacyWorkspacesDirPath({ homeDir: home });
+  await mkdir(legacyDir, { recursive: true });
+  await symlink('bea', path.join(legacyDir, 'ava'));
+  await symlink('ava', path.join(legacyDir, 'bea'));
+  const dying = {
+    homeDir: home,
+    async beforeWorkspaceMove(agentId: string): Promise<void> {
+      if (agentId === 'bea') {
+        throw new Error('the process stopped here');
+      }
+    },
+  };
+  await runStateMigrations(dying, { exclusive: true }).catch(() => undefined);
+  const env = { homeDir: home };
+  assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'), 'the first run did write ava');
+
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'bea'), 'theirs.md'), 'not ava\'s');
+  await runStateMigrations(env, { exclusive: true });
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+  // Nothing left to repair, so nothing left recorded.
+  await assert.rejects(lstat(path.join(home, '.stratus', 'workspace-links.json')), { code: 'ENOENT' });
+});
+
+test('a legacy link carried across as it stood is never pointed back', async () => {
+  // `workspaces/ava -> ../agents/bea/workspace` names a live path the
+  // operator chose; nothing retargeted it. bea's own legacy entry is stale
+  // and stays, its destination being taken, and ava must still name bea's
+  // live workspace rather than bea's dangling legacy path.
+  const home = await newHome();
+  const env = { homeDir: home };
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await symlink(path.join('..', 'agents', 'bea', 'workspace'), path.join(legacyWorkspacesDirPath(env), 'ava'));
+  await symlink('zed', path.join(legacyWorkspacesDirPath(env), 'bea'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  assert.equal(await realpath(agentWorkspacePath(env, 'ava')), await realpath(agentWorkspacePath(env, 'bea')));
+});
+
 test('a link an operator made in the new layout is not taken for a cycle peer', async () => {
   // A stale legacy link with an occupied destination, and elsewhere an
   // operator's own `agents/ava/workspace -> ../bea/workspace` sharing bea's

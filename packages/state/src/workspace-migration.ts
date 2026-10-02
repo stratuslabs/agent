@@ -1146,6 +1146,55 @@ export const strayWorkspaceNames = async (env: StateEnvironment): Promise<readon
  * months; parsing all of them on every start would be a real cost to pay
  * for a state that no longer exists.
  */
+/**
+ * The links the workspace migration retargeted, by agent, and the path each
+ * was written naming — kept on disk until `workspaces/` is gone.
+ *
+ * The only evidence a link in the new layout is this migration's: one an
+ * operator made to share a workspace is the same bytes. Kept in memory
+ * alone, it died with a run that stopped between recreating a cycle's
+ * links and reaching the member whose destination was then taken, and the
+ * next start had nothing to repair those links from (#220).
+ */
+const linkRecordPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), 'workspace-links.json');
+
+const readLinkRecord = async (env: StateEnvironment): Promise<Map<string, string>> => {
+  const file = linkRecordPath(env);
+  try {
+    // Derived state under the home is never read through a link.
+    if ((await lstat(file)).isSymbolicLink()) {
+      return new Map();
+    }
+    const parsed = JSON.parse(await readFile(file, 'utf8')) as unknown;
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return new Map();
+    }
+    return new Map(Object.entries(parsed).filter((entry): entry is [string, string] =>
+      isValidAgentId(entry[0]) && typeof entry[1] === 'string' && path.isAbsolute(entry[1])));
+  } catch {
+    // Absent, or unreadable: nothing this migration can prove it wrote.
+    return new Map();
+  }
+};
+
+/** Replaced in one step, never rewritten in place, and removed once empty. */
+const saveLinkRecord = async (env: StateEnvironment, written: ReadonlyMap<string, string>): Promise<void> => {
+  const file = linkRecordPath(env);
+  if (written.size === 0) {
+    await rm(file, { force: true });
+    return;
+  }
+  const replacement = `${file}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(replacement, `${JSON.stringify(Object.fromEntries(written), null, 2)}\n`, { mode: 0o600 });
+    await rename(replacement, file);
+  } catch (error) {
+    await rm(replacement, { force: true });
+    throw error;
+  }
+};
+
 export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<string | undefined> => {
   // Before anything else: a previous run may have moved a workspace and
   // died before its ledger followed, and there is nothing in `workspaces/`
@@ -1163,6 +1212,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // over it would refuse every `stratus serve` for good, since the
     // migration that would clear the obstacle is the one failing.
     if (code === 'ENOENT' || code === 'ENOTDIR') {
+      // Nothing left that could stay put, so nothing left to repair.
+      await rm(linkRecordPath(env), { force: true });
       return finished > 0 ? `finished ${finished} interrupted workspace move(s)` : undefined;
     }
     throw error;
@@ -1320,12 +1371,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // would silently swap the shared files for a different workspace that an
   // ordinary command happened to create.
   const moved = new Set<string>();
-  /**
-   * The links this run recreated, by agent, and the path each names. The
-   * only evidence a link in the new layout is this migration's: on disk,
-   * one an operator made to share a workspace is the same bytes.
-   */
-  const written = new Map<string, string>();
+  /** See `linkRecordPath`: this run's retargeted links and every earlier run's. */
+  const written = await readLinkRecord(env);
   /** The names this run left free, as opposed to deliberately left alone. */
   const emptied = new Set<string>();
   /**
@@ -1392,15 +1439,16 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    * what a cycle of links always did, and nowhere is safe where somebody
    * else's workspace is not.
    *
-   * Only links this run wrote, and only while they still name what it wrote.
-   * Asked of the disk alone, this repaired a home an earlier run had left
-   * torn, and could not tell that home from one where an operator chained
-   * `agents/ava/workspace -> ../bea/workspace -> ../cyd/workspace` to share
-   * a live workspace beside a stale `workspaces/cyd -> ava`: the same bytes,
-   * and the repair broke a working setup. A cycle has no files of its own,
-   * so whatever is at the stayed member's path is never the cycle's.
+   * Only links this migration retargeted, from this run or one that stopped
+   * before it got here, and only while they still name what was written.
+   * Asked of the disk alone, this could not tell a torn cycle from an
+   * operator's `agents/ava/workspace -> ../bea/workspace -> ../cyd/workspace`
+   * sharing a live workspace beside a stale `workspaces/cyd -> ava`: the
+   * same bytes, and the repair broke a working setup. A cycle has no files
+   * of its own, so whatever is at the stayed member's path is never the
+   * cycle's.
    *
-   * Every link this run wrote that names this member's new path, not only
+   * Every recorded link that names this member's new path, not only
    * the one a cycle walk reaches first: in `ava -> cyd`, `bea -> cyd`,
    * `cyd -> ava`, all three wait on one another, so all are announced, and
    * both `ava` and `bea` are recreated naming `cyd`'s new path.
@@ -1423,6 +1471,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       }
       await repointPeer(agentId, peer, peerTarget, path.join(from, below), wrote);
       written.delete(peer);
+      await saveLinkRecord(env, written);
     }
   };
 
@@ -1635,8 +1684,14 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           ?? (alias !== undefined ? await migratedTarget(alias) : undefined);
         const names = resolved ?? direct;
         if (!path.isAbsolute(text) || resolved !== undefined) {
+          // Recorded before it is written, and only when retargeted: a link
+          // carried across as it stood names what its operator chose, and
+          // is never one to point back.
+          if (resolved !== undefined) {
+            written.set(agentId, path.resolve(names));
+            await saveLinkRecord(env, written);
+          }
           await symlink(path.relative(path.dirname(target), names), target);
-          written.set(agentId, path.resolve(names));
           // Both exist for an instant. A run killed here finds the source
           // again next time and the destination resolving to the same
           // directory, which `sameEntry` above reads as finished.
@@ -1842,6 +1897,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   try {
     if (!(await anyWorkspaceNamesLegacy(env, legacy))) {
       await rmdir(legacy);
+      await rm(linkRecordPath(env), { force: true });
     }
   } catch (error) {
     // Still holding something this run is right to leave: an operator's own

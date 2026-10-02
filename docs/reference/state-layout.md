@@ -16,6 +16,7 @@ what moves when you rename an agent.
 | `fleet.db` | The schedules, and the session index that says which agent's store holds a given session id. Fleet infrastructure, deliberately not per agent — see below. |
 | `gateway-token`, `gateway.json` | The [control API](../../packages/control-api/README.md)'s bearer token and the address a running daemon bound. Both `0600`. |
 | `stratusd.lock` | Held by the daemon serving this home; how a second `stratus serve` is refused. |
+| `workspace-links.json` | Only while the upgrade move of `workspaces/` is unfinished: which workspace links that move pointed somewhere new, so a later start can point them back if their target turns out to stay put. Removed with `workspaces/`. `0600`. |
 | `logs/` | `stratusd.jsonl`, the structured trace [`stratus logs`](../guides/logs.md) reads, plus the macOS LaunchAgent's stdout/stderr redirects. `0700`. |
 | `skills/` | Operator-installed [skills](../guides/skills.md), one directory each. |
 | `agents/` | One `<id>.md` soul per agent, plus one directory per agent — below. |
