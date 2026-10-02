@@ -1711,8 +1711,13 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           );
         }
         const peerText = await linkText(peerTarget);
-        // Still naming what this run wrote: anything else is not ours to touch.
+        // Still naming what this run wrote: anything else is not ours to
+        // touch, and the entry is forgotten now that something else is seen
+        // there — kept, it would match a link the operator later points at
+        // that same path, and rewrite theirs.
         if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
+          written.delete(peer);
+          await saveLinkRecord(env, record);
           settled = true;
         } else if (await repointPeer(agentId, peer, peerTarget, path.join(from, below), wrote, inodeOf(observed))) {
           written.delete(peer);

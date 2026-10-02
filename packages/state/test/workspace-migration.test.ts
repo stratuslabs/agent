@@ -2137,6 +2137,34 @@ test('a move proof is not accepted from beneath a linked agent directory', async
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+test('a recorded link replaced during the pass is forgotten there, not matched again on a later start', async () => {
+  // The operator replaces ava's link after the record was loaded and before
+  // bea's repair reaches it. The repair leaves the replacement alone, and
+  // must also drop the entry: otherwise a link the operator later points at
+  // bea's new path on purpose is taken for the migration's and rewritten.
+  const home = await newHome();
+  await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  const avaLink = agentWorkspacePath(env, 'ava');
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await applyPerAgentWorkspaces({
+    homeDir: home,
+    async beforeWorkspaceMove(agentId: string): Promise<void> {
+      if (agentId === 'bea') {
+        await rm(avaLink);
+        await symlink(elsewhere, avaLink);
+      }
+    },
+  });
+
+  await rm(avaLink);
+  await symlink(path.join('..', 'bea', 'workspace'), avaLink);
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there
