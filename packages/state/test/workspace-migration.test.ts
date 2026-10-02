@@ -2262,7 +2262,8 @@ test('a recorded peer whose agent directory became a link is left alone, not rew
   // `agents/ava` was moved to another tree and linked back. Its workspace
   // link reads `../bea/workspace` just as before, so by text it still names
   // bea's new path, but it lives outside the home now: repointing it would
-  // rename over a file there.
+  // rename over a file there. And the start is refused rather than finished,
+  // since that link, brought back, would name bea's occupied path.
   const home = await newHome();
   await stoppedAtBea(home);
   const env = { homeDir: home };
@@ -2271,7 +2272,7 @@ test('a recorded peer whose agent directory became a link is left alone, not rew
   await rename(path.join(agentsDirPath(env), 'ava'), path.join(elsewhere, 'ava'));
   await symlink(path.join(elsewhere, 'ava'), path.join(agentsDirPath(env), 'ava'));
 
-  await applyPerAgentWorkspaces(env);
+  await assert.rejects(applyPerAgentWorkspaces(env), /is a symbolic link, so "ava"'s workspace link/);
 
   assert.equal(await readlink(path.join(elsewhere, 'ava', 'workspace')), path.join('..', 'bea', 'workspace'));
 });
@@ -2309,7 +2310,7 @@ test('a link record entry is kept while its peer\'s agent directory is a link', 
   const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
   await mkdir(path.join(elsewhere, 'workspace'), { recursive: true });
   await symlink(elsewhere, avaDir);
-  await applyPerAgentWorkspaces(env);
+  await assert.rejects(applyPerAgentWorkspaces(env), /is a symbolic link, so "ava"'s workspace link/);
 
   await rm(avaDir);
   await rename(aside, avaDir);

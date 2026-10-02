@@ -159,7 +159,8 @@ do, wherever it cannot tell that a link is safe:
   gone and whose new one is missing or not a plain directory inside the
   home, so it cannot tell whether the move finished;
 - a link the move had pointed somewhere new that is missing when it needs
-  pointing back, or that keeps being replaced while it is;
+  pointing back, that keeps being replaced while it is, or whose
+  `agents/<id>` is a symbolic link at the time;
 - a link Stratus stopped while writing, found in place with exactly the
   text it was writing — it cannot be told from one you made yourself, so
   the error says which entry to remove from `workspace-links.json` if you

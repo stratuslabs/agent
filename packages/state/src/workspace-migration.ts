@@ -1251,6 +1251,15 @@ const asStored = (home: string, absolute: string): string => {
 
 const inodeOf = (stats: { dev: number; ino: number }): string => `${stats.dev}:${stats.ino}`;
 
+/**
+ * An entry's identity plus its change time, for telling whether one entry
+ * stayed put across a read. The inode alone misses a link renamed aside and
+ * renamed back — same inode, and a read in between saw something else — and
+ * a rename sets the change time.
+ */
+const stampOf = (stats: { dev: number; ino: number; ctimeMs: number }): string =>
+  `${inodeOf(stats)}:${stats.ctimeMs}`;
+
 const readLinkRecord = async (env: StateEnvironment, seenBefore: boolean): Promise<LinkRecord> => {
   const file = linkRecordPath(env);
   const unreadable = (reason: string): Error => new Error(
@@ -1688,7 +1697,7 @@ export const applyPerAgentWorkspaces = async (
       const stats = await lstat(peerTarget);
       names = stats.isSymbolicLink() ? path.resolve(parent, await readlink(peerTarget)) : '';
       // Asked again, for the reason the scan of `links` below gives.
-      if (inodeOf(await lstat(peerTarget)) !== inodeOf(stats)) {
+      if (stampOf(await lstat(peerTarget)) !== stampOf(stats)) {
         continue;
       }
     } catch {
@@ -1734,7 +1743,7 @@ export const applyPerAgentWorkspaces = async (
       // The entry itself as well as its directory: one swapped and swapped
       // back between the `lstat` and the `readlink` reads as something else,
       // and this entry is the only thing that repairs the link once it is back.
-      if (inodeOf(await lstat(peerTarget)) !== inodeOf(stats)) {
+      if (stampOf(await lstat(peerTarget)) !== stampOf(stats)) {
         continue;
       }
     } catch {
@@ -1878,14 +1887,19 @@ export const applyPerAgentWorkspaces = async (
         // would read against the wrong directory, and the rename would land
         // outside the home. Not ours to touch — the daemon refuses that agent
         // anyway — and asked on every attempt, not once before them.
+        //
+        // Not settled either: the entry is kept and the start refused, because
+        // a link put back in place of that directory after this pass would
+        // bring the link this run wrote back with it, naming the path of a
+        // member that stays put, for as long as the daemon runs.
         const linked = await linkedDerivedComponent(stratusHomePath(env), peerParent);
         if (linked !== undefined) {
-          report.quarantined.push(
-            `${peer} — ${path.relative(stratusHomePath(env), linked)} is a symbolic link, so its workspace link was `
-            + `left as it is rather than pointed at ${path.relative(stratusHomePath(env), from)}`,
+          throw new Error(
+            `${linked} is a symbolic link, so ${JSON.stringify(peer)}'s workspace link, last written naming ${wrote} `
+            + `where ${JSON.stringify(agentId)} is not moving, cannot be pointed at ${from}. Put the directory `
+            + `back, or remove ${JSON.stringify(peer)} from ${linkRecordPath(env)} if it is meant to stay a link, `
+            + 'and start again.',
           );
-          settled = true;
-          break;
         }
         const parentBefore = await lstat(peerParent).catch(() => undefined);
         // Its identity as well as its text, so the swap can tell whether the
@@ -1904,8 +1918,13 @@ export const applyPerAgentWorkspaces = async (
           );
         }
         const peerText = await linkText(peerTarget);
-        // Read through the directory it was checked in, or asked again.
-        if (parentBefore === undefined || await steadyDirectory(peerParent) !== inodeOf(parentBefore)) {
+        // Read through the directory it was checked in, and from the entry
+        // that was observed — one swapped and swapped back in between read as
+        // another link, and forgetting the entry over it would leave the
+        // original naming the stayed member's path — or asked again.
+        const settledEntry = await lstat(peerTarget).catch(() => undefined);
+        if (parentBefore === undefined || await steadyDirectory(peerParent) !== inodeOf(parentBefore)
+          || settledEntry === undefined || stampOf(settledEntry) !== stampOf(observed)) {
           continue;
         }
         // Still naming what this run wrote: anything else is not ours to
