@@ -1589,6 +1589,8 @@ test('a cycle peer left naming a member that never moved is pointed back at wher
   assert.equal(await readlink(path.join(legacyWorkspacesDirPath(env), 'bea')), 'ava');
   assert.equal(await readFile(path.join(agentWorkspacePath(env, 'bea'), 'theirs.md'), 'utf8'), 'not ava\'s');
   assert.match(line, /ava — named agents\/bea\/workspace, where "bea" was due to move and did not/);
+  // Replaced in one step: nothing left beside it from the swap.
+  assert.deepEqual(await readdir(path.join(agentsDirPath(env), 'ava')), ['workspace']);
 });
 
 test('a cycle whose destination is occupied is quarantined, not an aborted upgrade', async () => {

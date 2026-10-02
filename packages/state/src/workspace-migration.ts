@@ -9,6 +9,7 @@ import {
   readlink,
   realpath,
   rename,
+  rm,
   rmdir,
   stat,
   symlink,
@@ -1403,8 +1404,19 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== target) {
       return;
     }
-    await unlink(peerTarget);
-    await symlink(path.relative(path.dirname(peerTarget), from), peerTarget);
+    // Made beside it and renamed over it, never unlinked first: a run that
+    // dies between an unlink and its symlink leaves the peer with no link at
+    // all, and the next pass then has nothing to recognise and repair. A
+    // rename replaces the link in one step, and a failure before it leaves
+    // the old link, so the shape above is still there to be found.
+    const replacement = `${peerTarget}.${randomUUID()}.tmp`;
+    try {
+      await symlink(path.relative(path.dirname(peerTarget), from), replacement);
+      await rename(replacement, peerTarget);
+    } catch (error) {
+      await rm(replacement, { force: true });
+      throw error;
+    }
     report.quarantined.push(
       `${peer} — named ${path.relative(stratusHomePath(env), target)}, where ${JSON.stringify(agentId)} was due to `
       + `move and did not, so it names ${path.relative(stratusHomePath(env), from)} instead`,
