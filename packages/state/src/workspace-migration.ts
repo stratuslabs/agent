@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { createReadStream, type Dirent } from 'node:fs';
+import { constants, createReadStream, type Dirent } from 'node:fs';
 import {
   appendFile,
   chmod,
   lstat,
+  open,
   readdir,
   readFile,
   readlink,
@@ -1249,7 +1250,21 @@ const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
     const stats = await lstat(file);
     seen = true;
     if (!stats.isSymbolicLink()) {
-      raw = await readFile(file, 'utf8');
+      // Read through a handle proven to be the entry just checked: replaced
+      // in between, by a link or by another file, the name would hand over
+      // bytes nobody vouched for, and a stale record makes an operator's
+      // link look like one this migration wrote.
+      const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      try {
+        const opened = await handle.stat();
+        if (opened.isFile() && inodeOf(opened) === inodeOf(stats)) {
+          raw = (await handle.readFile()).toString('utf8');
+        } else {
+          reason = 'it was replaced while being read';
+        }
+      } finally {
+        await handle.close();
+      }
     }
   } catch (error) {
     // Absent only if it was never there: one seen and then gone before the
@@ -1619,15 +1634,18 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   }
   // A link a stopped run was about to write — asked after the markers above
   // are settled, since one whose target's move is proven was retired with
-  // it, and is right for good rather than ambiguous. Missing, it never was,
-  // and the entry goes. Naming exactly what was to be written, it is that
-  // run's — or
-  // one the operator made since with the same text, which nothing on disk
-  // tells apart, and pointing the operator's back at a legacy path is the
-  // harm the whole record exists to avoid. So the start is refused, naming
-  // the two ways out. Anything else there is not this migration's, and the
-  // entry goes too. Read only through a steady `agents/<id>`, for the reason
-  // the scan of `links` below gives; otherwise kept for a later start.
+  // it, and is right for good rather than ambiguous. Naming exactly what was
+  // to be written, it is that run's — or one the operator made since with
+  // the same text, which nothing on disk tells apart, and pointing the
+  // operator's back at a legacy path is the harm the whole record exists to
+  // avoid. So the start is refused, naming the two ways out. Anything else
+  // there is not this migration's, and the entry goes. Missing is kept, not
+  // taken for "never written": the link may be renamed aside for a backup,
+  // as a confirmed one may (see `repointPeersNamingNewPath`), and dropped
+  // now there would be nothing to repair it from once it is back; a retried
+  // move writes the entry afresh anyway. Read only through a steady
+  // `agents/<id>`, for the reason the scan of `links` below gives;
+  // otherwise kept for a later start too.
   for (const [peer, wrote] of [...record.pending]) {
     const peerTarget = agentWorkspacePath(env, peer);
     const parent = path.dirname(peerTarget);
@@ -1635,14 +1653,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     if (before === undefined) {
       continue;
     }
-    let names: string | undefined;
+    let names: string;
     try {
       const stats = await lstat(peerTarget);
       names = stats.isSymbolicLink() ? path.resolve(parent, await readlink(peerTarget)) : '';
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        continue;
-      }
+    } catch {
+      continue;
     }
     if (await steadyDirectory(parent) !== before) {
       continue;

@@ -1988,6 +1988,27 @@ test('a move marker named only by a pending link entry is kept while neither can
   assert.equal(await reachedFrom(env, 'ava'), beaWorkspace);
 });
 
+test('a pending link entry whose link is missing for a moment is kept, not taken for one never written', async () => {
+  // ava's link was written and the run stopped before promoting its entry.
+  // The next start finds the link renamed aside for a backup, and bea, the
+  // workspace it names, stays put because its new path is taken. Dropped
+  // then, nothing would say ava's link names somebody else's files once the
+  // backup put it back; kept, the start after refuses instead of serving it.
+  const home = await newHome();
+  await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as { links: Record<string, string> };
+  await writeFile(recordFile, JSON.stringify({ links: {}, pending: record.links, moving: {} }));
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  const avaLink = agentWorkspacePath(env, 'ava');
+  await rename(avaLink, `${avaLink}.bak`);
+  await applyPerAgentWorkspaces(env);
+  await rename(`${avaLink}.bak`, avaLink);
+
+  await assert.rejects(applyPerAgentWorkspaces(env), /cannot be told whether this one is that start's or yours/);
+});
+
 test('a link record survives the home being moved to another path', async () => {
   // A home restored from backup, or moved to a new disk, keeps its relative
   // links resolving. The record has to keep matching them, or the next
