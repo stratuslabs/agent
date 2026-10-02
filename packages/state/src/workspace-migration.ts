@@ -1768,6 +1768,13 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // Retired only if this workspace is nobody else's — see
       // `ledgerIsShared`. Asked before the fold, because the fold is
       // what would take it away.
+      //
+      // This member stays put too, whatever its own link resolves to now — a
+      // command of an older build can have remade the workspace a dangling
+      // one named — so a peer recorded naming its new path is pointed back
+      // here just as in the dangling case above.
+      moved.delete(agentId);
+      await repointPeersNamingNewPath(agentId, from, target);
       const shared = await ledgerIsShared(env, from);
       const folded = await foldLedgerInto(from, target, !shared);
       if (folded.outcome === 'folded') {

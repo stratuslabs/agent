@@ -1897,6 +1897,23 @@ test('a move marker whose proof cannot be seen for a moment is kept, not dropped
   assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
 });
 
+test('a recorded peer is repaired when the member that stays has a link that resolves again', async () => {
+  // A run stopped after recreating ava naming bea's new path. A command of an
+  // older build then remade `workspaces/ava`, so bea's legacy link resolves
+  // again, and something took bea's new path. bea stays, and ava must not go
+  // on reaching what took it just because bea no longer dangles.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await mkdir(path.join(legacyDir, 'ava'), { recursive: true });
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'bea'), 'theirs.md'), 'not ava\'s');
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+  assert.notEqual(await realpath(agentWorkspacePath(env, 'ava')), await realpath(agentWorkspacePath(env, 'bea')));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there
