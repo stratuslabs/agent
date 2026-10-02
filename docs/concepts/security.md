@@ -6,7 +6,8 @@ linked own the full story.
 ## Secrets on disk
 
 - `~/.stratus/credentials.json` is `0600` (owner-read-only), and so are
-  `~/.stratus/gateway-token`, `~/.stratus/gateway.json`,
+  `~/.stratus/config.json` (plugin config carries secrets, such as
+  tool-shell's `env` block), `~/.stratus/gateway-token`, `~/.stratus/gateway.json`,
   `~/.stratus/logs/stratusd.jsonl`, and everything in each agent's own
   directory — its `sessions.db`, its `memory.jsonl`, and its
   `whitelist.json`. The directory itself is `0700`.
