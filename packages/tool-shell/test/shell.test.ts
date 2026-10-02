@@ -113,6 +113,15 @@ test('an agent\'s own env adds to the fleet\'s, and a null withholds a shared va
   // Another agent sees only the fleet's — never blair's token.
   const ava = String((await runCommand(tools, 'echo "[$AGENTBOARD_TOKEN][$SHARED_TOKEN]"', 'ava')).stdout).trim();
   assert.equal(ava, '[][fleet]');
+
+  // A null withholds a name forwarded from the daemon by passEnv too, not
+  // only one the shared env set.
+  const forwarded = await registryFor(
+    { passEnv: ['PATH', 'DAEMON_TOKEN'], agents: { blair: { env: { DAEMON_TOKEN: null } } } },
+    { PATH: process.env.PATH ?? '/usr/bin:/bin', DAEMON_TOKEN: 'daemons' },
+  );
+  assert.equal(String((await runCommand(forwarded, 'echo "[$DAEMON_TOKEN]"', 'blair')).stdout).trim(), '[]');
+  assert.equal(String((await runCommand(forwarded, 'echo "[$DAEMON_TOKEN]"', 'ava')).stdout).trim(), '[daemons]');
 });
 
 test('commands start in the pinned working directory', async () => {

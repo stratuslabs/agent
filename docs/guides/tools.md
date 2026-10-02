@@ -37,7 +37,7 @@ preference.
 
 An agent's entry replaces each key it sets, with one exception: tool-shell's
 `env`, where an agent's variables are added to the shared ones (its names
-win, and `null` withholds a shared one from that agent). Giving one agent a
+win, and `null` withholds a name from that agent, `passEnv` included). Giving one agent a
 token no longer costs it the `PATH` everyone else gets. See
 [tool-shell](../../packages/tool-shell/README.md).
 

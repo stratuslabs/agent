@@ -112,6 +112,12 @@ const settingsFor = (
     for (const [name, value] of Object.entries(explicit)) {
       if (typeof value === 'string') {
         granted[name] = value;
+      } else if (value === null) {
+        // Withheld, wherever it would have come from: the shared `env` or
+        // the daemon's own environment through `passEnv`. Skipping the
+        // name here would only stop the first, and an operator who wrote
+        // `null` meant the agent does not get it.
+        delete granted[name];
       }
     }
   }
