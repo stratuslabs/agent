@@ -3217,15 +3217,26 @@ const failureSignature = (calls: ToolCall[], results: ToolResult[]): string | un
 };
 
 /**
- * The provider response a recorded tool call belongs to, as the session
- * holds it: every call in it, and every result recorded for them.
+ * The provider responses of the current message, oldest first, through the
+ * one a recorded tool call belongs to: each as every call in it and every
+ * result recorded for them.
  *
  * A response is saved as one contiguous run of assistant messages before
  * any of its calls runs, so the run around the call's own message is the
  * response. Found from the end and by the whole call, not its id alone:
  * ids repeat across turns when a provider omits them.
+ *
+ * The ones before it are what a restart forgets. A message that failed the
+ * same way twice before the process died and once more on the recovered
+ * turn has failed three times, and counting from the recovery alone let it
+ * fail twice more. Walked back through runs of tool results and the
+ * responses they answer, and no further than the first message that is
+ * neither — the person's own message, which is where this run began.
  */
-const responseOfCall = (session: Session, call: ToolCall): { calls: ToolCall[]; results: ToolResult[] } => {
+const responsesThroughCall = (
+  session: Session,
+  call: ToolCall,
+): Array<{ calls: ToolCall[]; results: ToolResult[] }> => {
   const messages = session.messages;
   const same = (candidate: ToolCall | undefined): boolean =>
     candidate !== undefined
@@ -3237,27 +3248,48 @@ const responseOfCall = (session: Session, call: ToolCall): { calls: ToolCall[]; 
     at -= 1;
   }
   if (at < 0) {
-    return { calls: [call], results: [] };
+    return [{ calls: [call], results: [] }];
   }
-  let start = at;
-  while (start > 0 && messages[start - 1]!.role === 'assistant') {
-    start -= 1;
-  }
+  const runStart = (index: number): number => {
+    let start = index;
+    while (start > 0 && messages[start - 1]!.role === 'assistant') {
+      start -= 1;
+    }
+    return start;
+  };
+  // [start, end] of the run, and the index past the results that answer it.
+  const responseAt = (start: number, end: number, resultsEnd: number) => {
+    const calls = messages.slice(start, end + 1).flatMap((message) => message.toolCalls ?? []);
+    const answering = messages.slice(end + 1, resultsEnd);
+    const results: ToolResult[] = [];
+    for (const recorded of calls) {
+      const result = answering.find((message) => message.toolResult?.callId === recorded.id)?.toolResult;
+      if (result) {
+        results.push(result);
+      }
+    }
+    return { calls, results };
+  };
+  let start = runStart(at);
   let end = at;
   while (end + 1 < messages.length && messages[end + 1]!.role === 'assistant') {
     end += 1;
   }
-  const calls = messages.slice(start, end + 1).flatMap((message) => message.toolCalls ?? []);
-  const results: ToolResult[] = [];
-  for (const recorded of calls) {
-    const result = messages
-      .slice(end + 1)
-      .find((message) => message.toolResult?.callId === recorded.id)?.toolResult;
-    if (result) {
-      results.push(result);
+  const responses = [responseAt(start, end, messages.length)];
+  for (;;) {
+    let resultsStart = start;
+    while (resultsStart > 0 && messages[resultsStart - 1]!.role === 'tool') {
+      resultsStart -= 1;
     }
+    if (resultsStart === start || resultsStart === 0 || messages[resultsStart - 1]!.role !== 'assistant') {
+      break;
+    }
+    const resultsEnd = start;
+    end = resultsStart - 1;
+    start = runStart(end);
+    responses.unshift(responseAt(start, end, resultsEnd));
   }
-  return { calls, results };
+  return responses;
 };
 
 /**
@@ -5909,9 +5941,12 @@ export class AgentRunner {
           // checkpoint holds only the parked call and what queued behind it,
           // and a call earlier in the same response that ran (and perhaps
           // succeeded) before the park is as much a part of the turn.
+          // The responses before it in this message too, which the counter
+          // lost with the process that counted them.
           if (first !== undefined) {
-            const whole = responseOfCall(session, first);
-            countFailures(whole.calls, whole.results);
+            for (const response of responsesThroughCall(session, first)) {
+              countFailures(response.calls, response.results);
+            }
           }
           continue;
         }

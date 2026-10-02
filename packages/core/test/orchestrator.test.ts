@@ -1373,7 +1373,11 @@ const parkAndAbandon = async (
   tools: ToolRegistry,
   provider: ModelProvider,
   sessionId: string,
+  // How many gated calls are refused before one parks: the turns a message
+  // had already failed when the process died.
+  deniedFirst = 0,
 ): Promise<void> => {
+  let denied = 0;
   const dying = new AgentRunner({
     provider,
     tools,
@@ -1382,9 +1386,16 @@ const parkAndAbandon = async (
       // Waves safe calls through and hangs on the gated one, as a real
       // policy does — the runner asks about every call, so a policy that
       // blocked on all of them would stall before the turn ever parked.
-      approve: ({ risk }) => (risk === 'safe'
-        ? Promise.resolve(true)
-        : new Promise<boolean>(() => {})),
+      approve: ({ risk }) => {
+        if (risk === 'safe') {
+          return Promise.resolve(true);
+        }
+        if (denied < deniedFirst) {
+          denied += 1;
+          return Promise.resolve(false);
+        }
+        return new Promise<boolean>(() => {});
+      },
     },
   });
   void dying.run({
@@ -1561,6 +1572,46 @@ test('a recovered turn\'s failure counts toward the repeated-failure stop', asyn
   const expired = await revived.recoverPendingApproval('recover-expired', { denyPending: true });
   assert.equal(expired?.status, 'completed');
   assert.equal(asked, 2, 'the expired denial is the first of the three');
+});
+
+test('failures before the restart still count toward the repeated-failure stop', async () => {
+  // Refused once, then parked on the same call, then the daemon died. The
+  // counter died with it, so counting from the recovered turn alone let the
+  // message fail four times running instead of three.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({ name: 'gated', risk: 'gated', async execute() { return { ran: true }; } });
+  let requests = 0;
+  const provider: ModelProvider = {
+    name: 'insistent',
+    async generate(request) {
+      requests += 1;
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'It keeps being refused.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `g${requests}`, toolName: 'gated', input: { x: 1 } } }] };
+    },
+  };
+
+  await parkAndAbandon(store, tools, provider, 'recover-earlier', 1);
+
+  let asked = 0;
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      async approve() {
+        asked += 1;
+        return false;
+      },
+    },
+  });
+  const recovered = await revived.recoverPendingApproval('recover-earlier');
+
+  assert.equal(recovered?.status, 'completed');
+  assert.equal(asked, 2, 'the denial before the restart and the recovered one are the first two of three');
+  assert.equal(recovered?.messages.at(-1)?.content, 'It keeps being refused.');
 });
 
 test('a recovered turn is counted as its whole response, so a call that succeeded before the park resets the count', async () => {
