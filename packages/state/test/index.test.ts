@@ -101,6 +101,16 @@ test('trustedConfigError judges exactly the files the trusted block readers read
   // A named file is trusted, and one that is missing cannot be read.
   const named = path.join(project, 'missing.json');
   assert.equal((await trustedConfigError(env, named))?.configPath, named);
+
+  // A project candidate that cannot even be read — a directory where the
+  // file would be — is still the clone's file, not the daemon's. The
+  // global one behind it is what is judged.
+  const unreadableProject = await mkdtemp(path.join(os.tmpdir(), 'stratus-trusted-error-dir-'));
+  await mkdir(path.join(unreadableProject, 'stratus.config.json'));
+  const behindDirectory = { ...env, cwd: unreadableProject };
+  assert.equal(await trustedConfigError(behindDirectory), undefined);
+  await writeFile(globalPath, '{ not json');
+  assert.equal((await trustedConfigError(behindDirectory))?.configPath, globalPath);
 });
 
 test('runtime config defaults to the demo provider with no configuration', async () => {

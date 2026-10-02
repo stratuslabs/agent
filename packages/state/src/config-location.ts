@@ -99,6 +99,32 @@ export type TrustedConfigBlock<T> =
   | { status: 'unreadable'; error: unknown };
 
 /**
+ * Discovery as the trusted readers need it.
+ *
+ * `resolveConfigLocation` throws when a candidate exists and cannot be read,
+ * which is right for a run. For a trusted block it is not: an unreadable
+ * project-local `stratus.config.json` (a directory, a file with no read
+ * permission) is an untrusted file that could not have set a trusted block
+ * anyway, and failing on it let a checkout stop the daemon, or empty every
+ * trusted block, by what it ships. Discovery reads candidates only, never an
+ * explicitly named path, so a throw names the project candidate or the
+ * global file, and only the second is a trusted failure.
+ */
+const trustedReadLocation = async (
+  env: StateEnvironment,
+  configPath: string | undefined,
+): Promise<ResolvedConfigLocation | undefined> => {
+  try {
+    return await resolveConfigLocation(configPath ? { configPath } : {}, env);
+  } catch (error) {
+    if (error instanceof ConfigFileError && error.configPath !== globalConfigPath(env)) {
+      return { path: error.configPath, trusted: false };
+    }
+    throw error;
+  }
+};
+
+/**
  * Read one block of the daemon's own config, honouring the trust boundary.
  *
  * `api`, `approvals`, and `plugins` are all read this way: which interface
@@ -121,7 +147,7 @@ export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
 ): Promise<TrustedConfigBlock<NonNullable<StratusConfigFile[K]>>> => {
   let location: ResolvedConfigLocation | undefined;
   try {
-    location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
+    location = await trustedReadLocation(env, configPath);
     if (!location) {
       return { status: 'absent' };
     }
@@ -187,8 +213,7 @@ export const readGlobalConfigBlock = async <K extends keyof StratusConfigFile>(
  * file that fails to parse is not a reason, by the same rule the block
  * reader follows — it could not have set a trusted block whatever it said,
  * and a malformed file in a clone must not keep the operator's daemon down.
- * Discovery failing outright is one, since every block then reads as
- * unreadable.
+ * Nor is one that cannot be read at all; see `trustedReadLocation`.
  *
  * Exists for `stratus serve`'s start (#214). Each block degrades on its own
  * when the file will not load — no plugins, the built-in soul, no
@@ -205,7 +230,7 @@ export const trustedConfigError = async (
     error instanceof ConfigFileError ? error : new ConfigFileError(filePath, error);
   let location: ResolvedConfigLocation | undefined;
   try {
-    location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
+    location = await trustedReadLocation(env, configPath);
   } catch (error) {
     return asConfigError(configPath ?? globalConfigPath(env), error);
   }
