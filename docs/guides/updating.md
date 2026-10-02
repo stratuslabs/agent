@@ -147,8 +147,9 @@ each pointed at where the other is going. If something takes one member's
 new path before that member moves, the member stays put, and its peer is
 pointed back at where it stayed rather than at what took its place. The
 pair then leads nowhere, as it did before, instead of reaching somebody
-else's files. The report names the peer, and every later start repairs a
-home left that way.
+else's files. The report names the peer. Only links that same run wrote
+are corrected: a chain of links you made yourself in the new layout is
+never rewritten.
 The ledger's own records follow the move — they are absolute paths, and
 every binary an MCP server returned was written and recorded *inside* the
 workspace, so leaving them would strip the label off each one. They are

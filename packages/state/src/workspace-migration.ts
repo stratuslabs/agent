@@ -1167,6 +1167,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     }
     throw error;
   }
+  // In name order, so a run is reproducible: the report reads the same on
+  // every machine, and which member of a cycle moves first is not up to
+  // the filesystem's directory order.
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   /** Every name this run was handed, so a later one can be told apart. */
   const snapshot = new Set(entries.map((entry) => entry.name));
   /**
@@ -1316,6 +1320,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // would silently swap the shared files for a different workspace that an
   // ordinary command happened to create.
   const moved = new Set<string>();
+  /**
+   * The links this run recreated, by agent, and the path each names. The
+   * only evidence a link in the new layout is this migration's: on disk,
+   * one an operator made to share a workspace is the same bytes.
+   */
+  const written = new Map<string, string>();
   /** The names this run left free, as opposed to deliberately left alone. */
   const emptied = new Set<string>();
   /**
@@ -1382,23 +1392,18 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    * what a cycle of links always did, and nowhere is safe where somebody
    * else's workspace is not.
    *
-   * Asked of what is on disk, not of what this run announced, so a home an
-   * earlier build left in this state is repaired on the next start: the
-   * pass that calls this runs every time, whatever the schema stamp says.
-   * The shape is precise. This member leads nowhere and stays, and a peer
-   * whose legacy entry is gone has a new link naming this member's new
-   * path. A cycle has no files of its own, so whatever is at that path is
-   * never the cycle's.
+   * Only links this run wrote, and only while they still name what it wrote.
+   * Asked of the disk alone, this repaired a home an earlier run had left
+   * torn, and could not tell that home from one where an operator chained
+   * `agents/ava/workspace -> ../bea/workspace -> ../cyd/workspace` to share
+   * a live workspace beside a stale `workspaces/cyd -> ava`: the same bytes,
+   * and the repair broke a working setup. A cycle has no files of its own,
+   * so whatever is at the stayed member's path is never the cycle's.
    *
-   * Found by walking the cycle from this member's own link, which is the
-   * evidence the peer belongs to it: each step is a member that moved (its
-   * legacy entry is gone) and whose new link names the next member's new
-   * path, the links this migration writes. In `ava -> bea -> cyd -> ava`
-   * with `cyd` staying, the walk goes `cyd` to `ava` to `bea`, and `bea`
-   * is the one naming `cyd`'s new path. A link an operator made in the new
-   * layout, `agents/ava/workspace -> ../bea/workspace` to share a live
-   * workspace, is never reached unless this member's own chain leads there,
-   * so an unrelated stale legacy link cannot have it rewritten.
+   * Found by walking the cycle from this member's own link: each step is a
+   * member this run recreated, whose link names the next member's new path.
+   * In `ava -> bea -> cyd -> ava` with `cyd` staying, the walk goes `cyd` to
+   * `ava` to `bea`, and `bea` is the one naming `cyd`'s new path.
    */
   const repointPeerNamingNewPath = async (agentId: string, from: string, target: string): Promise<void> => {
     const nextAfter = (resolved: string, root: string): string | undefined => {
@@ -1419,20 +1424,19 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     const visited = new Set<string>([agentId]);
     while (peer !== undefined && isValidAgentId(peer) && !visited.has(peer)) {
       visited.add(peer);
-      if (!(await pathIsFree(path.join(legacy, peer)))) {
-        return;
-      }
       const peerTarget = agentWorkspacePath(env, peer);
       const peerText = await linkText(peerTarget);
-      if (peerText === undefined) {
+      // A link this run wrote, still naming what it wrote, or the walk ends.
+      if (peerText === undefined || written.get(peer) !== path.resolve(path.dirname(peerTarget), peerText)) {
         return;
       }
       // The path itself, or one below it: `ava -> bea/subdir` is recreated as
       // `agents/bea/workspace/subdir`, the suffix `migratedTarget` carries
-      // across, and is pointed back with the same suffix below `from`.
+      // across, and is pointed back with the same suffix below `from`. By
+      // segment: `..cache` is a name inside the workspace, not a way out.
       const named = path.resolve(path.dirname(peerTarget), peerText);
       const below = path.relative(target, named);
-      if (named === target || !(below.startsWith('..') || path.isAbsolute(below))) {
+      if (named === target || !(below === '..' || below.startsWith(`..${path.sep}`) || path.isAbsolute(below))) {
         await repointPeer(agentId, peer, peerTarget, path.join(from, below), named);
         return;
       }
@@ -1497,6 +1501,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       report.quarantined.push(`${agentId} — left at ${path.relative(stratusHomePath(env), from)}`);
       return;
     }
+    await env.beforeWorkspaceMove?.(agentId);
     const target = agentWorkspacePath(env, agentId);
     // `lstat`, not `readdir` or `stat`: a *dangling* symlink at the
     // destination is something there, and both of those report it as
@@ -1656,6 +1661,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         const names = resolved ?? direct;
         if (!path.isAbsolute(text) || resolved !== undefined) {
           await symlink(path.relative(path.dirname(target), names), target);
+          written.set(agentId, path.resolve(names));
           // Both exist for an instant. A run killed here finds the source
           // again next time and the destination resolving to the same
           // directory, which `sameEntry` above reads as finished.
