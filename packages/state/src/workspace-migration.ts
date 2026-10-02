@@ -1148,7 +1148,7 @@ export const strayWorkspaceNames = async (env: StateEnvironment): Promise<readon
  */
 /**
  * The links the workspace migration retargeted, by agent, and the path each
- * was written naming — kept on disk until `workspaces/` is gone.
+ * was written naming — kept on disk until every entry is settled.
  *
  * The only evidence a link in the new layout is this migration's: one an
  * operator made to share a workspace is the same bytes. Kept in memory
@@ -1275,8 +1275,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // over it would refuse every `stratus serve` for good, since the
     // migration that would clear the obstacle is the one failing.
     if (code === 'ENOENT' || code === 'ENOTDIR') {
-      // Nothing left that could stay put, so nothing left to repair.
-      await rm(linkRecordPath(env), { force: true });
+      // The link record stays, if there is one: `workspaces/` can be gone for
+      // a moment while a command of an older build is between removing an
+      // entry and making it again, and an entry it remakes is a target that
+      // stays put after all. Only a finished move retires a record entry.
       return finished > 0 ? `finished ${finished} interrupted workspace move(s)` : undefined;
     }
     throw error;
@@ -2048,7 +2050,6 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   try {
     if (!(await anyWorkspaceNamesLegacy(env, legacy))) {
       await rmdir(legacy);
-      await rm(linkRecordPath(env), { force: true });
     }
   } catch (error) {
     // Still holding something this run is right to leave: an operator's own

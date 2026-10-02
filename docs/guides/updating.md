@@ -149,8 +149,8 @@ already pointed at its new path is pointed back at where it stayed rather
 than at what took its place. Those links then lead nowhere, as they did
 before, instead of reaching somebody else's files. The report names each
 one. Only links the move itself pointed somewhere new are corrected, and
-it keeps a record of those in `~/.stratus/workspace-links.json` until
-`workspaces/` is gone, so a start that was interrupted is finished by the
+it keeps a record of those in `~/.stratus/workspace-links.json` until each
+one's target has moved, so a start that was interrupted is finished by the
 next one. A chain of links you made yourself in the new layout is never
 rewritten.
 The ledger's own records follow the move — they are absolute paths, and

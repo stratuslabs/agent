@@ -1835,6 +1835,27 @@ test('a move marker is settled only by what the move itself leaves, not by paths
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+test('a pending link record outlives a pass that found workspaces/ itself gone', async () => {
+  // bea was the last legacy entry, and was briefly away: the pass removed
+  // the emptied `workspaces/`. That is no evidence bea moved, and a command
+  // of an older build making `workspaces/bea` again must still find the
+  // record that repairs ava.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await rm(path.join(legacyDir, 'README'));
+  await rm(path.join(legacyDir, 'bea'));
+  await applyPerAgentWorkspaces(env);
+  await assert.rejects(lstat(legacyDir), { code: 'ENOENT' });
+
+  await mkdir(legacyDir, { recursive: true });
+  await symlink('ava', path.join(legacyDir, 'bea'));
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there
