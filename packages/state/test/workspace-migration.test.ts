@@ -2035,6 +2035,24 @@ test('a recorded peer is pointed back when its target\'s legacy name holds a pla
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+test('a recorded peer is pointed back when its target\'s agent directory is refused', async () => {
+  // bea stays put because `agents/bea` is a link into another tree, which
+  // the move refuses before reaching either repair. ava, recorded naming
+  // bea's new path, would go on resolving through that link.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await mkdir(path.join(elsewhere, 'workspace'), { recursive: true });
+  await writeFile(path.join(elsewhere, 'workspace', 'theirs.md'), 'not ava\'s');
+  await rm(path.join(agentsDirPath(env), 'bea'), { recursive: true, force: true });
+  await symlink(elsewhere, path.join(agentsDirPath(env), 'bea'));
+
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there

@@ -1739,6 +1739,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // 0003 uses: a name that is another spelling of this id on a folding
     // filesystem would otherwise put two agents' output in one workspace.
     if (await agentDirectoryOrQuarantine(env, agentId, 'workspace', report) === undefined) {
+      // Staying put as surely as a member whose destination is taken, and a
+      // peer recorded naming its new path would otherwise go on resolving
+      // through whatever `agents/<id>` was refused for — a link into another
+      // state tree, say.
+      moved.delete(agentId);
+      await repointPeersNamingNewPath(agentId, from, agentWorkspacePath(env, agentId));
       report.quarantined.push(`${agentId} — left at ${path.relative(stratusHomePath(env), from)}`);
       return;
     }
