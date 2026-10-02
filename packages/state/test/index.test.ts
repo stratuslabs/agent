@@ -22,6 +22,7 @@ import {
   resolveAgentSlack,
   validateConfigFile,
   resolveRuntimeConfig,
+  saveConfigFile,
   saveCredentials,
 } from '../src/index.ts';
 
@@ -70,6 +71,22 @@ test('credentials file is written owner-read-only', async () => {
   const filePath = path.join(tempHome, '.stratus', 'credentials.json');
   const mode = (await stat(filePath)).mode & 0o777;
   assert.equal(mode, 0o600);
+});
+
+test('config file is written owner-read-only, and a loose one is tightened on the next save', async () => {
+  // It holds secrets — tool-shell's `env` block is the documented place for
+  // a command's token — so it gets the credentials file's posture (#204).
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-config-mode-'));
+  const fresh = path.join(dir, 'fresh', 'config.json');
+  await saveConfigFile(fresh, { provider: 'demo' });
+  assert.equal((await stat(fresh)).mode & 0o777, 0o600);
+
+  // An older build wrote it at the umask's mode; `writeFile`'s own mode
+  // never applies to a file that already exists.
+  const existing = path.join(dir, 'config.json');
+  await writeFile(existing, '{}\n', { mode: 0o644 });
+  await saveConfigFile(existing, { provider: 'demo' });
+  assert.equal((await stat(existing)).mode & 0o777, 0o600);
 });
 
 test('runtime config defaults to the demo provider with no configuration', async () => {

@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
   agentsDirPath,
@@ -143,6 +143,24 @@ export const collectDoctorReport = async (
       configFatal = true;
       problems.push(`${winner.path} could not be parsed (${(error as Error).message}). Every run fails until it is fixed or removed.`);
       warn(`ignoring unreadable config ${winner.path}`);
+    }
+  }
+
+  // Readable by other users: the file holds whatever plugin config carries,
+  // tool-shell's `env` tokens included, and the CLI writes it 0600 for that
+  // reason (#204) — but only from the next write, so a file an older build
+  // left at the umask's mode stays loose until something saves it. Only a
+  // trusted config: a project-local one sits in a checkout at whatever mode
+  // git gave it, and cannot set a plugin's config anyway. Windows has no
+  // mode bits to read.
+  if (winner && !unreadable && winner.label !== 'project' && process.platform !== 'win32') {
+    const mode = (await stat(winner.path)).mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      problems.push(
+        `${winner.path} can be read by other users on this machine (mode ${mode.toString(8)}), and it holds `
+        + "any secret in your plugin config, such as tool-shell's env block. "
+        + `Run \`chmod 600 ${winner.path}\`; Stratus writes it that way from now on.`,
+      );
     }
   }
 

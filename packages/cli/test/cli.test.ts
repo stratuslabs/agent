@@ -4604,7 +4604,8 @@ test('doctor reports the resolved provider and where it came from', async () => 
   const soulPath = path.join(agentsDir, 'ava.md');
   await writeFile(soulPath, '---\nname: Ava\n---\n\nYou are Ava.\n');
   const configPath = path.join(home, '.stratus', 'config.json');
-  await writeFile(configPath, JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5', soul: soulPath }));
+  // 0600, as the CLI writes it: a looser file is its own doctor problem.
+  await writeFile(configPath, JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5', soul: soulPath }), { mode: 0o600 });
   await writeFile(
     path.join(home, '.stratus', 'credentials.json'),
     JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
@@ -4625,6 +4626,45 @@ test('doctor reports the resolved provider and where it came from', async () => 
   assert.match(output.stdout, /agent {5}Ava \(ava\)/);
   assert.match(output.stdout, /anthropic API key/);
   assert.match(output.stdout, /No problems found\./);
+});
+
+test('doctor flags a trusted config other users can read, and not a project-local one', async () => {
+  // It holds plugin secrets — tool-shell's env block — and a file an older
+  // build wrote at the umask's mode stays loose until something saves it.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await writeFile(configPath, JSON.stringify({ provider: 'demo' }), { mode: 0o644 });
+  await chmod(configPath, 0o644);
+
+  const loose = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: loose.streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+  assert.match(loose.output.stdout, /can be read by other users on this machine \(mode 644\)/);
+  assert.match(loose.output.stdout, /chmod 600/);
+
+  await chmod(configPath, 0o600);
+  const tight = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: tight.streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+  assert.doesNotMatch(tight.output.stdout, /can be read by other users/);
+
+  // A project-local config sits in a checkout at whatever mode git gave it.
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }), { mode: 0o644 });
+  const checkout = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: checkout.streams,
+    env: { cwd: project, homeDir: home, processEnv: {} },
+  });
+  assert.doesNotMatch(checkout.output.stdout, /can be read by other users/);
 });
 
 test('doctor explains a demo provider instead of leaving it a mystery', async () => {
@@ -4887,6 +4927,7 @@ test('doctor ignores an apiKeyEnv belonging to a different provider', async () =
   await writeFile(
     path.join(home, '.stratus', 'config.json'),
     JSON.stringify({ provider: 'openai', apiKeyEnv: 'MY_OPENAI_KEY' }),
+    { mode: 0o600 },
   );
   await writeFile(
     path.join(home, '.stratus', 'credentials.json'),
@@ -5037,6 +5078,7 @@ test('doctor stays quiet about a secondary provider no fallback targets', async 
   await writeFile(
     path.join(home, '.stratus', 'config.json'),
     JSON.stringify({ provider: 'openai', baseUrl: 'https://api.openai.com/v1' }),
+    { mode: 0o600 },
   );
   // A stored Anthropic subscription plus ANTHROPIC_API_KEY, with no
   // Anthropic fallback configured: no run ever reads that credential.
