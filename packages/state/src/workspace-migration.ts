@@ -1407,10 +1407,15 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         ? segment
         : undefined;
     };
+    // Its own text, then the entry an alias outside the home reaches — the
+    // two the recreate step consulted. `cyd -> /srv/shared -> workspaces/ava`
+    // is in a cycle exactly as `cyd -> ava` is, and asking the text alone
+    // found no peer there and left `ava` naming whatever holds `cyd`'s path.
     const ownText = await linkText(from);
-    let peer = ownText === undefined
-      ? undefined
-      : insideLegacy(path.resolve(path.dirname(from), ownText))?.split(path.sep)[0];
+    const alias = aliased.get(agentId);
+    let peer = (ownText === undefined ? undefined : insideLegacy(path.resolve(path.dirname(from), ownText)))
+      ?? (alias !== undefined ? insideLegacy(alias) : undefined);
+    peer = peer?.split(path.sep)[0];
     const visited = new Set<string>([agentId]);
     while (peer !== undefined && isValidAgentId(peer) && !visited.has(peer)) {
       visited.add(peer);
@@ -1431,8 +1436,14 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         await repointPeer(agentId, peer, peerTarget, path.join(from, below), named);
         return;
       }
+      // The next member's new path or one below it, judged by path segment:
+      // a prefix test read `agents/bea/workspace-backup` as inside
+      // `agents/bea/workspace` and walked into a link the operator owns.
       const next = nextAfter(named, agentsDirPath(env));
-      peer = next !== undefined && named.startsWith(agentWorkspacePath(env, next)) ? next : undefined;
+      const within = next === undefined ? undefined : path.relative(agentWorkspacePath(env, next), named);
+      peer = within !== undefined && within !== '..' && !within.startsWith(`..${path.sep}`) && !path.isAbsolute(within)
+        ? next
+        : undefined;
     }
   };
 

@@ -1658,6 +1658,53 @@ test('a link an operator made in the new layout is not taken for a cycle peer', 
   assert.equal(path.resolve(path.dirname(avaTarget), await readlink(avaTarget)), agentWorkspacePath(env, 'bea'));
 });
 
+test('a cycle closed through an alias outside the home is walked from that alias', async () => {
+  // `cyd -> /srv/shared -> workspaces/ava`, and ava recreated naming cyd's
+  // new path. cyd stayed, its destination taken. Its own link names
+  // nothing inside the home, so asking the text alone found no peer, and
+  // ava went on resolving to whatever took cyd's destination.
+  const home = await newHome();
+  const env = { homeDir: home };
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'stratus-alias-'));
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink(path.join(legacyWorkspacesDirPath(env), 'ava'), path.join(outside, 'shared'));
+  await symlink(path.join(outside, 'shared'), path.join(legacyWorkspacesDirPath(env), 'cyd'));
+  await mkdir(path.join(agentsDirPath(env), 'ava'), { recursive: true });
+  await symlink(path.join('..', 'cyd', 'workspace'), agentWorkspacePath(env, 'ava'));
+  await mkdir(agentWorkspacePath(env, 'cyd'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'cyd'), 'theirs.md'), 'not ava\'s');
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const avaTarget = agentWorkspacePath(env, 'ava');
+  assert.equal(
+    path.resolve(path.dirname(avaTarget), await readlink(avaTarget)),
+    path.join(legacyWorkspacesDirPath(env), 'cyd'),
+  );
+});
+
+test('the cycle walk does not step into a sibling path that only shares a prefix', async () => {
+  // cyd stayed, and its link names ava. ava's new link names
+  // `agents/bea/workspace-backup`, which is not bea's workspace, so the
+  // chain ends there. A prefix test read it as inside
+  // `agents/bea/workspace` and went on to rewrite bea's link, which no
+  // chain from cyd proves this migration wrote.
+  const home = await newHome();
+  const env = { homeDir: home };
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink('ava', path.join(legacyWorkspacesDirPath(env), 'cyd'));
+  await mkdir(path.join(agentsDirPath(env), 'bea', 'workspace-backup'), { recursive: true });
+  await mkdir(path.join(agentsDirPath(env), 'ava'), { recursive: true });
+  await symlink(path.join('..', 'bea', 'workspace-backup'), agentWorkspacePath(env, 'ava'));
+  await symlink(path.join('..', 'cyd', 'workspace'), agentWorkspacePath(env, 'bea'));
+  await mkdir(agentWorkspacePath(env, 'cyd'), { recursive: true });
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const beaTarget = agentWorkspacePath(env, 'bea');
+  assert.equal(path.resolve(path.dirname(beaTarget), await readlink(beaTarget)), agentWorkspacePath(env, 'cyd'));
+});
+
 test('a cycle whose destination is occupied is quarantined, not an aborted upgrade', async () => {
   const home = await newHome();
   const env = { homeDir: home };
