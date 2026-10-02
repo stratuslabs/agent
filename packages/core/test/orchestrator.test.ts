@@ -1614,6 +1614,63 @@ test('failures before the restart still count toward the repeated-failure stop',
   assert.equal(recovered?.messages.at(-1)?.content, 'It keeps being refused.');
 });
 
+test('a streak that a later response broke does not stop a recovered message', async () => {
+  // An older build let a message fail the same way more than three times;
+  // a response after that succeeded, and the next one parked. Recovery
+  // replays the whole message, and a stop latched at the third failure
+  // wrapped it up although the streak had ended two responses ago.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({ name: 'ok', risk: 'safe', async execute() { return { fine: true }; } });
+  tools.register({ name: 'gated', risk: 'gated', async execute() { return { ran: true }; } });
+  let requests = 0;
+  const provider: ModelProvider = {
+    name: 'insistent',
+    async generate(request) {
+      requests += 1;
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'It keeps being refused.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `g${requests}`, toolName: 'gated', input: { x: 1 } } }] };
+    },
+  };
+
+  await parkAndAbandon(store, tools, provider, 'recover-broken-streak', 1);
+
+  // The history the older build left: two more of the same refusal, then a
+  // response that succeeded, all ahead of the parked one.
+  const stored = (await store.get('recover-broken-streak'))!;
+  const parkedAt = stored.messages.findLastIndex((message) => message.role === 'assistant');
+  const [refused, refusal] = stored.messages.slice(parkedAt - 2, parkedAt);
+  const copy = (suffix: string) => [
+    { ...refused!, id: `${refused!.id}-${suffix}`, toolCalls: refused!.toolCalls!.map((call) => ({ ...call, id: `${call.id}-${suffix}` })) },
+    { ...refusal!, id: `${refusal!.id}-${suffix}`, toolResult: { ...refusal!.toolResult!, callId: `${refusal!.toolResult!.callId}-${suffix}` } },
+  ];
+  const succeeded = [
+    { ...refused!, id: 'ok-call', toolCalls: [{ id: 'o1', toolName: 'ok', input: {} }] },
+    { ...refusal!, id: 'ok-result', toolResult: { callId: 'o1', toolName: 'ok', ok: true, output: { fine: true } } },
+  ];
+  stored.messages.splice(parkedAt, 0, ...copy('a'), ...copy('b'), ...succeeded);
+  await store.save(stored);
+
+  let asked = 0;
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      async approve() {
+        asked += 1;
+        return false;
+      },
+    },
+  });
+  const recovered = await revived.recoverPendingApproval('recover-broken-streak');
+
+  assert.equal(recovered?.status, 'completed');
+  assert.equal(asked, 3, 'the recovered denial starts a new streak of three');
+});
+
 test('a recovered turn is counted as its whole response, so a call that succeeded before the park resets the count', async () => {
   // The checkpoint holds the parked call and what queued behind it, not the
   // calls that ran before it. Counting only those read a turn with a

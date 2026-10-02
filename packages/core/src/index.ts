@@ -5902,9 +5902,12 @@ export class AgentRunner {
         const signature = failureSignature(calls, results);
         failureRun = signature !== undefined && signature === lastFailure ? failureRun + 1 : signature === undefined ? 0 : 1;
         lastFailure = signature;
-        if (failureRun >= REPEATED_FAILURE_LIMIT) {
-          stuck = { toolName: results[0]!.toolName, times: failureRun };
-        }
+        // Recomputed, not latched: a recovery replays the whole message, and
+        // a streak an older build let run past the limit is over once a
+        // later response breaks it.
+        stuck = failureRun >= REPEATED_FAILURE_LIMIT
+          ? { toolName: results[0]!.toolName, times: failureRun }
+          : undefined;
       };
       for (let turn = resumeFrom?.turn ?? 1; ; turn += 1) {
         throwIfAborted(signal);
