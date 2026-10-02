@@ -7,6 +7,7 @@ import {
   AgentRegistry,
   AgentRunner,
   CONVERSATION_METADATA_KEY,
+  ChannelRegistry,
   ContributionRegistry,
   EventBus,
   InMemoryAgentMemoryStore,
@@ -46,6 +47,7 @@ import {
   createFileCredentialResolver,
   createRuntimeProvider,
   describeServingModel,
+  loadChannelTransportSecrets,
   loadOperatorSkills,
   loadSoulFile,
   namedCredentialSource,
@@ -418,6 +420,12 @@ const main = async (): Promise<void> => {
       skills,
       bus: new EventBus(),
       providers,
+      // Both channel seams, as the gateway hands them over: a channel plugin
+      // reads its transport secrets at setup, and the loader refuses it
+      // whole without them, its provider and skills included. The registry
+      // is never started, so no channel connects from here.
+      channels: new ChannelRegistry(),
+      channelSecrets: (kind) => loadChannelTransportSecrets({}, kind),
       memory: new ContributionRegistry<MemoryStoreContribution>(),
       executors: new ContributionRegistry<ExecutorContribution>(),
       credentials: createFileCredentialResolver({}),

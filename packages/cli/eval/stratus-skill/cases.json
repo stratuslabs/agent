@@ -122,7 +122,8 @@
       "user": "stratus logs is empty but the daemon won't start, where's the error?",
       "checks": [
         { "kind": "readSkill" },
-        { "kind": "matches", "pattern": "stratusd\\.err\\.log|journalctl", "affirmative": true }
+        { "kind": "matches", "pattern": "stratusd\\.err\\.log", "affirmative": true },
+        { "kind": "matches", "pattern": "journalctl", "affirmative": true }
       ]
     },
     {
