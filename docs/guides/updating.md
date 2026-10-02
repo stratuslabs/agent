@@ -142,6 +142,33 @@ as `workspaces/ava -> /srv/stratus/shared -> workspaces/bea`, since the
 alias is not this migration's to rewrite and keeping it would leave `ava`
 naming nothing. That agent's link is retargeted at the workspace itself, so
 repointing the alias afterwards no longer moves it.
+Two links that name each other (`ava -> bea`, `bea -> ava`) move together,
+each pointed at where the other is going. If something takes one member's
+new path before that member moves, the member stays put, and every link
+already pointed at its new path is pointed back at where it stayed rather
+than at what took its place. Those links then lead nowhere, as they did
+before, instead of reaching somebody else's files. The report names each
+one. Only links the move itself pointed somewhere new are corrected, and
+it keeps a record of those in `~/.stratus/workspace-links.json` until each
+one's target has moved, so a start that was interrupted is finished by the
+next one. A chain of links you made yourself in the new layout is never
+rewritten. A start stops instead, naming the paths involved and what to
+do, wherever it cannot tell that a link is safe:
+
+- a workspace that was being moved when Stratus stopped, whose old path is
+  gone and whose new one is missing or not a plain directory inside the
+  home, so it cannot tell whether the move finished;
+- a link the move had pointed somewhere new that is missing when it needs
+  pointing back, that keeps being replaced while it is, or whose
+  `agents/<id>` is a symbolic link at the time;
+- a link Stratus stopped while writing, found in place with exactly the
+  text it was writing — it cannot be told from one you made yourself, so
+  the error says which entry to remove from `workspace-links.json` if you
+  did;
+- a `workspace-links.json` that cannot be read, or that disappears between
+  being seen and being read.
+
+Put back whatever you moved aside, follow the error, and start again.
 The ledger's own records follow the move — they are absolute paths, and
 every binary an MCP server returned was written and recorded *inside* the
 workspace, so leaving them would strip the label off each one. They are

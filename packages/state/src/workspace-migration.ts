@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto';
-import { createReadStream, type Dirent } from 'node:fs';
+import { constants, createReadStream, type Dirent } from 'node:fs';
 import {
   appendFile,
   chmod,
   lstat,
+  open,
   readdir,
   readFile,
   readlink,
   realpath,
   rename,
+  rm,
   rmdir,
   stat,
   symlink,
@@ -19,6 +21,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { isValidAgentId } from '@stratusagent/agents';
+import { linkedDerivedComponent } from '@stratusagent/permissions';
 import { LEDGER_FILENAME } from '@stratusagent/plugins';
 
 import { type StateEnvironment } from './environment.ts';
@@ -1078,7 +1081,26 @@ export const surveyLegacyWorkspaces = async (
  * rather than a lost label.
  */
 export const workspaceRepairPending = async (env: StateEnvironment): Promise<boolean> =>
-  (await surveyLegacyWorkspaces(env)).present;
+  (await surveyLegacyWorkspaces(env)).present
+  // Or a link record still pending: `workspaces/` can be gone while one of
+  // its entries is away, and the record may then have a link to repair.
+  || !(await pathIsFree(linkRecordPath(env)));
+
+/**
+ * {@link workspaceRepairPending}, then the pass if it says so — as one call,
+ * because the gate's answer is evidence the pass needs. A link record the
+ * gate saw and the pass then finds gone was renamed aside in between, by a
+ * backup say, and read as "nothing recorded" the start would go on without
+ * repairing the links it holds. Asked separately, that observation is lost
+ * between the two awaits.
+ */
+export const repairWorkspacesIfPending = async (env: StateEnvironment): Promise<string | undefined> => {
+  const linkRecordSeen = !(await pathIsFree(linkRecordPath(env)));
+  if (!linkRecordSeen && !(await surveyLegacyWorkspaces(env)).present) {
+    return undefined;
+  }
+  return applyPerAgentWorkspaces(env, { linkRecordSeen });
+};
 
 /**
  * The names still sitting in `workspaces/` that a repair would fold, or an
@@ -1145,13 +1167,212 @@ export const strayWorkspaceNames = async (env: StateEnvironment): Promise<readon
  * months; parsing all of them on every start would be a real cost to pay
  * for a state that no longer exists.
  */
-export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<string | undefined> => {
+/**
+ * The links the workspace migration retargeted, by agent, and the path each
+ * was written naming — kept on disk until every entry is settled.
+ *
+ * The only evidence a link in the new layout is this migration's: one an
+ * operator made to share a workspace is the same bytes. Kept in memory
+ * alone, it died with a run that stopped between recreating a cycle's
+ * links and reaching the member whose destination was then taken, and the
+ * next start had nothing to repair those links from (#220).
+ */
+const linkRecordPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), 'workspace-links.json');
+
+/**
+ * Absent is the one failure that means "nothing recorded". Anything else —
+ * a permission, a link planted at the path, a file that will not parse —
+ * stops the migration rather than reading as empty: this record is the only
+ * evidence a link points at somebody else's files, and starting without it
+ * leaves that link in place with nothing to say so.
+ */
+/**
+ * `links`: each retargeted link, by agent, and the path it was written
+ * naming. `pending`: the same for a link about to be written, promoted to
+ * `links` once it has been. Kept apart because an entry saved before its
+ * `symlink` is intent, not ownership: a run that stops between the two
+ * leaves no link, and one the operator makes there afterwards with the same
+ * text would otherwise read as this migration's and be pointed back.
+ * `moving`: the workspaces whose move had begun while an entry named
+ * them, each with what its destination holds once the move is done — the
+ * marker that lets a run that stopped between finishing a move and retiring
+ * its entries be finished by the next one.
+ *
+ * That proof is never "the old path is gone and the new one exists": ordinary
+ * commands hold no lock and can make both true without any move happening.
+ * It is what only the move produces. A rename carries the entry's inode to
+ * the destination; a recreated link is a link naming exactly what the move
+ * wrote. A directory an ordinary command makes there is neither.
+ *
+ * The inode with its birth time, not alone: an inode names an entry only
+ * while that entry is linked, so a legacy directory deleted after it was
+ * marked frees its number for the next directory made — at the destination,
+ * say — and that one would read as the move. A rename keeps the birth time
+ * and a new directory gets its own. On a filesystem that keeps none, Node
+ * reports the same placeholder for both and this is the inode alone again.
+ */
+type MoveProof = { inode: string; born: number } | { link: string };
+
+interface LinkRecord {
+  links: Map<string, string>;
+  pending: Map<string, string>;
+  moving: Map<string, MoveProof>;
+}
+
+/**
+ * Paths are kept relative to `~/.stratus`, never absolute: a home restored
+ * or moved somewhere else keeps its relative links resolving, and an
+ * absolute path in here would stop matching them and throw the evidence
+ * away (#220).
+ */
+const isHomeRelative = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0 && !path.isAbsolute(value)
+  && value !== '..' && !value.startsWith(`..${path.sep}`);
+
+const isMoveProof = (value: unknown): value is MoveProof => {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+  const { inode, born, link } = value as { inode?: unknown; born?: unknown; link?: unknown };
+  // A link proof can name somewhere outside the home — a legacy link to
+  // `../../data/ava` keeps that target — and that one stays absolute, since
+  // no relative spelling of it survives the home moving either.
+  return (typeof inode === 'string' && typeof born === 'number' && link === undefined)
+    || ((isHomeRelative(link) || (typeof link === 'string' && path.isAbsolute(link)))
+      && inode === undefined && born === undefined);
+};
+
+/** Relative to the home when inside it, absolute when not; `path.resolve(home, …)` reads either. */
+const asStored = (home: string, absolute: string): string => {
+  const relative = path.relative(home, absolute);
+  return isHomeRelative(relative) ? relative : absolute;
+};
+
+const inodeOf = (stats: { dev: number; ino: number }): string => `${stats.dev}:${stats.ino}`;
+
+/**
+ * An entry's identity plus its change time, for telling whether one entry
+ * stayed put across a read. The inode alone misses a link renamed aside and
+ * renamed back — same inode, and a read in between saw something else — and
+ * a rename sets the change time.
+ */
+const stampOf = (stats: { dev: number; ino: number; ctimeMs: number }): string =>
+  `${inodeOf(stats)}:${stats.ctimeMs}`;
+
+const readLinkRecord = async (env: StateEnvironment, seenBefore: boolean): Promise<LinkRecord> => {
+  const file = linkRecordPath(env);
+  const unreadable = (reason: string): Error => new Error(
+    `${file} could not be read (${reason}). It records which workspace links the upgrade move pointed `
+    + 'somewhere new, and without it a link left naming somebody else\'s files cannot be found. '
+    + 'Fix it, or remove it to go on without that check, and start again.',
+  );
+  let raw: string | undefined;
+  let reason = 'it is a symbolic link';
+  // Seen by the gate that decided to run this pass, or by the `lstat` below:
+  // either way it was there, and gone now is a rename aside, not "nothing
+  // recorded".
+  let seen = seenBefore;
+  try {
+    // Derived state under the home is never read through a link.
+    const stats = await lstat(file);
+    seen = true;
+    if (!stats.isSymbolicLink()) {
+      // Read through a handle proven to be the entry just checked: replaced
+      // in between, by a link or by another file, the name would hand over
+      // bytes nobody vouched for, and a stale record makes an operator's
+      // link look like one this migration wrote.
+      const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      try {
+        const opened = await handle.stat();
+        if (opened.isFile() && inodeOf(opened) === inodeOf(stats)) {
+          raw = (await handle.readFile()).toString('utf8');
+        } else {
+          reason = 'it was replaced while being read';
+        }
+      } finally {
+        await handle.close();
+      }
+    }
+  } catch (error) {
+    // Absent only if it was never there: one seen and then gone before the
+    // read was renamed aside for a moment, and taken for "nothing recorded"
+    // it would start without repairing what it records.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !seen) {
+      return { links: new Map(), pending: new Map(), moving: new Map() };
+    }
+    reason = (error as Error).message;
+  }
+  if (raw === undefined) {
+    throw unreadable(reason);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw unreadable((error as Error).message);
+  }
+  const { links, pending = {}, moving } = (parsed ?? {}) as { links?: unknown; pending?: unknown; moving?: unknown };
+  const isLinkMap = (value: unknown): boolean => value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Object.entries(value).every(([agentId, named]) => isValidAgentId(agentId) && isHomeRelative(named));
+  if (!isLinkMap(links) || !isLinkMap(pending)
+    || moving === null || typeof moving !== 'object' || Array.isArray(moving)
+    || Object.entries(moving).some(([agentId, proof]) => !isValidAgentId(agentId) || !isMoveProof(proof))) {
+    throw unreadable(
+      'it is not `links` and `pending`, maps of agent ids to paths inside the home, beside `moving`, a map of agent ids '
+      + 'to move proofs',
+    );
+  }
+  const home = stratusHomePath(env);
+  const resolved = (map: unknown): Map<string, string> => new Map(Object.entries(map as Record<string, string>)
+    .map(([agentId, named]) => [agentId, path.resolve(home, named)]));
+  return {
+    links: resolved(links),
+    pending: resolved(pending),
+    moving: new Map(Object.entries(moving as Record<string, MoveProof>)
+      .map(([agentId, proof]) => [agentId, 'link' in proof ? { link: path.resolve(home, proof.link) } : proof])),
+  };
+};
+
+/** Replaced in one step, never rewritten in place, and removed once empty. */
+const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promise<void> => {
+  const file = linkRecordPath(env);
+  if (record.links.size === 0 && record.pending.size === 0) {
+    await rm(file, { force: true });
+    return;
+  }
+  const replacement = `${file}.${randomUUID()}.tmp`;
+  const home = stratusHomePath(env);
+  const body = {
+    links: Object.fromEntries([...record.links].map(([agentId, named]) => [agentId, path.relative(home, named)])),
+    pending: Object.fromEntries([...record.pending].map(([agentId, named]) => [agentId, path.relative(home, named)])),
+    moving: Object.fromEntries([...record.moving].map(([agentId, proof]) =>
+      [agentId, 'link' in proof ? { link: asStored(home, proof.link) } : proof])),
+  };
+  try {
+    await writeFile(replacement, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
+    await rename(replacement, file);
+  } catch (error) {
+    await rm(replacement, { force: true });
+    throw error;
+  }
+};
+
+export const applyPerAgentWorkspaces = async (
+  env: StateEnvironment,
+  options: { linkRecordSeen?: boolean } = {},
+): Promise<string | undefined> => {
   // Before anything else: a previous run may have moved a workspace and
   // died before its ledger followed, and there is nothing in `workspaces/`
   // left to say so.
   const finished = await finishInterruptedMoves(env);
   const legacy = legacyWorkspacesDirPath(env);
   const legacySpellings = await spellingsOf(legacy);
+  // Whether the link record has been seen, by the caller's gate or by the
+  // check below: once it has, gone when it is read is a rename aside rather
+  // than "nothing recorded" — this pass is also run directly, as migration
+  // 0004, where the check below is the only sight of it before the read.
+  let linkRecordSeen = options.linkRecordSeen === true;
   let entries: Dirent[];
   try {
     entries = await readdir(legacy, { withFileTypes: true });
@@ -1161,11 +1382,28 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // `ENOTDIR` is a regular file somebody left at that name — aborting
     // over it would refuse every `stratus serve` for good, since the
     // migration that would clear the obstacle is the one failing.
-    if (code === 'ENOENT' || code === 'ENOTDIR') {
+    if ((code === 'ENOENT' || code === 'ENOTDIR')
+      && (linkRecordSeen || !(await pathIsFree(linkRecordPath(env))))) {
+      // Gone, or a file where it belongs, with a link record still pending:
+      // nothing to move, but the record may have a link to repair, which is
+      // asked below. Seen by the gate and gone now, it is asked too, and
+      // refused as unreadable rather than skipped.
+      linkRecordSeen = true;
+      entries = [];
+    } else if (code === 'ENOENT' || code === 'ENOTDIR') {
+      // The link record stays, if there is one: `workspaces/` can be gone for
+      // a moment while a command of an older build is between removing an
+      // entry and making it again, and an entry it remakes is a target that
+      // stays put after all. Only a finished move retires a record entry.
       return finished > 0 ? `finished ${finished} interrupted workspace move(s)` : undefined;
+    } else {
+      throw error;
     }
-    throw error;
   }
+  // In name order, so a run is reproducible: the report reads the same on
+  // every machine, and which member of a cycle moves first is not up to
+  // the filesystem's directory order.
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   /** Every name this run was handed, so a later one can be told apart. */
   const snapshot = new Set(entries.map((entry) => entry.name));
   /**
@@ -1315,6 +1553,216 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // would silently swap the shared files for a different workspace that an
   // ordinary command happened to create.
   const moved = new Set<string>();
+  /** See `linkRecordPath`: this run's retargeted links and every earlier run's. */
+  const record = await readLinkRecord(env, linkRecordSeen);
+  const written = record.links;
+  /**
+   * The workspaces this run finished moving — positive evidence, unlike a
+   * legacy pathname found absent, which an ordinary command holding no lock
+   * can make true for a moment and false again.
+   */
+  const completed = new Set<string>();
+  /** The agent whose new workspace path `named` is, or one below it. */
+  const workspaceOwnerOf = (named: string): string | undefined => {
+    const [owner, segment] = path.relative(agentsDirPath(env), named).split(path.sep);
+    return owner !== undefined && segment === 'workspace' && isValidAgentId(owner) ? owner : undefined;
+  };
+  /**
+   * An entry is evidence only until the workspace its link names has moved:
+   * that link is then right for good, and an entry kept past it would have
+   * a stale `workspaces/<id>` appearing later point a live link back at
+   * nothing. Retired the moment the move completes, from this run's own
+   * knowledge that it did.
+   */
+  const retireRecordsNaming = async (agentId: string): Promise<void> => {
+    completed.add(agentId);
+    let changed = record.moving.delete(agentId);
+    // A pending entry too: one a start could not inspect, kept for a later
+    // one, would otherwise outlive the move that made its link right and
+    // read as ambiguous on every start after.
+    for (const entries of [written, record.pending]) {
+      for (const [peer, wrote] of entries) {
+        if (workspaceOwnerOf(wrote) === agentId) {
+          entries.delete(peer);
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      await saveLinkRecord(env, record);
+    }
+  };
+  /**
+   * Marked before the step that cannot be taken back — the rename, or the
+   * unlink of a link's source — when an entry names this workspace, so a
+   * run that stops after it and before the retirement leaves the next one
+   * something to finish from.
+   */
+  /**
+   * Whether an entry, recorded or still pending, names this workspace. A
+   * pending one counts: a start that could not inspect it keeps it, and the
+   * move of what it names has to leave the same marker for it to be retired
+   * by, or a stop between that move and its retirement leaves it refusing
+   * every start after.
+   */
+  const entryNames = (agentId: string): boolean =>
+    [...written.values(), ...record.pending.values()].some((wrote) => workspaceOwnerOf(wrote) === agentId);
+  const markMoving = async (agentId: string, proof: MoveProof): Promise<void> => {
+    if (entryNames(agentId)) {
+      record.moving.set(agentId, proof);
+      await saveLinkRecord(env, record);
+    }
+  };
+  /** Whether the destination holds what only the marked move puts there. */
+  /**
+   * The identity of an `agents/<id>` while it is a real directory inside the
+   * home, or undefined when it is missing, a link, or below one. Taken
+   * before a read through it and compared after, so a directory swapped for
+   * a link in between is caught rather than read through.
+   */
+  const steadyDirectory = async (directory: string): Promise<string | undefined> => {
+    const stats = await lstat(directory).catch(() => undefined);
+    if (stats === undefined || stats.isSymbolicLink()
+      || await linkedDerivedComponent(stratusHomePath(env), directory) !== undefined) {
+      return undefined;
+    }
+    return inodeOf(stats);
+  };
+  /**
+   * What the destination says about a marked move: `proven` when it holds
+   * what only the move leaves, `refuted` when it was read through a steady
+   * directory and holds something else, `inconclusive` when it could not be
+   * read that way — missing, failing to stat, under a linked or swapped
+   * `agents/<id>`. Only `refuted` is evidence the move never happened; the
+   * other two must not be taken for it.
+   */
+  const judgeMove = async (agentId: string, proof: MoveProof): Promise<'proven' | 'refuted' | 'inconclusive'> => {
+    const destination = agentWorkspacePath(env, agentId);
+    // Never through a linked `agents/<id>`, nor one that became a link while
+    // the proof was read: what is found in another tree proves nothing
+    // about a move this migration made here, and a link's text read there
+    // can match the proof by accident.
+    const parent = path.dirname(destination);
+    const before = await steadyDirectory(parent);
+    if (before === undefined) {
+      return 'inconclusive';
+    }
+    let matches: boolean;
+    try {
+      const stats = await lstat(destination);
+      matches = 'inode' in proof
+        ? inodeOf(stats) === proof.inode && stats.birthtimeMs === proof.born
+        : stats.isSymbolicLink() && path.resolve(parent, await readlink(destination)) === proof.link;
+    } catch {
+      return 'inconclusive';
+    }
+    if (await steadyDirectory(parent) !== before) {
+      return 'inconclusive';
+    }
+    return matches ? 'proven' : 'refuted';
+  };
+  // What a stopped run marked: its move happened, and its entries are
+  // retired now, or that cannot be seen yet. A destination renamed away or
+  // failing to stat for a moment is not a move that never happened, so the
+  // marker stays until it is proven, until a retry of the move marks it
+  // afresh, or until no entry names that workspace any more.
+  for (const [agentId, proof] of [...record.moving]) {
+    if (await judgeMove(agentId, proof) === 'proven') {
+      await retireRecordsNaming(agentId);
+    }
+  }
+  // A link a stopped run was about to write — asked after the markers above
+  // are settled, since one whose target's move is proven was retired with
+  // it, and is right for good rather than ambiguous. Naming exactly what was
+  // to be written, it is that run's — or one the operator made since with
+  // the same text, which nothing on disk tells apart, and pointing the
+  // operator's back at a legacy path is the harm the whole record exists to
+  // avoid. So the start is refused, naming the two ways out. Anything else
+  // there is not this migration's, and the entry goes. Missing is kept, not
+  // taken for "never written": the link may be renamed aside for a backup,
+  // as a confirmed one may (see `repointPeersNamingNewPath`), and dropped
+  // now there would be nothing to repair it from once it is back; a retried
+  // move writes the entry afresh anyway. Read only through a steady
+  // `agents/<id>`, for the reason the scan of `links` below gives;
+  // otherwise kept for a later start too.
+  for (const [peer, wrote] of [...record.pending]) {
+    const peerTarget = agentWorkspacePath(env, peer);
+    const parent = path.dirname(peerTarget);
+    const before = await steadyDirectory(parent);
+    if (before === undefined) {
+      continue;
+    }
+    let names: string;
+    try {
+      const stats = await lstat(peerTarget);
+      names = stats.isSymbolicLink() ? path.resolve(parent, await readlink(peerTarget)) : '';
+      // Asked again, for the reason the scan of `links` below gives.
+      if (stampOf(await lstat(peerTarget)) !== stampOf(stats)) {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+    if (await steadyDirectory(parent) !== before) {
+      continue;
+    }
+    if (names === wrote) {
+      throw new Error(
+        `${peerTarget} names ${wrote}, and an earlier start stopped while writing exactly that link, so it cannot `
+        + `be told whether this one is that start's or yours. If you made it, remove ${JSON.stringify(peer)} from `
+        + `\`pending\` in ${linkRecordPath(env)}; if not, remove the link and it will be written again. Then start again.`,
+      );
+    }
+    record.pending.delete(peer);
+  }
+  // And an entry whose link no longer names what was written is nobody's
+  // evidence any more — repaired by a run that stopped before saving so, or
+  // changed by the operator. Kept, it would match a link the operator later
+  // points at that same path, and rewrite theirs.
+  //
+  // Only on seeing something else there, though: a link renamed aside for a
+  // backup, or under a mount that is briefly gone, is not one that changed,
+  // and dropping its entry then would leave nothing to repair it from once
+  // it is back.
+  for (const [peer, wrote] of [...written]) {
+    const peerTarget = agentWorkspacePath(env, peer);
+    const parent = path.dirname(peerTarget);
+    // Through a linked `agents/<id>` this would look at another tree, and
+    // what it found there says nothing about the link this entry is for.
+    // The parent's identity is taken before and checked after, so one
+    // replaced in between is inconclusive too rather than judged by
+    // whatever the read reached.
+    const before = await lstat(parent).catch(() => undefined);
+    if (before === undefined || await linkedDerivedComponent(stratusHomePath(env), parent) !== undefined) {
+      continue;
+    }
+    let names: string | undefined;
+    try {
+      const stats = await lstat(peerTarget);
+      names = stats.isSymbolicLink() ? path.resolve(parent, await readlink(peerTarget)) : '';
+      // The entry itself as well as its directory: one swapped and swapped
+      // back between the `lstat` and the `readlink` reads as something else,
+      // and this entry is the only thing that repairs the link once it is back.
+      if (stampOf(await lstat(peerTarget)) !== stampOf(stats)) {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+    const after = await lstat(parent).catch(() => undefined);
+    if (after === undefined || after.isSymbolicLink() || inodeOf(after) !== inodeOf(before)) {
+      continue;
+    }
+    if (names !== wrote) {
+      written.delete(peer);
+    }
+  }
+  for (const agentId of [...record.moving.keys()]) {
+    if (!entryNames(agentId)) {
+      record.moving.delete(agentId);
+    }
+  }
+  await saveLinkRecord(env, record);
   /** The names this run left free, as opposed to deliberately left alone. */
   const emptied = new Set<string>();
   /**
@@ -1363,6 +1811,189 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       === path.join(agentWorkspacePath(env, other), ...rest);
   };
 
+  /**
+   * Point a cycle peer back at where this member stayed, when it was
+   * recreated naming where this member was going.
+   *
+   * A cycle batch announces every member as moving before any of it moves,
+   * so that each can be recreated naming where its peer is going. The
+   * announcement checks that each destination is free; the move fills it
+   * later. An ordinary command holds no home lock and can take the
+   * destination in between. That member then stays put, as it should, but
+   * the peer already recreated naming its new path resolves to whatever
+   * took it: somebody else's files, with nothing left to say so (#220).
+   *
+   * Corrected to what a link to a target that stays put should name: the
+   * legacy path, where this member still is. The peer then leads nowhere,
+   * because this member is a link back to a path that has moved. That is
+   * what a cycle of links always did, and nowhere is safe where somebody
+   * else's workspace is not.
+   *
+   * Only links this migration retargeted, from this run or one that stopped
+   * before it got here, and only while they still name what was written.
+   * Asked of the disk alone, this could not tell a torn cycle from an
+   * operator's `agents/ava/workspace -> ../bea/workspace -> ../cyd/workspace`
+   * sharing a live workspace beside a stale `workspaces/cyd -> ava`: the
+   * same bytes, and the repair broke a working setup. A cycle has no files
+   * of its own, so whatever is at the stayed member's path is never the
+   * cycle's.
+   *
+   * Every recorded link that names this member's new path, not only
+   * the one a cycle walk reaches first: in `ava -> cyd`, `bea -> cyd`,
+   * `cyd -> ava`, all three wait on one another, so all are announced, and
+   * both `ava` and `bea` are recreated naming `cyd`'s new path.
+   */
+  /** Enough for an occasional replacement; a link that keeps changing is something to stop, not race. */
+  const REPOINT_ATTEMPTS = 3;
+  const repointPeersNamingNewPath = async (agentId: string, from: string, target: string): Promise<void> => {
+    // A pending entry still here is one the scan at the start could not
+    // settle — its link missing or unreadable then — and it names the path of
+    // a member now known to stay put. Nothing can be repointed that cannot be
+    // seen, and finishing the start would let it come back naming whatever
+    // is at that path, so the start is refused just as for a missing
+    // confirmed link below.
+    for (const [peer, wrote] of record.pending) {
+      const below = path.relative(target, wrote);
+      if (below === '..' || below.startsWith(`..${path.sep}`) || path.isAbsolute(below)) {
+        continue;
+      }
+      throw new Error(
+        `${agentWorkspacePath(env, peer)} could not be checked, and an earlier start stopped while writing it as `
+        + `a link to ${wrote}, where ${JSON.stringify(agentId)} is not moving. Put the link back so it can be `
+        + `pointed at ${from}, or remove ${JSON.stringify(peer)} from \`pending\` in ${linkRecordPath(env)} if it `
+        + 'was never written, and start again.',
+      );
+    }
+    for (const [peer, wrote] of written) {
+      // The path itself, or one below it: `ava -> bea/subdir` is recreated as
+      // `agents/bea/workspace/subdir`, the suffix `migratedTarget` carries
+      // across, and is pointed back with the same suffix below `from`. By
+      // segment: `..cache` is a name inside the workspace, not a way out.
+      const below = path.relative(target, wrote);
+      if (below === '..' || below.startsWith(`..${path.sep}`) || path.isAbsolute(below)) {
+        continue;
+      }
+      const peerTarget = agentWorkspacePath(env, peer);
+      const peerParent = path.dirname(peerTarget);
+      // Checked and swapped as one attempt, asked again whenever the entry is
+      // replaced between the two: a copy of the very same link is still the
+      // link this repair is for, and returning without it would start the
+      // daemon with that copy naming the path of a member that stays put.
+      let settled = false;
+      for (let attempt = 0; attempt < REPOINT_ATTEMPTS && !settled; attempt += 1) {
+        // Derived state is never followed through a link, and an `agents/<id>`
+        // that became one since the record was written puts this link in
+        // another tree: `lstat` would follow it there, its relative text
+        // would read against the wrong directory, and the rename would land
+        // outside the home. Not ours to touch — the daemon refuses that agent
+        // anyway — and asked on every attempt, not once before them.
+        //
+        // Not settled either: the entry is kept and the start refused, because
+        // a link put back in place of that directory after this pass would
+        // bring the link this run wrote back with it, naming the path of a
+        // member that stays put, for as long as the daemon runs.
+        const linked = await linkedDerivedComponent(stratusHomePath(env), peerParent);
+        if (linked !== undefined) {
+          throw new Error(
+            `${linked} is a symbolic link, so ${JSON.stringify(peer)}'s workspace link, last written naming ${wrote} `
+            + `where ${JSON.stringify(agentId)} is not moving, cannot be pointed at ${from}. Put the directory `
+            + `back, or remove ${JSON.stringify(peer)} from ${linkRecordPath(env)} if it is meant to stay a link, `
+            + 'and start again.',
+          );
+        }
+        const parentBefore = await lstat(peerParent).catch(() => undefined);
+        // Its identity as well as its text, so the swap can tell whether the
+        // entry it replaces is still the one checked here.
+        const observed = await lstat(peerTarget).catch(() => undefined);
+        // Missing now — renamed aside for a backup, under a mount that is
+        // away — but recorded naming the path of a member that is staying
+        // put. Put back after this pass, it would name that path again until
+        // the next restart, so the start is refused until it can be seen.
+        if (observed === undefined) {
+          throw new Error(
+            `${peerTarget} is missing, and it was last ${JSON.stringify(peer)}'s link to ${wrote}, where `
+            + `${JSON.stringify(agentId)} is not moving. Put the link back so it can be pointed at ${from}, `
+            + `or remove ${JSON.stringify(peer)} from ${linkRecordPath(env)} if you replaced it on purpose, `
+            + 'and start again.',
+          );
+        }
+        const peerText = await linkText(peerTarget);
+        // Read through the directory it was checked in, and from the entry
+        // that was observed — one swapped and swapped back in between read as
+        // another link, and forgetting the entry over it would leave the
+        // original naming the stayed member's path — or asked again.
+        const settledEntry = await lstat(peerTarget).catch(() => undefined);
+        if (parentBefore === undefined || await steadyDirectory(peerParent) !== inodeOf(parentBefore)
+          || settledEntry === undefined || stampOf(settledEntry) !== stampOf(observed)) {
+          continue;
+        }
+        // Still naming what this run wrote: anything else is not ours to
+        // touch, and the entry is forgotten now that something else is seen
+        // there — kept, it would match a link the operator later points at
+        // that same path, and rewrite theirs.
+        if (peerText === undefined || path.resolve(peerParent, peerText) !== wrote) {
+          written.delete(peer);
+          await saveLinkRecord(env, record);
+          settled = true;
+        } else if (await repointPeer(
+          agentId, peer, peerTarget, path.join(from, below), wrote, inodeOf(observed), inodeOf(parentBefore),
+        )) {
+          written.delete(peer);
+          await saveLinkRecord(env, record);
+          settled = true;
+        }
+      }
+      if (!settled) {
+        throw new Error(
+          `${peerTarget} kept being replaced while it was being pointed at ${from}, each time still naming `
+          + `${wrote}, where ${JSON.stringify(agentId)} is not moving. Stop whatever is rewriting it, and start again.`,
+        );
+      }
+    }
+  };
+
+  const repointPeer = async (
+    agentId: string,
+    peer: string,
+    peerTarget: string,
+    from: string,
+    target: string,
+    observed: string,
+    parentObserved: string,
+  ): Promise<boolean> => {
+    // Made beside it and renamed over it, never unlinked first: a run that
+    // dies between an unlink and its symlink leaves the peer with no link at
+    // all, and the next pass then has nothing to recognise and repair. A
+    // rename replaces the link in one step, and a failure before it leaves
+    // the old link, so the shape above is still there to be found.
+    //
+    // And only over the entry that was checked. Ordinary commands hold no
+    // lock, so the operator or one of them can replace the peer between the
+    // check and here; it is asked again as the last thing before the
+    // rename. That narrows the window to the one syscall rather than closing
+    // it, for the reason given at the rename in `move`: Node has no
+    // compare-and-swap rename to close it with.
+    const replacement = `${peerTarget}.${randomUUID()}.tmp`;
+    try {
+      await symlink(path.relative(path.dirname(peerTarget), from), replacement);
+      const now = await lstat(peerTarget).catch(() => undefined);
+      if (now === undefined || inodeOf(now) !== observed
+        || await steadyDirectory(path.dirname(peerTarget)) !== parentObserved) {
+        await rm(replacement, { force: true });
+        return false;
+      }
+      await rename(replacement, peerTarget);
+    } catch (error) {
+      await rm(replacement, { force: true });
+      throw error;
+    }
+    report.quarantined.push(
+      `${peer} — named ${path.relative(stratusHomePath(env), target)}, below where ${JSON.stringify(agentId)} was due to `
+      + `move and did not, so it names ${path.relative(stratusHomePath(env), from)} instead`,
+    );
+    return true;
+  };
+
   const move = async (entry: Dirent): Promise<void> => {
     if (!isWorkspaceEntry(entry)) {
       return;
@@ -1384,9 +2015,16 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // 0003 uses: a name that is another spelling of this id on a folding
     // filesystem would otherwise put two agents' output in one workspace.
     if (await agentDirectoryOrQuarantine(env, agentId, 'workspace', report) === undefined) {
+      // Staying put as surely as a member whose destination is taken, and a
+      // peer recorded naming its new path would otherwise go on resolving
+      // through whatever `agents/<id>` was refused for — a link into another
+      // state tree, say.
+      moved.delete(agentId);
+      await repointPeersNamingNewPath(agentId, from, agentWorkspacePath(env, agentId));
       report.quarantined.push(`${agentId} — left at ${path.relative(stratusHomePath(env), from)}`);
       return;
     }
+    await env.beforeWorkspaceMove?.(agentId);
     const target = agentWorkspacePath(env, agentId);
     // `lstat`, not `readdir` or `stat`: a *dangling* symlink at the
     // destination is something there, and both of those report it as
@@ -1402,7 +2040,21 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // nothing can resolve holds no records for anyone, so there is
       // nothing to fold and nothing at risk in not folding it.
       const leadsNowhere = entry.isSymbolicLink() && !(await resolves(from));
-      if (leadsNowhere && !(await destinationIsOurRecreate(from, target))) {
+      // Read through `agents/<id>`, which was checked above but can have
+      // become a link since: only a recreate read through the directory that
+      // was checked counts, or another tree's link with the right text would
+      // retire the records of peers that still need pointing back.
+      const ownerDirectory = await steadyDirectory(path.dirname(target));
+      const ourRecreate = leadsNowhere && ownerDirectory !== undefined
+        && await destinationIsOurRecreate(from, target)
+        && await steadyDirectory(path.dirname(target)) === ownerDirectory;
+      if (leadsNowhere && !ourRecreate) {
+        // Staying put, whatever was announced: a cycle batch adds every
+        // member to `moved` before any of it moves, and a member found here
+        // is one that will not. A dependent still to come must keep naming
+        // where it is.
+        moved.delete(agentId);
+        await repointPeersNamingNewPath(agentId, from, target);
         report.quarantined.push(
           `${agentId} — ${here} leads nowhere and ${there} is already there, so both were left as they are`,
         );
@@ -1414,6 +2066,14 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // Already reachable at the new path, so this is a finished state and
       // not a collision.
       if (!leadsNowhere && await sameEntry(from, target)) {
+        // Finished, then, as surely as a move that just landed: a link
+        // recorded naming the new path names this very workspace, and stays
+        // right once the old path's link is gone. Retired only on a reading
+        // through the directory checked for the recreate above, for the same
+        // reason as there.
+        if (ownerDirectory !== undefined && await steadyDirectory(path.dirname(target)) === ownerDirectory) {
+          await retireRecordsNaming(agentId);
+        }
         report.quarantined.push(`${agentId} — ${there} already resolves to ${here}, so it was left as it is`);
         return;
       }
@@ -1439,6 +2099,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // there when the volume came back.
       if (leadsNowhere) {
         moved.add(agentId);
+        await retireRecordsNaming(agentId);
         report.quarantined.push(
           `${agentId} — ${here} leads nowhere and ${there} is already there, so the new path is taken as `
           + 'this workspace and the stale link left for you to remove',
@@ -1453,6 +2114,13 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // Retired only if this workspace is nobody else's — see
       // `ledgerIsShared`. Asked before the fold, because the fold is
       // what would take it away.
+      //
+      // This member stays put too, whatever its own link resolves to now — a
+      // command of an older build can have remade the workspace a dangling
+      // one named — so a peer recorded naming its new path is pointed back
+      // here just as in the dangling case above.
+      moved.delete(agentId);
+      await repointPeersNamingNewPath(agentId, from, target);
       const shared = await ledgerIsShared(env, from);
       const folded = await foldLedgerInto(from, target, !shared);
       if (folded.outcome === 'folded') {
@@ -1539,7 +2207,26 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           ?? (alias !== undefined ? await migratedTarget(alias) : undefined);
         const names = resolved ?? direct;
         if (!path.isAbsolute(text) || resolved !== undefined) {
+          // Recorded before it is written, and only while what it names is
+          // announced and not yet moved — a cycle member, the one target
+          // that can still stay put. A link carried across as it stood names
+          // what its operator chose, and one retargeted at a workspace that
+          // has already moved is right for good; neither is ever pointed
+          // back. Pending until the `symlink` has returned, and only then
+          // evidence of anything: see `LinkRecord`.
+          const owner = resolved !== undefined ? workspaceOwnerOf(path.resolve(resolved)) : undefined;
+          const recorded = owner !== undefined && moved.has(owner) && !completed.has(owner);
+          if (recorded) {
+            record.pending.set(agentId, path.resolve(names));
+            await saveLinkRecord(env, record);
+          }
+          await markMoving(agentId, { link: path.resolve(names) });
           await symlink(path.relative(path.dirname(target), names), target);
+          if (recorded) {
+            record.pending.delete(agentId);
+            written.set(agentId, path.resolve(names));
+            await saveLinkRecord(env, record);
+          }
           // Both exist for an instant. A run killed here finds the source
           // again next time and the destination resolving to the same
           // directory, which `sameEntry` above reads as finished.
@@ -1567,6 +2254,8 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           + 'will be merged.',
         );
       }
+      const source = await lstat(from);
+      await markMoving(agentId, { inode: inodeOf(source), born: source.birthtimeMs });
       await rename(from, target);
     };
     try {
@@ -1608,12 +2297,69 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       );
     }
     moved.add(agentId);
+    await retireRecordsNaming(agentId);
     // The one place a source stops existing. Anything wearing this name
     // afterwards was put there by somebody else, which is what the sweep
     // below has to be able to tell.
     emptied.add(agentId);
     report.moved += 1;
   };
+
+  // A recorded peer whose target's legacy entry has gone without this
+  // migration moving it — every move of ours marks its workspace first, so
+  // no unproven marker means no move of ours — while something holds the
+  // target's new path. That something is not the cycle's, and the peer is
+  // pointed back at the legacy path now rather than left reaching it. That
+  // path may lead nowhere for the moment, which is the side to err on, and
+  // is right again the moment the entry returns.
+  //
+  const visited = new Set(entries.filter(isWorkspaceEntry).map((entry) => entry.name));
+  // Whether or not the new path is held yet: `serve` asks only as it starts,
+  // and an ordinary command can take a free one a moment later. A marked
+  // owner is repaired too once its new path visibly holds something its
+  // proof does not describe.
+  // Pending entries' owners too: one kept because its link could not be
+  // seen is exactly the case `repointPeersNamingNewPath` refuses for, and an
+  // owner reached only through it would otherwise never get there.
+  for (const owner of new Set([...written.values(), ...record.pending.values()].map(workspaceOwnerOf))) {
+    if (owner === undefined) {
+      continue;
+    }
+    const ownerFrom = path.join(legacy, owner);
+    const ownerTarget = agentWorkspacePath(env, owner);
+    // Left to the pass below only if that pass will reach it: a workspace
+    // entry in the snapshot it walks. One an older command made after the
+    // snapshot, or a regular file at that name, which both loops skip, is
+    // never visited, and deferring to a pass that will not come would start
+    // the daemon with the peer still naming the new path.
+    if (visited.has(owner) && !(await pathIsFree(ownerFrom))) {
+      continue;
+    }
+    const proof = record.moving.get(owner);
+    const verdict = proof === undefined ? undefined : await judgeMove(owner, proof);
+    if (verdict === 'proven') {
+      continue;
+    }
+    // A move of ours was under way and its destination cannot be read as
+    // either what the move left or something else: gone, failing to stat,
+    // under a linked `agents/<id>`. That is a move that never happened or
+    // one whose destination is briefly away, and the two need opposite
+    // answers — so neither is given. Repairing would point valid links at a
+    // legacy path that has moved on; starting anyway would leave the new
+    // path free for an ordinary command to take while a recorded link still
+    // names it.
+    if (verdict === 'inconclusive') {
+      const peers = [...written].filter(([, wrote]) => workspaceOwnerOf(wrote) === owner).map(([peer]) => peer);
+      throw new Error(
+        `${JSON.stringify(owner)}'s workspace was being moved when Stratus last stopped, ${ownerFrom} is gone, `
+        + `and ${ownerTarget} cannot be read as a plain path inside the home, so whether `
+        + `${peers.map((peer) => JSON.stringify(peer)).join(', ')} should follow it cannot be told. `
+        + `Put back whichever of the two you moved, or make ${path.dirname(ownerTarget)} a plain directory again, `
+        + 'and start again.',
+      );
+    }
+    await repointPeersNamingNewPath(owner, ownerFrom, ownerTarget);
+  }
 
   // Real workspaces first: a link can only be pointed at where its target
   // ended up once that is known.

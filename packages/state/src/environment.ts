@@ -27,6 +27,14 @@ export interface StateEnvironment {
    * drive except by launching the codex binary for real.
    */
   codexRunTurn?: CodexRunTurn;
+  /**
+   * Called as the workspace migration reaches each legacy entry, before it
+   * looks at that entry's destination: the moment an ordinary command,
+   * which holds no home lock, can create a path the migration is about to
+   * claim. Here for the same reason `fetch` is — without it the window
+   * #220 is about cannot be driven except by racing a real command.
+   */
+  beforeWorkspaceMove?: (agentId: string) => Promise<void>;
 }
 
 export const readProcessEnv = (env: StateEnvironment): NodeJS.ProcessEnv => env.processEnv ?? process.env;

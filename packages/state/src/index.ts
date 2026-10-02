@@ -19,6 +19,7 @@ export { BUILTIN_EXECUTOR_NAME, BUILTIN_MEMORY_STORE_NAME } from '@stratusagent/
 export { createFileMemoryStore, createShardedFileMemoryStore, type FileMemoryStoreOptions } from './memory.ts';
 export {
   applyPerAgentWorkspaces,
+  repairWorkspacesIfPending,
   surveyLegacyWorkspaces,
   workspaceRepairPending,
   type LegacyWorkspaceState,
