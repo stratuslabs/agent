@@ -1563,6 +1563,54 @@ test('a recovered turn\'s failure counts toward the repeated-failure stop', asyn
   assert.equal(asked, 2, 'the expired denial is the first of the three');
 });
 
+test('a recovered turn is counted as its whole response, so a call that succeeded before the park resets the count', async () => {
+  // The checkpoint holds the parked call and what queued behind it, not the
+  // calls that ran before it. Counting only those read a turn with a
+  // success in it as entirely failed.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({ name: 'ok', risk: 'safe', async execute() { return { fine: true }; } });
+  tools.register({ name: 'gated', risk: 'gated', async execute() { return { ran: true }; } });
+  let requests = 0;
+  const provider: ModelProvider = {
+    name: 'mixed-then-insistent',
+    async generate(request) {
+      requests += 1;
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'Still refused.' }] };
+      }
+      const gated = { type: 'tool-call' as const, call: { id: `g${requests}`, toolName: 'gated', input: { x: 1 } } };
+      return requests === 1
+        ? { parts: [{ type: 'tool-call', call: { id: 'o1', toolName: 'ok', input: {} } }, gated] }
+        : { parts: [gated] };
+    },
+  };
+
+  await parkAndAbandon(store, tools, provider, 'recover-mixed');
+
+  let asked = 0;
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      async approve({ risk }) {
+        if (risk === 'safe') {
+          return true;
+        }
+        asked += 1;
+        return false;
+      },
+    },
+  });
+  const recovered = await revived.recoverPendingApproval('recover-mixed');
+
+  assert.equal(recovered?.status, 'completed');
+  // The recovered turn held a success, so it is not the first of three:
+  // three more identical failures are needed after it.
+  assert.equal(asked, 4);
+});
+
 test('a recovery that denies the parked call still drains the queue behind it', async () => {
   const { ran, store, tools, provider } = parkedTurnHarness();
 

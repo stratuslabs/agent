@@ -3217,6 +3217,50 @@ const failureSignature = (calls: ToolCall[], results: ToolResult[]): string | un
 };
 
 /**
+ * The provider response a recorded tool call belongs to, as the session
+ * holds it: every call in it, and every result recorded for them.
+ *
+ * A response is saved as one contiguous run of assistant messages before
+ * any of its calls runs, so the run around the call's own message is the
+ * response. Found from the end and by the whole call, not its id alone:
+ * ids repeat across turns when a provider omits them.
+ */
+const responseOfCall = (session: Session, call: ToolCall): { calls: ToolCall[]; results: ToolResult[] } => {
+  const messages = session.messages;
+  const same = (candidate: ToolCall | undefined): boolean =>
+    candidate !== undefined
+    && candidate.id === call.id
+    && candidate.toolName === call.toolName
+    && sortedJson(candidate.input) === sortedJson(call.input);
+  let at = messages.length - 1;
+  while (at >= 0 && !(messages[at]!.role === 'assistant' && (messages[at]!.toolCalls ?? []).some(same))) {
+    at -= 1;
+  }
+  if (at < 0) {
+    return { calls: [call], results: [] };
+  }
+  let start = at;
+  while (start > 0 && messages[start - 1]!.role === 'assistant') {
+    start -= 1;
+  }
+  let end = at;
+  while (end + 1 < messages.length && messages[end + 1]!.role === 'assistant') {
+    end += 1;
+  }
+  const calls = messages.slice(start, end + 1).flatMap((message) => message.toolCalls ?? []);
+  const results: ToolResult[] = [];
+  for (const recorded of calls) {
+    const result = messages
+      .slice(end + 1)
+      .find((message) => message.toolResult?.callId === recorded.id)?.toolResult;
+    if (result) {
+      results.push(result);
+    }
+  }
+  return { calls, results };
+};
+
+/**
  * What the last turn of a message is told when it was stopped for making
  * the same failing call over and over (#208), in place of `TURN_LIMIT_NOTE`.
  *
@@ -5858,13 +5902,17 @@ export class AgentRunner {
           // meaningful when the parked call itself is being re-asked;
           // a denied one is already answered.
           const carriedParkedAt = pendingEntry.pending ? pendingEntry.parkedAt : undefined;
-          const answered = pendingEntry.answered;
+          const first = pendingEntry.answered?.call ?? recovered[0];
           pendingEntry = undefined;
-          const ran = await this.runToolCalls(session, recovered, signal, carriedParkedAt, turn);
-          countFailures(
-            answered ? [answered.call, ...recovered] : recovered,
-            answered ? [answered.result, ...ran] : ran,
-          );
+          await this.runToolCalls(session, recovered, signal, carriedParkedAt, turn);
+          // Counted as the whole response, read back from the session: the
+          // checkpoint holds only the parked call and what queued behind it,
+          // and a call earlier in the same response that ran (and perhaps
+          // succeeded) before the park is as much a part of the turn.
+          if (first !== undefined) {
+            const whole = responseOfCall(session, first);
+            countFailures(whole.calls, whole.results);
+          }
           continue;
         }
 
