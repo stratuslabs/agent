@@ -61,10 +61,13 @@ const claimAt = (lockPath: string, waitMs: number): DatabaseSync => {
   const { DatabaseSync: Database } = sqlite();
   const db = new Database(lockPath);
   try {
-    db.exec('PRAGMA journal_mode = MEMORY');
-    // How long BEGIN EXCLUSIVE retries a held lock before SQLITE_BUSY. Zero
-    // is node:sqlite's default and means at once.
+    // How long a held lock is retried before SQLITE_BUSY. Zero is
+    // node:sqlite's default and means at once. First, before anything that
+    // touches the file: setting the journal mode contends for the lock as
+    // well, and with no timeout yet it failed at once against a holder, so
+    // a waiter never waited and a daemon read went ahead without the lock.
     db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(waitMs))}`);
+    db.exec('PRAGMA journal_mode = MEMORY');
     db.exec('BEGIN EXCLUSIVE');
     // Created under the umask, like every other file SQLite makes;
     // tightened to match the rest of ~/.stratus. Inside the try: a

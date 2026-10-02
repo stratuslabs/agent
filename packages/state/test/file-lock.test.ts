@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -38,4 +40,28 @@ test('the grant read serializer holds the grants lock for exactly the read', asy
   assert.equal(during, 'held');
   // And let go afterwards, or the next revoke waits on a reader that is done.
   claimFileLock(grantsLockPath(env)).release();
+});
+
+test('a lock taken with a wait waits for another process\'s holder to let go', async () => {
+  // The holder is a second process that releases on its own a moment after
+  // it says it holds. Given a wait far longer than that, the claim has to
+  // succeed. It used to fail at once: the journal-mode statement met the
+  // held lock before the wait was set, so `waitMs` never applied and a
+  // daemon's grant read went ahead without the lock (#184).
+  const lockPath = path.join(await newHome(), '.stratus', 'held.lock');
+  claimFileLock(lockPath).release();
+  const holder = spawn(process.execPath, ['--no-warnings', '-e', `
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(${JSON.stringify(lockPath)});
+    db.exec('PRAGMA journal_mode = MEMORY');
+    db.exec('BEGIN EXCLUSIVE');
+    process.stdout.write('held\\n');
+    setTimeout(() => { db.close(); }, 200);
+  `], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const [chunk] = await once(holder.stdout!, 'data') as [Buffer];
+  assert.equal(chunk.toString().trim(), 'held');
+
+  const lock = claimFileLock(lockPath, { waitMs: 10_000 });
+  lock.release();
+  await once(holder, 'exit');
 });
