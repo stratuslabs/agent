@@ -2073,6 +2073,25 @@ test('a recorded peer whose agent directory became a link is left alone, not rew
   assert.equal(await readlink(path.join(elsewhere, 'ava', 'workspace')), path.join('..', 'bea', 'workspace'));
 });
 
+test('a link record is retired when the old path already resolves to the new one', async () => {
+  // After a stopped run, bea's workspace is live at its new path and
+  // `workspaces/bea` was made a link to it. That layout is finished, so the
+  // record naming bea is settled; removing the compatibility link later must
+  // not have ava pointed back at a legacy path that is gone.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await rm(path.join(legacyDir, 'bea'));
+  await symlink(agentWorkspacePath(env, 'bea'), path.join(legacyDir, 'bea'));
+  await applyPerAgentWorkspaces(env);
+
+  await rm(path.join(legacyDir, 'bea'));
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there

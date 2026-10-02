@@ -1807,6 +1807,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // Already reachable at the new path, so this is a finished state and
       // not a collision.
       if (!leadsNowhere && await sameEntry(from, target)) {
+        // Finished, then, as surely as a move that just landed: a link
+        // recorded naming the new path names this very workspace, and stays
+        // right once the old path's link is gone.
+        await retireRecordsNaming(agentId);
         report.quarantined.push(`${agentId} — ${there} already resolves to ${here}, so it was left as it is`);
         return;
       }
