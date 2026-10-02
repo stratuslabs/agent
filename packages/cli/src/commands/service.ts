@@ -9,10 +9,12 @@ import {
 } from '@stratusagent/state';
 import {
   installService,
+  readServiceCommand,
   readServiceStatus,
   startService,
   stopService,
   uninstallService,
+  type ServiceEnvironment,
 } from '../service.ts';
 import { serviceEnvFor } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
@@ -24,6 +26,29 @@ import type { ParsedServiceCommand } from '../parse.ts';
  * survives logout, crashes, and reboots. `serve` itself stays a plain
  * foreground process; this only tells the platform how to keep it up.
  */
+/**
+ * The error the installed unit's daemon would refuse to start on, asked by
+ * the rule `serve` uses, from where the unit runs: its working directory,
+ * the config it pins, and none of this shell's `STRATUS_CONFIG`, which a
+ * service manager does not pass on.
+ *
+ * Asked before a start rather than after it, because nothing after it can
+ * answer: systemd reports a `Type=simple` unit started the moment it forks,
+ * so a daemon that then exits 78 left `stratus service start` and `stratus
+ * update` saying it was running, over a unit that had already failed.
+ */
+export const installedUnitConfigError = async (
+  env: CliEnvironment,
+  serviceEnv: ServiceEnvironment,
+): Promise<Error | undefined> => {
+  const unit = await readServiceCommand(serviceEnv);
+  const { STRATUS_CONFIG: _selected, ...processEnv } = readProcessEnv(env);
+  return trustedConfigError(
+    { ...env, processEnv, ...(unit?.workingDirectory !== undefined ? { cwd: unit.workingDirectory } : {}) },
+    unit?.configPath,
+  );
+};
+
 export const runService = async (
   command: ParsedServiceCommand,
   streams: CliStreams,
@@ -103,6 +128,15 @@ export const runService = async (
     if (trustedError) {
       writeLine(streams.stderr, `Not installing: ${trustedError.message}`);
       writeLine(streams.stderr, 'The daemon refuses to start on a trusted config it cannot read. Fix the file, then install again.');
+      return 1;
+    }
+  }
+
+  if (command.action === 'start') {
+    const unitError = await installedUnitConfigError(env, serviceEnv);
+    if (unitError) {
+      writeLine(streams.stderr, `Not starting: ${unitError.message}`);
+      writeLine(streams.stderr, 'The daemon refuses to start on a trusted config it cannot read. Fix the file, then start it again.');
       return 1;
     }
   }

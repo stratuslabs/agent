@@ -18,6 +18,7 @@ import {
   stopService,
 } from '../service.ts';
 import { legacyDaemonServing, serviceEnvFor } from '../daemon.ts';
+import { installedUnitConfigError } from './service.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
 import {
@@ -190,6 +191,18 @@ export const runUpdate = async (
     // running — refuse instead, before anything has been stopped.
     writeLine(streams.stderr, `Not updating: whether stratusd ${status.running === undefined ? 'is running' : 'starts at login'} could not be determined (the service manager did not answer), and the unit rewrite would have to guess. Check \`stratus service status\` and retry.`);
     return 1;
+  }
+
+  // Before anything is stopped: the update restarts the service, and a
+  // daemon that then refuses its config would leave the fleet down with
+  // the update reporting it running (see `installedUnitConfigError`).
+  if (status?.installed) {
+    const unitError = await installedUnitConfigError(env, serviceEnv);
+    if (unitError) {
+      writeLine(streams.stderr, `Not updating: ${unitError.message}`);
+      writeLine(streams.stderr, 'The updated daemon would refuse to start on it, so nothing was stopped. Fix the file and run `stratus update` again.');
+      return 1;
+    }
   }
 
   const wasRunning = status?.running === true;

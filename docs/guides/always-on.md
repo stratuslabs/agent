@@ -83,6 +83,13 @@ service managers handle the exit differently:
   until the file is fixed. Each attempt fails at once, and the redirect
   logs are truncated so the loop cannot fill the disk.
 
+`stratus service install`, `stratus service start`, and `stratus update`
+check the config the unit runs with before they start anything, and refuse
+with the same error instead. A service manager reports a start as soon as
+the process exists, so without the check they would say the daemon was
+running while it was already exiting. `stratus update` refuses before it
+stops the running daemon, which keeps serving on its last good config.
+
 `status` asks the service manager, not the unit file, whether the daemon is
 alive, and exits non-zero when it isn't — so it works in a health check:
 
