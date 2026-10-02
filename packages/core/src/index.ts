@@ -5808,6 +5808,17 @@ export class AgentRunner {
       let lastFailure: string | undefined;
       let failureRun = 0;
       let stuck: { toolName: string; times: number } | undefined;
+      // Every turn's calls go through here, a recovered turn's included: it
+      // is a turn the provider already took, so its failures are as much
+      // the loop's as any other.
+      const countFailures = (calls: ToolCall[], results: ToolResult[]): void => {
+        const signature = failureSignature(calls, results);
+        failureRun = signature !== undefined && signature === lastFailure ? failureRun + 1 : signature === undefined ? 0 : 1;
+        lastFailure = signature;
+        if (failureRun >= REPEATED_FAILURE_LIMIT) {
+          stuck = { toolName: results[0]!.toolName, times: failureRun };
+        }
+      };
       for (let turn = resumeFrom?.turn ?? 1; ; turn += 1) {
         throwIfAborted(signal);
         // One turn past the ceiling, and only one: the wrap-up, which may
@@ -5837,7 +5848,7 @@ export class AgentRunner {
           // a denied one is already answered.
           const carriedParkedAt = pendingEntry.pending ? pendingEntry.parkedAt : undefined;
           pendingEntry = undefined;
-          await this.runToolCalls(session, recovered, signal, carriedParkedAt, turn);
+          countFailures(recovered, await this.runToolCalls(session, recovered, signal, carriedParkedAt, turn));
           continue;
         }
 
@@ -6046,12 +6057,7 @@ export class AgentRunner {
           break;
         }
 
-        const signature = failureSignature(calls, results);
-        failureRun = signature !== undefined && signature === lastFailure ? failureRun + 1 : signature === undefined ? 0 : 1;
-        lastFailure = signature;
-        if (failureRun >= REPEATED_FAILURE_LIMIT) {
-          stuck = { toolName: results[0]!.toolName, times: failureRun };
-        }
+        countFailures(calls, results);
       }
 
       session.status = 'completed';

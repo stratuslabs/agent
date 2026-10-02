@@ -1514,6 +1514,46 @@ test('a recovered turn resumes the exact parked call without replaying what alre
   assert.ok(providerTurns() >= 2, `expected the loop to continue, saw ${providerTurns()} provider turn(s)`);
 });
 
+test('a recovered turn\'s failure counts toward the repeated-failure stop', async () => {
+  // A recovered turn is one the provider already took. Leaving its result
+  // out of the count let a call denied after a restart be asked about a
+  // fourth time before the message stopped.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({ name: 'gated', risk: 'gated', async execute() { return { ran: true }; } });
+  let requests = 0;
+  const provider: ModelProvider = {
+    name: 'insistent',
+    async generate(request) {
+      requests += 1;
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'It keeps being refused.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `g${requests}`, toolName: 'gated', input: { x: 1 } } }] };
+    },
+  };
+
+  await parkAndAbandon(store, tools, provider, 'recover-count');
+
+  let asked = 0;
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      async approve() {
+        asked += 1;
+        return false;
+      },
+    },
+  });
+  const recovered = await revived.recoverPendingApproval('recover-count');
+
+  assert.equal(recovered?.status, 'completed');
+  assert.equal(asked, 3, 'the recovered denial is the first of the three');
+  assert.equal(recovered?.messages.at(-1)?.content, 'It keeps being refused.');
+});
+
 test('a recovery that denies the parked call still drains the queue behind it', async () => {
   const { ran, store, tools, provider } = parkedTurnHarness();
 
