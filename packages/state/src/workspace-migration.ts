@@ -1243,13 +1243,19 @@ const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
   );
   let raw: string | undefined;
   let reason = 'it is a symbolic link';
+  let seen = false;
   try {
     // Derived state under the home is never read through a link.
-    if (!(await lstat(file)).isSymbolicLink()) {
+    const stats = await lstat(file);
+    seen = true;
+    if (!stats.isSymbolicLink()) {
       raw = await readFile(file, 'utf8');
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    // Absent only if it was never there: one seen and then gone before the
+    // read was renamed aside for a moment, and taken for "nothing recorded"
+    // it would start without repairing what it records.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !seen) {
       return { links: new Map(), pending: new Map(), moving: new Map() };
     }
     reason = (error as Error).message;
