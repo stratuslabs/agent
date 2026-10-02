@@ -1561,16 +1561,25 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // it is back.
   for (const [peer, wrote] of [...written]) {
     const peerTarget = agentWorkspacePath(env, peer);
+    const parent = path.dirname(peerTarget);
     // Through a linked `agents/<id>` this would look at another tree, and
     // what it found there says nothing about the link this entry is for.
-    if (await linkedDerivedComponent(stratusHomePath(env), path.dirname(peerTarget)) !== undefined) {
+    // The parent's identity is taken before and checked after, so one
+    // replaced in between is inconclusive too rather than judged by
+    // whatever the read reached.
+    const before = await lstat(parent).catch(() => undefined);
+    if (before === undefined || await linkedDerivedComponent(stratusHomePath(env), parent) !== undefined) {
       continue;
     }
     let names: string | undefined;
     try {
       const stats = await lstat(peerTarget);
-      names = stats.isSymbolicLink() ? path.resolve(path.dirname(peerTarget), await readlink(peerTarget)) : '';
+      names = stats.isSymbolicLink() ? path.resolve(parent, await readlink(peerTarget)) : '';
     } catch {
+      continue;
+    }
+    const after = await lstat(parent).catch(() => undefined);
+    if (after === undefined || after.isSymbolicLink() || inodeOf(after) !== inodeOf(before)) {
       continue;
     }
     if (names !== wrote) {
