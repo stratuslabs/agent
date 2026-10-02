@@ -49,7 +49,10 @@ from general knowledge or from its own instructions. A question like "are
 we on the terminal?" is answered from the room line, and "do I need to
 restart after editing your soul?" from the line every served agent gets
 saying an edit reaches its next reply, so neither is required to read
-anything.
+anything. The credential-link case requires it only where `credential.request`
+is not offered: the tool's own result tells the agent to share the link only
+with the person who adds the key, so with the tool there is nothing the skill
+alone supplies.
 
 Run it against whatever `stratus` is configured to run on, optionally as a
 particular soul, or one case at a time. Without `--soul` the agent is Kai,
@@ -106,7 +109,9 @@ different:
   production, and a pass on one is a little less evidence. Plugins still
   load against the gateway's own tools, as the daemon loads them, so a
   plugin whose tool collides with one (`memory.remember`, say) is refused
-  whole here too, its provider and skills with it.
+  whole here too, its provider and skills with it. So is a plugin channel
+  claiming Slack for an agent whose Slack tokens are stored, which the daemon
+  carries itself.
 
 It prints each case with its reply and a total, and exits non-zero when a
 case fails. A case the `fallbackModel` answered, because the primary

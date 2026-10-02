@@ -47,6 +47,7 @@ import {
   createFileCredentialResolver,
   createRuntimeProvider,
   describeServingModel,
+  loadChannelCredentials,
   loadChannelTransportSecrets,
   loadOperatorSkills,
   loadSoulFile,
@@ -57,6 +58,7 @@ import {
 } from '@stratusagent/state';
 
 import { loadServeMaxTurns, loadServePlugins } from '../../src/trusted-config.ts';
+import { hostChannelClaimsFor, loadSlackAdapter } from '../../src/loaders.ts';
 
 type Check = (
   | { kind: 'readSkill' }
@@ -410,6 +412,15 @@ const main = async (): Promise<void> => {
   if (Object.keys(pluginsConfig).length > 0) {
     const staged = new ToolRegistry();
     registerGatewayTools(staged, new InMemoryAgentMemoryStore());
+    // The claims serve makes for the Slack adapter it wires itself, so a
+    // plugin channel taking Slack for one of those agents is refused here as
+    // it is there. The adapter is loaded only to learn it is installed.
+    const slackAgentIds = Object.keys((await loadChannelCredentials({})).slack ?? {});
+    const slackAdapterUp = slackAgentIds.length > 0 && await loadSlackAdapter() !== undefined;
+    const channels = new ChannelRegistry();
+    for (const claim of hostChannelClaimsFor(slackAgentIds, slackAdapterUp)) {
+      channels.claim(claim.kind, claim.agents);
+    }
     const result = await loadPlugins({
       config: pluginsConfig,
       host: {
@@ -424,7 +435,7 @@ const main = async (): Promise<void> => {
       // reads its transport secrets at setup, and the loader refuses it
       // whole without them, its provider and skills included. The registry
       // is never started, so no channel connects from here.
-      channels: new ChannelRegistry(),
+      channels,
       channelSecrets: (kind) => loadChannelTransportSecrets({}, kind),
       memory: new ContributionRegistry<MemoryStoreContribution>(),
       executors: new ContributionRegistry<ExecutorContribution>(),
