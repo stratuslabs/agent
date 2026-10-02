@@ -1869,7 +1869,15 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       // nothing can resolve holds no records for anyone, so there is
       // nothing to fold and nothing at risk in not folding it.
       const leadsNowhere = entry.isSymbolicLink() && !(await resolves(from));
-      if (leadsNowhere && !(await destinationIsOurRecreate(from, target))) {
+      // Read through `agents/<id>`, which was checked above but can have
+      // become a link since: only a recreate read through the directory that
+      // was checked counts, or another tree's link with the right text would
+      // retire the records of peers that still need pointing back.
+      const ownerDirectory = await steadyDirectory(path.dirname(target));
+      const ourRecreate = leadsNowhere && ownerDirectory !== undefined
+        && await destinationIsOurRecreate(from, target)
+        && await steadyDirectory(path.dirname(target)) === ownerDirectory;
+      if (leadsNowhere && !ourRecreate) {
         // Staying put, whatever was announced: a cycle batch adds every
         // member to `moved` before any of it moves, and a member found here
         // is one that will not. A dependent still to come must keep naming
@@ -1889,8 +1897,12 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       if (!leadsNowhere && await sameEntry(from, target)) {
         // Finished, then, as surely as a move that just landed: a link
         // recorded naming the new path names this very workspace, and stays
-        // right once the old path's link is gone.
-        await retireRecordsNaming(agentId);
+        // right once the old path's link is gone. Retired only on a reading
+        // through the directory checked for the recreate above, for the same
+        // reason as there.
+        if (ownerDirectory !== undefined && await steadyDirectory(path.dirname(target)) === ownerDirectory) {
+          await retireRecordsNaming(agentId);
+        }
         report.quarantined.push(`${agentId} — ${there} already resolves to ${here}, so it was left as it is`);
         return;
       }
