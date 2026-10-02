@@ -1159,23 +1159,48 @@ export const strayWorkspaceNames = async (env: StateEnvironment): Promise<readon
 const linkRecordPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), 'workspace-links.json');
 
+/**
+ * Absent is the one failure that means "nothing recorded". Anything else —
+ * a permission, a link planted at the path, a file that will not parse —
+ * stops the migration rather than reading as empty: this record is the only
+ * evidence a link points at somebody else's files, and starting without it
+ * leaves that link in place with nothing to say so.
+ */
 const readLinkRecord = async (env: StateEnvironment): Promise<Map<string, string>> => {
   const file = linkRecordPath(env);
+  const unreadable = (reason: string): Error => new Error(
+    `${file} could not be read (${reason}). It records which workspace links the upgrade move pointed `
+    + 'somewhere new, and without it a link left naming somebody else\'s files cannot be found. '
+    + 'Fix it, or remove it to go on without that check, and start again.',
+  );
+  let raw: string | undefined;
+  let reason = 'it is a symbolic link';
   try {
     // Derived state under the home is never read through a link.
-    if ((await lstat(file)).isSymbolicLink()) {
+    if (!(await lstat(file)).isSymbolicLink()) {
+      raw = await readFile(file, 'utf8');
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return new Map();
     }
-    const parsed = JSON.parse(await readFile(file, 'utf8')) as unknown;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return new Map();
-    }
-    return new Map(Object.entries(parsed).filter((entry): entry is [string, string] =>
-      isValidAgentId(entry[0]) && typeof entry[1] === 'string' && path.isAbsolute(entry[1])));
-  } catch {
-    // Absent, or unreadable: nothing this migration can prove it wrote.
-    return new Map();
+    reason = (error as Error).message;
   }
+  if (raw === undefined) {
+    throw unreadable(reason);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw unreadable((error as Error).message);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
+    || Object.entries(parsed).some(([agentId, named]) =>
+      !isValidAgentId(agentId) || typeof named !== 'string' || !path.isAbsolute(named))) {
+    throw unreadable('it is not a map of agent ids to absolute paths');
+  }
+  return new Map(Object.entries(parsed as Record<string, string>));
 };
 
 /** Replaced in one step, never rewritten in place, and removed once empty. */
@@ -1373,6 +1398,27 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   const moved = new Set<string>();
   /** See `linkRecordPath`: this run's retargeted links and every earlier run's. */
   const written = await readLinkRecord(env);
+  /**
+   * Drop what is settled: an entry is evidence only while the workspace its
+   * link names has a legacy entry, that is, while it may yet stay put. Once
+   * that one has moved, its link is right for good, and an entry kept past
+   * that would have a stale `workspaces/<id>` appearing later point a live
+   * link back at nothing.
+   */
+  const settleLinkRecord = async (): Promise<void> => {
+    let changed = false;
+    for (const [peer, wrote] of written) {
+      const [other] = path.relative(agentsDirPath(env), wrote).split(path.sep);
+      if (other === undefined || !isValidAgentId(other) || await pathIsFree(path.join(legacy, other))) {
+        written.delete(peer);
+        changed = true;
+      }
+    }
+    if (changed) {
+      await saveLinkRecord(env, written);
+    }
+  };
+  await settleLinkRecord();
   /** The names this run left free, as opposed to deliberately left alone. */
   const emptied = new Set<string>();
   /**
@@ -1894,6 +1940,9 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       + 'left where it is and folded on the next start',
     );
   }
+  // Settled now, while this run knows which workspaces moved: a stale
+  // legacy entry that appears before the next start must find nothing here.
+  await settleLinkRecord();
   try {
     if (!(await anyWorkspaceNamesLegacy(env, legacy))) {
       await rmdir(legacy);

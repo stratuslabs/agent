@@ -1737,6 +1737,37 @@ test('a legacy link carried across as it stood is never pointed back', async () 
   assert.equal(await realpath(agentWorkspacePath(env, 'ava')), await realpath(agentWorkspacePath(env, 'bea')));
 });
 
+test('a link record that will not read stops the move rather than reading as empty', async () => {
+  // It is the only evidence a link names somebody else's files; starting
+  // without it would leave such a link in place, saying nothing.
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'ava', { 'own.md': 'mine' });
+  await writeFile(path.join(home, '.stratus', 'workspace-links.json'), '{ not json');
+
+  await assert.rejects(runStateMigrations(env, { exclusive: true }), /workspace-links\.json could not be read/);
+  assert.equal(await readFile(path.join(legacyWorkspacesDirPath(env), 'ava', 'own.md'), 'utf8'), 'mine');
+});
+
+test('a link record is settled once the workspace it names has moved', async () => {
+  // bea moved and ava was pointed at its new path; a file of the operator's
+  // keeps `workspaces/` from emptying. A stale `workspaces/bea` appearing
+  // later must not have ava pointed back at it: that link is right for good.
+  const home = await newHome();
+  const env = { homeDir: home };
+  await seedWorkspace(home, 'bea', { 'own.md': 'bea\'s' });
+  await symlink('bea', path.join(legacyWorkspacesDirPath(env), 'ava'));
+  await writeFile(path.join(legacyWorkspacesDirPath(env), 'README'), 'the operator\'s');
+  await runStateMigrations(env, { exclusive: true });
+  assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
+
+  // The repair pass `serve` and `update` run on every start, stamp or not.
+  await symlink('zed', path.join(legacyWorkspacesDirPath(env), 'bea'));
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
+});
+
 test('a link an operator made in the new layout is not taken for a cycle peer', async () => {
   // A stale legacy link with an occupied destination, and elsewhere an
   // operator's own `agents/ava/workspace -> ../bea/workspace` sharing bea's
