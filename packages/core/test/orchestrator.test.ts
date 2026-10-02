@@ -470,6 +470,89 @@ test('a message that uses every turn wraps up with where it got to instead of fa
   assert.equal(session.messages.some((message) => message.content === TURN_LIMIT_NOTE), false);
 });
 
+test('a message that makes the same failing call three times running wraps up and says what is stuck', async () => {
+  // The turn limit was the only thing that stopped this, so a missing cwd
+  // or a gated tool refused in headless mode burned the whole allowance
+  // repeating one error (#208).
+  const tools = new ToolRegistry();
+  let ran = 0;
+  tools.register({
+    name: 'shell.run',
+    async execute() {
+      ran += 1;
+      throw new Error('cwd /work/missing does not exist');
+    },
+  });
+
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    name: 'stuck',
+    async generate(request) {
+      requests.push(request);
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'The working directory is missing, so every command fails.' }] };
+      }
+      // The same input in a different key order is still the same call.
+      const input = requests.length % 2 === 0 ? { command: 'ls', cwd: '/work/missing' } : { cwd: '/work/missing', command: 'ls' };
+      return { parts: [{ type: 'tool-call', call: { id: `c${requests.length}`, toolName: 'shell.run', input } }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools });
+  const session = await runner.run({
+    sessionId: 'stuck-loop',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'List the files',
+  });
+
+  assert.equal(ran, 3, 'stopped after three identical failures, not at maxTurns');
+  assert.equal(session.status, 'completed');
+  assert.equal(session.messages.at(-1)?.content, 'The working directory is missing, so every command fails.');
+  const wrapUp = requests.at(-1)!;
+  assert.equal(wrapUp.toolChoice, 'none');
+  assert.match(transcriptOf(wrapUp).at(-1)?.content ?? '', /called shell\.run 3 times in a row/);
+  // The runtime's note for one call, never something the person said.
+  assert.equal(session.messages.some((message) => /called shell\.run 3 times/.test(message.content)), false);
+});
+
+test('failures that change between turns are not a loop', async () => {
+  // A different input, or the same input failing differently, is the agent
+  // trying something or learning something; only the identical repeat is
+  // stopped early.
+  const tools = new ToolRegistry();
+  let ran = 0;
+  tools.register({
+    name: 'shell.run',
+    async execute(input) {
+      ran += 1;
+      throw new Error(`no such file: ${String((input as { path?: string }).path)}`);
+    },
+  });
+
+  let calls = 0;
+  const provider: ModelProvider = {
+    name: 'searching',
+    async generate() {
+      calls += 1;
+      if (calls > 5) {
+        return { parts: [{ type: 'text', text: 'None of those exist.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `c${calls}`, toolName: 'shell.run', input: { path: `/try/${calls}` } } }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools });
+  const session = await runner.run({
+    sessionId: 'searching',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'Find the config',
+  });
+
+  assert.equal(ran, 5);
+  assert.equal(session.status, 'completed');
+  assert.equal(session.messages.at(-1)?.content, 'None of those exist.');
+});
+
 test('resume continues an existing session with new user input', async () => {
   const store = new InMemorySessionStore();
   const provider: ModelProvider = {

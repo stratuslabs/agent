@@ -3182,6 +3182,64 @@ const turnLimitMessage = (maxTurns: number): string =>
   `Session exceeded the maximum of ${maxTurns} provider turns. `
   + 'Raise maxTurns in ~/.stratus/config.json for agents that do long multi-step work, or reply to carry on from here.';
 
+/**
+ * How many turns in a row may fail the same way before the runner stops
+ * the message. Three: once is an error, twice is a retry that might have
+ * been worth trying, and a third identical failure is a loop.
+ */
+const REPEATED_FAILURE_LIMIT = 3;
+
+/** A value as JSON with its object keys sorted, so equal inputs compare equal. */
+const sortedJson = (value: unknown): string => JSON.stringify(value, (_key, inner: unknown) => (
+  inner !== null && typeof inner === 'object' && !Array.isArray(inner)
+    ? Object.fromEntries(Object.entries(inner as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+    : inner
+));
+
+/**
+ * What a turn's tool calls had in common when every one of them failed, or
+ * `undefined` when any succeeded (or there were none).
+ *
+ * Tool, input, and error together: the same call failing differently is
+ * the agent learning something, and a different call failing the same way
+ * is it trying something else. A refused approval counts — a gated call
+ * refused in headless mode and then made again is the commonest loop of
+ * all, and asking again after a person said no is no better.
+ */
+const failureSignature = (calls: ToolCall[], results: ToolResult[]): string | undefined => {
+  if (results.length === 0 || results.some((result) => result.ok)) {
+    return undefined;
+  }
+  return sortedJson(results.map((result) => {
+    const call = calls.find((candidate) => candidate.id === result.callId);
+    return [result.toolName, call?.input ?? null, result.error ?? null];
+  }));
+};
+
+/**
+ * What the last turn of a message is told when it was stopped for making
+ * the same failing call over and over (#208), in place of `TURN_LIMIT_NOTE`.
+ *
+ * The turn limit was the only thing that ended such a loop, and at 40 turns
+ * that is 40 paid requests repeating one error — a shell `cwd` that does
+ * not exist, a gated tool refused in headless mode. The wrap-up is the
+ * same one the limit uses, so the person hears what is stuck rather than
+ * an error, and the session keeps everything that happened.
+ */
+const repeatedFailureNoteFor = (session: Session, toolName: string, times: number): Message => ({
+  id: `${session.id}:repeated-failure`,
+  role: 'user',
+  content: `You have called ${toolName} ${times} times in a row with the same input, and it failed the same way each time. `
+    + 'Do not call it again on this message. Reply now, in words: say what you were trying to do, what keeps failing, '
+    + 'and what you would need to get past it.',
+  createdAt: new Date().toISOString(),
+});
+
+/** What a turn stopped for repeating itself fails with, when it calls a tool even then. */
+const repeatedFailureMessage = (toolName: string, times: number): string =>
+  `The agent called ${toolName} ${times} times in a row with the same input and the same error, so this message was stopped. `
+  + 'Reply to carry on from here once whatever it needed is in place.';
+
 /** Reads the checkpoint off a session, if it is parked. */
 export const readPendingApproval = (session: Session): PendingApprovalRecord | undefined => {
   const raw = session.metadata?.[PENDING_APPROVAL_METADATA_KEY];
@@ -5744,12 +5802,19 @@ export class AgentRunner {
       // Resumed, not restarted: a recovered turn spends the budget it was
       // already on. Starting at 1 would let a call parked on the last
       // permitted turn buy the whole allowance again.
+      // Consecutive turns whose every call failed the same way, and how.
+      // Local to this run: a person replying is new information, and the
+      // call that failed before may work now.
+      let lastFailure: string | undefined;
+      let failureRun = 0;
+      let stuck: { toolName: string; times: number } | undefined;
       for (let turn = resumeFrom?.turn ?? 1; ; turn += 1) {
         throwIfAborted(signal);
         // One turn past the ceiling, and only one: the wrap-up, which may
         // not call a tool, so a turn that reaches `maxTurns + 2` is a
         // provider that ignored `toolChoice` and was already failed below.
-        const wrappingUp = turn > this.maxTurns;
+        // A turn stopped for repeating itself wraps up the same way, early.
+        const wrappingUp = turn > this.maxTurns || stuck !== undefined;
         // A recovered call is a tool turn too, so one parked past the
         // ceiling — `maxTurns` lowered while it waited — is refused as it
         // was before wrap-up existed, not run on the one call reserved for
@@ -5836,7 +5901,9 @@ export class AgentRunner {
           const floored = messagesWithinContextFloor(session);
           // The note rides in the window only, so the session never holds
           // it; see `TURN_LIMIT_NOTE`.
-          const window = wrappingUp ? [...floored, turnLimitNoteFor(session)] : floored;
+          const window = stuck
+            ? [...floored, repeatedFailureNoteFor(session, stuck.toolName, stuck.times)]
+            : wrappingUp ? [...floored, turnLimitNoteFor(session)] : floored;
           // Sink-reported usage is exclusive for the call: an adapter that
           // reports its internal attempts through the sink has already
           // counted the last one, and reading the response's field as well
@@ -5920,7 +5987,7 @@ export class AgentRunner {
         // the turn that may not make one is never run, and recording it
         // would leave a call in the transcript with no result to answer it.
         if (wrappingUp && response.parts.some((part) => part.type === 'tool-call')) {
-          throw new Error(turnLimitMessage(this.maxTurns));
+          throw new Error(stuck ? repeatedFailureMessage(stuck.toolName, stuck.times) : turnLimitMessage(this.maxTurns));
         }
 
         // Record and SAVE the entire response — text and every tool call —
@@ -5973,10 +6040,17 @@ export class AgentRunner {
         await this.store.save(session);
         await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
 
-        await this.runToolCalls(session, calls, signal, undefined, turn);
+        const results = await this.runToolCalls(session, calls, signal, undefined, turn);
 
         if (!sawToolCall) {
           break;
+        }
+
+        const signature = failureSignature(calls, results);
+        failureRun = signature !== undefined && signature === lastFailure ? failureRun + 1 : signature === undefined ? 0 : 1;
+        lastFailure = signature;
+        if (failureRun >= REPEATED_FAILURE_LIMIT) {
+          stuck = { toolName: results[0]!.toolName, times: failureRun };
         }
       }
 
@@ -6170,7 +6244,8 @@ export class AgentRunner {
      */
     parkedAt?: string,
     turn = 1,
-  ): Promise<void> {
+  ): Promise<ToolResult[]> {
+    const results: ToolResult[] = [];
     for (let index = 0; index < calls.length; index += 1) {
       const call = calls[index]!;
       throwIfAborted(signal);
@@ -6184,7 +6259,9 @@ export class AgentRunner {
       // The result lands immediately after execution, so side effects
       // are never durable without their record.
       await this.recordToolResult(session, result);
+      results.push(result);
     }
+    return results;
   }
 
   /**
