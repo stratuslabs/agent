@@ -151,16 +151,20 @@ export const collectDoctorReport = async (
   // reason (#204) — but only from the next write, so a file an older build
   // left at the umask's mode stays loose until something saves it. Only a
   // trusted config: a project-local one sits in a checkout at whatever mode
-  // git gave it, and cannot set a plugin's config anyway. Windows has no
+  // git gave it, and cannot set a plugin's config anyway. Every trusted one
+  // that is there, not only the one in use: a global config a project file
+  // shadows for this run still holds its secrets on disk. Windows has no
   // mode bits to read.
-  if (winner && !unreadable && winner.label !== 'project' && process.platform !== 'win32') {
-    const mode = (await stat(winner.path)).mode & 0o777;
-    if ((mode & 0o077) !== 0) {
-      problems.push(
-        `${winner.path} can be read by other users on this machine (mode ${mode.toString(8)}), and it holds `
-        + "any secret in your plugin config, such as tool-shell's env block. "
-        + `Run \`chmod 600 ${winner.path}\`; Stratus writes it that way from now on.`,
-      );
+  if (process.platform !== 'win32') {
+    for (const candidate of present.filter((entry) => entry.label !== 'project')) {
+      const mode = (await stat(candidate.path)).mode & 0o777;
+      if ((mode & 0o077) !== 0) {
+        problems.push(
+          `${candidate.path} can be read by other users on this machine (mode ${mode.toString(8)}), and it holds `
+          + "any secret in your plugin config, such as tool-shell's env block. "
+          + `Run \`chmod 600 ${candidate.path}\`; Stratus writes it that way from now on.`,
+        );
+      }
     }
   }
 

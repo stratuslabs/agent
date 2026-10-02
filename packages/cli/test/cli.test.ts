@@ -4665,6 +4665,17 @@ test('doctor flags a trusted config other users can read, and not a project-loca
     env: { cwd: project, homeDir: home, processEnv: {} },
   });
   assert.doesNotMatch(checkout.output.stdout, /can be read by other users/);
+
+  // But a loose global config is still named when a project file shadows it
+  // for this run: precedence decides what a run reads, not who else can.
+  await chmod(configPath, 0o644);
+  const shadowed = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: shadowed.streams,
+    env: { cwd: project, homeDir: home, processEnv: {} },
+  });
+  assert.match(shadowed.output.stdout, new RegExp(`${configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} can be read by other users`));
 });
 
 test('doctor explains a demo provider instead of leaving it a mystery', async () => {
