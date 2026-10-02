@@ -1645,9 +1645,13 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   const repointPeersNamingNewPath = async (agentId: string, from: string, target: string): Promise<void> => {
     for (const [peer, wrote] of written) {
       const peerTarget = agentWorkspacePath(env, peer);
+      // Its identity as well as its text, so the swap below can tell whether
+      // the entry it replaces is still the one checked here.
+      const observed = await lstat(peerTarget).catch(() => undefined);
       const peerText = await linkText(peerTarget);
       // Still naming what this run wrote: anything else is not ours to touch.
-      if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
+      if (observed === undefined || peerText === undefined
+        || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
         continue;
       }
       // The path itself, or one below it: `ava -> bea/subdir` is recreated as
@@ -1658,9 +1662,10 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       if (below === '..' || below.startsWith(`..${path.sep}`) || path.isAbsolute(below)) {
         continue;
       }
-      await repointPeer(agentId, peer, peerTarget, path.join(from, below), wrote);
-      written.delete(peer);
-      await saveLinkRecord(env, record);
+      if (await repointPeer(agentId, peer, peerTarget, path.join(from, below), wrote, inodeOf(observed))) {
+        written.delete(peer);
+        await saveLinkRecord(env, record);
+      }
     }
   };
 
@@ -1670,15 +1675,28 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     peerTarget: string,
     from: string,
     target: string,
-  ): Promise<void> => {
+    observed: string,
+  ): Promise<boolean> => {
     // Made beside it and renamed over it, never unlinked first: a run that
     // dies between an unlink and its symlink leaves the peer with no link at
     // all, and the next pass then has nothing to recognise and repair. A
     // rename replaces the link in one step, and a failure before it leaves
     // the old link, so the shape above is still there to be found.
+    //
+    // And only over the entry that was checked. Ordinary commands hold no
+    // lock, so the operator or one of them can replace the peer between the
+    // check and here; it is asked again as the last thing before the
+    // rename. That narrows the window to the one syscall rather than closing
+    // it, for the reason given at the rename in `move`: Node has no
+    // compare-and-swap rename to close it with.
     const replacement = `${peerTarget}.${randomUUID()}.tmp`;
     try {
       await symlink(path.relative(path.dirname(peerTarget), from), replacement);
+      const now = await lstat(peerTarget).catch(() => undefined);
+      if (now === undefined || inodeOf(now) !== observed) {
+        await rm(replacement, { force: true });
+        return false;
+      }
       await rename(replacement, peerTarget);
     } catch (error) {
       await rm(replacement, { force: true });
@@ -1688,6 +1706,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
       `${peer} — named ${path.relative(stratusHomePath(env), target)}, below where ${JSON.stringify(agentId)} was due to `
       + `move and did not, so it names ${path.relative(stratusHomePath(env), from)} instead`,
     );
+    return true;
   };
 
   const move = async (entry: Dirent): Promise<void> => {
