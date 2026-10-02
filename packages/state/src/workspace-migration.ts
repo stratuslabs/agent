@@ -1400,54 +1400,29 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    * and the repair broke a working setup. A cycle has no files of its own,
    * so whatever is at the stayed member's path is never the cycle's.
    *
-   * Found by walking the cycle from this member's own link: each step is a
-   * member this run recreated, whose link names the next member's new path.
-   * In `ava -> bea -> cyd -> ava` with `cyd` staying, the walk goes `cyd` to
-   * `ava` to `bea`, and `bea` is the one naming `cyd`'s new path.
+   * Every link this run wrote that names this member's new path, not only
+   * the one a cycle walk reaches first: in `ava -> cyd`, `bea -> cyd`,
+   * `cyd -> ava`, all three wait on one another, so all are announced, and
+   * both `ava` and `bea` are recreated naming `cyd`'s new path.
    */
-  const repointPeerNamingNewPath = async (agentId: string, from: string, target: string): Promise<void> => {
-    const nextAfter = (resolved: string, root: string): string | undefined => {
-      const [segment] = path.relative(root, resolved).split(path.sep);
-      return segment !== undefined && segment !== '..' && segment !== '' && isValidAgentId(segment)
-        ? segment
-        : undefined;
-    };
-    // Its own text, then the entry an alias outside the home reaches — the
-    // two the recreate step consulted. `cyd -> /srv/shared -> workspaces/ava`
-    // is in a cycle exactly as `cyd -> ava` is, and asking the text alone
-    // found no peer there and left `ava` naming whatever holds `cyd`'s path.
-    const ownText = await linkText(from);
-    const alias = aliased.get(agentId);
-    let peer = (ownText === undefined ? undefined : insideLegacy(path.resolve(path.dirname(from), ownText)))
-      ?? (alias !== undefined ? insideLegacy(alias) : undefined);
-    peer = peer?.split(path.sep)[0];
-    const visited = new Set<string>([agentId]);
-    while (peer !== undefined && isValidAgentId(peer) && !visited.has(peer)) {
-      visited.add(peer);
+  const repointPeersNamingNewPath = async (agentId: string, from: string, target: string): Promise<void> => {
+    for (const [peer, wrote] of written) {
       const peerTarget = agentWorkspacePath(env, peer);
       const peerText = await linkText(peerTarget);
-      // A link this run wrote, still naming what it wrote, or the walk ends.
-      if (peerText === undefined || written.get(peer) !== path.resolve(path.dirname(peerTarget), peerText)) {
-        return;
+      // Still naming what this run wrote: anything else is not ours to touch.
+      if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
+        continue;
       }
       // The path itself, or one below it: `ava -> bea/subdir` is recreated as
       // `agents/bea/workspace/subdir`, the suffix `migratedTarget` carries
       // across, and is pointed back with the same suffix below `from`. By
       // segment: `..cache` is a name inside the workspace, not a way out.
-      const named = path.resolve(path.dirname(peerTarget), peerText);
-      const below = path.relative(target, named);
-      if (named === target || !(below === '..' || below.startsWith(`..${path.sep}`) || path.isAbsolute(below))) {
-        await repointPeer(agentId, peer, peerTarget, path.join(from, below), named);
-        return;
+      const below = path.relative(target, wrote);
+      if (below === '..' || below.startsWith(`..${path.sep}`) || path.isAbsolute(below)) {
+        continue;
       }
-      // The next member's new path or one below it, judged by path segment:
-      // a prefix test read `agents/bea/workspace-backup` as inside
-      // `agents/bea/workspace` and walked into a link the operator owns.
-      const next = nextAfter(named, agentsDirPath(env));
-      const within = next === undefined ? undefined : path.relative(agentWorkspacePath(env, next), named);
-      peer = within !== undefined && within !== '..' && !within.startsWith(`..${path.sep}`) && !path.isAbsolute(within)
-        ? next
-        : undefined;
+      await repointPeer(agentId, peer, peerTarget, path.join(from, below), wrote);
+      written.delete(peer);
     }
   };
 
@@ -1523,7 +1498,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
         // is one that will not. A dependent still to come must keep naming
         // where it is.
         moved.delete(agentId);
-        await repointPeerNamingNewPath(agentId, from, target);
+        await repointPeersNamingNewPath(agentId, from, target);
         report.quarantined.push(
           `${agentId} — ${here} leads nowhere and ${there} is already there, so both were left as they are`,
         );

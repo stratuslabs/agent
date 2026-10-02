@@ -1622,6 +1622,24 @@ test('in a longer cycle, the member left naming the one that stayed is the one p
   assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
 });
 
+test('every link this run wrote naming the member that stayed is pointed back, not only one', async () => {
+  // `ava -> cyd`, `bea -> cyd`, `cyd -> ava`: all three wait on one another,
+  // so all are announced, and ava and bea are both recreated naming cyd's
+  // new path. A walk that stopped at the first one it found left bea
+  // resolving to whatever took cyd's destination.
+  const home = await newHome();
+  const env = takingDestinationOf(home, 'cyd', { 'theirs.md': 'not theirs' });
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink('cyd', path.join(legacyWorkspacesDirPath(env), 'ava'));
+  await symlink('cyd', path.join(legacyWorkspacesDirPath(env), 'bea'));
+  await symlink('ava', path.join(legacyWorkspacesDirPath(env), 'cyd'));
+
+  await runStateMigrations(env, { exclusive: true });
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyWorkspacesDirPath(env), 'cyd'));
+  assert.equal(await reachedFrom(env, 'bea'), path.join(legacyWorkspacesDirPath(env), 'cyd'));
+});
+
 test('a cycle peer that named a path below the member that stayed is pointed back with that path', async () => {
   // `ava -> bea/subdir` is recreated as `agents/bea/workspace/subdir`. If bea
   // then stays because its destination was taken, ava resolves into what
