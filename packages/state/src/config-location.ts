@@ -177,3 +177,54 @@ export const readGlobalConfigBlock = async <K extends keyof StratusConfigFile>(
   }
   return readTrustedConfigBlock(key, env, globalPath);
 };
+
+/**
+ * Why the trusted config a daemon would read cannot be used, if it cannot.
+ *
+ * Exactly the files `readTrustedConfigBlock` reads, so it answers "would a
+ * block come back `unreadable`": the file discovery picks when that file is
+ * trusted, and the global one behind an untrusted project file. A project
+ * file that fails to parse is not a reason, by the same rule the block
+ * reader follows — it could not have set a trusted block whatever it said,
+ * and a malformed file in a clone must not keep the operator's daemon down.
+ * Discovery failing outright is one, since every block then reads as
+ * unreadable.
+ *
+ * Exists for `stratus serve`'s start (#214). Each block degrades on its own
+ * when the file will not load — no plugins, the built-in soul, no
+ * approvers, every Slack sender refused — so a daemon on a broken file
+ * comes up answering in Slack as nobody, with no tools, and looks healthy.
+ * A daemon already running keeps its last good config instead; that is the
+ * gateway's call, and this is not consulted there.
+ */
+export const trustedConfigError = async (
+  env: StateEnvironment,
+  configPath?: string,
+): Promise<ConfigFileError | undefined> => {
+  const asConfigError = (filePath: string, error: unknown): ConfigFileError =>
+    error instanceof ConfigFileError ? error : new ConfigFileError(filePath, error);
+  let location: ResolvedConfigLocation | undefined;
+  try {
+    location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
+  } catch (error) {
+    return asConfigError(configPath ?? globalConfigPath(env), error);
+  }
+  if (location === undefined) {
+    return undefined;
+  }
+  let trustedPath = location.path;
+  if (!location.trusted) {
+    trustedPath = globalConfigPath(env);
+    try {
+      await stat(trustedPath);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : asConfigError(trustedPath, error);
+    }
+  }
+  try {
+    await loadConfigFile(trustedPath);
+    return undefined;
+  } catch (error) {
+    return asConfigError(trustedPath, error);
+  }
+};

@@ -36,6 +36,16 @@ export const RESTART_EXIT_CODE = 75;
  */
 export const UNDRAINED_RESTART_EXIT_CODE = 76;
 
+/**
+ * What `stratus serve` exits with when the trusted config it would read does
+ * not load — sysexits' EX_CONFIG. Its own status so the systemd unit can
+ * name it in `RestartPreventExitStatus`: restarting a daemon over a file
+ * nobody has fixed fails the same way every five seconds. launchd has no
+ * equivalent, so on macOS the job is restarted until the file is fixed,
+ * and `truncateRedirectLogs` is what keeps that from filling the disk.
+ */
+export const CONFIG_INVALID_EXIT_CODE = 78;
+
 /** Set in a daemon the supervisor started, so its own restart is an exit, not a second supervisor. */
 export const SUPERVISED_ENV = 'STRATUS_SERVE_SUPERVISED';
 
