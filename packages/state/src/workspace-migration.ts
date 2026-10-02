@@ -1169,13 +1169,33 @@ const linkRecordPath = (env: StateEnvironment): string =>
 /**
  * `links`: each retargeted link, by agent, and the path it was written
  * naming. `moving`: the workspaces whose move had begun while an entry named
- * them — the marker that lets a run that stopped between finishing a move
- * and retiring its entries be finished by the next one.
+ * them, each with what its destination holds once the move is done — the
+ * marker that lets a run that stopped between finishing a move and retiring
+ * its entries be finished by the next one.
+ *
+ * That proof is never "the old path is gone and the new one exists": ordinary
+ * commands hold no lock and can make both true without any move happening.
+ * It is what only the move produces. A rename carries the entry's inode to
+ * the destination; a recreated link is a link naming exactly what the move
+ * wrote. A directory an ordinary command makes there is neither.
  */
+type MoveProof = { inode: string } | { link: string };
+
 interface LinkRecord {
   links: Map<string, string>;
-  moving: Set<string>;
+  moving: Map<string, MoveProof>;
 }
+
+const isMoveProof = (value: unknown): value is MoveProof => {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+  const { inode, link } = value as { inode?: unknown; link?: unknown };
+  return (typeof inode === 'string' && link === undefined)
+    || (typeof link === 'string' && path.isAbsolute(link) && inode === undefined);
+};
+
+const inodeOf = (stats: { dev: number; ino: number }): string => `${stats.dev}:${stats.ino}`;
 
 const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
   const file = linkRecordPath(env);
@@ -1193,7 +1213,7 @@ const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { links: new Map(), moving: new Set() };
+      return { links: new Map(), moving: new Map() };
     }
     reason = (error as Error).message;
   }
@@ -1210,11 +1230,14 @@ const readLinkRecord = async (env: StateEnvironment): Promise<LinkRecord> => {
   if (links === null || typeof links !== 'object' || Array.isArray(links)
     || Object.entries(links).some(([agentId, named]) =>
       !isValidAgentId(agentId) || typeof named !== 'string' || !path.isAbsolute(named))
-    || !Array.isArray(moving)
-    || moving.some((agentId) => typeof agentId !== 'string' || !isValidAgentId(agentId))) {
-    throw unreadable('it is not `links`, a map of agent ids to absolute paths, beside `moving`, a list of agent ids');
+    || moving === null || typeof moving !== 'object' || Array.isArray(moving)
+    || Object.entries(moving).some(([agentId, proof]) => !isValidAgentId(agentId) || !isMoveProof(proof))) {
+    throw unreadable('it is not `links`, a map of agent ids to absolute paths, beside `moving`, a map of agent ids to move proofs');
   }
-  return { links: new Map(Object.entries(links as Record<string, string>)), moving: new Set(moving as string[]) };
+  return {
+    links: new Map(Object.entries(links as Record<string, string>)),
+    moving: new Map(Object.entries(moving as Record<string, MoveProof>)),
+  };
 };
 
 /** Replaced in one step, never rewritten in place, and removed once empty. */
@@ -1225,7 +1248,7 @@ const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promis
     return;
   }
   const replacement = `${file}.${randomUUID()}.tmp`;
-  const body = { links: Object.fromEntries(record.links), moving: [...record.moving] };
+  const body = { links: Object.fromEntries(record.links), moving: Object.fromEntries(record.moving) };
   try {
     await writeFile(replacement, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
     await rename(replacement, file);
@@ -1451,23 +1474,48 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    * run that stops after it and before the retirement leaves the next one
    * something to finish from.
    */
-  const markMoving = async (agentId: string): Promise<void> => {
+  const markMoving = async (agentId: string, proof: MoveProof): Promise<void> => {
     if ([...written.values()].some((wrote) => workspaceOwnerOf(wrote) === agentId)) {
-      record.moving.add(agentId);
+      record.moving.set(agentId, proof);
       await saveLinkRecord(env, record);
     }
   };
-  // What a stopped run marked: its move either happened — a rename is
-  // atomic, so the legacy entry is gone and the destination holds it — and
-  // its entries are retired now, or it did not, and the move is simply
-  // retried below with the entries still in force.
-  for (const agentId of [...record.moving]) {
-    if (await pathIsFree(path.join(legacy, agentId)) && !(await pathIsFree(agentWorkspacePath(env, agentId)))) {
+  /** Whether the destination holds what only the marked move puts there. */
+  const moveProven = async (agentId: string, proof: MoveProof): Promise<boolean> => {
+    const destination = agentWorkspacePath(env, agentId);
+    try {
+      const stats = await lstat(destination);
+      if ('inode' in proof) {
+        return inodeOf(stats) === proof.inode;
+      }
+      return stats.isSymbolicLink()
+        && path.resolve(path.dirname(destination), await readlink(destination)) === proof.link;
+    } catch {
+      return false;
+    }
+  };
+  // What a stopped run marked: its move either happened, and its entries
+  // are retired now, or it did not, and the move is simply retried below
+  // with the entries still in force.
+  for (const [agentId, proof] of [...record.moving]) {
+    if (await moveProven(agentId, proof)) {
       await retireRecordsNaming(agentId);
     } else {
       record.moving.delete(agentId);
     }
   }
+  // And an entry whose link no longer names what was written is nobody's
+  // evidence any more — repaired by a run that stopped before saving so, or
+  // changed by the operator. Kept, it would match a link the operator later
+  // points at that same path, and rewrite theirs.
+  for (const [peer, wrote] of [...written]) {
+    const peerTarget = agentWorkspacePath(env, peer);
+    const peerText = await linkText(peerTarget);
+    if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== wrote) {
+      written.delete(peer);
+    }
+  }
+  await saveLinkRecord(env, record);
   /** The names this run left free, as opposed to deliberately left alone. */
   const emptied = new Set<string>();
   /**
@@ -1765,7 +1813,6 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
     // it dangling whichever order the two are reached in. Such a target is
     // followed to where its workspace is going instead.
     const moveIntoPlace = async (): Promise<void> => {
-      await markMoving(agentId);
       if (entry.isSymbolicLink()) {
         const text = await readlink(from);
         const direct = path.resolve(path.dirname(from), text);
@@ -1792,6 +1839,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
             written.set(agentId, path.resolve(names));
             await saveLinkRecord(env, record);
           }
+          await markMoving(agentId, { link: path.resolve(names) });
           await symlink(path.relative(path.dirname(target), names), target);
           // Both exist for an instant. A run killed here finds the source
           // again next time and the destination resolving to the same
@@ -1820,6 +1868,7 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
           + 'will be merged.',
         );
       }
+      await markMoving(agentId, { inode: inodeOf(await lstat(from)) });
       await rename(from, target);
     };
     try {

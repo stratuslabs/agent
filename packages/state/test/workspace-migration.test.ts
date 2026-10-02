@@ -1774,19 +1774,82 @@ test('a move that finished just before a run stopped still retires its link reco
   await runStateMigrations(dying, { exclusive: true }).catch(() => undefined);
   const env = { homeDir: home };
   const recordFile = path.join(home, '.stratus', 'workspace-links.json');
-  const record = JSON.parse(await readFile(recordFile, 'utf8')) as { links: Record<string, string>; moving: string[] };
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as { links: Record<string, string> };
   assert.deepEqual(Object.keys(record.links), ['ava']);
-  await writeFile(recordFile, JSON.stringify({ ...record, moving: ['bea'] }));
   // A directory at bea's new path rather than the link its move would
   // write: the record does not care which, and the link would close a cycle
-  // in the new layout that a later pass cannot walk.
+  // in the new layout that a later pass cannot walk. The marker carries the
+  // inode a rename keeps, which is what the move would have written.
   await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  const moved = await lstat(agentWorkspacePath(env, 'bea'));
+  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${moved.dev}:${moved.ino}` } } }));
   await rm(path.join(legacyDir, 'bea'));
 
   // The next start finishes the retirement; a stale `workspaces/bea`
   // appearing after it then finds nothing recorded.
   await applyPerAgentWorkspaces(env);
   await symlink('zed', path.join(legacyDir, 'bea'));
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
+});
+
+/** A run that stopped at bea, with ava already recorded naming bea's new path. */
+const stoppedAtBea = async (home: string): Promise<string> => {
+  const legacyDir = legacyWorkspacesDirPath({ homeDir: home });
+  await mkdir(legacyDir, { recursive: true });
+  await symlink('bea', path.join(legacyDir, 'ava'));
+  await symlink('ava', path.join(legacyDir, 'bea'));
+  await writeFile(path.join(legacyDir, 'README'), 'the operator\'s');
+  const dying = {
+    homeDir: home,
+    async beforeWorkspaceMove(agentId: string): Promise<void> {
+      if (agentId === 'bea') {
+        throw new Error('the process stopped here');
+      }
+    },
+  };
+  await runStateMigrations(dying, { exclusive: true }).catch(() => undefined);
+  return legacyDir;
+};
+
+test('a move marker is settled only by what the move itself leaves, not by paths others can change', async () => {
+  // The run marked bea and stopped before renaming it. Then, with no lock
+  // held, bea's legacy entry went away and something made bea's new path.
+  // Those two paths are what a finished move looks like, and nothing moved:
+  // the entry naming bea must survive, so ava is repaired once bea is back.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as Record<string, unknown>;
+  const unmoved = await lstat(path.join(legacyDir, 'bea'));
+  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${unmoved.dev}:${unmoved.ino}` } } }));
+  await rm(path.join(legacyDir, 'bea'));
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await applyPerAgentWorkspaces(env);
+
+  await symlink('ava', path.join(legacyDir, 'bea'));
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
+test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
+  // ava was repaired and the run stopped before saving that, so the record
+  // still says ava names bea's new path. Later the operator points ava there
+  // on purpose; that link is theirs, and must not be pointed back.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  const avaLink = agentWorkspacePath(env, 'ava');
+  await rm(avaLink);
+  await symlink(path.relative(path.dirname(avaLink), path.join(legacyDir, 'bea')), avaLink);
+  await applyPerAgentWorkspaces(env);
+
+  await rm(avaLink);
+  await symlink(path.join('..', 'bea', 'workspace'), avaLink);
   await applyPerAgentWorkspaces(env);
 
   assert.equal(await reachedFrom(env, 'ava'), agentWorkspacePath(env, 'bea'));
