@@ -1984,6 +1984,39 @@ test('a recorded peer is pointed back while workspaces is a file, too', async ()
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+test('a recorded peer is pointed back as soon as its target is away, before anything takes the new path', async () => {
+  // bea's legacy entry is gone and no move of ours took it. Its new path is
+  // still free, but `serve` asks only as it starts, and an ordinary command
+  // can take that path a moment later; ava must not be left naming it.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  await rm(path.join(legacyDir, 'bea'));
+
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
+test('a move marker the destination visibly contradicts does not hold back the repair', async () => {
+  // The run marked bea and stopped before renaming it. bea's legacy entry is
+  // then away and something else holds bea's new path: not what the marker's
+  // proof describes, so the move never happened and ava is pointed back.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const record = JSON.parse(await readFile(recordFile, 'utf8')) as Record<string, unknown>;
+  const unmoved = await lstat(path.join(legacyDir, 'bea'));
+  await writeFile(recordFile, JSON.stringify({ ...record, moving: { bea: { inode: `${unmoved.dev}:${unmoved.ino}` } } }));
+  await rm(path.join(legacyDir, 'bea'));
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+
+  await applyPerAgentWorkspaces(env);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
+});
+
 test('a recorded link that no longer names what was written is forgotten, not matched again later', async () => {
   // ava was repaired and the run stopped before saving that, so the record
   // still says ava names bea's new path. Later the operator points ava there

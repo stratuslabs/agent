@@ -2006,15 +2006,26 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
   // pointed back at the legacy path now rather than left reaching it. That
   // path may lead nowhere for the moment, which is the side to err on, and
   // is right again the moment the entry returns.
+  //
+  // Whether or not the new path is held yet: `serve` asks only as it starts,
+  // and an ordinary command can take a free one a moment later. A marked
+  // owner is repaired too once its new path visibly holds something its
+  // proof does not describe; one whose new path is merely not there is left
+  // to the marker, which may yet be proven.
   for (const owner of new Set([...written.values()].map(workspaceOwnerOf))) {
-    if (owner === undefined || record.moving.has(owner)) {
+    if (owner === undefined) {
       continue;
     }
     const ownerFrom = path.join(legacy, owner);
     const ownerTarget = agentWorkspacePath(env, owner);
-    if (await pathIsFree(ownerFrom) && !(await pathIsFree(ownerTarget))) {
-      await repointPeersNamingNewPath(owner, ownerFrom, ownerTarget);
+    if (!(await pathIsFree(ownerFrom))) {
+      continue;
     }
+    const proof = record.moving.get(owner);
+    if (proof !== undefined && (await pathIsFree(ownerTarget) || await moveProven(owner, proof))) {
+      continue;
+    }
+    await repointPeersNamingNewPath(owner, ownerFrom, ownerTarget);
   }
 
   // Real workspaces first: a link can only be pointed at where its target
