@@ -1593,6 +1593,31 @@ test('a cycle peer left naming a member that never moved is pointed back at wher
   assert.deepEqual(await readdir(path.join(agentsDirPath(env), 'ava')), ['workspace']);
 });
 
+test('in a longer cycle, the member left naming the one that stayed is the one pointed back', async () => {
+  // ava -> bea -> cyd -> ava. ava and bea moved, each naming where the
+  // next was going; cyd's destination was then taken, so cyd stayed. The
+  // stale link is bea's, cyd's predecessor, not ava's, the member cyd
+  // names, which a match assuming a cycle of two never found.
+  const home = await newHome();
+  const env = { homeDir: home };
+  await mkdir(legacyWorkspacesDirPath(env), { recursive: true });
+  await symlink('ava', path.join(legacyWorkspacesDirPath(env), 'cyd'));
+  await mkdir(path.join(agentsDirPath(env), 'ava'), { recursive: true });
+  await symlink(path.join('..', 'bea', 'workspace'), agentWorkspacePath(env, 'ava'));
+  await mkdir(path.join(agentsDirPath(env), 'bea'), { recursive: true });
+  await symlink(path.join('..', 'cyd', 'workspace'), agentWorkspacePath(env, 'bea'));
+  await mkdir(agentWorkspacePath(env, 'cyd'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'cyd'), 'theirs.md'), 'not bea\'s');
+
+  await runStateMigrations(env, { exclusive: true });
+
+  const reached = async (agentId: string): Promise<string> =>
+    path.resolve(path.dirname(agentWorkspacePath(env, agentId)), await readlink(agentWorkspacePath(env, agentId)));
+  assert.equal(await reached('bea'), path.join(legacyWorkspacesDirPath(env), 'cyd'));
+  // ava named bea's new path, where bea really is, and is left alone.
+  assert.equal(await reached('ava'), agentWorkspacePath(env, 'bea'));
+});
+
 test('a cycle whose destination is occupied is quarantined, not an aborted upgrade', async () => {
   const home = await newHome();
   const env = { homeDir: home };

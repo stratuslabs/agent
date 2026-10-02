@@ -1385,25 +1385,52 @@ export const applyPerAgentWorkspaces = async (env: StateEnvironment): Promise<st
    * Asked of what is on disk, not of what this run announced, so a home an
    * earlier build left in this state is repaired on the next start: the
    * pass that calls this runs every time, whatever the schema stamp says.
-   * The shape is precise. This member's own link names the peer, the
-   * peer's legacy entry is gone, and the peer's new link names this
-   * member's new path. A cycle has no files of its own, so whatever is at
-   * that path is never the cycle's.
+   * The shape is precise. This member leads nowhere and stays, and a peer
+   * whose legacy entry is gone has a new link naming this member's new
+   * path. A cycle has no files of its own, so whatever is at that path is
+   * never the cycle's.
+   *
+   * Every such peer, found by what it names rather than by what this
+   * member names. In `ava -> bea -> cyd -> ava`, the link left naming
+   * `cyd`'s new path is `bea`'s, the member before `cyd`, not `ava`, the
+   * one `cyd` names. Following this member's own link only ever found the
+   * stale peer in a cycle of two.
    */
   const repointPeerNamingNewPath = async (agentId: string, from: string, target: string): Promise<void> => {
-    const text = await linkText(from);
-    const peer = text === undefined ? undefined : insideLegacy(path.resolve(path.dirname(from), text))?.split(path.sep)[0];
-    if (peer === undefined || peer === agentId || !isValidAgentId(peer)) {
-      return;
+    let entries: Dirent[];
+    try {
+      entries = await readdir(agentsDirPath(env), { withFileTypes: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        return;
+      }
+      throw error;
     }
-    if (!(await pathIsFree(path.join(legacy, peer)))) {
-      return;
+    for (const entry of entries) {
+      const peer = entry.name;
+      if (!entry.isDirectory() || peer === agentId || !isValidAgentId(peer)) {
+        continue;
+      }
+      if (!(await pathIsFree(path.join(legacy, peer)))) {
+        continue;
+      }
+      const peerTarget = agentWorkspacePath(env, peer);
+      const peerText = await linkText(peerTarget);
+      if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== target) {
+        continue;
+      }
+      await repointPeer(agentId, peer, peerTarget, from, target);
     }
-    const peerTarget = agentWorkspacePath(env, peer);
-    const peerText = await linkText(peerTarget);
-    if (peerText === undefined || path.resolve(path.dirname(peerTarget), peerText) !== target) {
-      return;
-    }
+  };
+
+  const repointPeer = async (
+    agentId: string,
+    peer: string,
+    peerTarget: string,
+    from: string,
+    target: string,
+  ): Promise<void> => {
     // Made beside it and renamed over it, never unlinked first: a run that
     // dies between an unlink and its symlink leaves the peer with no link at
     // all, and the next pass then has nothing to recognise and repair. A
