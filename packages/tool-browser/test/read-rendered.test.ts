@@ -130,15 +130,24 @@ test('browser.read hides the furniture under a CSP that forbids inline styles, a
       response.end('.invisible { visibility: hidden }');
       return;
     }
+    if (request.url === '/watch.js') {
+      // The page reporting, after a read, whether its menu is shown again.
+      response.writeHead(200, { 'content-type': 'text/javascript' });
+      response.end(`new MutationObserver(() => {
+        document.getElementById('out').textContent = 'nav-display=' + getComputedStyle(document.querySelector('nav')).display;
+      }).observe(document.body, { attributes: true, subtree: true, attributeFilter: ['style'] });`);
+      return;
+    }
     response.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'content-security-policy': "default-src 'self'; style-src 'self'",
     });
     response.end(`<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body>
-<nav>NAVIGATION</nav><header>HEADER</header>
+<nav style="COLOR : red;;">NAVIGATION</nav><header>HEADER</header>
 <article class="invisible"><p>INVISIBLE_ARTICLE</p></article>
-<article><p>the article</p><aside>ASIDE</aside><form>FORM</form></article>
+<article><p>the article</p><p id="out"></p><aside>ASIDE</aside><form>FORM</form></article>
 <footer>FOOTER</footer>
+<script src="/watch.js"></script>
 </body></html>`);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -163,4 +172,53 @@ test('browser.read hides the furniture under a CSP that forbids inline styles, a
     assert.doesNotMatch(text, new RegExp(furniture), `${furniture} is not the article`);
   }
 
+  // Under this policy a re-set style attribute is not applied, so putting
+  // the attribute string back alone would leave the menu hidden for good.
+  const after = await read.execute({}, session) as JsonObject;
+  assert.match(String(after.text), /nav-display=block/);
+
+});
+
+test('browser.read leaves the page as it found it, style attributes byte for byte', async (t) => {
+  const settings = await launchable();
+  if (settings === undefined) {
+    t.skip('no Chromium or Chrome to render the page in');
+    return;
+  }
+
+  // The page watches its own furniture: whatever the read leaves behind in
+  // the attribute, the page writes into its article, where the next read
+  // sees it. A style attribute is the page's to compare and select on, and
+  // the CSSOM re-serializes the whole of it when one property is touched.
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html><html><body>
+<nav id="menu" style="COLOR : red;;color:blue">menu</nav>
+<header id="plain">header</header>
+<article><p>article</p><p id="out">untouched</p></article>
+<script>
+  const out = document.getElementById('out');
+  new MutationObserver(() => {
+    out.textContent = 'menu=' + document.getElementById('menu').getAttribute('style')
+      + ' plain=' + document.getElementById('plain').getAttribute('style');
+  }).observe(document.body, { attributes: true, subtree: true, attributeFilter: ['style'] });
+</script>
+</body></html>`);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+
+  const plugin = createBrowserPlugin({ ...settings, allowedHosts: ['localhost'] });
+  t.after(() => plugin.dispose());
+  const tools = new ToolRegistry();
+  await plugin.setup({
+    bus: { emit: async () => undefined, subscribe: () => () => undefined } as never,
+    tools,
+  });
+  const read = tools.get('browser.read') as Tool;
+
+  await read.execute({ url: `http://localhost:${port}/` }, session);
+  const after = await read.execute({}, session) as JsonObject;
+  assert.match(String(after.text), /menu=COLOR : red;;color:blue plain=null/);
 });

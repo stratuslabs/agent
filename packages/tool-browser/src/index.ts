@@ -88,12 +88,20 @@ const settingsFor = (config: JsonObject, session: Session, workspaces: AgentWork
  * `visible`.
  *
  * So the furniture is hidden in the live page instead, through each
- * element's own `style` object and put back as it was, all inside this one
- * synchronous call — no page script runs in between, and the layout
- * `innerText` forces is the page's own minus the furniture. Not by an
- * inserted `<style>`: a page whose Content-Security-Policy forbids inline
- * styles ignores that element, and the furniture would come back as text.
- * Setting a property through the CSSOM is not governed by that policy.
+ * element's own `style` object, all inside this one synchronous call — no
+ * page script runs in between, and the layout `innerText` forces is the
+ * page's own minus the furniture. Not by an inserted `<style>`: a page
+ * whose Content-Security-Policy forbids inline styles ignores that
+ * element, and the furniture would come back as text. Setting a property
+ * through the CSSOM is not governed by that policy.
+ *
+ * Put back in two steps, because touching one property re-serializes the
+ * whole attribute (`COLOR : red;;` comes back `color: red;`) and a read
+ * must not change what a page compares or selects on. The property first,
+ * through the CSSOM, since under that same policy a re-set attribute is
+ * not applied and would leave the element hidden; then the attribute
+ * string itself, only where it now differs, so a page whose styles never
+ * needed it sees no write it would report as a violation.
  *
  * The container is the first `article` or `main` that is itself rendered
  * and visible: the same fallback, read on a `display: none` one, would hand
@@ -110,7 +118,7 @@ const READABLE_TEXT_SCRIPT = `(() => {
     if (!(element.style instanceof CSSStyleDeclaration)) continue;
     hidden.push({
       element,
-      hadStyle: element.hasAttribute('style'),
+      attribute: element.getAttribute('style'),
       value: element.style.getPropertyValue('display'),
       priority: element.style.getPropertyPriority('display'),
     });
@@ -121,13 +129,19 @@ const READABLE_TEXT_SCRIPT = `(() => {
     const main = [...document.querySelectorAll('article, main')].find(rendered) ?? document.body;
     return main && rendered(main) ? main.innerText : '';
   } finally {
-    for (const { element, hadStyle, value, priority } of hidden) {
+    for (const { element, attribute, value, priority } of hidden) {
       if (value === '') {
         element.style.removeProperty('display');
       } else {
         element.style.setProperty('display', value, priority);
       }
-      if (!hadStyle) element.removeAttribute('style');
+      if (element.getAttribute('style') !== attribute) {
+        if (attribute === null) {
+          element.removeAttribute('style');
+        } else {
+          element.setAttribute('style', attribute);
+        }
+      }
     }
   }
 })()`;
