@@ -7,6 +7,7 @@ import {
   markPromptDelivered,
   isUnaddressedTurn,
   renderSystemPromptSections,
+  renderToolResultContent,
   uncachedInputTokens,
   type ExecutionContext,
   type JsonObject,
@@ -209,7 +210,7 @@ export const startKernelMcpServer = async (
           content: [
             {
               type: 'text',
-              text: JSON.stringify(result.ok ? result.output : { error: result.error ?? 'Tool failed.' }),
+              text: renderToolResultContent(result),
             },
           ],
           ...(result.ok ? {} : { isError: true }),
