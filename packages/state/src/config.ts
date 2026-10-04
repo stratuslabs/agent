@@ -10,10 +10,20 @@ import {
 } from './provider-names.ts';
 
 /**
- * Who may approve one agent's gated calls, and where they are asked.
- * Approver ids are channel-native (Slack user ids) because that is where
- * the click comes from — mapping them through a Stratus identity would add
- * a lookup that can only ever be wrong.
+ * What reading `external` content — a web page, a search result, an MCP
+ * server's reply — does to a conversation's grants. `label`, the default,
+ * records it and changes nothing else. `gate` withdraws every grant from
+ * that conversation from then on: each gated call asks a person, and a
+ * headless daemon refuses it.
+ */
+export type ExternalContentApprovals = 'label' | 'gate';
+
+/**
+ * Who may approve one agent's gated calls, where they are asked, and what
+ * reading outside content costs its grants. Approver ids are
+ * channel-native (Slack user ids) because that is where the click comes
+ * from — mapping them through a Stratus identity would add a lookup that
+ * can only ever be wrong.
  */
 export interface AgentApprovalConfig {
   /**
@@ -27,6 +37,14 @@ export interface AgentApprovalConfig {
    * that arrived through Slack is answered in its own thread regardless.
    */
   slackChannel?: string;
+  /**
+   * Whether this agent's grants survive its conversation reading
+   * `external` content. See `ExternalContentApprovals`. Per agent because
+   * the answer is: an agent that browses all day is the one a page can
+   * steer, and one that only reads the operator's repository loses
+   * nothing by keeping its grants.
+   */
+  externalContent?: ExternalContentApprovals;
 }
 
 /**
