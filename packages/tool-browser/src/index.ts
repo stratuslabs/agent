@@ -79,18 +79,36 @@ const settingsFor = (config: JsonObject, session: Session, workspaces: AgentWork
 /**
  * Text as a reader would see it, extracted in the page.
  *
- * The DOM is right there, so there is nothing to guess at: the furniture is
- * removed from a clone and what is left is `innerText`, which already
- * respects what is visible. This is the one place a browser genuinely beats
- * `web.fetch`, whose extractor has to infer all of it from markup.
+ * `innerText` respects what is visible only on an element that is being
+ * rendered — on anything else it is the raw text content. This used to
+ * remove the furniture from a *clone*, which is never rendered, so every
+ * `hidden` element and every `display: none` class came back as text, the
+ * paragraphs run together. Checked in Chromium, not assumed: the clone read
+ * `visibleHIDDEN_ATTRINLINE_NONECLASS_NONE…` where the live page read
+ * `visible`.
+ *
+ * So the furniture is hidden in the live page instead, by a stylesheet
+ * added and removed inside this one synchronous call — no page script runs
+ * in between, and the layout `innerText` forces is the page's own plus that
+ * one rule. The container is the first `article` or `main` that is itself
+ * rendered: the same fallback, read on a hidden one, would hand back its
+ * raw text, which makes an invisible `<article>` the easiest place on the
+ * page to put words for the agent alone.
+ *
+ * This matches what a reader sees; it is not an injection filter, and text
+ * a page shows only to a model (white on white, off-screen) still arrives.
  */
 const READABLE_TEXT_SCRIPT = `(() => {
-  const doc = document.cloneNode(true);
-  for (const element of doc.querySelectorAll('script, style, noscript, svg, nav, header, footer, aside, form')) {
-    element.remove();
+  const furniture = document.createElement('style');
+  furniture.textContent = 'script, style, noscript, svg, nav, header, footer, aside, form { display: none !important; }';
+  (document.head ?? document.documentElement).append(furniture);
+  try {
+    const rendered = (element) => element.checkVisibility();
+    const main = [...document.querySelectorAll('article, main')].find(rendered) ?? document.body;
+    return main && rendered(main) ? main.innerText : '';
+  } finally {
+    furniture.remove();
   }
-  const main = doc.querySelector('article, main') ?? doc.body;
-  return main ? main.innerText : '';
 })()`;
 
 /**
