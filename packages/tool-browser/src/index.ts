@@ -87,27 +87,48 @@ const settingsFor = (config: JsonObject, session: Session, workspaces: AgentWork
  * `visibleHIDDEN_ATTRINLINE_NONECLASS_NONE…` where the live page read
  * `visible`.
  *
- * So the furniture is hidden in the live page instead, by a stylesheet
- * added and removed inside this one synchronous call — no page script runs
- * in between, and the layout `innerText` forces is the page's own plus that
- * one rule. The container is the first `article` or `main` that is itself
- * rendered: the same fallback, read on a hidden one, would hand back its
- * raw text, which makes an invisible `<article>` the easiest place on the
- * page to put words for the agent alone.
+ * So the furniture is hidden in the live page instead, through each
+ * element's own `style` object and put back as it was, all inside this one
+ * synchronous call — no page script runs in between, and the layout
+ * `innerText` forces is the page's own minus the furniture. Not by an
+ * inserted `<style>`: a page whose Content-Security-Policy forbids inline
+ * styles ignores that element, and the furniture would come back as text.
+ * Setting a property through the CSSOM is not governed by that policy.
+ *
+ * The container is the first `article` or `main` that is itself rendered
+ * and visible: the same fallback, read on a `display: none` one, would hand
+ * back its raw text, which makes an invisible `<article>` the easiest place
+ * on the page to put words for the agent alone — and a `visibility: hidden`
+ * one, chosen, would hide the article that is actually there.
  *
  * This matches what a reader sees; it is not an injection filter, and text
  * a page shows only to a model (white on white, off-screen) still arrives.
  */
 const READABLE_TEXT_SCRIPT = `(() => {
-  const furniture = document.createElement('style');
-  furniture.textContent = 'script, style, noscript, svg, nav, header, footer, aside, form { display: none !important; }';
-  (document.head ?? document.documentElement).append(furniture);
+  const hidden = [];
+  for (const element of document.querySelectorAll('script, style, noscript, svg, nav, header, footer, aside, form')) {
+    if (!(element.style instanceof CSSStyleDeclaration)) continue;
+    hidden.push({
+      element,
+      hadStyle: element.hasAttribute('style'),
+      value: element.style.getPropertyValue('display'),
+      priority: element.style.getPropertyPriority('display'),
+    });
+    element.style.setProperty('display', 'none', 'important');
+  }
   try {
-    const rendered = (element) => element.checkVisibility();
+    const rendered = (element) => element.checkVisibility({ visibilityProperty: true });
     const main = [...document.querySelectorAll('article, main')].find(rendered) ?? document.body;
     return main && rendered(main) ? main.innerText : '';
   } finally {
-    furniture.remove();
+    for (const { element, hadStyle, value, priority } of hidden) {
+      if (value === '') {
+        element.style.removeProperty('display');
+      } else {
+        element.style.setProperty('display', value, priority);
+      }
+      if (!hadStyle) element.removeAttribute('style');
+    }
   }
 })()`;
 

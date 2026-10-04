@@ -111,3 +111,56 @@ test('browser.read returns what the page renders, not its hidden text', async (t
   // as raw text because it is first.
   assert.doesNotMatch(text, /DECOY_ARTICLE/);
 });
+
+test('browser.read hides the furniture under a CSP that forbids inline styles, and skips a visibility-hidden article', async (t) => {
+  const settings = await launchable();
+  if (settings === undefined) {
+    t.skip('no Chromium or Chrome to render the page in');
+    return;
+  }
+
+  // A page that allows no inline style at all — so a <style> element the
+  // extraction inserts is ignored, and only a mechanism outside the
+  // page's style policy hides anything.
+  // The page's own styling comes from a stylesheet on its origin, since
+  // its policy blocks its inline `style` attributes as much as ours.
+  const server = http.createServer((request, response) => {
+    if (request.url === '/site.css') {
+      response.writeHead(200, { 'content-type': 'text/css' });
+      response.end('.invisible { visibility: hidden }');
+      return;
+    }
+    response.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-security-policy': "default-src 'self'; style-src 'self'",
+    });
+    response.end(`<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body>
+<nav>NAVIGATION</nav><header>HEADER</header>
+<article class="invisible"><p>INVISIBLE_ARTICLE</p></article>
+<article><p>the article</p><aside>ASIDE</aside><form>FORM</form></article>
+<footer>FOOTER</footer>
+</body></html>`);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+
+  const plugin = createBrowserPlugin({ ...settings, allowedHosts: ['localhost'] });
+  t.after(() => plugin.dispose());
+  const tools = new ToolRegistry();
+  await plugin.setup({
+    bus: { emit: async () => undefined, subscribe: () => () => undefined } as never,
+    tools,
+  });
+  const read = tools.get('browser.read') as Tool;
+
+  const result = await read.execute({ url: `http://localhost:${port}/` }, session) as JsonObject;
+  const text = String(result.text);
+  // A `visibility: hidden` article is rendered and empty; chosen, it would
+  // hide the article that is actually there.
+  assert.match(text, /the article/);
+  for (const furniture of ['NAVIGATION', 'HEADER', 'ASIDE', 'FORM', 'FOOTER', 'INVISIBLE_ARTICLE']) {
+    assert.doesNotMatch(text, new RegExp(furniture), `${furniture} is not the article`);
+  }
+
+});
