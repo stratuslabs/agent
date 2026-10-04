@@ -4,9 +4,12 @@ import assert from 'node:assert/strict';
 import {
   assertRequestAllowed,
   checkAddress,
+  checkHost,
   classifyAddress,
+  egressPolicyFrom,
   EgressPolicyError,
   HOSTILE_URLS,
+  policyKeyFor,
 } from '../src/index.ts';
 
 test('every non-global address is refused, in both families and every disguise', () => {
@@ -97,5 +100,71 @@ test('an operator can widen the policy, narrowly or bluntly', () => {
   assert.equal(
     assertRequestAllowed('http://127.0.0.1:8080/', { allowPrivateAddresses: true }).port,
     '8080',
+  );
+});
+
+test('onlyHosts narrows which names are reachable, exactly or by subdomain', () => {
+  const policy = { onlyHosts: ['docs.python.org', '*.wikipedia.org', '93.184.216.34'] };
+
+  assert.equal(checkHost(policy, 'docs.python.org').allowed, true);
+  assert.equal(checkHost(policy, 'DOCS.Python.org.').allowed, true);
+  assert.equal(checkHost(policy, 'en.wikipedia.org').allowed, true);
+  assert.equal(checkHost(policy, 'upload.en.wikipedia.org').allowed, true);
+  assert.equal(checkHost(policy, '93.184.216.34').allowed, true);
+
+  // A wildcard is subdomains only — the apex is its own entry — and a
+  // suffix match on the bare name would let `evilwikipedia.org` through.
+  assert.equal(checkHost(policy, 'wikipedia.org').allowed, false);
+  assert.equal(checkHost(policy, 'evilwikipedia.org').allowed, false);
+  assert.equal(checkHost(policy, 'python.org').allowed, false);
+  assert.equal(checkHost(policy, 'attacker.example').allowed, false);
+  // A trailing dot is the same name to DNS, so it is the same name here.
+  assert.equal(checkHost(policy, 'attacker.example.').allowed, false);
+
+  // Unset reaches every public host, which is the default and stays it.
+  assert.equal(checkHost({}, 'attacker.example').allowed, true);
+  // Set and empty reaches nothing.
+  assert.equal(checkHost({ onlyHosts: [] }, 'docs.python.org').allowed, false);
+});
+
+test('a host outside onlyHosts is refused at the URL, before any lookup, with the setting named', () => {
+  const policy = { onlyHosts: ['docs.python.org'] };
+  // The exfiltration shape this exists for: a page told the agent to put
+  // what it read into a query string on a host the operator never named.
+  assert.throws(
+    () => assertRequestAllowed('https://attacker.example/?d=secret', policy),
+    (error: unknown) => error instanceof EgressPolicyError
+      && /attacker\.example is not one of the hosts this agent may reach/.test(error.message)
+      && /onlyHosts/.test(error.message),
+  );
+  assert.equal(assertRequestAllowed('https://docs.python.org/3/', policy).hostname, 'docs.python.org');
+});
+
+test('onlyHosts narrows names and never widens the address check', () => {
+  // A listed name that resolves somewhere private is still refused — the
+  // list is about where data may go, not a second exemption list.
+  assert.equal(checkAddress({ onlyHosts: ['intranet.example'] }, 'intranet.example', '10.0.0.5').allowed, false);
+  // Every path that dials goes through checkAddress, so it enforces the
+  // names too.
+  assert.equal(checkAddress({ onlyHosts: ['docs.python.org'] }, 'attacker.example', '93.184.216.34').allowed, false);
+  // An allowedHosts entry stays reachable without being written twice.
+  const both = { onlyHosts: ['docs.python.org'], allowedHosts: ['dev.internal'] };
+  assert.equal(checkAddress(both, 'dev.internal', '10.0.0.5').allowed, true);
+});
+
+test('onlyHosts is read from settings failing closed, and is part of the policy key', () => {
+  assert.equal(egressPolicyFrom({}).onlyHosts, undefined);
+  assert.deepEqual(egressPolicyFrom({ onlyHosts: ['a.example', 7] }).onlyHosts, ['a.example']);
+  // Present but not a list: a restriction nobody can read restricts to
+  // nothing, rather than being dropped and lifting itself.
+  assert.deepEqual(egressPolicyFrom({ onlyHosts: 'a.example' }).onlyHosts, []);
+
+  // A browser per policy is keyed on this, so two agents with different
+  // lists must never share one — and unset must not collide with empty.
+  assert.notEqual(policyKeyFor({}), policyKeyFor({ onlyHosts: [] }));
+  assert.notEqual(policyKeyFor({ onlyHosts: ['a.example'] }), policyKeyFor({ onlyHosts: ['b.example'] }));
+  assert.equal(
+    policyKeyFor({ onlyHosts: ['a.example', 'b.example'] }),
+    policyKeyFor({ onlyHosts: ['b.example', 'a.example'] }),
   );
 });

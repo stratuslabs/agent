@@ -138,6 +138,11 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
   link-local, IPv6 unique-local, and their IPv4-mapped and NAT64
   spellings — validated on the connection, so a redirect or DNS answer
   cannot walk an agent into a metadata endpoint. ([Tools](../guides/tools.md))
+- **Network tools can be held to a list of hosts.** `onlyHosts` on
+  `tool-web` or `tool-browser`, per agent, refuses every other host by name
+  before it is looked up — the control that keeps an agent which read a
+  hostile page from sending what it knows to that page's server in a URL.
+  ([`tool-web`](../../packages/tool-web/README.md#settings))
 - **Third-party text is labelled as such, end to end.** Every tool result
   carries a trust label — `web.fetch`, the four `browser.*` tools,
   `web.search`, and every MCP-bridged tool declare their output `external`,
