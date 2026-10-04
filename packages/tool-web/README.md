@@ -43,6 +43,19 @@ Approval decides *whether*; the address policy decides *where*, and it is
 not the same question. An approver looking at `https://example.com/report`
 has approved that URL — not the redirect it answers with.
 
+## What the text leaves out
+
+Scripts, styles, `svg` and `canvas`, frames, navigation, headers, footers,
+asides, and forms are dropped whole, and block boundaries become line
+breaks. So is what a browser would not show — an element with the
+`hidden` attribute or an inline `style` of `display: none` or
+`visibility: hidden` — and what it withholds from a screen reader,
+`aria-hidden="true"`. That is to match what a reader of the rendered page
+gets, not a defence against prompt injection: text hidden by a
+stylesheet, a class, or a zero font size still comes through, which is
+why every result is labelled `external`. `raw: true` returns the body as
+received.
+
 ## Settings
 
 | Key | Default | What |

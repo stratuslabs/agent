@@ -30,6 +30,118 @@ const DROPPED_ELEMENTS = [
 ];
 
 /**
+ * Elements with no content and no end tag. Only an element that can hold
+ * text can hide any, and pairing one of these with a later end tag of the
+ * same name would drop everything in between.
+ */
+const VOID_ELEMENTS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta',
+  'source', 'track', 'wbr',
+]);
+
+/**
+ * Whether an inline `style` declares the element away. The last
+ * declaration of a property wins unless an earlier one was `!important`,
+ * which is the cascade inside one attribute — `display:none;display:block`
+ * is a visible element, and dropping it would delete text the page shows.
+ */
+const styleHides = (style: string): boolean => {
+  const declared = new Map<string, { value: string; important: boolean }>();
+  for (const declaration of style.split(';')) {
+    const colon = declaration.indexOf(':');
+    if (colon === -1) continue;
+    const property = declaration.slice(0, colon).trim().toLowerCase();
+    const raw = declaration.slice(colon + 1).trim().toLowerCase();
+    const important = /!\s*important$/.test(raw);
+    const value = important ? raw.replace(/!\s*important$/, '').trim() : raw;
+    if (declared.get(property)?.important === true && !important) continue;
+    declared.set(property, { value, important });
+  }
+  return declared.get('display')?.value === 'none' || declared.get('visibility')?.value === 'hidden';
+};
+
+/**
+ * Attributes are read one by one rather than searched for, because a
+ * search for `hidden` also finds `data-hidden`, `aria-hidden="false"`, and
+ * `title="hidden gem"`. The first of a repeated attribute is the one a
+ * browser keeps.
+ */
+const attributesHide = (source: string): boolean => {
+  const attributes = new Map<string, string>();
+  for (const match of source.matchAll(/([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
+    const name = (match[1] ?? '').toLowerCase();
+    if (!attributes.has(name)) {
+      attributes.set(name, decodeEntities(match[2] ?? match[3] ?? match[4] ?? ''));
+    }
+  }
+  const style = attributes.get('style');
+  return attributes.has('hidden')
+    || attributes.get('aria-hidden')?.trim().toLowerCase() === 'true'
+    || (style !== undefined && styleHides(style));
+};
+
+/**
+ * Drops the elements a browser would not show: the `hidden` attribute, an
+ * inline `display: none` or `visibility: hidden`, and `aria-hidden="true"`.
+ * The last is still drawn on screen; it is here because it is what the
+ * page withholds from a reader who cannot see it, and a model reading this
+ * extraction is that reader.
+ *
+ * This is the extraction matching what a browser renders, not a
+ * prompt-injection filter, and must not be read as one. Text hidden by a
+ * stylesheet or a class is kept, because without a browser there is no
+ * cascade to evaluate, and neither are opacity, a zero font size, or
+ * off-screen positioning chased: a filter that mostly works is worse than
+ * the `external` label that always does, because it invites trust
+ * (docs/roadmap/30-provenance.md). `raw: true` exists for a page this gets
+ * wrong, including the one case where it drops text a browser shows: a
+ * descendant of a `visibility: hidden` element that sets `visible` again.
+ *
+ * Each element is paired with its own end tag by a stack per tag name, so
+ * `<div hidden><div>a</div>b</div>` drops through the outer end tag rather
+ * than the first `</div>` — one pass, linear in the page, where a search
+ * for each element's end would rescan the rest of the page for every one.
+ *
+ * An element left unclosed keeps its text. `p` and `li` close implicitly,
+ * so `<li hidden>a<li>b` is ordinary markup, and dropping to the end of the
+ * document would erase the article behind one sloppy tag. Keeping is what
+ * this extractor did before it read visibility at all, which is the right
+ * place for a rendering approximation to fall back to.
+ */
+const dropHiddenElements = (html: string): string => {
+  // Tags are only read up to the last `>`: past it, every `<` would be a
+  // tag that never closes, and each would scan the rest of the page to
+  // find that out.
+  const scanned = html.slice(0, html.lastIndexOf('>') + 1);
+  const open = new Map<string, { start: number; hidden: boolean }[]>();
+  const dropped: [number, number][] = [];
+  for (const match of scanned.matchAll(/<(\/?)([a-zA-Z][^\s/>]*)([^>]*)>/g)) {
+    const [tag, slash, rawName = '', attributes = ''] = match;
+    const name = rawName.toLowerCase();
+    if (VOID_ELEMENTS.has(name)) continue;
+    const stack = open.get(name) ?? [];
+    open.set(name, stack);
+    if (slash === '') {
+      stack.push({ start: match.index, hidden: attributesHide(attributes) });
+      continue;
+    }
+    const opener = stack.pop();
+    if (opener?.hidden === true) dropped.push([opener.start, match.index + tag.length]);
+  }
+  if (dropped.length === 0) return html;
+
+  // Pairs of different names can nest or cross, so they are merged by start.
+  dropped.sort((a, b) => a[0] - b[0]);
+  let text = '';
+  let cursor = 0;
+  for (const [start, end] of dropped) {
+    if (start >= cursor) text += `${html.slice(cursor, start)} `;
+    cursor = Math.max(cursor, end);
+  }
+  return text + html.slice(cursor);
+};
+
+/**
  * Formatting that wraps text which was already adjacent, so removing it
  * joins nothing that was apart. Deliberately a closed set: everything not
  * named here becomes a space, which is the safe direction — see the
@@ -117,6 +229,9 @@ export const htmlToText = (html: string): string => {
     text = text.replace(new RegExp(`<${element}\\b[^>]*/?>`, 'gi'), ' ');
   }
   text = text.replace(/<head\b[^>]*>[\s\S]*?<\/head>/gi, ' ');
+  // After the dropped elements, so a `</div>` inside a script's string
+  // cannot close a hidden element early.
+  text = dropHiddenElements(text);
 
   text = text.replace(/<li\b[^>]*>/gi, '\n- ');
   for (const element of BLOCK_ELEMENTS) {
