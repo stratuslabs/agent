@@ -222,3 +222,58 @@ test('browser.read leaves the page as it found it, style attributes byte for byt
   const after = await read.execute({}, session) as JsonObject;
   assert.match(String(after.text), /menu=COLOR : red;;color:blue plain=null/);
 });
+
+test('browser.read reads a display: contents article, and a hidden body\'s visible child', async (t) => {
+  const settings = await launchable();
+  if (settings === undefined) {
+    t.skip('no Chromium or Chrome to render the page in');
+    return;
+  }
+
+  const pages: Record<string, string> = {
+    // No box of its own, and its text is on screen: passing over it for a
+    // later article would drop the page's actual content.
+    '/contents': `<!doctype html><html><body>
+<article style="display: contents"><p>FIRST_ARTICLE</p><p hidden>HIDDEN_CHILD</p></article>
+<article><p>SECOND_ARTICLE</p></article></body></html>`,
+    // Nothing qualifies but the body, which is hidden while one child is
+    // shown — the child is what a reader sees.
+    '/body': `<!doctype html><html><body style="visibility: hidden">
+<p>HIDDEN_TEXT</p><p style="visibility: visible">SHOWN_TEXT</p></body></html>`,
+    // An article inside a display: none parent has no box: innerText on it
+    // would be the raw text, so it must be passed over.
+    '/boxless': `<!doctype html><html><body>
+<div style="display: none"><article><p>BOXLESS_ARTICLE</p></article></div>
+<article><p>REAL_ARTICLE</p></article></body></html>`,
+  };
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(pages[request.url ?? ''] ?? '');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+
+  const plugin = createBrowserPlugin({ ...settings, allowedHosts: ['localhost'] });
+  t.after(() => plugin.dispose());
+  const tools = new ToolRegistry();
+  await plugin.setup({
+    bus: { emit: async () => undefined, subscribe: () => () => undefined } as never,
+    tools,
+  });
+  const read = tools.get('browser.read') as Tool;
+  const textOf = async (route: string): Promise<string> =>
+    String((await read.execute({ url: `http://localhost:${port}${route}` }, session) as JsonObject).text);
+
+  const contents = await textOf('/contents');
+  assert.match(contents, /FIRST_ARTICLE/);
+  assert.doesNotMatch(contents, /HIDDEN_CHILD|SECOND_ARTICLE/);
+
+  const body = await textOf('/body');
+  assert.match(body, /SHOWN_TEXT/);
+  assert.doesNotMatch(body, /HIDDEN_TEXT/);
+
+  const boxless = await textOf('/boxless');
+  assert.match(boxless, /REAL_ARTICLE/);
+  assert.doesNotMatch(boxless, /BOXLESS_ARTICLE/);
+});

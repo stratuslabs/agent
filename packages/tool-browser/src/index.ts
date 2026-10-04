@@ -103,11 +103,17 @@ const settingsFor = (config: JsonObject, session: Session, workspaces: AgentWork
  * string itself, only where it now differs, so a page whose styles never
  * needed it sees no write it would report as a violation.
  *
- * The container is the first `article` or `main` that is itself rendered
- * and visible: the same fallback, read on a `display: none` one, would hand
- * back its raw text, which makes an invisible `<article>` the easiest place
- * on the page to put words for the agent alone — and a `visibility: hidden`
- * one, chosen, would hide the article that is actually there.
+ * The container is the first `article` or `main` that is rendered and
+ * shows some text, else the body. "Rendered" is the one thing checked on
+ * the element itself, because it is the one case `innerText` gets wrong:
+ * on an element with no box — `display: none`, or inside one — it hands
+ * back the raw text, which makes an invisible `<article>` the easiest
+ * place on a page to put words for the agent alone. `display: contents`
+ * has no box either and is rendered all the same. Everything else is left
+ * to `innerText`, which already reads `visibility` per node: an article
+ * that is `visibility: hidden` reads empty and is passed over, and a
+ * hidden body with a visible child reads as that child. Checked in
+ * Chromium for each, not assumed.
  *
  * This matches what a reader sees; it is not an injection filter, and text
  * a page shows only to a model (white on white, off-screen) still arrives.
@@ -125,9 +131,10 @@ const READABLE_TEXT_SCRIPT = `(() => {
     element.style.setProperty('display', 'none', 'important');
   }
   try {
-    const rendered = (element) => element.checkVisibility({ visibilityProperty: true });
-    const main = [...document.querySelectorAll('article, main')].find(rendered) ?? document.body;
-    return main && rendered(main) ? main.innerText : '';
+    const unrendered = (element) => !element.checkVisibility() && getComputedStyle(element).display !== 'contents';
+    const main = [...document.querySelectorAll('article, main')]
+      .find((element) => !unrendered(element) && element.innerText.trim() !== '') ?? document.body;
+    return main && !unrendered(main) ? main.innerText : '';
   } finally {
     for (const { element, attribute, value, priority } of hidden) {
       if (value === '') {
