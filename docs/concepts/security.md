@@ -144,10 +144,13 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
   and `fs.read` marks a file a tainted session wrote — and the label follows
   the content: into the session (which only ever gets less trusted), across a
   restart, across a delegation in both directions, and into every fact the
-  session remembers, which the prompt then renders under its own heading. A
-  message from a Slack sender you have not named as a principal is `unknown`,
-  not `user`. It is a label, not a defence against prompt injection, and it
-  does not make acting on that text safe. ([Memory](./memory.md#where-a-fact-came-from))
+  session remembers, which the prompt then renders under its own heading. The
+  model sees it too: every provider hands it an `external` result wrapped as
+  `{ untrusted, untrustedNote, output }`, the note saying the text is data to
+  evaluate, never instructions to follow. A message from a Slack sender you
+  have not named as a principal is `unknown`, not `user`. It is a label and
+  the marker is a nudge, not a defence against prompt injection, and neither
+  makes acting on that text safe. ([Memory](./memory.md#where-a-fact-came-from))
 - **A conversation that has read the web can lose its grants.** With
   `approvals.externalContent: "gate"`, the first `external` result withdraws
   every standing grant, approved scope, and site from that conversation, so

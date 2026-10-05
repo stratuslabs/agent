@@ -6,6 +6,7 @@ import {
   imagesWithinReplayBudget,
   omitImage,
   renderSystemPromptSections,
+  renderToolResultContent,
   uncachedInputTokens,
   type ExecutionContext,
   type ImageAttachment,
@@ -798,7 +799,7 @@ const createOpenAICompatibleMessages = (
       messages.push({
         role: 'tool',
         content: result
-          ? JSON.stringify(result.ok ? result.output : { error: result.error ?? 'Tool failed' })
+          ? renderToolResultContent(result)
           : message.content,
         ...(result ? { tool_call_id: result.callId } : {}),
       });
@@ -1025,7 +1026,11 @@ export const renderTranscriptPrompt = (request: ProviderRequest, options: Prompt
   const lines: string[] = ['Conversation so far:'];
   for (const message of conversational) {
     if (message.role === 'tool') {
-      lines.push(`[tool ${message.name ?? 'result'}] ${message.content}`);
+      // The result as every other path renders it, not the runner's stored
+      // `content` — that is the whole record, label as a bare field, and a
+      // session moved onto a harness would replay a fetched page unmarked.
+      const content = message.toolResult !== undefined ? renderToolResultContent(message.toolResult) : message.content;
+      lines.push(`[tool ${message.name ?? 'result'}] ${content}`);
       continue;
     }
     // A tool call is part of the assistant's turn: without it, the next
