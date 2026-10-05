@@ -319,35 +319,50 @@ const canonicalHost = (host: string): string => {
   }
 };
 
+type HostRule = 'any' | { wildcard: boolean; host: string };
+
+/**
+ * One `onlyHosts` entry, read against the grammar it is documented to
+ * take, or `undefined` for anything else — which then matches nothing.
+ *
+ * Checked whole, before anything is stripped. Every way a malformed rule
+ * has turned into a working one here came from cleaning it piece by piece:
+ * `*.` lost its dot and became `*`, brackets came off `[*.example.com]`,
+ * two trailing dots came off `*.example.com..` one step at a time, and a
+ * URL parser read `trusted.example@attacker.example` as the second host.
+ *
+ * The grammar: `*` alone; a hostname — labels of name characters joined by
+ * single dots, one trailing dot allowed — optionally after `*.`; or an
+ * IPv6 literal, bracketed or bare. IPv4 literals are hostnames to this
+ * grammar, and the URL parser gives them their canonical form.
+ */
+const LABELS = /^[a-z0-9_\-\u0080-\uffff]+(?:\.[a-z0-9_\-\u0080-\uffff]+)*\.?$/;
+
+const parseHostRule = (entry: string): HostRule | undefined => {
+  const raw = entry.trim().toLowerCase();
+  if (raw === '*') return 'any';
+  const bracketed = /^\[([^[\]]+)\]$/.exec(raw);
+  if (bracketed !== null) {
+    return expandIPv6(bracketed[1] ?? '') ? { wildcard: false, host: canonicalHost(bracketed[1] ?? '') } : undefined;
+  }
+  if (expandIPv6(raw)) return { wildcard: false, host: canonicalHost(raw) };
+  const wildcard = raw.startsWith('*.');
+  const name = wildcard ? raw.slice(2) : raw;
+  if (!LABELS.test(name)) return undefined;
+  const host = canonicalHost(name);
+  return host === '' ? undefined : { wildcard, host };
+};
+
 const onlyHostsMatch = (entries: readonly string[], host: string): boolean => {
   const normalized = canonicalHost(host);
   return entries.some((entry) => {
-    // `*` as written, before normalizing: `*.`, a wildcard cut short,
-    // normalizes to `*` too, and a typo must not lift the whole list. A
-    // bare `*` left after normalizing is that typo, and matches nothing.
-    if (entry.trim() === '*') {
-      return true;
-    }
-    // Brackets are checked before `normalizeHost` strips them: they are
-    // valid around one IPv6 literal and nowhere else, and stripped from
-    // `[*.example.com]` they turned a malformed rule into a working
-    // wildcard. Any other bracket matches nothing.
-    if (/[[\]]/.test(entry)) {
-      const bracketed = /^\[([^[\]]+)\]$/.exec(entry.trim());
-      if (bracketed === null || !expandIPv6(bracketed[1] ?? '')) {
-        return false;
-      }
-    }
-    const rule = normalizeHost(entry);
-    if (rule === '*') {
-      return false;
-    }
+    const rule = parseHostRule(entry);
+    if (rule === undefined) return false;
+    if (rule === 'any') return true;
     // `*.example.com` is every subdomain, at any depth, and never the
     // apex: the suffix carries its leading dot, so `badexample.com` does
     // not end with it.
-    return rule.startsWith('*.')
-      ? normalized.endsWith(`.${canonicalHost(rule.slice(2))}`)
-      : canonicalHost(rule) === normalized;
+    return rule.wildcard ? normalized.endsWith(`.${rule.host}`) : rule.host === normalized;
   });
 };
 

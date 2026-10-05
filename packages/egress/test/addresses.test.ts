@@ -159,6 +159,13 @@ test('onlyHosts narrows which names are reachable, exactly or by subdomain', () 
     assert.equal(checkHost({ onlyHosts: [rule] }, '[2001:db8::1]').allowed, false, rule);
   }
   assert.equal(checkHost({ onlyHosts: ['[2001:db8::1]'] }, '[2001:db8::1]').allowed, true);
+  // One trailing dot is the same name; more is no name at all.
+  for (const rule of ['*.example.com..', 'example.com..', 'example..com', '.example.com', '*.*.example.com', '*example.com']) {
+    assert.equal(checkHost({ onlyHosts: [rule] }, 'secret.example.com').allowed, false, rule);
+    assert.equal(checkHost({ onlyHosts: [rule] }, 'example.com').allowed, false, rule);
+  }
+  assert.equal(checkHost({ onlyHosts: ['example.com.'] }, 'example.com').allowed, true);
+  assert.equal(checkHost({ onlyHosts: ['*.example.com.'] }, 'secret.example.com').allowed, true);
 });
 
 test('a host outside onlyHosts is refused at the URL, before any lookup, with the setting named', () => {
