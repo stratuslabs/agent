@@ -331,12 +331,23 @@ const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined
   return api;
 };
 
-const parseApprovalRoute = (raw: unknown): AgentApprovalConfig | undefined => {
+const parseApprovalRoute = (raw: unknown, configPath: string, where: string): AgentApprovalConfig | undefined => {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
   }
   const source = raw as Record<string, unknown>;
   const route: AgentApprovalConfig = {};
+  if (source.externalContent !== undefined) {
+    // Refused when misspelled, like `mode`: dropping it would leave the
+    // grants an operator meant to withdraw quietly in force, and the
+    // config in front of them saying otherwise.
+    if (source.externalContent !== 'label' && source.externalContent !== 'gate') {
+      throw new Error(
+        `Unsupported ${where}.externalContent in config ${configPath}: ${String(source.externalContent)}. Use label or gate.`,
+      );
+    }
+    route.externalContent = source.externalContent;
+  }
   if (Array.isArray(source.slackApprovers)) {
     // Kept even when it filters down to nothing. An agent entry saying
     // `"slackApprovers": []` is an operator excluding that agent from a
@@ -355,7 +366,7 @@ const parseApprovalRoute = (raw: unknown): AgentApprovalConfig | undefined => {
 };
 
 const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig | undefined => {
-  const route = parseApprovalRoute(raw);
+  const route = parseApprovalRoute(raw, configPath, 'approvals');
   if (!route) {
     return undefined;
   }
@@ -397,7 +408,7 @@ const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig
   if (typeof source.agents === 'object' && source.agents !== null && !Array.isArray(source.agents)) {
     const agents: Record<string, AgentApprovalConfig> = {};
     for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
-      const parsed = parseApprovalRoute(entry);
+      const parsed = parseApprovalRoute(entry, configPath, `approvals.agents.${agentId}`);
       if (parsed) {
         agents[agentId] = parsed;
       }
@@ -426,9 +437,11 @@ export const resolveAgentApprovals = (
   const agent = approvals?.agents?.[agentId];
   const slackApprovers = agent?.slackApprovers ?? approvals?.slackApprovers;
   const slackChannel = agent?.slackChannel ?? approvals?.slackChannel;
+  const externalContent = agent?.externalContent ?? approvals?.externalContent;
   return {
     ...(slackApprovers ? { slackApprovers } : {}),
     ...(slackChannel ? { slackChannel } : {}),
+    ...(externalContent !== undefined ? { externalContent } : {}),
   };
 };
 
