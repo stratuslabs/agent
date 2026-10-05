@@ -40,18 +40,12 @@ const VOID_ELEMENTS = new Set([
 ]);
 
 /**
- * Whether an inline `style` declares the element away. The last
- * declaration of a property wins unless an earlier one was `!important`,
- * which is the cascade inside one attribute — `display:none;display:block`
- * is a visible element, and dropping it would delete text the page shows.
- */
-/**
  * An inline style's declarations, split where a browser splits them: on a
  * `;` outside a string, outside parentheses, and with comments removed.
  * Split on every `;`, `content:";display:none;"` invents a declaration the
- * browser never sees and drops text it shows. One pass, character by
- * character; an unterminated string or comment runs to the end, as CSS
- * reads it.
+ * browser never sees and drops text it shows; so does an escaped `\;`.
+ * One pass, character by character; an unterminated string or comment
+ * runs to the end, as CSS reads it.
  */
 const declarationsOf = (style: string): string[] => {
   const declarations: string[] = [];
@@ -68,6 +62,13 @@ const declarationsOf = (style: string): string[] => {
       } else if (char === quote) {
         quote = '';
       }
+      continue;
+    }
+    // An escape outside a string too: `color:red\;display:none` is one
+    // declaration whose value holds a semicolon, and no `display` at all.
+    if (char === '\\') {
+      current += char + (style[index + 1] ?? '');
+      index += 1;
       continue;
     }
     if (char === '/' && style[index + 1] === '*') {
@@ -92,6 +93,12 @@ const declarationsOf = (style: string): string[] => {
   return declarations;
 };
 
+/**
+ * Whether an inline `style` declares the element away. The last
+ * declaration of a property wins unless an earlier one was `!important`,
+ * which is the cascade inside one attribute — `display:none;display:block`
+ * is a visible element, and dropping it would delete text the page shows.
+ */
 const styleHides = (style: string): boolean => {
   const declared = new Map<string, { value: string; important: boolean }>();
   for (const declaration of declarationsOf(style)) {
@@ -108,23 +115,17 @@ const styleHides = (style: string): boolean => {
 };
 
 /**
- * Attributes are read one by one rather than searched for, because a
- * search for `hidden` also finds `data-hidden`, `aria-hidden="false"`, and
- * `title="hidden gem"`. The first of a repeated attribute is the one a
- * browser keeps.
+ * Whether an element's attributes hide it. They arrive parsed by
+ * `scanTags`, never searched for in the tag's text: a search for `hidden`
+ * also finds `data-hidden`, `aria-hidden="false"`, and `title="hidden
+ * gem"`, and a second parser would disagree with the scanner about where
+ * an attribute ends — `<div x=a"hidden>` has no `hidden` attribute.
  */
-const attributesHide = (source: string): boolean => {
-  const attributes = new Map<string, string>();
-  for (const match of source.matchAll(/([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
-    const name = (match[1] ?? '').toLowerCase();
-    if (!attributes.has(name)) {
-      attributes.set(name, decodeEntities(match[2] ?? match[3] ?? match[4] ?? ''));
-    }
-  }
+const attributesHide = (attributes: ReadonlyMap<string, string>): boolean => {
   const style = attributes.get('style');
   return attributes.has('hidden')
-    || attributes.get('aria-hidden')?.trim().toLowerCase() === 'true'
-    || (style !== undefined && styleHides(style));
+    || decodeEntities(attributes.get('aria-hidden') ?? '').trim().toLowerCase() === 'true'
+    || (style !== undefined && styleHides(decodeEntities(style)));
 };
 
 /**
@@ -134,7 +135,7 @@ const attributesHide = (source: string): boolean => {
  * read out the rest of it.
  */
 const RAW_TEXT_ELEMENTS = new Set([
-  'script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext',
+  'script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript',
 ]);
 
 interface ScannedTag {
@@ -142,17 +143,24 @@ interface ScannedTag {
   end: number;
   closing: boolean;
   name: string;
-  attributes: string;
+  /** Lowercased name to raw value; the first of a repeated name, as a browser keeps it. */
+  attributes: Map<string, string>;
 }
+
+type AttributeState = 'beforeName' | 'name' | 'afterName' | 'beforeValue' | 'unquoted';
 
 /**
  * The page's tags, in one pass, read the way the HTML tokenizer reads them
- * rather than up to the first `>`: a quote opens a value only straight
- * after `=`, and inside one a `>` is a character — `<div title="1>0"
- * hidden>` is hidden, and a regex ending at the first `>` never saw the
- * `hidden`. A tag still open at the end of the page is dropped, as a
- * browser drops it, and nothing after it is a tag. Every character is
- * visited a bounded number of times, so a hostile page costs its length.
+ * rather than up to the first `>`. Attributes go through the tokenizer's
+ * own states, because each shortcut is a page the browser reads one way
+ * and this read another: a quote opens a value only where a value starts,
+ * so `<div title="1>0" hidden>` is hidden; an `=` or a quote inside an
+ * unquoted value is a character of it, so `<div x=a=">` ends at its `>`
+ * rather than swallowing the page. A tag still open at the end of the page
+ * is dropped, as a browser drops it, and nothing after it is a tag; nor is
+ * anything after `<plaintext>`, which has no end tag at all. Every
+ * character is visited a bounded number of times, so a hostile page costs
+ * its length.
  */
 const scanTags = (html: string): ScannedTag[] => {
   const tags: ScannedTag[] = [];
@@ -170,27 +178,81 @@ const scanTags = (html: string): ScannedTag[] => {
     const nameStart = cursor;
     while (cursor < html.length && !/[\s/>]/.test(html[cursor] ?? '')) cursor += 1;
     const name = html.slice(nameStart, cursor).toLowerCase();
-    const attributesStart = cursor;
+
+    const attributes = new Map<string, string>();
+    const keep = (attribute: string, value: string): void => {
+      if (!attributes.has(attribute)) attributes.set(attribute, value);
+    };
+    let state: AttributeState = 'beforeName';
+    let attribute = '';
+    let mark = cursor;
     let end = -1;
     while (cursor < html.length) {
-      const char = html[cursor];
+      const char = html[cursor] ?? '';
+      if (state === 'beforeValue' && (char === '"' || char === "'")) {
+        const close = html.indexOf(char, cursor + 1);
+        if (close === -1) {
+          cursor = html.length;
+          break;
+        }
+        keep(attribute, html.slice(cursor + 1, close));
+        cursor = close + 1;
+        state = 'beforeName';
+        continue;
+      }
       if (char === '>') {
+        if (state === 'name') keep(html.slice(mark, cursor).toLowerCase(), '');
+        else if (state === 'afterName' || state === 'beforeValue') keep(attribute, '');
+        else if (state === 'unquoted') keep(attribute, html.slice(mark, cursor));
         end = cursor;
         break;
       }
-      cursor += 1;
-      if (char !== '=') continue;
-      while (cursor < html.length && /\s/.test(html[cursor] ?? '')) cursor += 1;
-      const quote = html[cursor];
-      if (quote === '"' || quote === "'") {
-        const close = html.indexOf(quote, cursor + 1);
-        cursor = close === -1 ? html.length : close + 1;
+      const space = /\s/.test(char);
+      if (state === 'beforeName') {
+        if (!space && char !== '/') {
+          state = 'name';
+          mark = cursor;
+        }
+      } else if (state === 'name') {
+        if (space || char === '/' || char === '=') {
+          attribute = html.slice(mark, cursor).toLowerCase();
+          if (char === '=') {
+            state = 'beforeValue';
+          } else if (space) {
+            state = 'afterName';
+          } else {
+            keep(attribute, '');
+            state = 'beforeName';
+          }
+        }
+      } else if (state === 'afterName') {
+        if (char === '=') {
+          state = 'beforeValue';
+        } else if (char === '/') {
+          keep(attribute, '');
+          state = 'beforeName';
+        } else if (!space) {
+          keep(attribute, '');
+          state = 'name';
+          mark = cursor;
+        }
+      } else if (state === 'beforeValue') {
+        if (!space) {
+          state = 'unquoted';
+          mark = cursor;
+        }
+      } else if (space) {
+        keep(attribute, html.slice(mark, cursor));
+        state = 'beforeName';
       }
+      cursor += 1;
     }
     if (end === -1) break;
-    tags.push({ start, end: end + 1, closing, name, attributes: html.slice(attributesStart, end) });
+    tags.push({ start, end: end + 1, closing, name, attributes });
     index = end + 1;
-    if (!closing && RAW_TEXT_ELEMENTS.has(name)) {
+    if (closing) continue;
+    if (name === 'plaintext') break;
+    if (RAW_TEXT_ELEMENTS.has(name)) {
       const endTag = new RegExp(`</${name}[\\s/>]`, 'gi');
       endTag.lastIndex = index;
       const found = endTag.exec(html);

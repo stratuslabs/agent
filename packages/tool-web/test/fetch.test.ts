@@ -386,3 +386,27 @@ test('an end tag inside a textarea or title does not close a hidden element', ()
   );
   assert.equal(htmlToText('<div hidden><title></div>leak</title>still hidden</div><p>shown</p>'), 'shown');
 });
+
+test('attributes are read in one pass the way the tokenizer reads them', () => {
+  // An `=` inside an unquoted value is a character of it, and so is a
+  // quote: the tag ends at the first `>`, and the page goes on.
+  assert.equal(htmlToText('<div x=a=">visible</div><p hidden>secret</p>'), 'visible');
+  // A quote inside an unquoted value does not start an attribute after it.
+  assert.equal(htmlToText('<div x=a"hidden>kept</div>'), 'kept');
+  // A name may begin with `=`; the next `=` is its value.
+  assert.equal(htmlToText('<div =a hidden>secret</div><p>shown</p>'), 'shown');
+  // `/` ends a name, and a self-closing slash hides nothing.
+  assert.equal(htmlToText('<div hidden/>secret</div><p>shown</p>'), 'shown');
+});
+
+test('a CSS escape is part of the value it is in', () => {
+  assert.equal(htmlToText('<p style="color:red\\;display:none">kept</p>'), 'kept');
+  assert.equal(htmlToText('<p style="content:\'a\\\';display:none\'">kept</p>'), 'kept');
+});
+
+test('everything after a plaintext start tag is text', () => {
+  // A browser shows the rest of the page as literal text; this extractor
+  // still strips what look like tags from it, but it must not drop the
+  // text a `hidden` it could never have applied would have hidden.
+  assert.match(htmlToText('<plaintext></plaintext><p hidden>visible literal</p>'), /visible literal/);
+});
