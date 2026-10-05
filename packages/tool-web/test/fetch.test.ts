@@ -268,7 +268,8 @@ test('a hidden element is dropped through its own end tag, not the first of its 
 test('a void or unclosed hidden element does not swallow the page', () => {
   assert.equal(htmlToText('<p>a<img hidden src="x.png">b</p><p>c</p>'), 'a b\n\nc');
   assert.equal(htmlToText('<p>a<input type="hidden" value="x">b</p><p>c</p>'), 'a b\n\nc');
-  assert.equal(htmlToText('<p>a<br hidden>b</p><p>c</p>'), 'a\nb\n\nc');
+  // A hidden break is no break: it is dropped, as its text would be.
+  assert.equal(htmlToText('<p>a<br hidden>b</p><p>c</p>'), 'a b\n\nc');
   // `/>` closes nothing on an HTML element: the span is open until the
   // `</p>` around it ends, and `b` is inside it — hidden, as a browser
   // hides it — while the page after the paragraph is untouched.
@@ -599,4 +600,27 @@ test('a button start tag ends the button already open', () => {
   assert.match(text, /shown/);
   assert.match(text, /after/);
   assert.doesNotMatch(text, /gone/);
+});
+
+test('a table cell, row, or row group ends at the next of its kind', () => {
+  const cell = htmlToText('<table><tr><td hidden>gone<td>shown</tr></table><p>after</p>');
+  assert.match(cell, /shown/);
+  assert.match(cell, /after/);
+  assert.doesNotMatch(cell, /gone/);
+  const row = htmlToText('<table><tr hidden><td>gone<tr><td>shown</table>');
+  assert.match(row, /shown/);
+  assert.doesNotMatch(row, /gone/);
+  const group = htmlToText('<table><tbody hidden><tr><td>gone<tbody><tr><td>shown</table>');
+  assert.match(group, /shown/);
+  assert.doesNotMatch(group, /gone/);
+  // A table end tag reaches past an open cell, as the tree builder's
+  // table scope does.
+  assert.equal(htmlToText('<div hidden><table><tr><td>gone</table></div><p>after</p>'), 'after');
+  // A cell in a nested table does not end the cell holding that table.
+  assert.equal(htmlToText('<table><tr><td hidden><table><tr><td>a<td>b</table></td></tr></table><p>after</p>'), 'after');
+});
+
+test('a hidden void element is dropped, not just left empty', () => {
+  assert.equal(htmlToText('<p>one<br hidden>two</p>'), 'one two');
+  assert.equal(htmlToText('<p>one<br>two</p>'), 'one\ntwo');
 });

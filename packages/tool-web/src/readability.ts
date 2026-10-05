@@ -30,9 +30,8 @@ const DROPPED_ELEMENTS = [
 ];
 
 /**
- * Elements with no content and no end tag. Only an element that can hold
- * text can hide any, and pairing one of these with a later end tag of the
- * same name would drop everything in between.
+ * Elements with no content and no end tag: pairing one of these with a
+ * later end tag of the same name would drop everything in between.
  */
 const VOID_ELEMENTS = new Set([
   'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta',
@@ -353,6 +352,10 @@ const HEADINGS = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
 /** Where a search for an open element stops: the tree builder's default scope. */
 const SCOPE_BOUNDARIES = ['applet', 'caption', 'html', 'table', 'td', 'th', 'marquee', 'object', 'template'];
 
+/** Where a search for an open table part stops: the tree builder's table scope. */
+const TABLE_SCOPE = ['html', 'table', 'template'];
+const TABLE_PARTS = new Set(['table', 'caption', 'tbody', 'thead', 'tfoot', 'tr', 'td', 'th']);
+
 /** Start tags that end an open sibling of their own kind, and the list element the search stops at. */
 const IMPLIED_SIBLING_ENDS: Readonly<Record<string, { closes: string[]; stopAt: string[] }>> = {
   li: { closes: ['li'], stopAt: [...SCOPE_BOUNDARIES, 'ul', 'ol', 'menu'] },
@@ -361,6 +364,14 @@ const IMPLIED_SIBLING_ENDS: Readonly<Record<string, { closes: string[]; stopAt: 
   option: { closes: ['option'], stopAt: [...SCOPE_BOUNDARIES, 'select', 'datalist', 'optgroup'] },
   optgroup: { closes: ['option', 'optgroup'], stopAt: [...SCOPE_BOUNDARIES, 'select', 'datalist'] },
   button: { closes: ['button'], stopAt: SCOPE_BOUNDARIES },
+  // A table's own parts end at the next of their kind, searched for in
+  // table scope: a cell inside a nested table is not this row's.
+  td: { closes: ['td', 'th'], stopAt: TABLE_SCOPE },
+  th: { closes: ['td', 'th'], stopAt: TABLE_SCOPE },
+  tr: { closes: ['tr'], stopAt: TABLE_SCOPE },
+  tbody: { closes: ['tbody', 'thead', 'tfoot'], stopAt: TABLE_SCOPE },
+  thead: { closes: ['tbody', 'thead', 'tfoot'], stopAt: TABLE_SCOPE },
+  tfoot: { closes: ['tbody', 'thead', 'tfoot'], stopAt: TABLE_SCOPE },
 };
 
 /**
@@ -663,10 +674,12 @@ const dropHiddenElements = (html: string): string => {
       const hidden = attributesHide(tag.attributes);
       const id = nextId;
       nextId += 1;
-      // A void element holds no text, so there is nothing of it to hide;
-      // its tag is left to the passes after this one, as any other is.
+      // A void element holds no text, but a hidden one still has an
+      // effect to withhold — `one<br hidden>two` is one line — so its tag
+      // is dropped, and it is closed the moment it opens.
       if (VOID_ELEMENTS.has(tag.name)) {
-        segments.push({ start: tag.start, end: tag.end, governing: parent });
+        if (hidden) confirmed.add(id);
+        segments.push({ start: tag.start, end: tag.end, governing: hidden ? [...parent, id] : parent });
         continue;
       }
       const governing = hidden ? [...parent, id] : parent;
@@ -674,9 +687,12 @@ const dropHiddenElements = (html: string): string => {
       if (stack.length < MAX_OPEN_ELEMENTS) stack.push({ id, name: tag.name, hidden, governing });
       continue;
     }
-    // `</h1>` ends whichever heading is open, as `</h2>` does.
+    // `</h1>` ends whichever heading is open, as `</h2>` does. A table
+    // part's end tag is searched for in table scope, past an open cell:
+    // `</table>` from inside a `td` closes the cell and then the table.
     const names = HEADINGS.includes(tag.name) ? HEADINGS : [tag.name];
-    const index = nearest(names, SCOPE_BOUNDARIES.filter((name) => name !== tag.name));
+    const scope = TABLE_PARTS.has(tag.name) ? TABLE_SCOPE : SCOPE_BOUNDARIES;
+    const index = nearest(names, scope.filter((name) => name !== tag.name));
     // An end tag with nothing of its name open is a stray, and closes nothing.
     if (index === -1) {
       segments.push({ start: tag.start, end: tag.end, governing: parentFor(false) });
