@@ -1375,16 +1375,21 @@ export const htmlToText = (html: string): string => {
   let text = removeSpans(html.slice(0, end), /<!--/g, /-->/g, '');
   text = text.replace(/<[!?][^>]*>/g, ' ');
 
+  // Before the dropped elements, which are cut out by name with no regard
+  // for the tree: an end tag inside a `nav` closes its ancestors as much as
+  // one anywhere, and in `<div hidden>a<nav></div></nav>b` cutting the nav
+  // first left the div open and `a` kept. The scan already reads a script's
+  // or a style's body as text, so a `</div>` in a script string closes
+  // nothing either way.
+  const visible = dropHiddenElements(text, tail);
+  text = visible.text;
+
   for (const element of DROPPED_ELEMENTS) {
     text = removeSpans(text, new RegExp(`<${element}\\b[^>]*>`, 'gi'), new RegExp(`</${element}>`, 'gi'), ' ');
     // Unclosed or self-closing forms of the same elements.
     text = text.replace(new RegExp(`<${element}\\b[^>]*/?>`, 'gi'), ' ');
   }
   text = removeSpans(text, /<head\b[^>]*>/gi, /<\/head>/gi, ' ');
-  // After the dropped elements, so a `</div>` inside a script's string
-  // cannot close a hidden element early.
-  const visible = dropHiddenElements(text, tail);
-  text = visible.text;
 
   text = text.replace(/<li\b[^>]*>/gi, '\n- ');
   for (const element of BLOCK_ELEMENTS) {

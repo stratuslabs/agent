@@ -799,3 +799,13 @@ test('onlyHosts holds web.fetch to its list, per agent, redirect hops included',
   const lifted = await tool.execute({ url: `http://localhost:${port}/` }, ranger) as JsonObject;
   assert.equal(lifted.text, 'reached');
 });
+
+test('an end tag inside dropped furniture still closes its ancestors', () => {
+  // Navigation and forms are dropped whole, but only after visibility is
+  // read: the `</div>` in the nav closes the hidden div, as in Chromium.
+  for (const furniture of ['nav', 'header', 'form']) {
+    const text = htmlToText(`<div hidden>gone<${furniture}></div></${furniture}>shown<p>after</p>`);
+    assert.match(text, /shown/, furniture);
+    assert.doesNotMatch(text, /gone/, furniture);
+  }
+});
