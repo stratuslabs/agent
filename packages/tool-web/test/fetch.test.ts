@@ -688,3 +688,15 @@ test('a list item ends at the next only where no other block is between them', (
   assert.match(text, /after/);
   assert.doesNotMatch(text, /gone/);
 });
+
+test('obsolete void elements hold nothing, hidden or not', () => {
+  for (const name of ['param', 'keygen', 'bgsound', 'basefont', 'image', 'frame']) {
+    assert.match(htmlToText(`<${name} hidden>shown</${name}><p>after</p>`), /^shown\s+after$/, name);
+  }
+});
+
+test('&nbsp; in a style is not CSS whitespace', () => {
+  assert.equal(htmlToText('<p style="display:none&nbsp;">visible</p>'), 'visible');
+  // Read as text, it is still a space.
+  assert.equal(htmlToText('<p>a&nbsp;&nbsp;b</p>'), 'a b');
+});

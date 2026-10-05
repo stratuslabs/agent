@@ -36,6 +36,9 @@ const DROPPED_ELEMENTS = [
 const VOID_ELEMENTS = new Set([
   'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta',
   'source', 'track', 'wbr',
+  // Void to the parser though obsolete, or read as a void one: `image` is
+  // an `img`, and `frame` outside a frameset is dropped.
+  'basefont', 'bgsound', 'frame', 'image', 'keygen', 'param',
 ]);
 
 /**
@@ -317,9 +320,17 @@ const styleHides = (style: string): boolean => {
 const attributesHide = (attributes: ReadonlyMap<string, string>): boolean => {
   const style = attributes.get('style');
   return attributes.has('hidden')
-    || trimAscii(decodeEntities(attributes.get('aria-hidden') ?? '')).toLowerCase() === 'true'
-    || (style !== undefined && styleHides(decodeEntities(style)));
+    || trimAscii(decodeAttribute(attributes.get('aria-hidden') ?? '')).toLowerCase() === 'true'
+    || (style !== undefined && styleHides(decodeAttribute(style)));
 };
+
+/**
+ * An attribute value as the browser hands it to CSS. `&nbsp;` is U+00A0
+ * there, which is not whitespace to CSS — `display:none&nbsp;` is invalid,
+ * and the text it is on is shown. `decodeEntities` reads it as a space
+ * because its output is text to be read, where that is what it looks like.
+ */
+const decodeAttribute = (value: string): string => decodeEntities(value.replace(/&nbsp;/g, '\u00A0'));
 
 /**
  * Elements whose content is text up to their own end tag, whatever it
