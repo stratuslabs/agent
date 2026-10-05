@@ -1,0 +1,266 @@
+import { chmodSync, closeSync, constants, ftruncateSync, lstatSync, mkdirSync, openSync } from 'node:fs';
+import path from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
+import type { StateEnvironment } from './environment.ts';
+import { grantsLockPath } from './paths.ts';
+
+/** Thrown by `claimFileLock` when another holder kept the lock past the wait. */
+export class FileLockHeldError extends Error {
+  readonly lockPath: string;
+
+  constructor(lockPath: string) {
+    super(`${lockPath} is held by another process.`);
+    this.name = 'FileLockHeldError';
+    this.lockPath = lockPath;
+  }
+}
+
+export interface FileLock {
+  /**
+   * Let the lock go. Idempotent. A process that exits without calling it
+   * lets go too: the lock lives on the file descriptor, not on disk.
+   */
+  release(): void;
+}
+
+/** SQLITE_BUSY: another connection holds a lock this one needs. */
+const isBusy = (error: unknown): boolean => errcodeOf(error) === 5;
+
+/** SQLITE_CORRUPT or SQLITE_NOTADB: the file is not a database any more. */
+const isNotADatabase = (error: unknown): boolean => {
+  const code = errcodeOf(error);
+  return code === 11 || code === 26;
+};
+
+const errcodeOf = (error: unknown): unknown =>
+  typeof error === 'object' && error !== null ? (error as { errcode?: unknown }).errcode : undefined;
+
+/**
+ * `node:sqlite`, loaded only when a lock is taken, and synchronously,
+ * because taking a lock is.
+ *
+ * Every importer of this package would otherwise load it, and with it the
+ * experimental warning Node still prints; that is why the gateway is
+ * imported lazily too. `getBuiltinModule` is what makes it lazy without
+ * making the claim async.
+ */
+const sqlite = (): typeof import('node:sqlite') =>
+  process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
+
+/**
+ * Open the file and take the lock, or close the file and throw.
+ *
+ * The claim is an exclusive transaction held open, never committed: SQLite
+ * takes the OS file lock for it and nothing is ever written — not a row,
+ * not a page, not a journal — so there is nothing a crash mid-claim can
+ * tear, and a machine that dies leaves a file the next holder can claim.
+ * The in-memory journal mode is only so no `-journal` file appears beside
+ * the lock; it has nothing to roll back.
+ */
+const claimAt = (lockPath: string, waitMs: number): DatabaseSync => {
+  const { DatabaseSync: Database } = sqlite();
+  const db = new Database(lockPath);
+  try {
+    // How long a held lock is retried before SQLITE_BUSY. Zero is
+    // node:sqlite's default and means at once. First, before anything that
+    // touches the file: setting the journal mode contends for the lock as
+    // well, and with no timeout yet it failed at once against a holder, so
+    // a waiter never waited and a daemon read went ahead without the lock.
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(waitMs))}`);
+    db.exec('PRAGMA journal_mode = MEMORY');
+    db.exec('BEGIN EXCLUSIVE');
+    // Created under the umask, like every other file SQLite makes;
+    // tightened to match the rest of ~/.stratus. Inside the try: a
+    // filesystem that refuses the chmod must not leave the lock held by a
+    // connection nobody can close.
+    chmodSync(lockPath, 0o600);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+};
+
+/**
+ * Take an exclusive lock on a file, across processes, until released.
+ *
+ * SQLite's own file lock, which gives three things a pid file cannot. It is
+ * atomic across processes: two takers cannot both read it as free. It
+ * covers exactly as long as it is held. And a process that dies releases it
+ * with its descriptors, so it is never stale.
+ *
+ * `waitMs` is how long to wait for another holder before giving up with
+ * `FileLockHeldError`. The daemon's home claim wants none (a second daemon
+ * is refused, not queued). A short write lock wants a little. The wait
+ * blocks the thread, which is why whatever runs under a lock other code in
+ * the same process can wait on has to be synchronous: an `await` in it
+ * would hand the thread to a waiter that cannot give it back.
+ *
+ * The file is disposable, since nothing is ever written to it. One that is
+ * not a database any more — damaged from outside, or left by something
+ * that was not this — is emptied in place and claimed: nobody can be
+ * holding it, because holding it needed the header this read refused.
+ * Emptied, never removed and recreated: the OS lock lives on the inode,
+ * and a taker that unlinked the file would hand every later taker an inode
+ * of its own to hold. Two takers that read the same damage both empty the
+ * same file — the second finds it already empty, which is a valid database
+ * — and then contend for the one lock, where exactly one wins.
+ *
+ * Lifted from the gateway's home claim (#184), whose policy `claimHome`
+ * still is, when the grant file gained a lock of its own.
+ */
+/**
+ * A lock file is opened, locked, chmodded, and when damaged emptied — all of
+ * which follow a symlink. One planted at the lock's path would aim those at
+ * another file: a damaged-looking target would be truncated, a database
+ * locked and chmodded. Derived state under the home is never followed
+ * through a link, so neither is this. `~/.stratus` itself may be a link;
+ * only the lock file is asked about.
+ */
+const refuseSymlink = (lockPath: string): void => {
+  let linked = false;
+  try {
+    linked = lstatSync(lockPath).isSymbolicLink();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  if (linked) {
+    throw new Error(
+      `${lockPath} is a symbolic link, and a lock file is never followed somewhere else. `
+      + 'Remove the link; the next start creates the lock file afresh.',
+    );
+  }
+};
+
+/** Empty the file in place, never through a link swapped in since the check above. */
+const emptyInPlace = (lockPath: string): void => {
+  let fd: number;
+  try {
+    fd = openSync(lockPath, constants.O_WRONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    // Gone meanwhile: the claim that follows creates it afresh.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  try {
+    ftruncateSync(fd, 0);
+  } finally {
+    closeSync(fd);
+  }
+};
+
+export const claimFileLock = (lockPath: string, options: { waitMs?: number } = {}): FileLock => {
+  mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+  refuseSymlink(lockPath);
+  const waitMs = options.waitMs ?? 0;
+  let held: DatabaseSync | undefined;
+  // At most twice: the file as found, then the file emptied in place.
+  for (const emptied of [false, true]) {
+    try {
+      held = claimAt(lockPath, waitMs);
+      break;
+    } catch (error) {
+      if (isBusy(error)) {
+        throw new FileLockHeldError(lockPath);
+      }
+      if (emptied || !isNotADatabase(error)) {
+        throw error;
+      }
+      emptyInPlace(lockPath);
+    }
+  }
+  if (!held) {
+    throw new FileLockHeldError(lockPath);
+  }
+
+  let released = false;
+  return {
+    release() {
+      if (released) {
+        return;
+      }
+      released = true;
+      held!.close();
+    },
+  };
+};
+
+/**
+ * How long a grant read or revoke waits for the other side. A revoke
+ * rewrites one small file, so anything longer than this is a process that
+ * is stuck rather than busy.
+ */
+export const GRANTS_LOCK_WAIT_MS = 5_000;
+
+/** Lock paths this process holds across an async write, so its own reads do not wait on it. */
+const heldHere = new Set<string>();
+/** One grant write at a time per lock path, in this process. */
+const writeQueues = new Map<string, Promise<unknown>>();
+
+/**
+ * Run a grant file's read under the grants lock, for the daemon's store.
+ *
+ * A revoke that cannot reach the control API rewrites the file itself, and
+ * the store caches what it read for the life of the process. A daemon that
+ * read the file in the middle of that revoke cached the grant the CLI then
+ * reported as revoked, and honoured it until it restarted (#184). Under the
+ * lock, the read comes either wholly before the revoke or wholly after it.
+ *
+ * `read` must be synchronous; see `claimFileLock` for why. A lock still
+ * held after the wait throws `FileLockHeldError` rather than reading
+ * without it: reading through is the race this lock exists to close, so
+ * the store takes that read as no grants this once, caches nothing, and
+ * asks again on the next call.
+ */
+export const grantReadSerializer = (env: StateEnvironment, options: { waitMs?: number } = {}) =>
+  <T>(read: () => T): T => {
+    // Inside this process's own write, which already holds the lock: claiming
+    // it again would wait on ourselves for the whole wait.
+    if (heldHere.has(grantsLockPath(env))) {
+      return read();
+    }
+    const lock = claimFileLock(grantsLockPath(env), { waitMs: options.waitMs ?? GRANTS_LOCK_WAIT_MS });
+    try {
+      return read();
+    } finally {
+      lock.release();
+    }
+  };
+
+/**
+ * Run a grant write — its fresh read, its change, and its save — under the
+ * grants lock, for the daemon's store.
+ *
+ * The daemon used to write its cached view back: a write landing after a
+ * file-fallback revoke restored the revoked grant, and one landing before it
+ * lost whatever the revoke's own write left in the file. Under the lock the
+ * store re-reads the file and applies its change to what is there (#184).
+ *
+ * The section is async, so it is queued in this process and recorded as held
+ * here: a grant read inside it, the fresh one included, then runs without
+ * claiming the lock again, rather than blocking the thread on a lock this
+ * process holds. Another process still waits for it. A lock still held
+ * after the wait throws `FileLockHeldError` and writes nothing, as a revoke
+ * does: writing through is the race.
+ */
+export const grantWriteSerializer = (env: StateEnvironment, options: { waitMs?: number } = {}) =>
+  <T>(write: () => Promise<T>): Promise<T> => {
+    const lockPath = grantsLockPath(env);
+    const run = async (): Promise<T> => {
+      const lock = claimFileLock(lockPath, { waitMs: options.waitMs ?? GRANTS_LOCK_WAIT_MS });
+      heldHere.add(lockPath);
+      try {
+        return await write();
+      } finally {
+        heldHere.delete(lockPath);
+        lock.release();
+      }
+    };
+    const queued = (writeQueues.get(lockPath) ?? Promise.resolve()).then(run, run);
+    writeQueues.set(lockPath, queued.then(() => undefined, () => undefined));
+    return queued;
+  };

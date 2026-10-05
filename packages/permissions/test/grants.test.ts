@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +14,7 @@ import {
   findMatchingToolGrant,
   parseToolGrant,
   whitelistPathFor,
+  WhitelistUnreadableError,
   type PermissionDecision,
   type ToolGrant,
 } from '../src/index.ts';
@@ -116,6 +118,107 @@ test('always allow on a gated tool is a standing grant: per agent, past a restar
   assert.equal(await restarted.approve(contextFor(plainTool('memory.recall', 'safe'))), true);
   assert.equal(decisions[3]!.grant, undefined);
   assert.match(decisions[3]!.reason, /is safe/);
+});
+
+test('a grant file is read inside the host\'s serializer, so a revoke holding it is never read halfway', async () => {
+  // The store caches what it reads for the life of the process. A daemon
+  // that read the file while `stratus grants revoke` was rewriting it cached
+  // the revoked grant and honoured it until restart (#184). The daemon's
+  // serializer is the lock the revoke holds; here it stands in for a revoke
+  // that finishes while the read waits on it, and the read must see the
+  // result.
+  const directory = await newDirectory();
+  const writer = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
+  await writer.rememberTool('ava', { tool: 'web.fetch', package: 'stratus-plugin-web', grantedAt: '2026-09-07T01:00:00.000Z' });
+  const file = whitelistPathFor(directory, 'ava');
+
+  let held = 0;
+  const reader = createFileCommandWhitelist({
+    directory,
+    stateHome: path.dirname(directory),
+    serializeRead: (read) => {
+      held += 1;
+      writeFileSync(file, `${JSON.stringify({ version: 1, scopes: [] })}\n`);
+      return read();
+    },
+  });
+
+  assert.deepEqual((await reader.grantsFor('ava')).tools, []);
+  assert.ok(held > 0, 'the read went through the serializer');
+});
+
+test('a grant change under the host\'s write serializer starts from the file, not the cache', async () => {
+  // The daemon caches each agent's grants. When `stratus grants revoke`
+  // rewrote the file behind it, the daemon's next "always" wrote its cache
+  // back: the revoked grant returned, and anything the revoke's write held
+  // was lost (#184).
+  const directory = await newDirectory();
+  const daemon = createFileCommandWhitelist({
+    directory,
+    stateHome: path.dirname(directory),
+    serializeWrite: (write) => write(),
+  });
+  await daemon.rememberTool('ava', { tool: 'web.fetch', package: 'p', grantedAt: '2026-09-07T01:00:00.000Z' });
+  assert.deepEqual((await daemon.grantsFor('ava')).tools.map((grant) => grant.tool), ['web.fetch']);
+
+  // A revoke elsewhere: web.fetch gone, another grant there instead.
+  const elsewhere = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
+  assert.equal(await elsewhere.forgetTool('ava', 'web.fetch'), true);
+  await elsewhere.rememberTool('ava', { tool: 'web.search', package: 'p', grantedAt: '2026-09-07T02:00:00.000Z' });
+
+  await daemon.rememberTool('ava', { tool: 'shell.run', package: 'p', grantedAt: '2026-09-07T03:00:00.000Z' });
+
+  const onDisk = await createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }).grantsFor('ava');
+  assert.deepEqual(onDisk.tools.map((grant) => grant.tool).sort(), ['shell.run', 'web.search']);
+  // And the daemon's view caught up with the file it just wrote.
+  assert.deepEqual((await daemon.grantsFor('ava')).tools.map((grant) => grant.tool).sort(), ['shell.run', 'web.search']);
+});
+
+test('a grant read the host could not serialize is no grants this once, and is not cached', async () => {
+  // Reading through a lock still held is the race the lock exists to close.
+  // No grants is the safe answer — the call asks a human — and caching it
+  // would strip the agent's grants until a restart over one slow revoke.
+  const directory = await newDirectory();
+  const writer = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
+  await writer.rememberTool('ava', { tool: 'web.fetch', package: 'p', grantedAt: '2026-09-07T01:00:00.000Z' });
+
+  let busy = true;
+  const warnings: string[] = [];
+  const reader = createFileCommandWhitelist({
+    directory,
+    stateHome: path.dirname(directory),
+    warn: (line) => warnings.push(line),
+    serializeRead: (read) => {
+      if (busy) {
+        throw new Error('grants.lock is held by another process.');
+      }
+      return read();
+    },
+  });
+
+  assert.deepEqual((await reader.grantsFor('ava')).tools, []);
+  assert.match(warnings.join('\n'), /was not read \(grants\.lock is held by another process\.\)/);
+  busy = false;
+  assert.deepEqual((await reader.grantsFor('ava')).tools.map((grant) => grant.tool), ['web.fetch']);
+});
+
+test('a grant change the host could not serialize is refused as unsaved, and writes nothing', async () => {
+  // Writing through is the other half of the race. The refusal is a
+  // WhitelistUnreadableError because every caller already handles that one
+  // right: an "always" holds for the process, a revoke reports a conflict.
+  const directory = await newDirectory();
+  const store = createFileCommandWhitelist({
+    directory,
+    stateHome: path.dirname(directory),
+    serializeWrite: () => Promise.reject(new Error('grants.lock is held by another process.')),
+  });
+
+  await assert.rejects(
+    store.rememberTool('ava', { tool: 'web.fetch', package: 'p', grantedAt: '2026-09-07T01:00:00.000Z' }),
+    (error: unknown) => error instanceof WhitelistUnreadableError
+      && /ava's grants were not changed: grants\.lock is held by another process\. Try again/.test(error.message),
+  );
+  await assert.rejects(readFile(whitelistPathFor(directory, 'ava'), 'utf8'), { code: 'ENOENT' });
 });
 
 test('a revoked grant stops working on the next call, with no restart', async () => {
