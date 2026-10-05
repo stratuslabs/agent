@@ -524,3 +524,28 @@ test('text a table cannot hold is placed before it, outside a hidden table', () 
   // Whitespace between table parts is the table's own and moves nowhere.
   assert.equal(htmlToText('<table hidden>\n<tr><td>gone</td></tr>\n</table><p>after</p>'), 'after');
 });
+
+test('var( inside a CSS string is not a var() function', () => {
+  assert.equal(htmlToText(`<p style='display:none;display:"var("'>gone</p><p>shown</p>`), 'shown');
+  assert.equal(htmlToText(`<p style="display:none;display:'var(--x)'">gone</p><p>shown</p>`), 'shown');
+});
+
+test('an option ends at the next option', () => {
+  const text = htmlToText('<select><option hidden>gone<option>shown</select>');
+  assert.match(text, /shown/);
+  assert.doesNotMatch(text, /gone/);
+});
+
+test('a misnested formatting end tag closes what it holds, and rebuilds formatting outside', () => {
+  const text = htmlToText('<b hidden>gone<i>also</b>shown</i><p>after</p>');
+  assert.match(text, /shown/);
+  assert.match(text, /after/);
+  assert.doesNotMatch(text, /gone|also/);
+  // A plain element inside is closed with it, and not rebuilt.
+  const span = htmlToText('<b hidden>gone<span>also</b>shown</span>');
+  assert.match(span, /shown/);
+  assert.doesNotMatch(span, /gone|also/);
+  // A block inside is what the formatting is moved into: the text after
+  // the end tag is inside a copy of the hidden element, and hidden too.
+  assert.equal(htmlToText('<b hidden>x<p>y</b>z</p><p>after</p>'), 'after');
+});

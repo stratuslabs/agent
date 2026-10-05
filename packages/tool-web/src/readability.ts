@@ -200,7 +200,8 @@ const validDisplay = (words: readonly string[]): boolean => {
  * reads as not hiding — the direction that keeps text.
  */
 const validFor = (property: string, raw: string, words: readonly string[]): boolean => {
-  if (CSS_VAR_FUNCTION.test(raw)) return true;
+  // Strings removed first: `"var("` is a string, not a function.
+  if (CSS_VAR_FUNCTION.test(raw.replace(/"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?/g, ' '))) return true;
   if (words.length === 1 && CSS_WIDE_KEYWORDS.has(words[0] ?? '')) return true;
   if (property === 'visibility') return words.length === 1 && ['visible', 'hidden', 'collapse'].includes(words[0] ?? '');
   if (property === 'display') return validDisplay(words);
@@ -291,6 +292,8 @@ const IMPLIED_SIBLING_ENDS: Readonly<Record<string, { closes: string[]; stopAt: 
   li: { closes: ['li'], stopAt: [...SCOPE_BOUNDARIES, 'ul', 'ol', 'menu'] },
   dd: { closes: ['dd', 'dt'], stopAt: [...SCOPE_BOUNDARIES, 'dl'] },
   dt: { closes: ['dd', 'dt'], stopAt: [...SCOPE_BOUNDARIES, 'dl'] },
+  option: { closes: ['option'], stopAt: [...SCOPE_BOUNDARIES, 'select', 'datalist', 'optgroup'] },
+  optgroup: { closes: ['option', 'optgroup'], stopAt: [...SCOPE_BOUNDARIES, 'select', 'datalist'] },
 };
 
 /**
@@ -301,6 +304,21 @@ const IMPLIED_SIBLING_ENDS: Readonly<Record<string, { closes: string[]; stopAt: 
  * text is kept — the direction this pass falls back to throughout.
  */
 const MAX_OPEN_ELEMENTS = 512;
+
+/**
+ * The tree builder's "special" elements: a formatting end tag that finds
+ * one of these opened inside it moves it out (the adoption agency's
+ * furthest block); one that finds none simply closes everything inside.
+ */
+const SPECIAL_ELEMENTS = new Set([
+  'address', 'applet', 'area', 'article', 'aside', 'base', 'basefont', 'bgsound', 'blockquote', 'body', 'br',
+  'button', 'caption', 'center', 'col', 'colgroup', 'dd', 'details', 'dir', 'div', 'dl', 'dt', 'embed', 'fieldset',
+  'figcaption', 'figure', 'footer', 'form', 'frame', 'frameset', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header',
+  'hgroup', 'hr', 'html', 'iframe', 'img', 'input', 'keygen', 'li', 'link', 'listing', 'main', 'marquee', 'menu',
+  'meta', 'nav', 'noembed', 'noframes', 'noscript', 'object', 'ol', 'p', 'param', 'plaintext', 'pre', 'script',
+  'search', 'section', 'select', 'source', 'style', 'summary', 'table', 'tbody', 'td', 'template', 'textarea',
+  'tfoot', 'th', 'thead', 'title', 'tr', 'track', 'ul', 'wbr', 'xmp',
+]);
 
 interface OpenElement {
   id: number;
@@ -558,7 +576,27 @@ const dropHiddenElements = (html: string): string => {
     const element = stack[index];
     segments.push({ start: tag.start, end: tag.end, governing: element?.governing ?? [] });
     if (FORMATTING_ELEMENTS.has(tag.name)) {
-      stack.splice(index, 1);
+      const inside = stack.slice(index + 1);
+      if (inside.some((open) => SPECIAL_ELEMENTS.has(open.name))) {
+        // A block inside: the adoption agency moves it out and wraps its
+        // content in a copy of this element, so what follows stays under
+        // the same hiding. Leaving it governed as it was is that result.
+        stack.splice(index, 1);
+      } else {
+        // No block inside: everything opened in it closes with it, and
+        // the formatting among those is rebuilt outside it — copies,
+        // attributes and all — before the next content. In
+        // `<b hidden>gone<i>also</b>shown</i>` the rebuilt `i` is not in
+        // the `b`, and `shown` is visible.
+        closeFrom(index);
+        for (const open of inside) {
+          if (!FORMATTING_ELEMENTS.has(open.name) || stack.length >= MAX_OPEN_ELEMENTS) continue;
+          const id = nextId;
+          nextId += 1;
+          const parent = stack.at(-1)?.governing ?? [];
+          stack.push({ id, name: open.name, hidden: open.hidden, governing: open.hidden ? [...parent, id] : parent });
+        }
+      }
     } else {
       closeFrom(index + 1);
       stack.splice(index, 1);
