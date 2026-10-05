@@ -358,21 +358,100 @@ const TABLE_PARTS = new Set(['table', 'caption', 'tbody', 'thead', 'tfoot', 'tr'
 
 /** Start tags that end an open sibling of their own kind, and the list element the search stops at. */
 const IMPLIED_SIBLING_ENDS: Readonly<Record<string, { closes: string[]; stopAt: string[] }>> = {
-  li: { closes: ['li'], stopAt: [...SCOPE_BOUNDARIES, 'ul', 'ol', 'menu'] },
-  dd: { closes: ['dd', 'dt'], stopAt: [...SCOPE_BOUNDARIES, 'dl'] },
-  dt: { closes: ['dd', 'dt'], stopAt: [...SCOPE_BOUNDARIES, 'dl'] },
   option: { closes: ['option'], stopAt: [...SCOPE_BOUNDARIES, 'select', 'datalist', 'optgroup'] },
   optgroup: { closes: ['option', 'optgroup'], stopAt: [...SCOPE_BOUNDARIES, 'select', 'datalist'] },
   button: { closes: ['button'], stopAt: SCOPE_BOUNDARIES },
-  // A table's own parts end at the next of their kind, searched for in
-  // table scope: a cell inside a nested table is not this row's.
-  td: { closes: ['td', 'th'], stopAt: TABLE_SCOPE },
-  th: { closes: ['td', 'th'], stopAt: TABLE_SCOPE },
-  tr: { closes: ['tr'], stopAt: TABLE_SCOPE },
-  tbody: { closes: ['tbody', 'thead', 'tfoot'], stopAt: TABLE_SCOPE },
-  thead: { closes: ['tbody', 'thead', 'tfoot'], stopAt: TABLE_SCOPE },
-  tfoot: { closes: ['tbody', 'thead', 'tfoot'], stopAt: TABLE_SCOPE },
 };
+
+/**
+ * A table part's start tag, and the parts it belongs directly inside:
+ * everything open above the nearest of them closes first, as the tree
+ * builder clears the stack back to that context. So a cell ends the open
+ * cell, a row the open row, and a caption or row group everything back to
+ * the table. With none of them open the tag is outside any table, where
+ * the tree builder ignores it — and its `hidden` with it.
+ */
+const TABLE_PART_CONTEXT: Readonly<Record<string, readonly string[]>> = {
+  caption: ['table'],
+  colgroup: ['table'],
+  col: ['colgroup', 'table'],
+  tbody: ['table'],
+  thead: ['table'],
+  tfoot: ['table'],
+  tr: ['tbody', 'thead', 'tfoot', 'table'],
+  td: ['tr', 'tbody', 'thead', 'tfoot', 'table'],
+  th: ['tr', 'tbody', 'thead', 'tfoot', 'table'],
+};
+
+/** The document's own elements, which this pass neither hides nor closes. */
+const DOCUMENT_ELEMENTS = new Set(['html', 'head', 'body']);
+
+/**
+ * End tags that close the element they name only when it is in scope.
+ * Any other non-formatting end tag stops at the nearest special element.
+ */
+const SCOPED_END_TAGS = new Set([
+  'address', 'applet', 'article', 'aside', 'blockquote', 'button', 'center', 'dd', 'details', 'dialog', 'dir',
+  'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'header', 'hgroup', 'listing', 'main',
+  'marquee', 'menu', 'nav', 'object', 'ol', 'pre', 'search', 'section', 'select', 'summary', 'template', 'ul',
+]);
+
+/**
+ * Start tags that end an open list item of these names. The search stops
+ * at any special element but `address`, `div`, and `p`: an `li` inside a
+ * `ul` inside an `li` is the inner list's, and leaves the outer one open.
+ */
+const LIST_ITEM_ENDS: Readonly<Record<string, readonly string[]>> = {
+  li: ['li'],
+  dd: ['dd', 'dt'],
+  dt: ['dd', 'dt'],
+};
+
+/** The parts a table part's start tag implies, by the element it is opened in. */
+const IMPLIED_TABLE_PARTS: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  td: { table: ['tbody', 'tr'], tbody: ['tr'], thead: ['tr'], tfoot: ['tr'] },
+  th: { table: ['tbody', 'tr'], tbody: ['tr'], thead: ['tr'], tfoot: ['tr'] },
+  tr: { table: ['tbody'] },
+  col: { table: ['colgroup'] },
+};
+
+/** What the tree builder's "generate implied end tags" closes, while one is the current element. */
+const IMPLIED_END_ELEMENTS = new Set(['dd', 'dt', 'li', 'optgroup', 'option', 'p', 'rb', 'rp', 'rt', 'rtc']);
+
+/**
+ * Elements that put a marker in the list of active formatting elements:
+ * formatting opened outside one is not rebuilt inside it.
+ */
+const MARKER_ELEMENTS = new Set(['applet', 'marquee', 'object', 'td', 'th', 'caption', 'template']);
+
+/**
+ * The marker elements whose closing always clears the list back to their
+ * marker. The other three clear it only at their own end tag: an `object`
+ * popped by a table part leaves its marker, and with it, formatting
+ * opened after it out of reach of a later end tag and of the rebuild.
+ */
+const CLEARED_ON_CLOSE = new Set(['td', 'th', 'caption', 'template']);
+
+/**
+ * Start tags the tree builder inserts without first rebuilding the
+ * formatting a closed block left open — blocks, headings, lists, table
+ * parts, and what it handles as head content. Every other start tag, and
+ * every run of text, rebuilds it first.
+ */
+const INSERTED_WITHOUT_REBUILDING = new Set([
+  ...CLOSES_PARAGRAPH, 'base', 'basefont', 'bgsound', 'body', 'caption', 'col', 'colgroup', 'frame', 'head',
+  'html', 'iframe', 'link', 'meta', 'noembed', 'noframes', 'noscript', 'rb', 'rp', 'rt', 'rtc', 'script',
+  'style', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead', 'title', 'tr',
+].filter((name) => name !== 'xmp'));
+
+/**
+ * How many formatting elements the rebuild list holds past its last
+ * marker. The tree builder bounds only identical ones (three, below);
+ * without this, a page of `<p><b id=N>x</p>` makes every paragraph rebuild
+ * every earlier `b`, which is quadratic. The oldest past the bound is
+ * forgotten, so its text is kept — the direction this pass falls back to.
+ */
+const MAX_ACTIVE_FORMATTING = 16;
 
 /**
  * How deep the stack goes. Chromium's parser stops nesting at 512 too,
@@ -398,16 +477,32 @@ const SPECIAL_ELEMENTS = new Set([
   'tfoot', 'th', 'thead', 'title', 'tr', 'track', 'ul', 'wbr', 'xmp',
 ]);
 
+/**
+ * As much of a node of the tree the tree builder would build as says
+ * whether it is shown. The parent is mutable because the adoption agency
+ * moves a block — and everything already in it — to a new parent, so
+ * whether a run of text is hidden is only known at the end of the page.
+ */
+interface TreeNode {
+  id: number;
+  hidden: boolean;
+  parent: TreeNode | undefined;
+}
+
 interface OpenElement {
   id: number;
   name: string;
   hidden: boolean;
-  /** Ids of the hidden elements on this element's DOM ancestry, itself included. */
-  governing: readonly number[];
+  /** Where content inserted into this element goes. */
+  node: TreeNode;
 }
 
-/** Elements whose own content model is table structure, where other content is placed before the table. */
-const TABLE_CONTEXT = new Set(['table', 'tbody', 'thead', 'tfoot', 'tr']);
+/**
+ * Elements whose own content model is table structure, where other content
+ * is placed before the table. A `colgroup` holds only columns: anything
+ * else closes it and is placed the same way.
+ */
+const TABLE_CONTEXT = new Set(['table', 'tbody', 'thead', 'tfoot', 'tr', 'colgroup']);
 
 /** Start tags a table context holds itself; any other is placed before the table. */
 const TABLE_CONTENT = new Set([
@@ -565,15 +660,18 @@ const scanTags = (html: string): ScannedTag[] => {
  * where a search for each element's end would rescan the rest of the page
  * for every one.
  *
- * The implied ends that keep ordinary markup apart are modelled — `p`
- * before a block, `li` at the next `li`, `dd`/`dt` at the next of either,
- * a heading at a heading, a link at a link —
- * so `<li hidden>a<li>b` hides `a` and shows `b`. An element still open at
- * the end of the page keeps its text: a closing rule this pass does not
- * model must not erase the article behind it, and keeping is what this
- * extractor did before it read visibility at all.
+ * Where text lands is the HTML tree builder's "in body" and table rules,
+ * as far as they decide that: implied ends (`<li hidden>a<li>b` hides `a`
+ * and shows `b`), scopes, foster parenting, implied table parts, the list
+ * of active formatting elements and its rebuilding, and the adoption
+ * agency. Each rule here was checked against Chromium, page by page and by
+ * comparing random malformed pages; foreign content (`svg`, `math`) and
+ * `select`'s own rendering are not modelled. An element still open at the
+ * end of the page keeps its text: a closing rule this pass does not model
+ * must not erase the article behind it, and keeping is what this extractor
+ * did before it read visibility at all.
  */
-const dropHiddenElements = (html: string): string => {
+const dropHiddenElements = (html: string, tail: string): { text: string; tail: string } => {
   // One stack of open elements, as the tree builder keeps, rather than one
   // per tag name: an end tag closes everything opened inside the element
   // it names, so in `<div><span hidden>gone</div>shown</span>` the span
@@ -587,9 +685,20 @@ const dropHiddenElements = (html: string): string => {
   // hidden element on its ancestry was closed; one still open at the end
   // of the page confirms nothing, and its text is kept.
   const stack: OpenElement[] = [];
+  const onStack = new Set<OpenElement>();
   const confirmed = new Set<number>();
-  const segments: { start: number; end: number; governing: readonly number[] }[] = [];
+  const segments: { start: number; end: number; node: TreeNode | undefined }[] = [];
   let nextId = 0;
+  // The list of active formatting elements: formatting a block closed
+  // around is still in force, and the tree builder rebuilds it, `hidden`
+  // and all, before the next content. So in `<p><b hidden>gone</p><p>also`
+  // the second paragraph's text is in a copy of the hidden `b`.
+  type Formatting = { element: OpenElement; key: string };
+  const active: (Formatting | 'marker')[] = [];
+  // The form element pointer: while a form is open, another form start tag
+  // is ignored, and `</form>` removes that form alone.
+  let form: OpenElement | undefined;
+
   const nearest = (names: readonly string[], stopAt: readonly string[]): number => {
     for (let index = stack.length - 1; index >= 0; index -= 1) {
       const name = stack[index]?.name ?? '';
@@ -598,53 +707,209 @@ const dropHiddenElements = (html: string): string => {
     }
     return -1;
   };
-  const closeFrom = (index: number): void => {
-    for (const element of stack.splice(index)) {
-      if (element.hidden) confirmed.add(element.id);
+  const inScope = (index: number): boolean =>
+    !stack.slice(index + 1).some((inside) => SCOPE_BOUNDARIES.includes(inside.name));
+  const push = (element: OpenElement): boolean => {
+    if (stack.length >= MAX_OPEN_ELEMENTS) return false;
+    stack.push(element);
+    onStack.add(element);
+    return true;
+  };
+  const clearToMarker = (): void => {
+    while (active.length > 0 && active.pop() !== 'marker') {
+      // Everything after the last marker goes with it.
     }
   };
-  /** Whose ancestry new content takes: the top, or a table's parent for what a table cannot hold. */
-  const parentFor = (fostered: boolean): readonly number[] => {
-    const top = stack.at(-1);
-    if (top === undefined) return [];
-    if (!fostered || !TABLE_CONTEXT.has(top.name)) return top.governing;
-    const table = nearest(['table'], []);
-    return table > 0 ? (stack[table - 1]?.governing ?? []) : [];
+  const removed = (element: OpenElement): void => {
+    onStack.delete(element);
+    if (element.hidden) confirmed.add(element.id);
+    if (CLEARED_ON_CLOSE.has(element.name)) clearToMarker();
   };
-  /** A formatting element's end, as the adoption agency runs it. */
-  const endFormatting = (index: number): void => {
-    const element = stack[index];
-    const inside = stack.slice(index + 1);
-    if (inside.some((open) => SPECIAL_ELEMENTS.has(open.name))) {
-      // A block inside: the adoption agency moves it out and wraps its
-      // content in a copy of this element, so what follows stays under
-      // the same hiding. Leaving it governed as it was is that result.
-      stack.splice(index, 1);
-    } else {
-      // No block inside: everything opened in it closes with it, and
-      // the formatting among those is rebuilt outside it — copies,
-      // attributes and all — before the next content. In
-      // `<b hidden>gone<i>also</b>shown</i>` the rebuilt `i` is not in
-      // the `b`, and `shown` is visible.
-      closeFrom(index);
-      for (const open of inside) {
-        if (!FORMATTING_ELEMENTS.has(open.name) || stack.length >= MAX_OPEN_ELEMENTS) continue;
-        const id = nextId;
-        nextId += 1;
-        const parent = stack.at(-1)?.governing ?? [];
-        stack.push({ id, name: open.name, hidden: open.hidden, governing: open.hidden ? [...parent, id] : parent });
+  const closeFrom = (index: number): void => {
+    // Innermost first, so a cell's marker is cleared after what it holds.
+    for (const element of stack.splice(index).reverse()) removed(element);
+  };
+  /** The last entry past the last marker that `matches`, as an index into the list. */
+  const lastActive = (matches: (entry: Formatting) => boolean): number => {
+    for (let index = active.length - 1; index >= 0; index -= 1) {
+      const entry = active[index];
+      if (entry === 'marker' || entry === undefined) return -1;
+      if (matches(entry)) return index;
+    }
+    return -1;
+  };
+  const forget = (element: OpenElement): void => {
+    const index = lastActive((entry) => entry.element === element);
+    if (index !== -1) active.splice(index, 1);
+  };
+  /**
+   * Where foster-parented content goes: into the last open table's parent
+   * in the tree, before the table — which is not always the element below
+   * it on the stack. `<a hidden><table><a>` takes the hidden link off the
+   * stack and leaves the table in it, so what is fostered is hidden too.
+   */
+  const fosterParent = (): TreeNode | undefined => stack[nearest(['table'], [])]?.node.parent;
+  /** Where new content goes: the top, or a table's parent for what a table cannot hold. */
+  const parentFor = (fostered: boolean): TreeNode | undefined => {
+    const top = stack.at(-1);
+    return top !== undefined && fostered && TABLE_CONTEXT.has(top.name) ? fosterParent() : top?.node;
+  };
+  const element = (name: string, hidden: boolean, parent: TreeNode | undefined, id = nextId++): OpenElement =>
+    ({ id, name, hidden, node: { id, hidden, parent } });
+  /**
+   * The tree builder's reconstruction: reopen, in order, the formatting a
+   * block closed around. A copy keeps its original's id, so a copy of a
+   * hidden element hides as the original did — which was closed, or it
+   * would not need rebuilding.
+   */
+  const rebuild = (fostered: boolean): void => {
+    // In a table, only what is foster-parented rebuilds — before the table.
+    if (TABLE_CONTEXT.has(stack.at(-1)?.name ?? '') && !fostered) return;
+    let first = active.length;
+    while (first > 0) {
+      const entry = active[first - 1];
+      if (entry === 'marker' || entry === undefined || onStack.has(entry.element)) break;
+      first -= 1;
+    }
+    for (let index = first; index < active.length; index += 1) {
+      const entry = active[index];
+      if (entry === 'marker' || entry === undefined) continue;
+      const original = entry.element;
+      const copy = element(original.name, original.hidden, parentFor(true), original.id);
+      if (!push(copy)) return;
+      active[index] = { element: copy, key: entry.key };
+    }
+  };
+  /**
+   * Formatting enters the list, at most three identical — same name, same
+   * attributes — past the last marker, as the tree builder's "Noah's Ark"
+   * clause keeps it, and at most MAX_ACTIVE_FORMATTING in all.
+   */
+  const remember = (opened: OpenElement, attributes: ReadonlyMap<string, string>): void => {
+    const key = [opened.name, ...[...attributes].map(([name, value]) => `${name}=${value}`).sort()].join('\u0000');
+    let since = active.length;
+    while (since > 0 && active[since - 1] !== 'marker') since -= 1;
+    const same = active.slice(since).filter((entry) => entry !== 'marker' && entry.key === key);
+    if (same.length >= 3 && same[0] !== undefined) active.splice(active.indexOf(same[0]), 1);
+    if (active.length - since >= MAX_ACTIVE_FORMATTING) active.splice(since, 1);
+    active.push({ element: opened, key });
+  };
+  /**
+   * The end tag the tree builder calls "any other": it closes the nearest
+   * open element of its name unless a special element is opened inside
+   * that, in which case it is ignored — `</span>` does not reach out of a
+   * `div` opened in the span.
+   */
+  const anyOtherEnd = (name: string): number => {
+    for (let index = stack.length - 1; index >= 0; index -= 1) {
+      const open = stack[index];
+      if (open?.name === name) return index;
+      if (SPECIAL_ELEMENTS.has(open?.name ?? '')) return -1;
+    }
+    return -1;
+  };
+  /**
+   * The adoption agency, for an end tag naming formatting, in the terms
+   * this pass keeps: each element's ancestry. The element is the last of
+   * its name in the formatting list, not the stack — so after
+   * `<em hidden><p><em>x</p>`, `</em>` names the inner `em`, already
+   * closed, and the hidden one stays open. Content already read stays
+   * where it is, under copies of the element; what moves is the block that
+   * was opened inside it, which leaves it, so in `<b hidden>x<p>y</b>z`
+   * the `z` is in the paragraph and shown.
+   */
+  const adopt = (name: string): void => {
+    for (let round = 0; round < 8; round += 1) {
+      const entryIndex = lastActive((entry) => entry.element.name === name);
+      const formatting = active[entryIndex];
+      if (formatting === undefined || formatting === 'marker') {
+        const index = anyOtherEnd(name);
+        if (index !== -1) closeFrom(index);
+        return;
+      }
+      const index = stack.lastIndexOf(formatting.element);
+      if (index === -1) {
+        active.splice(entryIndex, 1);
+        return;
+      }
+      if (!inScope(index)) return;
+      const block = stack.findIndex((open, at) => at > index && SPECIAL_ELEMENTS.has(open.name));
+      if (block === -1) {
+        active.splice(entryIndex, 1);
+        closeFrom(index);
+        return;
+      }
+      // The block is moved under the element's parent — or, when that is a
+      // table part, foster-parented before the table, as anything is — and
+      // into copies of the formatting between them within three of the
+      // block. Anything else between is closed, and the block leaves it:
+      // in `<b><span hidden><p>x</b>` the `p` and its `x` are not hidden.
+      const common = stack[index - 1];
+      let ancestry = common !== undefined && TABLE_CONTEXT.has(common.name) ? fosterParent() : common?.node;
+      const between: OpenElement[] = [];
+      for (let at = index + 1; at < block; at += 1) {
+        const open = stack[at];
+        if (open === undefined) continue;
+        const entry = lastActive((candidate) => candidate.element === open);
+        const found = active[entry];
+        if (found !== undefined && found !== 'marker' && block - at <= 3) {
+          const copy = element(open.name, open.hidden, ancestry, open.id);
+          ancestry = copy.node;
+          active[entry] = { element: copy, key: found.key };
+          between.push(copy);
+        } else if (entry !== -1) {
+          active.splice(entry, 1);
+        }
+        removed(open);
+      }
+      const blockElement = stack[block];
+      if (blockElement === undefined) return;
+      onStack.delete(blockElement);
+      // What the block held so far moves into a copy of the formatting
+      // element inside it, which the next round closes. The block's node
+      // becomes that copy, keeping everything already in it, and the
+      // block takes a new node in its new place.
+      const holder = blockElement.node;
+      const moved: OpenElement = { ...blockElement, node: { id: blockElement.id, hidden: blockElement.hidden, parent: ancestry } };
+      holder.id = formatting.element.id;
+      holder.hidden = formatting.element.hidden;
+      holder.parent = moved.node;
+      const copy: OpenElement = { ...formatting.element, node: holder };
+      active[entryIndex] = { element: copy, key: formatting.key };
+      removed(formatting.element);
+      const inside = stack.slice(block + 1);
+      stack.splice(index);
+      for (const open of [...between, moved, copy, ...inside]) {
+        stack.push(open);
+        onStack.add(open);
       }
     }
-    if (element?.hidden === true) confirmed.add(element.id);
+  };
+  /** The tree builder's "generate implied end tags", optionally sparing one name. */
+  const impliedEnds = (except?: string): void => {
+    for (let top = stack.at(-1); top !== undefined && IMPLIED_END_ELEMENTS.has(top.name) && top.name !== except; top = stack.at(-1)) {
+      closeFrom(stack.length - 1);
+    }
   };
 
   let cursor = 0;
   for (const tag of scanTags(html)) {
     if (tag.start > cursor) {
-      const run = html.slice(cursor, tag.start);
-      segments.push({ start: cursor, end: tag.start, governing: parentFor(/[^ \t\n\f\r]/.test(run)) });
+      const fostered = /[^ \t\n\f\r]/.test(html.slice(cursor, tag.start));
+      rebuild(fostered);
+      segments.push({ start: cursor, end: tag.start, node: parentFor(fostered) });
     }
     cursor = tag.end;
+    const ignore = (): void => {
+      segments.push({ start: tag.start, end: tag.end, node: parentFor(false) });
+    };
+    // The document's own elements are never hidden or closed here: a body
+    // hidden until a script reveals it is the whole page, not part of it,
+    // and `</body>` ends nothing — content after it is the body's again.
+    if (DOCUMENT_ELEMENTS.has(tag.name)) {
+      ignore();
+      continue;
+    }
     if (!tag.closing) {
       // Before the void check, because `hr` both closes a paragraph and
       // holds nothing.
@@ -652,69 +917,182 @@ const dropHiddenElements = (html: string): string => {
         const paragraph = nearest(['p'], [...SCOPE_BOUNDARIES, 'button']);
         if (paragraph !== -1) closeFrom(paragraph);
       }
+      const items = LIST_ITEM_ENDS[tag.name];
+      if (items !== undefined) {
+        for (let index = stack.length - 1; index >= 0; index -= 1) {
+          const name = stack[index]?.name ?? '';
+          if (items.includes(name)) {
+            closeFrom(index);
+            break;
+          }
+          if (SPECIAL_ELEMENTS.has(name) && name !== 'address' && name !== 'div' && name !== 'p') break;
+        }
+      }
       const sibling = IMPLIED_SIBLING_ENDS[tag.name];
       if (sibling !== undefined) {
-        const open = nearest(sibling.closes, sibling.stopAt);
-        if (open !== -1) closeFrom(open);
+        const found = nearest(sibling.closes, sibling.stopAt);
+        if (found !== -1) closeFrom(found);
+      }
+      const context = TABLE_PART_CONTEXT[tag.name];
+      if (context !== undefined) {
+        const found = nearest(context, ['template']);
+        if (found === -1) {
+          ignore();
+          continue;
+        }
+        closeFrom(found + 1);
+        // The parts the tree builder implies: a cell in a table or a row
+        // group gets a row, a row in a table a row group, a column a column
+        // group — so a later `</tr>` has a row to close, as it does there.
+        const holder = stack[found]?.name ?? '';
+        for (const implied of IMPLIED_TABLE_PARTS[tag.name]?.[holder] ?? []) push(element(implied, false, parentFor(false)));
+      }
+      // A table directly in a table — not in one of its cells or its
+      // caption, where it nests — ends the first; the second is its sibling.
+      if (tag.name === 'table') {
+        const found = nearest(['table', 'caption', 'td', 'th'], ['template']);
+        if (stack[found]?.name === 'table') closeFrom(found);
       }
       // A heading never holds another: `<h1 hidden>gone<h2>shown` ends the
       // h1 at the h2 — but only when the h1 is the current element.
       if (HEADINGS.includes(tag.name) && HEADINGS.includes(stack.at(-1)?.name ?? '')) closeFrom(stack.length - 1);
-      // Nor does a link, and a second `nobr` ends the first: the tree
-      // builder runs the end tag for the open one before inserting this.
-      // For `a` the search stops where the list of active formatting
-      // elements has a marker — a cell, a caption, or an applet-like
-      // element, not a table; for `nobr` it is the default scope.
-      if (tag.name === 'a' || tag.name === 'nobr') {
-        const stopAt = tag.name === 'a' ? SCOPE_BOUNDARIES.filter((name) => name !== 'table') : SCOPE_BOUNDARIES;
-        const open = nearest([tag.name], stopAt);
-        if (open !== -1) endFormatting(open);
+      // Ruby annotations are siblings: each closes the open `rb`, `rp`,
+      // `rt` (and, for `rb` and `rtc`, `rtc`) before it.
+      if (['rb', 'rtc', 'rp', 'rt'].includes(tag.name) && nearest(['ruby'], SCOPE_BOUNDARIES) !== -1) {
+        impliedEnds(tag.name === 'rp' || tag.name === 'rt' ? 'rtc' : undefined);
       }
-      const parent = parentFor(!TABLE_CONTENT.has(tag.name));
-      const hidden = attributesHide(tag.attributes);
-      const id = nextId;
-      nextId += 1;
+      // A select never holds a select: the second closes the first and is
+      // itself dropped. An input closes it too, and is inserted after.
+      if (tag.name === 'select' || tag.name === 'input') {
+        const found = nearest(['select'], SCOPE_BOUNDARIES);
+        if (found !== -1) {
+          closeFrom(found);
+          if (tag.name === 'select') {
+            ignore();
+            continue;
+          }
+        }
+      }
+      if (tag.name === 'form' && form !== undefined && nearest(['template'], []) === -1) {
+        ignore();
+        continue;
+      }
+      // Nor does a link hold a link, and a second `nobr` ends the first:
+      // the tree builder runs the end tag for the open one first.
+      if (tag.name === 'a' && lastActive((entry) => entry.element.name === 'a') !== -1) {
+        const link = active[lastActive((entry) => entry.element.name === 'a')];
+        adopt('a');
+        if (link !== undefined && link !== 'marker') {
+          forget(link.element);
+          const index = stack.lastIndexOf(link.element);
+          if (index !== -1) {
+            const [left] = stack.splice(index, 1);
+            if (left !== undefined) removed(left);
+          }
+        }
+      }
+      const fostered = !TABLE_CONTENT.has(tag.name);
+      if (tag.name === 'nobr') {
+        rebuild(fostered);
+        if (nearest(['nobr'], SCOPE_BOUNDARIES) !== -1) adopt('nobr');
+      }
+      if (!INSERTED_WITHOUT_REBUILDING.has(tag.name)) rebuild(fostered);
+      const opened = element(tag.name, attributesHide(tag.attributes), parentFor(fostered));
+      segments.push({ start: tag.start, end: tag.end, node: opened.node });
       // A void element holds no text, but a hidden one still has an
       // effect to withhold — `one<br hidden>two` is one line — so its tag
       // is dropped, and it is closed the moment it opens.
       if (VOID_ELEMENTS.has(tag.name)) {
-        if (hidden) confirmed.add(id);
-        segments.push({ start: tag.start, end: tag.end, governing: hidden ? [...parent, id] : parent });
+        if (opened.hidden) confirmed.add(opened.id);
         continue;
       }
-      const governing = hidden ? [...parent, id] : parent;
-      segments.push({ start: tag.start, end: tag.end, governing });
-      if (stack.length < MAX_OPEN_ELEMENTS) stack.push({ id, name: tag.name, hidden, governing });
+      if (!push(opened)) continue;
+      if (FORMATTING_ELEMENTS.has(tag.name)) remember(opened, tag.attributes);
+      if (MARKER_ELEMENTS.has(tag.name)) active.push('marker');
+      if (tag.name === 'form') form = opened;
       continue;
     }
-    // `</h1>` ends whichever heading is open, as `</h2>` does. A table
-    // part's end tag is searched for in table scope, past an open cell:
-    // `</table>` from inside a `td` closes the cell and then the table.
-    const names = HEADINGS.includes(tag.name) ? HEADINGS : [tag.name];
-    const scope = TABLE_PARTS.has(tag.name) ? TABLE_SCOPE : SCOPE_BOUNDARIES;
-    const index = nearest(names, scope.filter((name) => name !== tag.name));
+
+    if (FORMATTING_ELEMENTS.has(tag.name)) {
+      ignore();
+      adopt(tag.name);
+      continue;
+    }
+    // `</form>` removes the form it opened and nothing inside it: in
+    // `<form hidden><div>a</form>b</div>` the `b` is still in the form.
+    if (tag.name === 'form') {
+      const pointer = form;
+      form = undefined;
+      const index = pointer === undefined ? -1 : stack.lastIndexOf(pointer);
+      segments.push({ start: tag.start, end: tag.end, node: pointer?.node ?? parentFor(false) });
+      if (pointer !== undefined && index !== -1 && inScope(index)) {
+        impliedEnds();
+        const [left] = stack.splice(stack.lastIndexOf(pointer), 1);
+        if (left !== undefined) removed(left);
+      }
+      continue;
+    }
+    // Where each end tag looks for its element: a table part in table
+    // scope, past an open cell — `</table>` from inside a `td` closes the
+    // cell and the table; any heading for any heading; `</p>` and `</li>`
+    // in their own scopes; a block in the default scope; and anything else
+    // only up to the nearest special element.
+    let index: number;
+    if (TABLE_PARTS.has(tag.name)) index = nearest([tag.name], TABLE_SCOPE.filter((name) => name !== tag.name));
+    else if (HEADINGS.includes(tag.name)) index = nearest(HEADINGS, SCOPE_BOUNDARIES);
+    else if (tag.name === 'p') index = nearest(['p'], [...SCOPE_BOUNDARIES, 'button']);
+    else if (tag.name === 'li') index = nearest(['li'], [...SCOPE_BOUNDARIES, 'ol', 'ul']);
+    else if (SCOPED_END_TAGS.has(tag.name)) index = nearest([tag.name], SCOPE_BOUNDARIES.filter((name) => name !== tag.name));
+    else index = anyOtherEnd(tag.name);
     // An end tag with nothing of its name open is a stray, and closes nothing.
     if (index === -1) {
-      segments.push({ start: tag.start, end: tag.end, governing: parentFor(false) });
+      ignore();
       continue;
     }
-    segments.push({ start: tag.start, end: tag.end, governing: stack[index]?.governing ?? [] });
-    if (FORMATTING_ELEMENTS.has(tag.name)) {
-      endFormatting(index);
-    } else {
-      const element = stack[index];
-      closeFrom(index);
-      if (element?.hidden === true) confirmed.add(element.id);
-    }
+    segments.push({ start: tag.start, end: tag.end, node: stack[index]?.node });
+    closeFrom(index);
+    if (MARKER_ELEMENTS.has(tag.name) && !CLEARED_ON_CLOSE.has(tag.name)) clearToMarker();
   }
-  if (cursor < html.length) segments.push({ start: cursor, end: html.length, governing: parentFor(false) });
-  if (confirmed.size === 0) return html;
+  if (cursor < html.length) {
+    const fostered = /[^ \t\n\f\r]/.test(html.slice(cursor));
+    rebuild(fostered);
+    segments.push({ start: cursor, end: html.length, node: parentFor(fostered) });
+  }
+  // The text after the page's last `>`, which the caller keeps apart from
+  // its patterns, is still read into the tree: formatting a block closed
+  // around is rebuilt for it, so `<div><b hidden>x</div>tail` hides it.
+  const tailFostered = /[^ \t\n\f\r]/.test(tail);
+  if (tail !== '') rebuild(tailFostered);
+  const tailNode = parentFor(tailFostered);
+  if (confirmed.size === 0) return { text: html, tail };
+
+  // Whether a node is dropped: it, or a node it is in, is hidden and was
+  // closed. Read once the page is done, since nodes move until then;
+  // remembered per node, so a page costs its nodes once.
+  const dropped = new Map<TreeNode, boolean>();
+  const isDropped = (node: TreeNode | undefined): boolean => {
+    const chain: TreeNode[] = [];
+    let result = false;
+    for (let at = node; at !== undefined; at = at.parent) {
+      const known = dropped.get(at);
+      if (known !== undefined) {
+        result = known;
+        break;
+      }
+      chain.push(at);
+    }
+    for (const at of chain.reverse()) {
+      result = result || (at.hidden && confirmed.has(at.id));
+      dropped.set(at, result);
+    }
+    return result;
+  };
 
   // A dropped stretch, however many segments, becomes one space.
   let text = '';
   let dropping = false;
   for (const segment of segments) {
-    if (segment.governing.some((id) => confirmed.has(id))) {
+    if (isDropped(segment.node)) {
       if (!dropping) text += ' ';
       dropping = true;
     } else {
@@ -722,7 +1100,7 @@ const dropHiddenElements = (html: string): string => {
       dropping = false;
     }
   }
-  return text;
+  return { text, tail: tail !== '' && isDropped(tailNode) ? ' ' : tail };
 };
 
 /**
@@ -921,7 +1299,8 @@ export const htmlToText = (html: string): string => {
   text = removeSpans(text, /<head\b[^>]*>/gi, /<\/head>/gi, ' ');
   // After the dropped elements, so a `</div>` inside a script's string
   // cannot close a hidden element early.
-  text = dropHiddenElements(text);
+  const visible = dropHiddenElements(text, tail);
+  text = visible.text;
 
   text = text.replace(/<li\b[^>]*>/gi, '\n- ');
   for (const element of BLOCK_ELEMENTS) {
@@ -957,7 +1336,7 @@ export const htmlToText = (html: string): string => {
     },
   );
 
-  text = decodeEntities(text + tail);
+  text = decodeEntities(text + visible.tail);
 
   return text
     .split('\n')

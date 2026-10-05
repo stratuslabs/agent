@@ -546,9 +546,9 @@ test('a misnested formatting end tag closes what it holds, and rebuilds formatti
   const span = htmlToText('<b hidden>gone<span>also</b>shown</span>');
   assert.match(span, /shown/);
   assert.doesNotMatch(span, /gone|also/);
-  // A block inside is what the formatting is moved into: the text after
-  // the end tag is inside a copy of the hidden element, and hidden too.
-  assert.equal(htmlToText('<b hidden>x<p>y</b>z</p><p>after</p>'), 'after');
+  // A block inside is moved out of it: what it held so far stays in a copy
+  // of the hidden element, and what follows the end tag does not.
+  assert.equal(htmlToText('<b hidden>x<p>y</b>z</p><p>after</p>'), 'z\n\nafter');
 });
 
 test('var( is a function only where the CSS tokenizer makes one', () => {
@@ -623,4 +623,68 @@ test('a table cell, row, or row group ends at the next of its kind', () => {
 test('a hidden void element is dropped, not just left empty', () => {
   assert.equal(htmlToText('<p>one<br hidden>two</p>'), 'one two');
   assert.equal(htmlToText('<p>one<br>two</p>'), 'one\ntwo');
+});
+
+// Each expected value below is what Chromium renders for the same page.
+
+test('a caption, a select, and a ruby annotation end at the next of their kind', () => {
+  assert.equal(htmlToText('<table><caption hidden>gone<caption>shown</caption></table><p>after</p>'), 'shown\n\nafter');
+  assert.equal(htmlToText('<select hidden><option>gone<select></select><p>shown</p>'), 'shown');
+  const ruby = htmlToText('<ruby>base<rt hidden>gone<rt>shown</ruby><p>after</p>');
+  assert.match(ruby, /shown/);
+  assert.doesNotMatch(ruby, /gone/);
+});
+
+test('formatting a block closed around is rebuilt, hidden as it was', () => {
+  assert.equal(htmlToText('<p><b hidden>gone</p><p>also</p>'), '');
+  // Text after the page's last tag is rebuilt into as well.
+  assert.equal(htmlToText('<div><b hidden>gone</div>tail'), '');
+});
+
+test('a formatting end tag names the last such element still in force', () => {
+  // The first `</em>` names the inner `em`, already closed: the hidden one
+  // stays open until the second, and holds `after`.
+  assert.equal(htmlToText('<em hidden><p>gone<em>also</p></em><p>after</p></em><p>end</p>'), 'end');
+});
+
+test('a misnested block leaves the elements it is moved out of', () => {
+  // The `p` leaves the hidden span along with the `b`: the span's own text
+  // stays hidden and the paragraph's does not.
+  const text = htmlToText('<b><span hidden>gone<p>moved</b>after</p></span>');
+  assert.match(text, /moved/);
+  assert.match(text, /after/);
+  assert.doesNotMatch(text, /gone/);
+});
+
+test('an end tag that is not a block stops at a block opened inside its element', () => {
+  assert.equal(htmlToText('<div><span hidden>gone<div>also</span>still</div></div><p>after</p>'), 'after');
+});
+
+test('table parts outside a table are ignored, and inside one imply their rows', () => {
+  assert.equal(htmlToText('<div><td hidden>shown</td></div>'), 'shown');
+  // `</tr>` closes the row the cell implied, and the cell with it.
+  assert.equal(htmlToText('<table><td hidden>gone</tr><tr><td>shown</table>'), 'shown');
+  // What a column group cannot hold is placed before the table.
+  assert.equal(htmlToText('<table hidden><colgroup>shown<col></table>'), 'shown');
+});
+
+test('foster-parented content goes into the table\'s parent in the tree', () => {
+  // The second link takes the hidden one off the stack, but the table is
+  // still inside it — and so is what is placed before the table.
+  assert.equal(htmlToText('<div><a hidden><table><a>gone</a></table></a></div><p>after</p>'), 'after');
+});
+
+test('the document\'s own elements are neither hidden nor closed', () => {
+  // A body hidden until a script reveals it is the whole page, not part of it.
+  assert.equal(htmlToText('<body hidden><p>page</p></body>'), 'page');
+  // `</body>` ends nothing: the div is still open, and holds `also`.
+  assert.equal(htmlToText('<body><div hidden>gone</body>also</div><p>after</p>'), 'after');
+});
+
+test('a list item ends at the next only where no other block is between them', () => {
+  // The `dd` is the hidden list's, not a sibling of the `dt` outside it.
+  const text = htmlToText('<dl><dt>term<ul hidden><dd>gone</dd></ul>after</dl>');
+  assert.match(text, /term/);
+  assert.match(text, /after/);
+  assert.doesNotMatch(text, /gone/);
 });

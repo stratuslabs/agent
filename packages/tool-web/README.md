@@ -56,6 +56,15 @@ stylesheet, a class, or a zero font size still comes through, which is
 why every result is labelled `external`. `raw: true` returns the body as
 received.
 
+Each element is judged where a browser's parser puts it, misnested and
+unclosed markup included, so text moved out of a hidden element is kept
+and text moved into one is not. Two exceptions are deliberate, and both
+keep text a browser would not show: an element still open at the end of
+the page keeps what it holds, so a closing rule this extraction does not
+model cannot erase the article after it; and a hidden `body` hides
+nothing, because a page that hides its whole body until a script runs is
+showing all of it.
+
 ## Settings
 
 | Key | Default | What |
