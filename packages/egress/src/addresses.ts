@@ -328,6 +328,16 @@ const onlyHostsMatch = (entries: readonly string[], host: string): boolean => {
     if (entry.trim() === '*') {
       return true;
     }
+    // Brackets are checked before `normalizeHost` strips them: they are
+    // valid around one IPv6 literal and nowhere else, and stripped from
+    // `[*.example.com]` they turned a malformed rule into a working
+    // wildcard. Any other bracket matches nothing.
+    if (/[[\]]/.test(entry)) {
+      const bracketed = /^\[([^[\]]+)\]$/.exec(entry.trim());
+      if (bracketed === null || !expandIPv6(bracketed[1] ?? '')) {
+        return false;
+      }
+    }
     const rule = normalizeHost(entry);
     if (rule === '*') {
       return false;

@@ -151,6 +151,14 @@ test('onlyHosts narrows which names are reachable, exactly or by subdomain', () 
   assert.equal(checkHost({ onlyHosts: ['*.trusted.example@attacker.example'] }, 'x.attacker.example').allowed, false);
   assert.equal(checkHost({ onlyHosts: ['trusted.example:443'] }, 'trusted.example').allowed, false);
   assert.equal(checkHost({ onlyHosts: ['trusted.example\uFF20attacker.example'] }, 'attacker.example').allowed, false);
+  // Brackets belong around an IPv6 literal and nothing else; stripped from
+  // anything else, a malformed rule became a working one.
+  for (const rule of ['[*.example.com]', '[example.com]', '[2001:db8::1', '2001:db8::1]', '[[2001:db8::1]]']) {
+    assert.equal(checkHost({ onlyHosts: [rule] }, 'secret.example.com').allowed, false, rule);
+    assert.equal(checkHost({ onlyHosts: [rule] }, 'example.com').allowed, false, rule);
+    assert.equal(checkHost({ onlyHosts: [rule] }, '[2001:db8::1]').allowed, false, rule);
+  }
+  assert.equal(checkHost({ onlyHosts: ['[2001:db8::1]'] }, '[2001:db8::1]').allowed, true);
 });
 
 test('a host outside onlyHosts is refused at the URL, before any lookup, with the setting named', () => {
