@@ -102,6 +102,19 @@ const declarationsOf = (style: string): string[] => {
  * which is the cascade inside one attribute — `display:none;display:block`
  * is a visible element, and dropping it would delete text the page shows.
  */
+/**
+ * Whitespace as HTML and CSS both define it: five ASCII characters. Not
+ * JavaScript's `\s` or `trim()`, which also take U+00A0 and the rest of
+ * Unicode's spaces — `x=a\u00A0hidden` is one unquoted value to a
+ * browser, and `none\u00A0` is not the keyword `none`.
+ */
+const isAsciiWhitespace = (char: string): boolean =>
+  char === ' ' || char === '\t' || char === '\n' || char === '\f' || char === '\r';
+const trimAscii = (value: string): string => value.replace(/^[ \t\n\f\r]+|[ \t\n\f\r]+$/g, '');
+
+/** `var(` as a function of its own, not the tail of `xvar(`. */
+const CSS_VAR_FUNCTION = /(?:^|[^a-z0-9_\-\u0080-\uffff\\])var\(/;
+
 const CSS_WIDE_KEYWORDS = new Set(['inherit', 'initial', 'unset', 'revert', 'revert-layer']);
 
 /** Every keyword `display` takes, single or in its multi-keyword form. */
@@ -121,9 +134,9 @@ const DISPLAY_KEYWORDS = new Set([
  * reads as not hiding — the direction that keeps text.
  */
 const validFor = (property: string, value: string): boolean => {
-  if (CSS_WIDE_KEYWORDS.has(value) || value.includes('var(')) return true;
+  if (CSS_WIDE_KEYWORDS.has(value) || CSS_VAR_FUNCTION.test(value)) return true;
   if (property === 'visibility') return value === 'visible' || value === 'hidden' || value === 'collapse';
-  if (property === 'display') return value.split(/\s+/).every((keyword) => DISPLAY_KEYWORDS.has(keyword));
+  if (property === 'display') return value.split(/[ \t\n\f\r]+/).every((keyword) => DISPLAY_KEYWORDS.has(keyword));
   return true;
 };
 
@@ -132,10 +145,10 @@ const styleHides = (style: string): boolean => {
   for (const declaration of declarationsOf(style)) {
     const colon = declaration.indexOf(':');
     if (colon === -1) continue;
-    const property = declaration.slice(0, colon).trim().toLowerCase();
-    const raw = declaration.slice(colon + 1).trim().toLowerCase();
-    const important = /!\s*important$/.test(raw);
-    const value = important ? raw.replace(/!\s*important$/, '').trim() : raw;
+    const property = trimAscii(declaration.slice(0, colon)).toLowerCase();
+    const raw = trimAscii(declaration.slice(colon + 1)).toLowerCase();
+    const important = /![ \t\n\f\r]*important$/.test(raw);
+    const value = important ? trimAscii(raw.replace(/![ \t\n\f\r]*important$/, '')) : raw;
     if (!validFor(property, value)) continue;
     if (declared.get(property)?.important === true && !important) continue;
     declared.set(property, { value, important });
@@ -154,7 +167,7 @@ const styleHides = (style: string): boolean => {
 const attributesHide = (attributes: ReadonlyMap<string, string>): boolean => {
   const style = attributes.get('style');
   return attributes.has('hidden')
-    || decodeEntities(attributes.get('aria-hidden') ?? '').trim().toLowerCase() === 'true'
+    || trimAscii(decodeEntities(attributes.get('aria-hidden') ?? '')).toLowerCase() === 'true'
     || (style !== undefined && styleHides(decodeEntities(style)));
 };
 
@@ -179,6 +192,19 @@ const CLOSES_PARAGRAPH = new Set([
   'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hgroup',
   'hr', 'li', 'listing', 'main', 'menu', 'nav', 'ol', 'p', 'plaintext', 'pre', 'search', 'section', 'summary',
   'table', 'ul', 'xmp',
+]);
+
+/**
+ * End tags that close every element opened inside them, an open `p`
+ * included — the tree builder pops to the element they name. Inline
+ * formatting end tags are not here: those run the adoption agency, which
+ * leaves a paragraph open.
+ */
+const ENDS_PARAGRAPHS_INSIDE = new Set([
+  'address', 'article', 'aside', 'blockquote', 'body', 'button', 'caption', 'center', 'dd', 'details', 'dialog',
+  'dir', 'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'header', 'hgroup', 'html', 'li', 'listing', 'main', 'menu', 'nav', 'ol', 'pre', 'search', 'section', 'select',
+  'summary', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul',
 ]);
 
 interface ScannedTag {
@@ -219,7 +245,9 @@ const scanTags = (html: string): ScannedTag[] => {
       continue;
     }
     const nameStart = cursor;
-    while (cursor < html.length && !/[\s/>]/.test(html[cursor] ?? '')) cursor += 1;
+    while (cursor < html.length && !isAsciiWhitespace(html[cursor] ?? '') && html[cursor] !== '/' && html[cursor] !== '>') {
+      cursor += 1;
+    }
     const name = html.slice(nameStart, cursor).toLowerCase();
 
     const attributes = new Map<string, string>();
@@ -250,7 +278,7 @@ const scanTags = (html: string): ScannedTag[] => {
         end = cursor;
         break;
       }
-      const space = /\s/.test(char);
+      const space = isAsciiWhitespace(char);
       if (state === 'beforeName') {
         if (!space && char !== '/') {
           state = 'name';
@@ -296,7 +324,7 @@ const scanTags = (html: string): ScannedTag[] => {
     if (closing) continue;
     if (name === 'plaintext') break;
     if (RAW_TEXT_ELEMENTS.has(name)) {
-      const endTag = new RegExp(`</${name}[\\s/>]`, 'gi');
+      const endTag = new RegExp(`</${name}[ \\t\\n\\f\\r/>]`, 'gi');
       endTag.lastIndex = index;
       const found = endTag.exec(html);
       if (found === null) break;
@@ -344,6 +372,21 @@ const dropHiddenElements = (html: string): string => {
       // the void check, because `hr` is both.
       for (const paragraph of (open.get('p') ?? []).splice(0)) {
         if (paragraph.hidden) dropped.push([paragraph.start, tag.start]);
+      }
+    }
+    if (tag.closing && ENDS_PARAGRAPHS_INSIDE.has(tag.name)) {
+      // `<div><p hidden>gone</div>shown</p>`: the `</div>` ends the
+      // paragraph opened inside it, so the later `</p>` is a stray one and
+      // `shown` is visible. Only paragraphs opened after the element this
+      // tag closes; one that was already open outside it stays open.
+      const ancestor = open.get(tag.name)?.at(-1);
+      const paragraphs = open.get('p') ?? [];
+      if (ancestor !== undefined) {
+        const inside = paragraphs.filter((paragraph) => paragraph.start > ancestor.start);
+        open.set('p', paragraphs.filter((paragraph) => paragraph.start < ancestor.start));
+        for (const paragraph of inside) {
+          if (paragraph.hidden) dropped.push([paragraph.start, tag.start]);
+        }
       }
     }
     if (VOID_ELEMENTS.has(tag.name)) continue;

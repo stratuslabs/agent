@@ -436,3 +436,27 @@ test('a block start tag closes an open paragraph, so a later </p> cannot reach b
   assert.match(ruled, /shown/);
   assert.doesNotMatch(ruled, /gone/);
 });
+
+test('whitespace is what HTML and CSS call whitespace, not what JavaScript does', () => {
+  // U+00A0 is a character of an unquoted value to the HTML tokenizer, so
+  // there is no `hidden` attribute here.
+  assert.equal(htmlToText('<p x=a hidden>visible</p>'), 'visible');
+  // And a character of the identifier to CSS: `none ` is not `none`.
+  assert.equal(htmlToText('<p style="display:none ">visible</p>'), 'visible');
+  // ASCII whitespace still separates, in both.
+  assert.equal(htmlToText('<p x=a\thidden>gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:none\t">gone</p><p>shown</p>'), 'shown');
+});
+
+test('only a real var() function defers a value', () => {
+  assert.equal(htmlToText('<p style="display:none;display:xvar(--x)">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:none;display:var(--x)">kept</p>'), 'kept');
+  assert.equal(htmlToText('<p style="display:none;display:VAR(--x)">kept</p>'), 'kept');
+});
+
+test('an ancestor end tag closes an open paragraph inside it', () => {
+  const text = htmlToText('<div><p hidden>gone</div>shown</p><p>after</p>');
+  assert.match(text, /shown/);
+  assert.match(text, /after/);
+  assert.doesNotMatch(text, /gone/);
+});
