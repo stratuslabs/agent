@@ -817,3 +817,10 @@ test('a form opened directly in a table holds nothing', () => {
   assert.match(text, /visible/);
   assert.match(text, /cell/);
 });
+
+test('a form ignored for the form pointer closes no paragraph', () => {
+  const text = htmlToText('<table><form><tr><td>cell</td></tr></table><p hidden>gone<form>stillgone</p><p>shown</p>');
+  assert.match(text, /cell/);
+  assert.match(text, /shown/);
+  assert.doesNotMatch(text, /gone/);
+});

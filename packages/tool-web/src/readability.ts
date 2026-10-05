@@ -995,6 +995,12 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       continue;
     }
     if (!tag.closing) {
+      // A second form while the form pointer is set is ignored before it
+      // does anything else — before it closes a paragraph, too.
+      if (tag.name === 'form' && form !== undefined && nearest(['template'], []) === -1) {
+        ignore();
+        continue;
+      }
       // Before the void check, because `hr` both closes a paragraph and
       // holds nothing.
       if (CLOSES_PARAGRAPH.has(tag.name)) {
@@ -1056,10 +1062,6 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
             continue;
           }
         }
-      }
-      if (tag.name === 'form' && form !== undefined && nearest(['template'], []) === -1) {
-        ignore();
-        continue;
       }
       // Nor does a link hold a link, and a second `nobr` ends the first:
       // the tree builder runs the end tag for the open one first.
