@@ -706,3 +706,13 @@ test('tag names fold case in ASCII only', () => {
   // element holding its text, not a void link.
   assert.equal(htmlToText('<lin\u212A hidden>gone</lin\u212A><p>after</p>'), 'after');
 });
+
+test('display values are the ones Chromium accepts', () => {
+  // Legacy, and accepted: the later declaration wins and the text shows.
+  assert.equal(htmlToText('<p style="display:none;display:-webkit-flex">shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:none;display:-webkit-inline-flex">shown</p>'), 'shown');
+  // In the spec, and rejected: the `none` before it stands.
+  assert.equal(htmlToText('<p style="display:none;display:run-in">gone</p><p>after</p>'), 'after');
+  assert.equal(htmlToText('<p style="display:none;display:ruby-base">gone</p><p>after</p>'), 'after');
+  assert.equal(htmlToText('<p style="display:none;display:run-in flow">gone</p><p>after</p>'), 'after');
+});

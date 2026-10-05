@@ -242,15 +242,20 @@ const cssDeclarations = (style: string): CssDeclaration[] => {
 
 const CSS_WIDE_KEYWORDS = new Set(['inherit', 'initial', 'unset', 'revert', 'revert-layer']);
 
-/** `display` values that stand alone. */
+/**
+ * `display` values that stand alone — exactly the ones Chromium accepts
+ * (`CSS.supports`), which is not the spec's list: it takes the legacy
+ * `-webkit-flex`, and rejects `run-in` and three of the four ruby values.
+ * Accepting a value it rejects reads `display:none;display:run-in` as shown.
+ */
 const DISPLAY_SINGLE = new Set([
-  'none', 'contents', 'block', 'inline', 'run-in', 'flow', 'flow-root', 'table', 'flex', 'grid', 'ruby',
+  'none', 'contents', 'block', 'inline', 'flow', 'flow-root', 'table', 'flex', 'grid', 'ruby',
   'list-item', 'math', 'inline-block', 'inline-flex', 'inline-grid', 'inline-table',
   'table-row-group', 'table-header-group', 'table-footer-group', 'table-row', 'table-cell',
-  'table-column-group', 'table-column', 'table-caption', 'ruby-base', 'ruby-text', 'ruby-base-container',
-  'ruby-text-container', '-webkit-box', '-webkit-inline-box',
+  'table-column-group', 'table-column', 'table-caption', 'ruby-text',
+  '-webkit-box', '-webkit-inline-box', '-webkit-flex', '-webkit-inline-flex',
 ]);
-const DISPLAY_OUTSIDE = new Set(['block', 'inline', 'run-in']);
+const DISPLAY_OUTSIDE = new Set(['block', 'inline']);
 const DISPLAY_INSIDE = new Set(['flow', 'flow-root', 'table', 'flex', 'grid', 'ruby', 'math']);
 
 /**
