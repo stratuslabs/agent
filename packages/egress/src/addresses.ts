@@ -288,8 +288,26 @@ const hostMatches = (policy: EgressPolicy, host: string): boolean => {
  */
 const normalizeHost = (host: string): string => host.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
 
+/**
+ * A host in the form a URL gives it: punycode for a Unicode name, an IPv6
+ * literal compressed and lowercased. Rules are written by people and hosts
+ * arrive from `URL`, so both sides go through the same parser or
+ * `bücher.de` never matches the `xn--bcher-kva.de` a request carries. A
+ * name the parser refuses keeps its plain form, and matches only itself.
+ */
+const canonicalHost = (host: string): string => {
+  const plain = normalizeHost(host);
+  if (plain === '') return plain;
+  try {
+    const parsed = new URL(`http://${expandIPv6(plain) ? `[${plain}]` : plain}/`).hostname;
+    return normalizeHost(parsed);
+  } catch {
+    return plain;
+  }
+};
+
 const onlyHostsMatch = (entries: readonly string[], host: string): boolean => {
-  const normalized = normalizeHost(host);
+  const normalized = canonicalHost(host);
   return entries.some((entry) => {
     // `*` as written, before normalizing: `*.`, a wildcard cut short,
     // normalizes to `*` too, and a typo must not lift the whole list. A
@@ -304,7 +322,9 @@ const onlyHostsMatch = (entries: readonly string[], host: string): boolean => {
     // `*.example.com` is every subdomain, at any depth, and never the
     // apex: the suffix carries its leading dot, so `badexample.com` does
     // not end with it.
-    return rule.startsWith('*.') ? normalized.endsWith(rule.slice(1)) : rule === normalized;
+    return rule.startsWith('*.')
+      ? normalized.endsWith(`.${canonicalHost(rule.slice(2))}`)
+      : canonicalHost(rule) === normalized;
   });
 };
 

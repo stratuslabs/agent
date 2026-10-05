@@ -134,6 +134,13 @@ test('onlyHosts narrows which names are reachable, exactly or by subdomain', () 
   assert.equal(checkHost({ onlyHosts: ['*.'] }, 'attacker.example').allowed, false);
   assert.equal(checkHost({ onlyHosts: ['*..'] }, 'attacker.example').allowed, false);
   assert.equal(checkHost({ onlyHosts: [' * '] }, 'attacker.example').allowed, true);
+  // A rule is read in the form a URL gives its host, or it never matches:
+  // a Unicode name arrives as punycode, an IPv6 literal compressed.
+  const unicode = { onlyHosts: ['bücher.de', '*.bücher.de', '2001:db8:0:0:0:0:0:1'] };
+  assert.equal(assertRequestAllowed('https://bücher.de/', unicode).hostname, 'xn--bcher-kva.de');
+  assert.equal(checkHost(unicode, 'shop.xn--bcher-kva.de').allowed, true);
+  assert.equal(checkHost(unicode, '[2001:db8::1]').allowed, true);
+  assert.equal(checkHost(unicode, 'xn--bchr-kva.de').allowed, false);
 });
 
 test('a host outside onlyHosts is refused at the URL, before any lookup, with the setting named', () => {
