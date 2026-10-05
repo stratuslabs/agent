@@ -72,7 +72,7 @@ would have refused it is never called.
 
 | Setting | What it does |
 | --- | --- |
-| `onlyHosts` | When set, the only hosts reachable at all: exact names or literal addresses, or `*.example.com` for every subdomain, never the apex. Checked on the name, before any lookup, on every path that dials — the URL check, the pinned lookup, and the proxy — because a DNS query for a refused name is itself a request. A listed name still faces the address check, and an `allowedHosts` entry stays reachable. Unset and empty differ: unset is every public host, `[]` is none. |
+| `onlyHosts` | When set, the only hosts reachable at all: exact names or literal addresses, or `*.example.com` for every subdomain, never the apex. Checked on the name, before any lookup, on every path that dials — the URL check, the pinned lookup, and the proxy — because a DNS query for a refused name is itself a request. A listed name still faces the address check, and an `allowedHosts` entry stays reachable. Unset and empty differ: unset is every public host, `[]` is none, and a list containing `*` is every public host again — what an agent's override uses to lift a list it would otherwise inherit. |
 
 The address check protects the machine from what an agent requests. This
 protects what an agent has read from where it may send it — a URL's query

@@ -42,7 +42,10 @@ export interface EgressPolicy {
    * The only hosts a tool may reach, when set — exact names or literal
    * addresses, or `*.example.com` for every subdomain (not `example.com`
    * itself; list both). Unset reaches any public host, which is the
-   * default and stays it.
+   * default and stays it; so does a list containing `*`, which is how one
+   * agent's override lifts a list every other agent inherits — a
+   * per-agent setting replaces the default rather than removing it, so
+   * without a value meaning "any host" there was no way back out.
    *
    * The other settings here widen the address check; this one narrows
    * what is reachable at all, and on a different axis. The address check
@@ -289,6 +292,9 @@ const onlyHostsMatch = (entries: readonly string[], host: string): boolean => {
   const normalized = normalizeHost(host);
   return entries.some((entry) => {
     const rule = normalizeHost(entry);
+    if (rule === '*') {
+      return true;
+    }
     // `*.example.com` is every subdomain, at any depth, and never the
     // apex: the suffix carries its leading dot, so `badexample.com` does
     // not end with it.

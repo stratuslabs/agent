@@ -314,7 +314,12 @@ test('onlyHosts holds web.fetch to its list, per agent, redirect hops included',
     onlyHosts: ['localhost'],
     // An allowedHosts entry stays reachable whatever onlyHosts says, so
     // scout's narrower list has to drop the inherited exemption as well.
-    agents: { scout: { onlyHosts: ['docs.python.org'], allowedHosts: [] } },
+    agents: {
+      scout: { onlyHosts: ['docs.python.org'], allowedHosts: [] },
+      // A fleet-wide list, lifted for one agent: an override replaces the
+      // default, so `*` is the way to say "no list" from under one.
+      ranger: { onlyHosts: ['*'] },
+    },
   });
 
   const reached = await tool.execute({ url: `http://localhost:${port}/` }, session) as JsonObject;
@@ -338,4 +343,13 @@ test('onlyHosts holds web.fetch to its list, per agent, redirect hops included',
     tool.execute({ url: `http://localhost:${port}/` }, scout),
     /localhost is not one of the hosts this agent may reach/,
   );
+  // Refused by address, not by name: the list is lifted, the SSRF check
+  // that the inherited `allowedHosts` answers for localhost is not.
+  const ranger: Session = { ...session, id: 'session-ranger', agent: { id: 'ranger', name: 'Ranger' } };
+  await assert.rejects(
+    tool.execute({ url: 'http://127.0.0.1:1/?d=secret' }, ranger),
+    (error: unknown) => error instanceof Error && !/is not one of the hosts/.test(error.message),
+  );
+  const lifted = await tool.execute({ url: `http://localhost:${port}/` }, ranger) as JsonObject;
+  assert.equal(lifted.text, 'reached');
 });

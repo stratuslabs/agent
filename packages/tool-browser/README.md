@@ -125,7 +125,7 @@ version of all of this.
 | `executablePath` | none | Use the browser at this path. |
 | `headless` | `true` | Set `false` to watch it work. |
 | `allowedHosts` | none | Hosts exempt from the address check. |
-| `onlyHosts` | unset (every public host) | The only hosts the browser may reach — every navigation **and every subresource**, so a page's CDNs, fonts, and APIs need entries too (`*.example.com` covers subdomains, not the apex). A refused name is never looked up. `allowedHosts` entries stay reachable. See [`tool-web`](../tool-web/README.md#settings) for why. |
+| `onlyHosts` | unset (every public host) | The only hosts the browser may reach — every navigation **and every subresource**, so a page's CDNs, fonts, and APIs need entries too (`*.example.com` covers subdomains, not the apex). A refused name is never looked up. `allowedHosts` entries stay reachable. `["*"]` under `agents` lifts an inherited list. See [`tool-web`](../tool-web/README.md#settings) for why. |
 | `allowPrivateAddresses` | `false` | Reach non-global addresses. The trusted-workstation posture. |
 | `idleMs` | `300000` | Close a conversation's context after this much quiet. |
 | `maxContexts` | `4` | Contexts at once; the least recently used goes first. |

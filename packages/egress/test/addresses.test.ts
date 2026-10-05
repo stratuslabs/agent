@@ -125,6 +125,9 @@ test('onlyHosts narrows which names are reachable, exactly or by subdomain', () 
   assert.equal(checkHost({}, 'attacker.example').allowed, true);
   // Set and empty reaches nothing.
   assert.equal(checkHost({ onlyHosts: [] }, 'docs.python.org').allowed, false);
+  // `*` is every host — the value an agent's override uses to lift a list
+  // it would otherwise inherit.
+  assert.equal(checkHost({ onlyHosts: ['*'] }, 'attacker.example').allowed, true);
 });
 
 test('a host outside onlyHosts is refused at the URL, before any lookup, with the setting named', () => {
