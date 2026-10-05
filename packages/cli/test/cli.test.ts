@@ -12224,6 +12224,32 @@ const writePluginFixture = async () => {
   return { home, cwd };
 };
 
+test('plugins says which agents lose their grants after reading external content', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  await writeFile(configPath, JSON.stringify({
+    ...config,
+    approvals: { externalContent: 'gate', agents: { stratus: { externalContent: 'label' } } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0);
+  // "Already-authorized ones still run" is false for a gated agent the
+  // first time it browses, so the summary names who it is false for.
+  assert.match(output.stdout, /approvals: headless — an uncovered gated call is refused/);
+  assert.match(
+    output.stdout,
+    /a conversation that has read external content runs nothing on a grant, for blair \(approvals\.externalContent\)/,
+  );
+});
+
 test('plugins names every link in the chain from installed to callable', async () => {
   const { home, cwd } = await writePluginFixture();
   const { streams, output } = createStreams();

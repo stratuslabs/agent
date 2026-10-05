@@ -396,7 +396,10 @@ half stood.
   installed the app" default that most installs would never touch.
 - **Should tainted writes ever be `gated` rather than merely labelled?**
   Out of scope above, but the argument is real for a fleet where an agent
-  browses untrusted pages all day.
+  browses untrusted pages all day. *Since answered as an opt-in:*
+  `approvals.externalContent: "gate"` withdraws a conversation's grants
+  once it reads `external` content, per agent, and the default stays
+  label-only ([Approvals](../guides/approvals.md#after-an-agent-reads-the-web)).
 - **Does the label reach the *user*, or only the model?** An operator reading
   their agent's memory in [17](./17-fleet-console.md) probably wants to see
   which facts came off the network, and that is a UI decision 17 owns.

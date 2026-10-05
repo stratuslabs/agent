@@ -190,6 +190,10 @@ risk levels. Four things are worth knowing here:
   labels a file the agent wrote while its session was tainted, from a
   per-agent ledger at `~/.stratus/agents/<agent>/workspace/fs-provenance.jsonl`. The session that read any of it only
   ever gets less trusted, and every fact it remembers carries the label.
+  The model reads an `external` result inside an envelope marked
+  `untrusted`, with a note that it is data, not instructions — a nudge, not
+  a defence. `unknown` is not wrapped: a marker on every command's output
+  would teach the model to skip it.
   A third-party plugin whose output comes from outside declares
   `outputTrust: 'external'` on the tool, or marks a single call through
   the execution context — see [`plugins.md`](../architecture/plugins.md).
