@@ -862,3 +862,11 @@ test('a form end tag inside a template leaves the document\'s form pointer set',
   // so the last form start tag is ignored and the paragraph stays open.
   assert.equal(htmlToText('<table><form></table><template><form></form></template><p hidden>gone<form></form>shown</p><p>after</p>'), 'after');
 });
+
+test('a comment ends where the HTML tokenizer ends it', () => {
+  // `--!>` closes a comment, so the `</div>` before it is inside it and
+  // closes nothing — as in Chromium.
+  assert.equal(htmlToText('<div hidden>gone<!-- x > </div> --!>still hidden</div><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p>a<!-->b</p>'), 'ab');
+  assert.equal(htmlToText('<p>a<!--->b</p>'), 'ab');
+});

@@ -1437,7 +1437,10 @@ export const htmlToText = (html: string): string => {
   // that sweep reads `5 < 10 and 20 > 15` as a tag and deletes the middle
   // of the sentence — prose about arbitrary subjects is exactly what a
   // fetched page is.
-  let text = removeSpans(html.slice(0, end), /<!--/g, /-->/g, '');
+  // A comment ends where the HTML tokenizer ends it: at `-->`, at `--!>`,
+  // or at once in `<!-->` and `<!--->`. Read only to `-->`, a `--!>`
+  // comment ran on and the markup inside it reached the visibility pass.
+  let text = removeSpans(html.slice(0, end), /<!--/g, /(?<=<!--)-?>|--!?>/g, '');
   text = text.replace(/<[!?][^>]*>/g, ' ');
 
   // Before the dropped elements, which are cut out by name with no regard
