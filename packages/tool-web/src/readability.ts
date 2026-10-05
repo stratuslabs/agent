@@ -45,9 +45,56 @@ const VOID_ELEMENTS = new Set([
  * which is the cascade inside one attribute — `display:none;display:block`
  * is a visible element, and dropping it would delete text the page shows.
  */
+/**
+ * An inline style's declarations, split where a browser splits them: on a
+ * `;` outside a string, outside parentheses, and with comments removed.
+ * Split on every `;`, `content:";display:none;"` invents a declaration the
+ * browser never sees and drops text it shows. One pass, character by
+ * character; an unterminated string or comment runs to the end, as CSS
+ * reads it.
+ */
+const declarationsOf = (style: string): string[] => {
+  const declarations: string[] = [];
+  let current = '';
+  let quote = '';
+  let depth = 0;
+  for (let index = 0; index < style.length; index += 1) {
+    const char = style[index] ?? '';
+    if (quote !== '') {
+      current += char;
+      if (char === '\\') {
+        current += style[index + 1] ?? '';
+        index += 1;
+      } else if (char === quote) {
+        quote = '';
+      }
+      continue;
+    }
+    if (char === '/' && style[index + 1] === '*') {
+      const close = style.indexOf('*/', index + 2);
+      index = close === -1 ? style.length : close + 1;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === '(') {
+      depth += 1;
+    } else if (char === ')' && depth > 0) {
+      depth -= 1;
+    } else if (char === ';' && depth === 0) {
+      declarations.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  declarations.push(current);
+  return declarations;
+};
+
 const styleHides = (style: string): boolean => {
   const declared = new Map<string, { value: string; important: boolean }>();
-  for (const declaration of style.split(';')) {
+  for (const declaration of declarationsOf(style)) {
     const colon = declaration.indexOf(':');
     if (colon === -1) continue;
     const property = declaration.slice(0, colon).trim().toLowerCase();
@@ -81,6 +128,80 @@ const attributesHide = (source: string): boolean => {
 };
 
 /**
+ * Elements whose content is text up to their own end tag, whatever it
+ * looks like: `<textarea></div></textarea>` holds the characters `</div>`,
+ * and pairing them as an end tag would close a hidden element early and
+ * read out the rest of it.
+ */
+const RAW_TEXT_ELEMENTS = new Set([
+  'script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext',
+]);
+
+interface ScannedTag {
+  start: number;
+  end: number;
+  closing: boolean;
+  name: string;
+  attributes: string;
+}
+
+/**
+ * The page's tags, in one pass, read the way the HTML tokenizer reads them
+ * rather than up to the first `>`: a quote opens a value only straight
+ * after `=`, and inside one a `>` is a character — `<div title="1>0"
+ * hidden>` is hidden, and a regex ending at the first `>` never saw the
+ * `hidden`. A tag still open at the end of the page is dropped, as a
+ * browser drops it, and nothing after it is a tag. Every character is
+ * visited a bounded number of times, so a hostile page costs its length.
+ */
+const scanTags = (html: string): ScannedTag[] => {
+  const tags: ScannedTag[] = [];
+  let index = 0;
+  for (;;) {
+    const start = html.indexOf('<', index);
+    if (start === -1) break;
+    let cursor = start + 1;
+    const closing = html[cursor] === '/';
+    if (closing) cursor += 1;
+    if (!/[a-zA-Z]/.test(html[cursor] ?? '')) {
+      index = start + 1;
+      continue;
+    }
+    const nameStart = cursor;
+    while (cursor < html.length && !/[\s/>]/.test(html[cursor] ?? '')) cursor += 1;
+    const name = html.slice(nameStart, cursor).toLowerCase();
+    const attributesStart = cursor;
+    let end = -1;
+    while (cursor < html.length) {
+      const char = html[cursor];
+      if (char === '>') {
+        end = cursor;
+        break;
+      }
+      cursor += 1;
+      if (char !== '=') continue;
+      while (cursor < html.length && /\s/.test(html[cursor] ?? '')) cursor += 1;
+      const quote = html[cursor];
+      if (quote === '"' || quote === "'") {
+        const close = html.indexOf(quote, cursor + 1);
+        cursor = close === -1 ? html.length : close + 1;
+      }
+    }
+    if (end === -1) break;
+    tags.push({ start, end: end + 1, closing, name, attributes: html.slice(attributesStart, end) });
+    index = end + 1;
+    if (!closing && RAW_TEXT_ELEMENTS.has(name)) {
+      const endTag = new RegExp(`</${name}[\\s/>]`, 'gi');
+      endTag.lastIndex = index;
+      const found = endTag.exec(html);
+      if (found === null) break;
+      index = found.index;
+    }
+  }
+  return tags;
+};
+
+/**
  * Drops the elements a browser would not show: the `hidden` attribute, an
  * inline `display: none` or `visibility: hidden`, and `aria-hidden="true"`.
  * The last is still drawn on screen; it is here because it is what the
@@ -109,24 +230,18 @@ const attributesHide = (source: string): boolean => {
  * place for a rendering approximation to fall back to.
  */
 const dropHiddenElements = (html: string): string => {
-  // Tags are only read up to the last `>`: past it, every `<` would be a
-  // tag that never closes, and each would scan the rest of the page to
-  // find that out.
-  const scanned = html.slice(0, html.lastIndexOf('>') + 1);
   const open = new Map<string, { start: number; hidden: boolean }[]>();
   const dropped: [number, number][] = [];
-  for (const match of scanned.matchAll(/<(\/?)([a-zA-Z][^\s/>]*)([^>]*)>/g)) {
-    const [tag, slash, rawName = '', attributes = ''] = match;
-    const name = rawName.toLowerCase();
-    if (VOID_ELEMENTS.has(name)) continue;
-    const stack = open.get(name) ?? [];
-    open.set(name, stack);
-    if (slash === '') {
-      stack.push({ start: match.index, hidden: attributesHide(attributes) });
+  for (const tag of scanTags(html)) {
+    if (VOID_ELEMENTS.has(tag.name)) continue;
+    const stack = open.get(tag.name) ?? [];
+    open.set(tag.name, stack);
+    if (!tag.closing) {
+      stack.push({ start: tag.start, hidden: attributesHide(tag.attributes) });
       continue;
     }
     const opener = stack.pop();
-    if (opener?.hidden === true) dropped.push([opener.start, match.index + tag.length]);
+    if (opener?.hidden === true) dropped.push([opener.start, tag.end]);
   }
   if (dropped.length === 0) return html;
 
@@ -196,15 +311,24 @@ const NAMED_ENTITIES: Record<string, string> = {
   rdquo: '”',
 };
 
+/**
+ * A numeric reference as a browser reads it: nothing past U+10FFFF, no
+ * surrogate, and no NUL is a character, so each becomes U+FFFD. Handed to
+ * `String.fromCodePoint`, the first throws — and one `&#1114112;` anywhere
+ * on a page, an attribute included, failed the whole fetch.
+ */
+const codePointText = (code: number): string =>
+  code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? '\uFFFD' : String.fromCodePoint(code);
+
 export const decodeEntities = (value: string): string =>
   value.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (match, entity: string) => {
     if (entity.startsWith('#x') || entity.startsWith('#X')) {
       const code = Number.parseInt(entity.slice(2), 16);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+      return Number.isFinite(code) ? codePointText(code) : '\uFFFD';
     }
     if (entity.startsWith('#')) {
       const code = Number.parseInt(entity.slice(1), 10);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+      return Number.isFinite(code) ? codePointText(code) : '\uFFFD';
     }
     return NAMED_ENTITIES[entity.toLowerCase()] ?? match;
   });

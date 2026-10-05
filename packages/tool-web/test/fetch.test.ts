@@ -354,3 +354,35 @@ test('the linear extraction reads a page exactly as the regexes did', () => {
   assert.equal(extractTitle('<title>İstanbul</title><p>x</p>'), 'İstanbul');
   assert.equal(extractTitle('<TITLE>Kettles</TITLE>'), 'Kettles');
 });
+
+test('an out-of-range numeric entity reads as a replacement character, never a thrown page', () => {
+  // String.fromCodePoint throws past U+10FFFF, and one such entity in an
+  // attribute — read now, for visibility — failed the whole fetch.
+  assert.equal(htmlToText('<p title="&#1114112;">hello</p>'), 'hello');
+  assert.equal(htmlToText('<p>a&#x110000;b&#0;c&#xD800;d</p>'), 'a�b�c�d');
+  assert.equal(htmlToText('<p>&#99999999999999999999;</p>'), '�');
+  assert.equal(htmlToText('<p>&#x1F600;</p>'), '😀');
+});
+
+test('a semicolon inside a quoted CSS value or a comment is not a declaration boundary', () => {
+  // A browser sees one `content` declaration here, and shows the element.
+  assert.equal(htmlToText(`<p style='content:";display:none;"'>kept</p>`), 'kept');
+  assert.equal(htmlToText('<p style="/*;display:none;*/color:red">kept</p>'), 'kept');
+  assert.equal(htmlToText(`<p style="background:url('a;b'); display:none">gone</p><p>shown</p>`), 'shown');
+  assert.equal(htmlToText('<p style="display/**/:none">gone</p><p>shown</p>'), 'shown');
+});
+
+test('a quoted > in an attribute does not end the tag before the attribute that hides it', () => {
+  assert.equal(htmlToText('<div title="1>0" hidden>secret</div><p>shown</p>'), 'shown');
+  assert.equal(htmlToText(`<div data-x='a>b' style="display:none">secret</div><p>shown</p>`), 'shown');
+  // A quote is a quote only where a value starts: in a name it is a name.
+  assert.equal(htmlToText('<div a"b hidden>secret</div><p>shown</p>'), 'shown');
+});
+
+test('an end tag inside a textarea or title does not close a hidden element', () => {
+  assert.equal(
+    htmlToText('<div hidden><textarea></div>leak</textarea>still hidden</div><p>shown</p>'),
+    'shown',
+  );
+  assert.equal(htmlToText('<div hidden><title></div>leak</title>still hidden</div><p>shown</p>'), 'shown');
+});
