@@ -1025,9 +1025,10 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     const ignore = (): void => {
       segments.push({ start: tag.start, end: tag.end, node: parentFor(false) });
     };
-    // The document's own elements are never hidden or closed here: a body
-    // hidden until a script reveals it is the whole page, not part of it,
-    // and `</body>` ends nothing — content after it is the body's again.
+    // The document's own elements are never hidden or closed here: an
+    // `html` or `body` hidden until a script reveals it is the whole page,
+    // not part of it, and `</body>` ends nothing — content after it is the
+    // body's again.
     if (DOCUMENT_ELEMENTS.has(tag.name)) {
       ignore();
       continue;

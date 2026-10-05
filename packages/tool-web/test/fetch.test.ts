@@ -677,6 +677,7 @@ test('foster-parented content goes into the table\'s parent in the tree', () => 
 test('the document\'s own elements are neither hidden nor closed', () => {
   // A body hidden until a script reveals it is the whole page, not part of it.
   assert.equal(htmlToText('<body hidden><p>page</p></body>'), 'page');
+  assert.equal(htmlToText('<html style="display:none"><body><p>page</p></body></html>'), 'page');
   // `</body>` ends nothing: the div is still open, and holds `also`.
   assert.equal(htmlToText('<body><div hidden>gone</body>also</div><p>after</p>'), 'after');
 });
