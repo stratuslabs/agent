@@ -361,26 +361,43 @@ const validFor = (property: string, value: readonly CssToken[]): boolean => {
   if (words === undefined) return false;
   if (words.length === 1 && CSS_WIDE_KEYWORDS.has(words[0] ?? '')) return true;
   if (property === 'visibility') return words.length === 1 && ['visible', 'hidden', 'collapse'].includes(words[0] ?? '');
+  if (property === 'content-visibility') return words.length === 1 && ['visible', 'auto', 'hidden'].includes(words[0] ?? '');
   return validDisplay(words);
 };
 
+/** The properties that decide whether an element's text is drawn, all of which `all` resets. */
+const HIDING_PROPERTIES = ['display', 'visibility', 'content-visibility'];
+
 /**
- * Whether an inline `style` declares the element away. The last
- * declaration of a property wins unless an earlier one was `!important`,
- * which is the cascade inside one attribute — `display:none;display:block`
- * is a visible element, and dropping it would delete text the page shows.
+ * What an inline `style` declares for each of HIDING_PROPERTIES: the
+ * single keyword, or `undefined` for a value that is valid but no one
+ * keyword (a `var()`, a two-keyword `display`). A property absent from the
+ * map was not validly declared. The last declaration wins unless an
+ * earlier one was `!important` — `display:none;display:block` is shown —
+ * and `all` sets each, so `display:none;all:initial` is shown too.
  */
-const styleHides = (style: string): boolean => {
+const styleDeclares = (style: string): Map<string, string | undefined> => {
   const declared = new Map<string, { word: string | undefined; important: boolean }>();
+  const declare = (property: string, word: string | undefined, important: boolean): void => {
+    if (declared.get(property)?.important === true && !important) return;
+    declared.set(property, { word, important });
+  };
   for (const { property, value, important, malformed } of cssDeclarations(style)) {
-    if (property !== 'display' && property !== 'visibility') continue;
-    if (malformed || !validFor(property, value)) continue;
-    if (declared.get(property)?.important === true && !important) continue;
+    if (malformed) continue;
     const words = wordsOf(value);
-    declared.set(property, { word: words?.length === 1 ? words[0] : undefined, important });
+    const word = words?.length === 1 ? words[0] : undefined;
+    if (property === 'all') {
+      // Only a CSS-wide keyword, or a var(), and it resets each.
+      const valid = value.some((token) => token.type === 'function' && token.value === 'var')
+        ? varsValid(value)
+        : word !== undefined && CSS_WIDE_KEYWORDS.has(word);
+      if (!valid) continue;
+      for (const hiding of HIDING_PROPERTIES) declare(hiding, word, important);
+    } else if (HIDING_PROPERTIES.includes(property) && validFor(property, value)) {
+      declare(property, word, important);
+    }
   }
-  const visibility = declared.get('visibility')?.word;
-  return declared.get('display')?.word === 'none' || visibility === 'hidden' || visibility === 'collapse';
+  return new Map([...declared].map(([property, { word }]) => [property, word]));
 };
 
 /**
@@ -389,12 +406,32 @@ const styleHides = (style: string): boolean => {
  * also finds `data-hidden`, `aria-hidden="false"`, and `title="hidden
  * gem"`, and a second parser would disagree with the scanner about where
  * an attribute ends — `<div x=a"hidden>` has no `hidden` attribute.
+ *
+ * `hidden` is a `display: none` beneath every author style, as Chromium
+ * applies it: any valid inline `display` overrides it, `revert` included,
+ * so `<p hidden style="display:block">` is shown, while `revert-layer`
+ * and an invalid value do not. `hidden="until-found"` is the same with
+ * `content-visibility: hidden`, which hides an element's content and is
+ * itself a way to hide it.
  */
 const attributesHide = (attributes: ReadonlyMap<string, string>): boolean => {
+  if (asciiLower(trimAscii(decodeAttribute(attributes.get('aria-hidden') ?? ''))) === 'true') return true;
+  const hidden = attributes.get('hidden');
   const style = attributes.get('style');
-  return attributes.has('hidden')
-    || asciiLower(trimAscii(decodeAttribute(attributes.get('aria-hidden') ?? ''))) === 'true'
-    || (style !== undefined && styleHides(decodeAttribute(style)));
+  const declared = style === undefined ? new Map<string, string | undefined>() : styleDeclares(decodeAttribute(style));
+  const visibility = declared.get('visibility');
+  if (visibility === 'hidden' || visibility === 'collapse') return true;
+  const display = declared.get('display');
+  if (display === 'none') return true;
+  const content = declared.get('content-visibility');
+  if (content === 'hidden') return true;
+  if (hidden === undefined) return false;
+  // The attribute's own rule, beneath every inline declaration of the
+  // property it sets but `revert-layer`.
+  const [property, word] = asciiLower(decodeAttribute(hidden)) === 'until-found'
+    ? ['content-visibility', content]
+    : ['display', display];
+  return !declared.has(property) || word === 'revert-layer';
 };
 
 /**
@@ -723,7 +760,8 @@ const scanTags = (html: string): ScannedTag[] => {
 
 /**
  * Drops the elements a browser would not show: the `hidden` attribute, an
- * inline `display: none` or `visibility: hidden`, and `aria-hidden="true"`.
+ * inline `display: none`, `visibility: hidden`, or `content-visibility:
+ * hidden`, and `aria-hidden="true"`.
  * The last is still drawn on screen; it is here because it is what the
  * page withholds from a reader who cannot see it, and a model reading this
  * extraction is that reader.
@@ -1096,14 +1134,17 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       // builder pops it at once: it holds nothing, and what follows is
       // placed as if it were not there.
       if (tag.name === 'form' && TABLE_CONTEXT.has(stack.at(-1)?.name ?? '')) {
-        form = opened;
+        if (nearest(['template'], []) === -1) form = opened;
         if (opened.hidden) confirmed.add(opened.id);
         continue;
       }
       if (!push(opened)) continue;
       if (FORMATTING_ELEMENTS.has(tag.name)) remember(opened, tag.attributes);
       if (MARKER_ELEMENTS.has(tag.name)) active.push('marker');
-      if (tag.name === 'form') form = opened;
+      // Not inside a template, whose content is a fragment of its own: a
+      // form there, closed with the template, would otherwise leave the
+      // pointer set and the next real form ignored.
+      if (tag.name === 'form' && nearest(['template'], []) === -1) form = opened;
       continue;
     }
 

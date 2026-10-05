@@ -824,3 +824,27 @@ test('a form ignored for the form pointer closes no paragraph', () => {
   assert.match(text, /shown/);
   assert.doesNotMatch(text, /gone/);
 });
+
+test('an inline display overrides the hidden attribute, and all resets display', () => {
+  // Each as Chromium renders it: `hidden` is a display: none beneath every
+  // author style, which any valid display overrides, revert included.
+  assert.equal(htmlToText('<p hidden style="display:block">shown</p>'), 'shown');
+  assert.equal(htmlToText('<p hidden style="display:revert">shown</p>'), 'shown');
+  assert.equal(htmlToText('<p hidden style="display:revert-layer">gone</p><p>after</p>'), 'after');
+  assert.equal(htmlToText('<p hidden style="display:bogus">gone</p><p>after</p>'), 'after');
+  assert.equal(htmlToText('<p hidden="until-found" style="display:block">gone</p><p>after</p>'), 'after');
+  // `all` resets display and visibility, in order and by importance.
+  assert.equal(htmlToText('<p style="display:none;all:initial">shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="visibility:hidden;all:unset">shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="all:initial;display:none">gone</p><p>after</p>'), 'after');
+  assert.equal(htmlToText('<p style="display:none;all:bogus">gone</p><p>after</p>'), 'after');
+  // content-visibility: hidden hides an element's content, and is what
+  // hidden="until-found" sets, beneath the same inline overrides.
+  assert.equal(htmlToText('<div style="content-visibility:hidden"><p>gone</p></div><p>after</p>'), 'after');
+  assert.equal(htmlToText('<p hidden="until-found" style="content-visibility:visible">shown</p>'), 'shown');
+  assert.equal(htmlToText('<p hidden="until-found" style="all:initial">shown</p>'), 'shown');
+});
+
+test('a form inside a template does not set the form pointer', () => {
+  assert.equal(htmlToText('<template><form></template><p hidden>gone<form></form>shown</p><p>after</p>'), 'shown\n\nafter');
+});
