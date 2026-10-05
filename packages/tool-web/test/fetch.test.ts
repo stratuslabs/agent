@@ -700,3 +700,9 @@ test('&nbsp; in a style is not CSS whitespace', () => {
   // Read as text, it is still a space.
   assert.equal(htmlToText('<p>a&nbsp;&nbsp;b</p>'), 'a b');
 });
+
+test('tag names fold case in ASCII only', () => {
+  // U+212A KELVIN SIGN lowercases to k in JavaScript: this is an unknown
+  // element holding its text, not a void link.
+  assert.equal(htmlToText('<lin\u212A hidden>gone</lin\u212A><p>after</p>'), 'after');
+});

@@ -52,9 +52,10 @@ const isAsciiWhitespace = (char: string): boolean =>
 const trimAscii = (value: string): string => value.replace(/^[ \t\n\f\r]+|[ \t\n\f\r]+$/g, '');
 
 /**
- * Lowercase as CSS compares keywords: ASCII only. `toLowerCase()` also
- * folds U+212A KELVIN SIGN to `k`, which would read `bloc\u212A` as the
- * `block` a browser does not see.
+ * Lowercase as HTML compares names and CSS compares keywords: ASCII only.
+ * `toLowerCase()` also folds U+212A KELVIN SIGN to `k`, which would read
+ * `bloc\u212A` as the `block` a browser does not see, and `<lin\u212A>` as a
+ * void `link` rather than the unknown element that holds its text.
  */
 const asciiLower = (value: string): string => value.replace(/[A-Z]/g, (char) => char.toLowerCase());
 
@@ -320,7 +321,7 @@ const styleHides = (style: string): boolean => {
 const attributesHide = (attributes: ReadonlyMap<string, string>): boolean => {
   const style = attributes.get('style');
   return attributes.has('hidden')
-    || trimAscii(decodeAttribute(attributes.get('aria-hidden') ?? '')).toLowerCase() === 'true'
+    || asciiLower(trimAscii(decodeAttribute(attributes.get('aria-hidden') ?? ''))) === 'true'
     || (style !== undefined && styleHides(decodeAttribute(style)));
 };
 
@@ -562,7 +563,7 @@ const scanTags = (html: string): ScannedTag[] => {
     while (cursor < html.length && !isAsciiWhitespace(html[cursor] ?? '') && html[cursor] !== '/' && html[cursor] !== '>') {
       cursor += 1;
     }
-    const name = html.slice(nameStart, cursor).toLowerCase();
+    const name = asciiLower(html.slice(nameStart, cursor));
 
     const attributes = new Map<string, string>();
     const keep = (attribute: string, value: string): void => {
@@ -586,7 +587,7 @@ const scanTags = (html: string): ScannedTag[] => {
         continue;
       }
       if (char === '>') {
-        if (state === 'name') keep(html.slice(mark, cursor).toLowerCase(), '');
+        if (state === 'name') keep(asciiLower(html.slice(mark, cursor)), '');
         else if (state === 'afterName' || state === 'beforeValue') keep(attribute, '');
         else if (state === 'unquoted') keep(attribute, html.slice(mark, cursor));
         end = cursor;
@@ -600,7 +601,7 @@ const scanTags = (html: string): ScannedTag[] => {
         }
       } else if (state === 'name') {
         if (space || char === '/' || char === '=') {
-          attribute = html.slice(mark, cursor).toLowerCase();
+          attribute = asciiLower(html.slice(mark, cursor));
           if (char === '=') {
             state = 'beforeValue';
           } else if (space) {
