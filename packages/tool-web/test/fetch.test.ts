@@ -499,3 +499,28 @@ test('a display value must be a whole valid value, not a run of valid keywords',
   assert.equal(htmlToText('<p style="display:none;display:inline flow-root">kept</p>'), 'kept');
   assert.equal(htmlToText('<p style="display:none;display:block flow list-item">kept</p>'), 'kept');
 });
+
+test('HTML character references in an attribute are decoded as a browser decodes them', () => {
+  assert.equal(htmlToText('<p style="display&colon;none">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display&#58none">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display&#x3a;none">gone</p><p>shown</p>'), 'shown');
+});
+
+test('a CSS escape in !important is still !important', () => {
+  assert.equal(htmlToText('<p style="display:block !\\69mportant;display:none">kept</p>'), 'kept');
+});
+
+test('a CSS string left open ends at the newline', () => {
+  assert.equal(htmlToText('<p style="display:none;x:\'\n;display:block">kept</p>'), 'kept');
+});
+
+test('text a table cannot hold is placed before it, outside a hidden table', () => {
+  const text = htmlToText('<table hidden>visible text<tr><td>cell</td></tr></table><p>after</p>');
+  assert.match(text, /visible text/);
+  assert.match(text, /after/);
+  assert.doesNotMatch(text, /cell/);
+  // Inside a cell it is the table's, and hidden with it.
+  assert.equal(htmlToText('<table hidden><tr><td>gone</td></tr></table><p>after</p>'), 'after');
+  // Whitespace between table parts is the table's own and moves nowhere.
+  assert.equal(htmlToText('<table hidden>\n<tr><td>gone</td></tr>\n</table><p>after</p>'), 'after');
+});

@@ -64,6 +64,11 @@ const declarationsOf = (style: string): string[] => {
         index += 1;
       } else if (char === quote) {
         quote = '';
+      } else if (char === '\n' || char === '\r' || char === '\f') {
+        // An unescaped newline ends a string as a bad one, and the
+        // declarations after it are read again: in `x:'\n;display:block`
+        // the `display` is real.
+        quote = '';
       }
       continue;
     }
@@ -220,8 +225,11 @@ const styleHides = (style: string): boolean => {
     if (name.length !== 1) continue;
     const property = name[0] ?? '';
     const raw = trimAscii(declaration.slice(colon + 1)).toLowerCase();
-    const important = /![ \t\n\f\r]*important$/.test(raw);
-    const value = important ? trimAscii(raw.replace(/![ \t\n\f\r]*important$/, '')) : raw;
+    // `!important` read as CSS reads it: the last `!` and the words after
+    // it, escapes decoded — `!\69mportant` is still `!important`.
+    const bang = raw.lastIndexOf('!');
+    const important = bang !== -1 && cssWords(raw.slice(bang + 1)).join(' ') === 'important';
+    const value = important ? trimAscii(raw.slice(0, bang)) : raw;
     const words = cssWords(value);
     if (!validFor(property, value, words)) continue;
     if (declared.get(property)?.important === true && !important) continue;
@@ -295,10 +303,21 @@ const IMPLIED_SIBLING_ENDS: Readonly<Record<string, { closes: string[]; stopAt: 
 const MAX_OPEN_ELEMENTS = 512;
 
 interface OpenElement {
+  id: number;
   name: string;
-  start: number;
   hidden: boolean;
+  /** Ids of the hidden elements on this element's DOM ancestry, itself included. */
+  governing: readonly number[];
 }
+
+/** Elements whose own content model is table structure, where other content is placed before the table. */
+const TABLE_CONTEXT = new Set(['table', 'tbody', 'thead', 'tfoot', 'tr']);
+
+/** Start tags a table context holds itself; any other is placed before the table. */
+const TABLE_CONTENT = new Set([
+  'caption', 'colgroup', 'col', 'tbody', 'thead', 'tfoot', 'tr', 'td', 'th', 'script', 'style', 'template', 'form',
+  'input', 'table',
+]);
 
 interface ScannedTag {
   start: number;
@@ -461,10 +480,19 @@ const dropHiddenElements = (html: string): string => {
   // One stack of open elements, as the tree builder keeps, rather than one
   // per tag name: an end tag closes everything opened inside the element
   // it names, so in `<div><span hidden>gone</div>shown</span>` the span
-  // ends at `</div>` and `shown` is visible. Per-name stacks paired the
-  // stray `</span>` with the hidden opener and dropped it.
+  // ends at `</div>` and `shown` is visible.
+  //
+  // And text is judged where the tree builder puts it, not where it sits
+  // in the source. Each run between tags belongs to the element that would
+  // receive it — usually the top of the stack, but text or a tag a table
+  // cannot hold is placed before the table, so in `<table hidden>visible`
+  // the text is the table's parent's, and shown. A run is dropped when a
+  // hidden element on its ancestry was closed; one still open at the end
+  // of the page confirms nothing, and its text is kept.
   const stack: OpenElement[] = [];
-  const dropped: [number, number][] = [];
+  const confirmed = new Set<number>();
+  const segments: { start: number; end: number; governing: readonly number[] }[] = [];
+  let nextId = 0;
   const nearest = (names: readonly string[], stopAt: readonly string[]): number => {
     for (let index = stack.length - 1; index >= 0; index -= 1) {
       const name = stack[index]?.name ?? '';
@@ -473,55 +501,86 @@ const dropHiddenElements = (html: string): string => {
     }
     return -1;
   };
-  // Implicitly closed where `at` is: the element and everything above it.
-  const closeFrom = (index: number, at: number): void => {
+  const closeFrom = (index: number): void => {
     for (const element of stack.splice(index)) {
-      if (element.hidden) dropped.push([element.start, at]);
+      if (element.hidden) confirmed.add(element.id);
     }
   };
+  /** Whose ancestry new content takes: the top, or a table's parent for what a table cannot hold. */
+  const parentFor = (fostered: boolean): readonly number[] => {
+    const top = stack.at(-1);
+    if (top === undefined) return [];
+    if (!fostered || !TABLE_CONTEXT.has(top.name)) return top.governing;
+    const table = nearest(['table'], []);
+    return table > 0 ? (stack[table - 1]?.governing ?? []) : [];
+  };
 
+  let cursor = 0;
   for (const tag of scanTags(html)) {
+    if (tag.start > cursor) {
+      const run = html.slice(cursor, tag.start);
+      segments.push({ start: cursor, end: tag.start, governing: parentFor(/[^ \t\n\f\r]/.test(run)) });
+    }
+    cursor = tag.end;
     if (!tag.closing) {
       // Before the void check, because `hr` both closes a paragraph and
       // holds nothing.
       if (CLOSES_PARAGRAPH.has(tag.name)) {
         const paragraph = nearest(['p'], [...SCOPE_BOUNDARIES, 'button']);
-        if (paragraph !== -1) closeFrom(paragraph, tag.start);
+        if (paragraph !== -1) closeFrom(paragraph);
       }
       const sibling = IMPLIED_SIBLING_ENDS[tag.name];
       if (sibling !== undefined) {
         const open = nearest(sibling.closes, sibling.stopAt);
-        if (open !== -1) closeFrom(open, tag.start);
+        if (open !== -1) closeFrom(open);
       }
-      if (!VOID_ELEMENTS.has(tag.name) && stack.length < MAX_OPEN_ELEMENTS) {
-        stack.push({ name: tag.name, start: tag.start, hidden: attributesHide(tag.attributes) });
+      const parent = parentFor(!TABLE_CONTENT.has(tag.name));
+      const hidden = attributesHide(tag.attributes);
+      const id = nextId;
+      nextId += 1;
+      // A void element holds no text, so there is nothing of it to hide;
+      // its tag is left to the passes after this one, as any other is.
+      if (VOID_ELEMENTS.has(tag.name)) {
+        segments.push({ start: tag.start, end: tag.end, governing: parent });
+        continue;
       }
+      const governing = hidden ? [...parent, id] : parent;
+      segments.push({ start: tag.start, end: tag.end, governing });
+      if (stack.length < MAX_OPEN_ELEMENTS) stack.push({ id, name: tag.name, hidden, governing });
       continue;
     }
     const index = nearest([tag.name], SCOPE_BOUNDARIES.filter((name) => name !== tag.name));
     // An end tag with nothing of its name open is a stray, and closes nothing.
-    if (index === -1) continue;
-    if (FORMATTING_ELEMENTS.has(tag.name)) {
-      const [element] = stack.splice(index, 1);
-      if (element?.hidden === true) dropped.push([element.start, tag.end]);
+    if (index === -1) {
+      segments.push({ start: tag.start, end: tag.end, governing: parentFor(false) });
       continue;
     }
     const element = stack[index];
-    closeFrom(index + 1, tag.start);
-    stack.splice(index, 1);
-    if (element?.hidden === true) dropped.push([element.start, tag.end]);
+    segments.push({ start: tag.start, end: tag.end, governing: element?.governing ?? [] });
+    if (FORMATTING_ELEMENTS.has(tag.name)) {
+      stack.splice(index, 1);
+    } else {
+      closeFrom(index + 1);
+      stack.splice(index, 1);
+    }
+    if (element?.hidden === true) confirmed.add(element.id);
   }
-  if (dropped.length === 0) return html;
+  if (cursor < html.length) segments.push({ start: cursor, end: html.length, governing: parentFor(false) });
+  if (confirmed.size === 0) return html;
 
-  // Pairs of different names can nest or cross, so they are merged by start.
-  dropped.sort((a, b) => a[0] - b[0]);
+  // A dropped stretch, however many segments, becomes one space.
   let text = '';
-  let cursor = 0;
-  for (const [start, end] of dropped) {
-    if (start >= cursor) text += `${html.slice(cursor, start)} `;
-    cursor = Math.max(cursor, end);
+  let dropping = false;
+  for (const segment of segments) {
+    if (segment.governing.some((id) => confirmed.has(id))) {
+      if (!dropping) text += ' ';
+      dropping = true;
+    } else {
+      text += html.slice(segment.start, segment.end);
+      dropping = false;
+    }
   }
-  return text + html.slice(cursor);
+  return text;
 };
 
 /**
@@ -563,12 +622,52 @@ const BLOCK_ELEMENTS = [
   'ul', 'ol', 'table', 'tr', 'blockquote', 'pre',
 ];
 
+/**
+ * The named references this extractor decodes — a small part of HTML's
+ * table, and case-sensitive as that table is (`&Colon;` is `∷`, not `:`).
+ * The punctuation names are here because a browser decodes an attribute
+ * before CSS reads it, so `display&colon;none` hides; one not listed stays
+ * as written.
+ */
 const NAMED_ENTITIES: Record<string, string> = {
   amp: '&',
+  AMP: '&',
   lt: '<',
+  LT: '<',
   gt: '>',
+  GT: '>',
   quot: '"',
+  QUOT: '"',
   apos: "'",
+  colon: ':',
+  semi: ';',
+  excl: '!',
+  num: '#',
+  period: '.',
+  comma: ',',
+  sol: '/',
+  bsol: '\\',
+  lpar: '(',
+  rpar: ')',
+  lsqb: '[',
+  rsqb: ']',
+  lbrace: '{',
+  rbrace: '}',
+  lowbar: '_',
+  hyphen: '\u2010',
+  dash: '\u2010',
+  plus: '+',
+  equals: '=',
+  ast: '*',
+  commat: '@',
+  verbar: '|',
+  vert: '|',
+  grave: '`',
+  Hat: '^',
+  dollar: '$',
+  percnt: '%',
+  Tab: '\t',
+  NewLine: '\n',
   nbsp: ' ',
   mdash: '—',
   ndash: '–',
@@ -588,17 +687,17 @@ const NAMED_ENTITIES: Record<string, string> = {
 const codePointText = (code: number): string =>
   code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? '\uFFFD' : String.fromCodePoint(code);
 
+/**
+ * Numeric references decode with or without their semicolon, as a browser
+ * decodes them — `display&#58none` hides — and a named one only with it.
+ */
 export const decodeEntities = (value: string): string =>
-  value.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (match, entity: string) => {
-    if (entity.startsWith('#x') || entity.startsWith('#X')) {
-      const code = Number.parseInt(entity.slice(2), 16);
+  value.replace(/&#[xX]([0-9a-fA-F]+);?|&#([0-9]+);?|&([a-zA-Z][a-zA-Z0-9]*);/g, (match, hex?: string, decimal?: string, name?: string) => {
+    if (hex !== undefined || decimal !== undefined) {
+      const code = hex !== undefined ? Number.parseInt(hex, 16) : Number.parseInt(decimal ?? '', 10);
       return Number.isFinite(code) ? codePointText(code) : '\uFFFD';
     }
-    if (entity.startsWith('#')) {
-      const code = Number.parseInt(entity.slice(1), 10);
-      return Number.isFinite(code) ? codePointText(code) : '\uFFFD';
-    }
-    return NAMED_ENTITIES[entity.toLowerCase()] ?? match;
+    return NAMED_ENTITIES[name ?? ''] ?? match;
   });
 
 /**
