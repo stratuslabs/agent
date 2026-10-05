@@ -716,3 +716,18 @@ test('display values are the ones Chromium accepts', () => {
   assert.equal(htmlToText('<p style="display:none;display:ruby-base">gone</p><p>after</p>'), 'after');
   assert.equal(htmlToText('<p style="display:none;display:run-in flow">gone</p><p>after</p>'), 'after');
 });
+
+test('a var() declaration with a malformed token or a malformed var() is rejected', () => {
+  // A string ended by a newline, a URL with a space in it, and a bracket
+  // closing nothing each reject the declaration, var() or not: the `none`
+  // before it stands, as it does in Chromium.
+  assert.equal(htmlToText('<p style="display:none;display:\'\nvar(--x)">gone</p><p>after</p>'), 'after');
+  assert.equal(htmlToText('<p style="display:none;display:url(a b) var(--x)">gone</p><p>after</p>'), 'after');
+  assert.equal(htmlToText('<p style="display:none;display:var(--x) )">gone</p><p>after</p>'), 'after');
+  // So does a var() that is not one: no custom property name, or a `!` in
+  // its fallback.
+  assert.equal(htmlToText('<p style="display:none;display:var(x)">gone</p><p>after</p>'), 'after');
+  assert.equal(htmlToText('<p style="display:none;display:var(--x, !)">gone</p><p>after</p>'), 'after');
+  // A well-formed one still defers, and reads as shown.
+  assert.equal(htmlToText('<p style="display:none;display:var(--x, red)">shown</p>'), 'shown');
+});

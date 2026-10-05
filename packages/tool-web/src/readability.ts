@@ -60,7 +60,7 @@ const trimAscii = (value: string): string => value.replace(/^[ \t\n\f\r]+|[ \t\n
 const asciiLower = (value: string): string => value.replace(/[A-Z]/g, (char) => char.toLowerCase());
 
 type CssTokenType =
-  | 'ident' | 'function' | 'url' | 'string' | 'hash' | 'at' | 'number' | 'delim'
+  | 'ident' | 'function' | 'url' | 'bad-url' | 'string' | 'bad-string' | 'hash' | 'at' | 'number' | 'delim'
   | 'space' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}';
 
 interface CssToken {
@@ -156,8 +156,10 @@ const cssTokens = (input: string): CssToken[] => {
           text += escape();
         }
       }
+      // Ended by a newline rather than its quote, it is a bad string.
+      const closed = css[index] !== '\n';
       if (css[index] === char) index += 1;
-      tokens.push({ type: 'string', value: text });
+      tokens.push({ type: closed ? 'string' : 'bad-string', value: text });
     } else if (startsNumber(index)) {
       CSS_NUMBER.lastIndex = index;
       CSS_NUMBER.exec(css);
@@ -175,11 +177,26 @@ const cssTokens = (input: string): CssToken[] => {
       let body = index;
       while (isAsciiWhitespace(css[body] ?? '')) body += 1;
       if (asciiLower(text) === 'url' && css[body] !== '"' && css[body] !== "'") {
-        // A URL token, or a bad one, runs to its first unescaped `)`.
+        // A URL token runs to its first unescaped `)`. It is a bad one if
+        // it holds a quote, a `(`, a control character, a bad escape, or
+        // whitespace anywhere but at its end.
         index = body;
-        while (index < css.length && css[index] !== ')') index += validEscape(index) ? 2 : 1;
+        let bad = false;
+        while (index < css.length && css[index] !== ')') {
+          const at = css[index] ?? '';
+          if (isAsciiWhitespace(at)) {
+            while (isAsciiWhitespace(css[index] ?? '')) index += 1;
+            if (index < css.length && css[index] !== ')') bad = true;
+          } else if (at === '\\') {
+            if (!validEscape(index)) bad = true;
+            index += 2;
+          } else {
+            if (at === '"' || at === "'" || at === '(' || /^[\0-\x08\x0B\x0E-\x1F\x7F]$/.test(at)) bad = true;
+            index += 1;
+          }
+        }
         index += 1;
-        tokens.push({ type: 'url', value: '' });
+        tokens.push({ type: bad ? 'bad-url' : 'url', value: '' });
       } else {
         tokens.push({ type: 'function', value: asciiLower(text) });
       }
@@ -204,6 +221,11 @@ interface CssDeclaration {
   /** The value's tokens, whitespace and `!important` removed, nested blocks included. */
   value: CssToken[];
   important: boolean;
+  /**
+   * Holds a bad string, a bad URL, or a closing bracket that closes
+   * nothing — which no property accepts, a `var()` or not.
+   */
+  malformed: boolean;
 }
 
 /** The token that closes each opening one. A function token opens a `(` block. */
@@ -217,8 +239,10 @@ const CSS_CLOSERS: Partial<Record<CssTokenType, CssTokenType>> = { function: ')'
  */
 const cssDeclarations = (style: string): CssDeclaration[] => {
   const runs: CssToken[][] = [[]];
+  const malformed = new Set<CssToken[]>();
   const blocks: CssTokenType[] = [];
   for (const token of cssTokens(style)) {
+    const run = runs.at(-1) ?? [];
     if (token.type === ';' && blocks.length === 0) {
       runs.push([]);
       continue;
@@ -226,16 +250,24 @@ const cssDeclarations = (style: string): CssDeclaration[] => {
     const closer = CSS_CLOSERS[token.type];
     if (closer !== undefined) blocks.push(closer);
     else if (token.type === blocks.at(-1)) blocks.pop();
-    if (token.type !== 'space') runs.at(-1)?.push(token);
+    else if (token.type === ')' || token.type === ']' || token.type === '}') malformed.add(run);
+    if (token.type === 'bad-string' || token.type === 'bad-url') malformed.add(run);
+    if (token.type !== 'space') run.push(token);
   }
   const declarations: CssDeclaration[] = [];
-  for (const [name, colon, ...value] of runs) {
+  for (const run of runs) {
+    const [name, colon, ...value] = run;
     if (name?.type !== 'ident' || colon?.type !== ':') continue;
     const bang = value.at(-2);
     const last = value.at(-1);
     const important = bang?.type === 'delim' && bang.value === '!'
       && last?.type === 'ident' && asciiLower(last.value) === 'important';
-    declarations.push({ property: asciiLower(name.value), value: important ? value.slice(0, -2) : value, important });
+    declarations.push({
+      property: asciiLower(name.value),
+      value: important ? value.slice(0, -2) : value,
+      important,
+      malformed: malformed.has(run),
+    });
   }
   return declarations;
 };
@@ -282,6 +314,36 @@ const wordsOf = (value: readonly CssToken[]): string[] | undefined =>
   value.every((token) => token.type === 'ident') ? value.map((token) => asciiLower(token.value)) : undefined;
 
 /**
+ * Whether every `var()` in a value is one Chromium parses: a custom
+ * property name (`--` and more) followed by `)`, a comma, or the end of
+ * the value, and no `;` or `!` directly in its fallback or at the top of
+ * the value. A malformed one rejects the whole declaration at parse time,
+ * so `display:none;display:var(x)` stays hidden.
+ */
+const varsValid = (value: readonly CssToken[]): boolean => {
+  const blocks: { closer: CssTokenType; isVar: boolean }[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const token = value[index];
+    if (token === undefined) continue;
+    if (token.type === 'function' && token.value === 'var') {
+      const name = value[index + 1];
+      const after = value[index + 2];
+      if (name?.type !== 'ident' || !name.value.startsWith('--') || name.value.length <= 2) return false;
+      if (after !== undefined && after.type !== ')' && !(after.type === 'delim' && after.value === ',')) return false;
+    }
+    const closer = CSS_CLOSERS[token.type];
+    if (closer !== undefined) {
+      blocks.push({ closer, isVar: token.type === 'function' && token.value === 'var' });
+    } else if (token.type === blocks.at(-1)?.closer) {
+      blocks.pop();
+    } else if (token.type === ';' || (token.type === 'delim' && token.value === '!')) {
+      if (blocks.length === 0 || blocks.at(-1)?.isVar === true) return false;
+    }
+  }
+  return true;
+};
+
+/**
  * Whether a value is one a browser would accept for the property. A
  * declaration it would not is dropped from the cascade rather than
  * overriding the one before it: `display:none;display:bogus` is hidden.
@@ -289,7 +351,7 @@ const wordsOf = (value: readonly CssToken[]): string[] | undefined =>
  * reads as not hiding — the direction that keeps text.
  */
 const validFor = (property: string, value: readonly CssToken[]): boolean => {
-  if (value.some((token) => token.type === 'function' && token.value === 'var')) return true;
+  if (value.some((token) => token.type === 'function' && token.value === 'var')) return varsValid(value);
   const words = wordsOf(value);
   if (words === undefined) return false;
   if (words.length === 1 && CSS_WIDE_KEYWORDS.has(words[0] ?? '')) return true;
@@ -305,9 +367,9 @@ const validFor = (property: string, value: readonly CssToken[]): boolean => {
  */
 const styleHides = (style: string): boolean => {
   const declared = new Map<string, { word: string | undefined; important: boolean }>();
-  for (const { property, value, important } of cssDeclarations(style)) {
+  for (const { property, value, important, malformed } of cssDeclarations(style)) {
     if (property !== 'display' && property !== 'visibility') continue;
-    if (!validFor(property, value)) continue;
+    if (malformed || !validFor(property, value)) continue;
     if (declared.get(property)?.important === true && !important) continue;
     const words = wordsOf(value);
     declared.set(property, { word: words?.length === 1 ? words[0] : undefined, important });
