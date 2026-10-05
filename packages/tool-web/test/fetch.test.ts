@@ -410,3 +410,29 @@ test('everything after a plaintext start tag is text', () => {
   // text a `hidden` it could never have applied would have hidden.
   assert.match(htmlToText('<plaintext></plaintext><p hidden>visible literal</p>'), /visible literal/);
 });
+
+test('an invalid display or visibility value is discarded, as the cascade discards it', () => {
+  assert.equal(htmlToText('<p style="display:none;display:bogus">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="visibility:hidden;visibility:nope">gone</p><p>shown</p>'), 'shown');
+  // Valid values still override, multi-keyword and vendor forms included.
+  assert.equal(htmlToText('<p style="display:none;display:inline flow-root">kept</p>'), 'kept');
+  assert.equal(htmlToText('<p style="display:none;display:-webkit-box">kept</p>'), 'kept');
+  assert.equal(htmlToText('<p style="visibility:collapse">gone</p><p>shown</p>'), 'shown');
+});
+
+test('a semicolon inside square or curly brackets is not a declaration boundary', () => {
+  assert.equal(htmlToText('<p style="--x:{;display:none;}">kept</p>'), 'kept');
+  assert.equal(htmlToText('<p style="--x:[;display:none;]">kept</p>'), 'kept');
+  assert.equal(htmlToText('<p style="--x:{a;b}; display:none">gone</p><p>shown</p>'), 'shown');
+});
+
+test('a block start tag closes an open paragraph, so a later </p> cannot reach back', () => {
+  const text = htmlToText('<p hidden>gone<div>shown</div></p><p>after</p>');
+  assert.match(text, /shown/);
+  assert.match(text, /after/);
+  assert.doesNotMatch(text, /gone/);
+  // `hr` is void and closes a paragraph all the same.
+  const ruled = htmlToText('<p hidden>gone<hr>shown</p><p>after</p>');
+  assert.match(ruled, /shown/);
+  assert.doesNotMatch(ruled, /gone/);
+});

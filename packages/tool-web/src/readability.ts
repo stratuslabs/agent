@@ -41,7 +41,8 @@ const VOID_ELEMENTS = new Set([
 
 /**
  * An inline style's declarations, split where a browser splits them: on a
- * `;` outside a string, outside parentheses, and with comments removed.
+ * `;` outside a string, outside any bracketed block, and with comments
+ * removed.
  * Split on every `;`, `content:";display:none;"` invents a declaration the
  * browser never sees and drops text it shows; so does an escaped `\;`.
  * One pass, character by character; an unterminated string or comment
@@ -51,7 +52,9 @@ const declarationsOf = (style: string): string[] => {
   const declarations: string[] = [];
   let current = '';
   let quote = '';
-  let depth = 0;
+  // Closers still owed, innermost last. Any CSS block — `()`, `[]`, `{}`
+  // — holds its semicolons, so `--x:{;display:none;}` is one declaration.
+  const blocks: string[] = [];
   for (let index = 0; index < style.length; index += 1) {
     const char = style[index] ?? '';
     if (quote !== '') {
@@ -78,11 +81,11 @@ const declarationsOf = (style: string): string[] => {
     }
     if (char === '"' || char === "'") {
       quote = char;
-    } else if (char === '(') {
-      depth += 1;
-    } else if (char === ')' && depth > 0) {
-      depth -= 1;
-    } else if (char === ';' && depth === 0) {
+    } else if (char === '(' || char === '[' || char === '{') {
+      blocks.push(char === '(' ? ')' : char === '[' ? ']' : '}');
+    } else if (char === blocks.at(-1)) {
+      blocks.pop();
+    } else if (char === ';' && blocks.length === 0) {
       declarations.push(current);
       current = '';
       continue;
@@ -99,6 +102,31 @@ const declarationsOf = (style: string): string[] => {
  * which is the cascade inside one attribute — `display:none;display:block`
  * is a visible element, and dropping it would delete text the page shows.
  */
+const CSS_WIDE_KEYWORDS = new Set(['inherit', 'initial', 'unset', 'revert', 'revert-layer']);
+
+/** Every keyword `display` takes, single or in its multi-keyword form. */
+const DISPLAY_KEYWORDS = new Set([
+  'none', 'contents', 'block', 'inline', 'run-in', 'flow', 'flow-root', 'table', 'flex', 'grid', 'ruby',
+  'list-item', 'math', 'inline-block', 'inline-flex', 'inline-grid', 'inline-table', 'inline-list-item',
+  'table-row-group', 'table-header-group', 'table-footer-group', 'table-row', 'table-cell',
+  'table-column-group', 'table-column', 'table-caption', 'ruby-base', 'ruby-text', 'ruby-base-container',
+  'ruby-text-container', '-webkit-box', '-webkit-inline-box',
+]);
+
+/**
+ * Whether a value is one a browser would accept for the property. A
+ * declaration it would not is dropped from the cascade rather than
+ * overriding the one before it: `display:none;display:bogus` is hidden.
+ * A `var()` is accepted, as a browser accepts it until computed time, and
+ * reads as not hiding — the direction that keeps text.
+ */
+const validFor = (property: string, value: string): boolean => {
+  if (CSS_WIDE_KEYWORDS.has(value) || value.includes('var(')) return true;
+  if (property === 'visibility') return value === 'visible' || value === 'hidden' || value === 'collapse';
+  if (property === 'display') return value.split(/\s+/).every((keyword) => DISPLAY_KEYWORDS.has(keyword));
+  return true;
+};
+
 const styleHides = (style: string): boolean => {
   const declared = new Map<string, { value: string; important: boolean }>();
   for (const declaration of declarationsOf(style)) {
@@ -108,10 +136,12 @@ const styleHides = (style: string): boolean => {
     const raw = declaration.slice(colon + 1).trim().toLowerCase();
     const important = /!\s*important$/.test(raw);
     const value = important ? raw.replace(/!\s*important$/, '').trim() : raw;
+    if (!validFor(property, value)) continue;
     if (declared.get(property)?.important === true && !important) continue;
     declared.set(property, { value, important });
   }
-  return declared.get('display')?.value === 'none' || declared.get('visibility')?.value === 'hidden';
+  const visibility = declared.get('visibility')?.value;
+  return declared.get('display')?.value === 'none' || visibility === 'hidden' || visibility === 'collapse';
 };
 
 /**
@@ -136,6 +166,19 @@ const attributesHide = (attributes: ReadonlyMap<string, string>): boolean => {
  */
 const RAW_TEXT_ELEMENTS = new Set([
   'script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript',
+]);
+
+/**
+ * Start tags that close an open `p` before they open — the tree builder's
+ * "close a p element" steps. Without them a hidden paragraph that a `div`
+ * has already ended pairs with a literal `</p>` further on, and drops the
+ * visible text between: `<p hidden>gone<div>shown</div></p>`.
+ */
+const CLOSES_PARAGRAPH = new Set([
+  'address', 'article', 'aside', 'blockquote', 'center', 'details', 'dialog', 'dir', 'div', 'dl', 'dd', 'dt',
+  'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hgroup',
+  'hr', 'li', 'listing', 'main', 'menu', 'nav', 'ol', 'p', 'plaintext', 'pre', 'search', 'section', 'summary',
+  'table', 'ul', 'xmp',
 ]);
 
 interface ScannedTag {
@@ -295,6 +338,14 @@ const dropHiddenElements = (html: string): string => {
   const open = new Map<string, { start: number; hidden: boolean }[]>();
   const dropped: [number, number][] = [];
   for (const tag of scanTags(html)) {
+    if (!tag.closing && CLOSES_PARAGRAPH.has(tag.name)) {
+      // The open paragraph ends where this tag starts, so a later `</p>`
+      // finds none to close; a hidden one is dropped up to here. Before
+      // the void check, because `hr` is both.
+      for (const paragraph of (open.get('p') ?? []).splice(0)) {
+        if (paragraph.hidden) dropped.push([paragraph.start, tag.start]);
+      }
+    }
     if (VOID_ELEMENTS.has(tag.name)) continue;
     const stack = open.get(tag.name) ?? [];
     open.set(tag.name, stack);
