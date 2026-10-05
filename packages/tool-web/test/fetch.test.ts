@@ -549,3 +549,33 @@ test('a misnested formatting end tag closes what it holds, and rebuilds formatti
   // the end tag is inside a copy of the hidden element, and hidden too.
   assert.equal(htmlToText('<b hidden>x<p>y</b>z</p><p>after</p>'), 'after');
 });
+
+test('var( is a function only where the CSS tokenizer makes one', () => {
+  // An unquoted url() body is one token, whatever it spells.
+  assert.equal(htmlToText('<p style="display:none;display:url(var(--x))">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:none;display:#var(--x)">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:none;display:1var(--x)">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:none;display:/*var(*/x">gone</p><p>shown</p>'), 'shown');
+  // An escaped name is still the name, and a quoted url() is a function.
+  assert.equal(htmlToText('<p style="display:none;display:v\\61r(--x)">kept</p>'), 'kept');
+  assert.equal(htmlToText('<p style="display:none;display:url(\'x\') var(--x)">kept</p>'), 'kept');
+});
+
+test('a heading start tag ends a heading that is the current element', () => {
+  const text = htmlToText('<h1 hidden>gone<h2>shown</h1><p>after</p>');
+  assert.match(text, /shown/);
+  assert.match(text, /after/);
+  assert.doesNotMatch(text, /gone/);
+  // And any heading end tag ends whichever heading is open.
+  assert.equal(htmlToText('<h2 hidden>gone</h1><p>after</p>'), 'after');
+});
+
+test('a link start tag ends the link already open', () => {
+  const text = htmlToText('<a hidden>gone<a>shown</a><p>after</p>');
+  assert.match(text, /shown/);
+  assert.match(text, /after/);
+  assert.doesNotMatch(text, /gone/);
+  const nobr = htmlToText('<nobr hidden>gone<nobr>shown</nobr>');
+  assert.match(nobr, /shown/);
+  assert.doesNotMatch(nobr, /gone/);
+});

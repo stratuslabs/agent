@@ -117,8 +117,60 @@ const isAsciiWhitespace = (char: string): boolean =>
   char === ' ' || char === '\t' || char === '\n' || char === '\f' || char === '\r';
 const trimAscii = (value: string): string => value.replace(/^[ \t\n\f\r]+|[ \t\n\f\r]+$/g, '');
 
-/** `var(` as a function of its own, not the tail of `xvar(`. */
-const CSS_VAR_FUNCTION = /(?:^|[^a-z0-9_\-\u0080-\uffff\\])var\(/;
+const isCssNameChar = (char: string): boolean => /^[a-zA-Z0-9_\-\u0080-\uffff]$/.test(char);
+
+/**
+ * Whether a value calls `var()`, found as the CSS tokenizer finds a
+ * function: a name, escapes decoded, directly before `(`. So `v\61r(` is
+ * one, and none of these is — `xvar(` (the name is `xvar`), `1var(` (a
+ * dimension), `#var(` (a hash), `"var("` (a string), a comment, or
+ * `url(var(--x))`, whose unquoted body is one URL token up to its `)`.
+ */
+const callsVar = (value: string): boolean => {
+  let name = '';
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index] ?? '';
+    if (char === '\\') {
+      const hex = /^[0-9a-fA-F]{1,6}/.exec(value.slice(index + 1, index + 7))?.[0];
+      if (hex !== undefined) {
+        name += codePointText(Number.parseInt(hex, 16));
+        index += hex.length;
+        if (isAsciiWhitespace(value[index + 1] ?? '')) index += 1;
+      } else {
+        name += value[index + 1] ?? '\uFFFD';
+        index += 1;
+      }
+      continue;
+    }
+    if (isCssNameChar(char)) {
+      name += char;
+      continue;
+    }
+    const called = char === '(' ? name.toLowerCase() : '';
+    // `#var` and `@var` are a hash and an at-keyword, never a function name.
+    name = char === '#' || char === '@' ? char : '';
+    if (called === 'var') return true;
+    if (called === 'url') {
+      let body = index + 1;
+      while (isAsciiWhitespace(value[body] ?? '')) body += 1;
+      if (value[body] !== '"' && value[body] !== "'") {
+        // A URL token, or a bad one, ends at its first unescaped `)`.
+        for (index = body; index < value.length && value[index] !== ')'; index += 1) {
+          if (value[index] === '\\') index += 1;
+        }
+      }
+    } else if (char === '"' || char === "'") {
+      // A string ends at its quote, or unclosed at a newline.
+      for (index += 1; index < value.length && value[index] !== char && !'\n\r\f'.includes(value[index] ?? ''); index += 1) {
+        if (value[index] === '\\') index += 1;
+      }
+    } else if (char === '/' && value[index + 1] === '*') {
+      const close = value.indexOf('*/', index + 2);
+      index = close === -1 ? value.length : close + 1;
+    }
+  }
+  return false;
+};
 
 const CSS_WIDE_KEYWORDS = new Set(['inherit', 'initial', 'unset', 'revert', 'revert-layer']);
 
@@ -200,8 +252,7 @@ const validDisplay = (words: readonly string[]): boolean => {
  * reads as not hiding — the direction that keeps text.
  */
 const validFor = (property: string, raw: string, words: readonly string[]): boolean => {
-  // Strings removed first: `"var("` is a string, not a function.
-  if (CSS_VAR_FUNCTION.test(raw.replace(/"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?/g, ' '))) return true;
+  if (callsVar(raw)) return true;
   if (words.length === 1 && CSS_WIDE_KEYWORDS.has(words[0] ?? '')) return true;
   if (property === 'visibility') return words.length === 1 && ['visible', 'hidden', 'collapse'].includes(words[0] ?? '');
   if (property === 'display') return validDisplay(words);
@@ -283,6 +334,8 @@ const CLOSES_PARAGRAPH = new Set([
 
 /** Elements whose end tag removes only themselves: the tree builder's adoption agency, which leaves blocks open. */
 const FORMATTING_ELEMENTS = new Set(['a', 'b', 'big', 'code', 'em', 'font', 'i', 'nobr', 's', 'small', 'strike', 'strong', 'tt', 'u']);
+
+const HEADINGS = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
 
 /** Where a search for an open element stops: the tree builder's default scope. */
 const SCOPE_BOUNDARIES = ['applet', 'caption', 'html', 'table', 'td', 'th', 'marquee', 'object', 'template'];
@@ -488,7 +541,8 @@ const scanTags = (html: string): ScannedTag[] => {
  * for every one.
  *
  * The implied ends that keep ordinary markup apart are modelled — `p`
- * before a block, `li` at the next `li`, `dd`/`dt` at the next of either —
+ * before a block, `li` at the next `li`, `dd`/`dt` at the next of either,
+ * a heading at a heading, a link at a link —
  * so `<li hidden>a<li>b` hides `a` and shows `b`. An element still open at
  * the end of the page keeps its text: a closing rule this pass does not
  * model must not erase the article behind it, and keeping is what this
@@ -532,6 +586,32 @@ const dropHiddenElements = (html: string): string => {
     const table = nearest(['table'], []);
     return table > 0 ? (stack[table - 1]?.governing ?? []) : [];
   };
+  /** A formatting element's end, as the adoption agency runs it. */
+  const endFormatting = (index: number): void => {
+    const element = stack[index];
+    const inside = stack.slice(index + 1);
+    if (inside.some((open) => SPECIAL_ELEMENTS.has(open.name))) {
+      // A block inside: the adoption agency moves it out and wraps its
+      // content in a copy of this element, so what follows stays under
+      // the same hiding. Leaving it governed as it was is that result.
+      stack.splice(index, 1);
+    } else {
+      // No block inside: everything opened in it closes with it, and
+      // the formatting among those is rebuilt outside it — copies,
+      // attributes and all — before the next content. In
+      // `<b hidden>gone<i>also</b>shown</i>` the rebuilt `i` is not in
+      // the `b`, and `shown` is visible.
+      closeFrom(index);
+      for (const open of inside) {
+        if (!FORMATTING_ELEMENTS.has(open.name) || stack.length >= MAX_OPEN_ELEMENTS) continue;
+        const id = nextId;
+        nextId += 1;
+        const parent = stack.at(-1)?.governing ?? [];
+        stack.push({ id, name: open.name, hidden: open.hidden, governing: open.hidden ? [...parent, id] : parent });
+      }
+    }
+    if (element?.hidden === true) confirmed.add(element.id);
+  };
 
   let cursor = 0;
   for (const tag of scanTags(html)) {
@@ -552,6 +632,19 @@ const dropHiddenElements = (html: string): string => {
         const open = nearest(sibling.closes, sibling.stopAt);
         if (open !== -1) closeFrom(open);
       }
+      // A heading never holds another: `<h1 hidden>gone<h2>shown` ends the
+      // h1 at the h2 — but only when the h1 is the current element.
+      if (HEADINGS.includes(tag.name) && HEADINGS.includes(stack.at(-1)?.name ?? '')) closeFrom(stack.length - 1);
+      // Nor does a link, and a second `nobr` ends the first: the tree
+      // builder runs the end tag for the open one before inserting this.
+      // For `a` the search stops where the list of active formatting
+      // elements has a marker — a cell, a caption, or an applet-like
+      // element, not a table; for `nobr` it is the default scope.
+      if (tag.name === 'a' || tag.name === 'nobr') {
+        const stopAt = tag.name === 'a' ? SCOPE_BOUNDARIES.filter((name) => name !== 'table') : SCOPE_BOUNDARIES;
+        const open = nearest([tag.name], stopAt);
+        if (open !== -1) endFormatting(open);
+      }
       const parent = parentFor(!TABLE_CONTENT.has(tag.name));
       const hidden = attributesHide(tag.attributes);
       const id = nextId;
@@ -567,41 +660,22 @@ const dropHiddenElements = (html: string): string => {
       if (stack.length < MAX_OPEN_ELEMENTS) stack.push({ id, name: tag.name, hidden, governing });
       continue;
     }
-    const index = nearest([tag.name], SCOPE_BOUNDARIES.filter((name) => name !== tag.name));
+    // `</h1>` ends whichever heading is open, as `</h2>` does.
+    const names = HEADINGS.includes(tag.name) ? HEADINGS : [tag.name];
+    const index = nearest(names, SCOPE_BOUNDARIES.filter((name) => name !== tag.name));
     // An end tag with nothing of its name open is a stray, and closes nothing.
     if (index === -1) {
       segments.push({ start: tag.start, end: tag.end, governing: parentFor(false) });
       continue;
     }
-    const element = stack[index];
-    segments.push({ start: tag.start, end: tag.end, governing: element?.governing ?? [] });
+    segments.push({ start: tag.start, end: tag.end, governing: stack[index]?.governing ?? [] });
     if (FORMATTING_ELEMENTS.has(tag.name)) {
-      const inside = stack.slice(index + 1);
-      if (inside.some((open) => SPECIAL_ELEMENTS.has(open.name))) {
-        // A block inside: the adoption agency moves it out and wraps its
-        // content in a copy of this element, so what follows stays under
-        // the same hiding. Leaving it governed as it was is that result.
-        stack.splice(index, 1);
-      } else {
-        // No block inside: everything opened in it closes with it, and
-        // the formatting among those is rebuilt outside it — copies,
-        // attributes and all — before the next content. In
-        // `<b hidden>gone<i>also</b>shown</i>` the rebuilt `i` is not in
-        // the `b`, and `shown` is visible.
-        closeFrom(index);
-        for (const open of inside) {
-          if (!FORMATTING_ELEMENTS.has(open.name) || stack.length >= MAX_OPEN_ELEMENTS) continue;
-          const id = nextId;
-          nextId += 1;
-          const parent = stack.at(-1)?.governing ?? [];
-          stack.push({ id, name: open.name, hidden: open.hidden, governing: open.hidden ? [...parent, id] : parent });
-        }
-      }
+      endFormatting(index);
     } else {
-      closeFrom(index + 1);
-      stack.splice(index, 1);
+      const element = stack[index];
+      closeFrom(index);
+      if (element?.hidden === true) confirmed.add(element.id);
     }
-    if (element?.hidden === true) confirmed.add(element.id);
   }
   if (cursor < html.length) segments.push({ start: cursor, end: html.length, governing: parentFor(false) });
   if (confirmed.size === 0) return html;
