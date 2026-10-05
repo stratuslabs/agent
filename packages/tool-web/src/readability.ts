@@ -117,14 +117,75 @@ const CSS_VAR_FUNCTION = /(?:^|[^a-z0-9_\-\u0080-\uffff\\])var\(/;
 
 const CSS_WIDE_KEYWORDS = new Set(['inherit', 'initial', 'unset', 'revert', 'revert-layer']);
 
-/** Every keyword `display` takes, single or in its multi-keyword form. */
-const DISPLAY_KEYWORDS = new Set([
+/** `display` values that stand alone. */
+const DISPLAY_SINGLE = new Set([
   'none', 'contents', 'block', 'inline', 'run-in', 'flow', 'flow-root', 'table', 'flex', 'grid', 'ruby',
-  'list-item', 'math', 'inline-block', 'inline-flex', 'inline-grid', 'inline-table', 'inline-list-item',
+  'list-item', 'math', 'inline-block', 'inline-flex', 'inline-grid', 'inline-table',
   'table-row-group', 'table-header-group', 'table-footer-group', 'table-row', 'table-cell',
   'table-column-group', 'table-column', 'table-caption', 'ruby-base', 'ruby-text', 'ruby-base-container',
   'ruby-text-container', '-webkit-box', '-webkit-inline-box',
 ]);
+const DISPLAY_OUTSIDE = new Set(['block', 'inline', 'run-in']);
+const DISPLAY_INSIDE = new Set(['flow', 'flow-root', 'table', 'flex', 'grid', 'ruby', 'math']);
+
+/**
+ * The words of a CSS value, escapes decoded and lowercased, split on
+ * unescaped ASCII whitespace — the identifiers a browser compares, not the
+ * characters written. `n\6f ne` is `none`; `none\20` is one word,
+ * `none ` with a space in it, and not `none` at all. A hex escape takes up
+ * to six digits and one whitespace after them; anything past U+10FFFF, a
+ * surrogate, or NUL reads as U+FFFD, as for HTML.
+ */
+const cssWords = (value: string): string[] => {
+  const words: string[] = [];
+  let word = '';
+  let inWord = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index] ?? '';
+    if (char === '\\') {
+      const hex = /^[0-9a-fA-F]{1,6}/.exec(value.slice(index + 1, index + 7))?.[0];
+      if (hex !== undefined) {
+        word += codePointText(Number.parseInt(hex, 16));
+        index += hex.length;
+        if (isAsciiWhitespace(value[index + 1] ?? '')) index += 1;
+      } else {
+        word += value[index + 1] ?? '\uFFFD';
+        index += 1;
+      }
+      inWord = true;
+      continue;
+    }
+    if (isAsciiWhitespace(char)) {
+      if (inWord) words.push(word.toLowerCase());
+      word = '';
+      inWord = false;
+      continue;
+    }
+    word += char;
+    inWord = true;
+  }
+  if (inWord) words.push(word.toLowerCase());
+  return words;
+};
+
+/**
+ * Whether `display` accepts these words: one keyword that stands alone,
+ * an outside and an inside keyword in either order, or `list-item` with at
+ * most one outside keyword and one of `flow` and `flow-root`. A run of
+ * valid keywords is not a valid value — `block none` is rejected, and the
+ * `none` before it stands.
+ */
+const validDisplay = (words: readonly string[]): boolean => {
+  if (words.length === 1) return DISPLAY_SINGLE.has(words[0] ?? '');
+  if (new Set(words).size !== words.length) return false;
+  const outside = words.filter((word) => DISPLAY_OUTSIDE.has(word)).length;
+  if (words.includes('list-item')) {
+    const flows = words.filter((word) => word === 'flow' || word === 'flow-root').length;
+    return words.length <= 3 && outside <= 1 && flows <= 1 && outside + flows + 1 === words.length;
+  }
+  const inside = words.filter((word) => DISPLAY_INSIDE.has(word)).length;
+  return words.length === 2 && outside === 1 && inside === 1;
+};
 
 /**
  * Whether a value is one a browser would accept for the property. A
@@ -133,28 +194,45 @@ const DISPLAY_KEYWORDS = new Set([
  * A `var()` is accepted, as a browser accepts it until computed time, and
  * reads as not hiding — the direction that keeps text.
  */
-const validFor = (property: string, value: string): boolean => {
-  if (CSS_WIDE_KEYWORDS.has(value) || CSS_VAR_FUNCTION.test(value)) return true;
-  if (property === 'visibility') return value === 'visible' || value === 'hidden' || value === 'collapse';
-  if (property === 'display') return value.split(/[ \t\n\f\r]+/).every((keyword) => DISPLAY_KEYWORDS.has(keyword));
+const validFor = (property: string, raw: string, words: readonly string[]): boolean => {
+  if (CSS_VAR_FUNCTION.test(raw)) return true;
+  if (words.length === 1 && CSS_WIDE_KEYWORDS.has(words[0] ?? '')) return true;
+  if (property === 'visibility') return words.length === 1 && ['visible', 'hidden', 'collapse'].includes(words[0] ?? '');
+  if (property === 'display') return validDisplay(words);
   return true;
 };
 
+/** The first `:` that is not escaped — `dis\:play` is one name. */
+const colonOf = (declaration: string): number => {
+  for (let index = 0; index < declaration.length; index += 1) {
+    if (declaration[index] === '\\') index += 1;
+    else if (declaration[index] === ':') return index;
+  }
+  return -1;
+};
+
 const styleHides = (style: string): boolean => {
-  const declared = new Map<string, { value: string; important: boolean }>();
+  const declared = new Map<string, { words: string[]; important: boolean }>();
   for (const declaration of declarationsOf(style)) {
-    const colon = declaration.indexOf(':');
+    const colon = colonOf(declaration);
     if (colon === -1) continue;
-    const property = trimAscii(declaration.slice(0, colon)).toLowerCase();
+    const name = cssWords(declaration.slice(0, colon));
+    if (name.length !== 1) continue;
+    const property = name[0] ?? '';
     const raw = trimAscii(declaration.slice(colon + 1)).toLowerCase();
     const important = /![ \t\n\f\r]*important$/.test(raw);
     const value = important ? trimAscii(raw.replace(/![ \t\n\f\r]*important$/, '')) : raw;
-    if (!validFor(property, value)) continue;
+    const words = cssWords(value);
+    if (!validFor(property, value, words)) continue;
     if (declared.get(property)?.important === true && !important) continue;
-    declared.set(property, { value, important });
+    declared.set(property, { words, important });
   }
-  const visibility = declared.get('visibility')?.value;
-  return declared.get('display')?.value === 'none' || visibility === 'hidden' || visibility === 'collapse';
+  const only = (property: string): string | undefined => {
+    const words = declared.get(property)?.words;
+    return words?.length === 1 ? words[0] : undefined;
+  };
+  const visibility = only('visibility');
+  return only('display') === 'none' || visibility === 'hidden' || visibility === 'collapse';
 };
 
 /**
@@ -194,18 +272,33 @@ const CLOSES_PARAGRAPH = new Set([
   'table', 'ul', 'xmp',
 ]);
 
+/** Elements whose end tag removes only themselves: the tree builder's adoption agency, which leaves blocks open. */
+const FORMATTING_ELEMENTS = new Set(['a', 'b', 'big', 'code', 'em', 'font', 'i', 'nobr', 's', 'small', 'strike', 'strong', 'tt', 'u']);
+
+/** Where a search for an open element stops: the tree builder's default scope. */
+const SCOPE_BOUNDARIES = ['applet', 'caption', 'html', 'table', 'td', 'th', 'marquee', 'object', 'template'];
+
+/** Start tags that end an open sibling of their own kind, and the list element the search stops at. */
+const IMPLIED_SIBLING_ENDS: Readonly<Record<string, { closes: string[]; stopAt: string[] }>> = {
+  li: { closes: ['li'], stopAt: [...SCOPE_BOUNDARIES, 'ul', 'ol', 'menu'] },
+  dd: { closes: ['dd', 'dt'], stopAt: [...SCOPE_BOUNDARIES, 'dl'] },
+  dt: { closes: ['dd', 'dt'], stopAt: [...SCOPE_BOUNDARIES, 'dl'] },
+};
+
 /**
- * End tags that close every element opened inside them, an open `p`
- * included — the tree builder pops to the element they name. Inline
- * formatting end tags are not here: those run the adoption agency, which
- * leaves a paragraph open.
+ * How deep the stack goes. Chromium's parser stops nesting at 512 too,
+ * and the bound is what keeps this pass linear: every end tag searches the
+ * stack, and an unbounded one let 80,000 nested `<div>`s and as many stray
+ * end tags cost their product. An element past it is not tracked, so its
+ * text is kept — the direction this pass falls back to throughout.
  */
-const ENDS_PARAGRAPHS_INSIDE = new Set([
-  'address', 'article', 'aside', 'blockquote', 'body', 'button', 'caption', 'center', 'dd', 'details', 'dialog',
-  'dir', 'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-  'header', 'hgroup', 'html', 'li', 'listing', 'main', 'menu', 'nav', 'ol', 'pre', 'search', 'section', 'select',
-  'summary', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul',
-]);
+const MAX_OPEN_ELEMENTS = 512;
+
+interface OpenElement {
+  name: string;
+  start: number;
+  hidden: boolean;
+}
 
 interface ScannedTag {
   start: number;
@@ -351,53 +444,72 @@ const scanTags = (html: string): ScannedTag[] => {
  * wrong, including the one case where it drops text a browser shows: a
  * descendant of a `visibility: hidden` element that sets `visible` again.
  *
- * Each element is paired with its own end tag by a stack per tag name, so
- * `<div hidden><div>a</div>b</div>` drops through the outer end tag rather
- * than the first `</div>` — one pass, linear in the page, where a search
- * for each element's end would rescan the rest of the page for every one.
+ * Each element is paired with its own end tag on one stack of open
+ * elements, so `<div hidden><div>a</div>b</div>` drops through the outer
+ * end tag rather than the first `</div>` — one pass, linear in the page,
+ * where a search for each element's end would rescan the rest of the page
+ * for every one.
  *
- * An element left unclosed keeps its text. `p` and `li` close implicitly,
- * so `<li hidden>a<li>b` is ordinary markup, and dropping to the end of the
- * document would erase the article behind one sloppy tag. Keeping is what
- * this extractor did before it read visibility at all, which is the right
- * place for a rendering approximation to fall back to.
+ * The implied ends that keep ordinary markup apart are modelled — `p`
+ * before a block, `li` at the next `li`, `dd`/`dt` at the next of either —
+ * so `<li hidden>a<li>b` hides `a` and shows `b`. An element still open at
+ * the end of the page keeps its text: a closing rule this pass does not
+ * model must not erase the article behind it, and keeping is what this
+ * extractor did before it read visibility at all.
  */
 const dropHiddenElements = (html: string): string => {
-  const open = new Map<string, { start: number; hidden: boolean }[]>();
+  // One stack of open elements, as the tree builder keeps, rather than one
+  // per tag name: an end tag closes everything opened inside the element
+  // it names, so in `<div><span hidden>gone</div>shown</span>` the span
+  // ends at `</div>` and `shown` is visible. Per-name stacks paired the
+  // stray `</span>` with the hidden opener and dropped it.
+  const stack: OpenElement[] = [];
   const dropped: [number, number][] = [];
+  const nearest = (names: readonly string[], stopAt: readonly string[]): number => {
+    for (let index = stack.length - 1; index >= 0; index -= 1) {
+      const name = stack[index]?.name ?? '';
+      if (names.includes(name)) return index;
+      if (stopAt.includes(name)) return -1;
+    }
+    return -1;
+  };
+  // Implicitly closed where `at` is: the element and everything above it.
+  const closeFrom = (index: number, at: number): void => {
+    for (const element of stack.splice(index)) {
+      if (element.hidden) dropped.push([element.start, at]);
+    }
+  };
+
   for (const tag of scanTags(html)) {
-    if (!tag.closing && CLOSES_PARAGRAPH.has(tag.name)) {
-      // The open paragraph ends where this tag starts, so a later `</p>`
-      // finds none to close; a hidden one is dropped up to here. Before
-      // the void check, because `hr` is both.
-      for (const paragraph of (open.get('p') ?? []).splice(0)) {
-        if (paragraph.hidden) dropped.push([paragraph.start, tag.start]);
-      }
-    }
-    if (tag.closing && ENDS_PARAGRAPHS_INSIDE.has(tag.name)) {
-      // `<div><p hidden>gone</div>shown</p>`: the `</div>` ends the
-      // paragraph opened inside it, so the later `</p>` is a stray one and
-      // `shown` is visible. Only paragraphs opened after the element this
-      // tag closes; one that was already open outside it stays open.
-      const ancestor = open.get(tag.name)?.at(-1);
-      const paragraphs = open.get('p') ?? [];
-      if (ancestor !== undefined) {
-        const inside = paragraphs.filter((paragraph) => paragraph.start > ancestor.start);
-        open.set('p', paragraphs.filter((paragraph) => paragraph.start < ancestor.start));
-        for (const paragraph of inside) {
-          if (paragraph.hidden) dropped.push([paragraph.start, tag.start]);
-        }
-      }
-    }
-    if (VOID_ELEMENTS.has(tag.name)) continue;
-    const stack = open.get(tag.name) ?? [];
-    open.set(tag.name, stack);
     if (!tag.closing) {
-      stack.push({ start: tag.start, hidden: attributesHide(tag.attributes) });
+      // Before the void check, because `hr` both closes a paragraph and
+      // holds nothing.
+      if (CLOSES_PARAGRAPH.has(tag.name)) {
+        const paragraph = nearest(['p'], [...SCOPE_BOUNDARIES, 'button']);
+        if (paragraph !== -1) closeFrom(paragraph, tag.start);
+      }
+      const sibling = IMPLIED_SIBLING_ENDS[tag.name];
+      if (sibling !== undefined) {
+        const open = nearest(sibling.closes, sibling.stopAt);
+        if (open !== -1) closeFrom(open, tag.start);
+      }
+      if (!VOID_ELEMENTS.has(tag.name) && stack.length < MAX_OPEN_ELEMENTS) {
+        stack.push({ name: tag.name, start: tag.start, hidden: attributesHide(tag.attributes) });
+      }
       continue;
     }
-    const opener = stack.pop();
-    if (opener?.hidden === true) dropped.push([opener.start, tag.end]);
+    const index = nearest([tag.name], SCOPE_BOUNDARIES.filter((name) => name !== tag.name));
+    // An end tag with nothing of its name open is a stray, and closes nothing.
+    if (index === -1) continue;
+    if (FORMATTING_ELEMENTS.has(tag.name)) {
+      const [element] = stack.splice(index, 1);
+      if (element?.hidden === true) dropped.push([element.start, tag.end]);
+      continue;
+    }
+    const element = stack[index];
+    closeFrom(index + 1, tag.start);
+    stack.splice(index, 1);
+    if (element?.hidden === true) dropped.push([element.start, tag.end]);
   }
   if (dropped.length === 0) return html;
 

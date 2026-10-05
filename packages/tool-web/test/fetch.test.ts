@@ -269,18 +269,24 @@ test('a void or unclosed hidden element does not swallow the page', () => {
   assert.equal(htmlToText('<p>a<img hidden src="x.png">b</p><p>c</p>'), 'a b\n\nc');
   assert.equal(htmlToText('<p>a<input type="hidden" value="x">b</p><p>c</p>'), 'a b\n\nc');
   assert.equal(htmlToText('<p>a<br hidden>b</p><p>c</p>'), 'a\nb\n\nc');
-  // `/>` closes nothing on an HTML element, and with no end tag to pair
-  // with, the element is kept rather than run to the end of the page.
-  assert.equal(htmlToText('<p>a<span hidden/>b</p><p>c</p>'), 'ab\n\nc');
-  // `li` closes implicitly, so an unclosed one is ordinary markup.
-  assert.equal(htmlToText('<ul><li hidden>a<li>b</ul><p>c</p>'), '- a\n- b\n\nc');
+  // `/>` closes nothing on an HTML element: the span is open until the
+  // `</p>` around it ends, and `b` is inside it — hidden, as a browser
+  // hides it — while the page after the paragraph is untouched.
+  assert.equal(htmlToText('<p>a<span hidden/>b</p><p>c</p>'), 'a\n\nc');
+  // Still open at the end of the page, an element keeps its text: a
+  // closing rule this pass does not model must not erase the rest.
+  assert.equal(htmlToText('<p>a</p><section hidden>open to the end'), 'a\n\nopen to the end');
+  // `li` closes at the next `li`, so a hidden one ends there and the
+  // visible item after it is kept.
+  assert.equal(htmlToText('<ul><li hidden>a<li>b</ul><p>c</p>'), '- b\n\nc');
 });
 
 test('the extractor reads a page at the default size limit with hidden elements throughout', () => {
   // Every shape the visibility pass handles, repeated to `maxBytes`: the
   // unclosed `li` is the one a per-element search for an end tag would
-  // rescan the rest of the page for.
-  const unit = '<p>keep <span hidden>drop</span></p><div style="display:none"><div>drop</div></div><li hidden>open ';
+  // rescan the rest of the page for. Visible, because a hidden one holds
+  // everything after it until the next `li` ends it.
+  const unit = '<p>keep <span hidden>drop</span></p><div style="display:none"><div>drop</div></div><li>open ';
   const repeats = Math.ceil(400_000 / unit.length);
   const text = htmlToText(unit.repeat(repeats));
   assert.equal(text.includes('drop'), false);
@@ -333,6 +339,9 @@ test('a page of unclosed tags is extracted in one pass, not one rescan per tag',
     '<p>x</p>' + '<script>'.repeat(50_000),
     '<p>x</p>' + '<!--'.repeat(50_000),
     '<title>' + '<title>'.repeat(50_000) + '>',
+    // Every end tag searches the open elements, so the stack must not
+    // grow with the page.
+    '<div>'.repeat(40_000) + '</span>'.repeat(30_000),
   ];
   assert.equal(await extractsWithin(pages, 10_000), true);
   for (const page of pages) {
@@ -459,4 +468,34 @@ test('an ancestor end tag closes an open paragraph inside it', () => {
   assert.match(text, /shown/);
   assert.match(text, /after/);
   assert.doesNotMatch(text, /gone/);
+});
+
+test('an ancestor end tag closes every element opened inside it', () => {
+  const span = htmlToText('<div><span hidden>gone</div>shown</span><p>after</p>');
+  assert.match(span, /shown/);
+  assert.match(span, /after/);
+  assert.doesNotMatch(span, /gone/);
+  // A matching end tag with nothing of its name open is a stray, and closes nothing.
+  assert.equal(htmlToText('<div hidden>gone</span>still gone</div><p>shown</p>'), 'shown');
+  // Implied ends that keep sibling list items apart, so closing the list
+  // does not run a hidden item over the visible one after it.
+  assert.equal(htmlToText('<ul><li hidden>a<li>b</ul><p>c</p>'), '- b\n\nc');
+  assert.equal(htmlToText('<dl><dt hidden>a<dd>b</dl>'), 'b');
+});
+
+test('CSS escapes are decoded before a property or keyword is matched', () => {
+  assert.equal(htmlToText('<p style="d\\69 splay:none">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:n\\6f ne">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:\\none">gone</p><p>shown</p>'), 'shown');
+  // An escape that spells something else is something else.
+  assert.equal(htmlToText('<p style="display:n\\6f nex">kept</p>'), 'kept');
+});
+
+test('a display value must be a whole valid value, not a run of valid keywords', () => {
+  assert.equal(htmlToText('<p style="display:none;display:block none">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:none;display:block block">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:none;display:flex grid">gone</p><p>shown</p>'), 'shown');
+  // Valid two- and three-keyword forms still override.
+  assert.equal(htmlToText('<p style="display:none;display:inline flow-root">kept</p>'), 'kept');
+  assert.equal(htmlToText('<p style="display:none;display:block flow list-item">kept</p>'), 'kept');
 });
