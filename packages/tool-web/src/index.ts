@@ -21,6 +21,8 @@ export interface WebPluginConfig extends JsonObject {
   allowPrivateAddresses?: boolean;
   /** Hosts exempt from the address check, by name or literal address. */
   allowedHosts?: string[];
+  /** The only hosts reachable at all, when set. See the README. */
+  onlyHosts?: string[];
   maxBytes?: number;
   timeoutMs?: number;
   maxRedirects?: number;

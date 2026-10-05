@@ -4630,7 +4630,8 @@ test('doctor reports the resolved provider and where it came from', async () => 
   const soulPath = path.join(agentsDir, 'ava.md');
   await writeFile(soulPath, '---\nname: Ava\n---\n\nYou are Ava.\n');
   const configPath = path.join(home, '.stratus', 'config.json');
-  await writeFile(configPath, JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5', soul: soulPath }));
+  // 0600, as the CLI writes it: a looser file is its own doctor problem.
+  await writeFile(configPath, JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5', soul: soulPath }), { mode: 0o600 });
   await writeFile(
     path.join(home, '.stratus', 'credentials.json'),
     JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
@@ -4651,6 +4652,121 @@ test('doctor reports the resolved provider and where it came from', async () => 
   assert.match(output.stdout, /agent {5}Ava \(ava\)/);
   assert.match(output.stdout, /anthropic API key/);
   assert.match(output.stdout, /No problems found\./);
+});
+
+test('doctor flags a trusted config other users can read, and not a project-local one', async () => {
+  // It holds plugin secrets — tool-shell's env block — and a file an older
+  // build wrote at the umask's mode stays loose until something saves it.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await writeFile(configPath, JSON.stringify({ provider: 'demo' }), { mode: 0o644 });
+  await chmod(configPath, 0o644);
+
+  const loose = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: loose.streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+  assert.match(loose.output.stdout, /can be read by other users on this machine \(mode 644\)/);
+  assert.match(loose.output.stdout, /chmod 600/);
+
+  await chmod(configPath, 0o600);
+  const tight = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: tight.streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+  assert.doesNotMatch(tight.output.stdout, /can be read by other users/);
+
+  // A project-local config sits in a checkout at whatever mode git gave it.
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }), { mode: 0o644 });
+  const checkout = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: checkout.streams,
+    env: { cwd: project, homeDir: home, processEnv: {} },
+  });
+  assert.doesNotMatch(checkout.output.stdout, /can be read by other users/);
+
+  // But a loose global config is still named when a project file shadows it
+  // for this run: precedence decides what a run reads, not who else can.
+  await chmod(configPath, 0o644);
+  const shadowed = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: shadowed.streams,
+    env: { cwd: project, homeDir: home, processEnv: {} },
+  });
+  assert.match(shadowed.output.stdout, new RegExp(`${configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} can be read by other users`));
+
+  // Even when the project candidate cannot be read, which stops discovery
+  // before it ever reaches the global file.
+  const blocked = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await mkdir(path.join(blocked, 'stratus.config.json'));
+  const unreadable = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams: unreadable.streams,
+    env: { cwd: blocked, homeDir: home, processEnv: {} },
+  });
+  assert.match(unreadable.output.stdout, /can be read by other users/);
+
+  // And when --config names another file: the selection decides what a run
+  // reads, not what sits on disk.
+  const elsewhere = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-explicit-')), 'config.json');
+  await writeFile(elsewhere, JSON.stringify({ provider: 'demo' }), { mode: 0o600 });
+  await chmod(elsewhere, 0o600);
+  const selected = createStreams();
+  await runCli({
+    argv: ['doctor', '--config', elsewhere],
+    streams: selected.streams,
+    env: { cwd: project, homeDir: home, processEnv: {} },
+  });
+  assert.match(selected.output.stdout, new RegExp(`${configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} can be read by other users`));
+
+  // Named once when --config names the global file itself.
+  const same = createStreams();
+  await runCli({
+    argv: ['doctor', '--config', configPath],
+    streams: same.streams,
+    env: { cwd: project, homeDir: home, processEnv: {} },
+  });
+  assert.equal(same.output.stdout.match(/can be read by other users/g)?.length, 1);
+});
+
+test('doctor suggests no chmod for a config path that is a directory', async () => {
+  // Reported as unreadable instead; `chmod 600` on a directory would only
+  // strip its search bit.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus', 'config.json'), { recursive: true, mode: 0o755 });
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+  assert.doesNotMatch(output.stdout, /chmod 600/);
+});
+
+test('doctor quotes the path in the chmod it suggests', async () => {
+  // Pasted into a shell, an unquoted home with a space in it chmods the
+  // wrong paths.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus home with space-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await writeFile(configPath, JSON.stringify({ provider: 'demo' }), { mode: 0o644 });
+  await chmod(configPath, 0o644);
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+  assert.ok(output.stdout.includes(`chmod 600 '${configPath}'`), output.stdout);
 });
 
 test('doctor explains a demo provider instead of leaving it a mystery', async () => {
@@ -4913,6 +5029,7 @@ test('doctor ignores an apiKeyEnv belonging to a different provider', async () =
   await writeFile(
     path.join(home, '.stratus', 'config.json'),
     JSON.stringify({ provider: 'openai', apiKeyEnv: 'MY_OPENAI_KEY' }),
+    { mode: 0o600 },
   );
   await writeFile(
     path.join(home, '.stratus', 'credentials.json'),
@@ -5063,6 +5180,7 @@ test('doctor stays quiet about a secondary provider no fallback targets', async 
   await writeFile(
     path.join(home, '.stratus', 'config.json'),
     JSON.stringify({ provider: 'openai', baseUrl: 'https://api.openai.com/v1' }),
+    { mode: 0o600 },
   );
   // A stored Anthropic subscription plus ANTHROPIC_API_KEY, with no
   // Anthropic fallback configured: no run ever reads that credential.
@@ -9481,6 +9599,40 @@ test('parseCommand reads the grants command and its revoke form', () => {
   }
 });
 
+test('a file-fallback revoke takes the grants lock, and refuses rather than racing a holder', async () => {
+  // A daemon reads grant files under this lock, so holding it from the
+  // revoke's read to its write is what stops a daemon caching the grant
+  // in between (#184). Held here by the test, the revoke has to wait and
+  // then refuse, leaving the grant where it was.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-lock-'));
+  const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
+  const { claimFileLock, grantsLockPath } = await import('@stratusagent/state');
+  const store = createFileCommandWhitelist({
+    directory: path.join(home, '.stratus', 'agents'),
+    stateHome: path.join(home, '.stratus'),
+  });
+  await store.rememberTool('ava', { tool: 'web.fetch', package: 'stratus-plugin-web', grantedAt: '2026-09-07T01:00:00.000Z' });
+  const env = { cwd: home, homeDir: home, processEnv: {}, grantsLockWaitMs: 50 };
+
+  const held = claimFileLock(grantsLockPath(env));
+  const refused = createStreams();
+  try {
+    assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: refused.streams, env }), 1);
+  } finally {
+    held.release();
+  }
+  assert.match(refused.output.stderr, /grants\.lock was held by another process.*nothing was revoked/);
+  const still = await createFileCommandWhitelist({
+    directory: path.join(home, '.stratus', 'agents'),
+    stateHome: path.join(home, '.stratus'),
+  }).grantsFor('ava');
+  assert.deepEqual(still.tools.map((grant) => grant.tool), ['web.fetch']);
+
+  // Free, it goes through and lets the lock go again.
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: createStreams().streams, env }), 0);
+  claimFileLock(grantsLockPath(env)).release();
+});
+
 test('stratus grants reads and revokes from the whitelist file when no daemon is serving', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-cli-'));
   const env = { cwd: home, homeDir: home, processEnv: {} };
@@ -12280,6 +12432,32 @@ const writePluginFixture = async () => {
   );
   return { home, cwd };
 };
+
+test('plugins says which agents lose their grants after reading external content', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  await writeFile(configPath, JSON.stringify({
+    ...config,
+    approvals: { externalContent: 'gate', agents: { stratus: { externalContent: 'label' } } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0);
+  // "Already-authorized ones still run" is false for a gated agent the
+  // first time it browses, so the summary names who it is false for.
+  assert.match(output.stdout, /approvals: headless — an uncovered gated call is refused/);
+  assert.match(
+    output.stdout,
+    /a conversation that has read external content runs nothing on a grant, for blair \(approvals\.externalContent\)/,
+  );
+});
 
 test('plugins names every link in the chain from installed to callable', async () => {
   const { home, cwd } = await writePluginFixture();

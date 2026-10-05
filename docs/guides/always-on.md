@@ -244,6 +244,11 @@ fresh allowance. Raise `maxTurns` for agents that do long work, so they
 check in less often — see [how many turns one message may
 spend](../reference/config.md#how-many-turns-one-message-may-spend).
 
+A message stuck repeating itself stops sooner. Three turns in a row that
+make the same failing call, with the same input and the same error, end
+the same way, early: the agent is told which tool keeps failing and says
+what it needs, instead of spending the rest of the allowance on one error.
+
 That is how the ceiling reads under a provider the kernel drives one call
 at a time. The `codex` and `claude-code` runtimes hold their own loop
 inside one call and take the number as an inner budget instead: codex

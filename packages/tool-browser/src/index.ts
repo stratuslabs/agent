@@ -33,6 +33,7 @@ const DEFAULT_MAX_TEXT_BYTES = 100_000;
 export interface BrowserPluginConfig extends JsonObject {
   allowPrivateAddresses?: boolean;
   allowedHosts?: string[];
+  onlyHosts?: string[];
   headless?: boolean;
   executablePath?: string;
   channel?: string;
@@ -79,18 +80,78 @@ const settingsFor = (config: JsonObject, session: Session, workspaces: AgentWork
 /**
  * Text as a reader would see it, extracted in the page.
  *
- * The DOM is right there, so there is nothing to guess at: the furniture is
- * removed from a clone and what is left is `innerText`, which already
- * respects what is visible. This is the one place a browser genuinely beats
- * `web.fetch`, whose extractor has to infer all of it from markup.
+ * `innerText` respects what is visible only on an element that is being
+ * rendered — on anything else it is the raw text content. This used to
+ * remove the furniture from a *clone*, which is never rendered, so every
+ * `hidden` element and every `display: none` class came back as text, the
+ * paragraphs run together. Checked in Chromium, not assumed: the clone read
+ * `visibleHIDDEN_ATTRINLINE_NONECLASS_NONE…` where the live page read
+ * `visible`.
+ *
+ * So the furniture is hidden in the live page instead, through each
+ * element's own `style` object, all inside this one synchronous call — no
+ * page script runs in between, and the layout `innerText` forces is the
+ * page's own minus the furniture. Not by an inserted `<style>`: a page
+ * whose Content-Security-Policy forbids inline styles ignores that
+ * element, and the furniture would come back as text. Setting a property
+ * through the CSSOM is not governed by that policy.
+ *
+ * Put back in two steps, because touching one property re-serializes the
+ * whole attribute (`COLOR : red;;` comes back `color: red;`) and a read
+ * must not change what a page compares or selects on. The property first,
+ * through the CSSOM, since under that same policy a re-set attribute is
+ * not applied and would leave the element hidden; then the attribute
+ * string itself, only where it now differs, so a page whose styles never
+ * needed it sees no write it would report as a violation.
+ *
+ * The container is the first `article` or `main` that is rendered and
+ * shows some text, else the body. "Rendered" is the one thing checked on
+ * the element itself, because it is the one case `innerText` gets wrong:
+ * on an element with no box — `display: none`, or inside one — it hands
+ * back the raw text, which makes an invisible `<article>` the easiest
+ * place on a page to put words for the agent alone. `display: contents`
+ * has no box either and is rendered all the same. Everything else is left
+ * to `innerText`, which already reads `visibility` per node: an article
+ * that is `visibility: hidden` reads empty and is passed over, and a
+ * hidden body with a visible child reads as that child. Checked in
+ * Chromium for each, not assumed.
+ *
+ * This matches what a reader sees; it is not an injection filter, and text
+ * a page shows only to a model (white on white, off-screen) still arrives.
  */
 const READABLE_TEXT_SCRIPT = `(() => {
-  const doc = document.cloneNode(true);
-  for (const element of doc.querySelectorAll('script, style, noscript, svg, nav, header, footer, aside, form')) {
-    element.remove();
+  const hidden = [];
+  for (const element of document.querySelectorAll('script, style, noscript, svg, nav, header, footer, aside, form')) {
+    if (!(element.style instanceof CSSStyleDeclaration)) continue;
+    hidden.push({
+      element,
+      attribute: element.getAttribute('style'),
+      value: element.style.getPropertyValue('display'),
+      priority: element.style.getPropertyPriority('display'),
+    });
+    element.style.setProperty('display', 'none', 'important');
   }
-  const main = doc.querySelector('article, main') ?? doc.body;
-  return main ? main.innerText : '';
+  try {
+    const unrendered = (element) => !element.checkVisibility() && getComputedStyle(element).display !== 'contents';
+    const main = [...document.querySelectorAll('article, main')]
+      .find((element) => !unrendered(element) && element.innerText.trim() !== '') ?? document.body;
+    return main && !unrendered(main) ? main.innerText : '';
+  } finally {
+    for (const { element, attribute, value, priority } of hidden) {
+      if (value === '') {
+        element.style.removeProperty('display');
+      } else {
+        element.style.setProperty('display', value, priority);
+      }
+      if (element.getAttribute('style') !== attribute) {
+        if (attribute === null) {
+          element.removeAttribute('style');
+        } else {
+          element.setAttribute('style', attribute);
+        }
+      }
+    }
+  }
 })()`;
 
 /**

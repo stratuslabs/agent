@@ -4,7 +4,7 @@ import https from 'node:https';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 
-import { assertRequestAllowed, checkAddress, EgressPolicyError, type EgressPolicy } from './addresses.ts';
+import { assertRequestAllowed, checkAddress, checkHost, EgressPolicyError, type EgressPolicy } from './addresses.ts';
 
 /**
  * One policy, as a key — sorted, because `{a,b}` and `{b,a}` are the same
@@ -16,6 +16,9 @@ export const policyKeyFor = (policy: EgressPolicy): string => JSON.stringify({
   allowPrivateAddresses: policy.allowPrivateAddresses ?? false,
   allowedHosts: [...(policy.allowedHosts ?? [])].sort(),
   allowedSchemes: [...(policy.allowedSchemes ?? [])].sort(),
+  // Unset and empty are different policies — every public host against
+  // none — so unset stays `null` rather than collapsing into `[]`.
+  onlyHosts: policy.onlyHosts === undefined ? null : [...policy.onlyHosts].sort(),
 });
 
 /**
@@ -50,6 +53,18 @@ const pinnedConnection = (policy: EgressPolicy): { agent: false; lookup: net.Loo
  */
 export const createPinnedLookup = (policy: EgressPolicy): net.LookupFunction => {
   const lookup: net.LookupFunction = (hostname, options, callback) => {
+    // Before the query, not after: the query is itself a request. A name
+    // like `<secret>.attacker.example` delivers its first label to whoever
+    // runs that zone's nameserver, connection or no connection.
+    const reachable = checkHost(policy, hostname);
+    if (!reachable.allowed) {
+      (callback as (err: NodeJS.ErrnoException | null, address: string, family: number) => void)(
+        new EgressPolicyError(`Refusing to connect to ${hostname}: ${reachable.reason}.`) as NodeJS.ErrnoException,
+        '',
+        0,
+      );
+      return;
+    }
     dns.lookup(hostname, { all: true, verbatim: true }, (error, addresses) => {
       if (error) {
         (callback as (err: NodeJS.ErrnoException | null, address: string, family: number) => void)(
@@ -287,6 +302,11 @@ export const createEgressProxy = async (
   const lookup = options.lookup ?? ((hostname: string) => dns.promises.lookup(hostname, { all: true, verbatim: true }));
 
   const dial = async (host: string, port: number): Promise<net.Socket> => {
+    // Judged before the lookup, for the reason the pinned lookup gives.
+    const reachable = checkHost(policy, host);
+    if (!reachable.allowed) {
+      throw new EgressPolicyError(`Refusing to connect to ${host}: ${reachable.reason}.`);
+    }
     const addresses = await lookup(host);
     const permitted = addresses.find((entry) => checkAddress(policy, host, entry.address).allowed);
     if (!permitted) {

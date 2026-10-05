@@ -31,6 +31,8 @@ import {
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
   trustedConfigError,
+  grantReadSerializer,
+  grantWriteSerializer,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogWriter } from '../logs.ts';
 import { describePrincipals, describeApprovers } from '../approvals.ts';
@@ -252,7 +254,16 @@ const serveHeldHome = async (
   // restart. A whitelist that exists and will not read is said here, once,
   // and never written over — the daemon's log is where a grant list going
   // quiet would otherwise go unnoticed.
-  const grantStore = createFileCommandWhitelist({ directory: agentsDirPath(env), stateHome: stratusHomePath(env), warn });
+  // Each grant file read, and each grant change, under the lock a
+  // file-fallback revoke takes: a daemon never caches a grant mid-revoke,
+  // and never writes a revoked one back from its cache (#184).
+  const grantStore = createFileCommandWhitelist({
+    directory: agentsDirPath(env),
+    stateHome: stratusHomePath(env),
+    warn,
+    serializeRead: grantReadSerializer(env),
+    serializeWrite: grantWriteSerializer(env),
+  });
 
   // The control API is a channel adapter like any other: started after the
   // roster loads, stopped before the store drains. It is optional because
@@ -466,6 +477,11 @@ const serveHeldHome = async (
       log(`${agentId}: ${describeOriginScope(scope)} is now acted on without asking`);
     },
   };
+  // Read through the shared resolver on every call rather than a set built
+  // here, so the per-agent override and the top-level default can never
+  // disagree about which one wins.
+  const gateExternalContent = (agentId: string): boolean =>
+    resolveAgentApprovals(approvalsConfig, agentId).externalContent === 'gate';
   const approvals = (transport: ApprovalTransport): ApprovalPolicy => {
     // The standing-grant engine, in the same file again — and the tool's
     // contributor from the gateway, so a grant records which package's
@@ -485,8 +501,8 @@ const serveHeldHome = async (
       // grant is the only path a scope-less gated tool has to running
       // unattended, and headless is where that matters.
       approvalMode === 'remote'
-        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations: transport.destinations }
-        : { mode: 'headless', onDecision, commands, origins, grants, destinations: transport.destinations },
+        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations: transport.destinations, gateExternalContent }
+        : { mode: 'headless', onDecision, commands, origins, grants, destinations: transport.destinations, gateExternalContent },
     );
   };
 

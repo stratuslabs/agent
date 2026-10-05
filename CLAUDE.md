@@ -273,6 +273,11 @@ These are deliberate. Changing one is a decision, not a refactor.
 - `~/.stratus/credentials.json` is `0600`, and so is
   `~/.stratus/logs/stratusd.jsonl` — with an explicit `chmod` before
   every append, because `appendFile`'s mode only applies on create.
+- **`~/.stratus/config.json` is `0600` too**, tightened before every write
+  and chmodded after it. It looks like settings and holds secrets: plugin
+  config, tool-shell's `env` block above all, is where a command's token
+  goes. It is written in place rather than renamed over, so a symlink to a
+  dotfiles checkout survives.
 - **Slack channel tokens are gateway infrastructure secrets.** They live
   under `channels.slack.<agentId>` and are never resolved through the
   agent-scoped `CredentialResolver` — an agent must not be able to read

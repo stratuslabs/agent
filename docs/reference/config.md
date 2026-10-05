@@ -147,6 +147,17 @@ that last call fails the turn with `Session exceeded the maximum of N
 provider turns`, and the call is not run. The first-party providers all
 honour it.
 
+**A loop ends sooner than the ceiling.** Three turns in a row where every
+call fails with the same tool, the same input, and the same error stop the
+message early, through the same wrap-up. The note names the tool and asks
+the agent to say what keeps failing. A missing working directory, or a
+gated tool refused in headless mode and called again, would otherwise
+repeat until the 40th turn. A call whose input or error changes is the
+agent trying something new and does not count, and a reply starts the
+count over. This applies under a provider the kernel drives one call at a
+time; the `codex` and `claude-code` runtimes run their own loops and
+are bounded by `maxTurns` alone.
+
 Raise it for agents that do long multi-step work — a shell, a migration,
 walking a set of issues. Lower it for a fleet that answers questions, where
 a long loop is more likely a mistake than a task.

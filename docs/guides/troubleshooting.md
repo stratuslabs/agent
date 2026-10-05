@@ -61,6 +61,10 @@ subscription sign-in to per-token billing.
   own workspace already holds files of its own, in which case they stay put
   rather than overwriting newer ones. [Updating](./updating.md) says which
   is which.
+- **Doctor says `config.json` can be read by other users** — an older build
+  wrote it at your umask's mode, and it can hold secrets (tool-shell's `env`
+  block is the usual one). Run `chmod 600 ~/.stratus/config.json`; every
+  save from this build writes it `0600`, and tightens a loose one.
 - **The agents stopped answering after a node upgrade** — the service unit
   points at an interpreter that no longer exists. `stratus update` repairs
   it; [Updating](./updating.md) explains why.

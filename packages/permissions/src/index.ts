@@ -11,6 +11,7 @@ import type {
   ToolCall,
   ToolRisk,
 } from '@stratusagent/core';
+import { sessionTaintedBy, sessionTrustOf } from '@stratusagent/core';
 
 /**
  * Re-exported, not re-implemented: the risk ordering moved to the kernel
@@ -278,6 +279,23 @@ export interface PermissionPolicyOptions {
    * is honestly offering.
    */
   grants?: ToolGrantOptions;
+  /**
+   * Whether an agent's grants stop applying once its conversation has read
+   * `external` content — a web page, a search result, an MCP server's
+   * reply. Asked per call with the agent's id, so a host can answer from
+   * per-agent config without rebuilding the policy. Omitted, or answering
+   * false, a session's label changes nothing here, which is the
+   * label-only behaviour provenance shipped with.
+   *
+   * When it answers true for a session that has read such content, every
+   * grant a person made somewhere else stops counting for it: standing tool
+   * grants, command scopes, site grants, "always this session". What still
+   * runs unattended is what never rested on a grant — `safe` tools, the
+   * built-in safe command scopes — and a schedule's pre-authorized
+   * destination (`destinations`), which a person chose for this exact job.
+   * Everything else asks, and `headless` refuses.
+   */
+  gateExternalContent?: (agentId: string) => boolean;
 }
 
 export interface ToolGrantOptions {
@@ -588,7 +606,7 @@ const awaitRemote = async (
  * `headless`, which is the mode every installed service runs in.
  */
 export const createPermissionPolicy = (options: PermissionPolicyOptions): ApprovalPolicy => {
-  const { mode, ask, request, onDecision, commands, destinations, origins, grants } = options;
+  const { mode, ask, request, onDecision, commands, destinations, origins, grants, gateExternalContent } = options;
   if (mode === 'interactive' && !ask) {
     throw new Error('interactive permission mode needs an `ask` function to reach a human.');
   }
@@ -694,6 +712,22 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // Who contributes this tool right now, for matching a grant and for
       // recording one. Resolved once so both halves see the same answer.
       const contributor = grants?.contributorOf?.(call.toolName);
+      // Whether this conversation has read text an outsider wrote, and the
+      // operator asked for that to cost it its grants. A grant is a person's
+      // answer to a question about calls the *agent* would choose; once a
+      // web page can be choosing them, the answer was given to a different
+      // question. The label is monotonic and written at execution, before
+      // the next call is judged, so a call the page asked for is never the
+      // one that slips through ahead of its own taint.
+      //
+      // `external` only. `unknown` is what a shell's output carries, and a
+      // gate on it would take the grants from every coding agent on its
+      // first command — a rule that fires on every session is one an
+      // operator turns off, and then it guards nothing. A stranger's
+      // message, the other common `unknown`, is what `principals.admit`
+      // exists to refuse before the turn starts.
+      const externalGate = sessionTrustOf(session) === 'external'
+        && gateExternalContent?.(session.agent.id) === true;
 
       const command = risk === 'gated' && singlyScoped
         ? context.tool.commandFor?.(call.input)
@@ -724,7 +758,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // else's. There is no await between this read and the match, so the
       // origin a grant is checked against is where the conversation is when
       // the decision is made, not where it was.
-      const grantedOrigins = scopedByOrigin
+      const grantedOrigins = scopedByOrigin && !externalGate
         ? [
             ...(sessionOrigins.get(session.agent.id) ?? []),
             ...(origins?.whitelist ? await origins.whitelist.originsFor(session.agent.id) : []),
@@ -752,10 +786,18 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             );
           }
         } else {
-          const stored = commands?.whitelist ? await commands.whitelist.scopesFor(session.agent.id) : [];
+          // The built-in safe scopes survive the gate and granted ones do
+          // not: `git status` was judged safe for any caller, while a
+          // granted `git push` was judged for an agent nobody else was
+          // steering.
+          const granted = externalGate
+            ? []
+            : [
+                ...(sessionScopes.get(session.agent.id) ?? []),
+                ...(commands?.whitelist ? await commands.whitelist.scopesFor(session.agent.id) : []),
+              ];
           const candidates = [
-            ...(sessionScopes.get(session.agent.id) ?? []),
-            ...stored,
+            ...granted,
             ...(commands?.safeScopes ?? SAFE_COMMAND_SCOPES),
           ];
           const scope = findMatchingScope(analysis, candidates);
@@ -768,7 +810,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             );
           }
         }
-      } else if (risk === 'gated' && unscoped) {
+      } else if (risk === 'gated' && unscoped && !externalGate) {
         // The standing grant: this process's answers first, then the file.
         // Read per call, never cached here, so a revocation through the
         // store is the next call's answer — the reason a revoke needs no
@@ -789,6 +831,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           );
         }
       } else if (risk !== 'dangerous'
+        && !externalGate
         && !scopedByOrigin
         && !multiplyScoped
         && alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
@@ -813,6 +856,12 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // refusal because an unattended firing is exactly when it applies.
       // `gated` only: a destination cannot launder a `dangerous` call, the
       // same way no argument shape makes `rm -rf` a read.
+      //
+      // Not withdrawn by the external-content gate, and that is the one
+      // grant it spares on purpose. A schedule that reads the web and
+      // reports to a channel is the job such a schedule is approved for,
+      // so withdrawing it would refuse every firing; and what the page can
+      // steer is only the words, sent to the one place a person picked.
       if (risk === 'gated' && singlyScoped && destinations) {
         const destination = context.tool.destinationFor?.(call.input);
         if (destination !== undefined
@@ -831,19 +880,27 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         return report(
           context,
           false,
-          command !== undefined
-            ? `${call.toolName} was called outside every approved scope`
-              + `${analysis?.base ? ` (${analysis.base})` : ''} and nobody is available to approve it`
-            : origin !== undefined
-              // Named, because it is the actionable half: an operator
-              // reading this at 3am needs to know which site to grant, and
-              // an origin carries no path or query to leak while saying so.
-              ? `${call.toolName} was called on ${origin}, which no approved site covers,`
-                + ' and nobody is available to approve it'
-              : scopedByOrigin
-                ? `${call.toolName} was called on a page with no origin a grant could name,`
+          // Named first because it is the cause: the operator reading this
+          // has grants on file that look like they should have covered the
+          // call, and needs to be told why they did not. The source is a
+          // tool name or `sender`, never content.
+          externalGate
+            ? `${call.toolName} was called after this conversation read external content`
+              + ` (from ${sessionTaintedBy(session) ?? 'an unrecorded source'}); with approvals.externalContent`
+              + ' set to "gate" no grant covers it, and nobody is available to approve it'
+            : command !== undefined
+              ? `${call.toolName} was called outside every approved scope`
+                + `${analysis?.base ? ` (${analysis.base})` : ''} and nobody is available to approve it`
+              : origin !== undefined
+                // Named, because it is the actionable half: an operator
+                // reading this at 3am needs to know which site to grant, and
+                // an origin carries no path or query to leak while saying so.
+                ? `${call.toolName} was called on ${origin}, which no approved site covers,`
                   + ' and nobody is available to approve it'
-                : `${call.toolName} is ${risk} and nobody is available to approve it`,
+                : scopedByOrigin
+                  ? `${call.toolName} was called on a page with no origin a grant could name,`
+                    + ' and nobody is available to approve it'
+                  : `${call.toolName} is ${risk} and nobody is available to approve it`,
           command,
           undefined,
           origin,
@@ -875,7 +932,12 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // after the answer so the question can say so; it is a pure function
       // of the analysis, and the branch below reuses this exact value.
       const commandScope = analysis ? normalizeCommandScope(analysis) : undefined;
+      // A gated conversation cannot mint a grant either: the request in
+      // front of the approver was composed after a page had its say, and
+      // "always" there would let the page talk a person into exactly the
+      // standing authority the gate withdrew.
       const oneShot = risk === 'dangerous'
+        || externalGate
         || multiplyScoped
         || (scopedByOrigin && origin === undefined)
         || (analysis !== undefined && commandScope === undefined);
@@ -894,11 +956,13 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       const alwaysMeans = oneShot
         ? risk === 'dangerous'
           ? 'not remembered — a dangerous tool asks every time'
-          : multiplyScoped
-            ? 'not remembered — this tool names more than one kind of scope'
-            : analysis !== undefined
-              ? 'not remembered — this command cannot be reduced to a scope'
-              : 'not remembered — there is no page to grant'
+          : externalGate
+            ? 'not remembered — this conversation has read external content, so it asks every time'
+            : multiplyScoped
+              ? 'not remembered — this tool names more than one kind of scope'
+              : analysis !== undefined
+                ? 'not remembered — this command cannot be reduced to a scope'
+                : 'not remembered — there is no page to grant'
         : always === 'scope'
           ? 'always this scope'
           : always === 'origin'
@@ -975,6 +1039,16 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       };
 
       if (answer === 'always') {
+        if (externalGate) {
+          // Before every branch that remembers something, because each of
+          // them would: `oneShot` told the transport not to offer this, and
+          // a prompt someone typed "always" into is not a transport that
+          // listened.
+          return allowUnlessMoved(
+            `${call.toolName} was approved once; this conversation has read external content, so nothing is remembered`,
+            command,
+          );
+        }
         if (scopedByOrigin) {
           if (!originScope) {
             // No origin to remember — a page that never loaded, or one

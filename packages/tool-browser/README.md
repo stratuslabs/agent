@@ -53,6 +53,15 @@ surface in the repository, reached by a page the agent was merely pointed
 at. The session that read it, and every fact it remembers afterwards,
 carries the label ([Memory](../../docs/concepts/memory.md#where-a-fact-came-from)).
 
+`read` returns what the page renders: the first visible `article` or `main`
+(else the body), without navigation, headers, footers, asides, forms, or
+scripts, and without anything the page hides — the `hidden` attribute, a
+`display: none` or `visibility: hidden` from any stylesheet. An `article`
+the page hides is skipped for a visible one rather than read as raw text.
+That is a match for what a reader sees, not a filter: text a page shows only
+to a model (white on white, off-screen) still arrives, which is what the
+label is for.
+
 ### Acting is scoped by origin
 
 A click submits, buys, and deletes: navigating somewhere else undoes a
@@ -116,6 +125,7 @@ version of all of this.
 | `executablePath` | none | Use the browser at this path. |
 | `headless` | `true` | Set `false` to watch it work. |
 | `allowedHosts` | none | Hosts exempt from the address check. |
+| `onlyHosts` | unset (every public host) | The only hosts the browser may reach — every navigation **and every subresource**, so a page's CDNs, fonts, and APIs need entries too (`*.example.com` covers subdomains, not the apex). A refused name is never looked up. `allowedHosts` entries stay reachable. `["*"]` under `agents` lifts an inherited list. See [`tool-web`](../tool-web/README.md#settings) for why. |
 | `allowPrivateAddresses` | `false` | Reach non-global addresses. The trusted-workstation posture. |
 | `idleMs` | `300000` | Close a conversation's context after this much quiet. |
 | `maxContexts` | `4` | Contexts at once; the least recently used goes first. |
