@@ -22,7 +22,7 @@ Everything is under `~/.stratus/` on the daemon's machine:
 
 | Path | What it is |
 | --- | --- |
-| `config.json` | The global config, and the trusted one (see "Config") |
+| `config.json` | The global config, and the trusted one (see "Config"). `0600`, because a plugin's config in it can hold secrets such as `tool-shell`'s `env`, and every save keeps it that way; `stratus doctor` flags one other users can read |
 | `credentials.json` | Provider sign-ins, channel tokens (Slack), and named credentials. `0600`, and kept that way by Stratus, which is why it is edited with `stratus credential set` rather than by hand |
 | `agents/<file>.md` | A soul: one agent's identity and allowlists. The file name is not the id; the id is the soul's `id:`, or derived from its `name:`. Use the id your instructions give |
 | `agents/<id>/` | That agent's state: `sessions.db`, `memory.jsonl`, `whitelist.json` (its standing approvals), and `workspace/` |

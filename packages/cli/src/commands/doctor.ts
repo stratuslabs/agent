@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
   agentsDirPath,
@@ -26,6 +26,7 @@ import {
   legacyWorkspacesDirPath,
   surveyLegacyWorkspaces,
   type LegacyWorkspaceState,
+  quoteShellArg,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
 import { serviceEnvFor } from '../daemon.ts';
@@ -143,6 +144,56 @@ export const collectDoctorReport = async (
       configFatal = true;
       problems.push(`${winner.path} could not be parsed (${(error as Error).message}). Every run fails until it is fixed or removed.`);
       warn(`ignoring unreadable config ${winner.path}`);
+    }
+  }
+
+  // Readable by other users: the file holds whatever plugin config carries,
+  // tool-shell's `env` tokens included, and the CLI writes it 0600 for that
+  // reason (#204) — but only from the next write, so a file an older build
+  // left at the umask's mode stays loose until something saves it. Only a
+  // trusted config: a project-local one sits in a checkout at whatever mode
+  // git gave it, and cannot set a plugin's config anyway. Every trusted one
+  // that is there, not only the one in use: a global config a project file
+  // shadows for this run still holds its secrets on disk. Asked of the
+  // candidates themselves rather than of what discovery reached, since a
+  // project file that cannot be read stops discovery before the global one.
+  // The global one even when --config or STRATUS_CONFIG names another: the
+  // selection decides what a run reads, not what sits on disk, so someone
+  // who always runs doctor that way would otherwise never hear about it.
+  // Once per file, so an explicit path that is the global one (or links to
+  // it) is not reported twice. Windows has no mode bits to read.
+  if (process.platform !== 'win32') {
+    const audited = [
+      ...candidates.filter((entry) => entry.label !== 'project'),
+      ...(explicitSource ? [{ path: globalConfigPath(env), label: 'global' }] : []),
+    ];
+    const seen = new Set<string>();
+    for (const candidate of audited) {
+      let mode: number;
+      try {
+        const stats = await stat(candidate.path);
+        // A directory where the file belongs is reported above as
+        // unreadable; `chmod 600` on it would only take away its search bit.
+        if (!stats.isFile()) {
+          continue;
+        }
+        const identity = `${stats.dev}:${stats.ino}`;
+        if (seen.has(identity)) {
+          continue;
+        }
+        seen.add(identity);
+        mode = stats.mode & 0o777;
+      } catch {
+        // Not there, or not something to stat: reported above if it matters.
+        continue;
+      }
+      if ((mode & 0o077) !== 0) {
+        problems.push(
+          `${candidate.path} can be read by other users on this machine (mode ${mode.toString(8)}), and it holds `
+          + "any secret in your plugin config, such as tool-shell's env block. "
+          + `Run \`chmod 600 ${quoteShellArg(candidate.path)}\`; Stratus writes it that way from now on.`,
+        );
+      }
     }
   }
 
