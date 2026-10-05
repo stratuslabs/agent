@@ -40,74 +40,6 @@ const VOID_ELEMENTS = new Set([
 ]);
 
 /**
- * An inline style's declarations, split where a browser splits them: on a
- * `;` outside a string, outside any bracketed block, and with comments
- * removed.
- * Split on every `;`, `content:";display:none;"` invents a declaration the
- * browser never sees and drops text it shows; so does an escaped `\;`.
- * One pass, character by character; an unterminated string or comment
- * runs to the end, as CSS reads it.
- */
-const declarationsOf = (style: string): string[] => {
-  const declarations: string[] = [];
-  let current = '';
-  let quote = '';
-  // Closers still owed, innermost last. Any CSS block — `()`, `[]`, `{}`
-  // — holds its semicolons, so `--x:{;display:none;}` is one declaration.
-  const blocks: string[] = [];
-  for (let index = 0; index < style.length; index += 1) {
-    const char = style[index] ?? '';
-    if (quote !== '') {
-      current += char;
-      if (char === '\\') {
-        current += style[index + 1] ?? '';
-        index += 1;
-      } else if (char === quote) {
-        quote = '';
-      } else if (char === '\n' || char === '\r' || char === '\f') {
-        // An unescaped newline ends a string as a bad one, and the
-        // declarations after it are read again: in `x:'\n;display:block`
-        // the `display` is real.
-        quote = '';
-      }
-      continue;
-    }
-    // An escape outside a string too: `color:red\;display:none` is one
-    // declaration whose value holds a semicolon, and no `display` at all.
-    if (char === '\\') {
-      current += char + (style[index + 1] ?? '');
-      index += 1;
-      continue;
-    }
-    if (char === '/' && style[index + 1] === '*') {
-      const close = style.indexOf('*/', index + 2);
-      index = close === -1 ? style.length : close + 1;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-    } else if (char === '(' || char === '[' || char === '{') {
-      blocks.push(char === '(' ? ')' : char === '[' ? ']' : '}');
-    } else if (char === blocks.at(-1)) {
-      blocks.pop();
-    } else if (char === ';' && blocks.length === 0) {
-      declarations.push(current);
-      current = '';
-      continue;
-    }
-    current += char;
-  }
-  declarations.push(current);
-  return declarations;
-};
-
-/**
- * Whether an inline `style` declares the element away. The last
- * declaration of a property wins unless an earlier one was `!important`,
- * which is the cascade inside one attribute — `display:none;display:block`
- * is a visible element, and dropping it would delete text the page shows.
- */
-/**
  * Whitespace as HTML and CSS both define it: five ASCII characters. Not
  * JavaScript's `\s` or `trim()`, which also take U+00A0 and the rest of
  * Unicode's spaces — `x=a\u00A0hidden` is one unquoted value to a
@@ -117,59 +49,192 @@ const isAsciiWhitespace = (char: string): boolean =>
   char === ' ' || char === '\t' || char === '\n' || char === '\f' || char === '\r';
 const trimAscii = (value: string): string => value.replace(/^[ \t\n\f\r]+|[ \t\n\f\r]+$/g, '');
 
-const isCssNameChar = (char: string): boolean => /^[a-zA-Z0-9_\-\u0080-\uffff]$/.test(char);
+/**
+ * Lowercase as CSS compares keywords: ASCII only. `toLowerCase()` also
+ * folds U+212A KELVIN SIGN to `k`, which would read `bloc\u212A` as the
+ * `block` a browser does not see.
+ */
+const asciiLower = (value: string): string => value.replace(/[A-Z]/g, (char) => char.toLowerCase());
+
+type CssTokenType =
+  | 'ident' | 'function' | 'url' | 'string' | 'hash' | 'at' | 'number' | 'delim'
+  | 'space' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}';
+
+interface CssToken {
+  type: CssTokenType;
+  /** Escapes decoded: an ident's or a function's name, a string's text, a delim's character. */
+  value: string;
+}
+
+const isNameStart = (char: string): boolean => /^[a-zA-Z_\u0080-\uffff]$/.test(char);
+const isNameChar = (char: string): boolean => isNameStart(char) || /^[0-9-]$/.test(char);
+const isDigit = (char: string): boolean => char >= '0' && char <= '9';
+const CSS_NUMBER = /[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?/y;
 
 /**
- * Whether a value calls `var()`, found as the CSS tokenizer finds a
- * function: a name, escapes decoded, directly before `(`. So `v\61r(` is
- * one, and none of these is — `xvar(` (the name is `xvar`), `1var(` (a
- * dimension), `#var(` (a hash), `"var("` (a string), a comment, or
- * `url(var(--x))`, whose unquoted body is one URL token up to its `)`.
+ * An inline style's tokens, as CSS Syntax tokenizes it. Every question
+ * below is asked of these, because each shortcut that read the characters
+ * instead was a page the browser read one way and this another:
+ * - a comment separates tokens and is otherwise nothing, so `n`, a
+ *   comment, and `one` are two words, not `none`;
+ * - escapes are decoded, so `n\6f ne` is `none`, `v\61r(` is a `var()`,
+ *   and `none\20` is one word with a space in it;
+ * - a string, or an unquoted `url(...)`, is one token whatever it spells —
+ *   `"var("` calls nothing, and a `;` inside either ends no declaration;
+ * - `1var` is a dimension and `#var` a hash, so neither starts a function;
+ * - a string left open ends at the newline, and what follows is read again.
+ * One pass, linear in the attribute. A hex escape past U+10FFFF, a
+ * surrogate, or NUL reads as U+FFFD, as for HTML.
  */
-const callsVar = (value: string): boolean => {
-  let name = '';
-  for (let index = 0; index < value.length; index += 1) {
-    const char = value[index] ?? '';
-    if (char === '\\') {
-      const hex = /^[0-9a-fA-F]{1,6}/.exec(value.slice(index + 1, index + 7))?.[0];
-      if (hex !== undefined) {
-        name += codePointText(Number.parseInt(hex, 16));
-        index += hex.length;
-        if (isAsciiWhitespace(value[index + 1] ?? '')) index += 1;
-      } else {
-        name += value[index + 1] ?? '\uFFFD';
+const cssTokens = (input: string): CssToken[] => {
+  const css = input.replace(/\r\n?|\f/g, '\n').replace(/\0/g, '\uFFFD');
+  const tokens: CssToken[] = [];
+  let index = 0;
+  const validEscape = (at: number): boolean => css[at] === '\\' && css[at + 1] !== '\n';
+  /** The character the escape at `index` stands for, consuming it. */
+  const escape = (): string => {
+    index += 1;
+    const hex = /^[0-9a-fA-F]{1,6}/.exec(css.slice(index, index + 6))?.[0];
+    if (hex !== undefined) {
+      index += hex.length;
+      if (isAsciiWhitespace(css[index] ?? '')) index += 1;
+      return codePointText(Number.parseInt(hex, 16));
+    }
+    const char = css[index];
+    if (char === undefined) return '\uFFFD';
+    index += 1;
+    return char;
+  };
+  const name = (): string => {
+    let text = '';
+    while (index < css.length) {
+      const char = css[index] ?? '';
+      if (isNameChar(char)) {
+        text += char;
         index += 1;
+      } else if (validEscape(index)) {
+        text += escape();
+      } else {
+        break;
       }
-      continue;
     }
-    if (isCssNameChar(char)) {
-      name += char;
-      continue;
-    }
-    const called = char === '(' ? name.toLowerCase() : '';
-    // `#var` and `@var` are a hash and an at-keyword, never a function name.
-    name = char === '#' || char === '@' ? char : '';
-    if (called === 'var') return true;
-    if (called === 'url') {
-      let body = index + 1;
-      while (isAsciiWhitespace(value[body] ?? '')) body += 1;
-      if (value[body] !== '"' && value[body] !== "'") {
-        // A URL token, or a bad one, ends at its first unescaped `)`.
-        for (index = body; index < value.length && value[index] !== ')'; index += 1) {
-          if (value[index] === '\\') index += 1;
+    return text;
+  };
+  const startsIdent = (at: number): boolean => {
+    const first = css[at] ?? '';
+    if (first === '-') return isNameStart(css[at + 1] ?? '') || css[at + 1] === '-' || validEscape(at + 1);
+    return isNameStart(first) || validEscape(at);
+  };
+  const startsNumber = (at: number): boolean => {
+    const first = css[at] ?? '';
+    const next = css[at + 1] ?? '';
+    if (first === '+' || first === '-') return isDigit(next) || (next === '.' && isDigit(css[at + 2] ?? ''));
+    return isDigit(first) || (first === '.' && isDigit(next));
+  };
+
+  while (index < css.length) {
+    const char = css[index] ?? '';
+    if (char === '/' && css[index + 1] === '*') {
+      const close = css.indexOf('*/', index + 2);
+      index = close === -1 ? css.length : close + 2;
+    } else if (isAsciiWhitespace(char)) {
+      while (isAsciiWhitespace(css[index] ?? '')) index += 1;
+      tokens.push({ type: 'space', value: ' ' });
+    } else if (char === '"' || char === "'") {
+      index += 1;
+      let text = '';
+      while (index < css.length && css[index] !== char && css[index] !== '\n') {
+        if (css[index] !== '\\') {
+          text += css[index];
+          index += 1;
+        } else if (css[index + 1] === '\n') {
+          index += 2;
+        } else {
+          text += escape();
         }
       }
-    } else if (char === '"' || char === "'") {
-      // A string ends at its quote, or unclosed at a newline.
-      for (index += 1; index < value.length && value[index] !== char && !'\n\r\f'.includes(value[index] ?? ''); index += 1) {
-        if (value[index] === '\\') index += 1;
+      if (css[index] === char) index += 1;
+      tokens.push({ type: 'string', value: text });
+    } else if (startsNumber(index)) {
+      CSS_NUMBER.lastIndex = index;
+      CSS_NUMBER.exec(css);
+      index = CSS_NUMBER.lastIndex;
+      if (startsIdent(index)) name();
+      else if (css[index] === '%') index += 1;
+      tokens.push({ type: 'number', value: '' });
+    } else if (startsIdent(index)) {
+      const text = name();
+      if (css[index] !== '(') {
+        tokens.push({ type: 'ident', value: text });
+        continue;
       }
-    } else if (char === '/' && value[index + 1] === '*') {
-      const close = value.indexOf('*/', index + 2);
-      index = close === -1 ? value.length : close + 1;
+      index += 1;
+      let body = index;
+      while (isAsciiWhitespace(css[body] ?? '')) body += 1;
+      if (asciiLower(text) === 'url' && css[body] !== '"' && css[body] !== "'") {
+        // A URL token, or a bad one, runs to its first unescaped `)`.
+        index = body;
+        while (index < css.length && css[index] !== ')') index += validEscape(index) ? 2 : 1;
+        index += 1;
+        tokens.push({ type: 'url', value: '' });
+      } else {
+        tokens.push({ type: 'function', value: asciiLower(text) });
+      }
+    } else if (char === '#' && (isNameChar(css[index + 1] ?? '') || validEscape(index + 1))) {
+      index += 1;
+      tokens.push({ type: 'hash', value: name() });
+    } else if (char === '@' && startsIdent(index + 1)) {
+      index += 1;
+      tokens.push({ type: 'at', value: name() });
+    } else {
+      index += 1;
+      const punctuation = ['(', ')', '[', ']', '{', '}', ';', ':'] as const;
+      const type = punctuation.find((candidate) => candidate === char);
+      tokens.push({ type: type ?? 'delim', value: char });
     }
   }
-  return false;
+  return tokens;
+};
+
+interface CssDeclaration {
+  property: string;
+  /** The value's tokens, whitespace and `!important` removed, nested blocks included. */
+  value: CssToken[];
+  important: boolean;
+}
+
+/** The token that closes each opening one. A function token opens a `(` block. */
+const CSS_CLOSERS: Partial<Record<CssTokenType, CssTokenType>> = { function: ')', '(': ')', '[': ']', '{': '}' };
+
+/**
+ * A style attribute's declarations: split on a `;` outside every block —
+ * `--x:{;display:none;}` is one declaration — and kept only where they are
+ * `name: value`, as a browser keeps them. `!important` is the last two
+ * tokens, `!` and the ident, whatever whitespace or comments sit between.
+ */
+const cssDeclarations = (style: string): CssDeclaration[] => {
+  const runs: CssToken[][] = [[]];
+  const blocks: CssTokenType[] = [];
+  for (const token of cssTokens(style)) {
+    if (token.type === ';' && blocks.length === 0) {
+      runs.push([]);
+      continue;
+    }
+    const closer = CSS_CLOSERS[token.type];
+    if (closer !== undefined) blocks.push(closer);
+    else if (token.type === blocks.at(-1)) blocks.pop();
+    if (token.type !== 'space') runs.at(-1)?.push(token);
+  }
+  const declarations: CssDeclaration[] = [];
+  for (const [name, colon, ...value] of runs) {
+    if (name?.type !== 'ident' || colon?.type !== ':') continue;
+    const bang = value.at(-2);
+    const last = value.at(-1);
+    const important = bang?.type === 'delim' && bang.value === '!'
+      && last?.type === 'ident' && asciiLower(last.value) === 'important';
+    declarations.push({ property: asciiLower(name.value), value: important ? value.slice(0, -2) : value, important });
+  }
+  return declarations;
 };
 
 const CSS_WIDE_KEYWORDS = new Set(['inherit', 'initial', 'unset', 'revert', 'revert-layer']);
@@ -184,46 +249,6 @@ const DISPLAY_SINGLE = new Set([
 ]);
 const DISPLAY_OUTSIDE = new Set(['block', 'inline', 'run-in']);
 const DISPLAY_INSIDE = new Set(['flow', 'flow-root', 'table', 'flex', 'grid', 'ruby', 'math']);
-
-/**
- * The words of a CSS value, escapes decoded and lowercased, split on
- * unescaped ASCII whitespace — the identifiers a browser compares, not the
- * characters written. `n\6f ne` is `none`; `none\20` is one word,
- * `none ` with a space in it, and not `none` at all. A hex escape takes up
- * to six digits and one whitespace after them; anything past U+10FFFF, a
- * surrogate, or NUL reads as U+FFFD, as for HTML.
- */
-const cssWords = (value: string): string[] => {
-  const words: string[] = [];
-  let word = '';
-  let inWord = false;
-  for (let index = 0; index < value.length; index += 1) {
-    const char = value[index] ?? '';
-    if (char === '\\') {
-      const hex = /^[0-9a-fA-F]{1,6}/.exec(value.slice(index + 1, index + 7))?.[0];
-      if (hex !== undefined) {
-        word += codePointText(Number.parseInt(hex, 16));
-        index += hex.length;
-        if (isAsciiWhitespace(value[index + 1] ?? '')) index += 1;
-      } else {
-        word += value[index + 1] ?? '\uFFFD';
-        index += 1;
-      }
-      inWord = true;
-      continue;
-    }
-    if (isAsciiWhitespace(char)) {
-      if (inWord) words.push(word.toLowerCase());
-      word = '';
-      inWord = false;
-      continue;
-    }
-    word += char;
-    inWord = true;
-  }
-  if (inWord) words.push(word.toLowerCase());
-  return words;
-};
 
 /**
  * Whether `display` accepts these words: one keyword that stands alone,
@@ -244,6 +269,10 @@ const validDisplay = (words: readonly string[]): boolean => {
   return words.length === 2 && outside === 1 && inside === 1;
 };
 
+/** A value's words, if it is nothing but identifiers — the only values `display` and `visibility` take. */
+const wordsOf = (value: readonly CssToken[]): string[] | undefined =>
+  value.every((token) => token.type === 'ident') ? value.map((token) => asciiLower(token.value)) : undefined;
+
 /**
  * Whether a value is one a browser would accept for the property. A
  * declaration it would not is dropped from the cascade rather than
@@ -251,48 +280,32 @@ const validDisplay = (words: readonly string[]): boolean => {
  * A `var()` is accepted, as a browser accepts it until computed time, and
  * reads as not hiding — the direction that keeps text.
  */
-const validFor = (property: string, raw: string, words: readonly string[]): boolean => {
-  if (callsVar(raw)) return true;
+const validFor = (property: string, value: readonly CssToken[]): boolean => {
+  if (value.some((token) => token.type === 'function' && token.value === 'var')) return true;
+  const words = wordsOf(value);
+  if (words === undefined) return false;
   if (words.length === 1 && CSS_WIDE_KEYWORDS.has(words[0] ?? '')) return true;
   if (property === 'visibility') return words.length === 1 && ['visible', 'hidden', 'collapse'].includes(words[0] ?? '');
-  if (property === 'display') return validDisplay(words);
-  return true;
+  return validDisplay(words);
 };
 
-/** The first `:` that is not escaped — `dis\:play` is one name. */
-const colonOf = (declaration: string): number => {
-  for (let index = 0; index < declaration.length; index += 1) {
-    if (declaration[index] === '\\') index += 1;
-    else if (declaration[index] === ':') return index;
-  }
-  return -1;
-};
-
+/**
+ * Whether an inline `style` declares the element away. The last
+ * declaration of a property wins unless an earlier one was `!important`,
+ * which is the cascade inside one attribute — `display:none;display:block`
+ * is a visible element, and dropping it would delete text the page shows.
+ */
 const styleHides = (style: string): boolean => {
-  const declared = new Map<string, { words: string[]; important: boolean }>();
-  for (const declaration of declarationsOf(style)) {
-    const colon = colonOf(declaration);
-    if (colon === -1) continue;
-    const name = cssWords(declaration.slice(0, colon));
-    if (name.length !== 1) continue;
-    const property = name[0] ?? '';
-    const raw = trimAscii(declaration.slice(colon + 1)).toLowerCase();
-    // `!important` read as CSS reads it: the last `!` and the words after
-    // it, escapes decoded — `!\69mportant` is still `!important`.
-    const bang = raw.lastIndexOf('!');
-    const important = bang !== -1 && cssWords(raw.slice(bang + 1)).join(' ') === 'important';
-    const value = important ? trimAscii(raw.slice(0, bang)) : raw;
-    const words = cssWords(value);
-    if (!validFor(property, value, words)) continue;
+  const declared = new Map<string, { word: string | undefined; important: boolean }>();
+  for (const { property, value, important } of cssDeclarations(style)) {
+    if (property !== 'display' && property !== 'visibility') continue;
+    if (!validFor(property, value)) continue;
     if (declared.get(property)?.important === true && !important) continue;
-    declared.set(property, { words, important });
+    const words = wordsOf(value);
+    declared.set(property, { word: words?.length === 1 ? words[0] : undefined, important });
   }
-  const only = (property: string): string | undefined => {
-    const words = declared.get(property)?.words;
-    return words?.length === 1 ? words[0] : undefined;
-  };
-  const visibility = only('visibility');
-  return only('display') === 'none' || visibility === 'hidden' || visibility === 'collapse';
+  const visibility = declared.get('visibility')?.word;
+  return declared.get('display')?.word === 'none' || visibility === 'hidden' || visibility === 'collapse';
 };
 
 /**
@@ -347,6 +360,7 @@ const IMPLIED_SIBLING_ENDS: Readonly<Record<string, { closes: string[]; stopAt: 
   dt: { closes: ['dd', 'dt'], stopAt: [...SCOPE_BOUNDARIES, 'dl'] },
   option: { closes: ['option'], stopAt: [...SCOPE_BOUNDARIES, 'select', 'datalist', 'optgroup'] },
   optgroup: { closes: ['option', 'optgroup'], stopAt: [...SCOPE_BOUNDARIES, 'select', 'datalist'] },
+  button: { closes: ['button'], stopAt: SCOPE_BOUNDARIES },
 };
 
 /**

@@ -579,3 +579,24 @@ test('a link start tag ends the link already open', () => {
   assert.match(nobr, /shown/);
   assert.doesNotMatch(nobr, /gone/);
 });
+
+test('a CSS comment separates tokens rather than joining them', () => {
+  assert.equal(htmlToText('<p style="display:n/**/one">kept</p>'), 'kept');
+  assert.equal(htmlToText('<p style="dis/**/play:none">kept</p>'), 'kept');
+  // Between tokens it is nothing at all.
+  assert.equal(htmlToText('<p style="display/**/:/**/none">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:none!/**/important;display:block">gone</p><p>shown</p>'), 'shown');
+});
+
+test('CSS keywords compare in ASCII case only', () => {
+  // U+212A KELVIN SIGN lowercases to k in JavaScript, and not in CSS.
+  assert.equal(htmlToText('<p style="display:none;display:blocK">gone</p><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:NONE">gone</p><p>shown</p>'), 'shown');
+});
+
+test('a button start tag ends the button already open', () => {
+  const text = htmlToText('<button hidden>gone<button>shown</button><p>after</p></button>');
+  assert.match(text, /shown/);
+  assert.match(text, /after/);
+  assert.doesNotMatch(text, /gone/);
+});
