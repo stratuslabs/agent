@@ -1090,6 +1090,14 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
         if (opened.hidden) confirmed.add(opened.id);
         continue;
       }
+      // A form opened directly in a table is the form pointer, but the tree
+      // builder pops it at once: it holds nothing, and what follows is
+      // placed as if it were not there.
+      if (tag.name === 'form' && TABLE_CONTEXT.has(stack.at(-1)?.name ?? '')) {
+        form = opened;
+        if (opened.hidden) confirmed.add(opened.id);
+        continue;
+      }
       if (!push(opened)) continue;
       if (FORMATTING_ELEMENTS.has(tag.name)) remember(opened, tag.attributes);
       if (MARKER_ELEMENTS.has(tag.name)) active.push('marker');

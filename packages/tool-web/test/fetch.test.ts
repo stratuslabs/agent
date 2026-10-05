@@ -809,3 +809,11 @@ test('an end tag inside dropped furniture still closes its ancestors', () => {
     assert.doesNotMatch(text, /gone/, furniture);
   }
 });
+
+test('a form opened directly in a table holds nothing', () => {
+  // The tree builder pops it at once, so the text after it is placed
+  // before the table, outside the hidden form, as in Chromium.
+  const text = htmlToText('<table><form hidden>visible<tr><td>cell</td></tr></form></table><p>after</p>');
+  assert.match(text, /visible/);
+  assert.match(text, /cell/);
+});
