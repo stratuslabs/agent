@@ -128,6 +128,12 @@ test('onlyHosts narrows which names are reachable, exactly or by subdomain', () 
   // `*` is every host — the value an agent's override uses to lift a list
   // it would otherwise inherit.
   assert.equal(checkHost({ onlyHosts: ['*'] }, 'attacker.example').allowed, true);
+  // Only `*` written as itself. A wildcard cut short — `*.` from
+  // `*.example.com` — normalizes to `*`, and reading it as every host
+  // would lift the list on a typo; a malformed rule reaches nothing.
+  assert.equal(checkHost({ onlyHosts: ['*.'] }, 'attacker.example').allowed, false);
+  assert.equal(checkHost({ onlyHosts: ['*..'] }, 'attacker.example').allowed, false);
+  assert.equal(checkHost({ onlyHosts: [' * '] }, 'attacker.example').allowed, true);
 });
 
 test('a host outside onlyHosts is refused at the URL, before any lookup, with the setting named', () => {

@@ -291,9 +291,15 @@ const normalizeHost = (host: string): string => host.toLowerCase().replace(/^\[|
 const onlyHostsMatch = (entries: readonly string[], host: string): boolean => {
   const normalized = normalizeHost(host);
   return entries.some((entry) => {
+    // `*` as written, before normalizing: `*.`, a wildcard cut short,
+    // normalizes to `*` too, and a typo must not lift the whole list. A
+    // bare `*` left after normalizing is that typo, and matches nothing.
+    if (entry.trim() === '*') {
+      return true;
+    }
     const rule = normalizeHost(entry);
     if (rule === '*') {
-      return true;
+      return false;
     }
     // `*.example.com` is every subdomain, at any depth, and never the
     // apex: the suffix carries its leading dot, so `badexample.com` does
