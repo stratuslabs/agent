@@ -172,7 +172,11 @@ risk levels. Four things are worth knowing here:
   unique-local — including the IPv4-mapped and NAT64 spellings of the same
   addresses. It is enforced on the connection, so a redirect or a DNS answer
   cannot walk an agent into your metadata endpoint. `allowedHosts` opens a
-  specific one when you mean to.
+  specific one when you mean to. `onlyHosts` narrows the other way: set, it
+  is the only list of hosts either tool may reach, which is what stops an
+  agent that read a hostile page from putting what it knows into a URL on
+  the page's own server
+  ([`tool-web`](../../packages/tool-web/README.md#settings)).
 - **`web.search` is a contract, not a package you install from us.** Every
   search backend needs a vendor key and a commercial relationship, so core
   ships `web.fetch` and the ecosystem ships `web.search`. What is

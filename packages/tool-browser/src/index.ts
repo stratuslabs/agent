@@ -33,6 +33,7 @@ const DEFAULT_MAX_TEXT_BYTES = 100_000;
 export interface BrowserPluginConfig extends JsonObject {
   allowPrivateAddresses?: boolean;
   allowedHosts?: string[];
+  onlyHosts?: string[];
   headless?: boolean;
   executablePath?: string;
   channel?: string;

@@ -68,6 +68,16 @@ would have refused it is never called.
 | `allowPrivateAddresses` | Reaches any non-global address. The trusted-workstation posture — it turns the protection off rather than adjusting it. |
 | `allowedSchemes` | Replaces the scheme allowlist. There is no good reason to add `file:`. |
 
-Neither is a substitute for network-level egress rules in a VM or hosted
+## Narrowing it
+
+| Setting | What it does |
+| --- | --- |
+| `onlyHosts` | When set, the only hosts reachable at all: exact names or literal addresses, or `*.example.com` for every subdomain, never the apex. Checked on the name, before any lookup, on every path that dials — the URL check, the pinned lookup, and the proxy — because a DNS query for a refused name is itself a request. A listed name still faces the address check, and an `allowedHosts` entry stays reachable. Unset and empty differ: unset is every public host, `[]` is none, and a list containing `*` is every public host again — what an agent's override uses to lift a list it would otherwise inherit. |
+
+The address check protects the machine from what an agent requests. This
+protects what an agent has read from where it may send it — a URL's query
+string is a channel to any host it names.
+
+None of these is a substitute for network-level egress rules in a VM or hosted
 profile ([08](../../docs/roadmap/08-deployment-profiles.md)); this is the
 in-process half.
