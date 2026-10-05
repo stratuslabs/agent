@@ -242,6 +242,35 @@ const ALREADY_AUTHORIZED = 'standing grants, approved command scopes and sites (
   + 'and destinations pre-authorized with a schedule (stratus schedules)';
 
 /**
+ * The exception to "already-authorized ones still run", for the agents it
+ * applies to: under `externalContent: "gate"`, a conversation that has read
+ * a web page runs nothing on a grant. Without it, the line above would
+ * promise unattended capability the engine withdraws the first time the
+ * agent browses — and the operator who turned the gate on would read the
+ * summary as saying it did nothing.
+ *
+ * The roster, when there is one, is who is asked about; without one, the
+ * config's own keys are all there is to go on.
+ */
+const externalContentClause = (
+  approvals: ApprovalsConfig,
+  servedAgentIds: readonly string[] | undefined,
+): string[] => {
+  const gated = (agentId: string): boolean => resolveAgentApprovals(approvals, agentId).externalContent === 'gate';
+  const exempt = Object.keys(approvals.agents ?? {}).filter((agentId) => !gated(agentId));
+  const who = servedAgentIds === undefined
+    ? approvals.externalContent === 'gate'
+      ? exempt.length > 0 ? `every agent but ${exempt.join(', ')}` : 'every agent'
+      : Object.keys(approvals.agents ?? {}).filter(gated).join(', ')
+    : servedAgentIds.length > 0 && servedAgentIds.every(gated)
+      ? 'every agent'
+      : servedAgentIds.filter(gated).join(', ');
+  return who === ''
+    ? []
+    : [`a conversation that has read external content runs nothing on a grant, for ${who} (approvals.externalContent)`];
+};
+
+/**
  * What a gated call would actually meet on this machine.
  *
  * The mode is not the answer on its own, in both directions. `headless`
@@ -345,7 +374,10 @@ export const unattendedReachParts = (
   env: CliEnvironment,
 ): string[] => {
   if (mode === 'headless') {
-    return [`headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`];
+    return [
+      `headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`,
+      ...externalContentClause(approvals, servedAgentIds),
+    ];
   }
   // The same condition `runServe` reports at startup, through the same
   // helper: an agent is askable when its tokens are stored and something is
@@ -461,5 +493,6 @@ export const unattendedReachParts = (
   parts.push('an "always allow" answer persists — a standing grant for an unscoped tool, a command scope, '
     + 'or a site, all until revoked; only a call scoped by destination, such as message.send, '
     + 'lasts just the session');
+  parts.push(...externalContentClause(approvals, servedAgentIds));
   return parts;
 };

@@ -486,6 +486,27 @@ test('an agent inherits the default approval route key by key', async () => {
   assert.deepEqual(resolveAgentApprovals(undefined, 'ava'), {});
 });
 
+test('externalContent parses at the top and per agent, inherits per agent, and fails loudly when misspelled', async () => {
+  const configPath = await writeConfig('external-content.json', {
+    approvals: { externalContent: 'gate', agents: { ava: { externalContent: 'label' }, bea: {} } },
+  });
+  const config = await loadConfigFile(configPath);
+  assert.equal(config.approvals?.externalContent, 'gate');
+  assert.equal(resolveAgentApprovals(config.approvals, 'ava').externalContent, 'label');
+  assert.equal(resolveAgentApprovals(config.approvals, 'bea').externalContent, 'gate');
+  assert.equal(resolveAgentApprovals(config.approvals, 'unlisted').externalContent, 'gate');
+  assert.equal(resolveAgentApprovals(undefined, 'ava').externalContent, undefined);
+
+  // Dropped, a misspelling would leave the grants it meant to withdraw in
+  // force — so it is refused, and the message names where it was written.
+  const top = await writeConfig('bad-external.json', { approvals: { externalContent: 'ask' } });
+  await assert.rejects(loadConfigFile(top), /Unsupported approvals\.externalContent/);
+  const perAgent = await writeConfig('bad-agent-external.json', {
+    approvals: { agents: { ava: { externalContent: true } } },
+  });
+  await assert.rejects(loadConfigFile(perAgent), /Unsupported approvals\.agents\.ava\.externalContent/);
+});
+
 test('an explicitly empty approver list excludes an agent instead of inheriting', async () => {
   const approvals = {
     slackApprovers: ['U-OPS'],
