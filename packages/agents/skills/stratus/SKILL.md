@@ -22,7 +22,7 @@ Everything is under `~/.stratus/` on the daemon's machine:
 
 | Path | What it is |
 | --- | --- |
-| `config.json` | The global config, and the trusted one (see "Config") |
+| `config.json` | The global config, and the trusted one (see "Config"). `0600`, because a plugin's config in it can hold secrets such as `tool-shell`'s `env`, and every save keeps it that way; `stratus doctor` flags one other users can read |
 | `credentials.json` | Provider sign-ins, channel tokens (Slack), and named credentials. `0600`, and kept that way by Stratus, which is why it is edited with `stratus credential set` rather than by hand |
 | `agents/<file>.md` | A soul: one agent's identity and allowlists. The file name is not the id; the id is the soul's `id:`, or derived from its `name:`. Use the id your instructions give |
 | `agents/<id>/` | That agent's state: `sessions.db`, `memory.jsonl`, `whitelist.json` (its standing approvals), and `workspace/` |
@@ -117,6 +117,7 @@ When a stored key "isn't found", check in this order:
   - every third-party tool, `web.search` included.
   - What happens to a gated call depends on the approvals mode. Under `headless` (the default) it is refused. Under `remote` the people in `approvals.slackApprovers` are asked in Slack (or through the control API's `/approvals`) with **Allow once**, **Always allow**, and **Deny**. Under `remote` with nobody to ask, it is refused too.
   - Either way, what was already approved still runs unattended. For `shell.run` that is a command scope plus a built-in safe list of read-only commands (`git status`, `git log`, `git diff`, `pwd`, and a few more; not `ls`). For `browser.act` it is an approved site, and for other gated tools a standing grant.
+  - The exception is `approvals.externalContent: "gate"`, set for every agent or per agent under `approvals.agents.<id>`. Once your conversation has read external content (`web.fetch`, `browser.*`, `web.search`, or an `mcp.*` tool), no grant applies for the rest of it: every gated call is asked or, headless, refused, and **Always allow** is not offered. `safe` tools, the built-in read-only commands, and a schedule's pre-authorized destination still run. Your next conversation starts with its grants again.
   - **Always allow** writes one of those to `agents/<id>/whitelist.json`, except for a tool that names a destination, such as `message.send`, where it lasts for the conversation. A `dangerous` call is never offered it.
   - `stratus grants <id>` lists the grants, and `stratus grants revoke <id> --tool|--scope|--origin` takes one back. There is no command to add one: a headless daemon asks nobody, so it never creates a grant, and a call nobody has approved yet needs `remote` mode first.
 

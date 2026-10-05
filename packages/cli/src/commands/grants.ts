@@ -6,7 +6,15 @@ import {
   type AgentGrantsListing,
   type ToolGrant,
 } from '@stratusagent/permissions';
-import { agentsDirPath, gatewayInfoPath, stratusHomePath } from '@stratusagent/state';
+import {
+  agentsDirPath,
+  claimFileLock,
+  FileLockHeldError,
+  gatewayInfoPath,
+  GRANTS_LOCK_WAIT_MS,
+  grantsLockPath,
+  stratusHomePath,
+} from '@stratusagent/state';
 import { callRunningGateway, gatewayErrorMessage, readGatewayInfo } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -60,12 +68,36 @@ export const runGrants = async (
       warn: (line) => writeLine(streams.stderr, `Warning: ${line}`),
     });
     if (revocation) {
-      const revoked = revocation.tool !== undefined
-        ? await store.forgetTool(agentId, revocation.tool)
-        : revocation.scope !== undefined
-          ? await store.forgetScope(agentId, revocation.scope)
-          : await store.forgetOrigin(agentId, revocation.origin ?? '');
-      return reportRevocation(revoked);
+      // Held from the read this revoke decides on until its bytes land. A
+      // daemon reading this agent's grants takes the same lock, so it reads
+      // before the revoke or after it, never between. One that read between
+      // used to cache the revoked grant and honour it until it restarted,
+      // after this command had reported it gone (#184). Async under the lock
+      // is safe here, and only here: nothing else in this process waits on it.
+      let lock;
+      try {
+        lock = claimFileLock(grantsLockPath(env), { waitMs: env.grantsLockWaitMs ?? GRANTS_LOCK_WAIT_MS });
+      } catch (error) {
+        if (error instanceof FileLockHeldError) {
+          writeLine(
+            streams.stderr,
+            `${error.lockPath} was held by another process for longer than the revoke waits, so nothing was revoked. `
+            + 'Run the command again; if it keeps happening, a stuck `stratus` process is holding it.',
+          );
+          return 1;
+        }
+        throw error;
+      }
+      try {
+        const revoked = revocation.tool !== undefined
+          ? await store.forgetTool(agentId, revocation.tool)
+          : revocation.scope !== undefined
+            ? await store.forgetScope(agentId, revocation.scope)
+            : await store.forgetOrigin(agentId, revocation.origin ?? '');
+        return reportRevocation(revoked);
+      } finally {
+        lock.release();
+      }
     }
     const listing: GrantsListing = { agentId, ...describeAgentGrants(await store.grantsFor(agentId)) };
     // The file that was actually read, which during an upgrade is the old

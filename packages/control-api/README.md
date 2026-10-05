@@ -474,11 +474,13 @@ when `always` would remember nothing.
   exists yet; the schedule carve-out is how a send runs unattended.
 
 For a **one-shot** request `always` is absent and **`oneShot: true`** is
-present: the call runs once and the next one asks again. Three cases reach
+present: the call runs once and the next one asks again. Four cases reach
 this — a `dangerous` tool, which means a human every time whatever is
 answered; a call judged by an origin whose conversation has no page to grant;
-and a command this daemon's parser cannot reduce to a scope, such as a pipe or
-a subshell. **A client must not offer an unconditional "always" on such a
+a command this daemon's parser cannot reduce to a scope, such as a pipe or
+a subshell; and any call from a conversation that has read external content,
+for an agent whose `approvals.externalContent` is `gate` (see
+[Approvals](../../docs/guides/approvals.md#after-an-agent-reads-the-web)). **A client must not offer an unconditional "always" on such a
 request** — it does exactly what `once` does, under a label promising a grant
 nobody gets. The Slack channel drops the button and says why. `POST
 /approvals` still *accepts* `always` on such a request — the endpoint takes

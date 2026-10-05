@@ -87,6 +87,12 @@
             "type": "string"
           }
         },
+        "onlyHosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "headless": {
           "type": "boolean"
         },
