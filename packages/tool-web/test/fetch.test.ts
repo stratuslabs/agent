@@ -849,3 +849,16 @@ test('an inline display overrides the hidden attribute, and all resets display',
 test('a form inside a template does not set the form pointer', () => {
   assert.equal(htmlToText('<template><form></template><p hidden>gone<form></form>shown</p><p>after</p>'), 'shown\n\nafter');
 });
+
+test('!important counts only at the top level of a declaration', () => {
+  // Inside an unclosed var() it is part of the argument, and the earlier
+  // important declaration stands, as in Chromium.
+  assert.equal(htmlToText('<p style="display:none!important;display:var(--missing,!important">gone</p><p>after</p>'), 'after');
+  assert.equal(htmlToText('<p style="display:none!important;display:var(--x)!important">shown</p>'), 'shown');
+});
+
+test('a form end tag inside a template leaves the document\'s form pointer set', () => {
+  // The table's form set the pointer; the template's form never touches it,
+  // so the last form start tag is ignored and the paragraph stays open.
+  assert.equal(htmlToText('<table><form></table><template><form></form></template><p hidden>gone<form></form>shown</p><p>after</p>'), 'after');
+});

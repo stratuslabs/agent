@@ -245,9 +245,14 @@ const CSS_CLOSERS: Partial<Record<CssTokenType, CssTokenType>> = { function: ')'
 const cssDeclarations = (style: string): CssDeclaration[] => {
   const runs: CssToken[][] = [[]];
   const malformed = new Set<CssToken[]>();
+  // The tokens at a declaration's top level, outside every block: only
+  // those can be its `!important`, which inside an unclosed var() is part
+  // of the argument.
+  const topLevel = new Set<CssToken>();
   const blocks: CssTokenType[] = [];
   for (const token of cssTokens(style)) {
     const run = runs.at(-1) ?? [];
+    if (blocks.length === 0) topLevel.add(token);
     if (token.type === ';' && blocks.length === 0) {
       runs.push([]);
       continue;
@@ -265,8 +270,8 @@ const cssDeclarations = (style: string): CssDeclaration[] => {
     if (name?.type !== 'ident' || colon?.type !== ':') continue;
     const bang = value.at(-2);
     const last = value.at(-1);
-    const important = bang?.type === 'delim' && bang.value === '!'
-      && last?.type === 'ident' && asciiLower(last.value) === 'important';
+    const important = bang?.type === 'delim' && bang.value === '!' && topLevel.has(bang)
+      && last?.type === 'ident' && asciiLower(last.value) === 'important' && topLevel.has(last);
     declarations.push({
       property: asciiLower(name.value),
       value: important ? value.slice(0, -2) : value,
@@ -1156,6 +1161,14 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     }
     // `</form>` removes the form it opened and nothing inside it: in
     // `<form hidden><div>a</form>b</div>` the `b` is still in the form.
+    // Inside a template, the form pointer is not used: the end tag closes
+    // the form in scope there, and the document's pointer stays set.
+    if (tag.name === 'form' && nearest(['template'], []) !== -1) {
+      const index = nearest(['form'], SCOPE_BOUNDARIES);
+      segments.push({ start: tag.start, end: tag.end, node: stack[index]?.node ?? parentFor(false) });
+      if (index !== -1) closeFrom(index);
+      continue;
+    }
     if (tag.name === 'form') {
       const pointer = form;
       form = undefined;
