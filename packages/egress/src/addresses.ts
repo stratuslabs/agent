@@ -292,15 +292,28 @@ const normalizeHost = (host: string): string => host.toLowerCase().replace(/^\[|
  * A host in the form a URL gives it: punycode for a Unicode name, an IPv6
  * literal compressed and lowercased. Rules are written by people and hosts
  * arrive from `URL`, so both sides go through the same parser or
- * `bücher.de` never matches the `xn--bcher-kva.de` a request carries. A
- * name the parser refuses keeps its plain form, and matches only itself.
+ * `bücher.de` never matches the `xn--bcher-kva.de` a request carries.
+ *
+ * Only a hostname or an IPv6 literal is parsed. Anything else would be
+ * parsed as a URL *authority*, where `trusted.example@attacker.example` is
+ * user-info and a host — and a rule meant for the first would allow the
+ * second. A rule carrying URL syntax, or one the parser refuses, keeps its
+ * plain form, which no host from a URL can equal: it matches nothing.
  */
+const HOSTNAME_CHARACTERS = /^[a-z0-9._\-\u0080-\uffff]+$/;
+
 const canonicalHost = (host: string): string => {
   const plain = normalizeHost(host);
   if (plain === '') return plain;
+  if (!expandIPv6(plain) && !HOSTNAME_CHARACTERS.test(plain)) return plain;
   try {
-    const parsed = new URL(`http://${expandIPv6(plain) ? `[${plain}]` : plain}/`).hostname;
-    return normalizeHost(parsed);
+    const parsed = new URL(`http://${expandIPv6(plain) ? `[${plain}]` : plain}/`);
+    // Belt to the character check's braces: a parse that found anything
+    // but a host — a fullwidth `＠` IDNA maps onto `@`, say — is not one.
+    if (parsed.username !== '' || parsed.password !== '' || parsed.port !== '' || parsed.pathname !== '/') {
+      return plain;
+    }
+    return normalizeHost(parsed.hostname);
   } catch {
     return plain;
   }

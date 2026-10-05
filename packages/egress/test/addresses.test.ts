@@ -141,6 +141,16 @@ test('onlyHosts narrows which names are reachable, exactly or by subdomain', () 
   assert.equal(checkHost(unicode, 'shop.xn--bcher-kva.de').allowed, true);
   assert.equal(checkHost(unicode, '[2001:db8::1]').allowed, true);
   assert.equal(checkHost(unicode, 'xn--bchr-kva.de').allowed, false);
+  // A rule is a hostname, never a URL authority: parsed as one, user-info
+  // or a path would move it onto a different host. Malformed matches
+  // nothing.
+  for (const rule of ['trusted.example@attacker.example', 'trusted.example/attacker.example', 'trusted.example\\attacker.example']) {
+    assert.equal(checkHost({ onlyHosts: [rule] }, 'attacker.example').allowed, false, rule);
+    assert.equal(checkHost({ onlyHosts: [rule] }, 'trusted.example').allowed, false, rule);
+  }
+  assert.equal(checkHost({ onlyHosts: ['*.trusted.example@attacker.example'] }, 'x.attacker.example').allowed, false);
+  assert.equal(checkHost({ onlyHosts: ['trusted.example:443'] }, 'trusted.example').allowed, false);
+  assert.equal(checkHost({ onlyHosts: ['trusted.example\uFF20attacker.example'] }, 'attacker.example').allowed, false);
 });
 
 test('a host outside onlyHosts is refused at the URL, before any lookup, with the setting named', () => {
