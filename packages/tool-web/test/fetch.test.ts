@@ -731,3 +731,10 @@ test('a var() declaration with a malformed token or a malformed var() is rejecte
   // A well-formed one still defers, and reads as shown.
   assert.equal(htmlToText('<p style="display:none;display:var(--x, red)">shown</p>'), 'shown');
 });
+
+test('an escape in an unquoted url() is read whole, its ending space included', () => {
+  // `\61 ` is `a`: the URL is `ab`, well formed, and the var() declaration
+  // after it stands — but a second space is inside the URL, and bad.
+  assert.equal(htmlToText('<p style="display:none;display:url(\\61 b) var(--x)">shown</p>'), 'shown');
+  assert.equal(htmlToText('<p style="display:none;display:url(\\61  b) var(--x)">gone</p><p>after</p>'), 'after');
+});

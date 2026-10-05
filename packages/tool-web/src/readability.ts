@@ -188,8 +188,13 @@ const cssTokens = (input: string): CssToken[] => {
             while (isAsciiWhitespace(css[index] ?? '')) index += 1;
             if (index < css.length && css[index] !== ')') bad = true;
           } else if (at === '\\') {
-            if (!validEscape(index)) bad = true;
-            index += 2;
+            // A whole escape, hex digits and the space that may end them.
+            if (validEscape(index)) {
+              escape();
+            } else {
+              bad = true;
+              index += 1;
+            }
           } else {
             if (at === '"' || at === "'" || at === '(' || /^[\0-\x08\x0B\x0E-\x1F\x7F]$/.test(at)) bad = true;
             index += 1;
