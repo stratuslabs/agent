@@ -2,7 +2,7 @@
 
 Talk to your agents in Slack — **each agent as its own Slack app**, with its
 own avatar, presence, and DMs. Threads are resumable conversations that
-survive daemon restarts (a turn parked on an approval when the daemon died is re-asked afterwards and its reply still lands in the thread), and a reply arrives once it is finished, with Slack's own "is thinking…" status while the agent works. Socket Mode
+survive daemon restarts (a turn parked on an approval when the daemon died is re-asked afterwards, one that was still running is continued, and either reply still lands in the thread; a Slack redelivery of a message already answered starts no second turn), and a reply arrives once it is finished, with Slack's own "is thinking…" status while the agent works. Socket Mode
 means no public ingress: a Mac Mini behind NAT is fine.
 
 ## Install the channel
