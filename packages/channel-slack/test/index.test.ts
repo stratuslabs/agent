@@ -36,13 +36,20 @@ interface FakeSocket extends SlackSocketLike {
    * come back in either order.
    */
   deliver(eventName: string, args: Omit<SlackSocketEventArgs, 'ack'>, ack?: () => Promise<void>): Promise<void>;
+  /**
+   * Resolves once the adapter has finished handling every delivery so far —
+   * the work its listeners return. A gate for a test whose next message
+   * depends on the last one's outcome, where `deliver` alone is not.
+   */
+  settled(): Promise<void>;
   started: boolean;
   disconnected: boolean;
   acks: number;
 }
 
 const createFakeSocket = (): FakeSocket => {
-  const listeners = new Map<string, Array<(args: SlackSocketEventArgs) => void>>();
+  const listeners = new Map<string, Array<(args: SlackSocketEventArgs) => unknown>>();
+  const started: Promise<unknown>[] = [];
   const socket: FakeSocket = {
     started: false,
     disconnected: false,
@@ -58,12 +65,22 @@ const createFakeSocket = (): FakeSocket => {
     async disconnect() {
       socket.disconnected = true;
     },
+    async settled() {
+      // Until nothing new has started: handling one delivery can be what
+      // another is waiting on.
+      while (started.length > 0) {
+        await Promise.all(started.splice(0));
+      }
+    },
     async deliver(eventName, args, ack) {
       const handlers = listeners.get(eventName) ?? [];
       for (const handler of handlers) {
-        handler({ ...args, ack: ack ?? (async () => { socket.acks += 1; }) });
+        started.push(Promise.resolve(handler({ ...args, ack: ack ?? (async () => { socket.acks += 1; }) })));
       }
-      // Handlers run async work after acking; let it settle.
+      // Lets the handlers get past admission, which is what most tests mean
+      // by a message having arrived — they release a turn's gate only after
+      // this. It is no promise the handlers have finished: a loaded runner
+      // outran it once. A test that needs that awaits `settled()`.
       await new Promise((resolve) => setTimeout(resolve, 20));
     },
   };
@@ -3080,6 +3097,10 @@ test('a judged turn whose file landed but whose words Slack refused has spoken, 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
   await both(channelMessage({ text: 'chart please', ts: '1080.1', thread: '1080.0' }));
+  // Who 'nice' is for depends on where Ava's file landed, which her turn
+  // records once it has finished — so it waits for that, not for a delay
+  // her real file read and upload once outran on a loaded runner.
+  await Promise.all([socketAva.settled(), socketBea.settled()]);
   await both(channelMessage({ text: 'nice', ts: '1080.2', thread: '1080.0' }));
   await adapter.stop();
 
