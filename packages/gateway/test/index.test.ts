@@ -5871,10 +5871,13 @@ test('holdsMessage counts a dispatch still queued behind another turn, and not a
     const first = gateway.dispatch({ sessionId: 'holds-q', agentId: 'blair', userMessage: 'first', idempotencyKey: 'k0' });
     await running;
     const queued = gateway.dispatch({ sessionId: 'holds-q', agentId: 'blair', userMessage: 'second', idempotencyKey: 'k1' });
+    const judged = gateway.dispatch({ sessionId: 'holds-q', agentId: 'blair', userMessage: 'overheard', idempotencyKey: 'k3', addressed: false });
     assert.equal(await gateway.holdsMessage('holds-q', 'k1'), true);
+    assert.equal(await gateway.holdsMessage('holds-q', 'k3'), false);
     release();
     await first;
     await queued;
+    await judged;
     await gateway.dispatch({ sessionId: 'holds-q', agentId: 'blair', userMessage: 'aside', idempotencyKey: 'k2', addressed: false });
     assert.equal(await gateway.holdsMessage('holds-q', 'k2'), false);
   } finally {

@@ -2702,8 +2702,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // handed a session that is not its agent's.
   // `confirmed` once the chain has seen the dispatch past the identity
   // check with a key the session had not seen (`claimLiveItem`); until
-  // then the entry is a claim that may yet be refused.
-  const liveWorkItems = new Map<string, Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean }>>();
+  // then the entry is a claim that may yet be refused. `addressed` is false
+  // for a turn nobody asked for, which `holdsMessage` does not count.
+  const liveWorkItems = new Map<string, Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean; addressed: boolean }>>();
   /** The start-up snapshot `recoverParkedTurns` judges orphans from, for a repeat that gets there first. */
   let orphanedAtStart: ReadonlySet<string> = new Set();
 
@@ -3621,8 +3622,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Reads `turn` only once it is assigned: the registration below runs
     // after it, and the chain's work runs in a later tick (`.then`).
     const claimLiveItem = (key: string, confirmed: boolean): void => {
-      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean }>();
-      items.set(key, { turn, agentId: input.agentId, confirmed });
+      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean; addressed: boolean }>();
+      items.set(key, { turn, agentId: input.agentId, confirmed, addressed: input.addressed !== false });
       liveWorkItems.set(input.sessionId, items);
     };
     const turn: Promise<Session> = onSessionChain(input.sessionId, async () => {
@@ -4200,8 +4201,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     async holdsMessage(sessionId: string, idempotencyKey: string) {
       // A dispatch still queued behind another turn holds the message too:
-      // its key reaches the transcript only when the chain gets to it.
-      if (liveWorkItems.get(sessionId)?.has(idempotencyKey) === true) {
+      // its key reaches the transcript only when the chain gets to it. By
+      // the same rule as the transcript below — a judged turn still waiting
+      // to run did not take the message either.
+      if (liveWorkItems.get(sessionId)?.get(idempotencyKey)?.addressed === true) {
         return true;
       }
       const session = await store.get(sessionId);
