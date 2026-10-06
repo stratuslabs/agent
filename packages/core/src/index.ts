@@ -303,6 +303,14 @@ export interface Message {
    */
   overheard?: boolean;
   /**
+   * Appended by `observe`, so it started no turn. `overheard` alone cannot
+   * say so: a turn dispatched with `addressed: false` is overheard too, and
+   * is a turn. Present only when true; a message observed before this was
+   * recorded reads as a turn, which errs toward attributing nothing to an
+   * earlier one (`isLatestTurn`).
+   */
+  observed?: boolean;
+  /**
    * The caller's idempotency key for the dispatch that brought this user
    * message (`RunInput.idempotencyKey`). Written in the same save as the
    * message, so a key is never durable without its message or the other
@@ -3250,13 +3258,12 @@ export const recordTurnFailure = (session: Session, error: string): void => {
 
 /**
  * Whether the keyed message started the session's latest turn. A message
- * `observe` appended since started no turn and is passed over: it is
- * overheard and unkeyed, where every keyed dispatch carries its key.
+ * `observe` appended since started no turn and is passed over
+ * (`Message.observed`); every other user message, keyed or not, addressed
+ * or not, started one.
  */
 export const isLatestTurn = (session: Pick<Session, 'messages'>, idempotencyKey: string): boolean =>
-  session.messages.findLast(
-    (message) => message.role === 'user' && !(message.overheard === true && message.idempotencyKey === undefined),
-  )?.idempotencyKey === idempotencyKey;
+  session.messages.findLast((message) => message.role === 'user' && message.observed !== true)?.idempotencyKey === idempotencyKey;
 
 /**
  * Why the turn a keyed message started failed, or undefined if it did not.
@@ -3273,7 +3280,14 @@ export const turnFailureFor = (session: Pick<Session, 'messages' | 'status' | 'l
   if (keyed.turnError !== undefined) {
     return keyed.turnError;
   }
-  return session.status === 'failed' && isLatestTurn(session, idempotencyKey) ? session.lastError ?? 'The turn failed.' : undefined;
+  // A transcript with any failure stamped on its turn's message was written
+  // since turns carried their own, and the session's failure is stamped on
+  // whichever turn it was — not this one. Only an older transcript falls
+  // back to the session's.
+  if (session.status !== 'failed' || session.messages.some((message) => message.role === 'user' && message.turnError !== undefined)) {
+    return undefined;
+  }
+  return isLatestTurn(session, idempotencyKey) ? session.lastError ?? 'The turn failed.' : undefined;
 };
 
 /**
@@ -6038,6 +6052,7 @@ export class AgentRunner {
       content: input.message,
       createdAt: new Date().toISOString(),
       overheard: true,
+      observed: true,
     });
 
     // The speaker is judged like any sender: their words are in the
