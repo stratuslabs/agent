@@ -8,6 +8,7 @@ import type {
   EventBus,
   JsonObject,
   Plugin,
+  PluginStateDirectory,
   Skill,
   SkillRegistry,
   ToolRegistry,
@@ -279,6 +280,12 @@ export interface LoadPluginsOptions {
    * that shape down. The host answers the whole question now.
    */
   workspaces?: AgentWorkspaces;
+  /**
+   * Where each plugin keeps durable state, by package name, handed to its
+   * `setup` as `PluginContext.stateDirectory`. Asked per plugin, so one
+   * plugin is never handed another's directory.
+   */
+  stateDirectories?: (packageName: string) => PluginStateDirectory;
   /** Overrides the trusted set. See `isFirstPartyPackage`. */
   trusted?: (packageName: string) => boolean;
   /** Handed to every plugin's `setup` as `PluginContext.log` / `.warn`. */
@@ -530,6 +537,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
           ? { credentials: createManifestBoundCredentialResolver(manifest, options.credentials) }
           : {}),
         ...(options.workspaces !== undefined ? { workspaces: options.workspaces } : {}),
+        ...(options.stateDirectories !== undefined ? { stateDirectory: options.stateDirectories(manifest.packageName) } : {}),
         ...(options.log !== undefined ? { log: options.log } : {}),
         ...(options.warn !== undefined ? { warn: options.warn } : {}),
       });

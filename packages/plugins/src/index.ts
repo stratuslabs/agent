@@ -10,6 +10,7 @@
  */
 export {
   declaredRiskFor,
+  isPackageName,
   parsePluginManifest,
   parseToolRiskOverrides,
   resolvePluginAgentConfig,

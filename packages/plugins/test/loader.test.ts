@@ -744,3 +744,47 @@ test('the preflight refuses a declared skill file that is not there', async () =
   );
   await preflightPlugin(manifest, directory, {});
 });
+
+test('each plugin is handed the state directory for its own package, and none when the host gives none', async () => {
+  const handed: Array<string | undefined> = [];
+  const asked: string[] = [];
+  const host = await fakeHost({
+    '@stratusagent/tool-web': {
+      manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'web.fetch', risk: 'gated' }] } } },
+      module: pluginModule('tool-web', (tools, _config, context) => {
+        handed.push(context.stateDirectory?.prepare());
+        tools.register(tool('web.fetch', 'gated'));
+      }),
+    },
+    'stratus-plugin-elsewhere': {
+      manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'elsewhere.ping', risk: 'safe' }] } } },
+      module: pluginModule('elsewhere', (tools, _config, context) => {
+        handed.push(context.stateDirectory?.prepare());
+        tools.register(tool('elsewhere.ping', 'safe'));
+      }),
+    },
+  });
+  const config = { '@stratusagent/tool-web': {}, 'stratus-plugin-elsewhere': {} };
+
+  await loadPlugins({
+    config,
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    stateDirectories: (packageName) => ({
+      prepare: () => {
+        asked.push(packageName);
+        return `/home/blair/.stratus/plugins/${packageName}`;
+      },
+    }),
+  });
+  assert.deepEqual(handed, [
+    '/home/blair/.stratus/plugins/@stratusagent/tool-web',
+    '/home/blair/.stratus/plugins/stratus-plugin-elsewhere',
+  ]);
+  assert.deepEqual(asked, ['@stratusagent/tool-web', 'stratus-plugin-elsewhere']);
+
+  handed.length = 0;
+  await loadPlugins({ config, host, tools: new ToolRegistry(), bus: new EventBus() });
+  assert.deepEqual(handed, [undefined, undefined]);
+});

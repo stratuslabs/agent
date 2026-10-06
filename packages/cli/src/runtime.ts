@@ -48,6 +48,7 @@ import {
   readProcessEnv,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   createAgentWorkspaces,
+  createPluginStateDirectories,
   describeServingModel,
   type RuntimeSelection,
   type RuntimeConfig,
@@ -292,6 +293,7 @@ export const createAgentRuntime = async (
       // that says so rather than answered with an empty roster.
       credentials: createFileCredentialResolver(runEnv),
       workspaces: createAgentWorkspaces(runEnv),
+      stateDirectories: createPluginStateDirectories(runEnv),
     });
     loadedPlugins.push(...result.loaded);
     for (const failure of result.failures) {

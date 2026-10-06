@@ -29,6 +29,7 @@ Everything is under `~/.stratus/` on the daemon's machine:
 | `agents/<id>/workspace/` | The agent's own working directory, where `shell.run` starts by default |
 | `fleet.db` | Schedules, and the index of every session |
 | `skills/<id>/SKILL.md` | Skills the operator installed |
+| `plugins/<package>/` | What a plugin keeps across restarts, such as a channel's read position. `0700` |
 | `logs/stratusd.jsonl` | The daemon's structured log, read with `stratus logs` |
 | `gateway.json`, `gateway-token` | Where the control API is listening, and its bearer token. `0600` |
 | `stratusd.lock` | The running daemon's claim on this home: one daemon per home |
