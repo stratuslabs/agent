@@ -4,7 +4,7 @@
 
 ```
   1) Providers            anthropic — signed in with your Claude subscription
-  2) Models               default claude-opus-5 · fallback gpt-4.1-mini
+  2) Models               default claude-opus-5-5 · fallback gpt-4.1-mini
   3) Agent                ~/.stratus/agents/blair.md
   4) Plugins              tool-fs, tool-web
   5) Channels             Slack: 1 agent connected

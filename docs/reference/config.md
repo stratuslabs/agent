@@ -31,7 +31,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 ```json
 {
   "provider": "anthropic",
-  "model": "claude-opus-5",
+  "model": "claude-opus-5-5",
   "apiKeyEnv": "ANTHROPIC_API_KEY",
   "soul": "./examples/souls/blair.md"
 }

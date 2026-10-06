@@ -1405,7 +1405,7 @@ test('parseCommand accepts the anthropic provider and soul flag', () => {
   assert.throws(() => parseCommand(['run', '--provider', 'Claude', 'hello']), /Unsupported provider/);
 });
 
-test('resolveRuntimeConfig defaults anthropic to claude-opus-5 and its own key env', async () => {
+test('resolveRuntimeConfig defaults anthropic to claude-opus-5-5 and its own key env', async () => {
   const runtime = await resolveRuntimeConfig({
     command: 'run',
     prompt: 'hello',
@@ -1424,7 +1424,7 @@ test('resolveRuntimeConfig defaults anthropic to claude-opus-5 and its own key e
     provider: 'anthropic',
     apiKey: 'env-key',
     apiKeyEnvVar: 'ANTHROPIC_API_KEY',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
   });
 
   await assert.rejects(
@@ -1586,7 +1586,7 @@ test('runCli executes the anthropic provider path with env config', async () => 
           id: 'msg_1',
           type: 'message',
           role: 'assistant',
-          model: 'claude-opus-5',
+          model: 'claude-opus-5-5',
           content: [{ type: 'text', text: 'Hello from Claude.' }],
           stop_reason: 'end_turn',
           stop_sequence: null,
@@ -1597,10 +1597,10 @@ test('runCli executes the anthropic provider path with env config', async () => 
   });
 
   assert.equal(exitCode, 0);
-  assert.equal(requestBodies[0]?.model, 'claude-opus-5');
+  assert.equal(requestBodies[0]?.model, 'claude-opus-5-5');
   const tools = requestBodies[0]?.tools as Array<{ name?: string }>;
   assert.equal(tools?.[0]?.name, 'demo_echo');
-  assert.match(output.stdout, /Starting Stratus Agent local loop with provider=anthropic model=claude-opus-5/);
+  assert.match(output.stdout, /Starting Stratus Agent local loop with provider=anthropic model=claude-opus-5-5/);
   assert.match(output.stdout, /\[assistant\] Hello from Claude\./);
   assert.equal(output.stderr, '');
 });
@@ -1616,7 +1616,7 @@ test('runCli agent new renders a ready-to-run soul file', async () => {
   assert.match(output.stdout, /^---\n/);
   assert.match(output.stdout, /name: Vera\n/);
   assert.match(output.stdout, /provider: anthropic\n/);
-  assert.match(output.stdout, /model: claude-opus-5\n/);
+  assert.match(output.stdout, /model: claude-opus-5-5\n/);
   assert.match(output.stdout, /Be kind\./);
 });
 
@@ -1649,7 +1649,7 @@ test("resolveRuntimeConfig ignores another provider's config file settings", asy
     provider: 'anthropic',
     apiKey: 'anthropic-key',
     apiKeyEnvVar: 'ANTHROPIC_API_KEY',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
   });
 });
 
@@ -2001,7 +2001,7 @@ test('resolveRuntimeConfig treats provider-less config settings as openai-specif
     provider: 'anthropic',
     apiKey: 'anthropic-key',
     apiKeyEnvVar: 'ANTHROPIC_API_KEY',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
   });
 
   // ...while still applying to openai runs as before.
@@ -2152,7 +2152,7 @@ test('setup signs into Claude with a pasted API key, verifies it, and saves cred
   assert.equal(requests[0]?.headers['x-api-key'], 'sk-ant-test-key');
 
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
-  assert.deepEqual(config, { provider: 'anthropic', model: 'claude-opus-5' });
+  assert.deepEqual(config, { provider: 'anthropic', model: 'claude-opus-5-5' });
 
   const credentialsFile = path.join(home, '.stratus', 'credentials.json');
   const credentials = JSON.parse(await readFile(credentialsFile, 'utf8'));
@@ -2568,7 +2568,7 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
   });
   assert.match(viaEnv.output.stdout, /STRATUS_CONFIG is set, so the config will be written to/);
   const envWritten = JSON.parse(await readFile(envConfigPath, 'utf8'));
-  assert.deepEqual(envWritten, { provider: 'anthropic', model: 'claude-opus-5' });
+  assert.deepEqual(envWritten, { provider: 'anthropic', model: 'claude-opus-5-5' });
 
   const viaFlag = createStreams();
   await runCli({
@@ -2657,7 +2657,7 @@ test('run uses the stored sign-in from the global config and credentials', async
     homeDir: home,
     processEnv: {},
   });
-  assert.deepEqual(runtime, { provider: 'anthropic', apiKey: 'stored-key', model: 'claude-opus-5' });
+  assert.deepEqual(runtime, { provider: 'anthropic', apiKey: 'stored-key', model: 'claude-opus-5-5' });
 
   // A subscription token resolves as authToken instead of apiKey.
   await writeFile(
@@ -2669,7 +2669,7 @@ test('run uses the stored sign-in from the global config and credentials', async
     homeDir: home,
     processEnv: {},
   });
-  assert.deepEqual(subscription, { provider: 'anthropic', authToken: 'sk-ant-oat-xyz', model: 'claude-opus-5' });
+  assert.deepEqual(subscription, { provider: 'anthropic', authToken: 'sk-ant-oat-xyz', model: 'claude-opus-5-5' });
 
   // Env keys still outrank the stored sign-in.
   const envWins = await resolveRuntimeConfig(baseCommand, {
@@ -2682,7 +2682,7 @@ test('run uses the stored sign-in from the global config and credentials', async
     apiKey: 'env-key',
     // The resolver records which variable won, so diagnostics never guess.
     apiKeyEnvVar: 'ANTHROPIC_API_KEY',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
   });
 });
 
@@ -2851,10 +2851,10 @@ test('switching the default provider clears settings chosen for the old one', as
   // The openai model and apiKeyEnv were provider-bound and must not leak
   // into the anthropic default.
   assert.equal(config.provider, 'anthropic');
-  assert.equal(config.model, 'claude-opus-5');
+  assert.equal(config.model, 'claude-opus-5-5');
   assert.equal(config.apiKeyEnv, undefined);
   // After the switch, the menu shows the new provider's default model.
-  assert.match(output.stdout, /default claude-opus-5 \(default\)/);
+  assert.match(output.stdout, /default claude-opus-5-5 \(default\)/);
 });
 
 test('creating an agent never claims an id another soul already declares', async () => {
@@ -14393,7 +14393,7 @@ test('a new soul on a plugin provider pins no model unless one was chosen', () =
   assert.deepEqual(soulPinForNewAgent({ provider: 'plugin:ollama' }, {}), { provider: 'plugin:ollama' });
   assert.deepEqual(soulPinForNewAgent({ provider: 'plugin:ollama', model: 'llama3' }, {}), { provider: 'plugin:ollama', model: 'llama3' });
   assert.deepEqual(soulPinForNewAgent({}, { STRATUS_PROVIDER: 'ollama', STRATUS_MODEL: 'llama3' }), { provider: 'plugin:ollama', model: 'llama3' });
-  assert.deepEqual(soulPinForNewAgent({ provider: 'anthropic' }, {}), { provider: 'anthropic', model: 'claude-opus-5' });
+  assert.deepEqual(soulPinForNewAgent({ provider: 'anthropic' }, {}), { provider: 'anthropic', model: 'claude-opus-5-5' });
 });
 
 test('stratus memory export refuses a corpus holding one id twice rather than migrating the shadowed copy', async () => {
