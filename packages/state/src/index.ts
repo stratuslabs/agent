@@ -125,6 +125,8 @@ export {
   loadChannelTransportSecrets,
   listChannelKinds,
   saveChannelTransportSecrets,
+  removeChannelTransportSecrets,
+  CHANNEL_KIND_PATTERN,
   type NamedCredentials,
   loadNamedCredentials,
   saveNamedCredentials,
@@ -233,6 +235,7 @@ export {
   describeServingModel,
   type RegisteredProviders,
   createRuntimeProvider,
+  runsOnHarness,
 } from './provider-runtime.ts';
 
 export {

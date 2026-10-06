@@ -17,6 +17,9 @@ importers:
       stratus-plugin-fixture-channel:
         specifier: workspace:*
         version: link:fixtures/stratus-plugin-fixture-channel
+      stratus-plugin-fixture-channel-twin:
+        specifier: workspace:stratus-plugin-fixture-channel@*
+        version: link:fixtures/stratus-plugin-fixture-channel
       stratus-plugin-fixture-executor:
         specifier: workspace:*
         version: link:fixtures/stratus-plugin-fixture-executor

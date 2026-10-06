@@ -93,7 +93,9 @@ resolved per agent from the `openai.apiKey` named credential.
 ## Channels
 
 A channel plugin registers an adapter for a **kind** — `discord`, `matrix` —
-and carries the agents that have transport secrets stored for that kind.
+and carries the agents that have transport secrets stored for that kind,
+or, for a channel that needs none, the agents its own config block lists
+under `agents` (iMessage on the daemon's own Mac is bound that way).
 Those are the agents it speaks for, inbound and out: an agent's
 `message.send` to that kind goes through the adapter carrying it, and an
 agent no adapter of the kind carries is refused rather than posted under
@@ -112,11 +114,33 @@ plugin's README says which names to store:
 }
 ```
 
-Store them through the control API — `PUT /credentials/channels/discord`
-with `{ "agentId": "blair", "secrets": { "botToken": "…" } }` — or by editing
-the file; `stratus setup`'s channel menu is Slack's. Saving Slack tokens
-never disturbs another kind's, and `GET /credentials` lists which agents
-are bound on each kind, ids only.
+Store them at the machine with `stratus channel set`, which asks for each
+value without echoing it (or reads one per line from stdin) and never takes
+one from the command line:
+
+```console
+$ stratus channel set discord --agent blair botToken
+botToken (not echoed):
+Stored botToken for blair on discord in ~/.stratus/credentials.json (readable only by you).
+$ stratus channel list
+discord:
+  blair  botToken
+```
+
+`stratus setup`'s Channels row does the same for every kind an enabled
+plugin declares, and shows an agent bound by its plugin's config too.
+Remotely, the control API's `PUT /credentials/channels/discord` takes
+`{ "agentId": "blair", "secrets": { "botToken": "…" } }`. Each replaces what
+that agent had on that kind and never disturbs another kind's; `stratus
+channel remove discord --agent blair` forgets one. `GET /credentials` lists
+which agents are bound on each kind, ids only. A running daemon reads them
+at its next start: `stratus restart`.
+
+Who may approve a channel's gated calls is in the plugin's own config
+block, not the trusted `approvals` block, whose approver lists are Slack's —
+see [the plugin architecture](../architecture/plugins.md#registering-providers-channels-memory-stores-and-executors)
+for that and for what the channel contract gives an adapter that is not
+shaped like Slack.
 
 These are **the daemon's secrets, not the agent's**. A channel plugin
 receives its own kind's entries through a host-owned handle; nothing

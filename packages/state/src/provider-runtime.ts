@@ -280,6 +280,20 @@ const attributeUsage = async (
  */
 export type RegisteredProviders = Pick<ContributionRegistry<ProviderContribution>, 'get' | 'names'>;
 
+/**
+ * Whether a resolved runtime is served by a harness that runs its own tool
+ * loop and keeps its own conversation — the codex harness, and the Claude
+ * subscription path through the Agent SDK — rather than by the kernel's
+ * loop over a stateless API. The one rule for both the provider that gets
+ * built and anything that has to know what the turn is talking to: the
+ * gateway will not continue a crashed turn on one, because the prompt may
+ * already have run tools inside it that the transcript never saw.
+ */
+export const runsOnHarness = (
+  config: { provider: string; apiKey?: string | undefined; authToken?: string | undefined },
+): boolean =>
+  config.provider === 'codex' || (config.provider === 'anthropic' && Boolean(config.authToken) && !config.apiKey);
+
 export const createRuntimeProvider = (
   config: RuntimeConfig,
   onFallback?: (error: unknown) => void,
@@ -319,7 +333,8 @@ export const createRuntimeProvider = (
     // Subscription setup tokens are only honored inside the Claude Code
     // harness, so they route through the Agent SDK runtime; API keys use
     // the raw Messages API.
-    if (config.authToken && !config.apiKey) {
+    // `authToken` again only to narrow it: the rule already requires one.
+    if (runsOnHarness(config) && config.authToken) {
       return createClaudeCodeProvider({
         authToken: config.authToken,
         model: config.model,
