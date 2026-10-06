@@ -149,9 +149,11 @@ has exactly one spelling and a homograph is not a second way to write it.
   selector for up to `navigationTimeoutMs` — and a page that navigates
   itself in there is not caught. Nothing outside the browser can catch it:
   a scope is a bound on where an agent may aim, not a lock on the page.
-- **`allowedHosts` is a different question.** The address policy decides
-  which hosts the browser may *reach* at all, including for `browser.goto`
-  and every subresource ([Tools](./tools.md), and
+- **The address policy is a different question.** It decides which
+  *addresses* the browser may reach — public ones, plus whatever
+  `allowedHosts` exempts — for `browser.goto` and every subresource alike;
+  `onlyHosts`, when set, narrows that to a list of hosts
+  ([Tools](./tools.md), and
   [`tool-browser`](../../packages/tool-browser/README.md)). An origin grant
   decides which of the pages it reached may be clicked on. A site needs to
   pass both.

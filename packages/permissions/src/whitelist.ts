@@ -1,4 +1,5 @@
-import { chmod, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { chmod, mkdir, open, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { assertDerivedStatePath } from './state-directory.ts';
 
@@ -244,6 +245,35 @@ export class WhitelistUnreadableError extends Error {
 }
 
 /**
+ * Thrown by a grant change when the host's `serializeWrite` could not take
+ * its lock: nothing was changed. A `WhitelistUnreadableError` because the
+ * bargain is the same one — an "always" answer holds for this process and
+ * is not saved, a revoke reports a conflict — and every caller already
+ * makes it by that type. Its own message, because there is nothing to fix
+ * in the file, only something to wait for.
+ */
+class WhitelistBusyError extends WhitelistUnreadableError {
+  constructor(agentId: string, cause: unknown) {
+    super('', '');
+    this.name = 'WhitelistBusyError';
+    this.message = `${agentId}'s grants were not changed: ${cause instanceof Error ? cause.message : String(cause)} `
+      + 'Try again; if it keeps happening, look for a `stratus grants` that is stuck.';
+  }
+}
+
+/** A read the host's `serializeRead` could not serialize: transient, never cached. */
+class GrantReadDeferred extends Error {
+  readonly reason: string;
+
+  constructor(cause: unknown) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    super(reason);
+    this.name = 'GrantReadDeferred';
+    this.reason = reason;
+  }
+}
+
+/**
  * The persistent tier of the scope resolution, on disk — every kind of
  * grant, in one file per agent: command scopes, origins, and the standing
  * tool grants an operator's "always allow" answers with.
@@ -279,6 +309,36 @@ export const createFileCommandWhitelist = (options: {
    * no line about it.
    */
   warn?: (line: string) => void;
+  /**
+   * Runs each read of a grant file's bytes, which is synchronous on
+   * purpose: the daemon passes a cross-process lock here, and a lock other
+   * code in the process can wait on must not be held across an `await`.
+   *
+   * The store caches what it reads for the life of the process, so a read
+   * that lands in the middle of `stratus grants revoke` rewriting the file
+   * caches the grant the CLI then reports as revoked (#184). Under the same
+   * lock the revoke takes, the read is wholly before or wholly after it.
+   * A host that omits it reads without one, as every host did before.
+   *
+   * If it throws without running the read, that read is taken as no grants
+   * — the safe answer, which asks a human — and is not cached, so the next
+   * call reads again. Reading through instead is the race.
+   */
+  serializeRead?: <T>(read: () => T) => T;
+  /**
+   * Runs each grant change — its read, its change, and its save — and
+   * means the change starts from the file rather than from this process's
+   * cache. The daemon passes the same cross-process lock as `serializeRead`.
+   *
+   * Without it, a write applied its change to what this process had cached
+   * and wrote the lot back: landing after a `stratus grants revoke` that
+   * rewrote the file, it restored the revoked grant, and landing before it,
+   * the revoke's write dropped this one (#184). A host that omits it keeps
+   * the cached read-modify-write, which is right when nothing else writes
+   * the file. If it throws without running the change, the change is
+   * refused with a `WhitelistUnreadableError`, and nothing is written.
+   */
+  serializeWrite?: <T>(write: () => Promise<T>) => Promise<T>;
 }): AgentGrantStore => {
   /**
    * One read per agent per process, shared by everyone who asks — as a
@@ -314,14 +374,23 @@ export const createFileCommandWhitelist = (options: {
    * else — a permission, a directory in the way — is the caller's to
    * report, because it means the grants exist and could not be read.
    */
-  const readAt = async (file: string): Promise<string | undefined> => {
+  const serialize = options.serializeRead ?? (<T>(read: () => T): T => read());
+  const readAt = (file: string): string | undefined => {
+    let ran = false;
     try {
-      return await readFile(file, 'utf8');
+      return serialize(() => {
+        ran = true;
+        try {
+          return readFileSync(file, 'utf8');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            return undefined;
+          }
+          throw error;
+        }
+      });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return undefined;
-      }
-      throw error;
+      throw ran ? error : new GrantReadDeferred(error);
     }
   };
 
@@ -334,7 +403,7 @@ export const createFileCommandWhitelist = (options: {
     // at the parse boundary, so this does not re-check it.
     let file = await resolveWhitelistPath(options.stateHome, options.directory, agentId);
     try {
-      let raw = await readAt(file);
+      let raw = readAt(file);
       if (raw === undefined) {
         // Resolved, then gone: the exclusive migration renames the legacy
         // `<id>.whitelist.json` into the agent's own directory, and a read
@@ -350,7 +419,7 @@ export const createFileCommandWhitelist = (options: {
         const moved = await resolveWhitelistPath(options.stateHome, options.directory, agentId);
         if (moved !== file) {
           file = moved;
-          raw = await readAt(file);
+          raw = readAt(file);
         }
       }
       if (raw !== undefined) {
@@ -366,6 +435,16 @@ export const createFileCommandWhitelist = (options: {
           : [];
       }
     } catch (error) {
+      if (error instanceof GrantReadDeferred) {
+        // Nothing wrong with the file, so nothing marked against it, and
+        // not cached: an agent must not lose its grants until a restart
+        // over one read that had to wait too long.
+        cache.delete(agentId);
+        options.warn?.(
+          `${file} was not read (${error.reason}); ${agentId} is treated as having no grants until the next call reads it.`,
+        );
+        return { scopes: [], origins: [], tools: [] };
+      }
       // No whitelist means no stored scopes, and is not worth failing a
       // turn over: the fallback is asking a human, which is where an agent
       // with no whitelist starts anyway — that case reaches here as an
@@ -507,9 +586,39 @@ export const createFileCommandWhitelist = (options: {
   const writes = new Map<string, Promise<unknown>>();
 
   const serialized = <T>(agentId: string, work: () => Promise<T>): Promise<T> => {
-    const queued = (writes.get(agentId) ?? Promise.resolve()).then(work, work);
+    const serializeWrite = options.serializeWrite;
+    const guarded = serializeWrite
+      ? async (): Promise<T> => {
+        let ran = false;
+        try {
+          return await serializeWrite(() => {
+            ran = true;
+            return work();
+          });
+        } catch (error) {
+          throw ran ? error : new WhitelistBusyError(agentId, error);
+        }
+      }
+      : work;
+    const queued = (writes.get(agentId) ?? Promise.resolve()).then(guarded, guarded);
     writes.set(agentId, queued.then(() => undefined, () => undefined));
     return queued;
+  };
+
+  /**
+   * What a change starts from: the file itself when the host serializes
+   * writes, since another process may have rewritten it since this one
+   * cached it, and the cache otherwise. A fresh read that succeeds clears
+   * an earlier failure, and becomes the cache.
+   */
+  const readForChange = async (agentId: string): Promise<Grants> => {
+    if (!options.serializeWrite) {
+      return read(agentId);
+    }
+    unreadable.delete(agentId);
+    const fresh = readFresh(agentId);
+    cache.set(agentId, fresh);
+    return fresh;
   };
 
   /** Nothing is written over a grant list nobody could read. */
@@ -529,7 +638,7 @@ export const createFileCommandWhitelist = (options: {
       // from a snapshot taken before the one ahead of it saved would write
       // that one back out of existence, which is the whole race.
       return serialized(agentId, async () => {
-        const grants = await read(agentId);
+        const grants = await readForChange(agentId);
         refuseIfUnreadable(agentId);
         if (grants.scopes.some((existing) => sameScope(existing, scope))) {
           return;
@@ -542,7 +651,7 @@ export const createFileCommandWhitelist = (options: {
     },
     async rememberOrigin(agentId, scope) {
       return serialized(agentId, async () => {
-        const grants = await read(agentId);
+        const grants = await readForChange(agentId);
         refuseIfUnreadable(agentId);
         if (grants.origins.some((existing) => sameOriginScope(existing, scope))) {
           return;
@@ -555,7 +664,7 @@ export const createFileCommandWhitelist = (options: {
     },
     async rememberTool(agentId, grant) {
       return serialized(agentId, async () => {
-        const grants = await read(agentId);
+        const grants = await readForChange(agentId);
         refuseIfUnreadable(agentId);
         // Replaces rather than skips: the new row carries the package the
         // operator was just shown, and a stale row for the same name would
@@ -570,7 +679,7 @@ export const createFileCommandWhitelist = (options: {
     },
     async forgetScope(agentId, description) {
       return serialized(agentId, async () => {
-        const grants = await read(agentId);
+        const grants = await readForChange(agentId);
         refuseIfUnreadable(agentId);
         const kept = grants.scopes.filter((scope) => describeCommandScope(scope) !== description);
         if (kept.length === grants.scopes.length) {
@@ -582,7 +691,7 @@ export const createFileCommandWhitelist = (options: {
     },
     async forgetOrigin(agentId, origin) {
       return serialized(agentId, async () => {
-        const grants = await read(agentId);
+        const grants = await readForChange(agentId);
         refuseIfUnreadable(agentId);
         const kept = grants.origins.filter((scope) => scope.origin !== origin);
         if (kept.length === grants.origins.length) {
@@ -594,7 +703,7 @@ export const createFileCommandWhitelist = (options: {
     },
     async forgetTool(agentId, tool) {
       return serialized(agentId, async () => {
-        const grants = await read(agentId);
+        const grants = await readForChange(agentId);
         refuseIfUnreadable(agentId);
         const kept = grants.tools.filter((grant) => grant.tool !== tool);
         if (kept.length === grants.tools.length) {

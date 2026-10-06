@@ -102,7 +102,11 @@ receives marks one call, for a tool whose output is only sometimes from
 outside (`fs.read` of a file the agent downloaded, `memory.recall` of an
 `external` entry). The executor promotes whichever fired into
 `ToolResult.trust`; a tool that uses neither is labelled `agent`, its own
-work. The rule is a rule, not a list the kernel keeps — a newly registered
+work. Declaring `external` also changes what the model reads: every provider
+sends such a result, failures included, wrapped as `{ untrusted,
+untrustedNote, output }` (`renderToolResultContent` in core), so a tool
+need not word a marker of its own. The transcript keeps the output as
+returned. The rule is a rule, not a list the kernel keeps — a newly registered
 third-party tool that declares itself a producer is labelled with no change
 to kernel code, which is what makes the ecosystem's tools first-class here.
 **All seven kinds now register.** The first-party implementations that

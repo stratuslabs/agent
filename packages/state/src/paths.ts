@@ -30,11 +30,21 @@ const GATEWAY_TOKEN_FILENAME = 'gateway-token';
 
 const GATEWAY_INFO_FILENAME = 'gateway.json';
 
+const GRANTS_LOCK_FILENAME = 'grants.lock';
+
 export const stratusHomePath = (env: StateEnvironment): string =>
   path.join(readHomeDirectory(env), STRATUS_HOME_DIRNAME);
 
 export const globalConfigPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), GLOBAL_CONFIG_FILENAME);
+
+/**
+ * `~/.stratus/grants.lock`: held while a grant file is read or rewritten
+ * outside the daemon's own store (#184). One for every agent's file: a
+ * revoke is rare and quick, and one lock is one file to reason about.
+ */
+export const grantsLockPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), GRANTS_LOCK_FILENAME);
 
 /** Where `stratus serve` keeps its structured log, and `stratus logs` reads it. */
 export const logsDirPath = (env: StateEnvironment): string =>

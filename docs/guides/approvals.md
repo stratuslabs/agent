@@ -24,7 +24,9 @@ That is the honest default (`headless`) behind a service manager. If
 somebody *is* reachable, `--approvals remote` asks them instead — see
 below. What somebody has already answered **Always allow** to still runs
 unattended: a command scope, a site, or a standing grant on the tool — see
-[Standing grants](#standing-grants).
+[Standing grants](#standing-grants) — unless the conversation has read a web
+page and you have asked for that to cost it its grants; see
+[After an agent reads the web](#after-an-agent-reads-the-web).
 
 A tool that declares no risk counts as `gated`, never `safe` — forgetting
 to classify something should cost a prompt, not an unattended command. Most
@@ -51,10 +53,11 @@ was its one member, and it was there because no scope model existed for a
 click rather than because a click is worse than a shell command.
 
 A `dangerous` call asks **every time**, and **Always allow** on one does not
-change that: the call runs, and nothing is remembered. Two other calls
-behave the same way — a browser action with no page to grant, and a shell
-command the parser cannot reduce to a scope — and all three are called
-**one-shot**: they are not offered **Always allow** at all, on any surface.
+change that: the call runs, and nothing is remembered. Three other calls
+behave the same way — a browser action with no page to grant, a shell
+command the parser cannot reduce to a scope, and any call from a
+conversation the [external-content gate](#after-an-agent-reads-the-web) has
+closed — and all four are called **one-shot**: they are not offered **Always allow** at all, on any surface.
 Slack, the dashboard, and the terminal prompt each say that an approval
 covers the one call, rather than showing a button that does nothing extra.
 
@@ -266,6 +269,23 @@ until that daemon restarts; the command falls back to the file, and says
 so, only when the daemon `~/.stratus/gateway.json` names does not answer.
 With no daemon at all, the file is edited directly.
 
+A file-fallback revoke holds `~/.stratus/grants.lock` from the read it
+decides on until its write lands, and a daemon reads each grant file under
+the same lock. So a daemon starting during a revoke reads the file before
+the revoke or after it, never halfway, and can't cache a grant the command
+then reports as gone. The daemon's own grant writes (an "always" answer)
+take the lock too, and apply to the file as it is rather than to what the
+daemon cached, so one landing after a revoke doesn't bring the revoked
+grant back, and one landing before it isn't lost. Nothing goes ahead
+without the lock. A revoke that can't get it within 5 seconds revokes
+nothing and says so; run it again. A daemon that can't treats that agent
+as having no grants for that one call, so it asks rather than acting, and
+an "always" answer it can't save holds only until the daemon restarts. One case is unchanged: a daemon
+that is already running, and whose control API doesn't answer, keeps
+whatever it read until it restarts. The command still writes the file
+then, because refusing would leave no way to revoke at all, and the next
+daemon to start reads the file.
+
 A grant can outlive its agent: delete a soul and its `whitelist.json`
 stays, and an agent created later under the same id inherits it.
 `stratus grants <id>` shows it whether or not a soul exists, so revoke the
@@ -283,6 +303,71 @@ was `safe`:
 09:14:36  —  ava: web.fetch now runs without asking, until revoked (granted by U01DYLAN)
 03:00:02  —  ava: web.fetch ran under a standing grant (web.fetch (@stratusagent/tool-web), granted 2026-09-07T09:14:36.000Z by U01DYLAN) (session schedule:…)
 ```
+
+## After an agent reads the web
+
+A grant is your answer about calls the agent chooses. Once it has read a web
+page, a search result, or an MCP server's reply, a call may be one the page
+chose instead: text written by a stranger, telling the agent to send your
+files somewhere or to fetch a URL with a secret in its query string. Nothing
+can reliably tell those instructions apart from content, so the defence is
+not to filter the text but to stop treating your old answers as covering
+what comes after it.
+
+Every tool that returns third-party text labels its result `external`
+(see [Security](../concepts/security.md#what-an-agent-can-reach)), and the
+conversation keeps the lowest label it has seen. `externalContent` decides
+what that label does to the agent's grants:
+
+```jsonc
+// ~/.stratus/config.json
+{
+  "approvals": {
+    "externalContent": "gate",                     // every agent…
+    "agents": { "coder": { "externalContent": "label" } }  // …except this one
+  }
+}
+```
+
+- **`label`** (the default) records it, and changes nothing else.
+- **`gate`** withdraws the agent's grants from that conversation from then
+  on. Standing grants, command scopes you approved, sites, and "always this
+  session" stop counting; every gated call asks a person, or under
+  `headless` is refused, with a log line naming what the conversation read:
+
+  ```text
+  09:14:36  —  warning: scout: fs.write was called after this conversation read external content (from web.fetch); with approvals.externalContent set to "gate" no grant covers it, and nobody is available to approve it (session …)
+  ```
+
+  An approval given in a gated conversation is **one-shot**: there is no
+  **Always allow**, because the request in front of you was composed after
+  the page had its say, and a grant made there is exactly the standing
+  authority the gate withdrew.
+
+What still runs unattended under `gate` is what never rested on a grant:
+`safe` tools, the built-in read-only commands (`git status`, `git log`, …),
+and a schedule's pre-authorized destination — a schedule that reads the web
+and reports to the channel you approved it for is the job it was approved
+to do, and the page can only change the words it sends there.
+
+Three limits to know before relying on it:
+
+- **It is per conversation, not per call.** The first `web.fetch` closes the
+  gate for the rest of that session, including the next `web.fetch`. An
+  agent whose job is reading many pages unattended needs those reads to be
+  `safe`, which `toolRisks` on the plugin sets for every agent that holds
+  the tool (see [Tools](./tools.md)). That says a fetch to any public
+  address is acceptable unattended — a URL can carry whatever the agent
+  read — so make it only for souls that hold nothing that can write or
+  send.
+- **Only `external` content trips it.** A shell's output is `unknown`, not
+  `external`, so a coding agent keeps its grants after `ls`. A message from
+  a Slack sender you have not named as a principal is `unknown` too; refuse
+  those before the turn starts with `principals.admit: "principals"`
+  ([Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator)).
+- **It gates what an agent does, not what it believes.** A page can still
+  mislead an answer. What the gate removes is the page's ability to act
+  through your grants without a person seeing the call.
 
 ## What the request shows, and how it ends
 
