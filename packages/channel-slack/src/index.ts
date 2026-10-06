@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   filePathsOf,
   latestTurnReply,
+  turnReplyFor,
   CONVERSATION_METADATA_KEY,
   SENDER_TRUST_METADATA_KEY,
   sessionWriteTrust,
@@ -1177,8 +1178,8 @@ class ReplyRenderer {
 
   /**
    * Stand down without saying anything: the message this renderer was
-   * opened for repeated one whose turn another delivery already started,
-   * and that delivery's answer is the one in the thread. Whatever this
+   * opened for repeated one whose turn another delivery in this process
+   * is still waiting on, and that delivery posts the answer. Whatever this
    * renderer put up — a placeholder, a loading status — comes down, so a
    * redelivery leaves no trace.
    */
@@ -1443,9 +1444,14 @@ const messageText = (text: string): string => truncateForSlack(toSlackMrkdwn(tex
  */
 const messageChunks = (text: string): string[] => splitForSlack(toSlackMrkdwn(text));
 
-// One rule with the gateway's `sessionRouting`, which posts the same
-// message for a turn this adapter did not start.
-const lastAssistantReply = (session: Session): string => latestTurnReply(session) ?? NO_REPLY_TEXT;
+/**
+ * The reply to the message `key` names. A redelivery of a message whose turn
+ * already finished resolves with the session as it stands, which may have
+ * moved on since, so its own turn is found by the key; a host that stores
+ * no key has only just run the turn, and it is the latest one.
+ */
+const replyTo = (session: Session, key: string): string | undefined =>
+  session.messages.some((message) => message.idempotencyKey === key) ? turnReplyFor(session, key) : latestTurnReply(session);
 
 const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
   stratus_approve_once: 'once',
@@ -4426,9 +4432,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // the potentially slow final edit, uploads, and overflow posts.
     removeFromQueue();
 
-    // The turn was an earlier delivery's, and that delivery's renderer posted
-    // its answer: this one takes down whatever it put up and says nothing.
-    // Posting the session's reply here would answer the message twice.
+    // The turn is a live earlier delivery's, and that delivery's renderer
+    // posts its answer: this one takes down whatever it put up and says
+    // nothing. A finished one's reply is posted below, because nothing says
+    // the delivery that ran it lived to post it.
     if (session && repeated()) {
       await renderer.withdraw();
       renderers.get(sessionId)?.[0]?.refreshLoading();
@@ -4440,10 +4447,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // take their place for it — before the final edit and the overflow
       // posts, which are network I/O a later message must not overtake.
       // A DM has no thread, and nobody else in it.
-      const reply = latestTurnReply(session);
+      const reply = replyTo(session, eventKey);
       // A turn nobody asked for that said nothing posts nothing; every
-      // other turn says `(no reply)` where its answer would have gone.
-      const finalized = renderer.finalize(renderer.lazy ? reply ?? '' : lastAssistantReply(session));
+      // other turn says `(no reply)` where its answer would have gone — one
+      // rule with the gateway's `sessionRouting`, which posts the same
+      // message for a turn this adapter did not start.
+      const finalized = renderer.finalize(renderer.lazy ? reply ?? '' : reply ?? NO_REPLY_TEXT);
       const heard = thread !== undefined && reply !== undefined
         ? overhearReply(connection, event.channel, thread, reply, session, finalized.then((outcome) => outcome.published))
         : undefined;

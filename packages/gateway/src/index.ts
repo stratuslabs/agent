@@ -711,12 +711,18 @@ export interface DispatchInput {
    */
   idempotencyKey?: string;
   /**
-   * Called, before the dispatch resolves, when it turns out to be a repeat
-   * of a turn another dispatch with the same key already started — live or
-   * finished. That turn was rendered by whoever started it, so a caller
+   * Called, before the dispatch resolves, when it attaches to a turn another
+   * dispatch with the same key started in this process and is still
+   * waiting on. That dispatch is alive to render the reply, so a caller
    * with a reply of its own in progress takes it down and posts nothing.
-   * Not called when the repeat continues a turn a crash left unfinished:
-   * nobody else is rendering that one, so this caller should.
+   *
+   * Not called for any repeat this process has no live dispatch for. A
+   * finished turn's reply may never have been posted — the process can
+   * die between the turn's last write and the channel's — and nothing
+   * durable says whether it was, so that caller posts
+   * `turnReplyFor(session, key)` itself: a reply said twice beats one
+   * never said. Nor for a repeat that continues a turn a crash left
+   * unfinished, which nobody else is rendering.
    */
   onRepeat?: () => void;
 }
@@ -3303,7 +3309,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     sessionId: string,
     idempotencyKey: string,
     turnId: string | undefined,
-    onRepeat: (() => void) | undefined,
   ): Promise<Session | undefined> => {
     const session = await store.get(sessionId);
     const state = session === undefined ? undefined : workItemState(session, idempotencyKey);
@@ -3311,7 +3316,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return undefined;
     }
     if (state === 'finished') {
-      onRepeat?.();
       return session;
     }
     // Run now, on this caller's behalf, so its events are this caller's
@@ -3457,7 +3461,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const turn = onSessionChain(input.sessionId, async () => {
       // Before `activeTurns` is touched: a repeat that runs nothing must
       // not claim the session's turn id, even for the instant it takes.
-      const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, turnId, input.onRepeat) : undefined;
+      const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, turnId) : undefined;
       if (repeated !== undefined) {
         return repeated;
       }

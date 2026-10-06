@@ -8047,53 +8047,87 @@ test('each turn says what kind of room it is in now and how many are in it, neve
   await adapter.stop();
 });
 
-test('a redelivery after a restart passes its message key and, as a repeat, posts nothing', async () => {
-  // The in-memory dedupe dies with the process. The idempotency key is what
-  // tells the gateway the redelivery is the message it already answered,
-  // and `onRepeat` is what tells this adapter to say nothing about it.
+test('a redelivery after a restart passes its message key and posts its own turn\'s reply, not the newest', async () => {
+  // The in-memory dedupe dies with the process, and so may the delivery
+  // that ran the turn — after the turn's last write and before its reply
+  // reached Slack. Nothing says which, so the redelivery posts the reply,
+  // and the reply it posts is the one its own message got, though the
+  // session has moved on since.
   const keys: Array<string | undefined> = [];
-  const answered = new Set<string>();
-  const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hello from Ava'));
+  const finished = (sessionId: string, key: string): Session => {
+    const now = new Date().toISOString();
+    return {
+      id: sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: key },
+        { id: 'a1', role: 'assistant', content: 'hello from Ava', createdAt: now },
+        { id: 'u2', role: 'user', content: 'and later', createdAt: now, idempotencyKey: 'ava:C1:200.1' },
+        { id: 'a2', role: 'assistant', content: 'a newer reply', createdAt: now },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+  const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
   const gateway: StubGateway = {
     ...stub,
     async dispatch(input) {
       keys.push(input.idempotencyKey);
-      if (input.idempotencyKey !== undefined && answered.has(input.idempotencyKey)) {
-        input.onRepeat?.();
-        return sessionWithReply(input.sessionId, 'hello from Ava');
-      }
-      if (input.idempotencyKey !== undefined) {
-        answered.add(input.idempotencyKey);
-      }
-      return stub.dispatch(input);
+      // What the gateway does for a finished repeat: no turn, no events, no
+      // `onRepeat`, and the session as it stands.
+      return finished(input.sessionId, input.idempotencyKey ?? '');
     },
   };
 
   for (const replies of ['stream', 'final'] as const) {
-    answered.clear();
     keys.length = 0;
-    const webs = [createFakeWeb('B-AVA', 'T1'), createFakeWeb('B-AVA', 'T1')];
-    for (const web of webs) {
-      const socket = createFakeSocket();
-      const statuses = recordStatuses(web);
-      const adapter = createAdapterAsShipped({
-        agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
-        editIntervalMs: 0,
-        createSocketClient: () => socket,
-        createWebClient: () => web,
-      });
-      await adapter.start(gateway);
-      await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
-      await adapter.stop();
-      if (web === webs[1]) {
-        // Whatever went up for the redelivery came down, and no answer was
-        // posted or written into a placeholder.
-        assert.equal(web.posts.length, web.deletes.length, `${replies}: a placeholder stayed up`);
-        assert.ok(!web.updates.some((update) => update.text === 'hello from Ava'), `${replies}: the answer was written again`);
-        assert.ok(!web.posts.some((post) => post.text === 'hello from Ava'), `${replies}: the answer was posted again`);
-        assert.equal(statuses.at(-1)?.status ?? '', '', `${replies}: a loading status stayed up`);
-      }
-    }
-    assert.deepEqual(keys, ['ava:C1:100.1', 'ava:C1:100.1']);
+    const web = createFakeWeb('B-AVA', 'T1');
+    const socket = createFakeSocket();
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
+      editIntervalMs: 0,
+      createSocketClient: () => socket,
+      createWebClient: () => web,
+    });
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+    await adapter.stop();
+    const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+    assert.ok(said.includes('hello from Ava'), `${replies}: the reply was not posted`);
+    assert.ok(!said.includes('a newer reply'), `${replies}: a newer turn's reply answered the message`);
+    assert.deepEqual(keys, ['ava:C1:100.1']);
+  }
+});
+
+test('a repeat of a turn another delivery is still waiting on posts nothing', async () => {
+  // That delivery posts the answer; this one takes down what it put up.
+  const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hello from Ava'));
+  const gateway: StubGateway = {
+    ...stub,
+    async dispatch(input) {
+      input.onRepeat?.();
+      return sessionWithReply(input.sessionId, 'hello from Ava');
+    },
+  };
+
+  for (const replies of ['stream', 'final'] as const) {
+    const web = createFakeWeb('B-AVA', 'T1');
+    const socket = createFakeSocket();
+    const statuses = recordStatuses(web);
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
+      editIntervalMs: 0,
+      createSocketClient: () => socket,
+      createWebClient: () => web,
+    });
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+    await adapter.stop();
+    assert.equal(web.posts.length, web.deletes.length, `${replies}: a placeholder stayed up`);
+    assert.ok(!web.updates.some((update) => update.text === 'hello from Ava'), `${replies}: the answer was written`);
+    assert.ok(!web.posts.some((post) => post.text === 'hello from Ava'), `${replies}: the answer was posted`);
+    assert.equal(statuses.at(-1)?.status ?? '', '', `${replies}: a loading status stayed up`);
   }
 });

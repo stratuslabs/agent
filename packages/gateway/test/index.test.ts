@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   PENDING_APPROVAL_METADATA_KEY,
   RunAbortedError,
+  turnReplyFor,
   type ApprovalAnswer,
   type ApprovalOutcome,
   type StratusEvent,
@@ -5441,7 +5442,7 @@ test('a message accepted just before shutdown does not bury a keyed item its rec
   assert.deepEqual(session?.messages.filter((message) => message.role === 'user').map((message) => message.content), ['gated work']);
 });
 
-test('onRepeat says when a dispatch repeated a turn someone else started, and only then', async () => {
+test('onRepeat says when a dispatch attached to a live turn, and not for a finished one', async () => {
   const home = await newHome();
   await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
   const env = {
@@ -5459,11 +5460,13 @@ test('onRepeat says when a dispatch repeated a turn someone else started, and on
 
     // Live: the second attaches to the first while it is still queued.
     await Promise.all([send('first', 'k1'), send('live repeat', 'k1')]);
-    // Finished: the turn is over and the repeat runs nothing.
-    await send('finished repeat', 'k1');
+    // Finished: the turn is over and the repeat runs nothing, but nothing
+    // says its reply was ever posted, so the caller is not told to stay quiet.
+    const finished = await send('finished repeat', 'k1');
+    assert.equal(turnReplyFor(finished, 'k1'), 'reply');
     // A new key is a new message.
     await send('second', 'k2');
-    assert.deepEqual(repeats, ['live repeat', 'finished repeat']);
+    assert.deepEqual(repeats, ['live repeat']);
   } finally {
     await gateway.stop();
   }

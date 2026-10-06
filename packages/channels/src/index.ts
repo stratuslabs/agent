@@ -193,13 +193,14 @@ export interface GatewayLike {
      */
     idempotencyKey?: string;
     /**
-     * Called before the dispatch resolves when it repeats a turn another
-     * dispatch of the same key already started, live or finished: that
-     * turn's reply is the other dispatch's to post, so this caller takes
-     * down anything of its own and posts nothing. Not called for a repeat
-     * that continues a turn a crash left unfinished, which this caller
-     * renders as its own. See `DispatchInput.onRepeat` in
-     * `@stratusagent/gateway`.
+     * Called before the dispatch resolves when it attaches to a turn
+     * another dispatch of the same key started in this process and is
+     * still waiting on: that turn's reply is the other dispatch's to post,
+     * so this caller takes down anything of its own and posts nothing. Not
+     * called for a finished turn, whose reply may never have been posted
+     * (this caller posts `turnReplyFor(session, key)`), nor for one a crash
+     * left unfinished, which this caller renders as its own. See
+     * `DispatchInput.onRepeat` in `@stratusagent/gateway`.
      */
     onRepeat?: () => void;
   }): Promise<Session>;
