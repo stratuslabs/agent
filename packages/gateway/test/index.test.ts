@@ -5358,3 +5358,34 @@ test('a continued turn spends the budget it was on, not a fresh one', async () =
   assert.equal(bodies.length, 1);
   assert.ok(bodies[0]?.includes('You have used every step this message allows'), 'the continuation was not the wrap-up');
 });
+
+test('two different session and key pairs never attach to each other\'s turn, however their strings are spelled', async () => {
+  // Joined with a separator, ("x", "y\u0000z") and ("x\u0000y", "z") read
+  // the same, and the second dispatch would resolve with the first's turn
+  // without ever running its own.
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText(`reply ${calls}`);
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    const [first, second] = await Promise.all([
+      gateway.dispatch({ sessionId: 'x', agentId: 'blair', userMessage: 'one', idempotencyKey: 'y\u0000z' }),
+      gateway.dispatch({ sessionId: 'x\u0000y', agentId: 'blair', userMessage: 'two', idempotencyKey: 'z' }),
+    ]);
+    assert.equal(calls, 2);
+    assert.equal(first.id, 'x');
+    assert.equal(second.id, 'x\u0000y');
+  } finally {
+    await gateway.stop();
+  }
+});

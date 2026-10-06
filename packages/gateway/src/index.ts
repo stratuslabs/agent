@@ -2619,7 +2619,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * attaches to. In memory on purpose: it only has to cover the turns this
    * process is running, and the transcript covers the rest.
    */
-  const liveWorkItems = new Map<string, Promise<Session>>();
+  // Nested rather than one joined string: both halves are the caller's, and
+  // no separator is one a caller cannot also put inside a key.
+  const liveWorkItems = new Map<string, Map<string, Promise<Session>>>();
   /** The start-up snapshot `recoverParkedTurns` judges orphans from, for a repeat that gets there first. */
   let orphanedAtStart: ReadonlySet<string> = new Set();
 
@@ -3408,8 +3410,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // A repeat of a dispatch still queued or running is that dispatch: it
     // resolves with it rather than queueing behind it, which would let
     // another caller's turn land in between and then find a finished item.
-    const liveKey = idempotencyKey !== undefined ? `${input.sessionId}\u0000${idempotencyKey}` : undefined;
-    const live = liveKey !== undefined ? liveWorkItems.get(liveKey) : undefined;
+    const live = idempotencyKey !== undefined ? liveWorkItems.get(input.sessionId)?.get(idempotencyKey) : undefined;
     if (live !== undefined) {
       return live;
     }
@@ -3435,11 +3436,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         activeTurns.delete(input.sessionId);
       }
     });
-    if (liveKey !== undefined) {
-      liveWorkItems.set(liveKey, turn);
+    if (idempotencyKey !== undefined) {
+      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, Promise<Session>>();
+      items.set(idempotencyKey, turn);
+      liveWorkItems.set(input.sessionId, items);
       void turn.catch(() => {}).finally(() => {
-        if (liveWorkItems.get(liveKey) === turn) {
-          liveWorkItems.delete(liveKey);
+        const current = liveWorkItems.get(input.sessionId);
+        if (current?.get(idempotencyKey) === turn) {
+          current.delete(idempotencyKey);
+          if (current.size === 0) {
+            liveWorkItems.delete(input.sessionId);
+          }
         }
       });
     }
