@@ -5071,3 +5071,58 @@ test('a continued turn whose last response held a call before its text goes back
   assert.equal(session?.messages.at(-1)?.content, 'it was interrupted; here is where things stand');
   assert.ok(session?.messages.some((message) => message.role === 'tool' && message.toolResult?.callId === 'call-1' && message.toolResult.ok === false));
 });
+
+test('a keyed turn on a session switched for good to a stateless fallback is not marked as reaching a harness', async () => {
+  // The primary is a Claude subscription, a harness; the fallback is an API.
+  // Once the session has switched, the primary is never called again, so
+  // this turn cannot reach the harness, and a crash in it can be continued.
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'model-p',
+    fallbackModel: 'model-f',
+    fallbackProvider: 'openai',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-test' } }),
+  );
+  const queryFn = (() => {
+    throw new Error('the primary should not be called for a switched session');
+  }) as never;
+  const gateway = createGateway({
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { OPENAI_API_KEY: 'sk-o' },
+      fetch: (async () => openAiText('from the fallback')) as typeof fetch,
+      queryFn,
+    },
+    idleTimeoutMs: 0,
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    await gateway.store.create({
+      id: 'switched-keyed-1',
+      agent: { id: 'stratus', name: 'Stratus' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'earlier', createdAt: new Date().toISOString() },
+        { id: 'a1', role: 'assistant', content: 'earlier reply', createdAt: new Date().toISOString() },
+      ],
+      metadata: { fallbackActive: true },
+    });
+    const switched = await gateway.dispatch({ sessionId: 'switched-keyed-1', userMessage: 'again', idempotencyKey: 'k1' });
+    assert.equal(switched.messages.at(-1)?.content, 'from the fallback');
+    assert.equal(switched.messages.findLast((message) => message.role === 'user')?.hostedLoop, undefined);
+
+    // Not switched: the harness primary is the one that will answer.
+    const fresh = await gateway.dispatch({ sessionId: 'fresh-keyed-1', userMessage: 'hi', idempotencyKey: 'k1' }).catch(() => undefined);
+    const stored = await gateway.store.get('fresh-keyed-1');
+    assert.equal(stored?.messages.find((message) => message.role === 'user')?.hostedLoop, true, String(fresh?.status));
+  } finally {
+    await gateway.stop();
+  }
+});

@@ -2778,9 +2778,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(existing, config);
     // Recorded with a keyed message so a restart judges the turn by what it
     // could have run on, not by whatever the config resolves to by then.
-    // The fallback counts: a turn can switch to it mid-run.
+    // The fallback counts: a turn can switch to it mid-run. Once a session
+    // has switched for good, the primary is never called again, and only
+    // the fallback counts.
+    const fallback = config.provider !== 'demo' ? config.fallback : undefined;
     const hostedLoop = input.idempotencyKey !== undefined && (
-      runsOnHarness(config) || (config.provider !== 'demo' && config.fallback !== undefined && runsOnHarness(config.fallback))
+      switchedToFallback && fallback !== undefined
+        ? runsOnHarness(fallback)
+        : runsOnHarness(config) || (fallback !== undefined && runsOnHarness(fallback))
     );
 
     return withWatchdog(input.sessionId, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
