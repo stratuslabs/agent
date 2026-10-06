@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { lstat, open, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -7,6 +7,7 @@ import {
   filePathsOf,
   isLatestTurn,
   latestTurnReply,
+  MAX_IDEMPOTENCY_KEY_LENGTH,
   turnFailureFor,
   turnFilesFor,
   turnReplyFor,
@@ -521,6 +522,16 @@ interface ReplyOutcome {
   spoke: boolean;
   spokeAt?: string;
 }
+
+/**
+ * The dispatch's idempotency key for a message's dedupe key: the key itself
+ * when it fits the gateway's bound, and a digest of it when it does not —
+ * an agent id is not length-bounded (overlong ids that predate validation
+ * are kept), and a key over the bound would refuse every message for that
+ * agent. Deterministic, so a redelivery after a restart maps to the same.
+ */
+const dispatchKeyFor = (eventKey: string): string =>
+  eventKey.length <= MAX_IDEMPOTENCY_KEY_LENGTH ? eventKey : `slack-sha256:${createHash('sha256').update(eventKey).digest('hex')}`;
 
 /**
  * What the report of a turn nobody was rendering got into the thread, part
@@ -4275,6 +4286,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     const { event, isDm, team, userId, thread, sessionId, threadKey, eventKey } = admitted;
+    // What the gateway knows this message by (see `dispatchKeyFor`).
+    const dispatchKey = dispatchKeyFor(eventKey);
 
     // Everything up to (and including) the dispatch call is serialized per
     // session in Slack receipt order: the user lookups and placeholder
@@ -4488,7 +4501,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // A redelivery this process no longer remembers (it restarted, or
         // the dedupe evicted it) is still the message it was: the gateway
         // runs no second turn for it, and says so through `onRepeat`.
-        idempotencyKey: eventKey,
+        idempotencyKey: dispatchKey,
         onRepeat: (kind) => {
           repeat = kind;
         },
@@ -4559,12 +4572,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // the thread: the files it landed are not posted again, and the text
     // only if it was not said in full.
     const finished = repeat() === 'finished';
-    const reportedAhead = session && finished && renderer.outcomeReportedAhead !== undefined && isLatestTurn(session, eventKey)
+    const reportedAhead = session && finished && renderer.outcomeReportedAhead !== undefined && isLatestTurn(session, dispatchKey)
       ? await renderer.outcomeReportedAhead
       : undefined;
     if (session && finished) {
-      const landed = new Set(reportedAhead?.landed ?? []);
-      renderer.queueFiles(turnFilesFor(session, eventKey).filter((file) => !landed.has(file.path)));
+      // Counted, not a set: a turn can produce one path twice, and each
+      // result is an upload of its own, so one landing does not cover both.
+      const landed = new Map<string, number>();
+      for (const filePath of reportedAhead?.landed ?? []) {
+        landed.set(filePath, (landed.get(filePath) ?? 0) + 1);
+      }
+      renderer.queueFiles(turnFilesFor(session, dispatchKey).filter((file) => {
+        const left = landed.get(file.path) ?? 0;
+        if (left > 0) {
+          landed.set(file.path, left - 1);
+          return false;
+        }
+        return true;
+      }));
     }
     if (reportedAhead?.said === true) {
       await renderer.withdraw();
@@ -4576,7 +4601,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // already failed — or continues a crashed one the gateway could only
     // fail — resolves with the failed session. Its failure is posted as the
     // original delivery's would have been, not as a reply that says nothing.
-    const failedWith = session ? turnFailureFor(session, eventKey) : undefined;
+    const failedWith = session ? turnFailureFor(session, dispatchKey) : undefined;
     if (failedWith !== undefined) {
       failure = new Error(failedWith);
       session = undefined;
@@ -4589,7 +4614,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // A DM has no thread, and nobody else in it.
       // A finished repeat's session may have moved on since; its own turn
       // is found by the key.
-      const reply = finished ? turnReplyFor(session, eventKey) : latestTurnReply(session);
+      const reply = finished ? turnReplyFor(session, dispatchKey) : latestTurnReply(session);
       // A turn nobody asked for that said nothing posts nothing; every
       // other turn says `(no reply)` where its answer would have gone — one
       // rule with the gateway's `sessionRouting`, which posts the same

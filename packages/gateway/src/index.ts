@@ -7,6 +7,7 @@ import {
   isUnaddressedTurn,
   workItemState,
   lastResponseIsAnswer,
+  MAX_IDEMPOTENCY_KEY_LENGTH,
   recordTurnFailure,
   completeAnsweredTurn,
   abortErrorFor,
@@ -995,7 +996,6 @@ export const ABANDONED_TURN_ERROR =
  * is far shorter; the bound is so a key cannot be used to grow every row it
  * is stored on.
  */
-const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
 
 /**
  * Recorded on a delegated sub-session that was parked on a human when the
@@ -3535,9 +3535,24 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           return session;
         },
         (error: unknown) => {
-          if (error instanceof CrossIdentityError) {
+          // Refused for who it named, or failed before its keyed message was
+          // ever written (an agent gone, a provider it could not build): either
+          // way the item is still unowned, there is no turn to have repeated,
+          // and this delivery is the one to run it.
+          const unowned = async (): Promise<boolean> => {
+            if (error instanceof CrossIdentityError) {
+              return true;
+            }
+            const stored = idempotencyKey === undefined ? undefined : await store.get(input.sessionId);
+            return idempotencyKey !== undefined && (stored === undefined || workItemState(stored, idempotencyKey) === undefined);
+          };
+          return unowned().then((free) => {
+            if (!free) {
+              input.onRepeat?.('live');
+              throw error;
+            }
             // Its own cleanup runs a tick later; the dispatch below must not
-            // find the refused claim still standing and wait on it again.
+            // find the dead claim still standing and wait on it again.
             const items = liveWorkItems.get(input.sessionId);
             if (idempotencyKey !== undefined && items?.get(idempotencyKey)?.turn === claim) {
               items.delete(idempotencyKey);
@@ -3546,9 +3561,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
               }
             }
             return dispatch(input);
-          }
-          input.onRepeat?.('live');
-          throw error;
+          });
         },
       );
     }

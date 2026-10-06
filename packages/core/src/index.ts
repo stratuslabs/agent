@@ -3181,6 +3181,13 @@ export const completeAnsweredTurn = async (finished: Session, store: SessionStor
 };
 
 /**
+ * The longest idempotency key a dispatch accepts. Here rather than in the
+ * gateway that enforces it, because a channel composing keys from ids it
+ * does not bound (an agent's, a platform's) has to fit them to it.
+ */
+export const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
+
+/**
  * The reply of the turn a keyed message started (`Message.idempotencyKey`),
  * where `latestTurnReply` is the newest turn's. A repeated dispatch resolves
  * with the session as it stands, which may have moved on since: an adapter

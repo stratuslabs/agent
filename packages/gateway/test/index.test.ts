@@ -5754,3 +5754,33 @@ test('a repeat naming nobody, of a claim naming the wrong agent, runs once that 
     await gateway.stop();
   }
 });
+
+test('a repeat naming nobody, of a claim that failed before writing anything, runs on its own', async () => {
+  const home = await newHome();
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('reply')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    const repeats: string[] = [];
+    // A new session, claimed for an agent the roster does not have: the
+    // claim fails before its keyed message is ever written.
+    const ghost = gateway.dispatch({ sessionId: 'unowned-1', agentId: 'ghost', userMessage: 'hello', idempotencyKey: 'k1' });
+    const unnamed = gateway.dispatch({
+      sessionId: 'unowned-1',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(kind),
+    });
+    await assert.rejects(ghost);
+    const session = await unnamed;
+    assert.equal(session.messages.filter((message) => message.idempotencyKey === 'k1').length, 1);
+    assert.deepEqual(repeats, []);
+  } finally {
+    await gateway.stop();
+  }
+});

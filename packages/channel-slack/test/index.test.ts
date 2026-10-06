@@ -8496,3 +8496,91 @@ test('a redelivery the start-up sweep finished posts only the files that sweep c
   const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
   assert.equal(said.filter((text) => text === 'the recovered answer').length, 1);
 });
+
+test('a message for an agent with an overlong id is dispatched with a key the gateway accepts, the same after a restart', async () => {
+  const longId = `agent-${'x'.repeat(300)}`;
+  const keys: Array<string | undefined> = [];
+  for (let run = 0; run < 2; run += 1) {
+    const socket = createFakeSocket();
+    const web = createFakeWeb('B-AVA', 'T1');
+    const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hi'));
+    gateway.agents = () => [{ id: longId, name: 'Long' }];
+    const dispatch = gateway.dispatch;
+    gateway.dispatch = async (input) => {
+      keys.push(input.idempotencyKey);
+      return dispatch.call(gateway, input);
+    };
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: longId, appToken: 'xapp-1', botToken: 'xoxb-1' }],
+      editIntervalMs: 0,
+      createSocketClient: () => socket,
+      createWebClient: () => web,
+    });
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+    await adapter.stop();
+  }
+  assert.equal(keys.length, 2);
+  assert.ok((keys[0] ?? '').length > 0 && (keys[0] ?? '').length <= 256, `key length ${(keys[0] ?? '').length}`);
+  assert.equal(keys[0], keys[1]);
+});
+
+test('a redelivery the start-up sweep finished posts each occurrence of a file the sweep could not, even one path twice', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-sweep-same-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'png bytes');
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let attempts = 0;
+  const upload = web.files.uploadV2.bind(web.files);
+  web.files.uploadV2 = async (args) => {
+    attempts += 1;
+    if (attempts === 2) {
+      throw new Error('ratelimited');
+    }
+    return upload(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered answer',
+  });
+  gateway.dispatch = async (input) => {
+    for (const callId of ['c1', 'c2']) {
+      await gateway.bus.emit({
+        type: 'tool.completed',
+        sessionId: input.sessionId,
+        result: { callId, toolName: 'chart.render', ok: true, output: { file: chart } },
+      });
+    }
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    input.onRepeat?.('finished');
+    const now = new Date().toISOString();
+    return {
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: input.idempotencyKey ?? '' },
+        { id: 't1', role: 'tool', content: '', createdAt: now, toolResult: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: chart } } },
+        { id: 't2', role: 'tool', content: '', createdAt: now, toolResult: { callId: 'c2', toolName: 'chart.render', ok: true, output: { file: chart } } },
+        { id: 'a1', role: 'assistant', content: 'the recovered answer', createdAt: now },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+  // Two results, two uploads: the sweep's one that landed, the redelivery's for the other.
+  assert.deepEqual(web.uploads.map((entry) => entry.filename), ['chart.png', 'chart.png']);
+});
