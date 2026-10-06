@@ -7,45 +7,18 @@
  *
  *   pnpm --filter @stratusagent/tool-web render-in-chromium
  *
- * It finds Chromium the way Playwright does, then whatever revision a
- * Playwright install left in its browser cache (PLAYWRIGHT_BROWSERS_PATH, or
- * the platform's default), then an installed Google Chrome. CHROMIUM_PATH
- * names a binary outright.
+ * CHROMIUM_PATH names the browser outright; otherwise it is the one
+ * playwright-core finds, then an installed Google Chrome. It does not hunt
+ * through Playwright's cache for another revision: where that cache is and
+ * how it is laid out is Playwright's to know, and any recent Chromium answers
+ * these pages the same, so pointing CHROMIUM_PATH at one is the whole fix.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { writeFileSync } from 'node:fs';
 import { chromium, type Browser } from 'playwright-core';
 import { markersOf, renderedPages } from './rendered-pages.ts';
 
 const OUTPUT = new URL('../test/rendered-in-chromium.json', import.meta.url);
-
-// Where each platform's Playwright download keeps its binary, current
-// layouts (Chrome for Testing) and the older Chromium ones alike.
-const CACHED_EXECUTABLES = [
-  ['chrome-linux64', 'chrome'],
-  ['chrome-linux', 'chrome'],
-  ['chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'],
-  ['chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'],
-  ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'],
-  ['chrome-win64', 'chrome.exe'],
-  ['chrome-win', 'chrome.exe'],
-];
-
-/** Every Chromium a Playwright install left on this machine, newest revision first. */
-const cachedChromiums = (): string[] => {
-  const cache = process.platform === 'darwin' ? join(homedir(), 'Library', 'Caches')
-    : process.platform === 'win32' ? process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local')
-    : process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache');
-  const root = process.env.PLAYWRIGHT_BROWSERS_PATH ?? join(cache, 'ms-playwright');
-  if (!existsSync(root)) return [];
-  return readdirSync(root)
-    .filter((name) => name.startsWith('chromium-'))
-    .sort((a, b) => Number(b.slice('chromium-'.length)) - Number(a.slice('chromium-'.length)))
-    .flatMap((entry) => CACHED_EXECUTABLES.map((parts) => join(root, entry, ...parts)))
-    .filter((path) => existsSync(path));
-};
 
 const launch = async (): Promise<Browser> => {
   const explicit = process.env.CHROMIUM_PATH;
@@ -56,21 +29,12 @@ const launch = async (): Promise<Browser> => {
   } catch (error) {
     tried.push(error instanceof Error ? error.message.split('\n')[0] ?? '' : String(error));
   }
-  // A Playwright install of another version leaves a revision this one does
-  // not ask for by name; any recent Chromium answers these pages the same.
-  for (const executablePath of cachedChromiums()) {
-    try {
-      return await chromium.launch({ executablePath });
-    } catch (error) {
-      tried.push(error instanceof Error ? error.message.split('\n')[0] ?? '' : String(error));
-    }
-  }
   try {
     return await chromium.launch({ channel: 'chrome' });
   } catch (error) {
     tried.push(error instanceof Error ? error.message.split('\n')[0] ?? '' : String(error));
   }
-  throw new Error(`No Chromium could be launched. Set CHROMIUM_PATH to a Chromium or Chrome binary.\n  ${tried.join('\n  ')}`);
+  throw new Error(`No Chromium could be launched. Install the one this playwright-core expects with pnpm --filter @stratusagent/tool-web exec playwright-core install chromium, or set CHROMIUM_PATH to any Chromium or Chrome binary.\n  ${tried.join('\n  ')}`);
 };
 
 // Which of these words the extractor keeps because what hides them is still
