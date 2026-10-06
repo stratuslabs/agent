@@ -470,6 +470,89 @@ test('a message that uses every turn wraps up with where it got to instead of fa
   assert.equal(session.messages.some((message) => message.content === TURN_LIMIT_NOTE), false);
 });
 
+test('a message that makes the same failing call three times running wraps up and says what is stuck', async () => {
+  // The turn limit was the only thing that stopped this, so a missing cwd
+  // or a gated tool refused in headless mode burned the whole allowance
+  // repeating one error (#208).
+  const tools = new ToolRegistry();
+  let ran = 0;
+  tools.register({
+    name: 'shell.run',
+    async execute() {
+      ran += 1;
+      throw new Error('cwd /work/missing does not exist');
+    },
+  });
+
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    name: 'stuck',
+    async generate(request) {
+      requests.push(request);
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'The working directory is missing, so every command fails.' }] };
+      }
+      // The same input in a different key order is still the same call.
+      const input = requests.length % 2 === 0 ? { command: 'ls', cwd: '/work/missing' } : { cwd: '/work/missing', command: 'ls' };
+      return { parts: [{ type: 'tool-call', call: { id: `c${requests.length}`, toolName: 'shell.run', input } }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools });
+  const session = await runner.run({
+    sessionId: 'stuck-loop',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'List the files',
+  });
+
+  assert.equal(ran, 3, 'stopped after three identical failures, not at maxTurns');
+  assert.equal(session.status, 'completed');
+  assert.equal(session.messages.at(-1)?.content, 'The working directory is missing, so every command fails.');
+  const wrapUp = requests.at(-1)!;
+  assert.equal(wrapUp.toolChoice, 'none');
+  assert.match(transcriptOf(wrapUp).at(-1)?.content ?? '', /called shell\.run 3 times in a row/);
+  // The runtime's note for one call, never something the person said.
+  assert.equal(session.messages.some((message) => /called shell\.run 3 times/.test(message.content)), false);
+});
+
+test('failures that change between turns are not a loop', async () => {
+  // A different input, or the same input failing differently, is the agent
+  // trying something or learning something; only the identical repeat is
+  // stopped early.
+  const tools = new ToolRegistry();
+  let ran = 0;
+  tools.register({
+    name: 'shell.run',
+    async execute(input) {
+      ran += 1;
+      throw new Error(`no such file: ${String((input as { path?: string }).path)}`);
+    },
+  });
+
+  let calls = 0;
+  const provider: ModelProvider = {
+    name: 'searching',
+    async generate() {
+      calls += 1;
+      if (calls > 5) {
+        return { parts: [{ type: 'text', text: 'None of those exist.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `c${calls}`, toolName: 'shell.run', input: { path: `/try/${calls}` } } }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools });
+  const session = await runner.run({
+    sessionId: 'searching',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'Find the config',
+  });
+
+  assert.equal(ran, 5);
+  assert.equal(session.status, 'completed');
+  assert.equal(session.messages.at(-1)?.content, 'None of those exist.');
+});
+
 test('resume continues an existing session with new user input', async () => {
   const store = new InMemorySessionStore();
   const provider: ModelProvider = {
@@ -1290,7 +1373,11 @@ const parkAndAbandon = async (
   tools: ToolRegistry,
   provider: ModelProvider,
   sessionId: string,
+  // How many gated calls are refused before one parks: the turns a message
+  // had already failed when the process died.
+  deniedFirst = 0,
 ): Promise<void> => {
+  let denied = 0;
   const dying = new AgentRunner({
     provider,
     tools,
@@ -1299,9 +1386,16 @@ const parkAndAbandon = async (
       // Waves safe calls through and hangs on the gated one, as a real
       // policy does — the runner asks about every call, so a policy that
       // blocked on all of them would stall before the turn ever parked.
-      approve: ({ risk }) => (risk === 'safe'
-        ? Promise.resolve(true)
-        : new Promise<boolean>(() => {})),
+      approve: ({ risk }) => {
+        if (risk === 'safe') {
+          return Promise.resolve(true);
+        }
+        if (denied < deniedFirst) {
+          denied += 1;
+          return Promise.resolve(false);
+        }
+        return new Promise<boolean>(() => {});
+      },
     },
   });
   void dying.run({
@@ -1429,6 +1523,200 @@ test('a recovered turn resumes the exact parked call without replaying what alre
   // The turn continued to the provider after draining, rather than stopping
   // at the recovered calls.
   assert.ok(providerTurns() >= 2, `expected the loop to continue, saw ${providerTurns()} provider turn(s)`);
+});
+
+test('a recovered turn\'s failure counts toward the repeated-failure stop', async () => {
+  // A recovered turn is one the provider already took. Leaving its result
+  // out of the count let a call denied after a restart be asked about a
+  // fourth time before the message stopped.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({ name: 'gated', risk: 'gated', async execute() { return { ran: true }; } });
+  let requests = 0;
+  const provider: ModelProvider = {
+    name: 'insistent',
+    async generate(request) {
+      requests += 1;
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'It keeps being refused.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `g${requests}`, toolName: 'gated', input: { x: 1 } } }] };
+    },
+  };
+
+  await parkAndAbandon(store, tools, provider, 'recover-count');
+
+  let asked = 0;
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      async approve() {
+        asked += 1;
+        return false;
+      },
+    },
+  });
+  const recovered = await revived.recoverPendingApproval('recover-count');
+
+  assert.equal(recovered?.status, 'completed');
+  assert.equal(asked, 3, 'the recovered denial is the first of the three');
+  assert.equal(recovered?.messages.at(-1)?.content, 'It keeps being refused.');
+
+  // The same when the parked call's deadline passed while the daemon was
+  // down: recovery refuses it without asking, and that refusal counts too,
+  // so only two more are asked about.
+  await parkAndAbandon(store, tools, provider, 'recover-expired');
+  asked = 0;
+  const expired = await revived.recoverPendingApproval('recover-expired', { denyPending: true });
+  assert.equal(expired?.status, 'completed');
+  assert.equal(asked, 2, 'the expired denial is the first of the three');
+});
+
+test('failures before the restart still count toward the repeated-failure stop', async () => {
+  // Refused once, then parked on the same call, then the daemon died. The
+  // counter died with it, so counting from the recovered turn alone let the
+  // message fail four times running instead of three.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({ name: 'gated', risk: 'gated', async execute() { return { ran: true }; } });
+  let requests = 0;
+  const provider: ModelProvider = {
+    name: 'insistent',
+    async generate(request) {
+      requests += 1;
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'It keeps being refused.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `g${requests}`, toolName: 'gated', input: { x: 1 } } }] };
+    },
+  };
+
+  await parkAndAbandon(store, tools, provider, 'recover-earlier', 1);
+
+  let asked = 0;
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      async approve() {
+        asked += 1;
+        return false;
+      },
+    },
+  });
+  const recovered = await revived.recoverPendingApproval('recover-earlier');
+
+  assert.equal(recovered?.status, 'completed');
+  assert.equal(asked, 2, 'the denial before the restart and the recovered one are the first two of three');
+  assert.equal(recovered?.messages.at(-1)?.content, 'It keeps being refused.');
+});
+
+test('a streak that a later response broke does not stop a recovered message', async () => {
+  // An older build let a message fail the same way more than three times;
+  // a response after that succeeded, and the next one parked. Recovery
+  // replays the whole message, and a stop latched at the third failure
+  // wrapped it up although the streak had ended two responses ago.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({ name: 'ok', risk: 'safe', async execute() { return { fine: true }; } });
+  tools.register({ name: 'gated', risk: 'gated', async execute() { return { ran: true }; } });
+  let requests = 0;
+  const provider: ModelProvider = {
+    name: 'insistent',
+    async generate(request) {
+      requests += 1;
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'It keeps being refused.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `g${requests}`, toolName: 'gated', input: { x: 1 } } }] };
+    },
+  };
+
+  await parkAndAbandon(store, tools, provider, 'recover-broken-streak', 1);
+
+  // The history the older build left: two more of the same refusal, then a
+  // response that succeeded, all ahead of the parked one.
+  const stored = (await store.get('recover-broken-streak'))!;
+  const parkedAt = stored.messages.findLastIndex((message) => message.role === 'assistant');
+  const [refused, refusal] = stored.messages.slice(parkedAt - 2, parkedAt);
+  const copy = (suffix: string) => [
+    { ...refused!, id: `${refused!.id}-${suffix}`, toolCalls: refused!.toolCalls!.map((call) => ({ ...call, id: `${call.id}-${suffix}` })) },
+    { ...refusal!, id: `${refusal!.id}-${suffix}`, toolResult: { ...refusal!.toolResult!, callId: `${refusal!.toolResult!.callId}-${suffix}` } },
+  ];
+  const succeeded = [
+    { ...refused!, id: 'ok-call', toolCalls: [{ id: 'o1', toolName: 'ok', input: {} }] },
+    { ...refusal!, id: 'ok-result', toolResult: { callId: 'o1', toolName: 'ok', ok: true, output: { fine: true } } },
+  ];
+  stored.messages.splice(parkedAt, 0, ...copy('a'), ...copy('b'), ...succeeded);
+  await store.save(stored);
+
+  let asked = 0;
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      async approve() {
+        asked += 1;
+        return false;
+      },
+    },
+  });
+  const recovered = await revived.recoverPendingApproval('recover-broken-streak');
+
+  assert.equal(recovered?.status, 'completed');
+  assert.equal(asked, 3, 'the recovered denial starts a new streak of three');
+});
+
+test('a recovered turn is counted as its whole response, so a call that succeeded before the park resets the count', async () => {
+  // The checkpoint holds the parked call and what queued behind it, not the
+  // calls that ran before it. Counting only those read a turn with a
+  // success in it as entirely failed.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({ name: 'ok', risk: 'safe', async execute() { return { fine: true }; } });
+  tools.register({ name: 'gated', risk: 'gated', async execute() { return { ran: true }; } });
+  let requests = 0;
+  const provider: ModelProvider = {
+    name: 'mixed-then-insistent',
+    async generate(request) {
+      requests += 1;
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'Still refused.' }] };
+      }
+      const gated = { type: 'tool-call' as const, call: { id: `g${requests}`, toolName: 'gated', input: { x: 1 } } };
+      return requests === 1
+        ? { parts: [{ type: 'tool-call', call: { id: 'o1', toolName: 'ok', input: {} } }, gated] }
+        : { parts: [gated] };
+    },
+  };
+
+  await parkAndAbandon(store, tools, provider, 'recover-mixed');
+
+  let asked = 0;
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      async approve({ risk }) {
+        if (risk === 'safe') {
+          return true;
+        }
+        asked += 1;
+        return false;
+      },
+    },
+  });
+  const recovered = await revived.recoverPendingApproval('recover-mixed');
+
+  assert.equal(recovered?.status, 'completed');
+  // The recovered turn held a success, so it is not the first of three:
+  // three more identical failures are needed after it.
+  assert.equal(asked, 4);
 });
 
 test('a recovery that denies the parked call still drains the queue behind it', async () => {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   BUILTIN_EXECUTOR_NAME,
@@ -331,12 +331,23 @@ const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined
   return api;
 };
 
-const parseApprovalRoute = (raw: unknown): AgentApprovalConfig | undefined => {
+const parseApprovalRoute = (raw: unknown, configPath: string, where: string): AgentApprovalConfig | undefined => {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
   }
   const source = raw as Record<string, unknown>;
   const route: AgentApprovalConfig = {};
+  if (source.externalContent !== undefined) {
+    // Refused when misspelled, like `mode`: dropping it would leave the
+    // grants an operator meant to withdraw quietly in force, and the
+    // config in front of them saying otherwise.
+    if (source.externalContent !== 'label' && source.externalContent !== 'gate') {
+      throw new Error(
+        `Unsupported ${where}.externalContent in config ${configPath}: ${String(source.externalContent)}. Use label or gate.`,
+      );
+    }
+    route.externalContent = source.externalContent;
+  }
   if (Array.isArray(source.slackApprovers)) {
     // Kept even when it filters down to nothing. An agent entry saying
     // `"slackApprovers": []` is an operator excluding that agent from a
@@ -355,7 +366,7 @@ const parseApprovalRoute = (raw: unknown): AgentApprovalConfig | undefined => {
 };
 
 const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig | undefined => {
-  const route = parseApprovalRoute(raw);
+  const route = parseApprovalRoute(raw, configPath, 'approvals');
   if (!route) {
     return undefined;
   }
@@ -397,7 +408,7 @@ const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig
   if (typeof source.agents === 'object' && source.agents !== null && !Array.isArray(source.agents)) {
     const agents: Record<string, AgentApprovalConfig> = {};
     for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
-      const parsed = parseApprovalRoute(entry);
+      const parsed = parseApprovalRoute(entry, configPath, `approvals.agents.${agentId}`);
       if (parsed) {
         agents[agentId] = parsed;
       }
@@ -426,9 +437,11 @@ export const resolveAgentApprovals = (
   const agent = approvals?.agents?.[agentId];
   const slackApprovers = agent?.slackApprovers ?? approvals?.slackApprovers;
   const slackChannel = agent?.slackChannel ?? approvals?.slackChannel;
+  const externalContent = agent?.externalContent ?? approvals?.externalContent;
   return {
     ...(slackApprovers ? { slackApprovers } : {}),
     ...(slackChannel ? { slackChannel } : {}),
+    ...(externalContent !== undefined ? { externalContent } : {}),
   };
 };
 
@@ -585,17 +598,42 @@ export const resolveAgentSlack = (
 // ---------------------------------------------------------------------------
 
 /**
- * Persist settings, creating the directory if it is not there yet.
+ * Persist settings, owner-read-only, creating the directory if it is not
+ * there yet.
  *
- * Deliberately NOT 0600: `config.json` holds no secrets (those live in
- * `credentials.json`, which has its own posture), and tightening it here
- * would be a security theatre that also breaks a shared-machine setup where
- * the daemon runs as another user.
+ * 0600 for the reason `credentials.json` is: this file holds secrets. It was
+ * once left readable on the grounds that it held none, but tool-shell's `env`
+ * block is the documented way to hand a command a token, and it lives here —
+ * so a real install had a third-party API token in a world-readable file
+ * (#204). The other argument, a daemon running as another user, never held
+ * either: that daemon reads the 0600 `credentials.json` beside this file.
+ *
+ * Tightened before the write as well as after it. `writeFile`'s mode applies
+ * only when it creates the file, so a file an older build left loose would
+ * otherwise take the new contents at the old mode, if only until the chmod.
+ * In place rather than through a rename, unlike the credentials file: a
+ * `config.json` symlinked from a dotfiles checkout must stay a link.
  */
 export const saveConfigFile = async (
   configPath: string,
   config: StratusConfigFile,
 ): Promise<void> => {
   await mkdir(path.dirname(configPath), { recursive: true });
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  // Only a file is tightened ahead of the write. A directory where the
+  // config belongs (setup reads past an unreadable config and saves anyway)
+  // would lose its search bit to the chmod and then fail the write with
+  // EISDIR, left worse than it was found; the write alone fails cleanly.
+  let existing: Awaited<ReturnType<typeof stat>> | undefined;
+  try {
+    existing = await stat(configPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  if (existing?.isFile()) {
+    await chmod(configPath, 0o600);
+  }
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await chmod(configPath, 0o600);
 };

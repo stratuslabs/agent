@@ -72,6 +72,12 @@
             "type": "string"
           }
         },
+        "onlyHosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "maxBytes": {
           "type": "integer"
         },
