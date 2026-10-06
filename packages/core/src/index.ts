@@ -3114,6 +3114,28 @@ export const latestTurnReply = (session: Pick<Session, 'messages'>): string | un
 };
 
 /**
+ * Whether a session's transcript already ends in the turn's answer: its
+ * last response holds no tool call, so the loop owed the model nothing more
+ * and only the save marking the turn completed is missing. A continuation
+ * then completes it without a provider call.
+ *
+ * Judged on the last response as a whole: a response's parts are saved
+ * together and its tool results after them all, so the trailing run of
+ * assistant messages is that one response. Any call in it — even one
+ * followed by text, which a provider may send in that order — means the
+ * model is owed another turn. Read it before `reconcileInterruptedToolCalls`
+ * splices results in.
+ */
+export const lastResponseIsAnswer = (session: Pick<Session, 'messages'>): boolean => {
+  const lastResponse: Message[] = [];
+  for (let index = session.messages.length - 1; index >= 0 && session.messages[index]?.role === 'assistant'; index -= 1) {
+    lastResponse.push(session.messages[index]!);
+  }
+  return lastResponse.length > 0
+    && lastResponse.every((candidate) => candidate.toolCalls === undefined || candidate.toolCalls.length === 0);
+};
+
+/**
  * The reply of the turn a keyed message started (`Message.idempotencyKey`),
  * where `latestTurnReply` is the newest turn's. A repeated dispatch resolves
  * with the session as it stands, which may have moved on since: an adapter
@@ -5819,18 +5841,8 @@ export class AgentRunner {
     if (!session || session.status !== 'running') {
       return undefined;
     }
-    // Judged on the last response as a whole, before reconciliation splices
-    // results into it: a response's parts are saved together and its tool
-    // results after them all, so the trailing run of assistant messages is
-    // that one response. Any call in it — even one followed by text, which
-    // a provider may send in that order — means the loop owes the model
-    // another turn.
-    const lastResponse: Message[] = [];
-    for (let index = session.messages.length - 1; index >= 0 && session.messages[index]?.role === 'assistant'; index -= 1) {
-      lastResponse.push(session.messages[index]!);
-    }
-    const answered = lastResponse.length > 0
-      && lastResponse.every((candidate) => candidate.toolCalls === undefined || candidate.toolCalls.length === 0);
+    // Before reconciliation splices results into the response it judges.
+    const answered = lastResponseIsAnswer(session);
     this.reconcileInterruptedToolCalls(session);
     const message = session.messages.findLast((candidate) => candidate.role === 'user');
     if (message !== undefined) {

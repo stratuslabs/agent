@@ -5228,3 +5228,47 @@ test('a keyed turn parked on approval whose recovery cannot start is failed, not
   assert.equal(session?.status, 'failed');
   assert.equal(session?.metadata?.[PENDING_APPROVAL_METADATA_KEY], undefined);
 });
+
+test('a saved answer is completed even after a second crash, and even on a harness', async () => {
+  // The continuation died after saving the final response and before the
+  // save marking it completed. Completing it calls no provider, so neither
+  // the once-only rule nor the harness rule has anything to protect.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+  const now = new Date().toISOString();
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-answered-twice-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'hello', createdAt: now, idempotencyKey: 'msg-1', continuedAfterCrash: true, hostedLoop: true },
+      { id: 'a1', role: 'assistant', content: 'the saved answer', createdAt: now },
+    ],
+  });
+  before.close();
+
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('a second answer');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const completed = eventGate(gateway, (event) => event.type === 'session.completed' && event.sessionId === 'keyed-answered-twice-1');
+  await gateway.start();
+  await gateway.stop().then(() => completed.give_up('the saved answer was never completed'));
+  await completed.seen;
+
+  const after = new ShardedSessionStore({ stateDir });
+  const session = await after.get('keyed-answered-twice-1');
+  after.close();
+  assert.equal(calls, 0);
+  assert.equal(session?.status, 'completed');
+  assert.equal(session?.messages.at(-1)?.content, 'the saved answer');
+});
