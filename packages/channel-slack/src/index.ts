@@ -3903,10 +3903,34 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const resolveFollowUpWinner = async (
     parts: { team: string; conversation: string; thread: string },
+    ts: string,
   ): Promise<string | undefined> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting || !parts.thread) {
       return undefined;
+    }
+    // A message an agent already accepted is that agent's, whoever has spoken
+    // since. Nothing in memory says so after a restart, and the order below
+    // would hand a redelivery to the newer speaker — whose session holds no
+    // key for it, so it would run the message as new. Asked of the agents the
+    // thread rule routes, the only ones this verdict picks between.
+    if (gateway.holdsMessage) {
+      for (const candidate of connections) {
+        const agentId = candidate.config.agentId;
+        if (candidate.teamId !== parts.team || listensOf(agentId) !== 'thread') {
+          continue;
+        }
+        const sessionId = channelSessionKey({
+          channel: 'slack',
+          agentId,
+          team: parts.team,
+          conversation: parts.conversation,
+          thread: parts.thread,
+        });
+        if (await gateway.holdsMessage(sessionId, dispatchKeyFor(`${agentId}:${parts.conversation}:${ts}`))) {
+          return agentId;
+        }
+      }
     }
     const engaged: Array<{ agentId: string; lastSpokeAt?: string }> = [];
     // Live connections in this message's OWN workspace. Live, because an
@@ -3989,7 +4013,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (existing) {
       return existing.verdict;
     }
-    const entry = { verdict: resolveFollowUpWinner(parts), settled: false };
+    const entry = { verdict: resolveFollowUpWinner(parts, ts), settled: false };
     coldVerdicts.set(key, entry);
     void entry.verdict.then(
       () => {

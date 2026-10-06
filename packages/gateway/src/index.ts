@@ -908,6 +908,14 @@ export interface Gateway {
    */
   sessionRouting(sessionId: string): Promise<SessionRouting | undefined>;
   /**
+   * Whether a session already holds the message an idempotency key names: a
+   * turn was started for it, finished or not, here or in the transcript a
+   * recent rollover archived (`settleRepeat` reads the same). Lets a channel
+   * route a redelivered message to the agent that already accepted it rather
+   * than to whoever its routing rule would pick now.
+   */
+  holdsMessage(sessionId: string, idempotencyKey: string): Promise<boolean>;
+  /**
    * Start a conversation over under the same id, leaving its transcript so
    * far behind as an archived session.
    *
@@ -4187,6 +4195,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     dispatch,
     observe,
+
+    async holdsMessage(sessionId: string, idempotencyKey: string) {
+      const session = await store.get(sessionId);
+      if (session === undefined) {
+        return false;
+      }
+      return workItemState(session, idempotencyKey) !== undefined || (await archivedRepeat(session, idempotencyKey)) !== undefined;
+    },
 
     async sessionRouting(sessionId: string) {
       const session = await store.get(sessionId);

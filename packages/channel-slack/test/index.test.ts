@@ -8646,3 +8646,43 @@ test('a redelivery the start-up sweep finished with nothing to say still says (n
   const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
   assert.equal(said.filter((text) => text === '(no reply)').length, 1, `said: ${JSON.stringify(said)}`);
 });
+
+test('after a restart, an untagged reply an agent already accepted stays that agent\'s, though another spoke since', async () => {
+  // Ava took the message before the restart; Bea has spoken in the thread
+  // since, so the newest-speaker rule alone would hand the redelivery to Bea,
+  // who holds no key for it and would run it as new.
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = async (sessionId: string) => {
+    const agentId = sessionId.split(':')[1] ?? '';
+    return { agentId, metadata: {}, lastSpokeAt: agentId === 'bea' ? '2026-01-01T00:00:09.000Z' : '2026-01-01T00:00:01.000Z' };
+  };
+  const asked: string[] = [];
+  gateway.holdsMessage = async (sessionId: string, key: string) => {
+    asked.push(key);
+    return sessionId.startsWith('slack:ava:') && key === 'ava:C1:993.1';
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const redelivered = channelMessage({ text: 'so?', ts: '993.1', thread: '993.0' });
+  await socketAva.deliver('message', redelivered);
+  await socketBea.deliver('message', redelivered);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: so?'],
+  ]);
+  assert.ok(asked.includes('ava:C1:993.1'));
+});

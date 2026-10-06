@@ -469,6 +469,13 @@ capability rather than an assumption:
   (`turnReplyFor`, `turnFilesFor`, `turnFailureFor`), since nothing says it
   was posted before a crash. Slack does all of it. Without it, an adapter delivering at
   least once has only in-memory dedupe, which a restart erases.
+- `GatewayLike.holdsMessage(sessionId, key)` says whether a session already
+  started a turn for a key. An adapter that picks between agents for one
+  message asks it first: a message an agent already accepted stays that
+  agent's, whoever its routing rule would pick now. Slack asks it before the
+  "whoever spoke last" rule, which after a restart would otherwise hand a
+  redelivery to an agent that has spoken since — and that agent, holding no
+  key for it, would run it again.
 
 The rest of Slack's turn and render lifecycle — draining in `stop()`, the
 approval outcome texts, finishing a reply after a restart through

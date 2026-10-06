@@ -43,7 +43,9 @@ message nobody addressed to it is not its business.
 
 Threads with more than one agent follow the rule people already use: an
 untagged reply goes to **whoever spoke last**, and mentioning another agent
-moves the conversation to them. The agent that stood down keeps
+moves the conversation to them. A reply an agent already took stays its own,
+even if Slack delivers it again after a restart and someone else has spoken
+since. The agent that stood down keeps
 listening: what you say to its colleague in that thread, and what the
 colleague answers, go into its own session, marked as said to somebody
 else, so when you turn back to it, it answers as someone who followed

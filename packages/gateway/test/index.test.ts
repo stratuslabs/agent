@@ -5816,3 +5816,26 @@ test('two owner deliveries waiting behind a refused claim run the turn once, the
     await gateway.stop();
   }
 });
+
+test('holdsMessage says whether a session has started a turn for a key, across a recent rollover too', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('reply')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    assert.equal(await gateway.holdsMessage('holds-1', 'k1'), false);
+    await gateway.dispatch({ sessionId: 'holds-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1' });
+    assert.equal(await gateway.holdsMessage('holds-1', 'k1'), true);
+    assert.equal(await gateway.holdsMessage('holds-1', 'k2'), false);
+    await gateway.rolloverSession('holds-1');
+    assert.equal(await gateway.holdsMessage('holds-1', 'k1'), true);
+  } finally {
+    await gateway.stop();
+  }
+});
