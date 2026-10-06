@@ -2119,14 +2119,23 @@ export const applyPerAgentWorkspaces = async (
         // through the two directories checked for the recreate above, and of
         // the two entries seen before it, for the same reason as there: either
         // one swapped for an alias of the other and restored would read as
-        // finished while the restored one names something else. Unsteady is
-        // kept, not retired — the records repair nothing that is right.
-        if (destinationBefore !== undefined && sourceBefore !== undefined
+        // finished while the restored one names something else.
+        if (!(destinationBefore !== undefined && sourceBefore !== undefined
           && await lstat(target).then(stampOf, () => undefined) === destinationBefore
           && await lstat(from).then(stampOf, () => undefined) === sourceBefore
-          && await parentsSteady()) {
-          await retireRecordsNaming(agentId);
+          && await parentsSteady())) {
+          // Inconclusive, and not a finish: the alias may have been a
+          // stand-in, so neither retiring the records nor skipping the
+          // repair is safe, and the fold below would read the very entries
+          // that just moved. Refused, with nothing changed, for a start
+          // that can see them hold still.
+          throw new Error(
+            `${here} and ${there} changed while they were being compared, so whether ${JSON.stringify(agentId)}'s `
+            + 'workspace has already moved could not be told. Nothing was changed. Stop whatever is rewriting them, '
+            + 'and start again.',
+          );
         }
+        await retireRecordsNaming(agentId);
         report.quarantined.push(`${agentId} — ${there} already resolves to ${here}, so it was left as it is`);
         return;
       }

@@ -166,7 +166,10 @@ do, wherever it cannot tell that a link is safe:
   the error says which entry to remove from `workspace-links.json` if you
   did;
 - a `workspace-links.json` that cannot be read, or that disappears between
-  being seen and being read.
+  being seen and being read;
+- a workspace whose old and new paths are already the same directory, but
+  change while they are being compared, so it cannot tell whether the move
+  finished.
 
 Put back whatever you moved aside, follow the error, and start again.
 The ledger's own records follow the move — they are absolute paths, and
