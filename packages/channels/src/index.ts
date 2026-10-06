@@ -229,6 +229,17 @@ export interface GatewayLike {
    */
   sessionRouting?(sessionId: string): Promise<SessionRouting | undefined>;
   /**
+   * Whether a session already accepted the message an idempotency key names,
+   * as addressed to it — a turn was started for it, finished or not; a turn
+   * nobody asked for (`addressed: false`) does not count. Asked before routing a message
+   * that more than one agent could answer: one an agent already accepted is
+   * that agent's, whoever the routing rule would pick now. Optional: a host
+   * without it leaves the choice to the rule alone, which after a restart can
+   * hand a redelivered message to an agent that has spoken since — and that
+   * agent, holding no key for it, runs it again.
+   */
+  holdsMessage?(sessionId: string, idempotencyKey: string): Promise<boolean>;
+  /**
    * A message that reaches a session without running a turn: something
    * said in a conversation the agent is in, to somebody else. The next
    * turn the agent takes has it in hand; nothing is posted now.

@@ -10,7 +10,8 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "eval:room": "pnpm --filter @stratusagent/cli run eval:room",
-    "eval:defaults": "pnpm --filter @stratusagent/cli run eval:defaults"
+    "eval:defaults": "pnpm --filter @stratusagent/cli run eval:defaults",
+    "eval:skill": "pnpm --filter @stratusagent/cli run eval:skill"
   },
   "license": "MIT",
   "repository": {

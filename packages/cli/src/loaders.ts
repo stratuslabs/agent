@@ -45,6 +45,19 @@ export const loadSlackAdapter = async (): Promise<SlackAdapterFactory | undefine
   return (await import('@stratusagent/channel-slack')).createSlackChannelAdapter;
 };
 
+/**
+ * The (kind, agents) channel claims a daemon makes for the adapter it wires
+ * itself rather than loading as a plugin: Slack, for every agent with Slack
+ * tokens stored, once the adapter package loaded. A plugin channel claiming
+ * one of them is refused at load, its provider and skills with it, so the
+ * skill eval stages plugins against these same claims.
+ */
+export const hostChannelClaimsFor = (
+  slackAgentIds: readonly string[],
+  slackAdapterUp: boolean,
+): Array<{ kind: string; agents: readonly string[] }> =>
+  slackAdapterUp && slackAgentIds.length > 0 ? [{ kind: 'slack', agents: slackAgentIds }] : [];
+
 type ControlApiFactory = typeof import('@stratusagent/control-api').createControlApi;
 
 export type GatewayFactory = typeof import('@stratusagent/gateway').createGateway;
