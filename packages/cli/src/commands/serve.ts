@@ -546,6 +546,19 @@ const serveHeldHome = async (
       restart = outcome;
       requestShutdown();
     },
+    // The replacement asks the same question at its start and exits 78 on
+    // the answer, which systemd will not retry — so a restart over a
+    // half-saved file is refused here, while this daemon can stay up on its
+    // last good snapshot, rather than drained into an outage.
+    restartPreflight: async () => {
+      const configError = await trustedConfigError(env, command.configPath);
+      if (configError) {
+        throw new Error(
+          `${configError.message} A restarted stratusd would refuse to start on it, so this one keeps serving. `
+          + 'Fix the file (`stratus doctor` names the problem), then restart again.',
+        );
+      }
+    },
     ...(Object.keys(pluginsConfig).length > 0
       ? {
           plugins: pluginsConfig,

@@ -10026,6 +10026,47 @@ test('runCli serve comes back from an announced restart by supervising a fresh d
   await rm(path.join(serveHome, '.stratus', 'gateway.json'), { force: true });
 });
 
+test('a restart over a trusted config that will not load is refused while the daemon keeps serving', async () => {
+  // The replacement would exit 78 on this file, and systemd does not retry
+  // that, so a restart that drained first turned a half-saved config into
+  // an outage. Refused before the drain, the daemon stays up on its last
+  // good snapshot; fixed, the same request goes through.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-restart-config-'));
+  const configFile = path.join(serveHome, '.stratus', 'config.json');
+  await mkdir(path.dirname(configFile), { recursive: true });
+  await writeFile(configFile, JSON.stringify({ provider: 'demo' }), { mode: 0o600 });
+  const watched = watchedServeStreams();
+  let respawns = 0;
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      serveRespawn: async () => {
+        respawns += 1;
+        return { code: 0 };
+      },
+    },
+  });
+
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  await writeFile(configFile, '{ "provider": "demo",');
+  const refused = await postJson(`${base}/api/v1/restart`, token, { reason: 'test' });
+  assert.equal(refused.status, 409, refused.body);
+  assert.match(refused.body, /would refuse to start on it, so this one keeps serving/);
+  assert.ok(!watched.output.stdout.includes('restart requested'), 'nothing may be announced for a refused restart');
+
+  await writeFile(configFile, JSON.stringify({ provider: 'demo' }));
+  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test' });
+  assert.equal(accepted.status, 202, accepted.body);
+  assert.equal(await serving, 0);
+  assert.equal(respawns, 1);
+});
+
 test('a supervised daemon answers a restart by exiting with the restart status, never by supervising in turn', async () => {
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-supervised-'));
   const watched = watchedServeStreams();

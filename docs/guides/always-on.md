@@ -89,6 +89,9 @@ with the same error instead. A service manager reports a start as soon as
 the process exists, so without the check they would say the daemon was
 running while it was already exiting. `stratus update` refuses before it
 stops the running daemon, which keeps serving on its last good config.
+`stratus restart` (and `POST /restart`) refuses the same way, before the
+drain, so the daemon stays up rather than draining into a replacement that
+exits 78.
 
 `status` asks the service manager, not the unit file, whether the daemon is
 alive, and exits non-zero when it isn't — so it works in a health check:
