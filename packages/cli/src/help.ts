@@ -38,6 +38,8 @@ Usage:
   stratus session rollover slack:ava:T01ABCDEF:D07GHIJKL
   printf %s "$BRAVE_KEY" | stratus credential set search.apiKey
   stratus credentials
+  stratus channel set imessage --agent ava apiKey apiSecret
+  stratus channels
   stratus doctor
   stratus update
   stratus update --check
@@ -52,7 +54,8 @@ Usage:
 Commands:
   setup            Menu-driven onboarding: pick a provider, sign in (Claude
                    subscription or API key), create your agent, enable the
-                   plugins it may use, connect it to Slack, choose who
+                   plugins it may use, connect it to Slack or a channel a
+                   plugin contributes, choose who
                    approves gated calls unattended, and test it — settings
                    go to ~/.stratus/config.json,
                    sign-ins and channel tokens to ~/.stratus/credentials.json
@@ -138,6 +141,15 @@ Commands:
                    own — names only, never values (also: credential list)
   credential remove
                    Forget one (--agent <id> for that agent's own entry)
+  channel set      Store a channel plugin's secrets for one agent: stratus
+                   channel set <kind> --agent <id> <name>... asks for each
+                   value without echoing it, or reads one per line from
+                   stdin; never from a flag. Replaces what that agent had on
+                   that channel. Slack's are appToken and botToken, the
+                   default when no names are given. Read at the next start
+  channel list     Which agents have secrets stored for which channel —
+                   names only, never values (also: channels)
+  channel remove   Forget one agent's secrets for one channel
   schedules        List every schedule the fleet has set — cadence, prompt,
                    pre-authorized destination, next firing — straight from the
                    daemon's database (--format json). "stratus schedules

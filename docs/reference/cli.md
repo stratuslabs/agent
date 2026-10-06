@@ -46,6 +46,10 @@ printf %s "$KEY" | stratus credential set search.apiKey   # store a named creden
 stratus credential set search.apiKey --agent ava         # one agent's own key, over the shared one
 stratus credentials                    # stored names, never values (also: stratus credential list)
 stratus credential remove search.apiKey
+stratus channel set imessage --agent ava apiKey apiSecret   # a channel plugin's secrets for one agent (asked without echo, or one per stdin line)
+stratus channel set slack --agent ava                        # Slack's appToken and botToken
+stratus channels                       # which agents have secrets for which channel, names only (also: stratus channel list)
+stratus channel remove imessage --agent ava
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
 stratus grants ava                     # what ava may do unattended: standing tool grants, command scopes, sites
@@ -79,6 +83,7 @@ stratus dashboard                      # local browser dashboard
 | `template add` | [Templates](../guides/templates.md) |
 | `skill add`, `skill validate`, `skills`, `skill reload` | [Skills](../guides/skills.md), [Skill format](./skill-format.md) |
 | `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
+| `channel set`, `channels`, `channel remove` | [Extending](../guides/extending.md#channels), [Slack](../guides/slack.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `grants`, `grants revoke` | [Approvals](../guides/approvals.md#standing-grants) |
@@ -126,7 +131,7 @@ stratus dashboard                      # local browser dashboard
 | `--no-login` | `stratus service install`: install without the start-at-login trigger |
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
 | `-n <count>` | `stratus logs`: how much backlog to print (default 50) |
-| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one |
+| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one. `channel set` / `channel remove`: the agent whose binding it is (required) |
 | `--session` | `stratus logs`: show only one session's records |
 | `--skill <id>` | `stratus skill add`: pick one skill from a multi-skill repo (repeatable) |
 | `--force` | `stratus skill add`: replace an already-installed skill id. `stratus template add`: replace an agent or skill already installed under the same name |
@@ -144,6 +149,20 @@ names and which agents have their own.
 It strips **one trailing newline and nothing else**, so `echo "$KEY" |` and
 `printf %s "$KEY" |` both store the same key, and a key whose own value
 begins or ends with a space is stored as it is rather than quietly altered.
+
+`stratus channel set <kind> --agent <id> <name>...` names the secrets on
+the command line and never their values. At a terminal it asks for each
+without echoing it; otherwise it reads **one value per line from stdin**,
+in the order named, keeping each exactly as typed:
+
+```bash
+printf '%s\n%s\n' "$API_KEY" "$API_SECRET" | stratus channel set imessage --agent ava apiKey apiSecret
+```
+
+It replaces whatever that agent had stored on that channel, refuses an
+agent the roster does not have (the channel would skip it), and is read by
+a running daemon at its next start. Slack's names are `appToken` and
+`botToken`, the default when none are given.
 
 Tool plugins have no flags: what is installed is a config decision
 (`plugins` in a trusted config) and what an agent may call is a soul

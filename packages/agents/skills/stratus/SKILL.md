@@ -23,7 +23,7 @@ Everything is under `~/.stratus/` on the daemon's machine:
 | Path | What it is |
 | --- | --- |
 | `config.json` | The global config, and the trusted one (see "Config"). `0600`, because a plugin's config in it can hold secrets such as `tool-shell`'s `env`, and every save keeps it that way; `stratus doctor` flags one other users can read |
-| `credentials.json` | Provider sign-ins, channel tokens (Slack), and named credentials. `0600`, and kept that way by Stratus, which is why it is edited with `stratus credential set` rather than by hand |
+| `credentials.json` | Provider sign-ins, channel secrets (Slack's tokens and any channel plugin's, under `channels.<kind>.<agentId>`), and named credentials. `0600`, and kept that way by Stratus, which is why it is edited with `stratus credential set` and `stratus channel set` rather than by hand |
 | `agents/<file>.md` | A soul: one agent's identity and allowlists. The file name is not the id; the id is the soul's `id:`, or derived from its `name:`. Use the id your instructions give |
 | `agents/<id>/` | That agent's state: `sessions.db`, `memory.jsonl`, `whitelist.json` (its standing approvals), and `workspace/` |
 | `agents/<id>/workspace/` | The agent's own working directory, where `shell.run` starts by default |
@@ -146,7 +146,7 @@ When a stored key "isn't found", check in this order:
   - On macOS it is a LaunchAgent, started at login, not at power-on. `--no-login` also gives up restarts after a crash.
   - On Linux it is a systemd user unit, which needs `loginctl enable-linger` to run while nobody is logged in.
 - **`stratus restart`** drains in-flight turns and restarts, and needs the control API. Without the API, use `stratus service stop` then `stratus service start`.
-  - A restart is needed after a change to `plugins` (a plugin's `env` included), `approvals`, `api`, `principals`, `slack`, `maxTurns`, `executor`, or `memoryStore`, and after new Slack tokens.
+  - A restart is needed after a change to `plugins` (a plugin's `env` included), `approvals`, `api`, `principals`, `slack`, `maxTurns`, `executor`, or `memoryStore`, and after new channel secrets (Slack's tokens or a channel plugin's).
   - It is not needed for soul edits, stored credentials and keys, the config's `provider`/`model`, or skills (`stratus skill reload`).
   - `stratus update` stops and starts the service itself. Only a daemon someone started with `stratus serve` needs restarting by hand.
 - **`stratus logs`** (`-f` to follow, `--agent`, `--session`) reads the structured log. It records that tools ran and sessions finished, never prompts or replies. One exception: a failed session keeps the provider's error text, so skim a log before sharing it.
@@ -158,7 +158,7 @@ When a stored key "isn't found", check in this order:
 
 | Command | What it does |
 | --- | --- |
-| `stratus setup` | The menu: providers, models, an agent, plugins, channels (Slack), approvals, always-on |
+| `stratus setup` | The menu: providers, models, an agent, plugins, channels (Slack, and any channel an enabled plugin contributes), approvals, always-on |
 | `stratus chat` / `stratus run` | Talk to an agent in the terminal, as a conversation or one prompt |
 | `stratus serve` | Run the daemon in the foreground |
 | `stratus service install\|uninstall\|start\|stop\|status` | Keep the daemon running as a background service |
@@ -173,6 +173,7 @@ When a stored key "isn't found", check in this order:
 | `stratus skills` | List skills and which agents enable each |
 | `stratus plugins` | Every tool, its plugin, who is granted it, and what approvals do |
 | `stratus credential set` / `stratus credential remove` / `stratus credentials` | Store (value on stdin) or remove a named credential; list the names |
+| `stratus channel set` / `stratus channel remove` / `stratus channel list` | Store (values prompted without echo, or one per stdin line) or remove a channel's secrets for one agent; list which agents have them. A channel's secrets are never yours to read, and a running daemon picks them up at its next start |
 | `stratus grants <id>` / `stratus grants revoke <id>` | An agent's standing approvals, and taking one back |
 | `stratus schedules` / `stratus schedules cancel <id>` | Scheduled turns, and cancelling one |
 | `stratus memory list` / `stratus memory search` / `stratus memory audit` | An agent's live memories with their trust labels, searched as the agent does, and every entry ever written |
