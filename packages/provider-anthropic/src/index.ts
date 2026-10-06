@@ -15,6 +15,7 @@ import {
   imagesWithinReplayBudget,
   omitImage,
   renderSystemPromptParts,
+  renderToolResultContent,
   type ImageAttachment,
   type ImageReplayBudget,
   type JsonObject,
@@ -438,7 +439,7 @@ const createAnthropicMessages = (
         {
           type: 'tool_result',
           tool_use_id: result.callId,
-          content: JSON.stringify(result.ok ? result.output : { error: result.error ?? 'Tool failed' }),
+          content: renderToolResultContent(result),
           ...(result.ok ? {} : { is_error: true }),
         },
       ]);

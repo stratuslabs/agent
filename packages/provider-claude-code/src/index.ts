@@ -16,6 +16,7 @@ import {
   TURN_LIMIT_NOTE,
   omitImage,
   renderSystemPromptSections,
+  renderToolResultContent,
   type JsonObject,
   type ModelProvider,
   type ProviderRequest,
@@ -148,7 +149,7 @@ export const bridgeKernelTools = (
           content: [
             {
               type: 'text' as const,
-              text: JSON.stringify(result.ok ? result.output : { error: result.error ?? 'Tool failed.' }),
+              text: renderToolResultContent(result),
             },
           ],
           ...(result.ok ? {} : { isError: true }),

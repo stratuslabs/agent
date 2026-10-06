@@ -10,6 +10,7 @@
 export {
   assertRequestAllowed,
   checkAddress,
+  checkHost,
   classifyAddress,
   egressPolicyFrom,
   EgressPolicyError,

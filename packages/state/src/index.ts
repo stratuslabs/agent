@@ -63,7 +63,17 @@ export {
   foldedAgentId,
   gatewayTokenPath,
   gatewayInfoPath,
+  grantsLockPath,
 } from './paths.ts';
+
+export {
+  claimFileLock,
+  FileLockHeldError,
+  type FileLock,
+  GRANTS_LOCK_WAIT_MS,
+  grantReadSerializer,
+  grantWriteSerializer,
+} from './file-lock.ts';
 
 export {
   REGISTERED_PROVIDER_PREFIX,
@@ -85,6 +95,7 @@ export {
   type AgentApprovalConfig,
   MAX_APPROVAL_TIMEOUT_MS,
   type ApprovalsConfig,
+  type ExternalContentApprovals,
   type AgentPrincipalsConfig,
   type PrincipalsAdmit,
   type PrincipalsConfig,

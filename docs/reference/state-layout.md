@@ -10,12 +10,13 @@ what moves when you rename an agent.
 
 | Path | What it is |
 | --- | --- |
-| `config.json` | The global [configuration](./config.md). The **trusted** config: `api`, `approvals`, `soul`, and `systemPrompt` are read only from here (or a `--config` file you named), never from a project-local one. |
+| `config.json` | The global [configuration](./config.md). The **trusted** config: `api`, `approvals`, `soul`, and `systemPrompt` are read only from here (or a `--config` file you named), never from a project-local one. `0600`, since plugin config can carry secrets — tool-shell's `env` block among them. |
 | `credentials.json` | Stored sign-ins and Slack channel tokens. `0600`. No endpoint ever returns a secret from it. |
 | `state.json` | The schema stamp: which format this home is in, and which migrations have run. See [Updating](../guides/updating.md). |
 | `fleet.db` | The schedules, and the session index that says which agent's store holds a given session id. Fleet infrastructure, deliberately not per agent — see below. |
 | `gateway-token`, `gateway.json` | The [control API](../../packages/control-api/README.md)'s bearer token and the address a running daemon bound. Both `0600`. |
 | `stratusd.lock` | Held by the daemon serving this home; how a second `stratus serve` is refused. |
+| `grants.lock` | Held for a moment while a grant file is read by the daemon or rewritten by `stratus grants revoke`, so a daemon never reads one halfway through a revoke. Empty; safe to delete when nothing is running. |
 | `workspace-links.json` | Only while the upgrade move of `workspaces/` is unfinished: which workspace links that move pointed somewhere new, so a later start can point them back if their target turns out to stay put. An entry saved just before its link is written is held as pending until the link exists, and a start that finds that very link there with the entry still pending refuses, since it cannot tell the link from one you made yourself — the error names the file and how to settle it. An entry is dropped once its target has moved, and the file once it holds none; `workspaces/` being gone does not settle it, since a command of an older build can make an entry again. One that will not read stops the move, naming the file, rather than being skipped. `0600`. |
 | `logs/` | `stratusd.jsonl`, the structured trace [`stratus logs`](../guides/logs.md) reads, plus the macOS LaunchAgent's stdout/stderr redirects. `0700`. |
 | `skills/` | Operator-installed [skills](../guides/skills.md), one directory each. |
