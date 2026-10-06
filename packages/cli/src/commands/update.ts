@@ -206,6 +206,19 @@ export const runUpdate = async (
     }
   }
 
+  // Loaded before npm replaces anything on disk. Everything this process
+  // imported statically is the old build, held in the module cache; a
+  // module first imported *after* the install is read from the new files,
+  // and its own imports of a package already loaded resolve to the old
+  // copy in that cache. 0.11.7's gateway imports `FileLockHeldError` from
+  // `@stratusagent/state`, which a 0.11.6 process has loaded without it,
+  // so every upgrade to 0.11.7 failed its migrations on a missing export.
+  // Loaded here, the whole run stays the old build, as the line after the
+  // install says it is. And before the stop, not just before the install:
+  // a load that fails then leaves the daemon serving, where one failing
+  // after the stop sat outside the recovery that restarts it.
+  const gateway = await (env.gatewayLoader ?? (() => import('@stratusagent/gateway')))();
+
   const wasRunning = status?.running === true;
   if (wasRunning) {
     // No daemon may hold the session database while state migrates — this
@@ -239,16 +252,6 @@ export const runUpdate = async (
     // one this CLI shipped alongside.
     ...stale.map((entry) => `${entry.name}@${target === latest ? 'latest' : target}`),
   ];
-  // Loaded before npm replaces anything on disk. Everything this process
-  // imported statically is the old build, held in the module cache; a
-  // module first imported *after* the install is read from the new files,
-  // and its own imports of a package already loaded resolve to the old
-  // copy in that cache. 0.11.7's gateway imports `FileLockHeldError` from
-  // `@stratusagent/state`, which a 0.11.6 process has loaded without it,
-  // so every upgrade to 0.11.7 failed its migrations on a missing export.
-  // Loaded here, the whole run stays the old build, as the line after the
-  // install says it is.
-  const gateway = await (env.gatewayLoader ?? (() => import('@stratusagent/gateway')))();
   if (upgrading.length > 0) {
     if (upgradeAvailable) {
       out(`Upgrading ${CLI_PACKAGE_NAME} ${CLI_VERSION} → ${latest}…`);

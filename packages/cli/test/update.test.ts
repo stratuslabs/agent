@@ -197,6 +197,37 @@ test('update loads every module it will use before npm replaces them on disk', a
   assert.deepEqual(events, ['load gateway', 'install']);
 });
 
+test('a gateway that will not load stops the update before the daemon is stopped', async () => {
+  // Loaded after the stop, a failure there sat outside the recovery that
+  // restarts the service, and left a running fleet down.
+  const home = await freshHome();
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner },
+    {},
+  );
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => '99.0.0',
+      installedVersionReader: async () => undefined,
+      gatewayLoader: async () => {
+        throw new Error('Cannot find module @stratusagent/gateway');
+      },
+      packageInstaller: async () => ({ ok: true, message: '' }),
+    },
+  });
+  assert.notEqual(code, 0);
+  assert.match(output.stderr, /Cannot find module/);
+  assert.ok(!output.stdout.includes('Stopping stratusd'), output.stdout);
+});
+
 test('update --check reports a companion left behind by a CLI that is already current', async () => {
   const home = await freshHome();
   await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });
