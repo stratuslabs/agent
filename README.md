@@ -60,7 +60,7 @@ structured parts, prose for the personality:
 
 ```markdown
 ---
-name: Ava
+name: Blair
 provider: anthropic
 model: claude-opus-5
 tools: [fs.read, fs.search, web.fetch, memory.*]

@@ -74,7 +74,7 @@ skills relate to tools and to the packages that ship them.
 
 **Out:** automatic skill selection by embedding similarity (the model choosing
 from descriptions is the mechanism); skills that carry executable code (that is
-a plugin contributing a tool); distribution and discovery ([12](./12-plugin-registry.md)).
+a plugin contributing a tool); distribution and discovery.
 
 ## Design sketch
 

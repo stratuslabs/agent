@@ -17,7 +17,7 @@ Anything riskier is refused, with a line in the log saying which agent
 wanted what:
 
 ```text
-09:14:36  —           warning: ava: shell.run is gated and nobody is available to approve it (session slack:ava:…)
+09:14:36  —           warning: blair: shell.run is gated and nobody is available to approve it (session slack:blair:…)
 ```
 
 That is the honest default (`headless`) behind a service manager. If
@@ -93,13 +93,13 @@ Turn it on for the daemon with `--approvals remote`, or in
     "slackApprovers": ["U01OPS"],  // who may decide, for every agent
     "slackChannel": "C07OPS",      // where to ask when the turn isn't in Slack
     "agents": {
-      "ava": { "slackApprovers": ["U01DYLAN"] }
+      "blair": { "slackApprovers": ["U01DYLAN"] }
     }
   }
 }
 ```
 
-An agent inherits the top-level route key by key, so `ava` above asks her
+An agent inherits the top-level route key by key, so `blair` above asks its
 own approver in the shared `C07OPS` fallback channel. An explicit
 `"slackApprovers": []` on an agent excludes it from the default list — that
 agent's gated calls are then denied outright — while omitting the key
@@ -130,7 +130,7 @@ warning naming the file.
   out at 3am:
 
   ```text
-  approvals: remote — gated calls are parked and asked in Slack (approvers set for ava)
+  approvals: remote — gated calls are parked and asked in Slack (approvers set for blair)
   ```
 - **A parked turn survives a restart.** The daemon records what has not run
   before it asks, so an approval outstanding when it stops is finished when
@@ -211,7 +211,7 @@ was granted, and who answered — a Slack user id when a channel asked, or
 decision came through the control API:
 
 ```jsonc
-// ~/.stratus/agents/ava/whitelist.json
+// ~/.stratus/agents/blair/whitelist.json
 {
   "version": 1,
   "scopes": [{ "command": "git", "args": ["push"], "denyRefspecForms": true }],
@@ -225,7 +225,7 @@ decision came through the control API:
 Three rules hold it in place, and they are the security argument rather
 than scoping choices:
 
-- **Per agent.** A grant Ava holds is not one Juno inherits — which is the
+- **Per agent.** A grant Blair holds is not one Juno inherits — which is the
   whole reason the roster has separate identities.
 - **Never for a tool judged by a scope, and never for `dangerous`.** A
   shell tool's risk lives in its argument, so a standing yes to `shell.run`
@@ -254,10 +254,10 @@ than scoping choices:
 ### Seeing and revoking them
 
 ```bash
-stratus grants ava                                    # everything ava may do unattended, all three kinds
-stratus grants revoke ava --tool web.fetch            # a standing grant
-stratus grants revoke ava --scope "git push"          # a command scope, by the line the listing shows
-stratus grants revoke ava --origin https://app.example.com
+stratus grants blair                                # everything blair may do unattended, all three kinds
+stratus grants revoke blair --tool web.fetch          # a standing grant
+stratus grants revoke blair --scope "git push"        # a command scope, by the line the listing shows
+stratus grants revoke blair --origin https://app.example.com
 ```
 
 With a daemon serving, both go through its control API (`GET
@@ -300,8 +300,8 @@ happened unattended can be told apart from one that ran because the tool
 was `safe`:
 
 ```text
-09:14:36  —  ava: web.fetch now runs without asking, until revoked (granted by U01DYLAN)
-03:00:02  —  ava: web.fetch ran under a standing grant (web.fetch (@stratusagent/tool-web), granted 2026-09-07T09:14:36.000Z by U01DYLAN) (session schedule:…)
+09:14:36  —  blair: web.fetch now runs without asking, until revoked (granted by U01DYLAN)
+03:00:02  —  blair: web.fetch ran under a standing grant (web.fetch (@stratusagent/tool-web), granted 2026-09-07T09:14:36.000Z by U01DYLAN) (session schedule:…)
 ```
 
 ## After an agent reads the web

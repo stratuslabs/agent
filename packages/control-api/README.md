@@ -488,7 +488,7 @@ all three answers whatever was rendered — and the engine treats it as `once`,
 which is also how the resolved message describes it.
 
 So a client can word the button and the outcome from the request alone:
-`always: 'tool'` is "always allow for Ava, until revoked", `always: 'session'`
+`always: 'tool'` is "always allow for Blair, until revoked", `always: 'session'`
 is "for the rest of this session", and the two scoped values name what they
 widen. One thing the request cannot promise is the disk write: the daemon
 does not write over a whitelist it could not read, and a policy can be built

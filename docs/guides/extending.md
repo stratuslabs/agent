@@ -46,8 +46,8 @@ and a soul selects it exactly as it selects a built-in:
 
 ```markdown
 ---
-name: Ava
-id: ava
+name: Blair
+id: blair
 provider: ollama
 model: llama3
 ---
@@ -106,14 +106,14 @@ plugin's README says which names to store:
 // ~/.stratus/credentials.json (0600)
 {
   "channels": {
-    "slack":   { "ava": { "appToken": "xapp-…", "botToken": "xoxb-…" } },
-    "discord": { "ava": { "botToken": "…" }, "juno": { "botToken": "…" } }
+    "slack":   { "blair": { "appToken": "xapp-…", "botToken": "xoxb-…" } },
+    "discord": { "blair": { "botToken": "…" }, "juno": { "botToken": "…" } }
   }
 }
 ```
 
 Store them through the control API — `PUT /credentials/channels/discord`
-with `{ "agentId": "ava", "secrets": { "botToken": "…" } }` — or by editing
+with `{ "agentId": "blair", "secrets": { "botToken": "…" } }` — or by editing
 the file; `stratus setup`'s channel menu is Slack's. Saving Slack tokens
 never disturbs another kind's, and `GET /credentials` lists which agents
 are bound on each kind, ids only.

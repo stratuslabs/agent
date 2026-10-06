@@ -14,12 +14,12 @@ stratus doctor --format json
 Stratus Agent — what a run would use right now
 
   provider  anthropic
-            from ~/.stratus/agents/ava.md (soul frontmatter)
+            from ~/.stratus/agents/blair.md (soul frontmatter)
   model     claude-opus-5
-            from ~/.stratus/agents/ava.md (soul frontmatter)
-  soul      ~/.stratus/agents/ava.md
+            from ~/.stratus/agents/blair.md (soul frontmatter)
+  soul      ~/.stratus/agents/blair.md
             from ~/.stratus/config.json
-  agent     Ava (ava)
+  agent     Blair (blair)
 
 Files
   config    ~/.stratus/config.json

@@ -15,9 +15,9 @@ npm install @stratusagent/tool-shell
   "plugins": {
     "@stratusagent/tool-shell": {
       "enabled": true,
-      "cwd": "~/work/ava",
+      "cwd": "~/work/blair",
       "passEnv": ["PATH", "HOME"],
-      "env": { "GIT_AUTHOR_NAME": "Ava" }
+      "env": { "GIT_AUTHOR_NAME": "Blair" }
     }
   }
 }

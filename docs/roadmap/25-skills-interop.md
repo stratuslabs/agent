@@ -23,7 +23,7 @@ candidate for a Stratus agent, and every skill written here is portable out.
 For a project whose skills story is "an agent learns a procedure," starting
 from a corpus rather than from zero is worth more than anything we could write.
 
-**It splits [12](./12-plugin-registry.md).** 12 is deferred because building
+**It splits distribution.** Plugin distribution is deferred because building
 discovery for an ecosystem that does not exist is a platform for nobody. That
 reasoning holds for *plugins* and is simply false for *skills*: the ecosystem
 exists, somebody else built the distribution, and consuming it requires
@@ -56,7 +56,7 @@ distribution stays deferred.
 **Out:**
 
 - **Publishing to, or operating, any index.** Consuming somebody else's
-  distribution is the whole point of this step; running one is 12.
+  distribution is the whole point of this step; running one is later work.
 - **Automatic installation from anywhere.** A skill is prose an agent follows
   and a trusted config decides what runs — a skill that installed itself
   because an agent found it is the auto-loading `plugins.md` forbids, wearing

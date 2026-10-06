@@ -33,7 +33,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
   "provider": "anthropic",
   "model": "claude-opus-5",
   "apiKeyEnv": "ANTHROPIC_API_KEY",
-  "soul": "./examples/souls/ava.md"
+  "soul": "./examples/souls/blair.md"
 }
 ```
 
