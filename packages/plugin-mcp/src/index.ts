@@ -9,6 +9,8 @@ import { join, resolve } from 'node:path';
 
 import {
   DEFAULT_SUBPROCESS_PASS_ENV,
+  leastTrusted,
+  sessionTrustOf,
   type ExecutionContext,
   type JsonObject,
   type JsonValue,
@@ -926,7 +928,12 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         tool: info.mcpName,
         agentId: session.agent.id,
         maxResultChars: state.spec.maxResultChars,
-        trust: state.spec.outputTrust,
+        // The server's label, lowered to the session's: a file is written
+        // from this call's arguments as well as the server's answer, and a
+        // session that has read a stranger's text can steer both. Vouching
+        // for a server says what it returns, not what was asked of it —
+        // the same label `fs.write` records for this session.
+        trust: leastTrusted(state.spec.outputTrust, sessionTrustOf(session)),
         ...(resolve !== undefined ? { workspace: () => resolve(session.agent.id) } : {}),
         ...(ledger !== undefined ? { ledger } : {}),
       });

@@ -18,6 +18,7 @@ import { z } from 'zod';
 import {
   AgentRunner,
   EventBus,
+  SESSION_TRUST_METADATA_KEY,
   ToolRegistry,
   resolveToolRisk,
   type AgentWorkspaces,
@@ -1299,8 +1300,16 @@ test('a server the operator vouches for carries that label, on its results and o
     const ledger = createFileLedger(under(workspaceRoot));
     const theirs = await defaulted.get('mcp.linear.chart')!.execute({}, sessionFor('ava')) as JsonObject;
     assert.equal(await ledger.lookup('ava', (theirs.files as string[])[0]!), 'external');
-    const mine = await vouched.get('mcp.linear.chart')!.execute({}, sessionFor('ava')) as JsonObject;
+    const clean: Session = { ...sessionFor('ava'), metadata: { [SESSION_TRUST_METADATA_KEY]: 'user' } };
+    const mine = await vouched.get('mcp.linear.chart')!.execute({}, clean) as JsonObject;
     assert.equal(await ledger.lookup('ava', (mine.files as string[])[0]!), undefined);
+
+    // Vouching covers what the server returns, not what a tainted session
+    // asked of it: the file a stranger's text could have steered is
+    // recorded at the session's label, as `fs.write` would record it.
+    const tainted: Session = { ...sessionFor('ava'), metadata: { [SESSION_TRUST_METADATA_KEY]: 'external' } };
+    const steered = await vouched.get('mcp.linear.chart')!.execute({}, tainted) as JsonObject;
+    assert.equal(await ledger.lookup('ava', (steered.files as string[])[0]!), 'external');
   } finally {
     await stranger.dispose?.();
     await ours.dispose?.();

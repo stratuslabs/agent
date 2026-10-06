@@ -736,10 +736,10 @@ export interface NormalizeOptions {
    */
   ledger?: TaintedWriteLedger;
   /**
-   * The label this server's output carries — the operator's
-   * `servers.<name>.outputTrust`, `external` unless they said otherwise.
-   * The same one as the tool result's, so a file read back never claims
-   * more or less than the result that wrote it.
+   * The label a file this call writes is recorded at: the operator's
+   * `servers.<name>.outputTrust` (`external` unless they said otherwise),
+   * lowered to the calling session's own label, so a file read back never
+   * claims more than the result or the session that wrote it.
    */
   trust?: TrustLevel;
   /**
