@@ -2269,18 +2269,27 @@ export const runSetup = async (
 
   /**
    * The channel kinds the enabled plugins declare, Slack's own aside, each
-   * with the config key of the first plugin declaring it — from manifests,
-   * never by loading a package, as the Plugins row reads them.
+   * with the config key of every plugin declaring it — from manifests,
+   * never by loading a package, as the Plugins row reads them. Every one,
+   * not the first: two plugins may carry the same kind for different agents
+   * (channels key on agent and kind), and an agent bound by the second one's
+   * config is as bound as one bound by the first's.
    */
-  const pluginChannelKinds = async (): Promise<Array<{ kind: string; plugin: string }>> => {
-    const kinds: Array<{ kind: string; plugin: string }> = [];
+  const pluginChannelKinds = async (): Promise<Array<{ kind: string; plugins: string[] }>> => {
+    const kinds: Array<{ kind: string; plugins: string[] }> = [];
     for (const name of pluginPackages()) {
       if (!pluginEnabled(name)) {
         continue;
       }
       for (const kind of (await pluginContributions(name))?.channels ?? []) {
-        if (kind !== 'slack' && !kinds.some((entry) => entry.kind === kind)) {
-          kinds.push({ kind, plugin: name });
+        if (kind === 'slack') {
+          continue;
+        }
+        const entry = kinds.find((candidate) => candidate.kind === kind);
+        if (entry === undefined) {
+          kinds.push({ kind, plugins: [name] });
+        } else if (!entry.plugins.includes(name)) {
+          entry.plugins.push(name);
         }
       }
     }
@@ -2301,7 +2310,7 @@ export const runSetup = async (
     while (true) {
       const options = [
         'Slack'.padEnd(20) + 'built in',
-        ...kinds.map(({ kind, plugin }) => kind.padEnd(20) + `from ${plugin}`),
+        ...kinds.map(({ kind, plugins }) => kind.padEnd(20) + `from ${plugins.join(', ')}`),
         'Back',
       ];
       const choice = await prompter.select('Channels', options);
@@ -2312,7 +2321,7 @@ export const runSetup = async (
       if (picked === undefined) {
         await chooseSlackChannel();
       } else {
-        await choosePluginChannel(picked.kind, picked.plugin);
+        await choosePluginChannel(picked.kind, picked.plugins);
       }
     }
   };
@@ -2327,7 +2336,7 @@ export const runSetup = async (
    * Setup stores secrets and never writes the plugin's config: which keys
    * that block takes is the plugin's schema, which only its README states.
    */
-  const choosePluginChannel = async (kind: string, plugin: string): Promise<void> => {
+  const choosePluginChannel = async (kind: string, plugins: readonly string[]): Promise<void> => {
     const secretsFor = async (): Promise<Record<string, Record<string, string>>> => {
       state.pluginChannelSecrets[kind] ??= await loadChannelTransportSecrets(env, kind);
       return state.pluginChannelSecrets[kind];
@@ -2335,9 +2344,11 @@ export const runSetup = async (
     while (true) {
       const { entries: roster, loaded: rosterLoaded } = await channelRoster();
       const stored = await secretsFor();
-      const configured = state.plugins?.[plugin]?.agents;
-      const inConfig = (id: string): boolean =>
-        typeof configured === 'object' && configured !== null && !Array.isArray(configured) && Object.hasOwn(configured, id);
+      // Any plugin carrying this kind binds the agents its own block lists.
+      const inConfig = (id: string): boolean => plugins.some((plugin) => {
+        const configured = state.plugins?.[plugin]?.agents;
+        return typeof configured === 'object' && configured !== null && !Array.isArray(configured) && Object.hasOwn(configured, id);
+      });
       const options = roster.map((entry) => {
         const id = entry.soul.agent.id;
         const bindings = [
@@ -2356,8 +2367,9 @@ export const runSetup = async (
       }
       options.push('Back');
 
-      const choice = await prompter.select(`Channels — ${kind} (from ${plugin})`, options, {
-        footnote: `Bound by secrets stored here, or by an entry under plugins["${plugin}"].agents in your config — its README says which. Run \`${serveCommand()}\` afterwards.`,
+      const blocks = plugins.map((plugin) => `plugins["${plugin}"].agents`).join(' or ');
+      const choice = await prompter.select(`Channels — ${kind} (from ${plugins.join(', ')})`, options, {
+        footnote: `Bound by secrets stored here, or by an entry under ${blocks} in your config — the plugin's README says which. Run \`${serveCommand()}\` afterwards.`,
       });
       if (choice.kind !== 'index' || choice.index === options.length - 1) {
         return;

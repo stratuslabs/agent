@@ -4395,6 +4395,43 @@ test('setup shows a plugin channel bound by config or by secrets, and stores its
   });
 });
 
+test('setup counts an agent bound by any plugin carrying the channel kind, not only the first', async () => {
+  // Channels key on agent and kind, so two plugins may carry one kind for
+  // different agents. The twin binds Blair; listing only the first plugin's
+  // block would show Blair as not connected.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'blair.md'), '---\nname: Blair\n---\n\nYou are Blair.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({
+      plugins: {
+        'stratus-plugin-fixture-channel': {},
+        'stratus-plugin-fixture-channel-twin': { agents: { blair: {} } },
+      },
+    })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → fixture → Back → Back → Save & finish
+      setupInput: Readable.from(['5\n', '2\n', '3\n', '3\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /fixture\s+from stratus-plugin-fixture-channel, stratus-plugin-fixture-channel-twin/);
+  assert.match(output.stdout, /Blair \(blair\)\s+✓ in its plugin config/);
+});
+
 test('setup with no channel plugin opens Slack\'s channel menu directly, as it always has', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
