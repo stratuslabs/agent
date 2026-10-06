@@ -149,6 +149,8 @@
     "corpus-145": {"sha":"315fd8c88498eed4","hidden":["OPENVIS"],"openAtEnd":["OPENVIS"]},
     "corpus-146": {"sha":"02821ca7afc006e4","hidden":["OPENVIS"],"openAtEnd":["OPENVIS"]},
     "corpus-147": {"sha":"aabe678377e7de46","hidden":["INNER"]},
+    "corpus-148": {"sha":"be8c18febfdbd351","hidden":["INNERVIS","OPENVIS"],"openAtEnd":["OPENVIS"]},
+    "corpus-149": {"sha":"92df940237f3a35e","hidden":["INHERITS","OPENVIS"],"openAtEnd":["INHERITS","OPENVIS"]},
     "soup-1-0": {"sha":"3460e4d64cba4ddd","hidden":["WABQ","WACQ"]},
     "soup-1-1": {"sha":"7c603778e9975ec2","hidden":["WACQ","WADQ"]},
     "soup-1-2": {"sha":"be137dc53182d704","hidden":[]},

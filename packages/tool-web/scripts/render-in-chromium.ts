@@ -81,17 +81,28 @@ const launch = async (): Promise<Browser> => {
 // but its text is dropped. Every start tag is marked with its own `data-k`
 // for this pass, which the parser copies onto every clone; a hiding element
 // is open at the end only when each element sharing its mark holds the
-// sentinel. An element hides by its own computed style, not its attributes —
-// a `hidden` that an inline display undoes hides nothing — and by every
-// property the extractor reads: display, visibility where its parent's is
-// visible, and content-visibility. A string, as tool-browser's scripts are,
-// because this package's types describe Node and not the page.
+// sentinel.
+//
+// An element hides by its own computed style, not its attributes — a
+// `hidden` that an inline display undoes hides nothing — through each
+// property the extractor reads: display, content-visibility, and a
+// visibility the element sets rather than inherits. That last is not "one
+// its parent does not share": a closed span inside an open div can both say
+// visibility:hidden. A string, as tool-browser's scripts are, because this
+// package's types describe Node and not the page.
 const OPEN_AT_END = `(words) => {
   const hides = (el) => {
     const style = getComputedStyle(el);
     if (style.display === 'none' || style.contentVisibility === 'hidden') return true;
+    if (style.visibility === 'visible') return false;
     const parent = el.parentElement;
-    return style.visibility !== 'visible' && (parent === null || getComputedStyle(parent).visibility === 'visible');
+    if (parent === null || getComputedStyle(parent).visibility === 'visible') return true;
+    // Inherited or declared again? Show the parent and ask once more.
+    const before = parent.getAttribute('style');
+    parent.style.setProperty('visibility', 'visible', 'important');
+    const own = getComputedStyle(el).visibility !== 'visible';
+    if (before === null) parent.removeAttribute('style'); else parent.setAttribute('style', before);
+    return own;
   };
   const open = (mark) => [...document.querySelectorAll('[data-k="' + mark + '"]')]
     .every((el) => el.querySelector('#sentinelq') !== null);

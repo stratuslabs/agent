@@ -170,6 +170,8 @@ const CORPUS: readonly string[] = [
   '<p>SHOWN</p><div style="content-visibility:hidden">OPENVIS',
   '<p>SHOWN</p><div hidden=until-found>OPENVIS',
   '<div hidden style="display:block"><p hidden>INNER</p>OUTER',
+  '<p>SHOWN</p><div style="visibility:hidden"><span style="visibility:hidden">INNERVIS</span>OPENVIS',
+  '<p>SHOWN</p><div style="visibility:hidden"><span style="visibility:inherit">INHERITS</span>OPENVIS',
 ];
 
 /** mulberry32: small, fast, and the same sequence on every platform. */
