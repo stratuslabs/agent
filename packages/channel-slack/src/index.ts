@@ -285,7 +285,7 @@ export interface SlackFileDownload {
 export type SlackFileFetcher = (url: string, botToken: string, signal: AbortSignal, maxBytes: number) => Promise<SlackFileDownload>;
 
 export interface SlackSocketLike {
-  on(eventName: string, listener: (args: SlackSocketEventArgs) => void): void;
+  on(eventName: string, listener: (args: SlackSocketEventArgs) => unknown): void;
   start(): Promise<unknown>;
   disconnect(): Promise<void>;
 }
@@ -4575,19 +4575,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       for (const connection of authenticated) {
         const { config, socket } = connection;
         try {
-          const onEvent = (args: SlackSocketEventArgs): void => {
+          // Returns the work it started: the SDK ignores it, and a test's fake
+          // socket waits on it rather than guessing how long it takes.
+          const onEvent = (args: SlackSocketEventArgs): Promise<void> => {
             const handled = handleInbound(connection, args).catch((error) => {
               warn(`slack event handling failed: ${error instanceof Error ? error.message : String(error)}`);
             });
             inflight.add(handled);
             void handled.finally(() => inflight.delete(handled));
+            return handled;
           };
           socket.on('app_mention', onEvent);
           socket.on('message', onEvent);
-          socket.on('interactive', (args: SlackSocketEventArgs) => {
-            track(handleInteractive(connection, args).catch((error) => {
+          socket.on('interactive', (args: SlackSocketEventArgs): Promise<void> => {
+            const handled = handleInteractive(connection, args).catch((error) => {
               warn(`slack interaction handling failed: ${error instanceof Error ? error.message : String(error)}`);
-            }));
+            });
+            track(handled);
+            return handled;
           });
           await socket.start();
           connections.push(connection);
