@@ -1629,6 +1629,19 @@ export const applyPerAgentWorkspaces = async (
     return inodeOf(stats);
   };
   /**
+   * {@link steadyDirectory} with the change time as well, for the startup
+   * scans, whose decision is to *forget* a record: a directory renamed aside
+   * and back keeps its inode, and a link read from whatever stood in for it
+   * meanwhile would drop the only evidence that repairs the one restored.
+   * Not for the repair itself, whose own writes into the directory move
+   * that time.
+   */
+  const steadyStamp = async (directory: string): Promise<string | undefined> => {
+    const identity = await steadyDirectory(directory);
+    const stats = identity === undefined ? undefined : await lstat(directory).catch(() => undefined);
+    return stats === undefined || inodeOf(stats) !== identity ? undefined : stampOf(stats);
+  };
+  /**
    * What the destination says about a marked move: `proven` when it holds
    * what only the move leaves, `refuted` when it was read through a steady
    * directory and holds something else, `inconclusive` when it could not be
@@ -1688,7 +1701,7 @@ export const applyPerAgentWorkspaces = async (
   for (const [peer, wrote] of [...record.pending]) {
     const peerTarget = agentWorkspacePath(env, peer);
     const parent = path.dirname(peerTarget);
-    const before = await steadyDirectory(parent);
+    const before = await steadyStamp(parent);
     if (before === undefined) {
       continue;
     }
@@ -1703,7 +1716,7 @@ export const applyPerAgentWorkspaces = async (
     } catch {
       continue;
     }
-    if (await steadyDirectory(parent) !== before) {
+    if (await steadyStamp(parent) !== before) {
       continue;
     }
     if (names === wrote) {
@@ -1729,11 +1742,11 @@ export const applyPerAgentWorkspaces = async (
     const parent = path.dirname(peerTarget);
     // Through a linked `agents/<id>` this would look at another tree, and
     // what it found there says nothing about the link this entry is for.
-    // The parent's identity is taken before and checked after, so one
-    // replaced in between is inconclusive too rather than judged by
-    // whatever the read reached.
-    const before = await lstat(parent).catch(() => undefined);
-    if (before === undefined || await linkedDerivedComponent(stratusHomePath(env), parent) !== undefined) {
+    // The parent's identity and change time are taken before and checked
+    // after, so one replaced in between — or renamed aside and back — is
+    // inconclusive too rather than judged by whatever the read reached.
+    const before = await steadyStamp(parent);
+    if (before === undefined) {
       continue;
     }
     let names: string | undefined;
@@ -1749,8 +1762,7 @@ export const applyPerAgentWorkspaces = async (
     } catch {
       continue;
     }
-    const after = await lstat(parent).catch(() => undefined);
-    if (after === undefined || after.isSymbolicLink() || inodeOf(after) !== inodeOf(before)) {
+    if (await steadyStamp(parent) !== before) {
       continue;
     }
     if (names !== wrote) {
@@ -2044,10 +2056,17 @@ export const applyPerAgentWorkspaces = async (
       // become a link since: only a recreate read through the directory that
       // was checked counts, or another tree's link with the right text would
       // retire the records of peers that still need pointing back.
+      //
+      // And from the destination entry that was there before the read: one
+      // swapped for a link with the right text and then restored would be
+      // taken for our recreate, retiring the records of peers that still
+      // name what is really there.
       const ownerDirectory = await steadyDirectory(path.dirname(target));
-      const ourRecreate = leadsNowhere && ownerDirectory !== undefined
+      const destinationBefore = await lstat(target).then(stampOf, () => undefined);
+      const ourRecreate = leadsNowhere && ownerDirectory !== undefined && destinationBefore !== undefined
         && await destinationIsOurRecreate(from, target)
-        && await steadyDirectory(path.dirname(target)) === ownerDirectory;
+        && await steadyDirectory(path.dirname(target)) === ownerDirectory
+        && await lstat(target).then(stampOf, () => undefined) === destinationBefore;
       if (leadsNowhere && !ourRecreate) {
         // Staying put, whatever was announced: a cycle batch adds every
         // member to `moved` before any of it moves, and a member found here
