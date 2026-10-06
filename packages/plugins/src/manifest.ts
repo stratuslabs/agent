@@ -543,12 +543,37 @@ export const validatePluginConfig = (manifest: PluginManifest, block: JsonObject
  * rather than closing over a value at setup. `session.agent.id` is what
  * makes the answer different for two agents; resolving once at setup gives
  * every agent whichever one happened to be asked about first.
+ *
+ * Replacing is the rule because an agent's own value is usually a
+ * boundary — `tool-fs`'s `roots` narrows what one agent may touch, and a
+ * merge would hand it the fleet's roots as well. `mergeKeys` names the
+ * object-valued keys a plugin wants combined instead, name by name with the
+ * agent's entry winning: tool-shell's `env`, where an agent's token
+ * replacing the fleet's `PATH` left its commands unable to find `node`
+ * (#205). The plugin opts in for its own keys, so no other plugin's
+ * settings change meaning.
  */
-export const resolvePluginAgentConfig = (block: JsonObject | undefined, agentId: string): JsonObject => {
+export const resolvePluginAgentConfig = (
+  block: JsonObject | undefined,
+  agentId: string,
+  options: { mergeKeys?: readonly string[] } = {},
+): JsonObject => {
   if (!block) {
     return {};
   }
   const { enabled: _enabled, agents, toolRisks: _toolRisks, ...defaults } = block as JsonObject & { agents?: JsonValue };
   const overrides = isObject(agents) ? (agents as JsonObject)[agentId] : undefined;
-  return isObject(overrides) ? { ...defaults, ...(overrides as JsonObject) } : { ...defaults };
+  if (!isObject(overrides)) {
+    return { ...defaults };
+  }
+  const own = overrides as JsonObject;
+  const resolved: JsonObject = { ...defaults, ...own };
+  for (const key of options.mergeKeys ?? []) {
+    const shared = defaults[key];
+    const mine = own[key];
+    if (isObject(shared) && isObject(mine)) {
+      resolved[key] = { ...(shared as JsonObject), ...(mine as JsonObject) };
+    }
+  }
+  return resolved;
 };

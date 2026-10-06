@@ -96,7 +96,7 @@ repository once the contract has stopped moving.
   per-message name and avatar; a bot application gives one identity per token.
   Whether a five-agent roster is five applications, one application with
   per-message overrides, or something else is the first thing to establish, and
-  the answer rhymes with [22](./22-slack-single-app.md) — both steps are asking
+  the answer rhymes with running a whole roster on one Slack app — both ask
   what a single application can express about many agents.
 - **Does the contract need a capability descriptor?** Once two adapters differ
   in what they support — threads, edits, presence, per-agent identity — the

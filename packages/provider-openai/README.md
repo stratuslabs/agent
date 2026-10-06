@@ -7,7 +7,7 @@ the way it selects a built-in:
 
 ```markdown
 ---
-id: ava
+id: blair
 provider: openai-compatible
 model: llama3
 credentials: [openai.apiKey]
@@ -38,7 +38,7 @@ entry, or one the fleet shares — and list it in each soul's `credentials:`:
 
 ```bash
 stratus credential set openai.apiKey                # shared by every agent that lists it
-stratus credential set openai.apiKey --agent ava    # ava's own account
+stratus credential set openai.apiKey --agent blair  # blair's own account
 ```
 
 ## Settings

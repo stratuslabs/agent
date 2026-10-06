@@ -14,12 +14,12 @@ stratus doctor --format json
 Stratus Agent — what a run would use right now
 
   provider  anthropic
-            from ~/.stratus/agents/ava.md (soul frontmatter)
+            from ~/.stratus/agents/blair.md (soul frontmatter)
   model     claude-opus-5
-            from ~/.stratus/agents/ava.md (soul frontmatter)
-  soul      ~/.stratus/agents/ava.md
+            from ~/.stratus/agents/blair.md (soul frontmatter)
+  soul      ~/.stratus/agents/blair.md
             from ~/.stratus/config.json
-  agent     Ava (ava)
+  agent     Blair (blair)
 
 Files
   config    ~/.stratus/config.json
@@ -74,6 +74,11 @@ subscription sign-in to per-token billing.
   names any that are behind, and so do `stratus doctor` and the warnings
   `stratus serve` prints when it starts. `stratus update` brings them up, and
   then restart the daemon: a running daemon keeps the version it loaded.
+- **The daemon won't start and says it cannot use its config** — the
+  trusted config has a syntax or validation error, and `stratus serve`
+  refuses to run without it rather than starting every agent bare. The
+  message names the file and position; `stratus doctor` says the same.
+  See [Always on](./always-on.md#a-config-that-will-not-load-stops-the-daemon).
 - **`stratus logs` shows nothing, but the daemon won't start** — a daemon
   that fails before it starts serving never opens the structured log. See
   [When the log is empty](./logs.md#when-the-log-is-empty) for where those

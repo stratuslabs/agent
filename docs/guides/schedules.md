@@ -17,7 +17,7 @@ Souls opt in like any other tool:
 
 ```markdown
 ---
-name: Ava
+name: Blair
 tools:
   - schedule.*
   - message.send

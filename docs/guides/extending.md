@@ -46,8 +46,8 @@ and a soul selects it exactly as it selects a built-in:
 
 ```markdown
 ---
-name: Ava
-id: ava
+name: Blair
+id: blair
 provider: ollama
 model: llama3
 ---
@@ -108,8 +108,8 @@ plugin's README says which names to store:
 // ~/.stratus/credentials.json (0600)
 {
   "channels": {
-    "slack":   { "ava": { "appToken": "xapp-…", "botToken": "xoxb-…" } },
-    "discord": { "ava": { "botToken": "…" }, "juno": { "botToken": "…" } }
+    "slack":   { "blair": { "appToken": "xapp-…", "botToken": "xoxb-…" } },
+    "discord": { "blair": { "botToken": "…" }, "juno": { "botToken": "…" } }
   }
 }
 ```

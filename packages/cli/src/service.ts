@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { CONFIG_INVALID_EXIT_CODE } from './supervisor.ts';
 
 /**
  * Running `stratus serve` as a managed service.
@@ -149,6 +150,7 @@ Type=simple
 ExecStart=${definition.argv.map((argument) => systemdArgument(JSON.stringify(argument))).join(' ')}
 WorkingDirectory=${systemdValue(definition.workingDirectory)}
 ${definition.path !== undefined ? `Environment=${systemdValue(JSON.stringify(`PATH=${definition.path}`))}\n` : ''}Restart=on-failure
+RestartPreventExitStatus=${CONFIG_INVALID_EXIT_CODE}
 RestartSec=5
 KillSignal=SIGTERM
 TimeoutStopSec=30

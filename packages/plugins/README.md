@@ -93,6 +93,16 @@ are an access boundary (`tool-fs` roots are the example), resolving once hands
 every agent whichever value was resolved first, which is one agent reading
 another's files from code that looks correct.
 
+An agent's entry **replaces** a default key by key, because that is what a
+boundary needs: an agent's own `roots` must not be added to the fleet's. For
+an object-valued key that should combine instead, pass it in `mergeKeys`.
+The agent's names win and the shared ones it didn't name come along:
+
+```ts
+// tool-shell: an agent's own token must not cost it the fleet's PATH.
+resolvePluginAgentConfig(config, session.agent.id, { mergeKeys: ['env'] });
+```
+
 ## `loadOptionalModule`
 
 The resolve-then-import split, in one place:

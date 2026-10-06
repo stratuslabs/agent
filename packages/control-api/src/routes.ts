@@ -877,6 +877,13 @@ export const routes: Route[] = [
       if (drainTimeoutMs !== undefined && (typeof drainTimeoutMs !== 'number' || !Number.isInteger(drainTimeoutMs) || drainTimeoutMs < 0)) {
         throw new ApiError(400, 'invalid_body', '"drainTimeoutMs" must be a non-negative whole number of milliseconds when present.');
       }
+      // Before anything is announced: a refused restart leaves the daemon
+      // serving, where one refused after the drain leaves nothing serving.
+      try {
+        await context.gateway.checkRestart();
+      } catch (error) {
+        throw new ApiError(409, 'not_restartable', error instanceof Error ? error.message : String(error));
+      }
       let status;
       try {
         status = context.gateway.restart({

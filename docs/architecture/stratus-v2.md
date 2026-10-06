@@ -110,7 +110,7 @@ Every surface is a thin client. None of them ever reimplements the loop.
 
 - **CLI** (exists): keeps its in-process mode for one-shots and `chat`; gains `serve` and, later, remote-client commands against a running gateway.
 - **Web dashboard**: replaces the smoke-test page with a real chat and monitoring UI over the control API.
-- **Desktop app**: a **distribution and lifecycle client**, not a management surface and not a chat runtime. Managing a fleet visually is the dashboard's job, on every platform; this one exists because everything above is currently reachable only through a terminal. It installs and supervises the daemon — shipping its own Node and a prebuilt package tree, writing the LaunchAgent, and updating itself — and it drives sign-ins so the vendor CLIs run as child processes rather than as instructions to a user. It holds no runtime of its own, and it reads and writes `~/.stratus` through the control API rather than by hand. See [roadmap 07](../roadmap/07-desktop-app.md).
+- **Desktop app**: a **distribution and lifecycle client**, not a management surface and not a chat runtime. Managing a fleet visually is the dashboard's job, on every platform; this one exists because everything above is currently reachable only through a terminal. It installs and supervises the daemon — shipping its own Node and a prebuilt package tree, writing the LaunchAgent, and updating itself — and it drives sign-ins so the vendor CLIs run as child processes rather than as instructions to a user. It holds no runtime of its own, and it reads and writes `~/.stratus` through the control API rather than by hand. Not scheduled.
 - **iOS**: out of scope entirely for now. Nothing here forecloses it — it would be another client of the same API — but we are not designing for it yet.
 
 ### L4 — Deployment recipes
@@ -147,7 +147,7 @@ Rules every step of the roadmap honors:
 
 - iOS app
 - Serverless agent runtime
-- Marketplace infrastructure. The *vocabulary* is settled now (see [`plugins.md`](./plugins.md)) because renaming after packages exist is expensive; discovery and distribution are step 12, and nothing before it depends on them.
+- Marketplace infrastructure. The *vocabulary* is settled now (see [`plugins.md`](./plugins.md)) because renaming after packages exist is expensive; discovery and distribution are later work, and nothing before them depends on them.
 - Layered SQL memory, vector search, and model-routing heuristics
 - Container isolation as a default
 

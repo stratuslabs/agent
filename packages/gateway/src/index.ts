@@ -639,6 +639,16 @@ export interface GatewayOptions {
    * up `restart()`, which then throws `RestartUnsupportedError`.
    */
   onRestart?: (outcome: RestartOutcome) => void | Promise<void>;
+  /**
+   * Asked by {@link Gateway.checkRestart} before a restart is announced,
+   * while this daemon still serves: a throw refuses the restart with its
+   * message and leaves the daemon up. `stratus serve` checks here that the
+   * trusted config will load, because the replacement refuses to start on
+   * one that will not (#214) — and a restart that drained first would turn
+   * a half-saved file into an outage. A host that omits this restarts
+   * unchecked.
+   */
+  restartPreflight?: () => Promise<void>;
   /** The drain window a `restart()` uses when the request names none. Default 30s. */
   restartDrainTimeoutMs?: number;
   log?: (line: string) => void;
@@ -781,6 +791,14 @@ export interface Gateway {
    * close it.
    */
   restart(request?: RestartRequest): RestartStatus;
+  /**
+   * Whether a `restart()` now would bring the daemon back, as the host
+   * judges it (`restartPreflight`): rejects with the host's refusal,
+   * resolves when there is none. Separate from `restart()`, which stays
+   * synchronous and idempotent, so a caller asks this first — `POST
+   * /restart` does.
+   */
+  checkRestart(): Promise<void>;
   /**
    * The turn currently running on a session, if the caller that started it
    * named one. Single-flight per session is what makes this exact: at most
@@ -4192,6 +4210,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           warn(`restart failed: ${error instanceof Error ? error.message : String(error)}`);
         });
       return status;
+    },
+
+    async checkRestart() {
+      await options.restartPreflight?.();
     },
 
     activeTurnId(sessionId) {

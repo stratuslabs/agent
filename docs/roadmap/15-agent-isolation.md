@@ -110,7 +110,7 @@ reader can parse is the whole merge.
   segments precisely so they can key paths — this step is why that
   validation exists — but the invariant is path *safety*, not the slug
   shape ids are minted in: `isValidAgentId` deliberately accepts the
-  legacy `Ava_1`, `team.alpha`, and `AVA` that key real data today, and
+  legacy `Blair_1`, `team.alpha`, and `BLAIR` that key real data today, and
   its own comments say why holding them to `AGENT_ID_PATTERN` on upgrade
   would strand their agents. So the layout and the migration walk the
   validated roster's actual ids, never a pattern — and not only the

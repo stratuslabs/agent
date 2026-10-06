@@ -183,6 +183,7 @@ export {
   discoverActiveConfig,
   type TrustedConfigBlock,
   readTrustedConfigBlock,
+  trustedConfigError,
   readGlobalConfigBlock,
 } from './config-location.ts';
 
