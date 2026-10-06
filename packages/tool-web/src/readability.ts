@@ -521,7 +521,7 @@ const contentVisibilityApplies = (name: string, display: string): boolean => {
 
 /**
  * Whether an element's attributes hide it where it is placed, and the
- * `display` they give it there, which an `inherit` beneath it takes. Both
+ * style they give it there, which an `inherit` beneath it takes. Both
  * depend on the parent, so a copy the tree builder makes elsewhere is
  * judged again: a `b` rebuilt as a flex item is a block. They arrive parsed by
  * `scanTags`, never searched for in the tag's text: a search for `hidden`
@@ -535,67 +535,111 @@ const contentVisibilityApplies = (name: string, display: string): boolean => {
  * and an invalid value do not. `hidden="until-found"` is the same with
  * `content-visibility: hidden`, which hides an element's content and is
  * itself a way to hide it — on an element whose box can contain it, which
- * a `span` cannot: `<span hidden=until-found>` is shown.
+ * a `span` cannot: `<span hidden=until-found>` is shown, though a block
+ * inside it that inherits `content-visibility` is not.
  */
 const styleOf = (
   name: string,
   attributes: ReadonlyMap<string, string>,
   parent: TreeNode | undefined,
-): { hidden: boolean; display: string } => {
+): { hidden: boolean; style: ComputedStyle } => {
   const hidden = attributes.get('hidden');
-  const style = attributes.get('style');
-  const declared = style === undefined ? new Map<string, string | undefined>() : styleDeclares(decodeAttribute(style));
-  const display = resolveDisplay(name, declared, parent);
+  const declaredStyle = attributes.get('style');
+  const declared = declaredStyle === undefined
+    ? new Map<string, string | undefined>()
+    : styleDeclares(decodeAttribute(declaredStyle));
+  const untilFound = hidden !== undefined && asciiLower(decodeAttribute(hidden)) === 'until-found';
+  const style = computeStyle(name, declared, parent?.style ?? ROOT_STYLE, parent, untilFound);
   const hides = (): boolean => {
     if (asciiLower(trimAscii(decodeAttribute(attributes.get('aria-hidden') ?? ''))) === 'true') return true;
     const visibility = declared.get('visibility');
     if (visibility === 'hidden' || visibility === 'collapse') return true;
     if (declared.get('display') === 'none') return true;
-    const content = declared.get('content-visibility');
-    if (content === 'hidden' && contentVisibilityApplies(name, display)) return true;
-    if (hidden === undefined) return false;
-    // The attribute's own rule, beneath every inline declaration of the
-    // property it sets but `revert-layer`.
-    if (asciiLower(decodeAttribute(hidden)) === 'until-found') {
-      return (!declared.has('content-visibility') || content === 'revert-layer') && contentVisibilityApplies(name, display);
-    }
+    if (style.contentVisibility === 'hidden' && contentVisibilityApplies(name, style.display)) return true;
+    if (hidden === undefined || untilFound) return false;
+    // The attribute's own rule, beneath every inline `display` but `revert-layer`.
     return !declared.has('display') || declared.get('display') === 'revert-layer';
   };
-  return { hidden: hides(), display };
+  return { hidden: hides(), style };
 };
 
 /**
- * The `display` an element computes to, from its inline declaration, the
- * default for its name, and where it is: `inherit` takes the parent's,
- * and a box is made a block by a `float`, an absolute or fixed `position`,
- * or a flex or grid container — the nearest ancestor with a box, since one
- * with `display: contents` has none and passes its children through. A
- * `var()` reads as `inline`, and a `float` or `position` that is not a
- * keyword as none: the value an unresolved one falls back to, and the
- * direction that keeps text.
+ * The properties of an element that decide whether `content-visibility`
+ * hides its content, as they compute: each is what a child's `inherit`
+ * takes, `display` and `content-visibility` included, so a block inside an
+ * inline `content-visibility: hidden` that inherits it is hidden though
+ * its parent is not.
  */
-const resolveDisplay = (
+interface ComputedStyle {
+  display: string;
+  float: string;
+  position: string;
+  contentVisibility: string;
+}
+
+/** What the root of the page computes to, for an element with no parent open. */
+const ROOT_STYLE: ComputedStyle = { display: 'block', float: 'none', position: 'static', contentVisibility: 'visible' };
+
+/**
+ * A property that is not inherited, as it computes from its inline
+ * declaration: `inherit` takes the parent's value, `revert-layer` the
+ * value beneath every author style (where `hidden="until-found"` sets
+ * `content-visibility`), and any other CSS-wide keyword or a `var()` the
+ * initial value — what an unresolved one falls back to, and the direction
+ * that keeps text.
+ */
+const computeKeyword = (
+  declared: ReadonlyMap<string, string | undefined>,
+  property: string,
+  inherited: string,
+  initial: string,
+  beneath = initial,
+): string => {
+  if (!declared.has(property)) return beneath;
+  const value = declared.get(property);
+  if (value === 'inherit') return inherited;
+  if (value === 'revert-layer') return beneath;
+  return value === undefined || CSS_WIDE_KEYWORDS.has(value) ? initial : value;
+};
+
+/**
+ * An element's computed style, from its inline declarations, the default
+ * for its name, and where it is. A box is made a block by a `float`, an
+ * absolute or fixed `position`, or a flex or grid container — the nearest
+ * ancestor with a box, since one with `display: contents` has none and
+ * passes its children through. A `display` that is a `var()` reads as
+ * `inline`, its fallback and the direction that keeps text.
+ */
+const computeStyle = (
   name: string,
   declared: ReadonlyMap<string, string | undefined>,
+  inherited: ComputedStyle,
   parent: TreeNode | undefined,
-): string => {
+  untilFound: boolean,
+): ComputedStyle => {
+  const float = computeKeyword(declared, 'float', inherited.float, 'none');
+  const position = computeKeyword(declared, 'position', inherited.position, 'static');
+  const contentVisibility = computeKeyword(
+    declared, 'content-visibility', inherited.contentVisibility, 'visible', untilFound ? 'hidden' : 'visible',
+  );
   const ownDefault = DEFAULT_DISPLAY[name] ?? 'inline';
-  const display = !declared.has('display')
+  let display = !declared.has('display')
     ? ownDefault
-    : declaredDisplay(declared.get('display'), ownDefault, parent?.display ?? 'block');
+    : declaredDisplay(declared.get('display'), ownDefault, inherited.display);
   let box = parent;
-  while (box !== undefined && box.display === 'contents') box = box.parent;
-  const container = (box?.display ?? 'block').split(' ');
-  const floated = ['left', 'right', 'inline-start', 'inline-end'].includes(declared.get('float') ?? 'none');
-  const positioned = ['absolute', 'fixed'].includes(declared.get('position') ?? 'static');
-  if (BLOCKIFIED.has(name) || floated || positioned || container.some((word) => BLOCKIFYING_CONTAINERS.has(word))) {
-    return blockify(display);
+  while (box !== undefined && box.style.display === 'contents') box = box.parent;
+  const container = (box?.style.display ?? 'block').split(' ');
+  const blockified = BLOCKIFIED.has(name) || float !== 'none' || position === 'absolute' || position === 'fixed'
+    || container.some((word) => BLOCKIFYING_CONTAINERS.has(word));
+  if (blockified) {
+    display = blockify(display);
+  } else if (container.includes('ruby') && display.split(' ').includes('list-item')) {
+    // A ruby container makes its children inline-level. Of what that
+    // changes, only a list item matters here: `inline list-item` contains
+    // nothing, while a block made `inline-block` still contains.
+    display = ['inline', ...display.split(' ').filter((word) => !DISPLAY_OUTSIDE.has(word))].join(' ');
   }
-  // A ruby container makes its children inline-level. Of what that changes,
-  // only a list item matters here: `inline list-item` contains nothing,
-  // while a block made `inline-block` still contains.
-  if (!container.includes('ruby') || !display.split(' ').includes('list-item')) return display;
-  return ['inline', ...display.split(' ').filter((word) => !DISPLAY_OUTSIDE.has(word))].join(' ');
+  return { display, float, position, contentVisibility };
 };
 
 const declaredDisplay = (display: string | undefined, ownDefault: string, parentDisplay: string): string => {
@@ -778,8 +822,8 @@ const SPECIAL_ELEMENTS = new Set([
 interface TreeNode {
   id: number;
   hidden: boolean;
-  /** Its computed `display`, which a child's `display: inherit` takes. */
-  display: string;
+  /** Its computed style, which a child's `inherit` takes. */
+  style: ComputedStyle;
   parent: TreeNode | undefined;
 }
 
@@ -1057,8 +1101,8 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     parent: TreeNode | undefined,
     id = nextId++,
   ): OpenElement => {
-    const { hidden, display } = styleOf(name, attributes, parent);
-    return { id, name, attributes, hidden, node: { id, hidden, display, parent } };
+    const { hidden, style } = styleOf(name, attributes, parent);
+    return { id, name, attributes, hidden, node: { id, hidden, style, parent } };
   };
   /**
    * The tree builder's reconstruction: reopen, in order, the formatting a
@@ -1179,7 +1223,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       const inBlock = styleOf(formatting.element.name, formatting.element.attributes, moved.node);
       holder.id = formatting.element.id;
       holder.hidden = inBlock.hidden;
-      holder.display = inBlock.display;
+      holder.style = inBlock.style;
       holder.parent = moved.node;
       const copy: OpenElement = { ...formatting.element, hidden: inBlock.hidden, node: holder };
       active[entryIndex] = { element: copy, key: formatting.key };

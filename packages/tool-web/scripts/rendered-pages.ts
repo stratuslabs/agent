@@ -214,7 +214,15 @@ const CORPUS: readonly string[] = [
   '<span hidden=until-found style="position:fixed">MARK</span>AFTER',
   '<span style="display:inline"><b style="display:inherit;content-visibility:hidden"><p>MARK</b>AFTER</p></span>',
   '<div style="display:flex"><p><b style="content-visibility:hidden">FIRST</p>MARK</div>AFTER',
-  '<div style="display:flex"><b style="content-visibility:hidden"><p>MARK</b>AFTER</p></div>',
+  '<div style="display:flex"><b style="content-visibility:hidden"><p>MARK</b>AFTER</p></div>',  '<div style="float:left"><span style="float:inherit;content-visibility:hidden">MARK</span></div>AFTER',
+  '<div style="position:absolute"><span style="position:inherit;content-visibility:hidden">MARK</span></div>AFTER',
+  '<div style="position:relative"><span style="position:inherit;content-visibility:hidden">MARK</span></div>AFTER',
+  '<div style="display:inline;content-visibility:hidden"><span style="display:block;content-visibility:inherit">MARK</span></div>AFTER',
+  '<span hidden=until-found><span style="display:block;content-visibility:inherit">MARK</span></span>AFTER',
+  '<span hidden=until-found style="content-visibility:revert"><b style="display:block;content-visibility:inherit">MARK</b></span>AFTER',
+  '<span hidden=until-found style="content-visibility:revert-layer"><b style="display:block;content-visibility:inherit">MARK</b></span>AFTER',
+  '<span style="content-visibility:hidden"><b style="display:block;content-visibility:initial">MARK</b></span>AFTER',
+  '<span style="float:left;float:revert;content-visibility:hidden">MARK</span>AFTER',
 ];
 
 /** mulberry32: small, fast, and the same sequence on every platform. */
