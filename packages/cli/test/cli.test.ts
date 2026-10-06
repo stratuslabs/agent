@@ -4153,11 +4153,17 @@ test('serve warns at startup when a first-party package is older than the CLI', 
   assert.match(output.stderr, /Warning: @stratusagent\/channel-slack 0\.6\.0 is older than this CLI/);
 });
 
-test('serve keeps refusing gated calls when the approvals config cannot be read', async () => {
+test('serve refuses to start on a trusted config that does not parse', async () => {
+  // It used to start, with every block degraded on its own: no plugins, the
+  // built-in soul, no approvers, every Slack sender refused — an agent with
+  // no persona and no tools answering in Slack, looking healthy (#214).
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-badconfig-'));
   await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
-  await writeFile(path.join(serveHome, '.stratus', 'config.json'), '{ not json');
+  const configPath = path.join(serveHome, '.stratus', 'config.json');
+  await writeFile(configPath, '{ not json');
   const { streams, output } = createStreams();
+  // A gate that only loses: a daemon that started would be stopped by it
+  // and exit 0, which fails the assertion below rather than hanging.
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 150);
 
@@ -4167,12 +4173,32 @@ test('serve keeps refusing gated calls when the approvals config cannot be read'
     env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
   });
 
-  // Degrades to headless with a warning rather than taking the fleet down
-  // over a policy block that may not even be present — and never to
-  // "approve everything", which is the only outcome that would be unsafe.
+  // EX_CONFIG, which the systemd unit names as not worth restarting.
+  assert.equal(code, 78);
+  assert.match(output.stderr, new RegExp(`Could not use config ${configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(output.stderr, /stratus doctor/);
+  assert.doesNotMatch(output.stdout, /stratusd ready/);
+});
+
+test('serve still starts when only an untrusted project config is broken', async () => {
+  // A project-local file could not have set a trusted block whatever it
+  // said, and a malformed one in a clone must not keep the operator's
+  // daemon down — the same rule the block readers follow.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-badproject-'));
+  await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-badproject-cwd-'));
+  await writeFile(path.join(project, 'stratus.config.json'), '{ not json');
+  const { streams } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: { homeDir: serveHome, cwd: project, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
   assert.equal(code, 0);
-  assert.match(output.stderr, /ignoring the approvals config/);
-  assert.doesNotMatch(output.stdout, /approvals: remote/);
 });
 
 test('optional channel packages are never hard dependencies of the CLI', async () => {
@@ -6112,6 +6138,9 @@ test('the systemd unit restarts on failure and enables at login', async () => {
   const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
   assert.match(unit, /ExecStart="\/usr\/bin\/node" ".*bin\.js" "serve"/);
   assert.match(unit, /Restart=on-failure/);
+  // Except for a config that will not load: restarting over a file nobody
+  // has fixed fails the same way every five seconds.
+  assert.match(unit, /RestartPreventExitStatus=78/);
   // serve drains on SIGTERM, so systemd must send it and wait.
   assert.match(unit, /KillSignal=SIGTERM/);
   assert.match(unit, /WantedBy=default\.target/);
@@ -8611,6 +8640,34 @@ test('a config that exists but cannot be read blocks the install', async () => {
   assert.match(output.stderr, /Not installing:/);
 });
 
+test('a broken global config blocks the install even behind a valid project config', async () => {
+  // The project file is fine, so validating only what discovery picks
+  // installed a daemon that then refused to start on the global file its
+  // trusted blocks fall back to, and exited 78 under the service manager.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /Not installing: Could not use config .*config\.json/);
+});
+
 test('the unit keeps the node flags the entrypoint needs', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await installService({
@@ -9967,6 +10024,47 @@ test('runCli serve comes back from an announced restart by supervising a fresh d
   assert.ok(!watched.output.stdout.includes('Stopping — draining'), 'the restart path must not stop twice');
   // The supervisor keeps going for as long as daemons ask to come back.
   await rm(path.join(serveHome, '.stratus', 'gateway.json'), { force: true });
+});
+
+test('a restart over a trusted config that will not load is refused while the daemon keeps serving', async () => {
+  // The replacement would exit 78 on this file, and systemd does not retry
+  // that, so a restart that drained first turned a half-saved config into
+  // an outage. Refused before the drain, the daemon stays up on its last
+  // good snapshot; fixed, the same request goes through.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-restart-config-'));
+  const configFile = path.join(serveHome, '.stratus', 'config.json');
+  await mkdir(path.dirname(configFile), { recursive: true });
+  await writeFile(configFile, JSON.stringify({ provider: 'demo' }), { mode: 0o600 });
+  const watched = watchedServeStreams();
+  let respawns = 0;
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      serveRespawn: async () => {
+        respawns += 1;
+        return { code: 0 };
+      },
+    },
+  });
+
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  await writeFile(configFile, '{ "provider": "demo",');
+  const refused = await postJson(`${base}/api/v1/restart`, token, { reason: 'test' });
+  assert.equal(refused.status, 409, refused.body);
+  assert.match(refused.body, /would refuse to start on it, so this one keeps serving/);
+  assert.ok(!watched.output.stdout.includes('restart requested'), 'nothing may be announced for a refused restart');
+
+  await writeFile(configFile, JSON.stringify({ provider: 'demo' }));
+  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test' });
+  assert.equal(accepted.status, 202, accepted.body);
+  assert.equal(await serving, 0);
+  assert.equal(respawns, 1);
 });
 
 test('a supervised daemon answers a restart by exiting with the restart status, never by supervising in turn', async () => {
@@ -13522,10 +13620,12 @@ test('the startup provenance line says which agents refuse unlisted senders, eve
   );
 });
 
-test('serve with an unreadable principals block refuses every Slack sender rather than admitting everyone', async () => {
+test('serve with an invalid principals block refuses to start rather than admitting everyone', async () => {
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-principals-'));
   await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
-  // A typo in the one setting whose misspelling would open the door.
+  // A typo in the one setting whose misspelling would open the door. A
+  // validation failure is refused at start like a parse failure: the door
+  // stays shut because there is no daemon behind it.
   await writeFile(
     path.join(serveHome, '.stratus', 'config.json'),
     JSON.stringify({ principals: { slackUsers: ['U-DYLAN'], admit: 'principal' } }),
@@ -13540,8 +13640,8 @@ test('serve with an unreadable principals block refuses every Slack sender rathe
     env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
   });
 
-  assert.equal(code, 0);
-  assert.match(output.stderr, /principals config could not be read \(.*Invalid principals\.admit .*received "principal"\.\); refusing every Slack sender until it is fixed/);
+  assert.equal(code, 78);
+  assert.match(output.stderr, /Invalid principals\.admit .*received "principal"/);
   assert.doesNotMatch(output.stderr, /every Slack sender is unknown/);
 });
 

@@ -145,6 +145,7 @@ When a stored key "isn't found", check in this order:
 - **Running it.** `stratus serve` runs the daemon in the foreground. `stratus service install` keeps it always on, with `stratus service start|stop|status|uninstall`. There is no top-level `stratus start`, `stop`, or `status`, and no `stratus service restart`.
   - On macOS it is a LaunchAgent, started at login, not at power-on. `--no-login` also gives up restarts after a crash.
   - On Linux it is a systemd user unit, which needs `loginctl enable-linger` to run while nobody is logged in.
+  - It will not start while the trusted config (`~/.stratus/config.json`, or the file `--config` names) fails to parse or validate. The error goes to stderr, not `stratus logs`: on Linux the unit then shows as failed until the file is fixed and `stratus service start` is run; on macOS launchd keeps retrying until the file is fixed. A daemon already running keeps its last good config, and `stratus service start`, `stratus update`, and `stratus restart` refuse up front with the same error rather than restart into it.
 - **`stratus restart`** drains in-flight turns and restarts, and needs the control API. Without the API, use `stratus service stop` then `stratus service start`.
   - A restart is needed after a change to `plugins` (a plugin's `env` included), `approvals`, `api`, `principals`, `slack`, `maxTurns`, `executor`, or `memoryStore`, and after new Slack tokens.
   - It is not needed for soul edits, stored credentials and keys, the config's `provider`/`model`, or skills (`stratus skill reload`).

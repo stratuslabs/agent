@@ -410,6 +410,70 @@ test('update refuses to rewrite the unit when the login setting cannot be determ
   assert.ok(!output.stdout.includes('Stopping stratusd'), output.stdout);
 });
 
+test('update refuses before stopping anything when the unit\'s trusted config will not load', async () => {
+  // The restart would bring up a daemon that exits 78, and systemd reports
+  // a simple unit started once it forks, so the update used to say the
+  // daemon was running while the unit had already failed. The config read
+  // is the one the unit pins, not this shell's.
+  const home = await freshHome();
+  const pinned = path.join(home, 'pinned.json');
+  await writeFile(pinned, '{ not json');
+  const calls: string[] = [];
+  const runner: ServiceRunner = async (command, args) => {
+    calls.push([command, ...args].join(' '));
+    return runningServiceRunner(command, args);
+  };
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    { configPath: pinned },
+  );
+  calls.length = 0;
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: runner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  assert.equal(code, 1);
+  assert.match(output.stderr, /Not updating: .*pinned\.json/);
+  assert.ok(!calls.some((call) => / stop /.test(` ${call} `)), calls.join('\n'));
+  assert.ok(!output.stdout.includes('Stopping stratusd'), output.stdout);
+});
+
+test('service start refuses a unit whose trusted config will not load', async () => {
+  const home = await freshHome();
+  const pinned = path.join(home, 'pinned.json');
+  await writeFile(pinned, '{ not json');
+  const calls: string[] = [];
+  const runner: ServiceRunner = async (command, args) => {
+    calls.push([command, ...args].join(' '));
+    return runningServiceRunner(command, args);
+  };
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    { configPath: pinned },
+  );
+  calls.length = 0;
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['service', 'start'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: runner },
+  });
+  assert.equal(code, 1);
+  assert.match(output.stderr, /Not starting: .*pinned\.json/);
+  assert.ok(!calls.some((call) => /\bstart\b/.test(call)), calls.join('\n'));
+});
+
 test('update fails loudly when it cannot restore a deliberately stopped daemon', async () => {
   const home = await freshHome();
   const stoppedRunner: ServiceRunner = async (command, args) => {
