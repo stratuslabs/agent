@@ -302,6 +302,20 @@ export interface Message {
    * — the boundary provenance draws, here at the point text enters.
    */
   overheard?: boolean;
+  /**
+   * The caller's idempotency key for the dispatch that brought this user
+   * message (`RunInput.idempotencyKey`). Written in the same save as the
+   * message, so a key is never durable without its message or the other
+   * way round; `workItemState` reads it back.
+   */
+  idempotencyKey?: string;
+  /**
+   * This message's turn was continued once after the process running it
+   * died (`AgentRunner.continueTurn`). A host fails a second such turn
+   * instead of continuing it again: a turn that takes the process down
+   * with it would otherwise do so on every start. Present only when true.
+   */
+  continuedAfterCrash?: boolean;
 }
 
 export interface AgentDescriptor {
@@ -3142,6 +3156,33 @@ export const isUnaddressedTurn = (session: Pick<Session, 'messages'>): boolean =
   session.messages.findLast((message) => message.role === 'user')?.overheard === true;
 
 /**
+ * Where the dispatch carrying `idempotencyKey` stands in this session:
+ * `undefined` if no message carries the key, `unfinished` if its message
+ * is the one the session's in-flight turn is on, `finished` otherwise.
+ *
+ * Derived, never recorded separately, which is what makes it exact. The
+ * keyed message is written in the same save that sets the status to
+ * `running` (accepted and started are one write), and the save that moves
+ * the status off `running` or `pending_approval` is the turn's final one,
+ * so `finished` is written in the same transaction as the final save by
+ * construction. While a turn is in flight its message is the session's
+ * newest user message — `observe` refuses to append during one, and the
+ * runner's wrap-up notes never reach the store — the same reading
+ * `isUnaddressedTurn` relies on.
+ */
+export const workItemState = (
+  session: Pick<Session, 'messages' | 'status'>,
+  idempotencyKey: string,
+): 'unfinished' | 'finished' | undefined => {
+  const keyed = session.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (keyed === undefined) {
+    return undefined;
+  }
+  const inFlight = session.status === 'running' || session.status === 'pending_approval';
+  return inFlight && session.messages.findLast((message) => message.role === 'user') === keyed ? 'unfinished' : 'finished';
+};
+
+/**
  * A provider's way of saying a failed turn's prompt had already reached
  * the model before the failure — a harness that recorded its session id
  * and then died, most often. Marked on the error, off the type, the way
@@ -5209,6 +5250,13 @@ export interface RunInput {
    * attachments instead, as an overheard one does.
    */
   addressed?: boolean;
+  /**
+   * The caller's name for this dispatch, stored on the user message
+   * (`Message.idempotencyKey`) in the same write as the message itself.
+   * The runner only records it; refusing a repeat is the host's job — see
+   * `workItemState` and the gateway's `DispatchInput.idempotencyKey`.
+   */
+  idempotencyKey?: string;
   metadata?: JsonObject;
   /**
    * What the host can say about how this agent is run, rendered as the
@@ -5232,6 +5280,8 @@ export interface ResumeInput {
   images?: ImageAttachment[];
   /** See `RunInput.addressed`. */
   addressed?: boolean;
+  /** See `RunInput.idempotencyKey`. */
+  idempotencyKey?: string;
   /**
    * This turn's metadata — read for the sender's trust
    * (`SENDER_TRUST_METADATA_KEY`) and not merged into the session's. The
@@ -5575,6 +5625,7 @@ export class AgentRunner {
       createdAt: new Date().toISOString(),
       ...userImages(input.images),
       ...(input.addressed === false ? { overheard: true } : {}),
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
     };
     omitImagesOutsideReplayBudget([opening], this.imageReplayBudget);
     const sessionInput: Omit<Session, 'createdAt' | 'updatedAt'> = {
@@ -5676,6 +5727,7 @@ export class AgentRunner {
       // difference is only that a turn runs on it, and every renderer
       // frames it from the same mark.
       ...(input.addressed === false ? { overheard: true } : {}),
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
     });
     // Before the save below: the row that carries this turn is the row
     // that stops carrying the pixels nothing can send any more.
@@ -5698,6 +5750,56 @@ export class AgentRunner {
     await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
 
     return this.executeTurns(working, input.signal, undefined, input.runtime);
+  }
+
+  /**
+   * Picks up a turn whose process died while it was `running`: its user
+   * message is durable and its reply is not. Nothing is appended — the turn
+   * already has its message — so this is `resume` without the input.
+   * Dangling tool calls are closed as interrupted, telling the model they
+   * may not have run rather than running them again, and the loop goes back
+   * to the provider with the transcript as it stands.
+   *
+   * A transcript that already ends in the reply (the response was saved,
+   * and the process died before the save that marks the turn completed) is
+   * completed as it stands, with no provider call: asking again would send
+   * a second answer to one message.
+   *
+   * Marks the turn's message `continuedAfterCrash` in its first save, so a
+   * host can refuse to do this twice. Resolves `undefined` when the session
+   * is missing or no longer `running`. Never for a turn parked on a human:
+   * `recoverPendingApproval` re-enters the parked call, which reconciling
+   * here would close.
+   */
+  async continueTurn(
+    sessionId: string,
+    options: {
+      /** See `RunInput.runtime`. */
+      runtime?: AgentRuntimeContext;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<Session | undefined> {
+    const session = await this.store.get(sessionId);
+    if (!session || session.status !== 'running') {
+      return undefined;
+    }
+    this.reconcileInterruptedToolCalls(session);
+    const message = session.messages.findLast((candidate) => candidate.role === 'user');
+    if (message !== undefined) {
+      message.continuedAfterCrash = true;
+    }
+    await this.labelLegacySession(session);
+    await this.store.save(session);
+    const stored = await this.store.get(session.id);
+    const working = stored ?? session;
+
+    await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
+
+    const last = working.messages.at(-1);
+    if (last?.role === 'assistant' && (last.toolCalls === undefined || last.toolCalls.length === 0)) {
+      return this.completeTurn(working);
+    }
+    return this.executeTurns(working, options.signal, undefined, options.runtime);
   }
 
   /**
@@ -6205,33 +6307,7 @@ export class AgentRunner {
         countFailures(calls, results);
       }
 
-      session.status = 'completed';
-      await this.store.save(session);
-      const stored = await this.store.get(session.id);
-      session = stored ?? session;
-      await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
-      await this.bus.emit({
-        type: 'session.completed',
-        sessionId: session.id,
-        // Copies all the way down — a fresh array of fresh records, not the
-        // session's own. This is durable accounting state rather than a
-        // per-event payload, so a subscriber that sorts the list, appends to
-        // it, or normalizes a count in place must not be reaching the stored
-        // record. A shallow array copy is not enough: the record objects
-        // behind it are the ones the session holds, and
-        // `InMemorySessionStore` hands the very same objects back on the
-        // next read.
-        //
-        // What this does NOT buy is isolation between subscribers. `emit`
-        // hands one event object to every handler in turn, so an earlier
-        // handler's edits are visible to later ones — true of `parts` on
-        // provider.response and of every other payload on this bus, and not
-        // a promise the bus has ever made. Copy before mutating.
-        ...(session.usage && session.usage.length > 0
-          ? { usage: session.usage.map((record) => ({ ...record })) }
-          : {}),
-      });
-      return session;
+      return await this.completeTurn(session);
     } catch (caught) {
       // An abort can surface first from any layer (the provider's cancelled
       // request, an executor, this loop's own checks) — normalize so an
@@ -6272,6 +6348,42 @@ export class AgentRunner {
       await this.bus.emit({ type: 'session.failed', sessionId: session.id, error: lastError });
       throw error;
     }
+  }
+
+  /**
+   * The end of a turn that answered: marked completed in one save, then
+   * announced. Shared by the loop and by `continueTurn`, which can find a
+   * turn whose answer was saved by a process that died before this ran.
+   */
+  private async completeTurn(finished: Session): Promise<Session> {
+    let session = finished;
+    session.status = 'completed';
+    await this.store.save(session);
+    const stored = await this.store.get(session.id);
+    session = stored ?? session;
+    await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
+    await this.bus.emit({
+      type: 'session.completed',
+      sessionId: session.id,
+      // Copies all the way down — a fresh array of fresh records, not the
+      // session's own. This is durable accounting state rather than a
+      // per-event payload, so a subscriber that sorts the list, appends to
+      // it, or normalizes a count in place must not be reaching the stored
+      // record. A shallow array copy is not enough: the record objects
+      // behind it are the ones the session holds, and
+      // `InMemorySessionStore` hands the very same objects back on the
+      // next read.
+      //
+      // What this does NOT buy is isolation between subscribers. `emit`
+      // hands one event object to every handler in turn, so an earlier
+      // handler's edits are visible to later ones — true of `parts` on
+      // provider.response and of every other payload on this bus, and not
+      // a promise the bus has ever made. Copy before mutating.
+      ...(session.usage && session.usage.length > 0
+        ? { usage: session.usage.map((record) => ({ ...record })) }
+        : {}),
+    });
+    return session;
   }
 
   /**
