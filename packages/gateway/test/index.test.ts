@@ -5310,3 +5310,51 @@ test('a saved answer is completed even when its agent is gone', async () => {
   assert.equal(session?.status, 'completed');
   assert.equal(session?.messages.at(-1)?.content, 'the saved answer');
 });
+
+test('a continued turn spends the budget it was on, not a fresh one', async () => {
+  // One tool turn already ran before the crash and maxTurns is 1, so what
+  // the continuation owes the model is the wrap-up — not another turn that
+  // could call a tool past the ceiling.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+  const now = new Date().toISOString();
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-budget-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'do the thing', createdAt: now, idempotencyKey: 'msg-1' },
+      { id: 'a1', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'call-1', toolName: 'demo.echo', input: {} }] },
+      {
+        id: 't1',
+        role: 'tool',
+        name: 'demo.echo',
+        content: '{}',
+        createdAt: now,
+        toolResult: { callId: 'call-1', toolName: 'demo.echo', ok: true, output: 'echoed', trust: 'agent' },
+      },
+    ],
+  });
+  before.close();
+
+  const bodies: string[] = [];
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async (_url: unknown, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return openAiText('here is what I did');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, maxTurns: 1, warn: () => {} });
+  const completed = eventGate(gateway, (event) => event.type === 'session.completed' && event.sessionId === 'keyed-budget-1');
+  await gateway.start();
+  await gateway.stop().then(() => completed.give_up('the turn was never completed'));
+  await completed.seen;
+
+  assert.equal(bodies.length, 1);
+  assert.ok(bodies[0]?.includes('You have used every step this message allows'), 'the continuation was not the wrap-up');
+});

@@ -5896,7 +5896,27 @@ export class AgentRunner {
     if (answered) {
       return this.completeTurn(working);
     }
-    return this.executeTurns(working, options.signal, undefined, options.runtime);
+    // Resumed, not restarted, for the reason `recoverPendingApproval` is: a
+    // turn that already took provider turns spends the budget it was on, and
+    // its failure streak counts the responses before the crash. Handed over
+    // as an answered call with nothing left to run, so the loop counts this
+    // message's responses (`responsesThroughCall`) and goes straight to the
+    // next provider turn — the wrap-up, if the ceiling has been reached.
+    const userIndex = working.messages.findLastIndex((candidate) => candidate.role === 'user');
+    const callIndex = working.messages.findLastIndex((candidate) => candidate.role === 'assistant' && (candidate.toolCalls?.length ?? 0) > 0);
+    const lastCall = callIndex > userIndex ? working.messages[callIndex]?.toolCalls?.at(-1) : undefined;
+    const lastResult = lastCall === undefined
+      ? undefined
+      : working.messages.slice(callIndex + 1).findLast((candidate) => candidate.toolResult?.callId === lastCall.id)?.toolResult;
+    const resumeFrom = lastCall !== undefined && lastResult !== undefined
+      ? {
+        pending: undefined,
+        remaining: [],
+        turn: responsesThroughCall(working, lastCall).length,
+        answered: { call: lastCall, result: lastResult },
+      }
+      : undefined;
+    return this.executeTurns(working, options.signal, resumeFrom, options.runtime);
   }
 
   /**
