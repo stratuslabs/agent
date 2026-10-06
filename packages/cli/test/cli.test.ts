@@ -59,7 +59,14 @@ import {
   tailLog,
   npmNeedsShell,
 } from '../src/index.ts';
-import { agentMemoryFilePath, fleetDbPath, stateFilePath, validateSkillDirectory } from '@stratusagent/state';
+import {
+  agentMemoryFilePath,
+  fleetDbPath,
+  loadChannelCredentials,
+  loadChannelTransportSecrets,
+  stateFilePath,
+  validateSkillDirectory,
+} from '@stratusagent/state';
 import { loadStratusSkill, STRATUS_SKILL_PATH } from '@stratusagent/agents';
 import type { Session, Tool } from '@stratusagent/core';
 
@@ -11050,6 +11057,104 @@ test('credential set with nothing on stdin stores nothing and says how to pipe i
   await assert.rejects(() => readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
 });
 
+test('stratus channel set stores a plugin channel\'s secrets 0600 where the channel reads them, and never prints one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-channel-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+
+  const set = createStreams();
+  assert.equal(
+    await runCli({
+      argv: ['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey', 'apiSecret'],
+      streams: set.streams,
+      env: { ...env, stdin: 'key-value-1\n  secret value 2 \n' },
+    }),
+    0,
+    set.output.stderr,
+  );
+  // One value per line, in the order named, each kept exactly as typed.
+  assert.deepEqual(await loadChannelTransportSecrets(env, 'imessage'), {
+    ava: { apiKey: 'key-value-1', apiSecret: '  secret value 2 ' },
+  });
+  const credentialsFile = path.join(home, '.stratus', 'credentials.json');
+  assert.equal((await stat(credentialsFile)).mode & 0o777, 0o600);
+  assert.ok(!set.output.stdout.includes('key-value-1'), 'set printed a secret');
+
+  const list = createStreams();
+  assert.equal(await runCli({ argv: ['channels'], streams: list.streams, env }), 0);
+  assert.match(list.output.stdout, /imessage:\n {2}ava {2}apiKey, apiSecret/);
+  assert.ok(!list.output.stdout.includes('key-value-1') && !list.output.stdout.includes('secret value 2'), 'list printed a secret');
+
+  // Slack's two tokens are the default, and land in the shape the Slack
+  // adapter reads; a set replacing them keeps the other kinds intact.
+  assert.equal(
+    await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: createStreams().streams, env: { ...env, stdin: 'xapp-1\nxoxb-1\n' } }),
+    0,
+  );
+  assert.deepEqual(await loadChannelCredentials(env), { slack: { ava: { appToken: 'xapp-1', botToken: 'xoxb-1' } } });
+  assert.deepEqual(Object.keys(await loadChannelTransportSecrets(env, 'imessage')), ['ava']);
+
+  const removed = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'remove', 'imessage', '--agent', 'ava'], streams: removed.streams, env }), 0);
+  assert.deepEqual(await loadChannelTransportSecrets(env, 'imessage'), {});
+  const again = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'remove', 'imessage', '--agent', 'ava'], streams: again.streams, env }), 1);
+  assert.match(again.output.stderr, /Nothing is stored for ava on imessage/);
+});
+
+test('stratus channel set stores nothing when a line is missing, a value is empty, or the agent is not on the roster', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-channel-refuse-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const attempt = async (argv: string[], stdin: string): Promise<{ code: number; stderr: string }> => {
+    const { streams, output } = createStreams();
+    const code = await runCli({ argv, streams, env: { ...env, stdin } });
+    return { code, stderr: output.stderr };
+  };
+
+  const short = await attempt(['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey', 'apiSecret'], 'only-one\n');
+  assert.equal(short.code, 1);
+  assert.match(short.stderr, /Expected 2 line\(s\) on stdin, one for each of apiKey, apiSecret; got 1/);
+
+  const blank = await attempt(['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey', 'apiSecret'], 'k\n \n');
+  assert.equal(blank.code, 1);
+  assert.match(blank.stderr, /apiSecret was empty/);
+
+  const stranger = await attempt(['channel', 'set', 'imessage', '--agent', 'bea', 'apiKey'], 'k\n');
+  assert.equal(stranger.code, 1);
+  assert.match(stranger.stderr, /No agent bea is on the roster/);
+
+  const slack = await attempt(['channel', 'set', 'slack', '--agent', 'ava', 'appToken'], 'x\n');
+  assert.equal(slack.code, 1);
+  assert.match(slack.stderr, /Slack stores exactly appToken and botToken/);
+
+  await assert.rejects(() => readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+});
+
+test('channel commands parse a kind, an agent, and secret names, and refuse a value on the command line', () => {
+  assert.deepEqual(parseCommand(['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey']), {
+    command: 'channel', action: 'set', kind: 'imessage', agentId: 'ava', keys: ['apiKey'],
+  });
+  assert.deepEqual(parseCommand(['channel', 'set', 'slack', '--agent', 'ava']), {
+    command: 'channel', action: 'set', kind: 'slack', agentId: 'ava', keys: [],
+  });
+  assert.deepEqual(parseCommand(['channels']), { command: 'channel', action: 'list', keys: [] });
+  assert.equal(parseCommand(['channel']).command, 'help');
+
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', '--agent', 'ava']), /needs the names of the secrets/);
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', 'apiKey']), /needs --agent/);
+  assert.throws(() => parseCommand(['channel', 'set', 'iMessage', '--agent', 'ava', 'apiKey']), /is not a channel kind/);
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', '--agent', '__proto__', 'apiKey']), /cannot be an agent id/);
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey', 'apiKey']), /named twice/);
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', '--agent', 'ava', 'api/key']), /is not a secret name/);
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', '--agent', 'ava', '--value', 'sekrit']), /Unknown option: --value/);
+  assert.throws(() => parseCommand(['channel', 'list', 'imessage']), /takes no arguments/);
+  assert.throws(() => parseCommand(['channel', 'remove', 'imessage', '--agent', 'ava', 'apiKey']), /kind and --agent only/);
+  assert.throws(() => parseCommand(['channel', 'show']), /No channel subcommand named "show"/);
+});
+
 test('a local approval prompt names the site a browser action would act on', () => {
   const session = {
     id: 'local',
@@ -13986,10 +14091,15 @@ test('a plugin executor selected by a trusted config runs the commands, and a se
 test('a plugin channel starts under the daemon from its stored transport secrets and delivers an inbound message', async () => {
   const home = await seamHome({ plugins: { 'stratus-plugin-fixture-channel': {} } });
   await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
-  await writeFile(
-    path.join(home, '.stratus', 'credentials.json'),
-    `${JSON.stringify({ channels: { fixture: { ava: { token: 'fixture-token-1' } } } })}\n`,
-  );
+  // Stored the way an operator would, through the CLI rather than by
+  // editing the file: the binding the channel starts from is the one
+  // `stratus channel set` wrote.
+  const stored = createStreams();
+  assert.equal(await runCli({
+    argv: ['channel', 'set', 'fixture', '--agent', 'ava', 'token'],
+    streams: stored.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, stdin: 'fixture-token-1\n' },
+  }), 0, stored.output.stderr);
   const { streams, output } = createStreams();
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 1500);

@@ -53,6 +53,7 @@ import {
   withSoulFileLock,
   addNamedCredential,
   loadNamedCredentials,
+  CHANNEL_KIND_PATTERN,
   CREDENTIAL_NAME_PATTERN,
   NamedCredentialExistsError,
   type AgentSummary,
@@ -344,8 +345,6 @@ const delegatesAllowlist = (value: unknown): string[] => {
   return entries;
 };
 
-// The shape a channel kind takes: a plugin manifest's contribution name.
-const CHANNEL_KIND_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 /**
  * The `secrets` object of a non-Slack channel binding: every value a

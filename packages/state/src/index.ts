@@ -125,6 +125,8 @@ export {
   loadChannelTransportSecrets,
   listChannelKinds,
   saveChannelTransportSecrets,
+  removeChannelTransportSecrets,
+  CHANNEL_KIND_PATTERN,
   type NamedCredentials,
   loadNamedCredentials,
   saveNamedCredentials,
