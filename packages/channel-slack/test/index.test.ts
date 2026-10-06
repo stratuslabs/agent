@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -8257,13 +8257,17 @@ test('a final reply is not overtaken by a turn queued behind a repeat that withd
   assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'third answer']);
 });
 
-test('a repeat does not upload a file written after the turn that produced it', async () => {
+test('a repeat does not upload a file written after the turn that produced it, however soon after', async () => {
   // The transcript keeps the path, not the bytes. Written since, the path
-  // may hold a later turn's file, and the old message is not answered with it.
+  // may hold a later turn's file, and the old message is not answered with
+  // it — half a second later as surely as an hour: a grace window is one
+  // an overwrite fits inside.
   const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-stale-file-'));
   const chart = path.join(dir, 'chart.png');
   await writeFile(chart, 'a later turn wrote this');
-  const anHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const recorded = Date.now() - 60 * 60 * 1000;
+  await utimes(chart, new Date(recorded + 500), new Date(recorded + 500));
+  const anHourAgo = new Date(recorded).toISOString();
   const warnings: string[] = [];
   const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
   const gateway: StubGateway = {

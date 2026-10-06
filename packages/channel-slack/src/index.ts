@@ -523,11 +523,14 @@ interface ReplyOutcome {
 
 /**
  * How far a file's modification time may run past the record of the tool
- * result naming it. The tool writes the file before the result is saved,
- * but the record is stamped in whole milliseconds and some filesystems
- * keep modification times in seconds, rounded either way.
+ * result naming it: the rest of the millisecond the record was stamped in,
+ * since the record is whole milliseconds and the file time is finer. No
+ * more, because any window is one an overwrite fits inside — two seconds
+ * was, in review. A filesystem that rounds file times up, coarser than
+ * that, fails closed: the file is warned about and not uploaded, which a
+ * repeat can afford and a wrong attachment cannot.
  */
-const PRODUCED_AT_SLACK_MS = 2000;
+const PRODUCED_AT_SLACK_MS = 1;
 
 /**
  * A file a finished turn produced, read for a repeat of it — refused if the
@@ -539,15 +542,16 @@ const PRODUCED_AT_SLACK_MS = 2000;
  * and the file is checked through the handle it is read from.
  */
 const readUnchangedSince = async (filePath: string, producedAt: number): Promise<Buffer> => {
-  const notAfter = producedAt + PRODUCED_AT_SLACK_MS;
+  // Exclusive: a file time at or past it was written after the record.
+  const writtenBefore = producedAt + PRODUCED_AT_SLACK_MS;
   const changed = (): Error =>
     new Error('it was written after the turn that produced it, so it may hold another turn\'s file now; it was not uploaded.');
-  if ((await lstat(filePath)).mtimeMs > notAfter) {
+  if ((await lstat(filePath)).mtimeMs >= writtenBefore) {
     throw changed();
   }
   const handle = await open(filePath, 'r');
   try {
-    if ((await handle.stat()).mtimeMs > notAfter) {
+    if ((await handle.stat()).mtimeMs >= writtenBefore) {
       throw changed();
     }
     return await handle.readFile();
