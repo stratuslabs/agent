@@ -1945,8 +1945,13 @@ export const applyPerAgentWorkspaces = async (
         // that was observed — one swapped and swapped back in between read as
         // another link, and forgetting the entry over it would leave the
         // original naming the stayed member's path — or asked again.
+        //
+        // The directory by change time as well, since this reading can forget
+        // the record: one renamed aside and back keeps its inode while a
+        // stand-in answered the read. The swap below still compares by inode
+        // alone, because its own temporary link moves that time.
         const settledEntry = await lstat(peerTarget).catch(() => undefined);
-        if (parentBefore === undefined || await steadyDirectory(peerParent) !== inodeOf(parentBefore)
+        if (parentBefore === undefined || await steadyStamp(peerParent) !== stampOf(parentBefore)
           || settledEntry === undefined || stampOf(settledEntry) !== stampOf(observed)) {
           continue;
         }
