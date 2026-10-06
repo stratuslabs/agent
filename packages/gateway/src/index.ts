@@ -2776,6 +2776,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
 
     const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(existing, config);
+    // Recorded with a keyed message so a restart judges the turn by what it
+    // could have run on, not by whatever the config resolves to by then.
+    // The fallback counts: a turn can switch to it mid-run.
+    const hostedLoop = input.idempotencyKey !== undefined && (
+      runsOnHarness(config) || (config.provider !== 'demo' && config.fallback !== undefined && runsOnHarness(config.fallback))
+    );
 
     return withWatchdog(input.sessionId, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
       // The preflight above (agent refresh, config resolution, session
@@ -2829,6 +2835,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           ...(input.images !== undefined ? { images: input.images } : {}),
           ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
           ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+          ...(hostedLoop ? { hostedLoop } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
           runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
           signal,
@@ -2842,6 +2849,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(input.images !== undefined ? { images: input.images } : {}),
         ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
         ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+        ...(hostedLoop ? { hostedLoop } : {}),
         metadata,
         runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
         signal,
@@ -3144,10 +3152,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const settleAbandonedTurn = async (session: Session): Promise<Session> => {
     const message = session.messages.findLast((candidate) => candidate.role === 'user');
-    if (message?.idempotencyKey !== undefined && message.continuedAfterCrash !== true) {
-      return continueAbandonedTurn(session);
+    if (message?.idempotencyKey === undefined || message.continuedAfterCrash === true) {
+      return failAbandoned(session);
     }
-    return failAbandoned(session);
+    if (message.hostedLoop === true) {
+      log(`${session.id}: a keyed turn the last stratusd was running could reach a harness, which cannot be continued; failing it`);
+      return failAbandoned(session);
+    }
+    return continueAbandonedTurn(session);
   };
 
   const failAbandoned = async (session: Session): Promise<Session> => {
@@ -3166,18 +3178,33 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * `recoverOne` does and for the same reason: an allowlist is a permission
    * boundary, and a tool dropped while the daemon was down must not run.
    *
-   * Not on a harness (`runsOnHarness`). One runs its own tool loop inside a
-   * single provider call and keeps its own conversation, so the prompt the
-   * dead turn sent may already have run tools there that the transcript
-   * never saw, and continuing would send it again. That turn is failed as
-   * an unkeyed one is — the same answer as before keys existed.
+   * Not on a harness (`runsOnHarness`) — neither one the turn could have
+   * run on (`Message.hostedLoop`, recorded when it was accepted) nor one it
+   * would continue on. A harness runs its own tool loop inside a single
+   * provider call and keeps its own conversation, so the prompt the dead
+   * turn sent may already have run tools there that the transcript never
+   * saw, and continuing would send it again. That turn is failed as an
+   * unkeyed one is — the same answer as before keys existed.
    */
   const continueAbandonedTurn = async (session: Session): Promise<Session> => {
-    const source = await refreshAgent(session.agent.id);
-    const config = await runtimeForAgent(source);
+    // Settled either way: a turn whose agent left the roster, or whose
+    // provider no longer resolves, must not stay `running` for every later
+    // start and every redelivery to find unfinished and trip over again.
+    let source: AgentSource;
+    let config: RuntimeConfig;
+    try {
+      source = await refreshAgent(session.agent.id);
+      config = await runtimeForAgent(source);
+    } catch (error) {
+      log(`${session.id}: a keyed turn the last stratusd was running cannot be continued (${error instanceof Error ? error.message : String(error)}); failing it`);
+      return failAbandoned(session);
+    }
     const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(session, config);
+    // The message's own record covers the runtime the turn ran on; this
+    // covers the one it would continue on, which a changed config may make
+    // a harness that has never seen this conversation.
     if (runsOnHarness(switchedToFallback && config.provider !== 'demo' && config.fallback !== undefined ? config.fallback : config)) {
-      log(`${session.id}: a keyed turn the last stratusd was running is on a harness, which cannot be continued; failing it`);
+      log(`${session.id}: a keyed turn the last stratusd was running would continue on a harness; failing it`);
       return failAbandoned(session);
     }
     log(`${session.id}: continuing a keyed turn the last stratusd was still running`);

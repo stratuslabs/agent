@@ -316,6 +316,15 @@ export interface Message {
    * with it would otherwise do so on every start. Present only when true.
    */
   continuedAfterCrash?: boolean;
+  /**
+   * The turn this message started could reach a provider that runs its own
+   * tool loop (a harness): what that turn did is not all in this
+   * transcript, so a crash mid-turn cannot be continued from it. Recorded
+   * at accept time, because the runtime a crashed turn ran on is not the
+   * one a restart resolves if the configuration changed in between.
+   * Present only when true; see `RunInput.hostedLoop`.
+   */
+  hostedLoop?: boolean;
 }
 
 export interface AgentDescriptor {
@@ -5257,6 +5266,12 @@ export interface RunInput {
    * `workItemState` and the gateway's `DispatchInput.idempotencyKey`.
    */
   idempotencyKey?: string;
+  /**
+   * Whether this turn may run on a provider that hosts its own tool loop,
+   * stored on the user message (`Message.hostedLoop`). The host knows what
+   * it resolved for the turn; the runner only records it.
+   */
+  hostedLoop?: boolean;
   metadata?: JsonObject;
   /**
    * What the host can say about how this agent is run, rendered as the
@@ -5282,6 +5297,8 @@ export interface ResumeInput {
   addressed?: boolean;
   /** See `RunInput.idempotencyKey`. */
   idempotencyKey?: string;
+  /** See `RunInput.hostedLoop`. */
+  hostedLoop?: boolean;
   /**
    * This turn's metadata — read for the sender's trust
    * (`SENDER_TRUST_METADATA_KEY`) and not merged into the session's. The
@@ -5626,6 +5643,7 @@ export class AgentRunner {
       ...userImages(input.images),
       ...(input.addressed === false ? { overheard: true } : {}),
       ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
     };
     omitImagesOutsideReplayBudget([opening], this.imageReplayBudget);
     const sessionInput: Omit<Session, 'createdAt' | 'updatedAt'> = {
@@ -5728,6 +5746,7 @@ export class AgentRunner {
       // frames it from the same mark.
       ...(input.addressed === false ? { overheard: true } : {}),
       ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
     });
     // Before the save below: the row that carries this turn is the row
     // that stops carrying the pixels nothing can send any more.
