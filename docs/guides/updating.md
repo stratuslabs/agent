@@ -138,8 +138,8 @@ place or the other and never both; a workspace an operator relocated behind
 a symlink is moved *as the link*, so their files stay where they put them.
 A link pointing at another agent's workspace is followed to where that
 workspace is going — including through an alias outside `~/.stratus`, such
-as `workspaces/ava -> /srv/stratus/shared -> workspaces/bea`, since the
-alias is not this migration's to rewrite and keeping it would leave `ava`
+as `workspaces/blair -> /srv/stratus/shared -> workspaces/bea`, since the
+alias is not this migration's to rewrite and keeping it would leave `blair`
 naming nothing. That agent's link is retargeted at the workspace itself, so
 repointing the alias afterwards no longer moves it.
 The ledger's own records follow the move — they are absolute paths, and

@@ -24,6 +24,7 @@ import {
   resolveRuntimeConfig,
   saveConfigFile,
   saveCredentials,
+  trustedConfigError,
 } from '../src/index.ts';
 
 const tempHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-state-'));
@@ -71,6 +72,46 @@ test('credentials file is written owner-read-only', async () => {
   const filePath = path.join(tempHome, '.stratus', 'credentials.json');
   const mode = (await stat(filePath)).mode & 0o777;
   assert.equal(mode, 0o600);
+});
+
+test('trustedConfigError judges exactly the files the trusted block readers read', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-trusted-error-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-trusted-error-cwd-'));
+  const env = { homeDir: home, cwd: project, processEnv: {} };
+  const globalPath = globalConfigPath(env);
+  const projectPath = path.join(project, 'stratus.config.json');
+
+  // No config at all is a fine way to run.
+  assert.equal(await trustedConfigError(env), undefined);
+
+  // A broken global config is the daemon's own, and names itself.
+  await mkdir(path.dirname(globalPath), { recursive: true });
+  await writeFile(globalPath, '{ not json');
+  assert.equal((await trustedConfigError(env))?.configPath, globalPath);
+
+  // Behind a project file it is still what every trusted block falls back
+  // to, so it is still the reason.
+  await writeFile(projectPath, JSON.stringify({ provider: 'demo' }));
+  assert.equal((await trustedConfigError(env))?.configPath, globalPath);
+
+  // A broken project file is not: it could not have set a trusted block.
+  await writeFile(globalPath, JSON.stringify({ provider: 'demo' }));
+  await writeFile(projectPath, '{ not json');
+  assert.equal(await trustedConfigError(env), undefined);
+
+  // A named file is trusted, and one that is missing cannot be read.
+  const named = path.join(project, 'missing.json');
+  assert.equal((await trustedConfigError(env, named))?.configPath, named);
+
+  // A project candidate that cannot even be read — a directory where the
+  // file would be — is still the clone's file, not the daemon's. The
+  // global one behind it is what is judged.
+  const unreadableProject = await mkdtemp(path.join(os.tmpdir(), 'stratus-trusted-error-dir-'));
+  await mkdir(path.join(unreadableProject, 'stratus.config.json'));
+  const behindDirectory = { ...env, cwd: unreadableProject };
+  assert.equal(await trustedConfigError(behindDirectory), undefined);
+  await writeFile(globalPath, '{ not json');
+  assert.equal((await trustedConfigError(behindDirectory))?.configPath, globalPath);
 });
 
 test('config file is written owner-read-only, and a loose one is tightened on the next save', async () => {

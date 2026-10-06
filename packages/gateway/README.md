@@ -18,8 +18,8 @@ import { createGateway } from '@stratusagent/gateway';
 const gateway = createGateway();
 await gateway.start();
 const session = await gateway.dispatch({
-  sessionId: 'slack:ava:T1:C1:171234.5678', // stable → resumable
-  agentId: 'ava',
+  sessionId: 'slack:blair:T1:C1:171234.5678', // stable → resumable
+  agentId: 'blair',
   userMessage: 'morning!',
 });
 await gateway.stop(); // drains in-flight turns first

@@ -30,6 +30,7 @@ import {
   runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
+  trustedConfigError,
   grantReadSerializer,
   grantWriteSerializer,
 } from '@stratusagent/state';
@@ -45,6 +46,7 @@ import { CLI_VERSION } from '../npm.ts';
 import type { ParsedServeCommand } from '../parse.ts';
 import { warnOnCredentialOverride, warnOnUntrustedConfig, warnOnIgnoredConfig } from '../runtime.ts';
 import {
+  CONFIG_INVALID_EXIT_CODE,
   RESTART_EXIT_CODE,
   UNDRAINED_RESTART_EXIT_CODE,
   SUPERVISED_ENV,
@@ -74,6 +76,26 @@ export const runServe = async (
   // that case.
   if (command.logToFile !== false) {
     await truncateRedirectLogs(logsDirPath(env)).catch(() => undefined);
+  }
+
+  // Refused before anything else reads it. Every trusted block degrades on
+  // its own when the file will not load — no plugins, the built-in soul, no
+  // approvers, every Slack sender refused — so a daemon started on a broken
+  // config answered in Slack with no persona and no tools, and looked
+  // healthy while doing it; one install lost an hour to a stray comma that
+  // only stratusd.err.log mentioned (#214). Only at start: a file broken
+  // mid-edit under a running daemon is the gateway's to ride out on its
+  // last good snapshot, and stopping a fleet over a half-saved file is the
+  // worse failure there.
+  const configError = await trustedConfigError(env, command.configPath);
+  if (configError) {
+    writeLine(streams.stderr, `Error: ${configError.message}`);
+    writeLine(
+      streams.stderr,
+      'stratusd will not start on a config it cannot read: every agent would come up without its soul, plugins, '
+      + 'and approvers. Fix the file (`stratus doctor` names the problem), then start it again.',
+    );
+    return CONFIG_INVALID_EXIT_CODE;
   }
 
   // Loaded lazily: the gateway pulls in node:sqlite, which every other CLI
@@ -523,6 +545,19 @@ const serveHeldHome = async (
     onRestart: (outcome) => {
       restart = outcome;
       requestShutdown();
+    },
+    // The replacement asks the same question at its start and exits 78 on
+    // the answer, which systemd will not retry — so a restart over a
+    // half-saved file is refused here, while this daemon can stay up on its
+    // last good snapshot, rather than drained into an outage.
+    restartPreflight: async () => {
+      const configError = await trustedConfigError(env, command.configPath);
+      if (configError) {
+        throw new Error(
+          `${configError.message} A restarted stratusd would refuse to start on it, so this one keeps serving. `
+          + 'Fix the file (`stratus doctor` names the problem), then restart again.',
+        );
+      }
     },
     ...(Object.keys(pluginsConfig).length > 0
       ? {

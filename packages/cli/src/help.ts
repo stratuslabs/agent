@@ -6,11 +6,11 @@ export const HELP_TEXT = `Stratus Agent CLI
 Usage:
   stratus setup
   stratus chat
-  stratus chat --soul ./examples/souls/ava.md
+  stratus chat --soul ./examples/souls/blair.md
   stratus run --prompt "Use the demo tool"
   stratus run "Say hello"
   ANTHROPIC_API_KEY=... stratus run --provider anthropic "Say hello"
-  stratus run --soul ./examples/souls/ava.md "Say hello"
+  stratus run --soul ./examples/souls/blair.md "Say hello"
   echo "Use the echo tool" | stratus run --stdin
   STRATUS_PROVIDER=openai OPENAI_API_KEY=... stratus run "Say hello"
   stratus run --config ./stratus.config.json --provider openai "Say hello"
@@ -19,7 +19,7 @@ Usage:
   stratus template add ./examples/templates/example
   stratus template add stratuslabs/template-oncall --yes
   stratus skill add stratuslabs/skill-code-review
-  stratus skill add ./my-skills --skill code-review --agent ava
+  stratus skill add ./my-skills --skill code-review --agent blair
   stratus skill validate ./my-skill
   stratus skills
   stratus plugins
@@ -28,14 +28,14 @@ Usage:
   stratus restart
   stratus schedules
   stratus schedules cancel <id>
-  stratus grants ava
-  stratus grants revoke ava --tool web.fetch
-  stratus memory list ava
-  stratus memory search ava deploy pipeline
-  stratus memory pin ava ava:memory:...
-  stratus memory export ava --file ava-memory.jsonl
-  stratus memory reassert ava --trust user --all-unknown
-  stratus session rollover slack:ava:T01ABCDEF:D07GHIJKL
+  stratus grants blair
+  stratus grants revoke blair --tool web.fetch
+  stratus memory list blair
+  stratus memory search blair deploy pipeline
+  stratus memory pin blair blair:memory:...
+  stratus memory export blair --file blair-memory.jsonl
+  stratus memory reassert blair --trust user --all-unknown
+  stratus session rollover slack:blair:T01ABCDEF:D07GHIJKL
   printf %s "$BRAVE_KEY" | stratus credential set search.apiKey
   stratus credentials
   stratus doctor
@@ -45,7 +45,7 @@ Usage:
   stratus service install
   stratus service status
   stratus logs -f
-  stratus logs --agent ava -n 200
+  stratus logs --agent blair -n 200
   stratus dashboard
   stratus dashboard --port 4123 --host 0.0.0.0 --no-open
 
@@ -65,7 +65,8 @@ Commands:
   serve            Run stratusd, the always-on gateway: durable sessions, the
                    whole roster live at once (each agent on its own provider),
                    delegation, and a watchdog — one per home (it refuses to
-                   start over a daemon already serving ~/.stratus), and
+                   start over a daemon already serving ~/.stratus, and exits
+                   78 on a trusted config that will not load), and
                    Ctrl+C / SIGTERM drains cleanly
                    (--idle-timeout <seconds>, --approvals <headless|remote>,
                    --no-events, --no-log-file, --config <path>); everything it
@@ -279,7 +280,7 @@ Plugins (tools):
 
     "plugins": {
       "@stratusagent/tool-fs": { "enabled": true, "roots": ["~/notes"],
-                                 "agents": { "ava": { "roots": ["~/work/ava"] } } },
+                                 "agents": { "blair": { "roots": ["~/work/blair"] } } },
       "@stratusagent/tool-web": { "enabled": true }
     }
 
@@ -290,7 +291,7 @@ Plugins (tools):
 
 Soul files:
   A soul file is markdown with frontmatter (name, provider, model, tools, skills, credentials, delegates)
-  followed by the agent's persona in prose. See examples/souls/ava.md.
+  followed by the agent's persona in prose. See examples/souls/blair.md.
   "tools" takes exact names or a whole toolset: tools: [fs.read, fs.search] or
   tools: [fs.*]. Omitted means every registered tool.
   "delegates" lists the agent ids this agent may hand work to with agent.delegate,

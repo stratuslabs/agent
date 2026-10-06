@@ -69,7 +69,7 @@ This is the question you will be asked most. A secret reaches Stratus in one of 
 - **Channel tokens** (a Slack app's tokens): `stratus setup` → Channels, or the dashboard. No agent can read them, yours included.
 - **Named credentials**, such as `search.apiKey`, are for tools whose plugin declares that name. A web search backend is the common one: its key is always `search.apiKey`, whatever the vendor. These are the only secrets you can ask for yourself.
 - **A shell command's or an MCP server's token** is not a named credential: `shell.run` and MCP servers never read the credential store. Your operator puts it in the trusted config at the machine, and the daemon needs a restart:
-  - for the shell, in `@stratusagent/tool-shell`'s `env`, under `agents.<id>` to keep it to one agent (whose commands can then read it);
+  - for the shell, in `@stratusagent/tool-shell`'s `env`, under `agents.<id>` to keep it to one agent (whose commands can then read it). An agent's `env` is added to the shared one rather than replacing it, its own names win, and a name set to `null` there is withheld from that agent;
   - for an MCP server, in `servers.<name>.headers` (HTTP) or `servers.<name>.env` (stdio), which every agent granted `mcp.<name>.*` uses. Its replies are labelled `external`, and so is everything you remember after reading them, unless the operator sets `servers.<name>.outputTrust` to `agent` (or `unknown`) for a server they run; never `user`.
 
   `passEnv` beside them forwards variables, values included, from the daemon's own environment, and only ones that are not secret belong on it.
@@ -145,6 +145,7 @@ When a stored key "isn't found", check in this order:
 - **Running it.** `stratus serve` runs the daemon in the foreground. `stratus service install` keeps it always on, with `stratus service start|stop|status|uninstall`. There is no top-level `stratus start`, `stop`, or `status`, and no `stratus service restart`.
   - On macOS it is a LaunchAgent, started at login, not at power-on. `--no-login` also gives up restarts after a crash.
   - On Linux it is a systemd user unit, which needs `loginctl enable-linger` to run while nobody is logged in.
+  - It will not start while the trusted config (`~/.stratus/config.json`, or the file `--config` names) fails to parse or validate. The error goes to stderr, not `stratus logs`: on Linux the unit then shows as failed until the file is fixed and `stratus service start` is run; on macOS launchd keeps retrying until the file is fixed. A daemon already running keeps its last good config, and `stratus service start`, `stratus update`, and `stratus restart` refuse up front with the same error rather than restart into it.
 - **`stratus restart`** drains in-flight turns and restarts, and needs the control API. Without the API, use `stratus service stop` then `stratus service start`.
   - A restart is needed after a change to `plugins` (a plugin's `env` included), `approvals`, `api`, `principals`, `slack`, `maxTurns`, `executor`, or `memoryStore`, and after new Slack tokens.
   - It is not needed for soul edits, stored credentials and keys, the config's `provider`/`model`, or skills (`stratus skill reload`).

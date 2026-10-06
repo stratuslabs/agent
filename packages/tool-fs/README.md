@@ -21,7 +21,7 @@ npm install @stratusagent/tool-fs
       "enabled": true,
       "roots": ["~/notes"],
       "agents": {
-        "ava":  { "roots": ["~/work/ava"] },
+        "blair":  { "roots": ["~/work/blair"] },
         "juno": { "roots": ["~/work/juno", "~/shared"] }
       }
     }
@@ -38,7 +38,7 @@ second gate, and the per-identity one:
 
 ```markdown
 ---
-id: ava
+id: blair
 tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 ---
 ```

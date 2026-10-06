@@ -30,7 +30,7 @@ Two things make this the moment rather than later:
   aggressiveness — each is recorded as "leaning" one way. Those do not converge
   by argument, and each one relitigated in a PR review costs more than the
   harness that would answer it.
-- **[21](./21-team-knowledge.md) is about to add a second scope and a second
+- **Shared, roster-scoped memory would add a second scope and a second
   writer.** Whatever an entry must carry — validity, authorship, supersession —
   is far cheaper to add while there is one scope and one writer than after a
   shared pool exists with its own rendering and its own mutation policy.
@@ -344,8 +344,8 @@ different review look like.
   of the ordering here; 14 left this open leaning no, and this step's harness
   is what changes the answer from a preference to a result.
 - **The provenance contract.** That is [30](./30-provenance.md).
-- **The shared scope.** That is [21](./21-team-knowledge.md), and it should
-  land on this entry shape rather than beside it.
+- **The shared scope.** That is later work, and it should land on this entry
+  shape rather than beside it.
 - **Deletion.** Nothing in this step deletes anything. Decay ranks; validity
   filters; supersession retires. The record stays the record.
 
@@ -476,8 +476,8 @@ different review look like.
   `episodic` entries: they age fastest, and they carry "what happened last
   time", which does not stop being true when it stops being current. The expiry
   *policy* is settled in Scope; the exemption is arguable on its own.
-- **Does [21](./21-team-knowledge.md)'s `MemoryScope` need a third `project`
-  variant designed now?** An agent working across three repositories wants
+- **Does a shared `MemoryScope` need a third `project` variant designed
+  now?** An agent working across three repositories wants
   repository-scoped facts, and retrofitting a third variant into a union that
   shipped with two is the expensive version of finding that out.
 - **Does the harness ever get a judged mode?** Some questions — is this recall

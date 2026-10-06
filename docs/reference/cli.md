@@ -9,13 +9,13 @@ links to.
 ```bash
 stratus setup                          # onboarding menu: providers, models, agent, plugins, channels, approvals
 stratus chat                           # talk — the conversation persists
-stratus chat --soul ./ava.md
+stratus chat --soul ./blair.md
 stratus run "say hello"
-stratus run --soul ./ava.md "introduce yourself"
+stratus run --soul ./blair.md "introduce yourself"
 stratus run --provider anthropic --model claude-opus-5 "hello"
 stratus run --provider codex "say hello"
 stratus run --prompt "use the echo tool" --format json
-stratus serve                          # stratusd: the whole roster, always on
+stratus serve                          # stratusd: the whole roster, always on; exits 78 on a config it cannot load
 stratus serve --idle-timeout 120 --no-events
 stratus serve --approvals remote       # ask a human in Slack instead of refusing
 stratus service install                # keep stratusd running under launchd/systemd
@@ -24,18 +24,18 @@ stratus service start
 stratus service stop
 stratus service uninstall
 stratus logs -f                        # what the daemon has been doing
-stratus logs --agent ava -n 200
+stratus logs --agent blair -n 200
 stratus doctor                         # what a run would use right now, and why
 stratus update                         # the whole upgrade dance, in the safe order — the CLI and its companions
 stratus update --check                 # report what an update would do, do nothing
 stratus --version                      # which build this is (also: stratus version, stratus -v)
 stratus agent new                      # create an agent (guided on a terminal)
-stratus agent new --name Ava --instructions "You research things." --format soul > ava.md
+stratus agent new --name Blair --instructions "You research things." --format soul > blair.md
 stratus agents                         # who's on the team (also: stratus agent list)
 stratus template add ./my-template     # install an agent, its skills, and the plugins behind them
 stratus template add owner/repo --yes  # …from GitHub, without the review prompt
 stratus skill add owner/repo           # install skills from GitHub or a local path
-stratus skill add owner/repo --skill hn-search --agent ava
+stratus skill add owner/repo --skill hn-search --agent blair
 stratus skill validate ./my-skill      # check a skill (or a repo of them, or an installed id) against the Agent Skills spec
 stratus skills                         # the built-in skill, then what is installed and who enables it (also: stratus skill list)
 stratus skill reload                   # a running daemon re-reads ~/.stratus/skills — no restart
@@ -43,25 +43,25 @@ stratus plugins                        # installed → enabled → granted → w
 stratus plugins --format json          # the same chain as data
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 printf %s "$KEY" | stratus credential set search.apiKey   # store a named credential (value from stdin, never a flag)
-stratus credential set search.apiKey --agent ava         # one agent's own key, over the shared one
+stratus credential set search.apiKey --agent blair       # one agent's own key, over the shared one
 stratus credentials                    # stored names, never values (also: stratus credential list)
 stratus credential remove search.apiKey
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
-stratus grants ava                     # what ava may do unattended: standing tool grants, command scopes, sites
-stratus grants revoke ava --tool web.fetch              # take a standing grant back — a running daemon stops honouring it at once
-stratus grants revoke ava --scope "git push"            # or a command scope, by the line the listing shows
-stratus grants revoke ava --origin https://app.example.com
-stratus memory list ava                # every live fact, with its trust label, pin, and validity
-stratus memory list ava --trust unknown --format json
-stratus memory search ava deploy pipeline               # the way the agent searches: words, and what a fact is about
-stratus memory audit ava               # everything ever written, forgotten included, and what replaced what
-stratus memory pin ava <id>...         # keep facts in the prompt every turn (and memory unpin)
-stratus memory forget ava <id>...      # retire facts; they stay in the record
-stratus memory export ava --file ava.jsonl              # move an agent's memory to another machine
-stratus memory import ava --file ava.jsonl              # lands external unless --preserve-trust
-stratus memory reassert ava --trust user --all-unknown   # re-label every fact with no recorded origin
-stratus memory reassert ava --trust agent <id>...
+stratus grants blair                   # what blair may do unattended: standing tool grants, command scopes, sites
+stratus grants revoke blair --tool web.fetch            # take a standing grant back — a running daemon stops honouring it at once
+stratus grants revoke blair --scope "git push"          # or a command scope, by the line the listing shows
+stratus grants revoke blair --origin https://app.example.com
+stratus memory list blair              # every live fact, with its trust label, pin, and validity
+stratus memory list blair --trust unknown --format json
+stratus memory search blair deploy pipeline             # the way the agent searches: words, and what a fact is about
+stratus memory audit blair             # everything ever written, forgotten included, and what replaced what
+stratus memory pin blair <id>...       # keep facts in the prompt every turn (and memory unpin)
+stratus memory forget blair <id>...    # retire facts; they stay in the record
+stratus memory export blair --file blair.jsonl          # move an agent's memory to another machine
+stratus memory import blair --file blair.jsonl          # lands external unless --preserve-trust
+stratus memory reassert blair --trust user --all-unknown  # re-label every fact with no recorded origin
+stratus memory reassert blair --trust agent <id>...
 stratus session rollover <session-id>  # archive a conversation's transcript and start the same id over
 stratus dashboard                      # local browser dashboard
 ```

@@ -23,7 +23,7 @@ Then the agent's soul decides, per identity:
 
 ```markdown
 ---
-id: ava
+id: blair
 tools: [web.fetch]
 ---
 ```

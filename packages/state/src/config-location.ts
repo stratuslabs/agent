@@ -99,6 +99,32 @@ export type TrustedConfigBlock<T> =
   | { status: 'unreadable'; error: unknown };
 
 /**
+ * Discovery as the trusted readers need it.
+ *
+ * `resolveConfigLocation` throws when a candidate exists and cannot be read,
+ * which is right for a run. For a trusted block it is not: an unreadable
+ * project-local `stratus.config.json` (a directory, a file with no read
+ * permission) is an untrusted file that could not have set a trusted block
+ * anyway, and failing on it let a checkout stop the daemon, or empty every
+ * trusted block, by what it ships. Discovery reads candidates only, never an
+ * explicitly named path, so a throw names the project candidate or the
+ * global file, and only the second is a trusted failure.
+ */
+const trustedReadLocation = async (
+  env: StateEnvironment,
+  configPath: string | undefined,
+): Promise<ResolvedConfigLocation | undefined> => {
+  try {
+    return await resolveConfigLocation(configPath ? { configPath } : {}, env);
+  } catch (error) {
+    if (error instanceof ConfigFileError && error.configPath !== globalConfigPath(env)) {
+      return { path: error.configPath, trusted: false };
+    }
+    throw error;
+  }
+};
+
+/**
  * Read one block of the daemon's own config, honouring the trust boundary.
  *
  * `api`, `approvals`, and `plugins` are all read this way: which interface
@@ -121,7 +147,7 @@ export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
 ): Promise<TrustedConfigBlock<NonNullable<StratusConfigFile[K]>>> => {
   let location: ResolvedConfigLocation | undefined;
   try {
-    location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
+    location = await trustedReadLocation(env, configPath);
     if (!location) {
       return { status: 'absent' };
     }
@@ -176,4 +202,54 @@ export const readGlobalConfigBlock = async <K extends keyof StratusConfigFile>(
       : { status: 'unreadable', error };
   }
   return readTrustedConfigBlock(key, env, globalPath);
+};
+
+/**
+ * Why the trusted config a daemon would read cannot be used, if it cannot.
+ *
+ * Exactly the files `readTrustedConfigBlock` reads, so it answers "would a
+ * block come back `unreadable`": the file discovery picks when that file is
+ * trusted, and the global one behind an untrusted project file. A project
+ * file that fails to parse is not a reason, by the same rule the block
+ * reader follows — it could not have set a trusted block whatever it said,
+ * and a malformed file in a clone must not keep the operator's daemon down.
+ * Nor is one that cannot be read at all; see `trustedReadLocation`.
+ *
+ * Exists for `stratus serve`'s start (#214). Each block degrades on its own
+ * when the file will not load — no plugins, the built-in soul, no
+ * approvers, every Slack sender refused — so a daemon on a broken file
+ * comes up answering in Slack as nobody, with no tools, and looks healthy.
+ * A daemon already running keeps its last good config instead; that is the
+ * gateway's call, and this is not consulted there.
+ */
+export const trustedConfigError = async (
+  env: StateEnvironment,
+  configPath?: string,
+): Promise<ConfigFileError | undefined> => {
+  const asConfigError = (filePath: string, error: unknown): ConfigFileError =>
+    error instanceof ConfigFileError ? error : new ConfigFileError(filePath, error);
+  let location: ResolvedConfigLocation | undefined;
+  try {
+    location = await trustedReadLocation(env, configPath);
+  } catch (error) {
+    return asConfigError(configPath ?? globalConfigPath(env), error);
+  }
+  if (location === undefined) {
+    return undefined;
+  }
+  let trustedPath = location.path;
+  if (!location.trusted) {
+    trustedPath = globalConfigPath(env);
+    try {
+      await stat(trustedPath);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : asConfigError(trustedPath, error);
+    }
+  }
+  try {
+    await loadConfigFile(trustedPath);
+    return undefined;
+  } catch (error) {
+    return asConfigError(trustedPath, error);
+  }
 };

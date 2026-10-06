@@ -23,8 +23,8 @@ half-monitoring-system nobody maintains.
 
 It also gives two other steps somewhere to land. [17](./17-fleet-console.md)
 needs a notion of *what is worth attention* to be more than a list viewer, and
-[21](./21-team-knowledge.md)'s revision lane needs somewhere for a backlog to
-surface when nobody has opened the console in a week.
+a lane for reviewing what agents propose to share needs somewhere for a
+backlog to surface when nobody has opened the console in a week.
 
 ## Scope
 
@@ -135,8 +135,8 @@ surface when nobody has opened the console in a week.
   good and someone opens it daily, a digest agent adds little. The case for
   building it anyway is that nobody opens a console daily, and the digest goes
   where they already are. Worth revisiting once 17 is real.
-- **Where does "pending review" come from before [21](./21-team-knowledge.md)?**
-  Approvals and schedules exist now; the revision lane does not. The toolset
+- **Where does "pending review" come from?** Approvals and schedules exist
+  now; a lane for reviewing what agents propose to share does not. The toolset
   can ship with what exists and grow, or wait — probably ship.
 - **Per-agent or fleet-wide scoping?** A watcher wants the fleet. An ordinary
   agent asking about *itself* — its own usage, its own schedules — is a

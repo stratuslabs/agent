@@ -242,7 +242,7 @@ agent* / *not for it*, scored on false-speech (interrupting) far more heavily
 than on false-silence (missing a cue), because a colleague who misses one
 question is easier to live with than one who answers every message.
 
-Dismissal needs no mechanism. "Thanks Ava, we'll take it from here" is a
+Dismissal needs no mechanism. "Thanks Blair, we'll take it from here" is a
 sentence, and an agent that reads the thread reads that too — which is the
 test of whether this design is the right one.
 
