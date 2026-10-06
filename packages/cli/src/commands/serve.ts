@@ -40,7 +40,7 @@ import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
 import { formatEvent, eventDetail } from '../events.ts';
 import { writeLine } from '../io.ts';
-import { loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
+import { hostChannelClaimsFor, loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
 import { CLI_VERSION } from '../npm.ts';
 import type { ParsedServeCommand } from '../parse.ts';
@@ -583,7 +583,7 @@ const serveHeldHome = async (
     // The Slack adapter is host-wired, so its (agent, kind) claims are
     // declared here; a plugin channel claiming one of them is refused at
     // load rather than started beside it.
-    ...(slackAdapterUp ? { hostChannelClaims: [{ kind: 'slack', agents: slackAgents.map(([agentId]) => agentId) }] } : {}),
+    ...(slackAdapterUp ? { hostChannelClaims: hostChannelClaimsFor(slackAgents.map(([agentId]) => agentId), slackAdapterUp) } : {}),
     log,
     warn,
   });
