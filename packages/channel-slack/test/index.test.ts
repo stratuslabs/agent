@@ -8321,19 +8321,26 @@ test('a repeat does not upload a file whose times were set back to before its tu
   assert.deepEqual(web.uploads, []);
 });
 
-test('a redelivery the start-up sweep finished while it waited does not post that outcome again', async () => {
+test('a redelivery the start-up sweep finished while it waited posts that outcome once, whoever posts it', async () => {
   // The sweep takes the session's chain first and finishes this message's
   // turn; its outcome is reported ahead of the queued redelivery as a turn
-  // nobody was rendering. The redelivery then finds the key finished.
-  for (const replies of ['stream', 'final'] as const) {
+  // nobody was rendering. The redelivery then finds the key finished, and
+  // stands down only if that report reached the thread — one that could
+  // not read the routing leaves the redelivery to say it.
+  for (const [replies, reported] of [['stream', true], ['final', true], ['stream', false], ['final', false]] as const) {
     const socket = createFakeSocket();
     const web = createFakeWeb('B-AVA', 'T1');
     const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
-    gateway.sessionRouting = async () => ({
-      agentId: 'ava',
-      metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
-      reply: 'the recovered answer',
-    });
+    gateway.sessionRouting = async () => {
+      if (!reported) {
+        throw new Error('the store is unavailable');
+      }
+      return {
+        agentId: 'ava',
+        metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+        reply: 'the recovered answer',
+      };
+    };
     gateway.dispatch = async (input) => {
       await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
       input.onRepeat?.('finished');
@@ -8355,11 +8362,13 @@ test('a redelivery the start-up sweep finished while it waited does not post tha
       editIntervalMs: 0,
       createSocketClient: () => socket,
       createWebClient: () => web,
+      warn: () => {},
     });
     await adapter.start(gateway);
     await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
     await adapter.stop();
     const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
-    assert.equal(said.filter((text) => text === 'the recovered answer').length, 1, `${replies}: said ${said.filter((text) => text === 'the recovered answer').length} times`);
+    const times = said.filter((text) => text === 'the recovered answer').length;
+    assert.equal(times, 1, `${replies}, ${reported ? 'reported' : 'report failed'}: said ${times} times`);
   }
 });

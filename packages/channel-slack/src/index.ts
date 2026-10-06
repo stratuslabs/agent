@@ -644,13 +644,14 @@ class ReplyRenderer {
    */
   private handover: Promise<void> = Promise.resolve();
   /**
-   * Whether the outcome of a turn nobody was rendering was reported ahead
-   * of this renderer while it waited (`reserveHandover`) — through its
-   * placeholder or as messages of their own. Set when the report is
-   * claimed, before the turn it reports lets this renderer's dispatch go,
-   * so a repeat resolving after it can tell its own turn was that one.
+   * The report of a turn nobody was rendering, made ahead of this renderer
+   * while it waited — through its placeholder or as messages of their own
+   * — resolving to whether that outcome reached the thread. Set when the
+   * report is claimed, before the turn it reports lets this renderer's
+   * dispatch go, so a repeat resolving after it can tell its own turn was
+   * that one, and stand down only if the report actually said it.
    */
-  outcomeReportedAhead = false;
+  outcomeReportedAhead: Promise<boolean> | undefined;
   /**
    * Bumped by a handover. An edit scheduled before it carries the text of
    * the turn that was handed over — the recovery's stream, routed to this
@@ -1320,7 +1321,6 @@ class ReplyRenderer {
    * awaits anything (see `HandoverClaim`).
    */
   reserveHandover(): HandoverClaim {
-    this.outcomeReportedAhead = true;
     // One handover at a time: two turns ahead of this one finishing close
     // together would otherwise both take the placeholder as they found it,
     // and the second would write over the first's reply. Each waits for
@@ -3218,10 +3218,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     event: Extract<StratusEvent, { type: 'session.failed' }>,
     behind: HandoverClaim | undefined,
     files: readonly string[],
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
-      return;
+      return false;
     }
     let routing;
     try {
@@ -3231,17 +3231,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // the turn is already failed — there is nothing here to salvage
       // beyond saying why the thread stayed quiet.
       warn(`slack: could not read the routing for a failed turn: ${error instanceof Error ? error.message : String(error)}`);
-      return;
+      return false;
     }
     const metadata = routing?.metadata;
     // Another surface's session, or one with no conversation to speak
     // into. Not this adapter's to answer either way.
     if (!routing || metadata?.channel !== 'slack' || typeof metadata.slackChannel !== 'string') {
-      return;
+      return false;
     }
     const connection = connectionFor(routing.agentId);
     if (!connection) {
-      return;
+      return false;
     }
     const channel = metadata.slackChannel;
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
@@ -3263,9 +3263,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // only to a turn that had already chosen to speak.
       warn(`slack: a turn nobody asked for failed before saying anything: ${event.error}`);
       await uploadUnrenderedFiles(connection, channel, thread, files);
-      return;
+      return true;
     }
-    await postAheadOf(
+    return postAheadOf(
       behind,
       connection,
       channel,
@@ -3288,25 +3288,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     event: Extract<StratusEvent, { type: 'session.completed' }>,
     behind: HandoverClaim | undefined,
     files: readonly string[],
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
-      return;
+      return false;
     }
     let routing;
     try {
       routing = await gateway.sessionRouting(event.sessionId);
     } catch (error) {
       warn(`slack: could not read the routing for a finished turn: ${error instanceof Error ? error.message : String(error)}`);
-      return;
+      return false;
     }
     const metadata = routing?.metadata;
     if (!routing || metadata?.channel !== 'slack' || typeof metadata.slackChannel !== 'string') {
-      return;
+      return false;
     }
     const connection = connectionFor(routing.agentId);
     if (!connection) {
-      return;
+      return false;
     }
     const channel = metadata.slackChannel;
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
@@ -3322,7 +3322,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const uploads = (): Promise<void> => uploadUnrenderedFiles(connection, channel, thread, files);
     if (posting.length === 0) {
       await uploads();
-      return;
+      return true;
     }
     // A reply the thread's other agents hear like any other, taking their
     // place for it before the post, as `handleInbound` does.
@@ -3330,9 +3330,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const heard = routing.reply !== undefined && thread !== undefined
       ? overhearReply(connection, channel, thread, routing.reply, routing, published)
       : undefined;
-    await published;
+    const delivered = await published;
     await heard;
     log(`slack: posted the reply of a turn finished after a restart to ${channel}`);
+    return delivered;
   };
 
   /**
@@ -4520,9 +4521,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // redelivery waited behind it: that outcome was reported ahead of this
     // renderer as a turn nobody was rendering, and posting it here would
     // say it twice. It was this message's turn if it is the session's
-    // latest — anything finished after it would be the latest instead.
+    // latest — anything finished after it would be the latest instead —
+    // and only if the report reached the thread; one that found no route
+    // or that Slack refused leaves this redelivery to say it.
     const finished = repeat() === 'finished';
-    if (session && finished && renderer.outcomeReportedAhead && isLatestTurn(session, eventKey)) {
+    const reportedAhead = renderer.outcomeReportedAhead;
+    if (session && finished && reportedAhead !== undefined && isLatestTurn(session, eventKey) && await reportedAhead) {
       await renderer.withdraw();
       renderers.get(sessionId)?.[0]?.refreshLoading();
       return;
@@ -4683,7 +4687,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // connection — never leaves the queued reply stalled behind it.
         if (event.type === 'session.failed' && !rendered) {
           const claim = head?.reserveHandover();
-          track(reportUnrenderedFailure(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => {
+          const report = reportUnrenderedFailure(event, claim, takeUnrenderedFiles(event.sessionId));
+          if (head) {
+            head.outcomeReportedAhead = report.catch(() => false);
+          }
+          track(report.then(() => {}).finally(() => {
             claim?.release();
             head?.refreshLoading();
           }));
@@ -4691,7 +4699,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         }
         if (event.type === 'session.completed' && !rendered) {
           const claim = head?.reserveHandover();
-          track(reportUnrenderedReply(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => {
+          const report = reportUnrenderedReply(event, claim, takeUnrenderedFiles(event.sessionId));
+          if (head) {
+            head.outcomeReportedAhead = report.catch(() => false);
+          }
+          track(report.then(() => {}).finally(() => {
             claim?.release();
             head?.refreshLoading();
           }));
