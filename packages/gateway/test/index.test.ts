@@ -5668,3 +5668,57 @@ test('a repeat attached to an unnamed live dispatch whose turn fails is still to
     await gateway.stop();
   }
 });
+
+test('a refused claimant that registered a key first does not leave its owner\'s turn without a live entry', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      if (calls === 2) {
+        started();
+        await held;
+      }
+      return openAiText('reply');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    // The session is Blair's.
+    await gateway.dispatch({ sessionId: 'claim-1', agentId: 'blair', userMessage: 'first', idempotencyKey: 'k0' });
+    const repeats: string[] = [];
+    // A claimant naming another agent gets to the new key first, and is refused.
+    const wrong = gateway.dispatch({ sessionId: 'claim-1', agentId: 'cora', userMessage: 'hello', idempotencyKey: 'k1' });
+    const owner = gateway.dispatch({ sessionId: 'claim-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1' });
+    await assert.rejects(wrong, /belongs to agent blair, not cora/);
+    // While the owner's turn runs, its redelivery attaches to it.
+    await running;
+    const redelivered = gateway.dispatch({
+      sessionId: 'claim-1',
+      agentId: 'blair',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(kind),
+    });
+    release();
+    await owner;
+    await redelivered;
+    assert.deepEqual(repeats, ['live']);
+  } finally {
+    release();
+    await gateway.stop();
+  }
+});

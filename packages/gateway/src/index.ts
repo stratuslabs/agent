@@ -3546,12 +3546,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return attach();
     }
 
-    const turn = onSessionChain(input.sessionId, async () => {
+    // Reads `turn` only once it is assigned: the registration below runs
+    // after it, and the chain's work runs in a later tick (`.then`).
+    const claimLiveItem = (key: string): void => {
+      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, { turn: Promise<Session>; agentId: string | undefined }>();
+      items.set(key, { turn, agentId: input.agentId });
+      liveWorkItems.set(input.sessionId, items);
+    };
+    const turn: Promise<Session> = onSessionChain(input.sessionId, async () => {
       // Before `activeTurns` is touched: a repeat that runs nothing must
       // not claim the session's turn id, even for the instant it takes.
       const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, input.agentId, turnId, input.onRepeat) : undefined;
       if (repeated !== undefined) {
         return repeated;
+      }
+      // Past the identity check with a key the session has not seen, so this
+      // dispatch owns the item: it becomes the live entry even if a claimant
+      // that was then refused registered first, or a repeat arriving while
+      // this turn runs would find nothing to attach to, queue, and read the
+      // turn as finished — a second answer beside this caller's.
+      if (idempotencyKey !== undefined) {
+        claimLiveItem(idempotencyKey);
       }
       await settleOrphanedItem(input.sessionId);
       if (turnId === undefined) {
@@ -3568,13 +3583,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
     });
     if (idempotencyKey !== undefined) {
-      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, { turn: Promise<Session>; agentId: string | undefined }>();
       // A repeat that queued instead of attaching — it named another agent,
       // and is about to be refused — must not displace the turn it repeats.
-      if (!items.has(idempotencyKey)) {
-        items.set(idempotencyKey, { turn, agentId: input.agentId });
+      // The first registration is provisional; the chain confirms it
+      // (`claimLiveItem` above) once the dispatch is known to own the item.
+      if (liveWorkItems.get(input.sessionId)?.has(idempotencyKey) !== true) {
+        claimLiveItem(idempotencyKey);
       }
-      liveWorkItems.set(input.sessionId, items);
       void turn.catch(() => {}).finally(() => {
         const current = liveWorkItems.get(input.sessionId);
         if (current?.get(idempotencyKey)?.turn === turn) {
