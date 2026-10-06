@@ -5882,11 +5882,18 @@ export class AgentRunner {
   }
 
   /**
-   * Appends a synthetic failed result directly after every tool call that
-   * has none — the durable trace of a turn interrupted between the call's
-   * save and its result's. The model sees an honest record ("interrupted,
-   * never ran to completion") instead of a wire-format violation, and a
-   * resume can decide to retry rather than assume the side effect landed.
+   * Adds a synthetic failed result for every tool call that has none — the
+   * durable trace of a turn interrupted between the call's save and its
+   * result's. The model sees an honest record ("interrupted, never ran to
+   * completion") instead of a wire-format violation, and a resume can
+   * decide to retry rather than assume the side effect landed.
+   *
+   * Placed where an uninterrupted turn would have written it: after the
+   * whole response the call came in — every assistant message that one
+   * save wrote — and after any results already recorded for it. Directly
+   * after the call would split a response whose text followed its call, and
+   * a provider replaying the response's raw turn (which already holds that
+   * text) would then send the text a second time.
    */
   private reconcileInterruptedToolCalls(session: Session): void {
     // Matched by OCCURRENCE, not by id alone: providers can reuse ids
@@ -5902,9 +5909,12 @@ export class AgentRunner {
       }
     }
 
+    const messages = session.messages;
+    // By the index of the message they go after.
+    const inserts = new Map<number, Message[]>();
     const callsSeen = new Map<string, number>();
-    for (let index = 0; index < session.messages.length; index += 1) {
-      const message = session.messages[index];
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index];
       if (message?.role !== 'assistant' || !message.toolCalls) {
         continue;
       }
@@ -5924,16 +5934,25 @@ export class AgentRunner {
           // The kernel's own sentence, not the tool's output.
           trust: 'agent',
         };
-        index += 1;
-        session.messages.splice(index, 0, {
+        let end = index;
+        while (messages[end + 1]?.role === 'assistant') {
+          end += 1;
+        }
+        while (messages[end + 1]?.role === 'tool') {
+          end += 1;
+        }
+        inserts.set(end, [...(inserts.get(end) ?? []), {
           id: `${session.id}:tool:${call.id}`,
           role: 'tool',
           name: call.toolName,
           content: JSON.stringify(result),
           createdAt: new Date().toISOString(),
           toolResult: result,
-        });
+        }]);
       }
+    }
+    if (inserts.size > 0) {
+      messages.splice(0, messages.length, ...messages.flatMap((message, index) => [message, ...(inserts.get(index) ?? [])]));
     }
   }
 

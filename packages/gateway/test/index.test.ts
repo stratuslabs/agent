@@ -5070,6 +5070,12 @@ test('a continued turn whose last response held a call before its text goes back
   assert.equal(calls, 1);
   assert.equal(session?.messages.at(-1)?.content, 'it was interrupted; here is where things stand');
   assert.ok(session?.messages.some((message) => message.role === 'tool' && message.toolResult?.callId === 'call-1' && message.toolResult.ok === false));
+  // The interrupted result goes after the whole response, as a finished
+  // turn writes it: between the call and its text, a provider replaying the
+  // response's raw turn would send the text twice.
+  assert.deepEqual(session?.messages.map((message) => message.id === 'a2' ? 'text' : message.role), [
+    'user', 'assistant', 'text', 'tool', 'assistant',
+  ]);
 });
 
 test('a keyed turn on a session switched for good to a stateless fallback is not marked as reaching a harness', async () => {
