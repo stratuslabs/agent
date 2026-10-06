@@ -229,8 +229,9 @@ export interface GatewayLike {
    */
   sessionRouting?(sessionId: string): Promise<SessionRouting | undefined>;
   /**
-   * Whether a session already holds the message an idempotency key names — a
-   * turn was started for it, finished or not. Asked before routing a message
+   * Whether a session already accepted the message an idempotency key names,
+   * as addressed to it — a turn was started for it, finished or not; a turn
+   * nobody asked for (`addressed: false`) does not count. Asked before routing a message
    * that more than one agent could answer: one an agent already accepted is
    * that agent's, whoever the routing rule would pick now. Optional: a host
    * without it leaves the choice to the rule alone, which after a restart can

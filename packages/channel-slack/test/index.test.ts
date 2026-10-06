@@ -8721,3 +8721,40 @@ test('after a restart, a live agent stands down for an offline one that already 
 
   assert.deepEqual(gateway.dispatches, []);
 });
+
+test('after a restart, an agent that took a message keeps it though it listens differently now', async () => {
+  // Ava took the reply under the thread rule; the operator has since set her
+  // to mentions only. Bea, the newer speaker, must not run it again.
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava', listens: 'mentions' },
+    { id: 'bea', name: 'Bea' },
+  ];
+  gateway.sessionRouting = async (sessionId: string) => {
+    const agentId = sessionId.split(':')[1] ?? '';
+    return { agentId, metadata: {}, lastSpokeAt: agentId === 'bea' ? '2026-01-01T00:00:09.000Z' : '2026-01-01T00:00:01.000Z' };
+  };
+  gateway.holdsMessage = async (sessionId: string, key: string) =>
+    sessionId.startsWith('slack:ava:') && key === 'ava:C1:995.1';
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const redelivered = channelMessage({ text: 'so?', ts: '995.1', thread: '995.0' });
+  await socketAva.deliver('message', redelivered);
+  await socketBea.deliver('message', redelivered);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches, []);
+});

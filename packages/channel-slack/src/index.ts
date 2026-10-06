@@ -3912,16 +3912,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // A message an agent already accepted is that agent's, whoever has spoken
     // since. Nothing in memory says so after a restart, and the order below
     // would hand a redelivery to the newer speaker — whose session holds no
-    // key for it, so it would run the message as new. Asked of the agents the
-    // thread rule routes, the only ones this verdict picks between — every
-    // configured one, not only those connected, unlike the order below: an
+    // key for it, so it would run the message as new. Asked of every
+    // configured agent, whatever it listens to now and whether or not it is
+    // connected, unlike the order below: what counts is that it took the
+    // message as addressed to it (a judging agent's turn nobody asked for
+    // does not), an operator may have changed how it listens since, and an
     // owner whose app failed to come back after the restart still started
-    // that turn, and the live agents stand down for it rather than run it
-    // again. Its workspace is the one it last authenticated in, when known.
+    // that turn — the live agents stand down for it rather than run it again.
+    // Its workspace is the one it last authenticated in, when known.
     if (gateway.holdsMessage) {
       for (const agentId of configuredAgents) {
         const teamId = botIdentities.get(agentId)?.teamId;
-        if ((teamId !== undefined && teamId !== parts.team) || listensOf(agentId) !== 'thread') {
+        if (teamId !== undefined && teamId !== parts.team) {
           continue;
         }
         const sessionId = channelSessionKey({

@@ -470,7 +470,8 @@ capability rather than an assumption:
   was posted before a crash. Slack does all of it. Without it, an adapter delivering at
   least once has only in-memory dedupe, which a restart erases.
 - `GatewayLike.holdsMessage(sessionId, key)` says whether a session already
-  started a turn for a key. An adapter that picks between agents for one
+  accepted a key's message as addressed to it: a turn started for it, or
+  still queued (a turn nobody asked for does not count). An adapter that picks between agents for one
   message asks it first: a message an agent already accepted stays that
   agent's, whoever its routing rule would pick now. Slack asks it before the
   "whoever spoke last" rule, which after a restart would otherwise hand a

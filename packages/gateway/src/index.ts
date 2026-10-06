@@ -908,11 +908,13 @@ export interface Gateway {
    */
   sessionRouting(sessionId: string): Promise<SessionRouting | undefined>;
   /**
-   * Whether a session already holds the message an idempotency key names: a
-   * turn was started for it, finished or not, here or in the transcript a
-   * recent rollover archived (`settleRepeat` reads the same). Lets a channel
-   * route a redelivered message to the agent that already accepted it rather
-   * than to whoever its routing rule would pick now.
+   * Whether a session already accepted the message an idempotency key names,
+   * as addressed to it: a turn was started for it, finished, running or
+   * still queued, here or in the transcript a recent rollover archived
+   * (`settleRepeat` reads the same). A turn nobody asked for
+   * (`addressed: false`) does not count — that agent heard the message, it
+   * did not take it. Lets a channel route a redelivered message to the agent
+   * that accepted it rather than to whoever its routing rule picks now.
    */
   holdsMessage(sessionId: string, idempotencyKey: string): Promise<boolean>;
   /**
@@ -4197,11 +4199,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     observe,
 
     async holdsMessage(sessionId: string, idempotencyKey: string) {
+      // A dispatch still queued behind another turn holds the message too:
+      // its key reaches the transcript only when the chain gets to it.
+      if (liveWorkItems.get(sessionId)?.has(idempotencyKey) === true) {
+        return true;
+      }
       const session = await store.get(sessionId);
       if (session === undefined) {
         return false;
       }
-      return workItemState(session, idempotencyKey) !== undefined || (await archivedRepeat(session, idempotencyKey)) !== undefined;
+      const transcript = workItemState(session, idempotencyKey) !== undefined ? session : await archivedRepeat(session, idempotencyKey);
+      // Accepted as addressed: a turn nobody asked for (`addressed: false`,
+      // stored overheard) was this agent hearing the message, not taking it.
+      const keyed = transcript?.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+      return keyed !== undefined && keyed.overheard !== true;
     },
 
     async sessionRouting(sessionId: string) {
