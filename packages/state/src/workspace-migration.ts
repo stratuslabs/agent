@@ -2088,6 +2088,10 @@ export const applyPerAgentWorkspaces = async (
       const ourRecreate = leadsNowhere && ownerDirectory !== undefined
         && destinationBefore !== undefined && sourceBefore !== undefined
         && await destinationIsOurRecreate(from, target)
+        // Asked again inside the stamped window: `leadsNowhere` was answered
+        // before any snapshot, and a target briefly away then would have the
+        // source dangle for that one look while resolving again by now.
+        && !(await resolves(from))
         && await lstat(target).then(stampOf, () => undefined) === destinationBefore
         && await lstat(from).then(stampOf, () => undefined) === sourceBefore
         && await parentsSteady();
