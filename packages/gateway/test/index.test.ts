@@ -5592,3 +5592,40 @@ test('a repeat arriving just after a rollover is found in the archived transcrip
     await gateway.stop();
   }
 });
+
+test('a repeat naming the agent a live dispatch left unnamed attaches to it, and is refused for any other', async () => {
+  const home = await newHome();
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('reply')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    const repeats: string[] = [];
+    // The default agent's — the built-in one, here — with no agent named.
+    const first = gateway.dispatch({ sessionId: 'unnamed-1', userMessage: 'hello', idempotencyKey: 'k1' });
+    const named = gateway.dispatch({
+      sessionId: 'unnamed-1',
+      agentId: 'stratus',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(`stratus: ${kind}`),
+    });
+    const other = gateway.dispatch({
+      sessionId: 'unnamed-1',
+      agentId: 'cora',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(`cora: ${kind}`),
+    });
+    await assert.rejects(other, /belongs to agent stratus, not cora/);
+    assert.equal((await named).agent.id, 'stratus');
+    await first;
+    assert.deepEqual(repeats, ['stratus: live']);
+  } finally {
+    await gateway.stop();
+  }
+});

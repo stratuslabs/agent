@@ -3511,6 +3511,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       input.onRepeat?.('live');
       return live.turn;
     }
+    // The live dispatch named no agent, so whose session it is is known
+    // only once its turn resolves. Queueing instead would make this a
+    // `finished` repeat of a turn the live caller is still rendering — two
+    // answers — so it attaches, and is held to the agent it named then:
+    // told it repeated only if that agent owns the session, refused if not.
+    const claimed = input.agentId;
+    if (live !== undefined && live.agentId === undefined && claimed !== undefined) {
+      return live.turn.then((session) => {
+        if (session.agent.id !== claimed) {
+          throw crossIdentityError(input.sessionId, session.agent.id, claimed);
+        }
+        input.onRepeat?.('live');
+        return session;
+      });
+    }
 
     const turn = onSessionChain(input.sessionId, async () => {
       // Before `activeTurns` is touched: a repeat that runs nothing must
