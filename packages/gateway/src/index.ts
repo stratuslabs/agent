@@ -7,6 +7,7 @@ import {
   isUnaddressedTurn,
   workItemState,
   lastResponseIsAnswer,
+  completeAnsweredTurn,
   abortErrorFor,
   AgentRegistry,
   AgentRunner,
@@ -3183,10 +3184,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return failAbandoned(session);
     }
     // An answer already in the transcript is completed whatever came before
-    // — a second crash, a harness — because completing it calls no provider
-    // and runs nothing again; failing it would throw away a finished reply.
+    // — a second crash, a harness, an agent or provider gone since —
+    // because completing it needs none of them and runs nothing again;
+    // failing it would throw away a finished reply.
     if (lastResponseIsAnswer(session)) {
-      return continueAbandonedTurn(session, { answered: true });
+      log(`${session.id}: a keyed turn the last stratusd was running had saved its answer; completing it`);
+      return completeAnsweredTurn(session, store, bus);
     }
     if (message.continuedAfterCrash === true) {
       return failAbandoned(session);
@@ -3220,11 +3223,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * provider call and keeps its own conversation, so the prompt the dead
    * turn sent may already have run tools there that the transcript never
    * saw, and continuing would send it again. That turn is failed as an
-   * unkeyed one is — the same answer as before keys existed. The one
-   * exception is a turn whose answer is already saved (`answered`): that
-   * only needs marking completed, and sends nothing anywhere.
+   * unkeyed one is — the same answer as before keys existed. (A turn whose
+   * answer is already saved never gets here: `settleAbandonedTurn`
+   * completes it first.)
    */
-  const continueAbandonedTurn = async (session: Session, options: { answered?: boolean } = {}): Promise<Session> => {
+  const continueAbandonedTurn = async (session: Session): Promise<Session> => {
     // Settled either way: a turn whose agent left the roster, or whose
     // provider no longer resolves, must not stay `running` for every later
     // start and every redelivery to find unfinished and trip over again.
@@ -3241,7 +3244,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // The message's own record covers the runtimes the turn could have run
     // on; this covers the ones it would continue on — a fallback included —
     // which a changed config may make a harness.
-    if (options.answered !== true && reachesHarness(config, switchedToFallback)) {
+    if (reachesHarness(config, switchedToFallback)) {
       log(`${session.id}: a keyed turn the last stratusd was running would continue on a harness; failing it`);
       return failAbandoned(session);
     }

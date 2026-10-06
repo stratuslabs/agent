@@ -5272,3 +5272,41 @@ test('a saved answer is completed even after a second crash, and even on a harne
   assert.equal(session?.status, 'completed');
   assert.equal(session?.messages.at(-1)?.content, 'the saved answer');
 });
+
+test('a saved answer is completed even when its agent is gone', async () => {
+  // Completing it needs no current agent and no provider, so neither
+  // missing is a reason to throw the finished reply away.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+  const now = new Date().toISOString();
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-answered-orphan-1',
+    agent: { id: 'gone', name: 'Gone' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'hello', createdAt: now, idempotencyKey: 'msg-1' },
+      { id: 'a1', role: 'assistant', content: 'the saved answer', createdAt: now },
+    ],
+  });
+  before.close();
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('unused')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const completed = eventGate(gateway, (event) => event.type === 'session.completed' && event.sessionId === 'keyed-answered-orphan-1');
+  await gateway.start();
+  await gateway.stop().then(() => completed.give_up('the saved answer was failed, not completed'));
+  await completed.seen;
+
+  const after = new ShardedSessionStore({ stateDir });
+  const session = await after.get('keyed-answered-orphan-1');
+  after.close();
+  assert.equal(session?.status, 'completed');
+  assert.equal(session?.messages.at(-1)?.content, 'the saved answer');
+});

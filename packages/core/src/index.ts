@@ -3136,6 +3136,44 @@ export const lastResponseIsAnswer = (session: Pick<Session, 'messages'>): boolea
 };
 
 /**
+ * The end of a turn that answered: marked completed in one save, then
+ * announced. The runner's loop ends here, and so does a turn whose answer
+ * a process saved and then died before marking it completed — which needs
+ * no provider and no current agent definition to finish, so a host can do
+ * it with only its store and bus (`lastResponseIsAnswer` says when).
+ */
+export const completeAnsweredTurn = async (finished: Session, store: SessionStore, bus: EventBus): Promise<Session> => {
+  let session = finished;
+  session.status = 'completed';
+  await store.save(session);
+  const stored = await store.get(session.id);
+  session = stored ?? session;
+  await bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
+  await bus.emit({
+    type: 'session.completed',
+    sessionId: session.id,
+    // Copies all the way down — a fresh array of fresh records, not the
+    // session's own. This is durable accounting state rather than a
+    // per-event payload, so a subscriber that sorts the list, appends to
+    // it, or normalizes a count in place must not be reaching the stored
+    // record. A shallow array copy is not enough: the record objects
+    // behind it are the ones the session holds, and
+    // `InMemorySessionStore` hands the very same objects back on the
+    // next read.
+    //
+    // What this does NOT buy is isolation between subscribers. `emit`
+    // hands one event object to every handler in turn, so an earlier
+    // handler's edits are visible to later ones — true of `parts` on
+    // provider.response and of every other payload on this bus, and not
+    // a promise the bus has ever made. Copy before mutating.
+    ...(session.usage && session.usage.length > 0
+      ? { usage: session.usage.map((record) => ({ ...record })) }
+      : {}),
+  });
+  return session;
+};
+
+/**
  * The reply of the turn a keyed message started (`Message.idempotencyKey`),
  * where `latestTurnReply` is the newest turn's. A repeated dispatch resolves
  * with the session as it stands, which may have moved on since: an adapter
@@ -6428,40 +6466,9 @@ export class AgentRunner {
     }
   }
 
-  /**
-   * The end of a turn that answered: marked completed in one save, then
-   * announced. Shared by the loop and by `continueTurn`, which can find a
-   * turn whose answer was saved by a process that died before this ran.
-   */
+  /** See `completeAnsweredTurn`; the loop's end and `continueTurn`'s. */
   private async completeTurn(finished: Session): Promise<Session> {
-    let session = finished;
-    session.status = 'completed';
-    await this.store.save(session);
-    const stored = await this.store.get(session.id);
-    session = stored ?? session;
-    await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
-    await this.bus.emit({
-      type: 'session.completed',
-      sessionId: session.id,
-      // Copies all the way down — a fresh array of fresh records, not the
-      // session's own. This is durable accounting state rather than a
-      // per-event payload, so a subscriber that sorts the list, appends to
-      // it, or normalizes a count in place must not be reaching the stored
-      // record. A shallow array copy is not enough: the record objects
-      // behind it are the ones the session holds, and
-      // `InMemorySessionStore` hands the very same objects back on the
-      // next read.
-      //
-      // What this does NOT buy is isolation between subscribers. `emit`
-      // hands one event object to every handler in turn, so an earlier
-      // handler's edits are visible to later ones — true of `parts` on
-      // provider.response and of every other payload on this bus, and not
-      // a promise the bus has ever made. Copy before mutating.
-      ...(session.usage && session.usage.length > 0
-        ? { usage: session.usage.map((record) => ({ ...record })) }
-        : {}),
-    });
-    return session;
+    return completeAnsweredTurn(finished, this.store, this.bus);
   }
 
   /**
