@@ -5,6 +5,7 @@ import path from 'node:path';
 
 import {
   filePathsOf,
+  isLatestTurn,
   latestTurnReply,
   turnFailureFor,
   turnFilesFor,
@@ -522,39 +523,55 @@ interface ReplyOutcome {
 }
 
 /**
- * How far a file's modification time may run past the record of the tool
- * result naming it: the rest of the millisecond the record was stamped in,
- * since the record is whole milliseconds and the file time is finer. No
- * more, because any window is one an overwrite fits inside — two seconds
- * was, in review. A filesystem that rounds file times up, coarser than
- * that, fails closed: the file is warned about and not uploaded, which a
- * repeat can afford and a wrong attachment cannot.
+ * How far a file's change time may run past the record of the tool result
+ * naming it: the rest of the millisecond the record was stamped in, since
+ * the record is whole milliseconds and the file time is finer. No more,
+ * because any window is one an overwrite fits inside — two seconds was, in
+ * review. A filesystem that rounds file times up, coarser than that, fails
+ * closed: the file is warned about and not uploaded, which a repeat can
+ * afford and a wrong attachment cannot.
  */
 const PRODUCED_AT_SLACK_MS = 1;
 
 /**
- * A file a finished turn produced, read for a repeat of it — refused if the
- * path was written after the turn recorded it. The transcript keeps a path,
+ * A file a finished turn produced, read for a repeat of it — refused unless
+ * it is provably the file the turn left there. The transcript keeps a path,
  * not the bytes, and a repeat can come after a later turn or another
  * process has written the same path; uploading what is there now would
- * answer the old message with a different file. The path itself is checked
- * too, so a symlink swapped in since cannot point the read somewhere else,
- * and the file is checked through the handle it is read from.
+ * answer the old message with a different file, or a sensitive one.
+ *
+ * The change time, not the modification time, is what is compared: it
+ * moves on every write, on a rename into the path, and on `utimes` itself,
+ * so neither an older file renamed in nor a backdated one passes. Then the
+ * path has to name the same file before and after it is opened — the open
+ * handle's file, when it is not a link — and the handle has to be unchanged
+ * after the read, so a swap or a write landing between the checks and the
+ * read is caught rather than uploaded.
  */
 const readUnchangedSince = async (filePath: string, producedAt: number): Promise<Buffer> => {
-  // Exclusive: a file time at or past it was written after the record.
+  // Exclusive: a change time at or past it was a change after the record.
   const writtenBefore = producedAt + PRODUCED_AT_SLACK_MS;
   const changed = (): Error =>
-    new Error('it was written after the turn that produced it, so it may hold another turn\'s file now; it was not uploaded.');
-  if ((await lstat(filePath)).mtimeMs >= writtenBefore) {
+    new Error('it was changed after the turn that produced it, so it may hold another file now; it was not uploaded.');
+  const named = await lstat(filePath);
+  if (named.ctimeMs >= writtenBefore) {
     throw changed();
   }
   const handle = await open(filePath, 'r');
   try {
-    if ((await handle.stat()).mtimeMs >= writtenBefore) {
+    const opened = await handle.stat();
+    const stillNamed = await lstat(filePath);
+    const samePath = stillNamed.ino === named.ino && stillNamed.dev === named.dev && stillNamed.ctimeMs === named.ctimeMs;
+    const sameFile = named.isSymbolicLink() || (opened.ino === named.ino && opened.dev === named.dev);
+    if (!samePath || !sameFile || opened.ctimeMs >= writtenBefore) {
       throw changed();
     }
-    return await handle.readFile();
+    const data = await handle.readFile();
+    const after = await handle.stat();
+    if (after.ctimeMs !== opened.ctimeMs || after.size !== data.length) {
+      throw changed();
+    }
+    return data;
   } finally {
     await handle.close();
   }
@@ -626,6 +643,14 @@ class ReplyRenderer {
    * writes into the fresh one rather than over the reply it was given to.
    */
   private handover: Promise<void> = Promise.resolve();
+  /**
+   * Whether the outcome of a turn nobody was rendering was reported ahead
+   * of this renderer while it waited (`reserveHandover`) — through its
+   * placeholder or as messages of their own. Set when the report is
+   * claimed, before the turn it reports lets this renderer's dispatch go,
+   * so a repeat resolving after it can tell its own turn was that one.
+   */
+  outcomeReportedAhead = false;
   /**
    * Bumped by a handover. An edit scheduled before it carries the text of
    * the turn that was handed over — the recovery's stream, routed to this
@@ -1295,6 +1320,7 @@ class ReplyRenderer {
    * awaits anything (see `HandoverClaim`).
    */
   reserveHandover(): HandoverClaim {
+    this.outcomeReportedAhead = true;
     // One handover at a time: two turns ahead of this one finishing close
     // together would otherwise both take the placeholder as they found it,
     // and the second would write over the first's reply. Each waits for
@@ -4490,10 +4516,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       renderers.get(sessionId)?.[0]?.refreshLoading();
       return;
     }
-    // A finished one's outcome is posted here, because nothing says the
-    // delivery that ran it lived to post it, and no event will carry its
-    // files: they are read from the session, like its reply below.
+    // A finished one whose turn the start-up sweep just finished while this
+    // redelivery waited behind it: that outcome was reported ahead of this
+    // renderer as a turn nobody was rendering, and posting it here would
+    // say it twice. It was this message's turn if it is the session's
+    // latest — anything finished after it would be the latest instead.
     const finished = repeat() === 'finished';
+    if (session && finished && renderer.outcomeReportedAhead && isLatestTurn(session, eventKey)) {
+      await renderer.withdraw();
+      renderers.get(sessionId)?.[0]?.refreshLoading();
+      return;
+    }
+    // Otherwise a finished one's outcome is posted here, because nothing
+    // says the delivery that ran it lived to post it, and no event will
+    // carry its files: they are read from the session, like its reply below.
     if (session && finished) {
       renderer.queueFiles(turnFilesFor(session, eventKey));
     }

@@ -3242,13 +3242,21 @@ export const recordTurnFailure = (session: Session, error: string): void => {
 };
 
 /**
+ * Whether the keyed message started the session's latest turn. A message
+ * `observe` appended since started no turn and is passed over: it is
+ * overheard and unkeyed, where every keyed dispatch carries its key.
+ */
+export const isLatestTurn = (session: Pick<Session, 'messages'>, idempotencyKey: string): boolean =>
+  session.messages.findLast(
+    (message) => message.role === 'user' && !(message.overheard === true && message.idempotencyKey === undefined),
+  )?.idempotencyKey === idempotencyKey;
+
+/**
  * Why the turn a keyed message started failed, or undefined if it did not.
  * Read from the message (`recordTurnFailure`), so a turn the session has
  * moved on from still answers. A transcript written before turns carried
  * their own failure has only the session's, which is the keyed turn's
- * while it is the latest — a message `observe` appended since started no
- * turn and is passed over: it is overheard and unkeyed, where every keyed
- * dispatch carries its key.
+ * while it is the latest (`isLatestTurn`).
  */
 export const turnFailureFor = (session: Pick<Session, 'messages' | 'status' | 'lastError'>, idempotencyKey: string): string | undefined => {
   const keyed = session.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
@@ -3258,13 +3266,7 @@ export const turnFailureFor = (session: Pick<Session, 'messages' | 'status' | 'l
   if (keyed.turnError !== undefined) {
     return keyed.turnError;
   }
-  if (session.status !== 'failed') {
-    return undefined;
-  }
-  const latest = session.messages.findLast(
-    (message) => message.role === 'user' && !(message.overheard === true && message.idempotencyKey === undefined),
-  );
-  return latest === keyed ? session.lastError ?? 'The turn failed.' : undefined;
+  return session.status === 'failed' && isLatestTurn(session, idempotencyKey) ? session.lastError ?? 'The turn failed.' : undefined;
 };
 
 /**

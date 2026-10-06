@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -8257,37 +8257,28 @@ test('a final reply is not overtaken by a turn queued behind a repeat that withd
   assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'third answer']);
 });
 
-test('a repeat does not upload a file written after the turn that produced it, however soon after', async () => {
-  // The transcript keeps the path, not the bytes. Written since, the path
-  // may hold a later turn's file, and the old message is not answered with
-  // it — half a second later as surely as an hour: a grace window is one
-  // an overwrite fits inside.
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-stale-file-'));
-  const chart = path.join(dir, 'chart.png');
-  await writeFile(chart, 'a later turn wrote this');
-  const recorded = Date.now() - 60 * 60 * 1000;
-  await utimes(chart, new Date(recorded + 500), new Date(recorded + 500));
-  const anHourAgo = new Date(recorded).toISOString();
+const finishedTurnWithFile = (file: string, recorded: number) =>
+  async (input: Parameters<StubGateway['dispatch']>[0]): Promise<Session> => {
+    input.onRepeat?.('finished');
+    const at = new Date(recorded).toISOString();
+    return {
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: at, idempotencyKey: input.idempotencyKey ?? '' },
+        { id: 't1', role: 'tool', content: '', createdAt: at, toolResult: { callId: 'c1', toolName: 'shell.run', ok: true, output: { file } } },
+        { id: 'a1', role: 'assistant', content: 'here is the chart', createdAt: at },
+      ],
+      createdAt: at,
+      updatedAt: at,
+    };
+  };
+
+const replayWith = async (dispatch: StubGateway['dispatch']) => {
   const warnings: string[] = [];
   const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
-  const gateway: StubGateway = {
-    ...stub,
-    async dispatch(input) {
-      input.onRepeat?.('finished');
-      return {
-        id: input.sessionId,
-        agent: { id: 'ava', name: 'Ava' },
-        status: 'completed',
-        messages: [
-          { id: 'u1', role: 'user', content: 'hello there', createdAt: anHourAgo, idempotencyKey: input.idempotencyKey ?? '' },
-          { id: 't1', role: 'tool', content: '', createdAt: anHourAgo, toolResult: { callId: 'c1', toolName: 'shell.run', ok: true, output: { file: chart } } },
-          { id: 'a1', role: 'assistant', content: 'here is the chart', createdAt: anHourAgo },
-        ],
-        createdAt: anHourAgo,
-        updatedAt: anHourAgo,
-      };
-    },
-  };
+  const gateway: StubGateway = { ...stub, dispatch };
   const web = createFakeWeb('B-AVA', 'T1');
   const socket = createFakeSocket();
   const adapter = createAdapterAsShipped({
@@ -8300,7 +8291,75 @@ test('a repeat does not upload a file written after the turn that produced it, h
   await adapter.start(gateway);
   await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
   await adapter.stop();
+  return { web, warnings };
+};
+
+test('a repeat does not upload a file changed after the turn that produced it, however soon after', async () => {
+  // The transcript keeps the path, not the bytes. Changed since, the path
+  // may hold a later turn's file, and the old message is not answered with
+  // it — half a second later as surely as an hour: a grace window is one
+  // an overwrite fits inside.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-stale-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'a later turn wrote this');
+  const { ctimeMs } = await stat(chart);
+  const { web, warnings } = await replayWith(finishedTurnWithFile(chart, Math.floor(ctimeMs) - 500));
   assert.deepEqual(web.uploads, []);
   assert.ok(web.posts.some((post) => post.text === 'here is the chart'), 'the reply was not posted');
-  assert.ok(warnings.some((message) => message.includes('written after the turn that produced it')), 'the refusal was not said');
+  assert.ok(warnings.some((message) => message.includes('changed after the turn that produced it')), 'the refusal was not said');
+});
+
+test('a repeat does not upload a file whose times were set back to before its turn', async () => {
+  // A modification time is the writer's to set; the change time is not,
+  // and moves when it is set — as it does when an older file is renamed in.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-backdated-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'something else entirely');
+  const recorded = Date.now() - 60 * 60 * 1000;
+  await utimes(chart, new Date(recorded - 60_000), new Date(recorded - 60_000));
+  const { web } = await replayWith(finishedTurnWithFile(chart, recorded));
+  assert.deepEqual(web.uploads, []);
+});
+
+test('a redelivery the start-up sweep finished while it waited does not post that outcome again', async () => {
+  // The sweep takes the session's chain first and finishes this message's
+  // turn; its outcome is reported ahead of the queued redelivery as a turn
+  // nobody was rendering. The redelivery then finds the key finished.
+  for (const replies of ['stream', 'final'] as const) {
+    const socket = createFakeSocket();
+    const web = createFakeWeb('B-AVA', 'T1');
+    const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+    gateway.sessionRouting = async () => ({
+      agentId: 'ava',
+      metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+      reply: 'the recovered answer',
+    });
+    gateway.dispatch = async (input) => {
+      await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+      input.onRepeat?.('finished');
+      const now = new Date().toISOString();
+      return {
+        id: input.sessionId,
+        agent: { id: 'ava', name: 'Ava' },
+        status: 'completed',
+        messages: [
+          { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: input.idempotencyKey ?? '' },
+          { id: 'a1', role: 'assistant', content: 'the recovered answer', createdAt: now },
+        ],
+        createdAt: now,
+        updatedAt: now,
+      };
+    };
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
+      editIntervalMs: 0,
+      createSocketClient: () => socket,
+      createWebClient: () => web,
+    });
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+    await adapter.stop();
+    const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+    assert.equal(said.filter((text) => text === 'the recovered answer').length, 1, `${replies}: said ${said.filter((text) => text === 'the recovered answer').length} times`);
+  }
 });
