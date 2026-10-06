@@ -710,6 +710,15 @@ export interface DispatchInput {
    * failed at the next start instead of finished.
    */
   idempotencyKey?: string;
+  /**
+   * Called, before the dispatch resolves, when it turns out to be a repeat
+   * of a turn another dispatch with the same key already started — live or
+   * finished. That turn was rendered by whoever started it, so a caller
+   * with a reply of its own in progress takes it down and posts nothing.
+   * Not called when the repeat continues a turn a crash left unfinished:
+   * nobody else is rendering that one, so this caller should.
+   */
+  onRepeat?: () => void;
 }
 
 export interface ObserveInput {
@@ -3294,6 +3303,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     sessionId: string,
     idempotencyKey: string,
     turnId: string | undefined,
+    onRepeat: (() => void) | undefined,
   ): Promise<Session | undefined> => {
     const session = await store.get(sessionId);
     const state = session === undefined ? undefined : workItemState(session, idempotencyKey);
@@ -3301,6 +3311,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return undefined;
     }
     if (state === 'finished') {
+      onRepeat?.();
       return session;
     }
     // Run now, on this caller's behalf, so its events are this caller's
@@ -3439,13 +3450,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // another caller's turn land in between and then find a finished item.
     const live = idempotencyKey !== undefined ? liveWorkItems.get(input.sessionId)?.get(idempotencyKey) : undefined;
     if (live !== undefined) {
+      input.onRepeat?.();
       return live;
     }
 
     const turn = onSessionChain(input.sessionId, async () => {
       // Before `activeTurns` is touched: a repeat that runs nothing must
       // not claim the session's turn id, even for the instant it takes.
-      const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, turnId) : undefined;
+      const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, turnId, input.onRepeat) : undefined;
       if (repeated !== undefined) {
         return repeated;
       }

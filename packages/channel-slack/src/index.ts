@@ -1175,6 +1175,34 @@ class ReplyRenderer {
     return true;
   }
 
+  /**
+   * Stand down without saying anything: the message this renderer was
+   * opened for repeated one whose turn another delivery already started,
+   * and that delivery's answer is the one in the thread. Whatever this
+   * renderer put up — a placeholder, a loading status — comes down, so a
+   * redelivery leaves no trace.
+   */
+  async withdraw(): Promise<void> {
+    try {
+      await this.handover;
+      const hadStatus = this.statusTimer !== undefined;
+      this.stopLoading();
+      this.finalized = true;
+      if (this.pendingEdit) {
+        clearTimeout(this.pendingEdit);
+        this.pendingEdit = undefined;
+      }
+      await this.editChain;
+      await this.retract();
+      if (hadStatus) {
+        this.setStatus('');
+        await this.statusChain;
+      }
+    } finally {
+      this.settle();
+    }
+  }
+
   async fail(message: string): Promise<ReplyOutcome> {
     // The same wait `finalize` takes, for the same reason: a lazy turn's
     // first text may be opening its placeholder right now, and a failure
@@ -2121,6 +2149,13 @@ interface Admission {
   thread?: string;
   /** Absent for a DM, which has one agent by construction. */
   threadKey?: string;
+  /**
+   * The key the message is known by whichever delivery carried it — the
+   * dedupe key, and the dispatch's idempotency key, so a redelivery the
+   * in-memory dedupe has forgotten (a restart, an eviction) still starts
+   * no second turn.
+   */
+  eventKey: string;
   settled: boolean;
   /**
    * In the thread, if at all, as a listener: the message is somebody
@@ -4022,6 +4057,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       event,
       isDm,
       team,
+      eventKey,
       userId: event.user,
       sessionId: channelSessionKey({
         channel: 'slack',
@@ -4126,7 +4162,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (!gateway) {
       return;
     }
-    const { event, isDm, team, userId, thread, sessionId, threadKey } = admitted;
+    const { event, isDm, team, userId, thread, sessionId, threadKey, eventKey } = admitted;
 
     // Everything up to (and including) the dispatch call is serialized per
     // session in Slack receipt order: the user lookups and placeholder
@@ -4328,6 +4364,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // stopped until the reply ahead of it posted. In a channel thread the
       // key is shared, and the running turn's status stays up instead.
       renderer.showLoading(queue.length === 1 || queue[0]?.statusThread !== renderer.statusThread);
+      let repeated = false;
       const turn = gateway.dispatch({
         sessionId,
         agentId: connection.config.agentId,
@@ -4336,8 +4373,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ...(judged ? { addressed: false } : {}),
         turnId: renderer.turnId,
         metadata,
+        // A redelivery this process no longer remembers (it restarted, or
+        // the dedupe evicted it) is still the message it was: the gateway
+        // runs no second turn for it, and says so through `onRepeat`.
+        idempotencyKey: eventKey,
+        onRepeat: () => {
+          repeated = true;
+        },
       });
-      return { renderer, turn };
+      return { renderer, turn, repeated: () => repeated };
     });
 
     const started = await intake;
@@ -4355,7 +4399,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
       return;
     }
-    const { renderer, turn } = started;
+    const { renderer, turn, repeated } = started;
 
     const removeFromQueue = (): void => {
       const current = renderers.get(sessionId);
@@ -4381,6 +4425,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // events must reach ITS renderer, so this one leaves the queue BEFORE
     // the potentially slow final edit, uploads, and overflow posts.
     removeFromQueue();
+
+    // The turn was an earlier delivery's, and that delivery's renderer posted
+    // its answer: this one takes down whatever it put up and says nothing.
+    // Posting the session's reply here would answer the message twice.
+    if (session && repeated()) {
+      await renderer.withdraw();
+      renderers.get(sessionId)?.[0]?.refreshLoading();
+      return;
+    }
 
     if (session) {
       // The reply is final here, so this is when the thread's other agents

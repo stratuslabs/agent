@@ -5440,3 +5440,77 @@ test('a message accepted just before shutdown does not bury a keyed item its rec
   assert.equal(session?.status, 'pending_approval');
   assert.deepEqual(session?.messages.filter((message) => message.role === 'user').map((message) => message.content), ['gated work']);
 });
+
+test('onRepeat says when a dispatch repeated a turn someone else started, and only then', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('reply')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    const repeats: string[] = [];
+    const send = (label: string, key: string) =>
+      gateway.dispatch({ sessionId: 'rep-1', agentId: 'blair', userMessage: label, idempotencyKey: key, onRepeat: () => repeats.push(label) });
+
+    // Live: the second attaches to the first while it is still queued.
+    await Promise.all([send('first', 'k1'), send('live repeat', 'k1')]);
+    // Finished: the turn is over and the repeat runs nothing.
+    await send('finished repeat', 'k1');
+    // A new key is a new message.
+    await send('second', 'k2');
+    assert.deepEqual(repeats, ['live repeat', 'finished repeat']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('onRepeat is not called for a repeat that continues a turn a crash left unfinished', async () => {
+  // Nobody else is rendering that turn, so the caller that brought it back
+  // should render it as its own.
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const stateDir = path.join(home, 'state');
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'rep-crash-1',
+    agent: { id: 'blair', name: 'Blair' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'hello', createdAt: new Date().toISOString(), idempotencyKey: 'msg-1' }],
+  });
+  before.close();
+
+  let repeated = false;
+  let status = '';
+  const adapter: GatewayChannelAdapter = {
+    name: 'fake',
+    async start(gw) {
+      const session = await gw.dispatch({
+        sessionId: 'rep-crash-1',
+        agentId: 'blair',
+        userMessage: 'hello',
+        idempotencyKey: 'msg-1',
+        onRepeat: () => {
+          repeated = true;
+        },
+      });
+      status = session.status;
+    },
+    async stop() {},
+  };
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('continued')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, channels: [adapter], warn: () => {} });
+  await gateway.start();
+  await gateway.stop();
+  assert.equal(status, 'completed');
+  assert.equal(repeated, false);
+});

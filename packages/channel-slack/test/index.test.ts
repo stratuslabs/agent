@@ -8046,3 +8046,54 @@ test('each turn says what kind of room it is in now and how many are in it, neve
   assert.deepEqual(rooms.at(-1), { kind: 'public', thread: true });
   await adapter.stop();
 });
+
+test('a redelivery after a restart passes its message key and, as a repeat, posts nothing', async () => {
+  // The in-memory dedupe dies with the process. The idempotency key is what
+  // tells the gateway the redelivery is the message it already answered,
+  // and `onRepeat` is what tells this adapter to say nothing about it.
+  const keys: Array<string | undefined> = [];
+  const answered = new Set<string>();
+  const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hello from Ava'));
+  const gateway: StubGateway = {
+    ...stub,
+    async dispatch(input) {
+      keys.push(input.idempotencyKey);
+      if (input.idempotencyKey !== undefined && answered.has(input.idempotencyKey)) {
+        input.onRepeat?.();
+        return sessionWithReply(input.sessionId, 'hello from Ava');
+      }
+      if (input.idempotencyKey !== undefined) {
+        answered.add(input.idempotencyKey);
+      }
+      return stub.dispatch(input);
+    },
+  };
+
+  for (const replies of ['stream', 'final'] as const) {
+    answered.clear();
+    keys.length = 0;
+    const webs = [createFakeWeb('B-AVA', 'T1'), createFakeWeb('B-AVA', 'T1')];
+    for (const web of webs) {
+      const socket = createFakeSocket();
+      const statuses = recordStatuses(web);
+      const adapter = createAdapterAsShipped({
+        agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
+        editIntervalMs: 0,
+        createSocketClient: () => socket,
+        createWebClient: () => web,
+      });
+      await adapter.start(gateway);
+      await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+      await adapter.stop();
+      if (web === webs[1]) {
+        // Whatever went up for the redelivery came down, and no answer was
+        // posted or written into a placeholder.
+        assert.equal(web.posts.length, web.deletes.length, `${replies}: a placeholder stayed up`);
+        assert.ok(!web.updates.some((update) => update.text === 'hello from Ava'), `${replies}: the answer was written again`);
+        assert.ok(!web.posts.some((post) => post.text === 'hello from Ava'), `${replies}: the answer was posted again`);
+        assert.equal(statuses.at(-1)?.status ?? '', '', `${replies}: a loading status stayed up`);
+      }
+    }
+    assert.deepEqual(keys, ['ava:C1:100.1', 'ava:C1:100.1']);
+  }
+});

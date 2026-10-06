@@ -462,7 +462,9 @@ capability rather than an assumption:
   id. A redelivery — after a crash included — never starts a second turn,
   and a turn the daemon died inside is continued from its transcript at
   the next start instead of failed (unless it runs on a harness, whose own
-  tool loop may already have acted on the prompt). Without it, an adapter delivering at
+  tool loop may already have acted on the prompt). `onRepeat` tells the
+  adapter a dispatch was a repeat, so it posts nothing for it; Slack does
+  both. Without it, an adapter delivering at
   least once has only in-memory dedupe, which a restart erases.
 
 The rest of Slack's turn and render lifecycle — draining in `stop()`, the
