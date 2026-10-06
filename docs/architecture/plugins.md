@@ -331,8 +331,8 @@ from being a wildcard:
 
 The cost is real and belongs in the open: a namespace tells an operator
 strictly less than a list. They learn *where* a plugin may register and under
-what risk, not *what*. That is why [12](../roadmap/12-plugin-registry.md) has
-`stratus plugin install` render such a declaration as what it is — "registers
+what risk, not *what*. That is why a future
+`stratus plugin install` should render such a declaration as what it is — "registers
 tools under `mcp.*`, discovered at runtime, all `gated`" — rather than showing
 an empty tool list and implying the plugin contributes nothing.
 
@@ -709,4 +709,3 @@ the ecosystem non-empty on the day it lands.
 - [09 — skills](../roadmap/09-skills.md)
 - [10 — proactive agents: schedules and outbound messages](../roadmap/10-proactive.md)
 - [11 — MCP bridge](../roadmap/11-mcp.md)
-- [12 — plugin discovery and distribution](../roadmap/12-plugin-registry.md)

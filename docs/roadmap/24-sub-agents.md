@@ -124,8 +124,8 @@ around the context window itself).
   a durable candidate the parent may choose to persist — which closes the hole
   the no-memory rule otherwise opens: the sub-agent is the thing doing the
   reading, so it is the thing that finds durable facts, and without this they
-  die with the sub-session. The same shape as [21](./21-team-knowledge.md)'s
-  skill promotion, one level down: the sub-agent proposes, the parent decides.
+  die with the sub-session. The same shape as promoting a skill to
+  the whole roster, one level down: the sub-agent proposes, the parent decides.
 - **A three-part return, with different destinations:**
 
   | Field | What | Where it goes |
@@ -248,10 +248,11 @@ around the context window itself).
 - **Where do the bounds live?** Per-agent in the soul, host-owned in config, or
   both. The soul is where an agent's other limits live; a host-owned cap is
   what an operator actually wants when a bill surprises them.
-- **Should a sub-agent be able to read roster-scoped memory** from
-  [21](./21-team-knowledge.md) without writing anything? A research sub-agent
+- **Should a sub-agent be able to read roster-scoped memory**, once it
+  exists, without writing anything? A research sub-agent
   that knows the team's vocabulary is better at its job, and it is also the
-  path by which one agent's context could reach another. Decide it with 21.
+  path by which one agent's context could reach another. Decide it with that
+  scope.
 - **Is `notes` worth its output tokens?** [18](./18-usage-accounting.md) will
   measure what a fan-out cost far better than a model can describe it. The one
   thing metrics cannot supply is *why* — "the instruction was ambiguous so I
