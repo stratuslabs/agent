@@ -5389,3 +5389,54 @@ test('two different session and key pairs never attach to each other\'s turn, ho
     await gateway.stop();
   }
 });
+
+test('a message accepted just before shutdown does not bury a keyed item its recovery skipped', async () => {
+  // Accepted while the gateway was still serving, run once it is stopping:
+  // recovery of the parked item ahead of it returns at the shutdown guard,
+  // and resuming the session over it would make the old key read finished
+  // with its turn never run.
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('unused')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+
+  // Created after start, so the start-up sweep never saw it: the dispatch
+  // below is the first thing to reach it.
+  const now = new Date().toISOString();
+  await gateway.store.create({
+    id: 'keyed-parked-stopping-1',
+    agent: { id: 'blair', name: 'Blair' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'u1', role: 'user', content: 'gated work', createdAt: now, idempotencyKey: 'msg-1' },
+      { id: 'a1', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+
+  // dispatch() queues its work on the session chain synchronously, and that
+  // work runs only on a later microtask; stop() sets the stopping flag
+  // synchronously. So the work is certain to run with the gateway stopping.
+  const turn = gateway.dispatch({ sessionId: 'keyed-parked-stopping-1', agentId: 'blair', userMessage: 'newer', idempotencyKey: 'msg-2' });
+  const stopped = gateway.stop();
+  await assert.rejects(turn, /stopping/);
+  await stopped;
+
+  const after = new ShardedSessionStore({ stateDir: path.join(home, '.stratus') });
+  const session = await after.get('keyed-parked-stopping-1');
+  after.close();
+  assert.equal(session?.status, 'pending_approval');
+  assert.deepEqual(session?.messages.filter((message) => message.role === 'user').map((message) => message.content), ['gated work']);
+});

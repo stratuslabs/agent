@@ -3327,6 +3327,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       await settleUnfinished(session).catch((error: unknown) => {
         warn(`could not settle ${sessionId}'s unfinished turn before the next message: ${error instanceof Error ? error.message : String(error)}`);
       });
+      // Settling can leave it unfinished — a shutdown that began after this
+      // message was accepted skips recovery — and the message must not run
+      // over it then, or the old key reads finished with its turn never run.
+      const after = await store.get(sessionId);
+      if (after !== undefined && workItemState(after, key) === 'unfinished') {
+        throw stopping
+          ? refusal()
+          : new Error(`Session ${sessionId} has an unfinished turn that could not be settled, so this message was not added behind it. Send it again.`);
+      }
     }
   };
 
