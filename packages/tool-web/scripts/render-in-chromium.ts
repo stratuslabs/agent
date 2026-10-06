@@ -7,17 +7,45 @@
  *
  *   pnpm --filter @stratusagent/tool-web render-in-chromium
  *
- * It finds Chromium the way Playwright does, then under
- * PLAYWRIGHT_BROWSERS_PATH whatever revision is there, then an installed
- * Google Chrome. CHROMIUM_PATH names a binary outright.
+ * It finds Chromium the way Playwright does, then whatever revision a
+ * Playwright install left in its browser cache (PLAYWRIGHT_BROWSERS_PATH, or
+ * the platform's default), then an installed Google Chrome. CHROMIUM_PATH
+ * names a binary outright.
  */
 import { createHash } from 'node:crypto';
-import { readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { chromium, type Browser } from 'playwright-core';
 import { markersOf, renderedPages } from './rendered-pages.ts';
 
 const OUTPUT = new URL('../test/rendered-in-chromium.json', import.meta.url);
+
+// Where each platform's Playwright download keeps its binary, current
+// layouts (Chrome for Testing) and the older Chromium ones alike.
+const CACHED_EXECUTABLES = [
+  ['chrome-linux64', 'chrome'],
+  ['chrome-linux', 'chrome'],
+  ['chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'],
+  ['chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'],
+  ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'],
+  ['chrome-win64', 'chrome.exe'],
+  ['chrome-win', 'chrome.exe'],
+];
+
+/** Every Chromium a Playwright install left on this machine, newest revision first. */
+const cachedChromiums = (): string[] => {
+  const cache = process.platform === 'darwin' ? join(homedir(), 'Library', 'Caches')
+    : process.platform === 'win32' ? process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local')
+    : process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache');
+  const root = process.env.PLAYWRIGHT_BROWSERS_PATH ?? join(cache, 'ms-playwright');
+  if (!existsSync(root)) return [];
+  return readdirSync(root)
+    .filter((name) => name.startsWith('chromium-'))
+    .sort((a, b) => Number(b.slice('chromium-'.length)) - Number(a.slice('chromium-'.length)))
+    .flatMap((entry) => CACHED_EXECUTABLES.map((parts) => join(root, entry, ...parts)))
+    .filter((path) => existsSync(path));
+};
 
 const launch = async (): Promise<Browser> => {
   const explicit = process.env.CHROMIUM_PATH;
@@ -30,16 +58,11 @@ const launch = async (): Promise<Browser> => {
   }
   // A Playwright install of another version leaves a revision this one does
   // not ask for by name; any recent Chromium answers these pages the same.
-  const root = process.env.PLAYWRIGHT_BROWSERS_PATH;
-  if (root !== undefined) {
-    for (const entry of readdirSync(root).filter((name) => name.startsWith('chromium-')).sort().reverse()) {
-      for (const dir of ['chrome-linux64', 'chrome-linux']) {
-        try {
-          return await chromium.launch({ executablePath: join(root, entry, dir, 'chrome') });
-        } catch (error) {
-          tried.push(error instanceof Error ? error.message.split('\n')[0] ?? '' : String(error));
-        }
-      }
+  for (const executablePath of cachedChromiums()) {
+    try {
+      return await chromium.launch({ executablePath });
+    } catch (error) {
+      tried.push(error instanceof Error ? error.message.split('\n')[0] ?? '' : String(error));
     }
   }
   try {
@@ -50,20 +73,31 @@ const launch = async (): Promise<Browser> => {
   throw new Error(`No Chromium could be launched. Set CHROMIUM_PATH to a Chromium or Chrome binary.\n  ${tried.join('\n  ')}`);
 };
 
-// Which of these words sit inside a hidden element the sentinel landed in.
-// A string, as tool-browser's scripts are, because this package's types
-// describe Node and not the page.
-const OPEN_AT_END = `(words) => words.filter((word) => {
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-    if (!node.textContent.includes(word)) continue;
-    for (let el = node.parentElement; el !== null; el = el.parentElement) {
-      const hides = el.hasAttribute('hidden') || el.style.display === 'none';
-      if (hides && el.querySelector('#sentinelq') !== null) return true;
+// Which of these words sit inside an element that hides what it holds and
+// that the sentinel landed in. An element hides by its own computed style,
+// not its attributes — a `hidden` that an inline display undoes hides
+// nothing — and by every property the extractor reads: display,
+// visibility where its parent's is visible, and content-visibility. A string,
+// as tool-browser's scripts are, because this package's types describe Node
+// and not the page.
+const OPEN_AT_END = `(words) => {
+  const hides = (el) => {
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.contentVisibility === 'hidden') return true;
+    const parent = el.parentElement;
+    return style.visibility !== 'visible' && (parent === null || getComputedStyle(parent).visibility === 'visible');
+  };
+  return words.filter((word) => {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      if (!node.textContent.includes(word)) continue;
+      for (let el = node.parentElement; el !== null; el = el.parentElement) {
+        if (hides(el) && el.querySelector('#sentinelq') !== null) return true;
+      }
     }
-  }
-  return false;
-})`;
+    return false;
+  });
+}`;
 
 const browser = await launch();
 const page = await browser.newPage();
