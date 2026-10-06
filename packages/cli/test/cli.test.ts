@@ -4349,6 +4349,73 @@ test('setup disconnects an agent from Slack', async () => {
   assert.deepEqual(credentials.anthropic, { type: 'api_key', value: 'sk-keep-me' });
 });
 
+test('setup shows a plugin channel bound by config or by secrets, and stores its secrets on save', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // Ava is bound by the plugin's own config, with no secret — the shape a
+  // channel that needs none takes. The built-in agent is not bound at all.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ plugins: { 'stratus-plugin-fixture-channel': { agents: { ava: {} } } } })}\n`,
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-keep', botToken: 'xoxb-keep' } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → fixture → Stratus → Store secrets → "token" → value →
+      // Back → Back → Save & finish
+      setupInput: Readable.from(['5\n', '2\n', '1\n', '1\n', 'token\n', 'fixture-token-1\n', '3\n', '3\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /Channels\s+Slack: 1 agent connected; also fixture/);
+  assert.match(output.stdout, /fixture\s+from stratus-plugin-fixture-channel/);
+  assert.match(output.stdout, /Ava \(ava\)\s+✓ in its plugin config/);
+  assert.match(output.stdout, /Stratus \(stratus\)\s+— not connected/);
+  assert.match(output.stdout, /Stratus \(stratus\)\s+✓ secrets: token/);
+  assert.ok(!output.stdout.includes('fixture-token-1'), 'setup printed a secret');
+
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.channels, {
+    slack: { ava: { appToken: 'xapp-keep', botToken: 'xoxb-keep' } },
+    fixture: { stratus: { token: 'fixture-token-1' } },
+  });
+});
+
+test('setup with no channel plugin opens Slack\'s channel menu directly, as it always has', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → Back → Save & finish
+      setupInput: Readable.from(['5\n', '2\n', '9\n']),
+    },
+  });
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /Channels — Slack/);
+  assert.doesNotMatch(output.stdout, /also /);
+});
+
 test('the setup manifest matches the one shipped by the Slack package', async () => {
   // Setup generates the manifest itself so it works before the optional
   // channel package is installed; this pins the two copies together.
