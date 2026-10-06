@@ -165,6 +165,38 @@ test('update upgrades the companion packages that lag the CLI, in the same npm c
   assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/control-api/);
 });
 
+test('update loads every module it will use before npm replaces them on disk', async () => {
+  // A module first imported after the install is read from the new files,
+  // while its own imports of a package this process already holds resolve
+  // to the old copy: upgrading 0.11.6 to 0.11.7 failed every migration on
+  // "does not provide an export named 'FileLockHeldError'".
+  const home = await freshHome();
+  const events: string[] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => '99.0.0',
+      installedVersionReader: async () => undefined,
+      gatewayLoader: async () => {
+        events.push('load gateway');
+        return import('@stratusagent/gateway');
+      },
+      packageInstaller: async () => {
+        events.push('install');
+        return { ok: true, message: '' };
+      },
+    },
+  });
+  assert.equal(code, 0, `update failed:\n${output.stdout}\n${output.stderr}`);
+  assert.deepEqual(events, ['load gateway', 'install']);
+});
+
 test('update --check reports a companion left behind by a CLI that is already current', async () => {
   const home = await freshHome();
   await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });

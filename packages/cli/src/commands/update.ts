@@ -66,8 +66,9 @@ import { readCompanions } from '../companions.ts';
  */
 const claimExclusiveHome = async (
   env: CliEnvironment,
+  gateway: typeof import('@stratusagent/gateway'),
 ): Promise<{ held: boolean; reason: string; release: () => void }> => {
-  const { claimHome, HomeClaimedError } = await import('@stratusagent/gateway');
+  const { claimHome, HomeClaimedError } = gateway;
   let claim: { release: () => void };
   try {
     claim = claimHome(env);
@@ -238,6 +239,16 @@ export const runUpdate = async (
     // one this CLI shipped alongside.
     ...stale.map((entry) => `${entry.name}@${target === latest ? 'latest' : target}`),
   ];
+  // Loaded before npm replaces anything on disk. Everything this process
+  // imported statically is the old build, held in the module cache; a
+  // module first imported *after* the install is read from the new files,
+  // and its own imports of a package already loaded resolve to the old
+  // copy in that cache. 0.11.7's gateway imports `FileLockHeldError` from
+  // `@stratusagent/state`, which a 0.11.6 process has loaded without it,
+  // so every upgrade to 0.11.7 failed its migrations on a missing export.
+  // Loaded here, the whole run stays the old build, as the line after the
+  // install says it is.
+  const gateway = await (env.gatewayLoader ?? (() => import('@stratusagent/gateway')))();
   if (upgrading.length > 0) {
     if (upgradeAvailable) {
       out(`Upgrading ${CLI_PACKAGE_NAME} ${CLI_VERSION} → ${latest}…`);
@@ -277,7 +288,7 @@ export const runUpdate = async (
   let claim: Awaited<ReturnType<typeof claimExclusiveHome>> | undefined;
   let applied: AppliedStateMigration[];
   try {
-    claim = await claimExclusiveHome(env);
+    claim = await claimExclusiveHome(env, gateway);
     if (!claim.held) {
       writeLine(
         streams.stderr,
