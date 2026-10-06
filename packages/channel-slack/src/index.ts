@@ -3198,7 +3198,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     channel: string,
     thread: string | undefined,
     paths: readonly string[],
-  ): Promise<void> => {
+  ): Promise<boolean> => {
+    // Whether every file landed: a redelivery waiting behind this report
+    // stands down on it (`outcomeReportedAhead`), and a file that did not
+    // land is one only that redelivery can still post.
+    let landed = true;
     for (const filePath of paths) {
       try {
         const data = await readFile(filePath);
@@ -3209,9 +3213,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           ...(thread ? { thread_ts: thread } : {}),
         });
       } catch (error) {
+        landed = false;
         warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    return landed;
   };
 
   const reportUnrenderedFailure = async (
@@ -3262,17 +3268,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // interruption it existed to avoid; a line left standing happens
       // only to a turn that had already chosen to speak.
       warn(`slack: a turn nobody asked for failed before saying anything: ${event.error}`);
-      await uploadUnrenderedFiles(connection, channel, thread, files);
-      return true;
+      return uploadUnrenderedFiles(connection, channel, thread, files);
     }
-    return postAheadOf(
+    let uploaded = true;
+    const said = await postAheadOf(
       behind,
       connection,
       channel,
       thread,
       messageChunks(`Something went wrong: ${event.error}`),
-      () => uploadUnrenderedFiles(connection, channel, thread, files),
+      async () => {
+        uploaded = await uploadUnrenderedFiles(connection, channel, thread, files);
+      },
     );
+    return said && uploaded;
   };
 
   /**
@@ -3319,10 +3328,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // order to keep and nothing to say, so the files go on their own.
     const chunks = routing.reply ? messageChunks(routing.reply) : [];
     const posting = chunks.length > 0 ? chunks : (behind && files.length > 0 ? [NO_REPLY_TEXT] : []);
-    const uploads = (): Promise<void> => uploadUnrenderedFiles(connection, channel, thread, files);
+    let uploaded = true;
+    const uploads = async (): Promise<void> => {
+      uploaded = await uploadUnrenderedFiles(connection, channel, thread, files);
+    };
     if (posting.length === 0) {
       await uploads();
-      return true;
+      return uploaded;
     }
     // A reply the thread's other agents hear like any other, taking their
     // place for it before the post, as `handleInbound` does.
@@ -3333,7 +3345,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const delivered = await published;
     await heard;
     log(`slack: posted the reply of a turn finished after a restart to ${channel}`);
-    return delivered;
+    return delivered && uploaded;
   };
 
   /**

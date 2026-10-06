@@ -8372,3 +8372,62 @@ test('a redelivery the start-up sweep finished while it waited posts that outcom
     assert.equal(times, 1, `${replies}, ${reported ? 'reported' : 'report failed'}: said ${times} times`);
   }
 });
+
+test('a redelivery the start-up sweep finished posts the file that sweep could not', async () => {
+  // The sweep's report said the reply, but the file it produced did not
+  // land. Standing down on that report would lose the file for good; the
+  // redelivery is the one left to post it.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-sweep-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'png bytes');
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let attempts = 0;
+  const upload = web.files.uploadV2.bind(web.files);
+  web.files.uploadV2 = async (args) => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw new Error('ratelimited');
+    }
+    return upload(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered answer',
+  });
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({
+      type: 'tool.completed',
+      sessionId: input.sessionId,
+      result: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: chart } },
+    });
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    input.onRepeat?.('finished');
+    const now = new Date().toISOString();
+    return {
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: input.idempotencyKey ?? '' },
+        { id: 't1', role: 'tool', content: '', createdAt: now, toolResult: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: chart } } },
+        { id: 'a1', role: 'assistant', content: 'the recovered answer', createdAt: now },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+  assert.deepEqual(web.uploads.map((entry) => entry.filename), ['chart.png']);
+});
