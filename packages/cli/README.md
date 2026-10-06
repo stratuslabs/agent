@@ -52,12 +52,12 @@ stratus plugins                        # installed → enabled → granted → w
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 stratus credentials                    # stored credential names (never values)
 stratus schedules                      # what the fleet has scheduled, and where it reports
-stratus grants ava                     # what ava may do unattended, and `grants revoke` to take one back
-stratus memory list ava                # every live fact, with its trust label, pin, and validity
-stratus memory search ava deploy pipeline               # the way the agent searches it
-stratus memory pin ava <id>...         # keep facts in the prompt every turn (also `memory unpin`)
-stratus memory export ava --file ava.jsonl              # move an agent's memory (also `memory import`)
-stratus memory reassert ava --trust user --all-unknown   # vouch for the facts with no recorded origin
+stratus grants blair                   # what blair may do unattended, and `grants revoke` to take one back
+stratus memory list blair              # every live fact, with its trust label, pin, and validity
+stratus memory search blair deploy pipeline             # the way the agent searches it
+stratus memory pin blair <id>...       # keep facts in the prompt every turn (also `memory unpin`)
+stratus memory export blair --file blair.jsonl          # move an agent's memory (also `memory import`)
+stratus memory reassert blair --trust user --all-unknown  # vouch for the facts with no recorded origin
 stratus session rollover <session-id>  # archive a conversation's transcript and start the same id over
 stratus dashboard                      # web dashboard, signed in via a one-time link
 ```

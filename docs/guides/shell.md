@@ -76,7 +76,7 @@ the answer counts once and the next call asks again.
 
 The whitelist file is `0600` and per agent: it decides what runs with nobody
 watching, so neither another account on the machine nor another agent
-inherits it. `stratus grants ava` lists it and `stratus grants revoke ava
+inherits it. `stratus grants blair` lists it and `stratus grants revoke blair
 --scope "git push"` withdraws a scope; through a running daemon the next
 command is judged without it, where a hand edit waits for a restart (see
 [Standing grants](./approvals.md#standing-grants)). A file that exists
@@ -91,8 +91,8 @@ line says it was not saved.
 The scope, never the command:
 
 ```text
-09:14:36  —  warning: ava: shell.run was called outside every approved scope (git) and nobody is available to approve it
-09:16:02  —  ava: "git push" now runs without asking
+09:14:36  —  warning: blair: shell.run was called outside every approved scope (git) and nobody is available to approve it
+09:16:02  —  blair: "git push" now runs without asking
 ```
 
 The daemon log is a trace, not a second transcript — it records that a tool

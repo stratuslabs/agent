@@ -40,7 +40,7 @@ to [skills.sh](https://skills.sh) — installs directly:
 
 ```bash
 stratus skill add owner/skills-repo          # a whole repo of skills
-stratus skill add owner/repo --skill hn-search --agent ava
+stratus skill add owner/repo --skill hn-search --agent blair
 stratus skill add ./my-skills                # a local directory
 stratus skills                               # what is installed, and who enables it
 ```
@@ -129,7 +129,7 @@ how an agent behaves is worse than an agent that has to be told), apart from
 
 ```markdown
 ---
-name: Ava
+name: Blair
 tools: [fs.read, fs.search]
 skills:
   - code-review

@@ -462,7 +462,7 @@ put a plugin that adds a channel and a memory store.
   "enabled": true,
   "roots": ["~/notes"],
   "agents": {
-    "ava":  { "roots": ["~/work/ava"] },
+    "blair":  { "roots": ["~/work/blair"] },
     "juno": { "roots": ["~/work/juno", "~/shared"] }
   }
 }

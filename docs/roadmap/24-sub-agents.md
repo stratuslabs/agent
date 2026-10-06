@@ -91,7 +91,7 @@ around the context window itself).
 
   **This deliberately differs from `agent.delegate`, and the difference is the
   reason both exist.** Delegating to a *named roster agent* lets the delegate
-  hold tools the caller lacks — Ava can ask Rex to deploy without being able to
+  hold tools the caller lacks — Blair can ask Rex to deploy without being able to
   deploy — and that is safe because Rex is a soul a human wrote and enabled. An
   ephemeral sub-agent has no author and no review, so inheritance is the only
   thing between it and privilege escalation. Two rules for two things; the docs

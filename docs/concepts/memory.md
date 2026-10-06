@@ -3,8 +3,8 @@
 Agents remember: facts saved with the built-in `memory.remember` tool
 persist to `~/.stratus/agents/<id>/memory.jsonl` — one file per agent, in
 that agent's own [state directory](../reference/state-layout.md) — so the
-Ava you talk to tomorrow remembers today, from any directory, in every
-channel, and no read of hers can reach anybody else's facts.
+Blair you talk to tomorrow remembers today, from any directory, in every
+channel, and no read of theirs can reach anybody else's facts.
 
 Recall is something the agent does, not only something done to it. Every
 request carries three bounded blocks — the facts the agent **pinned**, an
@@ -217,10 +217,10 @@ every new session `unknown` on its first turn, the whole corpus would stay
 that way forever if only new writes carried the field. So:
 
 ```bash
-stratus memory list ava                            # every live entry, with its label
-stratus memory list ava --trust unknown            # the ones with no recorded origin
-stratus memory reassert ava --trust user --all-unknown
-stratus memory reassert ava --trust agent ava:memory:… ava:memory:…
+stratus memory list blair                          # every live entry, with its label
+stratus memory list blair --trust unknown          # the ones with no recorded origin
+stratus memory reassert blair --trust user --all-unknown
+stratus memory reassert blair --trust agent blair:memory:… blair:memory:…
 ```
 
 `--all-unknown` re-labels only entries with **no recorded origin** — the
@@ -246,8 +246,8 @@ which is correct, and what `stratus memory list` is for.
 ## Moving an agent's memory
 
 ```bash
-stratus memory export ava --file ava-memory.jsonl   # everything Ava still holds
-stratus memory import ava --file ava-memory.jsonl   # on the other machine
+stratus memory export blair --file blair-memory.jsonl  # everything Blair still holds
+stratus memory import blair --file blair-memory.jsonl  # on the other machine
 ```
 
 The exported file is owner-only (`0600`), and an existing path is tightened
@@ -281,10 +281,10 @@ waiting for.
 ## Searching it yourself
 
 ```bash
-stratus memory search ava deploy pipeline    # the way the agent searches
-stratus memory audit ava                     # everything ever written, and what replaced what
-stratus memory pin ava ava:memory:…          # and stratus memory unpin
-stratus memory forget ava ava:memory:…
+stratus memory search blair deploy pipeline  # the way the agent searches
+stratus memory audit blair                   # everything ever written, and what replaced what
+stratus memory pin blair blair:memory:…      # and stratus memory unpin
+stratus memory forget blair blair:memory:…
 ```
 
 Every one of these works the **built-in file store** directly, with no
