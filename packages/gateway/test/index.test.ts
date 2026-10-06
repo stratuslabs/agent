@@ -5722,3 +5722,35 @@ test('a refused claimant that registered a key first does not leave its owner\'s
     await gateway.stop();
   }
 });
+
+test('a repeat naming nobody, of a claim naming the wrong agent, runs once that claim is refused', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('reply')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'unnamed-claim-1', agentId: 'blair', userMessage: 'first', idempotencyKey: 'k0' });
+    const repeats: string[] = [];
+    const wrong = gateway.dispatch({ sessionId: 'unnamed-claim-1', agentId: 'cora', userMessage: 'hello', idempotencyKey: 'k1' });
+    const unnamed = gateway.dispatch({
+      sessionId: 'unnamed-claim-1',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(kind),
+    });
+    await assert.rejects(wrong, /belongs to agent blair, not cora/);
+    const session = await unnamed;
+    assert.equal(session.agent.id, 'blair');
+    assert.equal(session.status, 'completed');
+    assert.deepEqual(session.messages.filter((message) => message.idempotencyKey === 'k1').length, 1);
+    assert.deepEqual(repeats, []);
+  } finally {
+    await gateway.stop();
+  }
+});

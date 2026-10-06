@@ -1045,9 +1045,21 @@ export const ROLLED_OVER_SESSION_ID_MARKER = ':rolledover:';
  */
 const ROLLOVER_REPEAT_WINDOW_MS = 60 * 60 * 1000;
 
-/** The one refusal for a dispatch naming an agent other than its session's. */
+/**
+ * The one refusal for a dispatch naming an agent other than its session's.
+ * Its own type so a repeat attached to a claimant can tell the claimant was
+ * refused for who it named — the item then still has no owner — from the
+ * claimant's turn failing. Internal: callers read the message.
+ */
+class CrossIdentityError extends Error {
+  constructor(sessionId: string, owner: string, claimed: string) {
+    super(`Session ${sessionId} belongs to agent ${owner}, not ${claimed} — sessions never cross agent identities.`);
+    this.name = 'CrossIdentityError';
+  }
+}
+
 const crossIdentityError = (sessionId: string, owner: string, claimed: string): Error =>
-  new Error(`Session ${sessionId} belongs to agent ${owner}, not ${claimed} — sessions never cross agent identities.`);
+  new CrossIdentityError(sessionId, owner, claimed);
 
 /** Where the session's tool calls ran: `local-command`, or a contributed executor's registered name. */
 export const EXECUTOR_METADATA_KEY = 'executor';
@@ -2678,7 +2690,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // no separator is one a caller cannot also put inside a key. The agent
   // the dispatch named rides along, so a repeat naming another is not
   // handed a session that is not its agent's.
-  const liveWorkItems = new Map<string, Map<string, { turn: Promise<Session>; agentId: string | undefined }>>();
+  // `confirmed` once the chain has seen the dispatch past the identity
+  // check with a key the session had not seen (`claimLiveItem`); until
+  // then the entry is a claim that may yet be refused.
+  const liveWorkItems = new Map<string, Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean }>>();
   /** The start-up snapshot `recoverParkedTurns` judges orphans from, for a repeat that gets there first. */
   let orphanedAtStart: ReadonlySet<string> = new Set();
 
@@ -3507,6 +3522,36 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Attached only when it names no other agent than the live dispatch
     // did; otherwise it queues, and `settleRepeat` refuses it there.
     const live = idempotencyKey !== undefined ? liveWorkItems.get(input.sessionId)?.get(idempotencyKey) : undefined;
+    // A repeat naming nobody, of a claim naming someone the chain has not
+    // yet confirmed: the claim may be refused for who it named, and then
+    // the item is still unowned and this delivery is the one to run it —
+    // inheriting the claimant's refusal would drop a valid message. It
+    // waits to see, and repeats the claim only if the claim stood.
+    if (live !== undefined && input.agentId === undefined && live.agentId !== undefined && !live.confirmed) {
+      const claim = live.turn;
+      return claim.then(
+        (session) => {
+          input.onRepeat?.('live');
+          return session;
+        },
+        (error: unknown) => {
+          if (error instanceof CrossIdentityError) {
+            // Its own cleanup runs a tick later; the dispatch below must not
+            // find the refused claim still standing and wait on it again.
+            const items = liveWorkItems.get(input.sessionId);
+            if (idempotencyKey !== undefined && items?.get(idempotencyKey)?.turn === claim) {
+              items.delete(idempotencyKey);
+              if (items.size === 0) {
+                liveWorkItems.delete(input.sessionId);
+              }
+            }
+            return dispatch(input);
+          }
+          input.onRepeat?.('live');
+          throw error;
+        },
+      );
+    }
     if (live !== undefined && (input.agentId === undefined || input.agentId === live.agentId)) {
       input.onRepeat?.('live');
       return live.turn;
@@ -3548,9 +3593,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     // Reads `turn` only once it is assigned: the registration below runs
     // after it, and the chain's work runs in a later tick (`.then`).
-    const claimLiveItem = (key: string): void => {
-      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, { turn: Promise<Session>; agentId: string | undefined }>();
-      items.set(key, { turn, agentId: input.agentId });
+    const claimLiveItem = (key: string, confirmed: boolean): void => {
+      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean }>();
+      items.set(key, { turn, agentId: input.agentId, confirmed });
       liveWorkItems.set(input.sessionId, items);
     };
     const turn: Promise<Session> = onSessionChain(input.sessionId, async () => {
@@ -3566,7 +3611,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // this turn runs would find nothing to attach to, queue, and read the
       // turn as finished — a second answer beside this caller's.
       if (idempotencyKey !== undefined) {
-        claimLiveItem(idempotencyKey);
+        claimLiveItem(idempotencyKey, true);
       }
       await settleOrphanedItem(input.sessionId);
       if (turnId === undefined) {
@@ -3588,7 +3633,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // The first registration is provisional; the chain confirms it
       // (`claimLiveItem` above) once the dispatch is known to own the item.
       if (liveWorkItems.get(input.sessionId)?.has(idempotencyKey) !== true) {
-        claimLiveItem(idempotencyKey);
+        claimLiveItem(idempotencyKey, false);
       }
       void turn.catch(() => {}).finally(() => {
         const current = liveWorkItems.get(input.sessionId);
