@@ -1362,17 +1362,21 @@ export const applyPerAgentWorkspaces = async (
   env: StateEnvironment,
   options: { linkRecordSeen?: boolean } = {},
 ): Promise<string | undefined> => {
+  // Whether the link record has been seen — by the caller's gate, or here,
+  // first thing: once it has, gone when it is read is a rename aside rather
+  // than "nothing recorded". Asked before the preliminary work below and
+  // not only where `workspaces/` turns out to be gone, because this pass is
+  // also run directly, as migration 0004, with no gate in front of it, and
+  // a record renamed aside during that work would otherwise read as never
+  // there. Nothing between here and the read removes it legitimately: only
+  // this pass does, once it is empty.
+  let linkRecordSeen = options.linkRecordSeen === true || !(await pathIsFree(linkRecordPath(env)));
   // Before anything else: a previous run may have moved a workspace and
   // died before its ledger followed, and there is nothing in `workspaces/`
   // left to say so.
   const finished = await finishInterruptedMoves(env);
   const legacy = legacyWorkspacesDirPath(env);
   const legacySpellings = await spellingsOf(legacy);
-  // Whether the link record has been seen, by the caller's gate or by the
-  // check below: once it has, gone when it is read is a rename aside rather
-  // than "nothing recorded" — this pass is also run directly, as migration
-  // 0004, where the check below is the only sight of it before the read.
-  let linkRecordSeen = options.linkRecordSeen === true;
   let entries: Dirent[];
   try {
     entries = await readdir(legacy, { withFileTypes: true });
