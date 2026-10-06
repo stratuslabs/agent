@@ -678,7 +678,9 @@ export interface DispatchInput {
    * channel, the platform's own message id. A repeat never starts a second
    * turn: while the first is queued or running the repeat resolves with it;
    * once it has finished the repeat resolves with the session as it stands,
-   * running nothing and emitting nothing; and a turn whose process died
+   * running nothing and emitting nothing — which may have moved on since,
+   * so the repeated message's own reply is `turnReplyFor(session, key)`,
+   * not `latestTurnReply`; and a turn whose process died
    * mid-run is continued, once (`AgentRunner.continueTurn`), by whichever
    * comes first — the repeat or the next start's sweep. Not on a harness
    * (`runsOnHarness`), whose own tool loop may already have acted on the
@@ -2713,6 +2715,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return { switchedToFallback, effectiveStreams, fallbackStreams };
   };
 
+  /**
+   * Whether a turn on this config could be served by a harness
+   * (`runsOnHarness`): the primary or, since a turn can switch mid-run, the
+   * fallback. Once a session has switched for good the primary is never
+   * called again, and only the fallback counts.
+   */
+  const reachesHarness = (config: RuntimeConfig, switchedToFallback: boolean): boolean => {
+    const fallback = config.provider !== 'demo' ? config.fallback : undefined;
+    return switchedToFallback && fallback !== undefined
+      ? runsOnHarness(fallback)
+      : runsOnHarness(config) || (fallback !== undefined && runsOnHarness(fallback));
+  };
+
   const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
     // Re-read on every turn, not once at start: a newer build that stamps
     // the home while this daemon is serving has formats this build does not
@@ -2781,12 +2796,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // The fallback counts: a turn can switch to it mid-run. Once a session
     // has switched for good, the primary is never called again, and only
     // the fallback counts.
-    const fallback = config.provider !== 'demo' ? config.fallback : undefined;
-    const hostedLoop = input.idempotencyKey !== undefined && (
-      switchedToFallback && fallback !== undefined
-        ? runsOnHarness(fallback)
-        : runsOnHarness(config) || (fallback !== undefined && runsOnHarness(fallback))
-    );
+    const hostedLoop = input.idempotencyKey !== undefined && reachesHarness(config, switchedToFallback);
 
     return withWatchdog(input.sessionId, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
       // The preflight above (agent refresh, config resolution, session
@@ -3044,6 +3054,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
     } catch (error) {
       warn(`could not recover parked session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      // A keyed item is a promise to its caller, and one whose recovery
+      // cannot even start (its agent gone, its provider unresolvable) would
+      // otherwise stay parked for every later start and redelivery to try
+      // again. An unkeyed one keeps waiting for a sweep that can, as before.
+      const after = await store.get(sessionId).catch(() => undefined);
+      const key = after?.messages.findLast((candidate) => candidate.role === 'user')?.idempotencyKey;
+      if (after !== undefined && key !== undefined && after.status === 'pending_approval' && workItemState(after, key) === 'unfinished') {
+        await failParked(after, ABANDONED_TURN_ERROR).catch(() => {});
+      }
     }
   };
 
@@ -3052,15 +3071,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * parent: durably failed, with the checkpoint retired so no later sweep
    * can find a call to re-enter, and announced where surfaces can hear it.
    */
-  const failOrphanedDelegation = async (session: Session): Promise<void> => {
+  const failOrphanedDelegation = (session: Session): Promise<void> => failParked(session, ORPHANED_DELEGATION_ERROR);
+
+  const failParked = async (session: Session, error: string): Promise<void> => {
     const metadata = { ...(session.metadata ?? {}) };
     delete metadata[PENDING_APPROVAL_METADATA_KEY];
     session.metadata = metadata;
     session.status = 'failed';
-    session.lastError = ORPHANED_DELEGATION_ERROR;
+    session.lastError = error;
     await store.save(session);
     await bus.emit({ type: 'session.updated', sessionId: session.id, status: 'failed' });
-    await bus.emit({ type: 'session.failed', sessionId: session.id, error: ORPHANED_DELEGATION_ERROR });
+    await bus.emit({ type: 'session.failed', sessionId: session.id, error });
   };
 
   /**
@@ -3205,10 +3226,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return failAbandoned(session);
     }
     const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(session, config);
-    // The message's own record covers the runtime the turn ran on; this
-    // covers the one it would continue on, which a changed config may make
-    // a harness that has never seen this conversation.
-    if (runsOnHarness(switchedToFallback && config.provider !== 'demo' && config.fallback !== undefined ? config.fallback : config)) {
+    // The message's own record covers the runtimes the turn could have run
+    // on; this covers the ones it would continue on — a fallback included —
+    // which a changed config may make a harness.
+    if (reachesHarness(config, switchedToFallback)) {
       log(`${session.id}: a keyed turn the last stratusd was running would continue on a harness; failing it`);
       return failAbandoned(session);
     }

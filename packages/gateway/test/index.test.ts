@@ -5132,3 +5132,99 @@ test('a keyed turn on a session switched for good to a stateless fallback is not
     await gateway.stop();
   }
 });
+
+test('a keyed turn whose continuation could fall back to a harness is failed, not continued', async () => {
+  // The primary is a stateless API, but the fallback added since is a
+  // Claude subscription: a continuation whose primary failed would enter
+  // that hosted loop, which the recovery policy refuses.
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'model-p',
+    fallbackModel: 'model-f',
+    fallbackProvider: 'anthropic',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-test' } }),
+  );
+  const stateDir = path.join(home, 'state');
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-fallback-harness-1',
+    agent: { id: 'stratus', name: 'Stratus' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'hello', createdAt: new Date().toISOString(), idempotencyKey: 'msg-1' }],
+  });
+  before.close();
+
+  let calls = 0;
+  const gateway = createGateway({
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { OPENAI_API_KEY: 'sk-o' },
+      fetch: (async () => {
+        calls += 1;
+        return openAiText('unused');
+      }) as typeof fetch,
+      queryFn: (() => {
+        throw new Error('the harness must not be reached');
+      }) as never,
+    },
+    idleTimeoutMs: 0,
+    stateDir,
+    warn: () => {},
+  });
+  const failed = eventGate(gateway, (event) => event.type === 'session.failed' && event.sessionId === 'keyed-fallback-harness-1');
+  await gateway.start();
+  await gateway.stop().then(() => failed.give_up('the turn was never settled'));
+
+  const event = await failed.seen;
+  assert.equal(event.type === 'session.failed' ? event.error : '', ABANDONED_TURN_ERROR);
+  assert.equal(calls, 0);
+});
+
+test('a keyed turn parked on approval whose recovery cannot start is failed, not parked forever', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+  const now = new Date().toISOString();
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-parked-orphan-1',
+    agent: { id: 'gone', name: 'Gone' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'u1', role: 'user', content: 'gated work', createdAt: now, idempotencyKey: 'msg-1' },
+      { id: 'a1', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  before.close();
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('unused')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const failed = eventGate(gateway, (event) => event.type === 'session.failed' && event.sessionId === 'keyed-parked-orphan-1');
+  await gateway.start();
+  await gateway.stop().then(() => failed.give_up('the parked keyed turn stayed parked'));
+  await failed.seen;
+
+  const after = new ShardedSessionStore({ stateDir });
+  const session = await after.get('keyed-parked-orphan-1');
+  after.close();
+  assert.equal(session?.status, 'failed');
+  assert.equal(session?.metadata?.[PENDING_APPROVAL_METADATA_KEY], undefined);
+});

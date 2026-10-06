@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { workItemState, type Message } from '../src/index.ts';
+import { turnReplyFor, workItemState, type Message } from '../src/index.ts';
 
 const user = (content: string, idempotencyKey?: string): Message => ({
   id: `user:${content}`,
@@ -39,4 +39,13 @@ test('a work item is unfinished only while its message is the one the in-flight 
 
   // A key nothing carries has not been seen.
   assert.equal(workItemState({ status: 'completed', messages: keyed }, 'k9'), undefined);
+});
+
+test('a keyed message\'s reply is its own turn\'s, not the newest one', () => {
+  const messages = [user('first', 'k1'), assistant('answer one'), user('second', 'k2'), assistant('answer two')];
+  assert.equal(turnReplyFor({ messages }, 'k1'), 'answer one');
+  assert.equal(turnReplyFor({ messages }, 'k2'), 'answer two');
+  assert.equal(turnReplyFor({ messages }, 'k9'), undefined);
+  // A turn that said nothing has no reply, rather than borrowing the next.
+  assert.equal(turnReplyFor({ messages: [user('first', 'k1'), assistant(''), user('second', 'k2'), assistant('later')] }, 'k1'), undefined);
 });

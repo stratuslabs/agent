@@ -183,7 +183,9 @@ export interface GatewayLike {
      * a redelivery never starts a second turn — across a restart too, which
      * in-memory dedupe cannot survive. A repeat resolves with the original
      * turn: the live one, the finished session, or one the gateway continued
-     * after a crash. See `DispatchInput.idempotencyKey` in
+     * after a crash. A finished session may have moved on since, so the
+     * reply to post is `turnReplyFor(session, key)` from
+     * `@stratusagent/core`, never the latest one. See `DispatchInput.idempotencyKey` in
      * `@stratusagent/gateway`.
      *
      * A host without it ignores the field, and the adapter's own dedupe is

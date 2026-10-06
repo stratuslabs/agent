@@ -3114,6 +3114,23 @@ export const latestTurnReply = (session: Pick<Session, 'messages'>): string | un
 };
 
 /**
+ * The reply of the turn a keyed message started (`Message.idempotencyKey`),
+ * where `latestTurnReply` is the newest turn's. A repeated dispatch resolves
+ * with the session as it stands, which may have moved on since: an adapter
+ * answering a redelivered message reads the reply here, or it would answer
+ * the old message with a newer turn's words. Undefined when no message
+ * carries the key, or its turn produced no text.
+ */
+export const turnReplyFor = (session: Pick<Session, 'messages'>, idempotencyKey: string): string | undefined => {
+  const start = session.messages.findLastIndex((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (start < 0) {
+    return undefined;
+  }
+  const next = session.messages.findIndex((message, index) => index > start && message.role === 'user');
+  return latestTurnReply({ messages: session.messages.slice(0, next < 0 ? undefined : next) });
+};
+
+/**
  * A user message's text as a prompt should carry it. The one place an
  * overheard message is framed, so the API providers' per-message blocks
  * and the two harness renderers cannot drift on what "not spoken to"
