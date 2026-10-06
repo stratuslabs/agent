@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   PENDING_APPROVAL_METADATA_KEY,
   RunAbortedError,
+  turnReplyFor,
   type ApprovalAnswer,
   type ApprovalOutcome,
   type StratusEvent,
@@ -5439,4 +5440,379 @@ test('a message accepted just before shutdown does not bury a keyed item its rec
   after.close();
   assert.equal(session?.status, 'pending_approval');
   assert.deepEqual(session?.messages.filter((message) => message.role === 'user').map((message) => message.content), ['gated work']);
+});
+
+test('onRepeat says whether a dispatch attached to a live turn or repeated a finished one, and only then', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('reply')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    const repeats: string[] = [];
+    const send = (label: string, key: string) =>
+      gateway.dispatch({ sessionId: 'rep-1', agentId: 'blair', userMessage: label, idempotencyKey: key, onRepeat: (kind) => repeats.push(`${label}: ${kind}`) });
+
+    // Live: the second attaches to the first while it is still queued.
+    await Promise.all([send('first', 'k1'), send('live repeat', 'k1')]);
+    // Finished: the turn is over and the repeat runs nothing, and its
+    // reply is the caller's to read from the session.
+    const finished = await send('finished repeat', 'k1');
+    assert.equal(turnReplyFor(finished, 'k1'), 'reply');
+    // A new key is a new message.
+    await send('second', 'k2');
+    assert.deepEqual(repeats, ['live repeat: live', 'finished repeat: finished']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('onRepeat is not called for a repeat that continues a turn a crash left unfinished', async () => {
+  // Nobody else is rendering that turn, so the caller that brought it back
+  // should render it as its own.
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const stateDir = path.join(home, 'state');
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'rep-crash-1',
+    agent: { id: 'blair', name: 'Blair' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'hello', createdAt: new Date().toISOString(), idempotencyKey: 'msg-1' }],
+  });
+  before.close();
+
+  let repeated = false;
+  let status = '';
+  const adapter: GatewayChannelAdapter = {
+    name: 'fake',
+    async start(gw) {
+      const session = await gw.dispatch({
+        sessionId: 'rep-crash-1',
+        agentId: 'blair',
+        userMessage: 'hello',
+        idempotencyKey: 'msg-1',
+        onRepeat: () => {
+          repeated = true;
+        },
+      });
+      status = session.status;
+    },
+    async stop() {},
+  };
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('continued')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, channels: [adapter], warn: () => {} });
+  await gateway.start();
+  await gateway.stop();
+  assert.equal(status, 'completed');
+  assert.equal(repeated, false);
+});
+
+test('a repeat naming another agent is refused, live or finished, and never handed the session', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('reply')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    const repeats: string[] = [];
+    const first = gateway.dispatch({ sessionId: 'id-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1' });
+    // Live: the first is still queued when this arrives.
+    const live = gateway.dispatch({
+      sessionId: 'id-1',
+      agentId: 'cora',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(kind),
+    });
+    await assert.rejects(live, /belongs to agent blair, not cora/);
+    assert.equal((await first).status, 'completed');
+    // Finished.
+    await assert.rejects(
+      gateway.dispatch({ sessionId: 'id-1', agentId: 'cora', userMessage: 'hello', idempotencyKey: 'k1', onRepeat: (kind) => repeats.push(kind) }),
+      /belongs to agent blair, not cora/,
+    );
+    assert.deepEqual(repeats, []);
+    // A third, from the right agent, still repeats the turn rather than
+    // running it again.
+    const again = await gateway.dispatch({ sessionId: 'id-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1' });
+    assert.equal(again.messages.filter((message) => message.role === 'user').length, 1);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a repeat arriving just after a rollover is found in the archived transcript and runs nothing', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('the answer');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'roll-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1' });
+    const { archivedAs } = await gateway.rolloverSession('roll-1');
+    const before = calls;
+    const repeats: string[] = [];
+    const repeated = await gateway.dispatch({
+      sessionId: 'roll-1',
+      agentId: 'blair',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(kind),
+    });
+    assert.equal(calls, before);
+    assert.deepEqual(repeats, ['finished']);
+    assert.equal(repeated.id, archivedAs);
+    assert.equal(turnReplyFor(repeated, 'k1'), 'the answer');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a repeat naming the agent a live dispatch left unnamed attaches to it, and is refused for any other', async () => {
+  const home = await newHome();
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('reply')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    const repeats: string[] = [];
+    // The default agent's — the built-in one, here — with no agent named.
+    const first = gateway.dispatch({ sessionId: 'unnamed-1', userMessage: 'hello', idempotencyKey: 'k1' });
+    const named = gateway.dispatch({
+      sessionId: 'unnamed-1',
+      agentId: 'stratus',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(`stratus: ${kind}`),
+    });
+    const other = gateway.dispatch({
+      sessionId: 'unnamed-1',
+      agentId: 'cora',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(`cora: ${kind}`),
+    });
+    await assert.rejects(other, /belongs to agent stratus, not cora/);
+    assert.equal((await named).agent.id, 'stratus');
+    await first;
+    assert.deepEqual(repeats, ['stratus: live']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a repeat attached to an unnamed live dispatch whose turn fails is still told it repeated, or refused', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => new Response(JSON.stringify({ error: { message: 'bad request' } }), { status: 400 })) as typeof fetch,
+  };
+  // Blair is the default, so the dispatch naming nobody runs on a provider
+  // that fails it.
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {}, selection: { soul: path.join(home, '.stratus', 'agents', 'blair.md') } });
+  await gateway.start();
+  try {
+    const repeats: string[] = [];
+    const first = gateway.dispatch({ sessionId: 'unnamed-fail-1', userMessage: 'hello', idempotencyKey: 'k1' });
+    const named = gateway.dispatch({
+      sessionId: 'unnamed-fail-1',
+      agentId: 'blair',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(`blair: ${kind}`),
+    });
+    const other = gateway.dispatch({
+      sessionId: 'unnamed-fail-1',
+      agentId: 'cora',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(`cora: ${kind}`),
+    });
+    await assert.rejects(first);
+    await assert.rejects(named, (error: unknown) => !(error instanceof Error && /never cross agent identities/.test(error.message)));
+    await assert.rejects(other, /belongs to agent blair, not cora/);
+    assert.deepEqual(repeats, ['blair: live']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a refused claimant that registered a key first does not leave its owner\'s turn without a live entry', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      if (calls === 2) {
+        started();
+        await held;
+      }
+      return openAiText('reply');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    // The session is Blair's.
+    await gateway.dispatch({ sessionId: 'claim-1', agentId: 'blair', userMessage: 'first', idempotencyKey: 'k0' });
+    const repeats: string[] = [];
+    // A claimant naming another agent gets to the new key first, and is refused.
+    const wrong = gateway.dispatch({ sessionId: 'claim-1', agentId: 'cora', userMessage: 'hello', idempotencyKey: 'k1' });
+    const owner = gateway.dispatch({ sessionId: 'claim-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1' });
+    await assert.rejects(wrong, /belongs to agent blair, not cora/);
+    // While the owner's turn runs, its redelivery attaches to it.
+    await running;
+    const redelivered = gateway.dispatch({
+      sessionId: 'claim-1',
+      agentId: 'blair',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(kind),
+    });
+    release();
+    await owner;
+    await redelivered;
+    assert.deepEqual(repeats, ['live']);
+  } finally {
+    release();
+    await gateway.stop();
+  }
+});
+
+test('a repeat naming nobody, of a claim naming the wrong agent, runs once that claim is refused', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('reply')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'unnamed-claim-1', agentId: 'blair', userMessage: 'first', idempotencyKey: 'k0' });
+    const repeats: string[] = [];
+    const wrong = gateway.dispatch({ sessionId: 'unnamed-claim-1', agentId: 'cora', userMessage: 'hello', idempotencyKey: 'k1' });
+    const unnamed = gateway.dispatch({
+      sessionId: 'unnamed-claim-1',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(kind),
+    });
+    await assert.rejects(wrong, /belongs to agent blair, not cora/);
+    const session = await unnamed;
+    assert.equal(session.agent.id, 'blair');
+    assert.equal(session.status, 'completed');
+    assert.deepEqual(session.messages.filter((message) => message.idempotencyKey === 'k1').length, 1);
+    assert.deepEqual(repeats, []);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a repeat naming nobody, of a claim that failed before writing anything, runs on its own', async () => {
+  const home = await newHome();
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('reply')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    const repeats: string[] = [];
+    // A new session, claimed for an agent the roster does not have: the
+    // claim fails before its keyed message is ever written.
+    const ghost = gateway.dispatch({ sessionId: 'unowned-1', agentId: 'ghost', userMessage: 'hello', idempotencyKey: 'k1' });
+    const unnamed = gateway.dispatch({
+      sessionId: 'unowned-1',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(kind),
+    });
+    await assert.rejects(ghost);
+    const session = await unnamed;
+    assert.equal(session.messages.filter((message) => message.idempotencyKey === 'k1').length, 1);
+    assert.deepEqual(repeats, []);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('two owner deliveries waiting behind a refused claim run the turn once, the second attached to the first', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('reply');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'two-owners-1', agentId: 'blair', userMessage: 'first', idempotencyKey: 'k0' });
+    const before = calls;
+    const repeats: string[] = [];
+    const wrong = gateway.dispatch({ sessionId: 'two-owners-1', agentId: 'cora', userMessage: 'hello', idempotencyKey: 'k1' });
+    const a = gateway.dispatch({ sessionId: 'two-owners-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1', onRepeat: (kind) => repeats.push(`a: ${kind}`) });
+    const b = gateway.dispatch({ sessionId: 'two-owners-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1', onRepeat: (kind) => repeats.push(`b: ${kind}`) });
+    await assert.rejects(wrong, /belongs to agent blair, not cora/);
+    await a;
+    await b;
+    assert.equal(calls - before, 1);
+    assert.deepEqual(repeats, ['b: live']);
+  } finally {
+    await gateway.stop();
+  }
 });

@@ -18,6 +18,7 @@ import { z } from 'zod';
 import {
   AgentRunner,
   EventBus,
+  SESSION_TRUST_METADATA_KEY,
   ToolRegistry,
   resolveToolRisk,
   type AgentWorkspaces,
@@ -1263,6 +1264,70 @@ test('two server tools that fold to one bridged name refuse the server at load',
     /both bridge to mcp\.linear\.do_thing/,
   );
   await plugin.dispose?.();
+});
+
+test('a server the operator vouches for carries that label, on its results and on the files it writes', async () => {
+  // Every bridged result was `external`, so an agent working through the
+  // operator's own server remembered everything afterwards as a stranger's
+  // (#224). The label is the operator's word, from trusted config — the
+  // server's own claims never enter.
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  const tools = (server: McpServer): void => {
+    linearTools(server);
+    server.registerTool('chart', { description: 'Render a chart.' }, async () => ({
+      content: [{ type: 'image', data: png.toString('base64'), mimeType: 'image/png' }],
+    }));
+  };
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-trust-'));
+
+  const defaulted = new ToolRegistry();
+  const stranger = pluginFor(fakeServer({ current: tools }), { workspaceRoot });
+  await loadThroughView(stranger, defaulted);
+  const vouched = new ToolRegistry();
+  const ours = createMcpPlugin(
+    { servers: { linear: { url: 'http://127.0.0.1:9/unused', outputTrust: 'agent' } }, workspaceRoot },
+    { transportFor: () => fakeServer({ current: tools }).transportFor(), warn: () => {}, log: () => {} },
+  );
+  await loadThroughView(ours, vouched);
+  try {
+    assert.equal(defaulted.get('mcp.linear.get_issue')?.outputTrust, 'external');
+    assert.equal(vouched.get('mcp.linear.get_issue')?.outputTrust, 'agent');
+
+    // The same label on a file the result wrote, so reading it back with
+    // fs.read claims neither more nor less than the result did: a stranger's
+    // file is recorded `external`, and the vouched server's is the agent's
+    // own — a clean write records nothing at all.
+    const ledger = createFileLedger(under(workspaceRoot));
+    const theirs = await defaulted.get('mcp.linear.chart')!.execute({}, sessionFor('ava')) as JsonObject;
+    assert.equal(await ledger.lookup('ava', (theirs.files as string[])[0]!), 'external');
+    const clean: Session = { ...sessionFor('ava'), metadata: { [SESSION_TRUST_METADATA_KEY]: 'user' } };
+    const mine = await vouched.get('mcp.linear.chart')!.execute({}, clean) as JsonObject;
+    assert.equal(await ledger.lookup('ava', (mine.files as string[])[0]!), undefined);
+
+    // Vouching covers what the server returns, not what a tainted session
+    // asked of it: the file a stranger's text could have steered is
+    // recorded at the session's label, as `fs.write` would record it.
+    const tainted: Session = { ...sessionFor('ava'), metadata: { [SESSION_TRUST_METADATA_KEY]: 'external' } };
+    const steered = await vouched.get('mcp.linear.chart')!.execute({}, tainted) as JsonObject;
+    assert.equal(await ledger.lookup('ava', (steered.files as string[])[0]!), 'external');
+  } finally {
+    await stranger.dispose?.();
+    await ours.dispose?.();
+  }
+});
+
+test('a server cannot be labelled as a person, and a misspelled label is refused', () => {
+  // `user` means a person said it; no server's output is that.
+  assert.throws(
+    () => createMcpPlugin({ servers: { linear: { url: 'http://127.0.0.1:9/', outputTrust: 'user' } } }),
+    /outputTrust cannot be "user"/,
+  );
+  // A typo must not silently mean the default, or an operator would believe
+  // a label was in effect that is not.
+  assert.throws(
+    () => createMcpPlugin({ servers: { linear: { url: 'http://127.0.0.1:9/', outputTrust: 'trusted' } } }),
+    /outputTrust must be "agent", "unknown", or "external"/,
+  );
 });
 
 test('a server name that cannot be a name segment is refused as configuration', () => {

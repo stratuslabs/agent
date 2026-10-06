@@ -303,12 +303,27 @@ export interface Message {
    */
   overheard?: boolean;
   /**
+   * Appended by `observe`, so it started no turn. `overheard` alone cannot
+   * say so: a turn dispatched with `addressed: false` is overheard too, and
+   * is a turn. Present only when true; a message observed before this was
+   * recorded reads as a turn, which errs toward attributing nothing to an
+   * earlier one (`isLatestTurn`).
+   */
+  observed?: boolean;
+  /**
    * The caller's idempotency key for the dispatch that brought this user
    * message (`RunInput.idempotencyKey`). Written in the same save as the
    * message, so a key is never durable without its message or the other
    * way round; `workItemState` reads it back.
    */
   idempotencyKey?: string;
+  /**
+   * Why the turn this user message started failed, written by
+   * `recordTurnFailure` in the save that fails it. The session's
+   * `lastError` is the latest turn's and the next turn replaces it; this
+   * stays, so `turnFailureFor` can answer for any turn a key names.
+   */
+  turnError?: string;
   /**
    * This message's turn was continued once after the process running it
    * died (`AgentRunner.continueTurn`). A host fails a second such turn
@@ -3174,6 +3189,13 @@ export const completeAnsweredTurn = async (finished: Session, store: SessionStor
 };
 
 /**
+ * The longest idempotency key a dispatch accepts. Here rather than in the
+ * gateway that enforces it, because a channel composing keys from ids it
+ * does not bound (an agent's, a platform's) has to fit them to it.
+ */
+export const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
+
+/**
  * The reply of the turn a keyed message started (`Message.idempotencyKey`),
  * where `latestTurnReply` is the newest turn's. A repeated dispatch resolves
  * with the session as it stands, which may have moved on since: an adapter
@@ -3188,6 +3210,84 @@ export const turnReplyFor = (session: Pick<Session, 'messages'>, idempotencyKey:
   }
   const next = session.messages.findIndex((message, index) => index > start && message.role === 'user');
   return latestTurnReply({ messages: session.messages.slice(0, next < 0 ? undefined : next) });
+};
+
+/**
+ * The files the turn a keyed message started produced (`filePathsOf` over
+ * its tool results), the other half of what `turnReplyFor` reads. A
+ * channel uploads a turn's files as the results arrive, so an adapter
+ * answering a repeat of a finished turn — no events, only the session —
+ * has this and nothing else to find them by.
+ *
+ * A path, not the bytes: the transcript never held them. `producedAt` is
+ * when the result naming it was recorded, so a reader can refuse a path
+ * that has been written since — by now it may hold a later turn's file.
+ */
+export const turnFilesFor = (
+  session: Pick<Session, 'messages'>,
+  idempotencyKey: string,
+): Array<{ path: string; producedAt: string }> => {
+  const start = session.messages.findLastIndex((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (start < 0) {
+    return [];
+  }
+  const next = session.messages.findIndex((message, index) => index > start && message.role === 'user');
+  return session.messages
+    .slice(start + 1, next < 0 ? undefined : next)
+    .flatMap((message) => (message.role === 'tool' && message.toolResult !== undefined
+      ? filePathsOf(message.toolResult).map((filePath) => ({ path: filePath, producedAt: message.createdAt }))
+      : []));
+};
+
+/**
+ * Fail a session's in-flight turn: `status` and `lastError`, and the error
+ * on the turn's own user message (`Message.turnError`), where the next
+ * turn cannot overwrite it. The one write every path that fails a turn
+ * makes — the runner's and the gateway's sweeps — so `turnFailureFor`
+ * reads the same record whichever failed it. In flight, the turn's message
+ * is the session's newest user message (`observe` refuses to append).
+ */
+export const recordTurnFailure = (session: Session, error: string): void => {
+  session.status = 'failed';
+  session.lastError = error;
+  const turn = session.messages.findLast((message) => message.role === 'user');
+  if (turn !== undefined) {
+    turn.turnError = error;
+  }
+};
+
+/**
+ * Whether the keyed message started the session's latest turn. A message
+ * `observe` appended since started no turn and is passed over
+ * (`Message.observed`); every other user message, keyed or not, addressed
+ * or not, started one.
+ */
+export const isLatestTurn = (session: Pick<Session, 'messages'>, idempotencyKey: string): boolean =>
+  session.messages.findLast((message) => message.role === 'user' && message.observed !== true)?.idempotencyKey === idempotencyKey;
+
+/**
+ * Why the turn a keyed message started failed, or undefined if it did not.
+ * Read from the message (`recordTurnFailure`), so a turn the session has
+ * moved on from still answers. A transcript written before turns carried
+ * their own failure has only the session's, which is the keyed turn's
+ * while it is the latest (`isLatestTurn`).
+ */
+export const turnFailureFor = (session: Pick<Session, 'messages' | 'status' | 'lastError'>, idempotencyKey: string): string | undefined => {
+  const keyed = session.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (keyed === undefined) {
+    return undefined;
+  }
+  if (keyed.turnError !== undefined) {
+    return keyed.turnError;
+  }
+  // A transcript with any failure stamped on its turn's message was written
+  // since turns carried their own, and the session's failure is stamped on
+  // whichever turn it was — not this one. Only an older transcript falls
+  // back to the session's.
+  if (session.status !== 'failed' || session.messages.some((message) => message.role === 'user' && message.turnError !== undefined)) {
+    return undefined;
+  }
+  return isLatestTurn(session, idempotencyKey) ? session.lastError ?? 'The turn failed.' : undefined;
 };
 
 /**
@@ -5952,6 +6052,7 @@ export class AgentRunner {
       content: input.message,
       createdAt: new Date().toISOString(),
       overheard: true,
+      observed: true,
     });
 
     // The speaker is judged like any sender: their words are in the
@@ -6475,8 +6576,7 @@ export class AgentRunner {
           createdAt: new Date().toISOString(),
         });
       }
-      session.status = 'failed';
-      session.lastError = lastError;
+      recordTurnFailure(session, lastError);
       await this.store.save(session);
       const stored = await this.store.get(session.id);
       session = stored ?? session;

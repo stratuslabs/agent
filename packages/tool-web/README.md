@@ -59,13 +59,18 @@ received.
 
 Each element is judged where a browser's parser puts it, misnested and
 unclosed markup included, so text moved out of a hidden element is kept
-and text moved into one is not. Two exceptions are deliberate, and both
-keep text a browser would not show: an element still open at the end of
-the page keeps what it holds, so a closing rule this extraction does not
-model cannot erase the article after it; and a hidden `html` or `body`
-hides nothing, because a page that hides its whole document until a
-script runs is showing all of it — hiding everything hides nothing from
-a reader that the page shows anyone else.
+and text moved into one is not. The tests hold this to Chromium: some
+1,700 pages, hand-written and generated, with what Chromium shows of each
+recorded in [`test/rendered-in-chromium.json`](test/rendered-in-chromium.json)
+by [`scripts/render-in-chromium.ts`](scripts/render-in-chromium.ts).
+
+Two exceptions are deliberate, and both keep text a browser would not
+show: an element still open at the end of the page keeps what it holds,
+so a closing rule this extraction does not model cannot erase the
+article after it; and a hidden `html` or `body` hides nothing, because a
+page that hides its whole document until a script runs is showing all of
+it — hiding everything hides nothing from a reader that the page shows
+anyone else.
 
 ## Settings
 

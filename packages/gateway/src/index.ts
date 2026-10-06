@@ -7,6 +7,8 @@ import {
   isUnaddressedTurn,
   workItemState,
   lastResponseIsAnswer,
+  MAX_IDEMPOTENCY_KEY_LENGTH,
+  recordTurnFailure,
   completeAnsweredTurn,
   abortErrorFor,
   AgentRegistry,
@@ -710,6 +712,27 @@ export interface DispatchInput {
    * failed at the next start instead of finished.
    */
   idempotencyKey?: string;
+  /**
+   * Called, before the dispatch resolves, when it repeats a turn rather
+   * than starting or continuing one, and says which kind of repeat:
+   *
+   * - `live` — it attached to a turn another dispatch with the same key
+   *   started in this process and is still waiting on. That dispatch is
+   *   alive to render the outcome, so a caller with a reply of its own in
+   *   progress takes it down and posts nothing.
+   * - `finished` — the turn is over and nothing ran. Its outcome may never
+   *   have been posted — the process can die between the turn's last write
+   *   and the channel's — and nothing durable says whether it was, so the
+   *   caller posts it from the session: `turnReplyFor`, `turnFilesFor`, and
+   *   `turnFailureFor` from `@stratusagent/core`, since the session may
+   *   have moved on and no event will carry any of it. Said twice beats
+   *   never said.
+   *
+   * Not called for a repeat that continues a turn a crash left unfinished:
+   * that turn runs, its events are this caller's, and nobody else is
+   * rendering it.
+   */
+  onRepeat?: (repeat: 'live' | 'finished') => void;
 }
 
 export interface ObserveInput {
@@ -973,7 +996,6 @@ export const ABANDONED_TURN_ERROR =
  * is far shorter; the bound is so a key cannot be used to grow every row it
  * is stored on.
  */
-const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
 
 /**
  * Recorded on a delegated sub-session that was parked on a human when the
@@ -1011,6 +1033,33 @@ export const ROLLED_OVER_FROM_METADATA_KEY = 'rolledOverFrom';
 export const ROLLED_OVER_TO_METADATA_KEY = 'rolledOverTo';
 /** The segment a rollover mints into the archived transcript's id. */
 export const ROLLED_OVER_SESSION_ID_MARKER = ':rolledover:';
+
+/**
+ * How long after a rollover a repeated key is still looked for in the
+ * archived transcript. A rollover moves every keyed message out of the
+ * live row, so a redelivery arriving after one would otherwise read as a
+ * new message and run again. Platforms redeliver within minutes — Slack
+ * gives up after about five — and past the window the archive is not
+ * loaded at all, since every new message to the fresh row would pay for a
+ * read that can no longer find anything.
+ */
+const ROLLOVER_REPEAT_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * The one refusal for a dispatch naming an agent other than its session's.
+ * Its own type so a repeat attached to a claimant can tell the claimant was
+ * refused for who it named — the item then still has no owner — from the
+ * claimant's turn failing. Internal: callers read the message.
+ */
+class CrossIdentityError extends Error {
+  constructor(sessionId: string, owner: string, claimed: string) {
+    super(`Session ${sessionId} belongs to agent ${owner}, not ${claimed} — sessions never cross agent identities.`);
+    this.name = 'CrossIdentityError';
+  }
+}
+
+const crossIdentityError = (sessionId: string, owner: string, claimed: string): Error =>
+  new CrossIdentityError(sessionId, owner, claimed);
 
 /** Where the session's tool calls ran: `local-command`, or a contributed executor's registered name. */
 export const EXECUTOR_METADATA_KEY = 'executor';
@@ -2638,8 +2687,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * process is running, and the transcript covers the rest.
    */
   // Nested rather than one joined string: both halves are the caller's, and
-  // no separator is one a caller cannot also put inside a key.
-  const liveWorkItems = new Map<string, Map<string, Promise<Session>>>();
+  // no separator is one a caller cannot also put inside a key. The agent
+  // the dispatch named rides along, so a repeat naming another is not
+  // handed a session that is not its agent's.
+  // `confirmed` once the chain has seen the dispatch past the identity
+  // check with a key the session had not seen (`claimLiveItem`); until
+  // then the entry is a claim that may yet be refused.
+  const liveWorkItems = new Map<string, Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean }>>();
   /** The start-up snapshot `recoverParkedTurns` judges orphans from, for a repeat that gets there first. */
   let orphanedAtStart: ReadonlySet<string> = new Set();
 
@@ -2807,9 +2861,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     };
 
     if (existing && existing.agent.id !== agent.id) {
-      throw new Error(
-        `Session ${input.sessionId} belongs to agent ${existing.agent.id}, not ${agent.id} — sessions never cross agent identities.`,
-      );
+      throw crossIdentityError(input.sessionId, existing.agent.id, agent.id);
     }
 
     const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(existing, config);
@@ -3099,8 +3151,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const metadata = { ...(session.metadata ?? {}) };
     delete metadata[PENDING_APPROVAL_METADATA_KEY];
     session.metadata = metadata;
-    session.status = 'failed';
-    session.lastError = error;
+    recordTurnFailure(session, error);
     await store.save(session);
     await bus.emit({ type: 'session.updated', sessionId: session.id, status: 'failed' });
     await bus.emit({ type: 'session.failed', sessionId: session.id, error });
@@ -3222,8 +3273,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   const failAbandoned = async (session: Session): Promise<Session> => {
-    session.status = 'failed';
-    session.lastError = ABANDONED_TURN_ERROR;
+    recordTurnFailure(session, ABANDONED_TURN_ERROR);
     await store.save(session);
     await bus.emit({ type: 'session.updated', sessionId: session.id, status: 'failed' });
     await bus.emit({ type: 'session.failed', sessionId: session.id, error: ABANDONED_TURN_ERROR });
@@ -3293,14 +3343,30 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const settleRepeat = async (
     sessionId: string,
     idempotencyKey: string,
+    agentId: string | undefined,
     turnId: string | undefined,
+    onRepeat: DispatchInput['onRepeat'],
   ): Promise<Session | undefined> => {
     const session = await store.get(sessionId);
-    const state = session === undefined ? undefined : workItemState(session, idempotencyKey);
-    if (session === undefined || state === undefined) {
+    if (session === undefined) {
       return undefined;
     }
+    // Before anything is returned: the turn a dispatch would run is refused
+    // for naming another agent, and the one it would repeat is no less that
+    // agent's — a repeat is not a way to read its transcript.
+    if (agentId !== undefined && session.agent.id !== agentId) {
+      throw crossIdentityError(sessionId, session.agent.id, agentId);
+    }
+    const state = workItemState(session, idempotencyKey);
+    if (state === undefined) {
+      const archived = await archivedRepeat(session, idempotencyKey);
+      if (archived !== undefined) {
+        onRepeat?.('finished');
+      }
+      return archived;
+    }
     if (state === 'finished') {
+      onRepeat?.('finished');
       return session;
     }
     // Run now, on this caller's behalf, so its events are this caller's
@@ -3315,6 +3381,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         activeTurns.delete(sessionId);
       }
     }
+  };
+
+  /**
+   * The archived transcript holding a key the live row does not, when the
+   * row is a rollover's fresh one made inside `ROLLOVER_REPEAT_WINDOW_MS`.
+   * Only the one rollover back: a second inside the window is a redelivery
+   * outliving two deliberate resets, and the chain is not walked for it.
+   * Always finished — a rollover refuses a session with a turn in flight.
+   */
+  const archivedRepeat = async (session: Session, idempotencyKey: string): Promise<Session | undefined> => {
+    const archivedAs = session.metadata?.[ROLLED_OVER_FROM_METADATA_KEY];
+    if (typeof archivedAs !== 'string' || Date.now() - Date.parse(session.createdAt) > ROLLOVER_REPEAT_WINDOW_MS) {
+      return undefined;
+    }
+    const archived = await store.get(archivedAs);
+    return archived !== undefined && workItemState(archived, idempotencyKey) !== undefined ? archived : undefined;
   };
 
   /** An unfinished item with no live turn, settled the way the start-up sweeps would. */
@@ -3437,17 +3519,116 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // A repeat of a dispatch still queued or running is that dispatch: it
     // resolves with it rather than queueing behind it, which would let
     // another caller's turn land in between and then find a finished item.
+    // Attached only when it names no other agent than the live dispatch
+    // did; otherwise it queues, and `settleRepeat` refuses it there.
     const live = idempotencyKey !== undefined ? liveWorkItems.get(input.sessionId)?.get(idempotencyKey) : undefined;
-    if (live !== undefined) {
-      return live;
+    // A claim naming an agent other than this delivery does, that the chain
+    // has not yet confirmed — this delivery naming nobody, or someone else.
+    // The claim may be refused for who it named, and then the item is still
+    // unowned: inheriting the refusal would drop a valid message, and
+    // queueing behind it would leave this delivery to find the turn that a
+    // later valid delivery runs `finished`, and answer it twice. So it
+    // waits for the claim to settle and decides then: a claim that stood
+    // is repeated, by a delivery naming its owner or nobody, and refuses
+    // anyone else; a claim that left the item unowned is dispatched again,
+    // where the first delivery to get there runs it and the rest attach.
+    if (live !== undefined && !live.confirmed && live.agentId !== undefined && input.agentId !== live.agentId) {
+      const claim = live.turn;
+      const claimedBy = input.agentId;
+      const repeatOf = (owner: string): void => {
+        if (claimedBy !== undefined && claimedBy !== owner) {
+          throw crossIdentityError(input.sessionId, owner, claimedBy);
+        }
+        input.onRepeat?.('live');
+      };
+      return claim.then(
+        (session) => {
+          repeatOf(session.agent.id);
+          return session;
+        },
+        async (error: unknown) => {
+          // Refused for who it named, or failed before its keyed message was
+          // ever written (an agent gone, a provider it could not build): the
+          // item is still unowned, and there is no turn to have repeated.
+          const stored = error instanceof CrossIdentityError || idempotencyKey === undefined ? undefined : await store.get(input.sessionId);
+          const owned = stored !== undefined && idempotencyKey !== undefined && workItemState(stored, idempotencyKey) !== undefined;
+          if (owned) {
+            repeatOf(stored.agent.id);
+            throw error;
+          }
+          // Its own cleanup runs a tick later; the dispatch below must not
+          // find the dead claim still standing and wait on it again.
+          const items = liveWorkItems.get(input.sessionId);
+          if (idempotencyKey !== undefined && items?.get(idempotencyKey)?.turn === claim) {
+            items.delete(idempotencyKey);
+            if (items.size === 0) {
+              liveWorkItems.delete(input.sessionId);
+            }
+          }
+          return dispatch(input);
+        },
+      );
+    }
+    if (live !== undefined && (input.agentId === undefined || input.agentId === live.agentId)) {
+      input.onRepeat?.('live');
+      return live.turn;
+    }
+    // The live dispatch named no agent, so whose session it is is known
+    // only once its turn resolves. Queueing instead would make this a
+    // `finished` repeat of a turn the live caller is still rendering — two
+    // answers — so it attaches, and is held to the agent it named then:
+    // told it repeated only if that agent owns the session, refused if not.
+    const claimed = input.agentId;
+    if (live !== undefined && live.agentId === undefined && claimed !== undefined) {
+      const shared = live.turn;
+      // Whichever way the turn ends: a failed one is still that agent's,
+      // its owner read from the store, and a repeat of it is still told so
+      // — or refused, rather than handed another agent's error.
+      const attach = async (): Promise<Session> => {
+        let outcome: { session: Session } | { error: unknown };
+        try {
+          outcome = { session: await shared };
+        } catch (error) {
+          outcome = { error };
+        }
+        const owner = 'session' in outcome ? outcome.session.agent.id : (await store.get(input.sessionId))?.agent.id;
+        if (owner !== undefined && owner !== claimed) {
+          throw crossIdentityError(input.sessionId, owner, claimed);
+        }
+        // No owner means the dispatch failed before its session was ever
+        // written: there is no turn to have repeated, only its error.
+        if (owner !== undefined) {
+          input.onRepeat?.('live');
+        }
+        if ('error' in outcome) {
+          throw outcome.error;
+        }
+        return outcome.session;
+      };
+      return attach();
     }
 
-    const turn = onSessionChain(input.sessionId, async () => {
+    // Reads `turn` only once it is assigned: the registration below runs
+    // after it, and the chain's work runs in a later tick (`.then`).
+    const claimLiveItem = (key: string, confirmed: boolean): void => {
+      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean }>();
+      items.set(key, { turn, agentId: input.agentId, confirmed });
+      liveWorkItems.set(input.sessionId, items);
+    };
+    const turn: Promise<Session> = onSessionChain(input.sessionId, async () => {
       // Before `activeTurns` is touched: a repeat that runs nothing must
       // not claim the session's turn id, even for the instant it takes.
-      const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, turnId) : undefined;
+      const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, input.agentId, turnId, input.onRepeat) : undefined;
       if (repeated !== undefined) {
         return repeated;
+      }
+      // Past the identity check with a key the session has not seen, so this
+      // dispatch owns the item: it becomes the live entry even if a claimant
+      // that was then refused registered first, or a repeat arriving while
+      // this turn runs would find nothing to attach to, queue, and read the
+      // turn as finished — a second answer beside this caller's.
+      if (idempotencyKey !== undefined) {
+        claimLiveItem(idempotencyKey, true);
       }
       await settleOrphanedItem(input.sessionId);
       if (turnId === undefined) {
@@ -3464,12 +3645,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
     });
     if (idempotencyKey !== undefined) {
-      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, Promise<Session>>();
-      items.set(idempotencyKey, turn);
-      liveWorkItems.set(input.sessionId, items);
+      // A repeat that queued instead of attaching — it named another agent,
+      // and is about to be refused — must not displace the turn it repeats.
+      // The first registration is provisional; the chain confirms it
+      // (`claimLiveItem` above) once the dispatch is known to own the item.
+      if (liveWorkItems.get(input.sessionId)?.has(idempotencyKey) !== true) {
+        claimLiveItem(idempotencyKey, false);
+      }
       void turn.catch(() => {}).finally(() => {
         const current = liveWorkItems.get(input.sessionId);
-        if (current?.get(idempotencyKey) === turn) {
+        if (current?.get(idempotencyKey)?.turn === turn) {
           current.delete(idempotencyKey);
           if (current.size === 0) {
             liveWorkItems.delete(input.sessionId);
@@ -3512,9 +3697,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         return undefined;
       }
       if (input.agentId !== undefined && existing.agent.id !== input.agentId) {
-        throw new Error(
-          `Session ${input.sessionId} belongs to agent ${existing.agent.id}, not ${input.agentId} — sessions never cross agent identities.`,
-        );
+        throw crossIdentityError(input.sessionId, existing.agent.id, input.agentId);
       }
       const continuedAs = existing.metadata?.[ROLLED_OVER_TO_METADATA_KEY];
       if (typeof continuedAs === 'string') {
