@@ -2068,17 +2068,19 @@ export const applyPerAgentWorkspaces = async (
       // was checked counts, or another tree's link with the right text would
       // retire the records of peers that still need pointing back.
       //
-      // And from the destination entry that was there before the read: one
-      // swapped for a link with the right text and then restored would be
-      // taken for our recreate, retiring the records of peers that still
-      // name what is really there.
+      // And from the destination and source entries that were there before
+      // the read: either one swapped for a link with the right text and then
+      // restored would be taken for our recreate, retiring the records of
+      // peers that still name what is really there.
       const ownerDirectory = await steadyDirectory(path.dirname(target));
       const destinationBefore = await lstat(target).then(stampOf, () => undefined);
       const sourceBefore = await lstat(from).then(stampOf, () => undefined);
-      const ourRecreate = leadsNowhere && ownerDirectory !== undefined && destinationBefore !== undefined
+      const ourRecreate = leadsNowhere && ownerDirectory !== undefined
+        && destinationBefore !== undefined && sourceBefore !== undefined
         && await destinationIsOurRecreate(from, target)
         && await steadyDirectory(path.dirname(target)) === ownerDirectory
-        && await lstat(target).then(stampOf, () => undefined) === destinationBefore;
+        && await lstat(target).then(stampOf, () => undefined) === destinationBefore
+        && await lstat(from).then(stampOf, () => undefined) === sourceBefore;
       if (leadsNowhere && !ourRecreate) {
         // Staying put, whatever was announced: a cycle batch adds every
         // member to `moved` before any of it moves, and a member found here
