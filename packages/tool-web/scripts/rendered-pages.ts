@@ -200,7 +200,21 @@ const CORPUS: readonly string[] = [
   '<ruby>BASE<rt style="display:list-item;content-visibility:hidden">MARK</rt></ruby>AFTER',
   '<ruby>BASE<rt style="display:block;content-visibility:hidden">MARK</rt></ruby>AFTER',
   '<marquee style="display:table;content-visibility:hidden">MARK</marquee>AFTER',
-  '<marquee style="content-visibility:hidden">MARK</marquee>AFTER',
+  '<marquee style="content-visibility:hidden">MARK</marquee>AFTER',  '<div style="display:flex"><span style="content-visibility:hidden">MARK</span></div>AFTER',
+  '<div style="display:inline-grid"><span hidden=until-found>MARK</span></div>AFTER',
+  '<div style="display:-webkit-box"><span style="content-visibility:hidden">MARK</span></div>AFTER',
+  '<div style="display:flex"><div style="display:contents"><span style="content-visibility:hidden">MARK</span></div></div>AFTER',
+  '<div style="display:flex"><span style="display:table;content-visibility:hidden">MARK</span></div>AFTER',
+  '<div style="display:flex"><span style="display:table-row;content-visibility:hidden">MARK</span></div>AFTER',
+  '<span style="float:left;content-visibility:hidden">MARK</span>AFTER',
+  '<span style="float:none;content-visibility:hidden">MARK</span>AFTER',
+  '<span style="position:absolute;content-visibility:hidden">MARK</span>AFTER',
+  '<span style="position:relative;content-visibility:hidden">MARK</span>AFTER',
+  '<span style="float:left;all:initial;content-visibility:hidden">MARK</span>AFTER',
+  '<span hidden=until-found style="position:fixed">MARK</span>AFTER',
+  '<span style="display:inline"><b style="display:inherit;content-visibility:hidden"><p>MARK</b>AFTER</p></span>',
+  '<div style="display:flex"><p><b style="content-visibility:hidden">FIRST</p>MARK</div>AFTER',
+  '<div style="display:flex"><b style="content-visibility:hidden"><p>MARK</b>AFTER</p></div>',
 ];
 
 /** mulberry32: small, fast, and the same sequence on every platform. */

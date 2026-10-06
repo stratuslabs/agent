@@ -367,11 +367,18 @@ const validFor = (property: string, value: readonly CssToken[]): boolean => {
   if (words.length === 1 && CSS_WIDE_KEYWORDS.has(words[0] ?? '')) return true;
   if (property === 'visibility') return words.length === 1 && ['visible', 'hidden', 'collapse'].includes(words[0] ?? '');
   if (property === 'content-visibility') return words.length === 1 && ['visible', 'auto', 'hidden'].includes(words[0] ?? '');
+  if (property === 'float') return words.length === 1 && ['none', 'left', 'right', 'inline-start', 'inline-end'].includes(words[0] ?? '');
+  if (property === 'position') return words.length === 1 && ['static', 'relative', 'absolute', 'fixed', 'sticky'].includes(words[0] ?? '');
   return validDisplay(words);
 };
 
-/** The properties that decide whether an element's text is drawn, all of which `all` resets. */
-const HIDING_PROPERTIES = ['display', 'visibility', 'content-visibility'];
+/**
+ * The properties that decide whether an element's text is drawn, all of
+ * which `all` resets: `float` and `position` among them, because a floated
+ * or absolutely positioned box is made a block, which `content-visibility`
+ * then contains.
+ */
+const HIDING_PROPERTIES = ['display', 'visibility', 'content-visibility', 'float', 'position'];
 
 /**
  * What an inline `style` declares for each of HIDING_PROPERTIES: its
@@ -450,17 +457,48 @@ const CONTAINED_DISPLAYS = new Set([
 
 /**
  * Elements whose box Chromium lays out itself, whatever `display` says,
- * so it decides alone whether `content-visibility: hidden` takes:
- * a form control is always a contained box (a button or fieldset stops
- * being one only at `display: contents`, which drops its box); an option
- * and an option group are drawn by their select, which ignores it;
- * a dialog is absolutely positioned and a legend is made a block either
- * way, so an inline display there is a block one.
+ * so it decides alone whether `content-visibility: hidden` takes: a form
+ * control is always a contained box (a button or fieldset stops being one
+ * only at `display: contents`, which drops its box), and an option and an
+ * option group are drawn by their select, which ignores it.
  */
+const NO_ATTRIBUTES: ReadonlyMap<string, string> = new Map();
+
 const CONTAINED_WHATEVER_DISPLAY = new Set(['select', 'textarea', 'meter', 'progress', 'details']);
 const CONTAINED_UNLESS_CONTENTS = new Set(['button', 'fieldset']);
 const NEVER_CONTAINED = new Set(['option', 'optgroup']);
+
+/**
+ * Elements made a block whatever their `display`: a dialog is absolutely
+ * positioned by default, and a legend is laid out as a block.
+ */
 const BLOCKIFIED = new Set(['dialog', 'legend']);
+
+/** `display` keywords whose box makes each child box a block: a flex or grid container's items. */
+const BLOCKIFYING_CONTAINERS = new Set(['flex', 'grid', 'inline-flex', 'inline-grid', '-webkit-flex', '-webkit-inline-flex']);
+
+/**
+ * A `display` made block-level, as CSS does to a floated or absolutely
+ * positioned box and to a flex or grid item: `inline` and `inline-block`
+ * become `block`, `inline-table` a `table`, a row or a ruby box a block.
+ * `contents` and `none` stay, having no box to change.
+ */
+const blockify = (display: string): string => {
+  if (display === 'contents' || display === 'none') return display;
+  const words = display.split(' ');
+  if (words.length > 1) return words.map((word) => (word === 'inline' ? 'block' : word)).join(' ');
+  const single: Readonly<Record<string, string>> = {
+    'inline-table': 'table',
+    'inline-flex': 'flex',
+    '-webkit-inline-flex': 'flex',
+    'inline-grid': 'grid',
+    '-webkit-inline-box': '-webkit-box',
+    ruby: 'block ruby',
+    math: 'block math',
+  };
+  if (single[display] !== undefined) return single[display];
+  return CONTAINED_DISPLAYS.has(display) || display === 'table' ? display : 'block';
+};
 
 /**
  * Whether `content-visibility: hidden` hides the content of this element
@@ -474,9 +512,6 @@ const contentVisibilityApplies = (name: string, display: string): boolean => {
   if (NEVER_CONTAINED.has(name)) return false;
   if (CONTAINED_UNLESS_CONTENTS.has(name)) return display !== 'contents';
   const words = display.split(' ');
-  if (BLOCKIFIED.has(name)) {
-    return display !== 'contents' && !words.some((word) => word === 'table' || word === 'inline-table');
-  }
   if (words.length === 1) return CONTAINED_DISPLAYS.has(display);
   if (words.includes('list-item')) return !words.includes('inline') || words.includes('flow-root');
   const inside = words.find((word) => !DISPLAY_OUTSIDE.has(word)) ?? '';
@@ -485,8 +520,10 @@ const contentVisibilityApplies = (name: string, display: string): boolean => {
 };
 
 /**
- * Whether an element's attributes hide it, and the `display` they give it,
- * which an `inherit` beneath it takes. They arrive parsed by
+ * Whether an element's attributes hide it where it is placed, and the
+ * `display` they give it there, which an `inherit` beneath it takes. Both
+ * depend on the parent, so a copy the tree builder makes elsewhere is
+ * judged again: a `b` rebuilt as a flex item is a block. They arrive parsed by
  * `scanTags`, never searched for in the tag's text: a search for `hidden`
  * also finds `data-hidden`, `aria-hidden="false"`, and `title="hidden
  * gem"`, and a second parser would disagree with the scanner about where
@@ -503,12 +540,12 @@ const contentVisibilityApplies = (name: string, display: string): boolean => {
 const styleOf = (
   name: string,
   attributes: ReadonlyMap<string, string>,
-  parentDisplay: string,
+  parent: TreeNode | undefined,
 ): { hidden: boolean; display: string } => {
   const hidden = attributes.get('hidden');
   const style = attributes.get('style');
   const declared = style === undefined ? new Map<string, string | undefined>() : styleDeclares(decodeAttribute(style));
-  const display = resolveDisplay(name, declared, parentDisplay);
+  const display = resolveDisplay(name, declared, parent);
   const hides = (): boolean => {
     if (asciiLower(trimAscii(decodeAttribute(attributes.get('aria-hidden') ?? ''))) === 'true') return true;
     const visibility = declared.get('visibility');
@@ -528,18 +565,36 @@ const styleOf = (
 };
 
 /**
- * The `display` an element computes to, from its inline declaration and
- * the default for its name. A `var()` reads as `inline`, the value an
- * unresolved one falls back to and the direction that keeps text, since
- * `inline` contains nothing.
+ * The `display` an element computes to, from its inline declaration, the
+ * default for its name, and where it is: `inherit` takes the parent's,
+ * and a box is made a block by a `float`, an absolute or fixed `position`,
+ * or a flex or grid container — the nearest ancestor with a box, since one
+ * with `display: contents` has none and passes its children through. A
+ * `var()` reads as `inline`, and a `float` or `position` that is not a
+ * keyword as none: the value an unresolved one falls back to, and the
+ * direction that keeps text.
  */
-const resolveDisplay = (name: string, declared: ReadonlyMap<string, string | undefined>, parentDisplay: string): string => {
+const resolveDisplay = (
+  name: string,
+  declared: ReadonlyMap<string, string | undefined>,
+  parent: TreeNode | undefined,
+): string => {
   const ownDefault = DEFAULT_DISPLAY[name] ?? 'inline';
-  const display = !declared.has('display') ? ownDefault : declaredDisplay(declared.get('display'), ownDefault, parentDisplay);
+  const display = !declared.has('display')
+    ? ownDefault
+    : declaredDisplay(declared.get('display'), ownDefault, parent?.display ?? 'block');
+  let box = parent;
+  while (box !== undefined && box.display === 'contents') box = box.parent;
+  const container = (box?.display ?? 'block').split(' ');
+  const floated = ['left', 'right', 'inline-start', 'inline-end'].includes(declared.get('float') ?? 'none');
+  const positioned = ['absolute', 'fixed'].includes(declared.get('position') ?? 'static');
+  if (BLOCKIFIED.has(name) || floated || positioned || container.some((word) => BLOCKIFYING_CONTAINERS.has(word))) {
+    return blockify(display);
+  }
   // A ruby container makes its children inline-level. Of what that changes,
   // only a list item matters here: `inline list-item` contains nothing,
   // while a block made `inline-block` still contains.
-  if (!parentDisplay.split(' ').includes('ruby') || !display.split(' ').includes('list-item')) return display;
+  if (!container.includes('ruby') || !display.split(' ').includes('list-item')) return display;
   return ['inline', ...display.split(' ').filter((word) => !DISPLAY_OUTSIDE.has(word))].join(' ');
 };
 
@@ -731,6 +786,8 @@ interface TreeNode {
 interface OpenElement {
   id: number;
   name: string;
+  /** What it was opened with, so a copy placed elsewhere is judged again there. */
+  attributes: ReadonlyMap<string, string>;
   hidden: boolean;
   /** Where content inserted into this element goes. */
   node: TreeNode;
@@ -996,11 +1053,13 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   };
   const element = (
     name: string,
-    hidden: boolean,
+    attributes: ReadonlyMap<string, string>,
     parent: TreeNode | undefined,
-    display = DEFAULT_DISPLAY[name] ?? 'inline',
     id = nextId++,
-  ): OpenElement => ({ id, name, hidden, node: { id, hidden, display, parent } });
+  ): OpenElement => {
+    const { hidden, display } = styleOf(name, attributes, parent);
+    return { id, name, attributes, hidden, node: { id, hidden, display, parent } };
+  };
   /**
    * The tree builder's reconstruction: reopen, in order, the formatting a
    * block closed around. A copy keeps its original's id, so a copy of a
@@ -1020,7 +1079,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       const entry = active[index];
       if (entry === 'marker' || entry === undefined) continue;
       const original = entry.element;
-      const copy = element(original.name, original.hidden, parentFor(true), original.node.display, original.id);
+      const copy = element(original.name, original.attributes, parentFor(true), original.id);
       if (!push(copy)) return;
       active[index] = { element: copy, key: entry.key };
     }
@@ -1098,7 +1157,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
         const entry = lastActive((candidate) => candidate.element === open);
         const found = active[entry];
         if (found !== undefined && found !== 'marker' && block - at <= 3) {
-          const copy = element(open.name, open.hidden, ancestry, open.node.display, open.id);
+          const copy = element(open.name, open.attributes, ancestry, open.id);
           ancestry = copy.node;
           active[entry] = { element: copy, key: found.key };
           between.push(copy);
@@ -1115,12 +1174,14 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       // becomes that copy, keeping everything already in it, and the
       // block takes a new node in its new place.
       const holder = blockElement.node;
-      const moved: OpenElement = { ...blockElement, node: { ...blockElement.node, parent: ancestry } };
+      const placed = styleOf(blockElement.name, blockElement.attributes, ancestry);
+      const moved: OpenElement = { ...blockElement, hidden: placed.hidden, node: { ...blockElement.node, ...placed, parent: ancestry } };
+      const inBlock = styleOf(formatting.element.name, formatting.element.attributes, moved.node);
       holder.id = formatting.element.id;
-      holder.hidden = formatting.element.hidden;
-      holder.display = formatting.element.node.display;
+      holder.hidden = inBlock.hidden;
+      holder.display = inBlock.display;
       holder.parent = moved.node;
-      const copy: OpenElement = { ...formatting.element, node: holder };
+      const copy: OpenElement = { ...formatting.element, hidden: inBlock.hidden, node: holder };
       active[entryIndex] = { element: copy, key: formatting.key };
       removed(formatting.element);
       const inside = stack.slice(block + 1);
@@ -1198,7 +1259,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
         // group gets a row, a row in a table a row group, a column a column
         // group — so a later `</tr>` has a row to close, as it does there.
         const holder = stack[found]?.name ?? '';
-        for (const implied of IMPLIED_TABLE_PARTS[tag.name]?.[holder] ?? []) push(element(implied, false, parentFor(false)));
+        for (const implied of IMPLIED_TABLE_PARTS[tag.name]?.[holder] ?? []) push(element(implied, NO_ATTRIBUTES, parentFor(false)));
       }
       // A table directly in a table — not in one of its cells or its
       // caption, where it nests — ends the first; the second is its sibling.
@@ -1246,9 +1307,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
         if (nearest(['nobr'], SCOPE_BOUNDARIES) !== -1) adopt('nobr');
       }
       if (!INSERTED_WITHOUT_REBUILDING.has(tag.name)) rebuild(fostered);
-      const parent = parentFor(fostered);
-      const styled = styleOf(tag.name, tag.attributes, parent?.display ?? 'block');
-      const opened = element(tag.name, styled.hidden, parent, styled.display);
+      const opened = element(tag.name, tag.attributes, parentFor(fostered));
       segments.push({ start: tag.start, end: tag.end, node: opened.node });
       // A void element holds no text, but a hidden one still has an
       // effect to withhold — `one<br hidden>two` is one line — so its tag
