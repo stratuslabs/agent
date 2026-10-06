@@ -1189,6 +1189,13 @@ class ReplyRenderer {
       const hadStatus = this.statusTimer !== undefined;
       this.stopLoading();
       this.finalized = true;
+      // The barrier `finalizeInOrder` takes, for the same reason: the turn
+      // queued behind this one waits on `posted`, and settling it before
+      // the reply ahead has posted would let that turn's reply overtake it.
+      if (!this.streaming) {
+        await this.after;
+        await this.statusChain;
+      }
       if (this.pendingEdit) {
         clearTimeout(this.pendingEdit);
         this.pendingEdit = undefined;
@@ -1452,6 +1459,14 @@ const messageChunks = (text: string): string[] => splitForSlack(toSlackMrkdwn(te
  */
 const replyTo = (session: Session, key: string): string | undefined =>
   session.messages.some((message) => message.idempotencyKey === key) ? turnReplyFor(session, key) : latestTurnReply(session);
+
+/**
+ * Whether the turn the message `key` names is the session's latest and it
+ * failed. A failure is recorded on the session, not the turn, so a failed
+ * turn the session has moved on from reads as one that said nothing.
+ */
+const failedTurnFor = (session: Session, key: string): boolean =>
+  session.status === 'failed' && session.messages.findLast((message) => message.role === 'user')?.idempotencyKey === key;
 
 const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
   stratus_approve_once: 'once',
@@ -4433,13 +4448,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     removeFromQueue();
 
     // The turn is a live earlier delivery's, and that delivery's renderer
-    // posts its answer: this one takes down whatever it put up and says
-    // nothing. A finished one's reply is posted below, because nothing says
-    // the delivery that ran it lived to post it.
-    if (session && repeated()) {
+    // posts its answer, or its failure: this one takes down whatever it put
+    // up and says nothing. A finished one's reply is posted below, because
+    // nothing says the delivery that ran it lived to post it.
+    if (repeated()) {
       await renderer.withdraw();
       renderers.get(sessionId)?.[0]?.refreshLoading();
       return;
+    }
+
+    // A dispatch whose turn fails rejects, but one that repeats a turn that
+    // already failed — or continues a crashed one the gateway could only
+    // fail — resolves with the failed session. Its failure is posted as the
+    // original delivery's would have been, not as a reply that says nothing.
+    if (session && failedTurnFor(session, eventKey)) {
+      failure = new Error(session.lastError ?? 'the turn failed');
+      session = undefined;
     }
 
     if (session) {

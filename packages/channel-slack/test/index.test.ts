@@ -8131,3 +8131,118 @@ test('a repeat of a turn another delivery is still waiting on posts nothing', as
     assert.equal(statuses.at(-1)?.status ?? '', '', `${replies}: a loading status stayed up`);
   }
 });
+
+test('a repeat of a failed turn posts the failure, and a live repeat of one posts nothing', async () => {
+  const failed = (sessionId: string, key: string): Session => {
+    const now = new Date().toISOString();
+    return {
+      id: sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'failed',
+      lastError: 'the provider refused the request',
+      messages: [{ id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: key }],
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+  for (const live of [false, true]) {
+    for (const replies of ['stream', 'final'] as const) {
+      const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+      const gateway: StubGateway = {
+        ...stub,
+        async dispatch(input) {
+          if (live) {
+            // Attached to a turn another delivery is waiting on, which then
+            // failed: that delivery says so.
+            input.onRepeat?.();
+            throw new Error('the provider refused the request');
+          }
+          // Finished and failed: the session as it stands, not a rejection.
+          return failed(input.sessionId, input.idempotencyKey ?? '');
+        },
+      };
+      const web = createFakeWeb('B-AVA', 'T1');
+      const socket = createFakeSocket();
+      const adapter = createAdapterAsShipped({
+        agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
+        editIntervalMs: 0,
+        createSocketClient: () => socket,
+        createWebClient: () => web,
+      });
+      await adapter.start(gateway);
+      await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+      await adapter.stop();
+      const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+      const label = `${live ? 'live' : 'finished'}, ${replies}`;
+      if (live) {
+        assert.ok(!said.some((text) => text?.includes('provider refused')), `${label}: the failure was posted twice`);
+        assert.equal(web.posts.length, web.deletes.length, `${label}: a placeholder stayed up`);
+      } else {
+        assert.ok(said.includes('Something went wrong: the provider refused the request'), `${label}: the failure was not posted`);
+        assert.ok(!said.includes('(no reply)'), `${label}: a failure read as a reply that said nothing`);
+      }
+    }
+  }
+});
+
+test('a final reply is not overtaken by a turn queued behind a repeat that withdrew', async () => {
+  // first (slow to post) → a repeat that withdraws → third. The third waits
+  // on the repeat's place in line, so the repeat must hold it until the
+  // first has posted.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-withdraw-order-'));
+  const shot = path.join(dir, 'build.log');
+  await writeFile(shot, 'log');
+  let releaseUpload!: () => void;
+  const uploadGate = new Promise<void>((resolve) => {
+    releaseUpload = resolve;
+  });
+  const upload = web.files.uploadV2.bind(web.files);
+  web.files.uploadV2 = async (args) => {
+    await uploadGate;
+    return upload(args);
+  };
+  const stub: StubGateway = createStubGateway(async ({ sessionId, userMessage }) => {
+    if (/first/.test(userMessage)) {
+      await stub.bus.emit({
+        type: 'tool.completed',
+        sessionId,
+        result: { callId: 'c1', toolName: 'shell.run', ok: true, output: { file: shot } },
+      });
+      return sessionWithReply(sessionId, 'first answer');
+    }
+    return sessionWithReply(sessionId, /repeat/.test(userMessage) ? 'repeat answer' : 'third answer');
+  });
+  const gateway: StubGateway = {
+    ...stub,
+    async dispatch(input) {
+      if (/repeat/.test(input.userMessage)) {
+        input.onRepeat?.();
+      }
+      return stub.dispatch(input);
+    },
+  };
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  const delivered = Promise.all([
+    socket.deliver('app_mention', mention('<@B-AVA> first', { ts: '100.1' })),
+    socket.deliver('app_mention', mention('<@B-AVA> repeat', { ts: '100.2', thread_ts: '100.1' })),
+    socket.deliver('app_mention', mention('<@B-AVA> third', { ts: '100.3', thread_ts: '100.1' })),
+  ]);
+  for (let tick = 0; tick < 50; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(web.posts.map((post) => post.text), []);
+  releaseUpload();
+  await delivered;
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'third answer']);
+});
