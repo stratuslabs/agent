@@ -3522,46 +3522,50 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Attached only when it names no other agent than the live dispatch
     // did; otherwise it queues, and `settleRepeat` refuses it there.
     const live = idempotencyKey !== undefined ? liveWorkItems.get(input.sessionId)?.get(idempotencyKey) : undefined;
-    // A repeat naming nobody, of a claim naming someone the chain has not
-    // yet confirmed: the claim may be refused for who it named, and then
-    // the item is still unowned and this delivery is the one to run it —
-    // inheriting the claimant's refusal would drop a valid message. It
-    // waits to see, and repeats the claim only if the claim stood.
-    if (live !== undefined && input.agentId === undefined && live.agentId !== undefined && !live.confirmed) {
+    // A claim naming an agent other than this delivery does, that the chain
+    // has not yet confirmed — this delivery naming nobody, or someone else.
+    // The claim may be refused for who it named, and then the item is still
+    // unowned: inheriting the refusal would drop a valid message, and
+    // queueing behind it would leave this delivery to find the turn that a
+    // later valid delivery runs `finished`, and answer it twice. So it
+    // waits for the claim to settle and decides then: a claim that stood
+    // is repeated, by a delivery naming its owner or nobody, and refuses
+    // anyone else; a claim that left the item unowned is dispatched again,
+    // where the first delivery to get there runs it and the rest attach.
+    if (live !== undefined && !live.confirmed && live.agentId !== undefined && input.agentId !== live.agentId) {
       const claim = live.turn;
+      const claimedBy = input.agentId;
+      const repeatOf = (owner: string): void => {
+        if (claimedBy !== undefined && claimedBy !== owner) {
+          throw crossIdentityError(input.sessionId, owner, claimedBy);
+        }
+        input.onRepeat?.('live');
+      };
       return claim.then(
         (session) => {
-          input.onRepeat?.('live');
+          repeatOf(session.agent.id);
           return session;
         },
-        (error: unknown) => {
+        async (error: unknown) => {
           // Refused for who it named, or failed before its keyed message was
-          // ever written (an agent gone, a provider it could not build): either
-          // way the item is still unowned, there is no turn to have repeated,
-          // and this delivery is the one to run it.
-          const unowned = async (): Promise<boolean> => {
-            if (error instanceof CrossIdentityError) {
-              return true;
+          // ever written (an agent gone, a provider it could not build): the
+          // item is still unowned, and there is no turn to have repeated.
+          const stored = error instanceof CrossIdentityError || idempotencyKey === undefined ? undefined : await store.get(input.sessionId);
+          const owned = stored !== undefined && idempotencyKey !== undefined && workItemState(stored, idempotencyKey) !== undefined;
+          if (owned) {
+            repeatOf(stored.agent.id);
+            throw error;
+          }
+          // Its own cleanup runs a tick later; the dispatch below must not
+          // find the dead claim still standing and wait on it again.
+          const items = liveWorkItems.get(input.sessionId);
+          if (idempotencyKey !== undefined && items?.get(idempotencyKey)?.turn === claim) {
+            items.delete(idempotencyKey);
+            if (items.size === 0) {
+              liveWorkItems.delete(input.sessionId);
             }
-            const stored = idempotencyKey === undefined ? undefined : await store.get(input.sessionId);
-            return idempotencyKey !== undefined && (stored === undefined || workItemState(stored, idempotencyKey) === undefined);
-          };
-          return unowned().then((free) => {
-            if (!free) {
-              input.onRepeat?.('live');
-              throw error;
-            }
-            // Its own cleanup runs a tick later; the dispatch below must not
-            // find the dead claim still standing and wait on it again.
-            const items = liveWorkItems.get(input.sessionId);
-            if (idempotencyKey !== undefined && items?.get(idempotencyKey)?.turn === claim) {
-              items.delete(idempotencyKey);
-              if (items.size === 0) {
-                liveWorkItems.delete(input.sessionId);
-              }
-            }
-            return dispatch(input);
-          });
+          }
+          return dispatch(input);
         },
       );
     }

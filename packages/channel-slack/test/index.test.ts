@@ -8584,3 +8584,44 @@ test('a redelivery the start-up sweep finished posts each occurrence of a file t
   // Two results, two uploads: the sweep's one that landed, the redelivery's for the other.
   assert.deepEqual(web.uploads.map((entry) => entry.filename), ['chart.png', 'chart.png']);
 });
+
+test('a redelivery the start-up sweep finished with nothing to say still says (no reply), once', async () => {
+  // An addressed turn that produced no text and no file: the sweep's
+  // report has nothing to post, and the redelivery is owed the line a
+  // rendered turn would have put there.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+  });
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    input.onRepeat?.('finished');
+    const now = new Date().toISOString();
+    return {
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: input.idempotencyKey ?? '' },
+        { id: 'a1', role: 'assistant', content: '', createdAt: now },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+  const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+  assert.equal(said.filter((text) => text === '(no reply)').length, 1, `said: ${JSON.stringify(said)}`);
+});

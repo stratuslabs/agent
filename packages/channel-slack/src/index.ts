@@ -3362,7 +3362,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     };
     if (posting.length === 0) {
       await uploads();
-      return { said: true, landed };
+      // Nothing was said. A turn nobody asked for chose that; an addressed
+      // one is owed `(no reply)`, which a rendered turn would have posted,
+      // so a redelivery waiting behind this report is left to post it.
+      return { said: routing.unaddressed === true, landed };
     }
     // A reply the thread's other agents hear like any other, taking their
     // place for it before the post, as `handleInbound` does.

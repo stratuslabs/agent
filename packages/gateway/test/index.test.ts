@@ -5784,3 +5784,35 @@ test('a repeat naming nobody, of a claim that failed before writing anything, ru
     await gateway.stop();
   }
 });
+
+test('two owner deliveries waiting behind a refused claim run the turn once, the second attached to the first', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('reply');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'two-owners-1', agentId: 'blair', userMessage: 'first', idempotencyKey: 'k0' });
+    const before = calls;
+    const repeats: string[] = [];
+    const wrong = gateway.dispatch({ sessionId: 'two-owners-1', agentId: 'cora', userMessage: 'hello', idempotencyKey: 'k1' });
+    const a = gateway.dispatch({ sessionId: 'two-owners-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1', onRepeat: (kind) => repeats.push(`a: ${kind}`) });
+    const b = gateway.dispatch({ sessionId: 'two-owners-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1', onRepeat: (kind) => repeats.push(`b: ${kind}`) });
+    await assert.rejects(wrong, /belongs to agent blair, not cora/);
+    await a;
+    await b;
+    assert.equal(calls - before, 1);
+    assert.deepEqual(repeats, ['b: live']);
+  } finally {
+    await gateway.stop();
+  }
+});
