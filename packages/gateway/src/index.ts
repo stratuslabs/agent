@@ -908,6 +908,16 @@ export interface Gateway {
    */
   sessionRouting(sessionId: string): Promise<SessionRouting | undefined>;
   /**
+   * Whether a session already accepted the message an idempotency key names,
+   * as addressed to it: a turn was started for it, finished, running or
+   * still queued, here or in the transcript a recent rollover archived
+   * (`settleRepeat` reads the same). A turn nobody asked for
+   * (`addressed: false`) does not count — that agent heard the message, it
+   * did not take it. Lets a channel route a redelivered message to the agent
+   * that accepted it rather than to whoever its routing rule picks now.
+   */
+  holdsMessage(sessionId: string, idempotencyKey: string): Promise<boolean>;
+  /**
    * Start a conversation over under the same id, leaving its transcript so
    * far behind as an archived session.
    *
@@ -2692,8 +2702,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // handed a session that is not its agent's.
   // `confirmed` once the chain has seen the dispatch past the identity
   // check with a key the session had not seen (`claimLiveItem`); until
-  // then the entry is a claim that may yet be refused.
-  const liveWorkItems = new Map<string, Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean }>>();
+  // then the entry is a claim that may yet be refused. `addressed` is false
+  // for a turn nobody asked for, which `holdsMessage` does not count.
+  const liveWorkItems = new Map<string, Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean; addressed: boolean }>>();
   /** The start-up snapshot `recoverParkedTurns` judges orphans from, for a repeat that gets there first. */
   let orphanedAtStart: ReadonlySet<string> = new Set();
 
@@ -3611,8 +3622,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Reads `turn` only once it is assigned: the registration below runs
     // after it, and the chain's work runs in a later tick (`.then`).
     const claimLiveItem = (key: string, confirmed: boolean): void => {
-      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean }>();
-      items.set(key, { turn, agentId: input.agentId, confirmed });
+      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean; addressed: boolean }>();
+      items.set(key, { turn, agentId: input.agentId, confirmed, addressed: input.addressed !== false });
       liveWorkItems.set(input.sessionId, items);
     };
     const turn: Promise<Session> = onSessionChain(input.sessionId, async () => {
@@ -4187,6 +4198,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     dispatch,
     observe,
+
+    async holdsMessage(sessionId: string, idempotencyKey: string) {
+      // A dispatch still queued behind another turn holds the message too:
+      // its key reaches the transcript only when the chain gets to it. By
+      // the same rule as the transcript below — a judged turn still waiting
+      // to run did not take the message either.
+      if (liveWorkItems.get(sessionId)?.get(idempotencyKey)?.addressed === true) {
+        return true;
+      }
+      const session = await store.get(sessionId);
+      if (session === undefined) {
+        return false;
+      }
+      const transcript = workItemState(session, idempotencyKey) !== undefined ? session : await archivedRepeat(session, idempotencyKey);
+      // Accepted as addressed: a turn nobody asked for (`addressed: false`,
+      // stored overheard) was this agent hearing the message, not taking it.
+      const keyed = transcript?.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+      return keyed !== undefined && keyed.overheard !== true;
+    },
 
     async sessionRouting(sessionId: string) {
       const session = await store.get(sessionId);

@@ -43,7 +43,10 @@ they are the whole model:
    whenever the turn it starts gets around to answering: an addendum typed
    straight after it reaches the agent you just named, and the agent that
    *had* the thread stands down at the same instant rather than whenever its
-   own app next catches up.
+   own app next catches up. A message an agent already took stays that
+   agent's: Slack redelivering it after a restart goes back to the agent
+   that accepted it, not to whoever has spoken since — and if that agent's
+   app has not come back, the others stand down rather than run it again.
 5. **How an agent listens is the soul's to say.** Rules 3 and 4 are the
    `thread` mode, the default. A soul with `listens: mentions` takes only
    messages that name it, and hears the rest. One with `listens: judge`
