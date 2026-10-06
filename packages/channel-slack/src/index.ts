@@ -3913,11 +3913,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // since. Nothing in memory says so after a restart, and the order below
     // would hand a redelivery to the newer speaker — whose session holds no
     // key for it, so it would run the message as new. Asked of the agents the
-    // thread rule routes, the only ones this verdict picks between.
+    // thread rule routes, the only ones this verdict picks between — every
+    // configured one, not only those connected, unlike the order below: an
+    // owner whose app failed to come back after the restart still started
+    // that turn, and the live agents stand down for it rather than run it
+    // again. Its workspace is the one it last authenticated in, when known.
     if (gateway.holdsMessage) {
-      for (const candidate of connections) {
-        const agentId = candidate.config.agentId;
-        if (candidate.teamId !== parts.team || listensOf(agentId) !== 'thread') {
+      for (const agentId of configuredAgents) {
+        const teamId = botIdentities.get(agentId)?.teamId;
+        if ((teamId !== undefined && teamId !== parts.team) || listensOf(agentId) !== 'thread') {
           continue;
         }
         const sessionId = channelSessionKey({
