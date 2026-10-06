@@ -310,6 +310,13 @@ export interface Message {
    */
   idempotencyKey?: string;
   /**
+   * Why the turn this user message started failed, written by
+   * `recordTurnFailure` in the save that fails it. The session's
+   * `lastError` is the latest turn's and the next turn replaces it; this
+   * stays, so `turnFailureFor` can answer for any turn a key names.
+   */
+  turnError?: string;
+  /**
    * This message's turn was continued once after the process running it
    * died (`AgentRunner.continueTurn`). A host fails a second such turn
    * instead of continuing it again: a turn that takes the process down
@@ -3209,21 +3216,46 @@ export const turnFilesFor = (session: Pick<Session, 'messages'>, idempotencyKey:
 };
 
 /**
- * Why the turn a keyed message started failed, or undefined if it did not
- * — or if that is no longer knowable. A failure is recorded on the
- * session (`status`, `lastError`), not the turn, so it is the keyed
- * message's only while that message started the session's latest turn.
- * A message `observe` appended since started none and is passed over: it
- * is overheard and unkeyed, where every keyed dispatch carries its key.
+ * Fail a session's in-flight turn: `status` and `lastError`, and the error
+ * on the turn's own user message (`Message.turnError`), where the next
+ * turn cannot overwrite it. The one write every path that fails a turn
+ * makes — the runner's and the gateway's sweeps — so `turnFailureFor`
+ * reads the same record whichever failed it. In flight, the turn's message
+ * is the session's newest user message (`observe` refuses to append).
+ */
+export const recordTurnFailure = (session: Session, error: string): void => {
+  session.status = 'failed';
+  session.lastError = error;
+  const turn = session.messages.findLast((message) => message.role === 'user');
+  if (turn !== undefined) {
+    turn.turnError = error;
+  }
+};
+
+/**
+ * Why the turn a keyed message started failed, or undefined if it did not.
+ * Read from the message (`recordTurnFailure`), so a turn the session has
+ * moved on from still answers. A transcript written before turns carried
+ * their own failure has only the session's, which is the keyed turn's
+ * while it is the latest — a message `observe` appended since started no
+ * turn and is passed over: it is overheard and unkeyed, where every keyed
+ * dispatch carries its key.
  */
 export const turnFailureFor = (session: Pick<Session, 'messages' | 'status' | 'lastError'>, idempotencyKey: string): string | undefined => {
+  const keyed = session.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (keyed === undefined) {
+    return undefined;
+  }
+  if (keyed.turnError !== undefined) {
+    return keyed.turnError;
+  }
   if (session.status !== 'failed') {
     return undefined;
   }
   const latest = session.messages.findLast(
     (message) => message.role === 'user' && !(message.overheard === true && message.idempotencyKey === undefined),
   );
-  return latest?.idempotencyKey === idempotencyKey ? session.lastError ?? 'The turn failed.' : undefined;
+  return latest === keyed ? session.lastError ?? 'The turn failed.' : undefined;
 };
 
 /**
@@ -6511,8 +6543,7 @@ export class AgentRunner {
           createdAt: new Date().toISOString(),
         });
       }
-      session.status = 'failed';
-      session.lastError = lastError;
+      recordTurnFailure(session, lastError);
       await this.store.save(session);
       const stored = await this.store.get(session.id);
       session = stored ?? session;

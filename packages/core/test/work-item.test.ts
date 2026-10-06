@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { turnFailureFor, turnFilesFor, turnReplyFor, workItemState, type Message } from '../src/index.ts';
+import { AgentRunner, turnFailureFor, turnFilesFor, turnReplyFor, workItemState, type Message, type ModelProvider } from '../src/index.ts';
 
 const user = (content: string, idempotencyKey?: string): Message => ({
   id: `user:${content}`,
@@ -85,4 +85,30 @@ test('a keyed turn\'s failure is read only while it is the session\'s latest tur
   const judged: Message = { ...user('judged', 'k2'), overheard: true };
   assert.equal(turnFailureFor({ ...failed, messages: [user('hello', 'k1'), assistant('hi'), judged] }, 'k1'), undefined);
   assert.equal(turnFailureFor({ status: 'completed', messages: [user('hello', 'k1')] }, 'k1'), undefined);
+});
+
+test('a keyed turn\'s failure stays its own after a later turn replaces the session\'s', async () => {
+  let calls = 0;
+  const provider: ModelProvider = {
+    name: 'fails-once',
+    async generate() {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error('the provider refused the request');
+      }
+      return { parts: [{ type: 'text', text: 'fine now' }] };
+    },
+  };
+  const runner = new AgentRunner({ provider });
+  const agent = { id: 'blair', name: 'Blair' };
+  await assert.rejects(
+    () => runner.run({ sessionId: 's-fail', agent, userMessage: 'first', idempotencyKey: 'k1' }),
+    /refused the request/,
+  );
+  await runner.resume({ sessionId: 's-fail', userMessage: 'second', idempotencyKey: 'k2' });
+  const session = await runner.store.get('s-fail');
+  assert.ok(session);
+  assert.equal(session.status, 'completed');
+  assert.equal(turnFailureFor(session, 'k1'), 'the provider refused the request');
+  assert.equal(turnFailureFor(session, 'k2'), undefined);
 });

@@ -5517,3 +5517,78 @@ test('onRepeat is not called for a repeat that continues a turn a crash left unf
   assert.equal(status, 'completed');
   assert.equal(repeated, false);
 });
+
+test('a repeat naming another agent is refused, live or finished, and never handed the session', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('reply')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    const repeats: string[] = [];
+    const first = gateway.dispatch({ sessionId: 'id-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1' });
+    // Live: the first is still queued when this arrives.
+    const live = gateway.dispatch({
+      sessionId: 'id-1',
+      agentId: 'cora',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(kind),
+    });
+    await assert.rejects(live, /belongs to agent blair, not cora/);
+    assert.equal((await first).status, 'completed');
+    // Finished.
+    await assert.rejects(
+      gateway.dispatch({ sessionId: 'id-1', agentId: 'cora', userMessage: 'hello', idempotencyKey: 'k1', onRepeat: (kind) => repeats.push(kind) }),
+      /belongs to agent blair, not cora/,
+    );
+    assert.deepEqual(repeats, []);
+    // A third, from the right agent, still repeats the turn rather than
+    // running it again.
+    const again = await gateway.dispatch({ sessionId: 'id-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1' });
+    assert.equal(again.messages.filter((message) => message.role === 'user').length, 1);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a repeat arriving just after a rollover is found in the archived transcript and runs nothing', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('the answer');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'roll-1', agentId: 'blair', userMessage: 'hello', idempotencyKey: 'k1' });
+    const { archivedAs } = await gateway.rolloverSession('roll-1');
+    const before = calls;
+    const repeats: string[] = [];
+    const repeated = await gateway.dispatch({
+      sessionId: 'roll-1',
+      agentId: 'blair',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(kind),
+    });
+    assert.equal(calls, before);
+    assert.deepEqual(repeats, ['finished']);
+    assert.equal(repeated.id, archivedAs);
+    assert.equal(turnReplyFor(repeated, 'k1'), 'the answer');
+  } finally {
+    await gateway.stop();
+  }
+});
