@@ -26,7 +26,10 @@ import {
   type ToolResult,
 } from '@stratusagent/core';
 import {
+  admitsSender,
   channelSessionKey,
+  senderTrustFor,
+  type AdmitPolicy,
   type ChannelAdapter,
   type ChannelCredentialRequest,
   type GatewayLike,
@@ -162,7 +165,7 @@ export interface SlackAgentConfig {
    * would be in the transcript, which is what this mode exists to keep
    * out. The label above is provenance; this is authorization.
    */
-  admit?: 'anyone' | 'principals';
+  admit?: AdmitPolicy;
   /**
    * How replies appear. `final` (the default) shows Slack's loading status
    * while the turn runs and posts the reply once, finished; `stream` posts
@@ -2475,19 +2478,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     options.agents.find((candidate) => candidate.agentId === agentId);
 
   /**
-   * Whether an agent takes a message from this sender at all — judged on
-   * its configuration, not on a live connection: an agent whose socket
-   * failed to start is still recognizable in a mention, and its door is
-   * still its own. An agent this adapter was never configured for is
-   * nobody's to refuse here, so it admits — the answer from before the
-   * door existed.
-   */
-  const admitsSender = (config: SlackAgentConfig | undefined, userId: string): boolean =>
-    config === undefined
-    || config.admit !== 'principals'
-    || (config.principals ?? []).includes(userId);
-
-  /**
    * How an agent listens, from its soul — read per message, so a roster
    * reload takes effect on the next one. `thread` when the soul says
    * nothing, which is every soul written before there was a choice.
@@ -3934,6 +3924,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // answer it and hold the thread. One naming only agents that refuse
     // the sender is still theirs and not this agent's to answer — so the
     // refusing agent stays `named`, and only the handover is withheld.
+    // Judged on configuration, not on a live connection: an agent whose
+    // socket failed to start is still recognizable in a mention, and its
+    // door is still its own. One this adapter was never configured for has
+    // no policy, and nobody's to refuse here, so it admits.
     const handoverTo = agentNamedIn(text, team, (agentId) => admitsSender(agentConfigFor(agentId), sender));
     const named = handoverTo ?? agentNamedIn(text, team);
     // The key one Slack MESSAGE is known by, whichever delivery carried
@@ -4238,7 +4232,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // `unknown` exactly as a channel mention would be. The same label
       // whether the agent answers or only hears: the text is in its
       // transcript either way.
-      const senderTrust = (connection.config.principals ?? []).includes(userId) ? 'user' : 'unknown';
+      const senderTrust = senderTrustFor(connection.config, userId);
       // Who can read this, so the agent writes for them, and a thread says
       // it is one. A DM names the other person only when they are one of
       // the operator's principals: this lands in the system prompt, and
