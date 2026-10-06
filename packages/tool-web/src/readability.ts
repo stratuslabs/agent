@@ -539,17 +539,18 @@ const contentVisibilityApplies = (name: string, display: string): boolean => {
  * inside it that inherits `content-visibility` is not.
  */
 const styleOf = (
-  name: string,
-  attributes: ReadonlyMap<string, string>,
-  parent: TreeNode | undefined,
+  node: TreeNode,
+  styleAt: (node: TreeNode) => ComputedStyle,
 ): { hidden: boolean; style: ComputedStyle } => {
+  const { name, attributes, parent } = node;
   const hidden = attributes.get('hidden');
   const declaredStyle = attributes.get('style');
   const declared = declaredStyle === undefined
     ? new Map<string, string | undefined>()
     : styleDeclares(decodeAttribute(declaredStyle));
   const untilFound = hidden !== undefined && asciiLower(decodeAttribute(hidden)) === 'until-found';
-  const style = computeStyle(name, declared, parent?.style ?? ROOT_STYLE, parent, untilFound);
+  const inherited = parent === undefined ? ROOT_STYLE : styleAt(parent);
+  const style = computeStyle(name, declared, inherited, parent, styleAt, untilFound);
   const hides = (): boolean => {
     if (asciiLower(trimAscii(decodeAttribute(attributes.get('aria-hidden') ?? ''))) === 'true') return true;
     const visibility = declared.get('visibility');
@@ -615,6 +616,7 @@ const computeStyle = (
   declared: ReadonlyMap<string, string | undefined>,
   inherited: ComputedStyle,
   parent: TreeNode | undefined,
+  styleAt: (node: TreeNode) => ComputedStyle,
   untilFound: boolean,
 ): ComputedStyle => {
   const float = computeKeyword(declared, 'float', inherited.float, 'none');
@@ -627,8 +629,8 @@ const computeStyle = (
     ? ownDefault
     : declaredDisplay(declared.get('display'), ownDefault, inherited.display);
   let box = parent;
-  while (box !== undefined && box.style.display === 'contents') box = box.parent;
-  const container = (box?.style.display ?? 'block').split(' ');
+  while (box !== undefined && styleAt(box).display === 'contents') box = box.parent;
+  const container = (box === undefined ? 'block' : styleAt(box).display).split(' ');
   const blockified = BLOCKIFIED.has(name) || float !== 'none' || position === 'absolute' || position === 'fixed'
     || container.some((word) => BLOCKIFYING_CONTAINERS.has(word));
   if (blockified) {
@@ -815,15 +817,17 @@ const SPECIAL_ELEMENTS = new Set([
 
 /**
  * As much of a node of the tree the tree builder would build as says
- * whether it is shown. The parent is mutable because the adoption agency
- * moves a block — and everything already in it — to a new parent, so
- * whether a run of text is hidden is only known at the end of the page.
+ * whether it is shown. Every field is mutable because the adoption agency
+ * moves a block — and everything already in it — to a new parent, and
+ * turns the block's old node into a copy of a formatting element. A
+ * node's style depends on its parent's, all the way up, so whether a run
+ * of text is hidden is only known at the end of the page, and is worked
+ * out from the finished tree.
  */
 interface TreeNode {
   id: number;
-  hidden: boolean;
-  /** Its computed style, which a child's `inherit` takes. */
-  style: ComputedStyle;
+  name: string;
+  attributes: ReadonlyMap<string, string>;
   parent: TreeNode | undefined;
 }
 
@@ -832,7 +836,6 @@ interface OpenElement {
   name: string;
   /** What it was opened with, so a copy placed elsewhere is judged again there. */
   attributes: ReadonlyMap<string, string>;
-  hidden: boolean;
   /** Where content inserted into this element goes. */
   node: TreeNode;
 }
@@ -1027,7 +1030,11 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   // of the page confirms nothing, and its text is kept.
   const stack: OpenElement[] = [];
   const onStack = new Set<OpenElement>();
-  const confirmed = new Set<number>();
+  // Every element closed before the end of the page, by id: a copy shares
+  // its original's, so closing either closes both.
+  const closed = new Set<number>();
+  // Whether any element could hide anything; a page with none is returned as it is.
+  let mayHide = false;
   const segments: { start: number; end: number; node: TreeNode | undefined }[] = [];
   let nextId = 0;
   // The list of active formatting elements: formatting a block closed
@@ -1063,7 +1070,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   };
   const removed = (element: OpenElement): void => {
     onStack.delete(element);
-    if (element.hidden) confirmed.add(element.id);
+    closed.add(element.id);
     if (CLEARED_ON_CLOSE.has(element.name)) clearToMarker();
   };
   const closeFrom = (index: number): void => {
@@ -1101,8 +1108,8 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     parent: TreeNode | undefined,
     id = nextId++,
   ): OpenElement => {
-    const { hidden, style } = styleOf(name, attributes, parent);
-    return { id, name, attributes, hidden, node: { id, hidden, style, parent } };
+    if (attributes.has('hidden') || attributes.has('style') || attributes.has('aria-hidden')) mayHide = true;
+    return { id, name, attributes, node: { id, name, attributes, parent } };
   };
   /**
    * The tree builder's reconstruction: reopen, in order, the formatting a
@@ -1218,14 +1225,12 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       // becomes that copy, keeping everything already in it, and the
       // block takes a new node in its new place.
       const holder = blockElement.node;
-      const placed = styleOf(blockElement.name, blockElement.attributes, ancestry);
-      const moved: OpenElement = { ...blockElement, hidden: placed.hidden, node: { ...blockElement.node, ...placed, parent: ancestry } };
-      const inBlock = styleOf(formatting.element.name, formatting.element.attributes, moved.node);
+      const moved: OpenElement = { ...blockElement, node: { ...blockElement.node, parent: ancestry } };
       holder.id = formatting.element.id;
-      holder.hidden = inBlock.hidden;
-      holder.style = inBlock.style;
+      holder.name = formatting.element.name;
+      holder.attributes = formatting.element.attributes;
       holder.parent = moved.node;
-      const copy: OpenElement = { ...formatting.element, hidden: inBlock.hidden, node: holder };
+      const copy: OpenElement = { ...formatting.element, node: holder };
       active[entryIndex] = { element: copy, key: formatting.key };
       removed(formatting.element);
       const inside = stack.slice(block + 1);
@@ -1357,7 +1362,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       // effect to withhold — `one<br hidden>two` is one line — so its tag
       // is dropped, and it is closed the moment it opens.
       if (VOID_ELEMENTS.has(tag.name)) {
-        if (opened.hidden) confirmed.add(opened.id);
+        closed.add(opened.id);
         continue;
       }
       // A form opened directly in a table is the form pointer, but the tree
@@ -1365,7 +1370,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       // placed as if it were not there.
       if (tag.name === 'form' && TABLE_CONTEXT.has(stack.at(-1)?.name ?? '')) {
         if (nearest(['template'], []) === -1) form = opened;
-        if (opened.hidden) confirmed.add(opened.id);
+        closed.add(opened.id);
         continue;
       }
       if (!push(opened)) continue;
@@ -1437,7 +1442,18 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   const tailFostered = /[^ \t\n\f\r]/.test(tail);
   if (tail !== '') rebuild(tailFostered);
   const tailNode = parentFor(tailFostered);
-  if (confirmed.size === 0) return { text: html, tail };
+  if (!mayHide) return { text: html, tail };
+
+  // Each node's style in the finished tree, parents first, remembered so
+  // a page costs its nodes once.
+  const judged = new Map<TreeNode, { hidden: boolean; style: ComputedStyle }>();
+  const judge = (node: TreeNode): { hidden: boolean; style: ComputedStyle } => {
+    const known = judged.get(node);
+    if (known !== undefined) return known;
+    const result = styleOf(node, (at) => judge(at).style);
+    judged.set(node, result);
+    return result;
+  };
 
   // Whether a node is dropped: it, or a node it is in, is hidden and was
   // closed. Read once the page is done, since nodes move until then;
@@ -1455,7 +1471,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       chain.push(at);
     }
     for (const at of chain.reverse()) {
-      result = result || (at.hidden && confirmed.has(at.id));
+      result = result || (closed.has(at.id) && judge(at).hidden);
       dropped.set(at, result);
     }
     return result;
