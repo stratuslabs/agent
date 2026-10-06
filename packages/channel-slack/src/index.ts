@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { lstat, open, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -522,6 +522,41 @@ interface ReplyOutcome {
 }
 
 /**
+ * How far a file's modification time may run past the record of the tool
+ * result naming it. The tool writes the file before the result is saved,
+ * but the record is stamped in whole milliseconds and some filesystems
+ * keep modification times in seconds, rounded either way.
+ */
+const PRODUCED_AT_SLACK_MS = 2000;
+
+/**
+ * A file a finished turn produced, read for a repeat of it — refused if the
+ * path was written after the turn recorded it. The transcript keeps a path,
+ * not the bytes, and a repeat can come after a later turn or another
+ * process has written the same path; uploading what is there now would
+ * answer the old message with a different file. The path itself is checked
+ * too, so a symlink swapped in since cannot point the read somewhere else,
+ * and the file is checked through the handle it is read from.
+ */
+const readUnchangedSince = async (filePath: string, producedAt: number): Promise<Buffer> => {
+  const notAfter = producedAt + PRODUCED_AT_SLACK_MS;
+  const changed = (): Error =>
+    new Error('it was written after the turn that produced it, so it may hold another turn\'s file now; it was not uploaded.');
+  if ((await lstat(filePath)).mtimeMs > notAfter) {
+    throw changed();
+  }
+  const handle = await open(filePath, 'r');
+  try {
+    if ((await handle.stat()).mtimeMs > notAfter) {
+      throw changed();
+    }
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+};
+
+/**
  * A clock reading as a Slack timestamp, for a file whose upload answered
  * with no share ts. Slack timestamps are epoch seconds with six decimals,
  * so the clock's reading compares with them as long as the two agree to
@@ -902,11 +937,12 @@ class ReplyRenderer {
 
   /**
    * Upload files a turn produced that no event delivered: a repeat of a
-   * finished turn has only the session to read them from (`turnFilesFor`).
+   * finished turn has only the session to read them from (`turnFilesFor`),
+   * and a path written since then is refused (see `readUnchangedSince`).
    */
-  queueFiles(filePaths: readonly string[]): void {
-    for (const filePath of filePaths) {
-      this.queueUpload(filePath);
+  queueFiles(files: ReadonlyArray<{ path: string; producedAt: string }>): void {
+    for (const file of files) {
+      this.queueUpload(file.path, Date.parse(file.producedAt));
     }
   }
 
@@ -914,7 +950,7 @@ class ReplyRenderer {
   // generated report) become real attachments in the conversation — the
   // channel contract's upload operation. Uploads chain so they land in
   // order and finalize() waits for them.
-  private queueUpload(filePath: string): void {
+  private queueUpload(filePath: string, producedAt?: number): void {
     // Behind a handover in progress, for the same reason edits and the
     // finalize are: the turn being handed the placeholder has its own
     // attachments to put in the thread first, and an upload is a message
@@ -932,7 +968,7 @@ class ReplyRenderer {
       // not a path, and a missing file surfaces as this upload's own
       // failure instead of an unhandled stream error.
       .then(async () => {
-        const data = await readFile(filePath);
+        const data = producedAt === undefined ? await readFile(filePath) : await readUnchangedSince(filePath, producedAt);
         // Where the file will sit is Slack's to say — the ts of the
         // message it becomes, in the shares the upload answers with. When
         // the answer carries none, the clock stands in, read BEFORE the

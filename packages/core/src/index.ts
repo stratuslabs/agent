@@ -3203,8 +3203,15 @@ export const turnReplyFor = (session: Pick<Session, 'messages'>, idempotencyKey:
  * channel uploads a turn's files as the results arrive, so an adapter
  * answering a repeat of a finished turn — no events, only the session —
  * has this and nothing else to find them by.
+ *
+ * A path, not the bytes: the transcript never held them. `producedAt` is
+ * when the result naming it was recorded, so a reader can refuse a path
+ * that has been written since — by now it may hold a later turn's file.
  */
-export const turnFilesFor = (session: Pick<Session, 'messages'>, idempotencyKey: string): string[] => {
+export const turnFilesFor = (
+  session: Pick<Session, 'messages'>,
+  idempotencyKey: string,
+): Array<{ path: string; producedAt: string }> => {
   const start = session.messages.findLastIndex((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
   if (start < 0) {
     return [];
@@ -3212,7 +3219,9 @@ export const turnFilesFor = (session: Pick<Session, 'messages'>, idempotencyKey:
   const next = session.messages.findIndex((message, index) => index > start && message.role === 'user');
   return session.messages
     .slice(start + 1, next < 0 ? undefined : next)
-    .flatMap((message) => (message.role === 'tool' && message.toolResult !== undefined ? filePathsOf(message.toolResult) : []));
+    .flatMap((message) => (message.role === 'tool' && message.toolResult !== undefined
+      ? filePathsOf(message.toolResult).map((filePath) => ({ path: filePath, producedAt: message.createdAt }))
+      : []));
 };
 
 /**

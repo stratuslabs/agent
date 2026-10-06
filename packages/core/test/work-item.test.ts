@@ -67,8 +67,9 @@ test('a keyed message\'s files are its own turn\'s, not the newest one\'s', () =
     toolFile('/tmp/two.png'),
     assistant('answer two'),
   ];
-  assert.deepEqual(turnFilesFor({ messages }, 'k1'), ['/tmp/one.png']);
-  assert.deepEqual(turnFilesFor({ messages }, 'k2'), ['/tmp/two.png']);
+  const at = '2026-10-06T00:00:00.000Z';
+  assert.deepEqual(turnFilesFor({ messages }, 'k1'), [{ path: '/tmp/one.png', producedAt: at }]);
+  assert.deepEqual(turnFilesFor({ messages }, 'k2'), [{ path: '/tmp/two.png', producedAt: at }]);
   assert.deepEqual(turnFilesFor({ messages }, 'k9'), []);
 });
 

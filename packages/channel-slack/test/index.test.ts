@@ -8256,3 +8256,47 @@ test('a final reply is not overtaken by a turn queued behind a repeat that withd
 
   assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'third answer']);
 });
+
+test('a repeat does not upload a file written after the turn that produced it', async () => {
+  // The transcript keeps the path, not the bytes. Written since, the path
+  // may hold a later turn's file, and the old message is not answered with it.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-stale-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'a later turn wrote this');
+  const anHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const warnings: string[] = [];
+  const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  const gateway: StubGateway = {
+    ...stub,
+    async dispatch(input) {
+      input.onRepeat?.('finished');
+      return {
+        id: input.sessionId,
+        agent: { id: 'ava', name: 'Ava' },
+        status: 'completed',
+        messages: [
+          { id: 'u1', role: 'user', content: 'hello there', createdAt: anHourAgo, idempotencyKey: input.idempotencyKey ?? '' },
+          { id: 't1', role: 'tool', content: '', createdAt: anHourAgo, toolResult: { callId: 'c1', toolName: 'shell.run', ok: true, output: { file: chart } } },
+          { id: 'a1', role: 'assistant', content: 'here is the chart', createdAt: anHourAgo },
+        ],
+        createdAt: anHourAgo,
+        updatedAt: anHourAgo,
+      };
+    },
+  };
+  const web = createFakeWeb('B-AVA', 'T1');
+  const socket = createFakeSocket();
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (message) => warnings.push(message),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+  assert.deepEqual(web.uploads, []);
+  assert.ok(web.posts.some((post) => post.text === 'here is the chart'), 'the reply was not posted');
+  assert.ok(warnings.some((message) => message.includes('written after the turn that produced it')), 'the refusal was not said');
+});
