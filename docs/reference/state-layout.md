@@ -99,7 +99,7 @@ that are worth knowing:
   in `agents/` may be a link too (see
   [Templates](../guides/templates.md)).
 - **Two ids a filesystem reads as one name are one directory**, because
-  macOS and Windows fold `agents/Ava/` and `agents/ava/` onto the same name
+  macOS and Windows fold `agents/Blair/` and `agents/blair/` onto the same name
   — and APFS folds Unicode normalization too, so an accent written as one
   code point and as a combining pair land there as well. One directory
   holding two agents is the sessions, the memories, and the unattended

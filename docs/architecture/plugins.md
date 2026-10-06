@@ -331,8 +331,8 @@ from being a wildcard:
 
 The cost is real and belongs in the open: a namespace tells an operator
 strictly less than a list. They learn *where* a plugin may register and under
-what risk, not *what*. That is why [12](../roadmap/12-plugin-registry.md) has
-`stratus plugin install` render such a declaration as what it is — "registers
+what risk, not *what*. That is why a future
+`stratus plugin install` should render such a declaration as what it is — "registers
 tools under `mcp.*`, discovered at runtime, all `gated`" — rather than showing
 an empty tool list and implying the plugin contributes nothing.
 
@@ -423,6 +423,53 @@ while the daemon runs is there at the next start. Read what this does and
 does not buy, the same way the credential resolver's section does: it is
 the honest path, not an isolation boundary.
 
+**A channel may be bound by trusted config, not only by stored secrets.**
+`ChannelContribution.agents` is the plugin's to compute, and the secrets
+are one input to it, not the definition. A channel that needs no secret —
+iMessage through Messages.app on the daemon's own Mac — has nothing to
+store, and carries the agents its own config block lists under `agents`
+(plus any with secrets, for a delivery that does need them). That block is
+part of `plugins`, which is read only from a trusted config, so a cloned
+repository can no more bind an agent to a channel than it can load the
+plugin. `stratus setup` shows either kind of binding, and `stratus channel
+set` stores the secrets kind.
+
+**A channel plugin's approvers live in its own config block.** The trusted
+`approvals` block's `slackApprovers` and `slackChannel` are Slack's ids and
+stay Slack's. A channel plugin takes its approver list in its own block —
+fleet-wide and per agent under `agents`, in the channel's own id space —
+and decides who may answer itself, as `GatewayLike.resolveApproval` already
+requires of every adapter. That needs no contract change and inherits the
+trusted-only rule above. Generalizing `approvals` to
+`approvals.channels.<kind>` was the alternative; it waits for a reason one
+block has to see across channels.
+
+**What the contract gives an adapter beyond Slack's shape.** Slack edits a
+placeholder, renders buttons, and is reachable only from a workspace; a
+text-message channel does none of that, so the contract states each as a
+capability rather than an assumption:
+
+- `OutboundConnection.edit` and `upload` are optional. `post` is the whole
+  of what the gateway's `message.send` and schedule delivery use; a channel
+  without `edit` posts the finished reply instead of streaming it in place.
+- Who counts as the operator is one rule in `@stratusagent/channels`, not
+  one per adapter: `isPrincipal`, `admitsSender` (the `admit` policy), and
+  `senderTrustFor` (the `user`/`unknown` label a turn carries). Which
+  `admit` applies when config gives none stays the adapter's call — Slack
+  defaults to `anyone`, because only its workspace can reach it; a channel
+  anyone in the world can message should default to `principals`.
+- `GatewayLike.dispatch` takes an `idempotencyKey`: the platform's message
+  id. A redelivery — after a crash included — never starts a second turn,
+  and a turn the daemon died inside is continued from its transcript at
+  the next start instead of failed (unless it runs on a harness, whose own
+  tool loop may already have acted on the prompt). Without it, an adapter delivering at
+  least once has only in-memory dedupe, which a restart erases.
+
+The rest of Slack's turn and render lifecycle — draining in `stop()`, the
+approval outcome texts, finishing a reply after a restart through
+`sessionRouting` — stays inside `channel-slack` until a second adapter
+needs the same code, rather than becoming a framework ahead of it.
+
 **Selection is deterministic and the operator's.** Load order is the
 `plugins` block's order, so a fleet whose behavior depended on which plugin
 loaded first is a fleet whose config shows it. `executor` and `memoryStore`
@@ -462,7 +509,7 @@ put a plugin that adds a channel and a memory store.
   "enabled": true,
   "roots": ["~/notes"],
   "agents": {
-    "ava":  { "roots": ["~/work/ava"] },
+    "blair":  { "roots": ["~/work/blair"] },
     "juno": { "roots": ["~/work/juno", "~/shared"] }
   }
 }
@@ -709,4 +756,5 @@ the ecosystem non-empty on the day it lands.
 - [09 — skills](../roadmap/09-skills.md)
 - [10 — proactive agents: schedules and outbound messages](../roadmap/10-proactive.md)
 - [11 — MCP bridge](../roadmap/11-mcp.md)
-- [12 — plugin discovery and distribution](../roadmap/12-plugin-registry.md)
+- [20 — Discord channel: the second adapter](../roadmap/20-channel-discord.md)
+- [34 — iMessage channel](../roadmap/34-imessage-channel.md)

@@ -6,6 +6,7 @@ import type {
   ImageAttachment,
   JsonObject,
   Session,
+  TrustLevel,
 } from '@stratusagent/core';
 
 /**
@@ -41,15 +42,31 @@ export interface OutboundMessageRef {
 }
 
 /**
- * The write side of one conversation. Streaming replies are the
- * placeholder-then-edit pattern: post once, edit as fragments arrive,
- * finalize with the full text.
+ * The write side of one conversation. `post` is the whole of what every
+ * caller needs: the gateway's `message.send` and schedule delivery only ever
+ * post. Everything else is a capability a platform may not have, so it is
+ * optional, and a caller that wants it checks for the method rather than
+ * assuming it — the way `ChannelAdapter.resolveOutbound` works.
+ *
+ * Streaming by placeholder-then-edit (post once, edit as fragments arrive,
+ * finalize with the full text) is how a platform with editable messages
+ * shows a reply forming. A text-message channel has no such thing — an
+ * iMessage edit is visibly marked and capped — so it posts the finished
+ * reply instead.
  */
 export interface OutboundConnection {
   post(text: string): Promise<OutboundMessageRef>;
-  edit(ref: OutboundMessageRef, text: string): Promise<void>;
-  /** Uploads a local file into the conversation (tool outputs, screenshots). */
-  upload(filePath: string, title?: string): Promise<void>;
+  /**
+   * Rewrites a message this connection posted. A channel without it gives
+   * up streaming a reply in place: it posts the final text once.
+   */
+  edit?(ref: OutboundMessageRef, text: string): Promise<void>;
+  /**
+   * Uploads a local file into the conversation (tool outputs, screenshots).
+   * A channel without it cannot deliver files over an addressable
+   * destination; a caller says so instead of dropping the file silently.
+   */
+  upload?(filePath: string, title?: string): Promise<void>;
   /**
    * Optional typing affordance. Platforms without a real bot typing API
    * (Slack among them) no-op here and rely on the placeholder-edit pattern
@@ -161,6 +178,20 @@ export interface GatewayLike {
      * events from another caller's on the same session — see `activeTurnId`.
      */
     turnId?: string;
+    /**
+     * The platform's own id for the message, unique within the session, so
+     * a redelivery never starts a second turn — across a restart too, which
+     * in-memory dedupe cannot survive. A repeat resolves with the original
+     * turn: the live one, the finished session, or one the gateway continued
+     * after a crash. A finished session may have moved on since, so the
+     * reply to post is `turnReplyFor(session, key)` from
+     * `@stratusagent/core`, never the latest one. See `DispatchInput.idempotencyKey` in
+     * `@stratusagent/gateway`.
+     *
+     * A host without it ignores the field, and the adapter's own dedupe is
+     * all there is.
+     */
+    idempotencyKey?: string;
   }): Promise<Session>;
   readonly bus: EventBus;
   agents(): AgentDefinition[];
@@ -353,3 +384,56 @@ export const channelSessionKey = (parts: ChannelSessionKeyParts): string => {
   }
   return segments.join(':');
 };
+
+/**
+ * Whether a sender outside the principals list gets a turn at all.
+ * `anyone` admits them, labelled `unknown`; `principals` refuses them
+ * before a turn starts, and an adapter that overhears must not let the
+ * agent overhear them either — the text would be in the transcript, which
+ * is what this mode exists to keep out.
+ */
+export type AdmitPolicy = 'anyone' | 'principals';
+
+/**
+ * Who a channel treats as the operator, and whether anyone else is let in.
+ * Ids are the channel's own (a Slack user id, a phone number) — never a
+ * Stratus identity, for the same reason `OutboundAddress.to` is not.
+ *
+ * The two fields answer different questions. `principals` is provenance:
+ * an adapter's own admission checks (a DM, a mention) establish nothing
+ * about who is typing, and this list is what makes the `user` label mean
+ * something. `admit` is authorization. Absent `principals` and `[]` both
+ * mean nobody is a principal; an adapter may still tell them apart for
+ * presentation (Slack shows everyone's name when there is no list).
+ *
+ * Which `admit` applies when config gives none is the adapter's call, not
+ * this module's: Slack defaults to `anyone`, because only workspace members
+ * can reach it, while a channel anyone in the world can message should
+ * default to `principals`. Pass the policy with that default already
+ * applied.
+ */
+export interface SenderPolicy {
+  principals?: readonly string[];
+  admit?: AdmitPolicy;
+}
+
+/** Whether `senderId` is on the policy's principals list. */
+export const isPrincipal = (policy: SenderPolicy | undefined, senderId: string): boolean =>
+  (policy?.principals ?? []).includes(senderId);
+
+/**
+ * Whether a message from `senderId` may start a turn. No policy admits:
+ * there is nobody's list to refuse against, which is the answer from
+ * before admission existed.
+ */
+export const admitsSender = (policy: SenderPolicy | undefined, senderId: string): boolean =>
+  policy === undefined || policy.admit !== 'principals' || isPrincipal(policy, senderId);
+
+/**
+ * The trust label a turn from `senderId` carries (`SENDER_TRUST_METADATA_KEY`
+ * in `@stratusagent/core`): `user` for a principal, `unknown` for anyone else.
+ * Evaluated per message, never per session: a group conversation keys one
+ * session for everyone in it.
+ */
+export const senderTrustFor = (policy: SenderPolicy | undefined, senderId: string): Extract<TrustLevel, 'user' | 'unknown'> =>
+  isPrincipal(policy, senderId) ? 'user' : 'unknown';

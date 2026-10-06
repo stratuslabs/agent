@@ -4573,3 +4573,870 @@ test('a shared memory.jsonl a pre-per-agent build left is folded in by start(), 
   // its own file. Retiring it belongs to the exclusive bracket.
   await stat(legacyMemoryFilePath(env));
 });
+
+test('a repeated idempotency key never starts a second turn', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText(`reply ${calls}`);
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    // Delivered twice before the first has run: the repeat is that turn.
+    const [first, repeat] = await Promise.all([
+      gateway.dispatch({ sessionId: 'idem-1', agentId: 'ava', userMessage: 'hello', idempotencyKey: 'msg-1' }),
+      gateway.dispatch({ sessionId: 'idem-1', agentId: 'ava', userMessage: 'hello', idempotencyKey: 'msg-1' }),
+    ]);
+    assert.equal(calls, 1);
+    assert.equal(repeat, first);
+    assert.equal(first.messages.find((message) => message.role === 'user')?.idempotencyKey, 'msg-1');
+
+    // Delivered again once it has finished: the session as it stands, and
+    // no provider call.
+    const later = await gateway.dispatch({ sessionId: 'idem-1', agentId: 'ava', userMessage: 'hello', idempotencyKey: 'msg-1' });
+    assert.equal(calls, 1);
+    assert.equal(later.status, 'completed');
+    assert.equal(later.messages.filter((message) => message.role === 'user').length, 1);
+
+    // A new key is a new message.
+    const next = await gateway.dispatch({ sessionId: 'idem-1', agentId: 'ava', userMessage: 'again', idempotencyKey: 'msg-2' });
+    assert.equal(calls, 2);
+    assert.equal(next.messages.filter((message) => message.role === 'user').length, 2);
+
+    // Scoped to the session: the same key elsewhere is somebody else's.
+    await gateway.dispatch({ sessionId: 'idem-2', agentId: 'ava', userMessage: 'hello', idempotencyKey: 'msg-1' });
+    assert.equal(calls, 3);
+
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'idem-1', agentId: 'ava', userMessage: 'x', idempotencyKey: '' }),
+      /idempotency key is 1 to 256 characters/,
+    );
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a keyed turn the last stratusd left running is continued from its transcript, once', async () => {
+  // The caller was promised this message would be answered: its key is
+  // durable with the message, so a crash mid-turn is picked up rather than
+  // failed and left for a redelivery that, being a repeat, would run nothing.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-abandoned-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'do the thing', createdAt: new Date().toISOString(), idempotencyKey: 'msg-1' }],
+  });
+  before.close();
+
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('done after the restart');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const completed = eventGate(
+    gateway,
+    (event) => event.type === 'session.completed' && event.sessionId === 'keyed-abandoned-1',
+  );
+  await gateway.start();
+  await gateway.stop().then(() => completed.give_up('the keyed turn was never continued'));
+  await completed.seen;
+
+  const after = new ShardedSessionStore({ stateDir });
+  const session = await after.get('keyed-abandoned-1');
+  after.close();
+  assert.equal(calls, 1);
+  assert.equal(session?.status, 'completed');
+  assert.equal(session?.messages.at(-1)?.content, 'done after the restart');
+  const users = session?.messages.filter((message) => message.role === 'user') ?? [];
+  assert.equal(users.length, 1);
+  assert.equal(users[0]?.continuedAfterCrash, true);
+});
+
+test('a keyed turn that died again after being continued is failed, not continued forever', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-twice-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [{
+      id: 'u1',
+      role: 'user',
+      content: 'the turn that takes the daemon down',
+      createdAt: new Date().toISOString(),
+      idempotencyKey: 'msg-1',
+      continuedAfterCrash: true,
+    }],
+  });
+  before.close();
+
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('unused');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const failed = eventGate(gateway, (event) => event.type === 'session.failed' && event.sessionId === 'keyed-twice-1');
+  await gateway.start();
+  await gateway.stop().then(() => failed.give_up('the twice-abandoned turn was never failed'));
+
+  const event = await failed.seen;
+  assert.equal(event.type === 'session.failed' ? event.error : '', ABANDONED_TURN_ERROR);
+  assert.equal(calls, 0);
+});
+
+test('a keyed turn whose reply was saved before the crash is completed without asking again', async () => {
+  // The response is durable before it is announced, and the save that marks
+  // the turn completed is a separate one: a process dying between them left
+  // the answer in the transcript. Asking the provider again would send the
+  // person a second answer to one message.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+
+  const now = new Date().toISOString();
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-answered-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'do the thing', createdAt: now, idempotencyKey: 'msg-1' },
+      { id: 'a1', role: 'assistant', content: 'already answered', createdAt: now },
+    ],
+  });
+  before.close();
+
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('a second answer');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const completed = eventGate(gateway, (event) => event.type === 'session.completed' && event.sessionId === 'keyed-answered-1');
+  await gateway.start();
+  await gateway.stop().then(() => completed.give_up('the answered turn was never completed'));
+  await completed.seen;
+
+  const after = new ShardedSessionStore({ stateDir });
+  const session = await after.get('keyed-answered-1');
+  after.close();
+  assert.equal(calls, 0);
+  assert.equal(session?.status, 'completed');
+  assert.equal(session?.messages.at(-1)?.content, 'already answered');
+});
+
+test('a redelivery that beats the sweep continues the turn it repeats, and starts no other', async () => {
+  // The channels are up before the sweep runs, so the redelivery of the
+  // message whose turn died takes the session chain first. It must find the
+  // unfinished item and finish it — not resume the session with the same
+  // text again, and not resolve with a session nothing is running.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-raced-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'the turn that died', createdAt: new Date().toISOString(), idempotencyKey: 'msg-1' }],
+  });
+  before.close();
+
+  let redelivered: { status: string; users: number; reply: string } | undefined;
+  const adapter: GatewayChannelAdapter = {
+    name: 'fake',
+    async start(gw) {
+      const session = await gw.dispatch({
+        sessionId: 'keyed-raced-1',
+        agentId: 'ava',
+        userMessage: 'the turn that died',
+        idempotencyKey: 'msg-1',
+        turnId: 'turn-redelivered',
+      });
+      redelivered = {
+        status: session.status,
+        users: session.messages.filter((message) => message.role === 'user').length,
+        reply: session.messages.at(-1)?.content ?? '',
+      };
+    },
+    async stop() {},
+  };
+
+  let calls = 0;
+  let turnDuringCall: string | undefined;
+  let gatewayRef: { activeTurnId: (sessionId: string) => string | undefined } | undefined;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      // The continuation runs on the redelivery's behalf, so its events
+      // are that caller's turn.
+      turnDuringCall = gatewayRef?.activeTurnId('keyed-raced-1');
+      return openAiText('finished on the redelivery');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, channels: [adapter], warn: () => {} });
+  gatewayRef = gateway;
+  await gateway.start();
+  await gateway.stop();
+
+  assert.deepEqual(redelivered, { status: 'completed', users: 1, reply: 'finished on the redelivery' });
+  assert.equal(calls, 1);
+  assert.equal(turnDuringCall, 'turn-redelivered');
+});
+
+test('a keyed turn on a harness is failed, not continued, since its prompt may already have run tools there', async () => {
+  // The subscription path runs the whole tool loop inside one provider
+  // call and keeps its own conversation. A crash mid-call can leave tools
+  // run that the transcript never recorded; continuing would send the
+  // prompt again and run them twice.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\n---\n\nYou are Ava.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-test' } }),
+  );
+  const stateDir = path.join(home, 'state');
+
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-harness-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'push the branch', createdAt: new Date().toISOString(), idempotencyKey: 'msg-1' }],
+  });
+  before.close();
+
+  let queried = 0;
+  const queryFn = (() => {
+    queried += 1;
+    return (async function* () {
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'pushed again', session_id: 'sdk-1' };
+    })();
+  }) as never;
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {}, queryFn },
+    idleTimeoutMs: 0,
+    stateDir,
+    warn: () => {},
+  });
+  const failed = eventGate(gateway, (event) => event.type === 'session.failed' && event.sessionId === 'keyed-harness-1');
+  await gateway.start();
+  await gateway.stop().then(() => failed.give_up('the harness turn was never settled'));
+
+  const event = await failed.seen;
+  assert.equal(event.type === 'session.failed' ? event.error : '', ABANDONED_TURN_ERROR);
+  assert.equal(queried, 0);
+});
+
+test('a keyed turn that could have run on a harness is failed even when the config no longer names one', async () => {
+  // The agent was on a Claude subscription when the turn was accepted and
+  // has been moved to an API key since. What decides is the runtime the
+  // dead turn could have reached, recorded with its message — not the one a
+  // restart resolves now.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-was-harness-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [{
+      id: 'u1',
+      role: 'user',
+      content: 'push the branch',
+      createdAt: new Date().toISOString(),
+      idempotencyKey: 'msg-1',
+      hostedLoop: true,
+    }],
+  });
+  before.close();
+
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('pushed again');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const failed = eventGate(gateway, (event) => event.type === 'session.failed' && event.sessionId === 'keyed-was-harness-1');
+  await gateway.start();
+  await gateway.stop().then(() => failed.give_up('the turn was never settled'));
+
+  const event = await failed.seen;
+  assert.equal(event.type === 'session.failed' ? event.error : '', ABANDONED_TURN_ERROR);
+  assert.equal(calls, 0);
+});
+
+test('a keyed message records whether its turn could reach a harness', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-b\n---\n\nYou are Bea.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-test' } }),
+  );
+  const queryFn = (() => (async function* () {
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'sdk-1' };
+  })()) as never;
+  const gateway = createGateway({
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { OPENAI_API_KEY: 'sk-o' },
+      fetch: (async () => openAiText('done')) as typeof fetch,
+      queryFn,
+    },
+    idleTimeoutMs: 0,
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    const harness = await gateway.dispatch({ sessionId: 'hl-1', agentId: 'ava', userMessage: 'hi', idempotencyKey: 'k1' });
+    assert.equal(harness.messages.find((message) => message.role === 'user')?.hostedLoop, true);
+    const api = await gateway.dispatch({ sessionId: 'hl-2', agentId: 'bea', userMessage: 'hi', idempotencyKey: 'k1' });
+    assert.equal(api.messages.find((message) => message.role === 'user')?.hostedLoop, undefined);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a keyed turn whose agent is gone is failed, not left running for every later start', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-orphan-1',
+    agent: { id: 'gone', name: 'Gone' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'hello', createdAt: new Date().toISOString(), idempotencyKey: 'msg-1' }],
+  });
+  before.close();
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('unused')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const failed = eventGate(gateway, (event) => event.type === 'session.failed' && event.sessionId === 'keyed-orphan-1');
+  await gateway.start();
+  await gateway.stop().then(() => failed.give_up('the orphaned keyed turn stayed running'));
+
+  const event = await failed.seen;
+  assert.equal(event.type === 'session.failed' ? event.error : '', ABANDONED_TURN_ERROR);
+});
+
+test('a different message that beats the sweep waits for the keyed turn it would have buried', async () => {
+  // Resumed onto the unfinished turn, the new message would become the
+  // session's newest, and the old key would read finished: its redelivery
+  // would then run nothing although its turn never did.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-buried-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'first', createdAt: new Date().toISOString(), idempotencyKey: 'msg-1' }],
+  });
+  before.close();
+
+  let final: Array<{ role: string; content: string; key?: string }> = [];
+  const adapter: GatewayChannelAdapter = {
+    name: 'fake',
+    async start(gw) {
+      const session = await gw.dispatch({ sessionId: 'keyed-buried-1', agentId: 'ava', userMessage: 'second', idempotencyKey: 'msg-2' });
+      final = session.messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+        ...(message.idempotencyKey !== undefined ? { key: message.idempotencyKey } : {}),
+      }));
+    },
+    async stop() {},
+  };
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+      return openAiText(`answer to ${body.messages.at(-1)?.content ?? ''}`);
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, channels: [adapter], warn: () => {} });
+  await gateway.start();
+  await gateway.stop();
+
+  assert.deepEqual(final, [
+    { role: 'user', content: 'first', key: 'msg-1' },
+    { role: 'assistant', content: 'answer to first' },
+    { role: 'user', content: 'second', key: 'msg-2' },
+    { role: 'assistant', content: 'answer to second' },
+  ]);
+});
+
+test('a continued turn whose last response held a call before its text goes back to the provider', async () => {
+  // A provider may put text after a tool call in one response. Cut off
+  // before the call's result was recorded, that response is not an answer:
+  // the model is owed the (interrupted) result and another turn.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+
+  const now = new Date().toISOString();
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-call-then-text-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'do the thing', createdAt: now, idempotencyKey: 'msg-1' },
+      { id: 'a1', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'call-1', toolName: 'demo.echo', input: {} }] },
+      { id: 'a2', role: 'assistant', content: 'checking now', createdAt: now },
+    ],
+  });
+  before.close();
+
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('it was interrupted; here is where things stand');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const completed = eventGate(gateway, (event) => event.type === 'session.completed' && event.sessionId === 'keyed-call-then-text-1');
+  await gateway.start();
+  await gateway.stop().then(() => completed.give_up('the turn was never completed'));
+  await completed.seen;
+
+  const after = new ShardedSessionStore({ stateDir });
+  const session = await after.get('keyed-call-then-text-1');
+  after.close();
+  assert.equal(calls, 1);
+  assert.equal(session?.messages.at(-1)?.content, 'it was interrupted; here is where things stand');
+  assert.ok(session?.messages.some((message) => message.role === 'tool' && message.toolResult?.callId === 'call-1' && message.toolResult.ok === false));
+  // The interrupted result goes after the whole response, as a finished
+  // turn writes it: between the call and its text, a provider replaying the
+  // response's raw turn would send the text twice.
+  assert.deepEqual(session?.messages.map((message) => message.id === 'a2' ? 'text' : message.role), [
+    'user', 'assistant', 'text', 'tool', 'assistant',
+  ]);
+});
+
+test('a keyed turn on a session switched for good to a stateless fallback is not marked as reaching a harness', async () => {
+  // The primary is a Claude subscription, a harness; the fallback is an API.
+  // Once the session has switched, the primary is never called again, so
+  // this turn cannot reach the harness, and a crash in it can be continued.
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'model-p',
+    fallbackModel: 'model-f',
+    fallbackProvider: 'openai',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-test' } }),
+  );
+  const queryFn = (() => {
+    throw new Error('the primary should not be called for a switched session');
+  }) as never;
+  const gateway = createGateway({
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { OPENAI_API_KEY: 'sk-o' },
+      fetch: (async () => openAiText('from the fallback')) as typeof fetch,
+      queryFn,
+    },
+    idleTimeoutMs: 0,
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    await gateway.store.create({
+      id: 'switched-keyed-1',
+      agent: { id: 'stratus', name: 'Stratus' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'earlier', createdAt: new Date().toISOString() },
+        { id: 'a1', role: 'assistant', content: 'earlier reply', createdAt: new Date().toISOString() },
+      ],
+      metadata: { fallbackActive: true },
+    });
+    const switched = await gateway.dispatch({ sessionId: 'switched-keyed-1', userMessage: 'again', idempotencyKey: 'k1' });
+    assert.equal(switched.messages.at(-1)?.content, 'from the fallback');
+    assert.equal(switched.messages.findLast((message) => message.role === 'user')?.hostedLoop, undefined);
+
+    // Not switched: the harness primary is the one that will answer.
+    const fresh = await gateway.dispatch({ sessionId: 'fresh-keyed-1', userMessage: 'hi', idempotencyKey: 'k1' }).catch(() => undefined);
+    const stored = await gateway.store.get('fresh-keyed-1');
+    assert.equal(stored?.messages.find((message) => message.role === 'user')?.hostedLoop, true, String(fresh?.status));
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a keyed turn whose continuation could fall back to a harness is failed, not continued', async () => {
+  // The primary is a stateless API, but the fallback added since is a
+  // Claude subscription: a continuation whose primary failed would enter
+  // that hosted loop, which the recovery policy refuses.
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'model-p',
+    fallbackModel: 'model-f',
+    fallbackProvider: 'anthropic',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-test' } }),
+  );
+  const stateDir = path.join(home, 'state');
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-fallback-harness-1',
+    agent: { id: 'stratus', name: 'Stratus' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'hello', createdAt: new Date().toISOString(), idempotencyKey: 'msg-1' }],
+  });
+  before.close();
+
+  let calls = 0;
+  const gateway = createGateway({
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { OPENAI_API_KEY: 'sk-o' },
+      fetch: (async () => {
+        calls += 1;
+        return openAiText('unused');
+      }) as typeof fetch,
+      queryFn: (() => {
+        throw new Error('the harness must not be reached');
+      }) as never,
+    },
+    idleTimeoutMs: 0,
+    stateDir,
+    warn: () => {},
+  });
+  const failed = eventGate(gateway, (event) => event.type === 'session.failed' && event.sessionId === 'keyed-fallback-harness-1');
+  await gateway.start();
+  await gateway.stop().then(() => failed.give_up('the turn was never settled'));
+
+  const event = await failed.seen;
+  assert.equal(event.type === 'session.failed' ? event.error : '', ABANDONED_TURN_ERROR);
+  assert.equal(calls, 0);
+});
+
+test('a keyed turn parked on approval whose recovery cannot start is failed, not parked forever', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+  const now = new Date().toISOString();
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-parked-orphan-1',
+    agent: { id: 'gone', name: 'Gone' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'u1', role: 'user', content: 'gated work', createdAt: now, idempotencyKey: 'msg-1' },
+      { id: 'a1', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  before.close();
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('unused')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const failed = eventGate(gateway, (event) => event.type === 'session.failed' && event.sessionId === 'keyed-parked-orphan-1');
+  await gateway.start();
+  await gateway.stop().then(() => failed.give_up('the parked keyed turn stayed parked'));
+  await failed.seen;
+
+  const after = new ShardedSessionStore({ stateDir });
+  const session = await after.get('keyed-parked-orphan-1');
+  after.close();
+  assert.equal(session?.status, 'failed');
+  assert.equal(session?.metadata?.[PENDING_APPROVAL_METADATA_KEY], undefined);
+});
+
+test('a saved answer is completed even after a second crash, and even on a harness', async () => {
+  // The continuation died after saving the final response and before the
+  // save marking it completed. Completing it calls no provider, so neither
+  // the once-only rule nor the harness rule has anything to protect.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+  const now = new Date().toISOString();
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-answered-twice-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'hello', createdAt: now, idempotencyKey: 'msg-1', continuedAfterCrash: true, hostedLoop: true },
+      { id: 'a1', role: 'assistant', content: 'the saved answer', createdAt: now },
+    ],
+  });
+  before.close();
+
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('a second answer');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const completed = eventGate(gateway, (event) => event.type === 'session.completed' && event.sessionId === 'keyed-answered-twice-1');
+  await gateway.start();
+  await gateway.stop().then(() => completed.give_up('the saved answer was never completed'));
+  await completed.seen;
+
+  const after = new ShardedSessionStore({ stateDir });
+  const session = await after.get('keyed-answered-twice-1');
+  after.close();
+  assert.equal(calls, 0);
+  assert.equal(session?.status, 'completed');
+  assert.equal(session?.messages.at(-1)?.content, 'the saved answer');
+});
+
+test('a saved answer is completed even when its agent is gone', async () => {
+  // Completing it needs no current agent and no provider, so neither
+  // missing is a reason to throw the finished reply away.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+  const now = new Date().toISOString();
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-answered-orphan-1',
+    agent: { id: 'gone', name: 'Gone' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'hello', createdAt: now, idempotencyKey: 'msg-1' },
+      { id: 'a1', role: 'assistant', content: 'the saved answer', createdAt: now },
+    ],
+  });
+  before.close();
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('unused')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const completed = eventGate(gateway, (event) => event.type === 'session.completed' && event.sessionId === 'keyed-answered-orphan-1');
+  await gateway.start();
+  await gateway.stop().then(() => completed.give_up('the saved answer was failed, not completed'));
+  await completed.seen;
+
+  const after = new ShardedSessionStore({ stateDir });
+  const session = await after.get('keyed-answered-orphan-1');
+  after.close();
+  assert.equal(session?.status, 'completed');
+  assert.equal(session?.messages.at(-1)?.content, 'the saved answer');
+});
+
+test('a continued turn spends the budget it was on, not a fresh one', async () => {
+  // One tool turn already ran before the crash and maxTurns is 1, so what
+  // the continuation owes the model is the wrap-up — not another turn that
+  // could call a tool past the ceiling.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+  const now = new Date().toISOString();
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-budget-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'do the thing', createdAt: now, idempotencyKey: 'msg-1' },
+      { id: 'a1', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'call-1', toolName: 'demo.echo', input: {} }] },
+      {
+        id: 't1',
+        role: 'tool',
+        name: 'demo.echo',
+        content: '{}',
+        createdAt: now,
+        toolResult: { callId: 'call-1', toolName: 'demo.echo', ok: true, output: 'echoed', trust: 'agent' },
+      },
+    ],
+  });
+  before.close();
+
+  const bodies: string[] = [];
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async (_url: unknown, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return openAiText('here is what I did');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, maxTurns: 1, warn: () => {} });
+  const completed = eventGate(gateway, (event) => event.type === 'session.completed' && event.sessionId === 'keyed-budget-1');
+  await gateway.start();
+  await gateway.stop().then(() => completed.give_up('the turn was never completed'));
+  await completed.seen;
+
+  assert.equal(bodies.length, 1);
+  assert.ok(bodies[0]?.includes('You have used every step this message allows'), 'the continuation was not the wrap-up');
+});
+
+test('two different session and key pairs never attach to each other\'s turn, however their strings are spelled', async () => {
+  // Joined with a separator, ("x", "y\u0000z") and ("x\u0000y", "z") read
+  // the same, and the second dispatch would resolve with the first's turn
+  // without ever running its own.
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText(`reply ${calls}`);
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    const [first, second] = await Promise.all([
+      gateway.dispatch({ sessionId: 'x', agentId: 'blair', userMessage: 'one', idempotencyKey: 'y\u0000z' }),
+      gateway.dispatch({ sessionId: 'x\u0000y', agentId: 'blair', userMessage: 'two', idempotencyKey: 'z' }),
+    ]);
+    assert.equal(calls, 2);
+    assert.equal(first.id, 'x');
+    assert.equal(second.id, 'x\u0000y');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a message accepted just before shutdown does not bury a keyed item its recovery skipped', async () => {
+  // Accepted while the gateway was still serving, run once it is stopping:
+  // recovery of the parked item ahead of it returns at the shutdown guard,
+  // and resuming the session over it would make the old key read finished
+  // with its turn never run.
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('unused')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+
+  // Created after start, so the start-up sweep never saw it: the dispatch
+  // below is the first thing to reach it.
+  const now = new Date().toISOString();
+  await gateway.store.create({
+    id: 'keyed-parked-stopping-1',
+    agent: { id: 'blair', name: 'Blair' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'u1', role: 'user', content: 'gated work', createdAt: now, idempotencyKey: 'msg-1' },
+      { id: 'a1', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+
+  // dispatch() queues its work on the session chain synchronously, and that
+  // work runs only on a later microtask; stop() sets the stopping flag
+  // synchronously. So the work is certain to run with the gateway stopping.
+  const turn = gateway.dispatch({ sessionId: 'keyed-parked-stopping-1', agentId: 'blair', userMessage: 'newer', idempotencyKey: 'msg-2' });
+  const stopped = gateway.stop();
+  await assert.rejects(turn, /stopping/);
+  await stopped;
+
+  const after = new ShardedSessionStore({ stateDir: path.join(home, '.stratus') });
+  const session = await after.get('keyed-parked-stopping-1');
+  after.close();
+  assert.equal(session?.status, 'pending_approval');
+  assert.deepEqual(session?.messages.filter((message) => message.role === 'user').map((message) => message.content), ['gated work']);
+});

@@ -125,6 +125,8 @@ export {
   loadChannelTransportSecrets,
   listChannelKinds,
   saveChannelTransportSecrets,
+  removeChannelTransportSecrets,
+  CHANNEL_KIND_PATTERN,
   type NamedCredentials,
   loadNamedCredentials,
   saveNamedCredentials,
@@ -181,6 +183,7 @@ export {
   discoverActiveConfig,
   type TrustedConfigBlock,
   readTrustedConfigBlock,
+  trustedConfigError,
   readGlobalConfigBlock,
 } from './config-location.ts';
 
@@ -232,6 +235,7 @@ export {
   describeServingModel,
   type RegisteredProviders,
   createRuntimeProvider,
+  runsOnHarness,
 } from './provider-runtime.ts';
 
 export {

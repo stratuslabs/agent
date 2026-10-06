@@ -5,7 +5,7 @@
 ```
   1) Providers            anthropic — signed in with your Claude subscription
   2) Models               default claude-opus-5 · fallback gpt-4.1-mini
-  3) Agent                ~/.stratus/agents/ava.md
+  3) Agent                ~/.stratus/agents/blair.md
   4) Plugins              tool-fs, tool-web
   5) Channels             Slack: 1 agent connected
   6) Approvals            remote — asks in Slack, approvers for 1 agent
@@ -127,6 +127,13 @@ digits to jump, Esc to go back.
   Slack before accepting it, and stores them where `stratus serve` looks. The
   list marks who is connected; picking a connected agent offers to replace
   their tokens or disconnect. See [Slack](../guides/slack.md).
+  With a plugin enabled that contributes a channel, the row names it
+  (`Slack: 1 agent connected; also imessage`) and asks which channel first.
+  A plugin channel's list marks each agent bound by its stored secrets, by
+  an entry in the plugin's own config, or not connected; storing secrets
+  asks for their names, then each value with input hidden, and writes them
+  on save. Setup never edits the plugin's config — its README says what
+  goes there. See [Extending](../guides/extending.md#channels).
 - **Approvals** — what happens to a gated call with nobody watching.
   `headless` refuses it; **ask in Slack** parks the turn and asks an
   approver. Both halves are set on one screen because they are one decision:

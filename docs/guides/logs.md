@@ -10,16 +10,16 @@ terminal:
 stratus logs                     # the last 50 records
 stratus logs -f                  # follow, across rotations
 stratus logs -n 200
-stratus logs --agent ava
-stratus logs --session slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456
+stratus logs --agent blair
+stratus logs --session slack:blair:T01ABCDEF:C07GHIJKL:1731900000.123456
 stratus logs --format json       # the raw records, for jq
 ```
 
 ```text
 09:14:02  —           stratusd ready — 3 agents, slack connected
-09:14:31  ava         session.created [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
-09:14:36  ava         tool.completed tool=memory.remember ok=true [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
-09:18:44  ava         session.tainted trust=external source=web.fetch [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
+09:14:31  blair         session.created [slack:blair:T01ABCDEF:C07GHIJKL:1731900000.123456]
+09:14:36  blair         tool.completed tool=memory.remember ok=true [slack:blair:T01ABCDEF:C07GHIJKL:1731900000.123456]
+09:18:44  blair         session.tainted trust=external source=web.fetch [slack:blair:T01ABCDEF:C07GHIJKL:1731900000.123456]
 09:21:07  —           warning: anthropic returned 529; retrying on the fallback model
 09:40:12  —           warning: mcp server linear disconnected — its tools are unavailable until it comes back
 ```

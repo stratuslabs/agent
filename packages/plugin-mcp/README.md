@@ -40,7 +40,7 @@ Then allowlist the tools in a soul, exactly as for any other toolset:
 
 ```markdown
 ---
-id: ava
+id: blair
 tools: [mcp.linear.*, fs.read]
 ---
 ```

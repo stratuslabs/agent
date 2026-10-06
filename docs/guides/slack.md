@@ -35,7 +35,7 @@ which is canonical for the Slack surface.
 
 ## Talking to an agent
 
-Mention it — `@Ava what's blocking the release?` — and it answers in a
+Mention it — `@Blair what's blocking the release?` — and it answers in a
 thread. **Inside that thread you do not have to mention it again**: replies
 reach it the way replying to a colleague reaches them, and so do replies
 from anyone else in the thread. Outside a thread it stays quiet; a channel
@@ -71,7 +71,7 @@ agent *is*, next to `tools:` and `skills:`, not a deployment setting:
 
 ```markdown
 ---
-name: Ava
+name: Blair
 listens: judge
 ---
 ```
@@ -91,7 +91,7 @@ listens: judge
   ends first; past that a message is heard for free with no model call, and
   mentioning it starts the window again. Speaking up on its own does not —
   an agent cannot extend its own attention, or a talkative one would never
-  drift out. So "thanks Ava, we've got it from here" works because it is a
+  drift out. So "thanks Blair, we've got it from here" works because it is a
   sentence the agent read, and a mention is still the way to be sure.
 
 Judging costs a model call per message inside the window, which is why the
@@ -137,7 +137,7 @@ before `final` existed.
   "slack": {
     "replies": "final",              // the default; or "stream"
     "agents": {
-      "ava": { "replies": "stream" }  // per agent, over the default
+      "blair": { "replies": "stream" }  // per agent, over the default
     }
   }
 }

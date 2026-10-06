@@ -238,6 +238,14 @@ export const loadChannelTransportSecrets = async (
   return secrets;
 };
 
+/**
+ * The shape a channel kind takes: a plugin manifest's contribution name,
+ * lowercase with hyphens. The rule every surface that stores channel
+ * secrets checks a kind against — the control API's route and `stratus
+ * channel` — so a kind one accepts the other cannot refuse.
+ */
+export const CHANNEL_KIND_PATTERN = REGISTERED_PROVIDER_NAME_PATTERN;
+
 /** Every channel kind with something stored under `channels.<kind>`, Slack included. */
 export const listChannelKinds = async (env: StateEnvironment): Promise<string[]> => {
   const raw = await loadRawCredentialsFile(env);
@@ -257,7 +265,7 @@ export const saveChannelTransportSecrets = async (
 ): Promise<void> => {
   // The kind is a contribution name and the agent id a real one; keys
   // that are neither (`__proto__` among them) never reach the object below.
-  if (!REGISTERED_PROVIDER_NAME_PATTERN.test(kind)) {
+  if (!CHANNEL_KIND_PATTERN.test(kind)) {
     throw new Error(`${JSON.stringify(kind)} is not a channel kind. Use the kind a channel plugin declares (lowercase, hyphens).`);
   }
   if (agentId.length === 0 || agentId === '__proto__') {
@@ -270,6 +278,35 @@ export const saveChannelTransportSecrets = async (
   channels[kind] = byAgent;
   existing.channels = channels;
   await writeRawCredentialsFile(env, existing);
+};
+
+/**
+ * Drop one agent's transport secrets for a channel kind, and the kind's
+ * entry with them when it was the last. Resolves whether there was
+ * anything to remove, so a caller can say so rather than report success
+ * for a binding that never existed.
+ */
+export const removeChannelTransportSecrets = async (
+  env: StateEnvironment,
+  kind: string,
+  agentId: string,
+): Promise<boolean> => {
+  const existing = await loadRawCredentialsFile(env);
+  if (!isPlainRecord(existing.channels) || !isPlainRecord(existing.channels[kind])
+    || !Object.hasOwn(existing.channels[kind], agentId)) {
+    return false;
+  }
+  const channels = { ...existing.channels };
+  const byAgent = { ...(existing.channels[kind] as Record<string, unknown>) };
+  delete byAgent[agentId];
+  if (Object.keys(byAgent).length > 0) {
+    channels[kind] = byAgent;
+  } else {
+    delete channels[kind];
+  }
+  existing.channels = channels;
+  await writeRawCredentialsFile(env, existing);
+  return true;
 };
 
 /**

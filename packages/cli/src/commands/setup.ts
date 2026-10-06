@@ -21,6 +21,7 @@ import {
   DEFAULT_STRATUS_AGENT,
   globalConfigPath,
   loadChannelCredentials,
+  loadChannelTransportSecrets,
   loadCredentials,
   loadRosterSouls,
   loadSoulFile,
@@ -35,6 +36,9 @@ import {
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
   saveChannelCredentials,
+  saveChannelTransportSecrets,
+  removeChannelTransportSecrets,
+  CREDENTIAL_NAME_PATTERN,
   saveConfigFile,
   saveCredentials,
   CREDENTIAL_PROVIDER_NAMES,
@@ -153,6 +157,13 @@ interface SetupState {
   /** Channel tokens (Slack apps, keyed by agent id) and whether they changed. */
   channels: ChannelCredentials;
   channelsDirty: boolean;
+  /**
+   * Plugin channels' transport secrets as this run will leave them, by
+   * kind then agent, read the first time a kind's menu opens. The edits
+   * are written on save, in order, the way Slack's tokens are.
+   */
+  pluginChannelSecrets: Record<string, Record<string, Record<string, string>>>;
+  pluginChannelEdits: Array<{ kind: string; agentId: string; secrets?: Record<string, string> }>;
   /** Run stratusd under the platform's service manager after saving. */
   service: { install: boolean; runAtLogin: boolean };
 }
@@ -259,6 +270,8 @@ export const runSetup = async (
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
     channelsDirty: false,
+    pluginChannelSecrets: {},
+    pluginChannelEdits: [],
     // On by default: setup's whole promise is that you finish it and the
     // agents are working. An always-on runtime you have to remember to
     // start is not always-on, and every Slack app configured here stays
@@ -378,12 +391,12 @@ export const runSetup = async (
     return state.soulPath;
   };
 
-  const channelsSummary = (): string => {
+  const channelsSummary = (pluginKinds: readonly string[]): string => {
     const connected = Object.keys(state.channels.slack ?? {}).length;
-    if (connected === 0) {
-      return 'Slack: not connected';
-    }
-    return `Slack: ${connected} agent${connected === 1 ? '' : 's'} connected`;
+    const slack = connected === 0
+      ? 'Slack: not connected'
+      : `Slack: ${connected} agent${connected === 1 ? '' : 's'} connected`;
+    return pluginKinds.length === 0 ? slack : `${slack}; also ${pluginKinds.join(', ')}`;
   };
 
   const storeCredential = (provider: CredentialProviderName, credential: StoredCredential): void => {
@@ -1397,7 +1410,7 @@ export const runSetup = async (
    */
   const pluginContributions = async (
     name: string,
-  ): Promise<{ packageName: string; tools: string[]; namespaces: string[]; skills: string[] } | undefined> => {
+  ): Promise<{ packageName: string; tools: string[]; namespaces: string[]; skills: string[]; channels: string[] } | undefined> => {
     try {
       const { manifest } = await readPluginManifest(name, {
         resolve: (target) => import.meta.resolve(target),
@@ -1414,6 +1427,7 @@ export const runSetup = async (
         // The qualified form the loader stages them under, which is what a
         // `skills:` entry has to match.
         skills: manifest.contributes.skills.map((skill) => `${manifest.packageName}:${skill.id}`),
+        channels: manifest.contributes.channels.map((channel) => channel.name),
       };
     } catch {
       return undefined;
@@ -2253,7 +2267,163 @@ export const runSetup = async (
     }
   };
 
+  /**
+   * The channel kinds the enabled plugins declare, Slack's own aside, each
+   * with the config key of every plugin declaring it — from manifests,
+   * never by loading a package, as the Plugins row reads them. Every one,
+   * not the first: two plugins may carry the same kind for different agents
+   * (channels key on agent and kind), and an agent bound by the second one's
+   * config is as bound as one bound by the first's.
+   */
+  const pluginChannelKinds = async (): Promise<Array<{ kind: string; plugins: string[] }>> => {
+    const kinds: Array<{ kind: string; plugins: string[] }> = [];
+    for (const name of pluginPackages()) {
+      if (!pluginEnabled(name)) {
+        continue;
+      }
+      for (const kind of (await pluginContributions(name))?.channels ?? []) {
+        if (kind === 'slack') {
+          continue;
+        }
+        const entry = kinds.find((candidate) => candidate.kind === kind);
+        if (entry === undefined) {
+          kinds.push({ kind, plugins: [name] });
+        } else if (!entry.plugins.includes(name)) {
+          entry.plugins.push(name);
+        }
+      }
+    }
+    return kinds;
+  };
+
+  /**
+   * Slack alone, as it always was, until a plugin declares a channel: then
+   * the row asks which channel first. A setup with no channel plugin sees
+   * exactly the screens it saw before there could be one.
+   */
   const chooseChannels = async (): Promise<void> => {
+    const kinds = await pluginChannelKinds();
+    if (kinds.length === 0) {
+      await chooseSlackChannel();
+      return;
+    }
+    while (true) {
+      const options = [
+        'Slack'.padEnd(20) + 'built in',
+        ...kinds.map(({ kind, plugins }) => kind.padEnd(20) + `from ${plugins.join(', ')}`),
+        'Back',
+      ];
+      const choice = await prompter.select('Channels', options);
+      if (choice.kind !== 'index' || choice.index === options.length - 1) {
+        return;
+      }
+      const picked = kinds[choice.index - 1];
+      if (picked === undefined) {
+        await chooseSlackChannel();
+      } else {
+        await choosePluginChannel(picked.kind, picked.plugins);
+      }
+    }
+  };
+
+  /**
+   * One plugin channel's agents, and whether each is bound — by secrets
+   * stored under `channels.<kind>.<agentId>`, or by an entry under the
+   * plugin's own config `agents` block. Either is a binding: a channel that
+   * needs no secret (iMessage on this Mac) is bound by config alone, so a
+   * menu that knew only secrets would call it not connected.
+   *
+   * Setup stores secrets and never writes the plugin's config: which keys
+   * that block takes is the plugin's schema, which only its README states.
+   */
+  const choosePluginChannel = async (kind: string, plugins: readonly string[]): Promise<void> => {
+    const secretsFor = async (): Promise<Record<string, Record<string, string>>> => {
+      state.pluginChannelSecrets[kind] ??= await loadChannelTransportSecrets(env, kind);
+      return state.pluginChannelSecrets[kind];
+    };
+    while (true) {
+      const { entries: roster, loaded: rosterLoaded } = await channelRoster();
+      const stored = await secretsFor();
+      // Any plugin carrying this kind binds the agents its own block lists.
+      const inConfig = (id: string): boolean => plugins.some((plugin) => {
+        const configured = state.plugins?.[plugin]?.agents;
+        return typeof configured === 'object' && configured !== null && !Array.isArray(configured) && Object.hasOwn(configured, id);
+      });
+      const options = roster.map((entry) => {
+        const id = entry.soul.agent.id;
+        const bindings = [
+          ...(stored[id] !== undefined ? [`✓ secrets: ${Object.keys(stored[id]).sort().join(', ')}`] : []),
+          ...(inConfig(id) ? ['✓ in its plugin config'] : []),
+        ];
+        return `${entry.soul.agent.name} (${id})`.padEnd(34) + (bindings.length > 0 ? bindings.join('; ') : '— not connected');
+      });
+      // Only against a roster that loaded, for the reason the Slack menu
+      // gives: an unreadable roster would make every binding look orphaned.
+      const orphans = rosterLoaded
+        ? Object.keys(stored).filter((id) => !roster.some((entry) => entry.soul.agent.id === id))
+        : [];
+      for (const id of orphans) {
+        options.push(`${id}`.padEnd(34) + '! secrets without a matching agent');
+      }
+      options.push('Back');
+
+      const blocks = plugins.map((plugin) => `plugins["${plugin}"].agents`).join(' or ');
+      const choice = await prompter.select(`Channels — ${kind} (from ${plugins.join(', ')})`, options, {
+        footnote: `Bound by secrets stored here, or by an entry under ${blocks} in your config — the plugin's README says which. Run \`${serveCommand()}\` afterwards.`,
+      });
+      if (choice.kind !== 'index' || choice.index === options.length - 1) {
+        return;
+      }
+      const agentId = choice.index < roster.length
+        ? roster[choice.index]?.soul.agent.id
+        : orphans[choice.index - roster.length];
+      if (agentId === undefined) {
+        return;
+      }
+
+      const actions = [
+        ...(choice.index < roster.length ? [stored[agentId] !== undefined ? 'Replace the stored secrets' : 'Store secrets'] : []),
+        ...(stored[agentId] !== undefined ? ['Remove the stored secrets'] : []),
+        'Back',
+      ];
+      const action = await prompter.select(`${agentId} on ${kind}`, actions);
+      if (action.kind !== 'index' || actions[action.index] === 'Back') {
+        continue;
+      }
+      if (actions[action.index] === 'Remove the stored secrets') {
+        delete stored[agentId];
+        state.pluginChannelEdits.push({ kind, agentId });
+        writeLine(streams.stdout, `Removed ${agentId}'s ${kind} secrets.`);
+        continue;
+      }
+
+      const names = (await prompter.ask(`Secret names for ${kind}, separated by spaces (its README lists them): `))
+        .split(/\s+/)
+        .filter((name) => name.length > 0);
+      if (names.length === 0) {
+        continue;
+      }
+      const bad = names.find((name, index) => !CREDENTIAL_NAME_PATTERN.test(name) || names.indexOf(name) !== index);
+      if (bad !== undefined) {
+        writeLine(streams.stderr, `${bad} is not a secret name, or is named twice. Nothing was stored.`);
+        continue;
+      }
+      const secrets: Record<string, string> = {};
+      for (const name of names) {
+        secrets[name] = await prompter.askSecret(`${name} (not echoed): `);
+      }
+      const empty = names.find((name) => (secrets[name] ?? '').length === 0);
+      if (empty !== undefined) {
+        writeLine(streams.stderr, `${empty} was empty, so nothing was stored. A binding missing a secret would never come online.`);
+        continue;
+      }
+      stored[agentId] = secrets;
+      state.pluginChannelEdits.push({ kind, agentId, secrets });
+      writeLine(streams.stdout, `Stored ${names.join(', ')} for ${agentId} on ${kind}; saved when you finish.`);
+    }
+  };
+
+  const chooseSlackChannel = async (): Promise<void> => {
     while (true) {
       const { entries: roster, loaded: rosterLoaded } = await channelRoster();
       const slack = state.channels.slack ?? {};
@@ -2657,6 +2827,18 @@ export const runSetup = async (
         ? `Saved Slack tokens for ${connected} agent${connected === 1 ? '' : 's'} to ${credentialsPath(env)} — run \`${serveCommand()}\` to bring them online.`
         : `Removed the stored Slack tokens from ${credentialsPath(env)}.`);
     }
+    if (state.pluginChannelEdits.length > 0) {
+      // In the order they were made, so a store then a remove of the same
+      // binding ends removed, as the menu last showed it.
+      for (const edit of state.pluginChannelEdits) {
+        if (edit.secrets !== undefined) {
+          await saveChannelTransportSecrets(env, edit.kind, edit.agentId, edit.secrets);
+        } else {
+          await removeChannelTransportSecrets(env, edit.kind, edit.agentId);
+        }
+      }
+      writeLine(streams.stdout, `Saved your channel secrets to ${credentialsPath(env)} — run \`${serveCommand()}\` to bring them online.`);
+    }
 
     // Before the service block below, deliberately. A package installed
     // after the daemon starts is invisible to it — installing does not
@@ -2799,12 +2981,13 @@ export const runSetup = async (
       // corrupts every redraw after the first arrow key. Wrapping is not
       // the cosmetic cost I took it for when I let this line grow.
       const approvals = fitMenuRow((await approvalsSummary()).join('; '));
+      const channelKinds = (await pluginChannelKinds()).map((entry) => entry.kind);
       const choice = await prompter.select('', [
         `Providers            ${providersSummary()}`,
         `Models               ${modelsSummary()}`,
         `Agent                ${agentSummary()}`,
         `Plugins              ${fitMenuRow(pluginsSummary())}`,
-        `Channels             ${channelsSummary()}`,
+        `Channels             ${fitMenuRow(channelsSummary(channelKinds))}`,
         `Approvals            ${approvals}`,
         `Always on            ${serviceSummary()}`,
         'Test run             say hello with the current settings',

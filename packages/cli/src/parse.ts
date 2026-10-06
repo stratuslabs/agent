@@ -1,6 +1,6 @@
 import { isTrustLevel, TRUST_LEVELS, type TrustLevel } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
-import { CREDENTIAL_NAME_PATTERN, parseProviderName, type StratusProviderName } from '@stratusagent/state';
+import { CHANNEL_KIND_PATTERN, CREDENTIAL_NAME_PATTERN, parseProviderName, type StratusProviderName } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 
 export type CliProviderName = StratusProviderName;
@@ -118,6 +118,20 @@ export interface ParsedCredentialCommand {
   name?: string;
   /** Store or remove this agent's own entry rather than the fleet's shared one. */
   agentId?: string;
+}
+
+export interface ParsedChannelCommand {
+  command: 'channel';
+  action: 'set' | 'list' | 'remove';
+  /** The channel kind a plugin declares — `slack`, `imessage`. */
+  kind?: string;
+  /** The agent whose binding this is; required for set and remove. */
+  agentId?: string;
+  /**
+   * The secret names to store, in the order their values are asked for
+   * or read. Empty for Slack means its two tokens.
+   */
+  keys: string[];
 }
 
 export interface ParsedSkillReloadCommand {
@@ -301,6 +315,7 @@ export type ParsedCommand =
   | ParsedSkillsCommand
   | ParsedSkillReloadCommand
   | ParsedCredentialCommand
+  | ParsedChannelCommand
   | ParsedRestartCommand
   | ParsedSchedulesCommand
   | ParsedGrantsCommand
@@ -804,6 +819,77 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       ...(name !== undefined ? { name } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
     };
+  }
+
+  if (command === 'channel' || command === 'channels') {
+    const [subcommand, ...channelRest] = command === 'channels' ? ['list', ...rest] : rest;
+    if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+      return { command: 'help' };
+    }
+    if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove') {
+      throw new Error(`No channel subcommand named ${JSON.stringify(subcommand)}. It is set, list, or remove.`);
+    }
+    const positional: string[] = [];
+    let agentId: string | undefined;
+    for (let index = 0; index < channelRest.length; index += 1) {
+      const token = channelRest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--agent') {
+        agentId = readOptionValue(channelRest, index, '--agent');
+        index += 1;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      positional.push(token);
+    }
+    const [kind, ...keys] = positional;
+    if (subcommand === 'list') {
+      if (positional.length > 0 || agentId !== undefined) {
+        throw new Error('channel list takes no arguments; it lists every channel with stored secrets.');
+      }
+      return { command: 'channel', action: 'list', keys: [] };
+    }
+    if (kind === undefined) {
+      throw new Error(`channel ${subcommand} needs a channel kind — the name its plugin declares, such as imessage.`);
+    }
+    if (!CHANNEL_KIND_PATTERN.test(kind)) {
+      throw new Error(`${JSON.stringify(kind)} is not a channel kind. Use the kind a channel plugin declares (lowercase, hyphens).`);
+    }
+    if (agentId === undefined) {
+      throw new Error(`channel ${subcommand} needs --agent: channel secrets are one set per agent, since each agent is its own identity on the channel.`);
+    }
+    // The same rule the credential command keeps, for the same reason: an
+    // entry under an id no agent can have is a binding nothing resolves.
+    if (!isValidAgentId(agentId)) {
+      throw new Error(`${JSON.stringify(agentId)} cannot be an agent id, so a binding stored under it could never be resolved.`);
+    }
+    if (subcommand === 'remove') {
+      if (keys.length > 0) {
+        throw new Error('channel remove takes the kind and --agent only; it removes everything stored for that agent on that channel.');
+      }
+      return { command: 'channel', action: 'remove', kind, agentId, keys: [] };
+    }
+    if (kind !== 'slack' && keys.length === 0) {
+      throw new Error(
+        `channel set ${kind} needs the names of the secrets to store, from the plugin's README — for example \`stratus channel set ${kind} --agent ${agentId} apiKey apiSecret\`.`,
+      );
+    }
+    const bad = keys.find((key) => !CREDENTIAL_NAME_PATTERN.test(key));
+    if (bad !== undefined) {
+      throw new Error(`${JSON.stringify(bad)} is not a secret name. Use letters, digits, dots, dashes, or underscores, starting with a letter.`);
+    }
+    const repeated = keys.find((key, index) => keys.indexOf(key) !== index);
+    if (repeated !== undefined) {
+      throw new Error(`${repeated} is named twice; each secret is stored once.`);
+    }
+    return { command: 'channel', action: 'set', kind, agentId, keys };
   }
 
   if (command === 'plugins' || (command === 'plugin' && rest[0] === 'list')) {

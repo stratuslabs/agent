@@ -53,6 +53,7 @@ import {
   withSoulFileLock,
   addNamedCredential,
   loadNamedCredentials,
+  CHANNEL_KIND_PATTERN,
   CREDENTIAL_NAME_PATTERN,
   NamedCredentialExistsError,
   type AgentSummary,
@@ -344,8 +345,6 @@ const delegatesAllowlist = (value: unknown): string[] => {
   return entries;
 };
 
-// The shape a channel kind takes: a plugin manifest's contribution name.
-const CHANNEL_KIND_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 /**
  * The `secrets` object of a non-Slack channel binding: every value a
@@ -877,6 +876,13 @@ export const routes: Route[] = [
       const drainTimeoutMs = body.drainTimeoutMs;
       if (drainTimeoutMs !== undefined && (typeof drainTimeoutMs !== 'number' || !Number.isInteger(drainTimeoutMs) || drainTimeoutMs < 0)) {
         throw new ApiError(400, 'invalid_body', '"drainTimeoutMs" must be a non-negative whole number of milliseconds when present.');
+      }
+      // Before anything is announced: a refused restart leaves the daemon
+      // serving, where one refused after the drain leaves nothing serving.
+      try {
+        await context.gateway.checkRestart();
+      } catch (error) {
+        throw new ApiError(409, 'not_restartable', error instanceof Error ? error.message : String(error));
       }
       let status;
       try {

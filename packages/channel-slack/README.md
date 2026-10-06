@@ -13,7 +13,7 @@ Slack adapter for Stratus agents. **One Slack app per agent** — Slack has no w
 {
   "channels": {
     "slack": {
-      "ava": { "appToken": "xapp-…", "botToken": "xoxb-…" }
+      "blair": { "appToken": "xapp-…", "botToken": "xoxb-…" }
     }
   }
 }
@@ -276,7 +276,7 @@ Who may answer is configured per agent, in `~/.stratus/config.json`:
     "mode": "remote",
     "slackChannel": "C07OPS",
     "agents": {
-      "ava": { "slackApprovers": ["U01DYLAN", "U01OPS"] }
+      "blair": { "slackApprovers": ["U01DYLAN", "U01OPS"] }
     }
   }
 }
@@ -383,7 +383,7 @@ So a message is the operator's only when the operator has said so:
   "principals": {
     "slackUsers": ["U01DYLAN"],
     "agents": {
-      "ava": { "slackUsers": ["U01DYLAN", "U01OPS"] },
+      "blair": { "slackUsers": ["U01DYLAN", "U01OPS"] },
       "bea": { "slackUsers": [] }
     }
   }

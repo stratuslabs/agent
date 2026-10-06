@@ -75,7 +75,7 @@ Or with a config file `stratus.config.json` (start from
   "provider": "anthropic",
   "model": "claude-opus-5",
   "apiKeyEnv": "ANTHROPIC_API_KEY",
-  "soul": "./examples/souls/ava.md"
+  "soul": "./examples/souls/blair.md"
 }
 ```
 
@@ -134,7 +134,7 @@ to the provider for a final answer:
 
 - A persistent conversation: `stratus chat` — the session carries across
   turns and remembered facts accumulate ([Memory](../concepts/memory.md)).
-- Run as a named identity: `stratus run --soul ./examples/souls/ava.md "hi"`
+- Run as a named identity: `stratus run --soul ./examples/souls/blair.md "hi"`
   ([Agents](../concepts/agents.md)).
 - The whole roster, always on: [`stratus serve`](../guides/always-on.md) and
   [Slack](../guides/slack.md).

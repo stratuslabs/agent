@@ -20,3 +20,9 @@ is `private: true`, outside `packages/` so it is not mistaken for something
 that ships, and linked from the **root** `package.json` — a published
 package listing a private `workspace:*` devDependency would leave a version
 nobody can resolve in its published metadata.
+
+Two root links are aliases rather than packages: `stratus-plugin-aliased`
+(of `stratus-plugin-fixture`), for a config key that differs from its
+manifest's `packageName`, and `stratus-plugin-fixture-channel-twin` (of
+`stratus-plugin-fixture-channel`), for two enabled plugins contributing the
+same channel kind.

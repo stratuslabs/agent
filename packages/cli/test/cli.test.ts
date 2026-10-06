@@ -59,7 +59,14 @@ import {
   tailLog,
   npmNeedsShell,
 } from '../src/index.ts';
-import { agentMemoryFilePath, fleetDbPath, stateFilePath, validateSkillDirectory } from '@stratusagent/state';
+import {
+  agentMemoryFilePath,
+  fleetDbPath,
+  loadChannelCredentials,
+  loadChannelTransportSecrets,
+  stateFilePath,
+  validateSkillDirectory,
+} from '@stratusagent/state';
 import { loadStratusSkill, STRATUS_SKILL_PATH } from '@stratusagent/agents';
 import type { Session, Tool } from '@stratusagent/core';
 
@@ -4153,11 +4160,17 @@ test('serve warns at startup when a first-party package is older than the CLI', 
   assert.match(output.stderr, /Warning: @stratusagent\/channel-slack 0\.6\.0 is older than this CLI/);
 });
 
-test('serve keeps refusing gated calls when the approvals config cannot be read', async () => {
+test('serve refuses to start on a trusted config that does not parse', async () => {
+  // It used to start, with every block degraded on its own: no plugins, the
+  // built-in soul, no approvers, every Slack sender refused — an agent with
+  // no persona and no tools answering in Slack, looking healthy (#214).
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-badconfig-'));
   await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
-  await writeFile(path.join(serveHome, '.stratus', 'config.json'), '{ not json');
+  const configPath = path.join(serveHome, '.stratus', 'config.json');
+  await writeFile(configPath, '{ not json');
   const { streams, output } = createStreams();
+  // A gate that only loses: a daemon that started would be stopped by it
+  // and exit 0, which fails the assertion below rather than hanging.
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 150);
 
@@ -4167,12 +4180,32 @@ test('serve keeps refusing gated calls when the approvals config cannot be read'
     env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
   });
 
-  // Degrades to headless with a warning rather than taking the fleet down
-  // over a policy block that may not even be present — and never to
-  // "approve everything", which is the only outcome that would be unsafe.
+  // EX_CONFIG, which the systemd unit names as not worth restarting.
+  assert.equal(code, 78);
+  assert.match(output.stderr, new RegExp(`Could not use config ${configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(output.stderr, /stratus doctor/);
+  assert.doesNotMatch(output.stdout, /stratusd ready/);
+});
+
+test('serve still starts when only an untrusted project config is broken', async () => {
+  // A project-local file could not have set a trusted block whatever it
+  // said, and a malformed one in a clone must not keep the operator's
+  // daemon down — the same rule the block readers follow.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-badproject-'));
+  await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-badproject-cwd-'));
+  await writeFile(path.join(project, 'stratus.config.json'), '{ not json');
+  const { streams } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: { homeDir: serveHome, cwd: project, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
   assert.equal(code, 0);
-  assert.match(output.stderr, /ignoring the approvals config/);
-  assert.doesNotMatch(output.stdout, /approvals: remote/);
 });
 
 test('optional channel packages are never hard dependencies of the CLI', async () => {
@@ -4340,6 +4373,110 @@ test('setup disconnects an agent from Slack', async () => {
   assert.deepEqual(credentials.channels, { slack: {} });
   // Disconnecting a channel must never disturb the provider sign-in.
   assert.deepEqual(credentials.anthropic, { type: 'api_key', value: 'sk-keep-me' });
+});
+
+test('setup shows a plugin channel bound by config or by secrets, and stores its secrets on save', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // Ava is bound by the plugin's own config, with no secret — the shape a
+  // channel that needs none takes. The built-in agent is not bound at all.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ plugins: { 'stratus-plugin-fixture-channel': { agents: { ava: {} } } } })}\n`,
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-keep', botToken: 'xoxb-keep' } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → fixture → Stratus → Store secrets → "token" → value →
+      // Back → Back → Save & finish
+      setupInput: Readable.from(['5\n', '2\n', '1\n', '1\n', 'token\n', 'fixture-token-1\n', '3\n', '3\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /Channels\s+Slack: 1 agent connected; also fixture/);
+  assert.match(output.stdout, /fixture\s+from stratus-plugin-fixture-channel/);
+  assert.match(output.stdout, /Ava \(ava\)\s+✓ in its plugin config/);
+  assert.match(output.stdout, /Stratus \(stratus\)\s+— not connected/);
+  assert.match(output.stdout, /Stratus \(stratus\)\s+✓ secrets: token/);
+  assert.ok(!output.stdout.includes('fixture-token-1'), 'setup printed a secret');
+
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.channels, {
+    slack: { ava: { appToken: 'xapp-keep', botToken: 'xoxb-keep' } },
+    fixture: { stratus: { token: 'fixture-token-1' } },
+  });
+});
+
+test('setup counts an agent bound by any plugin carrying the channel kind, not only the first', async () => {
+  // Channels key on agent and kind, so two plugins may carry one kind for
+  // different agents. The twin binds Blair; listing only the first plugin's
+  // block would show Blair as not connected.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'blair.md'), '---\nname: Blair\n---\n\nYou are Blair.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({
+      plugins: {
+        'stratus-plugin-fixture-channel': {},
+        'stratus-plugin-fixture-channel-twin': { agents: { blair: {} } },
+      },
+    })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → fixture → Back → Back → Save & finish
+      setupInput: Readable.from(['5\n', '2\n', '3\n', '3\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /fixture\s+from stratus-plugin-fixture-channel, stratus-plugin-fixture-channel-twin/);
+  assert.match(output.stdout, /Blair \(blair\)\s+✓ in its plugin config/);
+});
+
+test('setup with no channel plugin opens Slack\'s channel menu directly, as it always has', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → Back → Save & finish
+      setupInput: Readable.from(['5\n', '2\n', '9\n']),
+    },
+  });
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /Channels — Slack/);
+  assert.doesNotMatch(output.stdout, /also /);
 });
 
 test('the setup manifest matches the one shipped by the Slack package', async () => {
@@ -6112,6 +6249,9 @@ test('the systemd unit restarts on failure and enables at login', async () => {
   const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
   assert.match(unit, /ExecStart="\/usr\/bin\/node" ".*bin\.js" "serve"/);
   assert.match(unit, /Restart=on-failure/);
+  // Except for a config that will not load: restarting over a file nobody
+  // has fixed fails the same way every five seconds.
+  assert.match(unit, /RestartPreventExitStatus=78/);
   // serve drains on SIGTERM, so systemd must send it and wait.
   assert.match(unit, /KillSignal=SIGTERM/);
   assert.match(unit, /WantedBy=default\.target/);
@@ -8611,6 +8751,34 @@ test('a config that exists but cannot be read blocks the install', async () => {
   assert.match(output.stderr, /Not installing:/);
 });
 
+test('a broken global config blocks the install even behind a valid project config', async () => {
+  // The project file is fine, so validating only what discovery picks
+  // installed a daemon that then refused to start on the global file its
+  // trusted blocks fall back to, and exited 78 under the service manager.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /Not installing: Could not use config .*config\.json/);
+});
+
 test('the unit keeps the node flags the entrypoint needs', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await installService({
@@ -9969,6 +10137,47 @@ test('runCli serve comes back from an announced restart by supervising a fresh d
   await rm(path.join(serveHome, '.stratus', 'gateway.json'), { force: true });
 });
 
+test('a restart over a trusted config that will not load is refused while the daemon keeps serving', async () => {
+  // The replacement would exit 78 on this file, and systemd does not retry
+  // that, so a restart that drained first turned a half-saved config into
+  // an outage. Refused before the drain, the daemon stays up on its last
+  // good snapshot; fixed, the same request goes through.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-restart-config-'));
+  const configFile = path.join(serveHome, '.stratus', 'config.json');
+  await mkdir(path.dirname(configFile), { recursive: true });
+  await writeFile(configFile, JSON.stringify({ provider: 'demo' }), { mode: 0o600 });
+  const watched = watchedServeStreams();
+  let respawns = 0;
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      serveRespawn: async () => {
+        respawns += 1;
+        return { code: 0 };
+      },
+    },
+  });
+
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  await writeFile(configFile, '{ "provider": "demo",');
+  const refused = await postJson(`${base}/api/v1/restart`, token, { reason: 'test' });
+  assert.equal(refused.status, 409, refused.body);
+  assert.match(refused.body, /would refuse to start on it, so this one keeps serving/);
+  assert.ok(!watched.output.stdout.includes('restart requested'), 'nothing may be announced for a refused restart');
+
+  await writeFile(configFile, JSON.stringify({ provider: 'demo' }));
+  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test' });
+  assert.equal(accepted.status, 202, accepted.body);
+  assert.equal(await serving, 0);
+  assert.equal(respawns, 1);
+});
+
 test('a supervised daemon answers a restart by exiting with the restart status, never by supervising in turn', async () => {
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-supervised-'));
   const watched = watchedServeStreams();
@@ -11048,6 +11257,104 @@ test('credential set with nothing on stdin stores nothing and says how to pipe i
   );
   assert.match(output.stderr, /printf %s "\$KEY" \| stratus credential set search\.apiKey/);
   await assert.rejects(() => readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+});
+
+test('stratus channel set stores a plugin channel\'s secrets 0600 where the channel reads them, and never prints one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-channel-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+
+  const set = createStreams();
+  assert.equal(
+    await runCli({
+      argv: ['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey', 'apiSecret'],
+      streams: set.streams,
+      env: { ...env, stdin: 'key-value-1\n  secret value 2 \n' },
+    }),
+    0,
+    set.output.stderr,
+  );
+  // One value per line, in the order named, each kept exactly as typed.
+  assert.deepEqual(await loadChannelTransportSecrets(env, 'imessage'), {
+    ava: { apiKey: 'key-value-1', apiSecret: '  secret value 2 ' },
+  });
+  const credentialsFile = path.join(home, '.stratus', 'credentials.json');
+  assert.equal((await stat(credentialsFile)).mode & 0o777, 0o600);
+  assert.ok(!set.output.stdout.includes('key-value-1'), 'set printed a secret');
+
+  const list = createStreams();
+  assert.equal(await runCli({ argv: ['channels'], streams: list.streams, env }), 0);
+  assert.match(list.output.stdout, /imessage:\n {2}ava {2}apiKey, apiSecret/);
+  assert.ok(!list.output.stdout.includes('key-value-1') && !list.output.stdout.includes('secret value 2'), 'list printed a secret');
+
+  // Slack's two tokens are the default, and land in the shape the Slack
+  // adapter reads; a set replacing them keeps the other kinds intact.
+  assert.equal(
+    await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: createStreams().streams, env: { ...env, stdin: 'xapp-1\nxoxb-1\n' } }),
+    0,
+  );
+  assert.deepEqual(await loadChannelCredentials(env), { slack: { ava: { appToken: 'xapp-1', botToken: 'xoxb-1' } } });
+  assert.deepEqual(Object.keys(await loadChannelTransportSecrets(env, 'imessage')), ['ava']);
+
+  const removed = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'remove', 'imessage', '--agent', 'ava'], streams: removed.streams, env }), 0);
+  assert.deepEqual(await loadChannelTransportSecrets(env, 'imessage'), {});
+  const again = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'remove', 'imessage', '--agent', 'ava'], streams: again.streams, env }), 1);
+  assert.match(again.output.stderr, /Nothing is stored for ava on imessage/);
+});
+
+test('stratus channel set stores nothing when a line is missing, a value is empty, or the agent is not on the roster', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-channel-refuse-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const attempt = async (argv: string[], stdin: string): Promise<{ code: number; stderr: string }> => {
+    const { streams, output } = createStreams();
+    const code = await runCli({ argv, streams, env: { ...env, stdin } });
+    return { code, stderr: output.stderr };
+  };
+
+  const short = await attempt(['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey', 'apiSecret'], 'only-one\n');
+  assert.equal(short.code, 1);
+  assert.match(short.stderr, /Expected 2 line\(s\) on stdin, one for each of apiKey, apiSecret; got 1/);
+
+  const blank = await attempt(['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey', 'apiSecret'], 'k\n \n');
+  assert.equal(blank.code, 1);
+  assert.match(blank.stderr, /apiSecret was empty/);
+
+  const stranger = await attempt(['channel', 'set', 'imessage', '--agent', 'bea', 'apiKey'], 'k\n');
+  assert.equal(stranger.code, 1);
+  assert.match(stranger.stderr, /No agent bea is on the roster/);
+
+  const slack = await attempt(['channel', 'set', 'slack', '--agent', 'ava', 'appToken'], 'x\n');
+  assert.equal(slack.code, 1);
+  assert.match(slack.stderr, /Slack stores exactly appToken and botToken/);
+
+  await assert.rejects(() => readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+});
+
+test('channel commands parse a kind, an agent, and secret names, and refuse a value on the command line', () => {
+  assert.deepEqual(parseCommand(['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey']), {
+    command: 'channel', action: 'set', kind: 'imessage', agentId: 'ava', keys: ['apiKey'],
+  });
+  assert.deepEqual(parseCommand(['channel', 'set', 'slack', '--agent', 'ava']), {
+    command: 'channel', action: 'set', kind: 'slack', agentId: 'ava', keys: [],
+  });
+  assert.deepEqual(parseCommand(['channels']), { command: 'channel', action: 'list', keys: [] });
+  assert.equal(parseCommand(['channel']).command, 'help');
+
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', '--agent', 'ava']), /needs the names of the secrets/);
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', 'apiKey']), /needs --agent/);
+  assert.throws(() => parseCommand(['channel', 'set', 'iMessage', '--agent', 'ava', 'apiKey']), /is not a channel kind/);
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', '--agent', '__proto__', 'apiKey']), /cannot be an agent id/);
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey', 'apiKey']), /named twice/);
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', '--agent', 'ava', 'api/key']), /is not a secret name/);
+  assert.throws(() => parseCommand(['channel', 'set', 'imessage', '--agent', 'ava', '--value', 'sekrit']), /Unknown option: --value/);
+  assert.throws(() => parseCommand(['channel', 'list', 'imessage']), /takes no arguments/);
+  assert.throws(() => parseCommand(['channel', 'remove', 'imessage', '--agent', 'ava', 'apiKey']), /kind and --agent only/);
+  assert.throws(() => parseCommand(['channel', 'show']), /No channel subcommand named "show"/);
 });
 
 test('a local approval prompt names the site a browser action would act on', () => {
@@ -13522,10 +13829,12 @@ test('the startup provenance line says which agents refuse unlisted senders, eve
   );
 });
 
-test('serve with an unreadable principals block refuses every Slack sender rather than admitting everyone', async () => {
+test('serve with an invalid principals block refuses to start rather than admitting everyone', async () => {
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-principals-'));
   await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
-  // A typo in the one setting whose misspelling would open the door.
+  // A typo in the one setting whose misspelling would open the door. A
+  // validation failure is refused at start like a parse failure: the door
+  // stays shut because there is no daemon behind it.
   await writeFile(
     path.join(serveHome, '.stratus', 'config.json'),
     JSON.stringify({ principals: { slackUsers: ['U-DYLAN'], admit: 'principal' } }),
@@ -13540,8 +13849,8 @@ test('serve with an unreadable principals block refuses every Slack sender rathe
     env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
   });
 
-  assert.equal(code, 0);
-  assert.match(output.stderr, /principals config could not be read \(.*Invalid principals\.admit .*received "principal"\.\); refusing every Slack sender until it is fixed/);
+  assert.equal(code, 78);
+  assert.match(output.stderr, /Invalid principals\.admit .*received "principal"/);
   assert.doesNotMatch(output.stderr, /every Slack sender is unknown/);
 });
 
@@ -13986,10 +14295,15 @@ test('a plugin executor selected by a trusted config runs the commands, and a se
 test('a plugin channel starts under the daemon from its stored transport secrets and delivers an inbound message', async () => {
   const home = await seamHome({ plugins: { 'stratus-plugin-fixture-channel': {} } });
   await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
-  await writeFile(
-    path.join(home, '.stratus', 'credentials.json'),
-    `${JSON.stringify({ channels: { fixture: { ava: { token: 'fixture-token-1' } } } })}\n`,
-  );
+  // Stored the way an operator would, through the CLI rather than by
+  // editing the file: the binding the channel starts from is the one
+  // `stratus channel set` wrote.
+  const stored = createStreams();
+  assert.equal(await runCli({
+    argv: ['channel', 'set', 'fixture', '--agent', 'ava', 'token'],
+    streams: stored.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, stdin: 'fixture-token-1\n' },
+  }), 0, stored.output.stderr);
   const { streams, output } = createStreams();
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 1500);

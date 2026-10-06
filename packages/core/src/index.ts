@@ -302,6 +302,29 @@ export interface Message {
    * — the boundary provenance draws, here at the point text enters.
    */
   overheard?: boolean;
+  /**
+   * The caller's idempotency key for the dispatch that brought this user
+   * message (`RunInput.idempotencyKey`). Written in the same save as the
+   * message, so a key is never durable without its message or the other
+   * way round; `workItemState` reads it back.
+   */
+  idempotencyKey?: string;
+  /**
+   * This message's turn was continued once after the process running it
+   * died (`AgentRunner.continueTurn`). A host fails a second such turn
+   * instead of continuing it again: a turn that takes the process down
+   * with it would otherwise do so on every start. Present only when true.
+   */
+  continuedAfterCrash?: boolean;
+  /**
+   * The turn this message started could reach a provider that runs its own
+   * tool loop (a harness): what that turn did is not all in this
+   * transcript, so a crash mid-turn cannot be continued from it. Recorded
+   * at accept time, because the runtime a crashed turn ran on is not the
+   * one a restart resolves if the configuration changed in between.
+   * Present only when true; see `RunInput.hostedLoop`.
+   */
+  hostedLoop?: boolean;
 }
 
 export interface AgentDescriptor {
@@ -3091,6 +3114,83 @@ export const latestTurnReply = (session: Pick<Session, 'messages'>): string | un
 };
 
 /**
+ * Whether a session's transcript already ends in the turn's answer: its
+ * last response holds no tool call, so the loop owed the model nothing more
+ * and only the save marking the turn completed is missing. A continuation
+ * then completes it without a provider call.
+ *
+ * Judged on the last response as a whole: a response's parts are saved
+ * together and its tool results after them all, so the trailing run of
+ * assistant messages is that one response. Any call in it — even one
+ * followed by text, which a provider may send in that order — means the
+ * model is owed another turn. Read it before `reconcileInterruptedToolCalls`
+ * splices results in.
+ */
+export const lastResponseIsAnswer = (session: Pick<Session, 'messages'>): boolean => {
+  const lastResponse: Message[] = [];
+  for (let index = session.messages.length - 1; index >= 0 && session.messages[index]?.role === 'assistant'; index -= 1) {
+    lastResponse.push(session.messages[index]!);
+  }
+  return lastResponse.length > 0
+    && lastResponse.every((candidate) => candidate.toolCalls === undefined || candidate.toolCalls.length === 0);
+};
+
+/**
+ * The end of a turn that answered: marked completed in one save, then
+ * announced. The runner's loop ends here, and so does a turn whose answer
+ * a process saved and then died before marking it completed — which needs
+ * no provider and no current agent definition to finish, so a host can do
+ * it with only its store and bus (`lastResponseIsAnswer` says when).
+ */
+export const completeAnsweredTurn = async (finished: Session, store: SessionStore, bus: EventBus): Promise<Session> => {
+  let session = finished;
+  session.status = 'completed';
+  await store.save(session);
+  const stored = await store.get(session.id);
+  session = stored ?? session;
+  await bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
+  await bus.emit({
+    type: 'session.completed',
+    sessionId: session.id,
+    // Copies all the way down — a fresh array of fresh records, not the
+    // session's own. This is durable accounting state rather than a
+    // per-event payload, so a subscriber that sorts the list, appends to
+    // it, or normalizes a count in place must not be reaching the stored
+    // record. A shallow array copy is not enough: the record objects
+    // behind it are the ones the session holds, and
+    // `InMemorySessionStore` hands the very same objects back on the
+    // next read.
+    //
+    // What this does NOT buy is isolation between subscribers. `emit`
+    // hands one event object to every handler in turn, so an earlier
+    // handler's edits are visible to later ones — true of `parts` on
+    // provider.response and of every other payload on this bus, and not
+    // a promise the bus has ever made. Copy before mutating.
+    ...(session.usage && session.usage.length > 0
+      ? { usage: session.usage.map((record) => ({ ...record })) }
+      : {}),
+  });
+  return session;
+};
+
+/**
+ * The reply of the turn a keyed message started (`Message.idempotencyKey`),
+ * where `latestTurnReply` is the newest turn's. A repeated dispatch resolves
+ * with the session as it stands, which may have moved on since: an adapter
+ * answering a redelivered message reads the reply here, or it would answer
+ * the old message with a newer turn's words. Undefined when no message
+ * carries the key, or its turn produced no text.
+ */
+export const turnReplyFor = (session: Pick<Session, 'messages'>, idempotencyKey: string): string | undefined => {
+  const start = session.messages.findLastIndex((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (start < 0) {
+    return undefined;
+  }
+  const next = session.messages.findIndex((message, index) => index > start && message.role === 'user');
+  return latestTurnReply({ messages: session.messages.slice(0, next < 0 ? undefined : next) });
+};
+
+/**
  * A user message's text as a prompt should carry it. The one place an
  * overheard message is framed, so the API providers' per-message blocks
  * and the two harness renderers cannot drift on what "not spoken to"
@@ -3140,6 +3240,33 @@ export const promptTextOf = (
  */
 export const isUnaddressedTurn = (session: Pick<Session, 'messages'>): boolean =>
   session.messages.findLast((message) => message.role === 'user')?.overheard === true;
+
+/**
+ * Where the dispatch carrying `idempotencyKey` stands in this session:
+ * `undefined` if no message carries the key, `unfinished` if its message
+ * is the one the session's in-flight turn is on, `finished` otherwise.
+ *
+ * Derived, never recorded separately, which is what makes it exact. The
+ * keyed message is written in the same save that sets the status to
+ * `running` (accepted and started are one write), and the save that moves
+ * the status off `running` or `pending_approval` is the turn's final one,
+ * so `finished` is written in the same transaction as the final save by
+ * construction. While a turn is in flight its message is the session's
+ * newest user message — `observe` refuses to append during one, and the
+ * runner's wrap-up notes never reach the store — the same reading
+ * `isUnaddressedTurn` relies on.
+ */
+export const workItemState = (
+  session: Pick<Session, 'messages' | 'status'>,
+  idempotencyKey: string,
+): 'unfinished' | 'finished' | undefined => {
+  const keyed = session.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (keyed === undefined) {
+    return undefined;
+  }
+  const inFlight = session.status === 'running' || session.status === 'pending_approval';
+  return inFlight && session.messages.findLast((message) => message.role === 'user') === keyed ? 'unfinished' : 'finished';
+};
 
 /**
  * A provider's way of saying a failed turn's prompt had already reached
@@ -5209,6 +5336,19 @@ export interface RunInput {
    * attachments instead, as an overheard one does.
    */
   addressed?: boolean;
+  /**
+   * The caller's name for this dispatch, stored on the user message
+   * (`Message.idempotencyKey`) in the same write as the message itself.
+   * The runner only records it; refusing a repeat is the host's job — see
+   * `workItemState` and the gateway's `DispatchInput.idempotencyKey`.
+   */
+  idempotencyKey?: string;
+  /**
+   * Whether this turn may run on a provider that hosts its own tool loop,
+   * stored on the user message (`Message.hostedLoop`). The host knows what
+   * it resolved for the turn; the runner only records it.
+   */
+  hostedLoop?: boolean;
   metadata?: JsonObject;
   /**
    * What the host can say about how this agent is run, rendered as the
@@ -5232,6 +5372,10 @@ export interface ResumeInput {
   images?: ImageAttachment[];
   /** See `RunInput.addressed`. */
   addressed?: boolean;
+  /** See `RunInput.idempotencyKey`. */
+  idempotencyKey?: string;
+  /** See `RunInput.hostedLoop`. */
+  hostedLoop?: boolean;
   /**
    * This turn's metadata — read for the sender's trust
    * (`SENDER_TRUST_METADATA_KEY`) and not merged into the session's. The
@@ -5575,6 +5719,8 @@ export class AgentRunner {
       createdAt: new Date().toISOString(),
       ...userImages(input.images),
       ...(input.addressed === false ? { overheard: true } : {}),
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
     };
     omitImagesOutsideReplayBudget([opening], this.imageReplayBudget);
     const sessionInput: Omit<Session, 'createdAt' | 'updatedAt'> = {
@@ -5676,6 +5822,8 @@ export class AgentRunner {
       // difference is only that a turn runs on it, and every renderer
       // frames it from the same mark.
       ...(input.addressed === false ? { overheard: true } : {}),
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
     });
     // Before the save below: the row that carries this turn is the row
     // that stops carrying the pixels nothing can send any more.
@@ -5698,6 +5846,77 @@ export class AgentRunner {
     await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
 
     return this.executeTurns(working, input.signal, undefined, input.runtime);
+  }
+
+  /**
+   * Picks up a turn whose process died while it was `running`: its user
+   * message is durable and its reply is not. Nothing is appended — the turn
+   * already has its message — so this is `resume` without the input.
+   * Dangling tool calls are closed as interrupted, telling the model they
+   * may not have run rather than running them again, and the loop goes back
+   * to the provider with the transcript as it stands.
+   *
+   * A transcript that already ends in the reply (the response was saved,
+   * and the process died before the save that marks the turn completed) is
+   * completed as it stands, with no provider call: asking again would send
+   * a second answer to one message.
+   *
+   * Marks the turn's message `continuedAfterCrash` in its first save, so a
+   * host can refuse to do this twice. Resolves `undefined` when the session
+   * is missing or no longer `running`. Never for a turn parked on a human:
+   * `recoverPendingApproval` re-enters the parked call, which reconciling
+   * here would close.
+   */
+  async continueTurn(
+    sessionId: string,
+    options: {
+      /** See `RunInput.runtime`. */
+      runtime?: AgentRuntimeContext;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<Session | undefined> {
+    const session = await this.store.get(sessionId);
+    if (!session || session.status !== 'running') {
+      return undefined;
+    }
+    // Before reconciliation splices results into the response it judges.
+    const answered = lastResponseIsAnswer(session);
+    this.reconcileInterruptedToolCalls(session);
+    const message = session.messages.findLast((candidate) => candidate.role === 'user');
+    if (message !== undefined) {
+      message.continuedAfterCrash = true;
+    }
+    await this.labelLegacySession(session);
+    await this.store.save(session);
+    const stored = await this.store.get(session.id);
+    const working = stored ?? session;
+
+    await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
+
+    if (answered) {
+      return this.completeTurn(working);
+    }
+    // Resumed, not restarted, for the reason `recoverPendingApproval` is: a
+    // turn that already took provider turns spends the budget it was on, and
+    // its failure streak counts the responses before the crash. Handed over
+    // as an answered call with nothing left to run, so the loop counts this
+    // message's responses (`responsesThroughCall`) and goes straight to the
+    // next provider turn — the wrap-up, if the ceiling has been reached.
+    const userIndex = working.messages.findLastIndex((candidate) => candidate.role === 'user');
+    const callIndex = working.messages.findLastIndex((candidate) => candidate.role === 'assistant' && (candidate.toolCalls?.length ?? 0) > 0);
+    const lastCall = callIndex > userIndex ? working.messages[callIndex]?.toolCalls?.at(-1) : undefined;
+    const lastResult = lastCall === undefined
+      ? undefined
+      : working.messages.slice(callIndex + 1).findLast((candidate) => candidate.toolResult?.callId === lastCall.id)?.toolResult;
+    const resumeFrom = lastCall !== undefined && lastResult !== undefined
+      ? {
+        pending: undefined,
+        remaining: [],
+        turn: responsesThroughCall(working, lastCall).length,
+        answered: { call: lastCall, result: lastResult },
+      }
+      : undefined;
+    return this.executeTurns(working, options.signal, resumeFrom, options.runtime);
   }
 
   /**
@@ -5750,11 +5969,18 @@ export class AgentRunner {
   }
 
   /**
-   * Appends a synthetic failed result directly after every tool call that
-   * has none — the durable trace of a turn interrupted between the call's
-   * save and its result's. The model sees an honest record ("interrupted,
-   * never ran to completion") instead of a wire-format violation, and a
-   * resume can decide to retry rather than assume the side effect landed.
+   * Adds a synthetic failed result for every tool call that has none — the
+   * durable trace of a turn interrupted between the call's save and its
+   * result's. The model sees an honest record ("interrupted, never ran to
+   * completion") instead of a wire-format violation, and a resume can
+   * decide to retry rather than assume the side effect landed.
+   *
+   * Placed where an uninterrupted turn would have written it: after the
+   * whole response the call came in — every assistant message that one
+   * save wrote — and after any results already recorded for it. Directly
+   * after the call would split a response whose text followed its call, and
+   * a provider replaying the response's raw turn (which already holds that
+   * text) would then send the text a second time.
    */
   private reconcileInterruptedToolCalls(session: Session): void {
     // Matched by OCCURRENCE, not by id alone: providers can reuse ids
@@ -5770,9 +5996,12 @@ export class AgentRunner {
       }
     }
 
+    const messages = session.messages;
+    // By the index of the message they go after.
+    const inserts = new Map<number, Message[]>();
     const callsSeen = new Map<string, number>();
-    for (let index = 0; index < session.messages.length; index += 1) {
-      const message = session.messages[index];
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index];
       if (message?.role !== 'assistant' || !message.toolCalls) {
         continue;
       }
@@ -5792,16 +6021,25 @@ export class AgentRunner {
           // The kernel's own sentence, not the tool's output.
           trust: 'agent',
         };
-        index += 1;
-        session.messages.splice(index, 0, {
+        let end = index;
+        while (messages[end + 1]?.role === 'assistant') {
+          end += 1;
+        }
+        while (messages[end + 1]?.role === 'tool') {
+          end += 1;
+        }
+        inserts.set(end, [...(inserts.get(end) ?? []), {
           id: `${session.id}:tool:${call.id}`,
           role: 'tool',
           name: call.toolName,
           content: JSON.stringify(result),
           createdAt: new Date().toISOString(),
           toolResult: result,
-        });
+        }]);
       }
+    }
+    if (inserts.size > 0) {
+      messages.splice(0, messages.length, ...messages.flatMap((message, index) => [message, ...(inserts.get(index) ?? [])]));
     }
   }
 
@@ -6205,33 +6443,7 @@ export class AgentRunner {
         countFailures(calls, results);
       }
 
-      session.status = 'completed';
-      await this.store.save(session);
-      const stored = await this.store.get(session.id);
-      session = stored ?? session;
-      await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
-      await this.bus.emit({
-        type: 'session.completed',
-        sessionId: session.id,
-        // Copies all the way down — a fresh array of fresh records, not the
-        // session's own. This is durable accounting state rather than a
-        // per-event payload, so a subscriber that sorts the list, appends to
-        // it, or normalizes a count in place must not be reaching the stored
-        // record. A shallow array copy is not enough: the record objects
-        // behind it are the ones the session holds, and
-        // `InMemorySessionStore` hands the very same objects back on the
-        // next read.
-        //
-        // What this does NOT buy is isolation between subscribers. `emit`
-        // hands one event object to every handler in turn, so an earlier
-        // handler's edits are visible to later ones — true of `parts` on
-        // provider.response and of every other payload on this bus, and not
-        // a promise the bus has ever made. Copy before mutating.
-        ...(session.usage && session.usage.length > 0
-          ? { usage: session.usage.map((record) => ({ ...record })) }
-          : {}),
-      });
-      return session;
+      return await this.completeTurn(session);
     } catch (caught) {
       // An abort can surface first from any layer (the provider's cancelled
       // request, an executor, this loop's own checks) — normalize so an
@@ -6272,6 +6484,11 @@ export class AgentRunner {
       await this.bus.emit({ type: 'session.failed', sessionId: session.id, error: lastError });
       throw error;
     }
+  }
+
+  /** See `completeAnsweredTurn`; the loop's end and `continueTurn`'s. */
+  private async completeTurn(finished: Session): Promise<Session> {
+    return completeAnsweredTurn(finished, this.store, this.bus);
   }
 
   /**

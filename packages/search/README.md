@@ -34,7 +34,7 @@ Then each agent's soul opts in, on both gates — the tool and the credential:
 
 ```markdown
 ---
-id: ava
+id: blair
 tools: [web.fetch, web.search]
 credentials: [search.apiKey]
 ---
@@ -42,7 +42,7 @@ credentials: [search.apiKey]
 
 `tools: [web.*]` picks up search too, with no soul edit, which is the reason
 the glob exists. The `credentials:` line is separate and is **not** optional:
-without it every call answers "Agent ava is not allowed to access credential:
+without it every call answers "Agent blair is not allowed to access credential:
 search.apiKey".
 
 **Two backends cannot be enabled at once.** Both contribute `web.search`, and
