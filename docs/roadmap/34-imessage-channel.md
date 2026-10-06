@@ -55,9 +55,9 @@ buttons), and the four delivery methods. It depends only on published
 `@stratusagent/channels` and `@stratusagent/core`, bounded to the minor that
 shipped Phase 0.
 
-**Out:** one line carrying the whole roster, which is the question
-[22](./22-slack-single-app.md) asks of Slack; group conversations by
-default; and anything that needs a native module on the default path.
+**Out:** one line carrying the whole roster, the same question as running
+the whole roster on one Slack app; group conversations by default; and
+anything that needs a native module on the default path.
 
 ## Acceptance criteria
 

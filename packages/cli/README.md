@@ -51,7 +51,7 @@ stratus skill validate ./my-skill      # check a skill against the spec without 
 stratus plugins                        # installed → enabled → granted → what approvals does with it
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 stratus credentials                    # stored credential names (never values)
-stratus channel set imessage --agent ava apiKey   # a channel plugin's secrets for one agent, asked without echo (also `channels`, `channel remove`)
+stratus channel set imessage --agent blair apiKey  # a channel plugin's secrets for one agent, asked without echo (also `channels`, `channel remove`)
 stratus schedules                      # what the fleet has scheduled, and where it reports
 stratus grants ava                     # what ava may do unattended, and `grants revoke` to take one back
 stratus memory list ava                # every live fact, with its trust label, pin, and validity

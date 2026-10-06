@@ -46,10 +46,10 @@ printf %s "$KEY" | stratus credential set search.apiKey   # store a named creden
 stratus credential set search.apiKey --agent ava         # one agent's own key, over the shared one
 stratus credentials                    # stored names, never values (also: stratus credential list)
 stratus credential remove search.apiKey
-stratus channel set imessage --agent ava apiKey apiSecret   # a channel plugin's secrets for one agent (asked without echo, or one per stdin line)
-stratus channel set slack --agent ava                        # Slack's appToken and botToken
+stratus channel set imessage --agent blair apiKey apiSecret  # a channel plugin's secrets for one agent (asked without echo, or one per stdin line)
+stratus channel set slack --agent blair                      # Slack's appToken and botToken
 stratus channels                       # which agents have secrets for which channel, names only (also: stratus channel list)
-stratus channel remove imessage --agent ava
+stratus channel remove imessage --agent blair
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
 stratus grants ava                     # what ava may do unattended: standing tool grants, command scopes, sites
@@ -156,7 +156,7 @@ without echoing it; otherwise it reads **one value per line from stdin**,
 in the order named, keeping each exactly as typed:
 
 ```bash
-printf '%s\n%s\n' "$API_KEY" "$API_SECRET" | stratus channel set imessage --agent ava apiKey apiSecret
+printf '%s\n%s\n' "$API_KEY" "$API_SECRET" | stratus channel set imessage --agent blair apiKey apiSecret
 ```
 
 It replaces whatever that agent had stored on that channel, refuses an

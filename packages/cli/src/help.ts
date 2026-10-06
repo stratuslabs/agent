@@ -38,7 +38,7 @@ Usage:
   stratus session rollover slack:ava:T01ABCDEF:D07GHIJKL
   printf %s "$BRAVE_KEY" | stratus credential set search.apiKey
   stratus credentials
-  stratus channel set imessage --agent ava apiKey apiSecret
+  stratus channel set imessage --agent blair apiKey apiSecret
   stratus channels
   stratus doctor
   stratus update

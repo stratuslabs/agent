@@ -119,20 +119,20 @@ value without echoing it (or reads one per line from stdin) and never takes
 one from the command line:
 
 ```console
-$ stratus channel set discord --agent ava botToken
+$ stratus channel set discord --agent blair botToken
 botToken (not echoed):
-Stored botToken for ava on discord in ~/.stratus/credentials.json (readable only by you).
+Stored botToken for blair on discord in ~/.stratus/credentials.json (readable only by you).
 $ stratus channel list
 discord:
-  ava  botToken
+  blair  botToken
 ```
 
 `stratus setup`'s Channels row does the same for every kind an enabled
 plugin declares, and shows an agent bound by its plugin's config too.
 Remotely, the control API's `PUT /credentials/channels/discord` takes
-`{ "agentId": "ava", "secrets": { "botToken": "…" } }`. Each replaces what
+`{ "agentId": "blair", "secrets": { "botToken": "…" } }`. Each replaces what
 that agent had on that kind and never disturbs another kind's; `stratus
-channel remove discord --agent ava` forgets one. `GET /credentials` lists
+channel remove discord --agent blair` forgets one. `GET /credentials` lists
 which agents are bound on each kind, ids only. A running daemon reads them
 at its next start: `stratus restart`.
 
