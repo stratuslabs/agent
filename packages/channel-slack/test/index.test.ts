@@ -8047,13 +8047,18 @@ test('each turn says what kind of room it is in now and how many are in it, neve
   await adapter.stop();
 });
 
-test('a redelivery after a restart passes its message key and posts its own turn\'s reply, not the newest', async () => {
+test('a redelivery after a restart passes its message key and posts its own turn\'s reply and files, not the newest', async () => {
   // The in-memory dedupe dies with the process, and so may the delivery
   // that ran the turn — after the turn's last write and before its reply
   // reached Slack. Nothing says which, so the redelivery posts the reply,
   // and the reply it posts is the one its own message got, though the
   // session has moved on since.
   const keys: Array<string | undefined> = [];
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-finished-repeat-'));
+  const chart = path.join(dir, 'chart.png');
+  const later = path.join(dir, 'later.png');
+  await writeFile(chart, 'png');
+  await writeFile(later, 'png');
   const finished = (sessionId: string, key: string): Session => {
     const now = new Date().toISOString();
     return {
@@ -8062,8 +8067,10 @@ test('a redelivery after a restart passes its message key and posts its own turn
       status: 'completed',
       messages: [
         { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: key },
+        { id: 't1', role: 'tool', content: '', createdAt: now, toolResult: { callId: 'c1', toolName: 'shell.run', ok: true, output: { file: chart } } },
         { id: 'a1', role: 'assistant', content: 'hello from Ava', createdAt: now },
         { id: 'u2', role: 'user', content: 'and later', createdAt: now, idempotencyKey: 'ava:C1:200.1' },
+        { id: 't2', role: 'tool', content: '', createdAt: now, toolResult: { callId: 'c2', toolName: 'shell.run', ok: true, output: { file: later } } },
         { id: 'a2', role: 'assistant', content: 'a newer reply', createdAt: now },
       ],
       createdAt: now,
@@ -8075,8 +8082,9 @@ test('a redelivery after a restart passes its message key and posts its own turn
     ...stub,
     async dispatch(input) {
       keys.push(input.idempotencyKey);
-      // What the gateway does for a finished repeat: no turn, no events, no
-      // `onRepeat`, and the session as it stands.
+      // What the gateway does for a finished repeat: no turn, no events,
+      // and the session as it stands.
+      input.onRepeat?.('finished');
       return finished(input.sessionId, input.idempotencyKey ?? '');
     },
   };
@@ -8097,6 +8105,7 @@ test('a redelivery after a restart passes its message key and posts its own turn
     const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
     assert.ok(said.includes('hello from Ava'), `${replies}: the reply was not posted`);
     assert.ok(!said.includes('a newer reply'), `${replies}: a newer turn's reply answered the message`);
+    assert.deepEqual(web.uploads.map((upload) => upload.filename), ['chart.png'], `${replies}: not exactly its own turn's file`);
     assert.deepEqual(keys, ['ava:C1:100.1']);
   }
 });
@@ -8107,7 +8116,7 @@ test('a repeat of a turn another delivery is still waiting on posts nothing', as
   const gateway: StubGateway = {
     ...stub,
     async dispatch(input) {
-      input.onRepeat?.();
+      input.onRepeat?.('live');
       return sessionWithReply(input.sessionId, 'hello from Ava');
     },
   };
@@ -8154,10 +8163,11 @@ test('a repeat of a failed turn posts the failure, and a live repeat of one post
           if (live) {
             // Attached to a turn another delivery is waiting on, which then
             // failed: that delivery says so.
-            input.onRepeat?.();
+            input.onRepeat?.('live');
             throw new Error('the provider refused the request');
           }
           // Finished and failed: the session as it stands, not a rejection.
+          input.onRepeat?.('finished');
           return failed(input.sessionId, input.idempotencyKey ?? '');
         },
       };
@@ -8218,7 +8228,7 @@ test('a final reply is not overtaken by a turn queued behind a repeat that withd
     ...stub,
     async dispatch(input) {
       if (/repeat/.test(input.userMessage)) {
-        input.onRepeat?.();
+        input.onRepeat?.('live');
       }
       return stub.dispatch(input);
     },

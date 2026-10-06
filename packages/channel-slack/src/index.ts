@@ -6,6 +6,8 @@ import path from 'node:path';
 import {
   filePathsOf,
   latestTurnReply,
+  turnFailureFor,
+  turnFilesFor,
   turnReplyFor,
   CONVERSATION_METADATA_KEY,
   SENDER_TRUST_METADATA_KEY,
@@ -898,6 +900,16 @@ class ReplyRenderer {
     }
   }
 
+  /**
+   * Upload files a turn produced that no event delivered: a repeat of a
+   * finished turn has only the session to read them from (`turnFilesFor`).
+   */
+  queueFiles(filePaths: readonly string[]): void {
+    for (const filePath of filePaths) {
+      this.queueUpload(filePath);
+    }
+  }
+
   // Tool results that reference local output files (a screenshot, a
   // generated report) become real attachments in the conversation — the
   // channel contract's upload operation. Uploads chain so they land in
@@ -1450,23 +1462,6 @@ const messageText = (text: string): string => truncateForSlack(toSlackMrkdwn(tex
  * no rewrite is ever asked to span a boundary.
  */
 const messageChunks = (text: string): string[] => splitForSlack(toSlackMrkdwn(text));
-
-/**
- * The reply to the message `key` names. A redelivery of a message whose turn
- * already finished resolves with the session as it stands, which may have
- * moved on since, so its own turn is found by the key; a host that stores
- * no key has only just run the turn, and it is the latest one.
- */
-const replyTo = (session: Session, key: string): string | undefined =>
-  session.messages.some((message) => message.idempotencyKey === key) ? turnReplyFor(session, key) : latestTurnReply(session);
-
-/**
- * Whether the turn the message `key` names is the session's latest and it
- * failed. A failure is recorded on the session, not the turn, so a failed
- * turn the session has moved on from reads as one that said nothing.
- */
-const failedTurnFor = (session: Session, key: string): boolean =>
-  session.status === 'failed' && session.messages.findLast((message) => message.role === 'user')?.idempotencyKey === key;
 
 const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
   stratus_approve_once: 'once',
@@ -4385,7 +4380,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // stopped until the reply ahead of it posted. In a channel thread the
       // key is shared, and the running turn's status stays up instead.
       renderer.showLoading(queue.length === 1 || queue[0]?.statusThread !== renderer.statusThread);
-      let repeated = false;
+      let repeat: 'live' | 'finished' | undefined;
       const turn = gateway.dispatch({
         sessionId,
         agentId: connection.config.agentId,
@@ -4398,11 +4393,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // the dedupe evicted it) is still the message it was: the gateway
         // runs no second turn for it, and says so through `onRepeat`.
         idempotencyKey: eventKey,
-        onRepeat: () => {
-          repeated = true;
+        onRepeat: (kind) => {
+          repeat = kind;
         },
       });
-      return { renderer, turn, repeated: () => repeated };
+      return { renderer, turn, repeat: () => repeat };
     });
 
     const started = await intake;
@@ -4420,7 +4415,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
       return;
     }
-    const { renderer, turn, repeated } = started;
+    const { renderer, turn, repeat } = started;
 
     const removeFromQueue = (): void => {
       const current = renderers.get(sessionId);
@@ -4449,20 +4444,27 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
     // The turn is a live earlier delivery's, and that delivery's renderer
     // posts its answer, or its failure: this one takes down whatever it put
-    // up and says nothing. A finished one's reply is posted below, because
-    // nothing says the delivery that ran it lived to post it.
-    if (repeated()) {
+    // up and says nothing.
+    if (repeat() === 'live') {
       await renderer.withdraw();
       renderers.get(sessionId)?.[0]?.refreshLoading();
       return;
+    }
+    // A finished one's outcome is posted here, because nothing says the
+    // delivery that ran it lived to post it, and no event will carry its
+    // files: they are read from the session, like its reply below.
+    const finished = repeat() === 'finished';
+    if (session && finished) {
+      renderer.queueFiles(turnFilesFor(session, eventKey));
     }
 
     // A dispatch whose turn fails rejects, but one that repeats a turn that
     // already failed — or continues a crashed one the gateway could only
     // fail — resolves with the failed session. Its failure is posted as the
     // original delivery's would have been, not as a reply that says nothing.
-    if (session && failedTurnFor(session, eventKey)) {
-      failure = new Error(session.lastError ?? 'the turn failed');
+    const failedWith = session ? turnFailureFor(session, eventKey) : undefined;
+    if (failedWith !== undefined) {
+      failure = new Error(failedWith);
       session = undefined;
     }
 
@@ -4471,7 +4473,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // take their place for it — before the final edit and the overflow
       // posts, which are network I/O a later message must not overtake.
       // A DM has no thread, and nobody else in it.
-      const reply = replyTo(session, eventKey);
+      // A finished repeat's session may have moved on since; its own turn
+      // is found by the key.
+      const reply = finished ? turnReplyFor(session, eventKey) : latestTurnReply(session);
       // A turn nobody asked for that said nothing posts nothing; every
       // other turn says `(no reply)` where its answer would have gone — one
       // rule with the gateway's `sessionRouting`, which posts the same

@@ -3191,6 +3191,42 @@ export const turnReplyFor = (session: Pick<Session, 'messages'>, idempotencyKey:
 };
 
 /**
+ * The files the turn a keyed message started produced (`filePathsOf` over
+ * its tool results), the other half of what `turnReplyFor` reads. A
+ * channel uploads a turn's files as the results arrive, so an adapter
+ * answering a repeat of a finished turn — no events, only the session —
+ * has this and nothing else to find them by.
+ */
+export const turnFilesFor = (session: Pick<Session, 'messages'>, idempotencyKey: string): string[] => {
+  const start = session.messages.findLastIndex((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (start < 0) {
+    return [];
+  }
+  const next = session.messages.findIndex((message, index) => index > start && message.role === 'user');
+  return session.messages
+    .slice(start + 1, next < 0 ? undefined : next)
+    .flatMap((message) => (message.role === 'tool' && message.toolResult !== undefined ? filePathsOf(message.toolResult) : []));
+};
+
+/**
+ * Why the turn a keyed message started failed, or undefined if it did not
+ * — or if that is no longer knowable. A failure is recorded on the
+ * session (`status`, `lastError`), not the turn, so it is the keyed
+ * message's only while that message started the session's latest turn.
+ * A message `observe` appended since started none and is passed over: it
+ * is overheard and unkeyed, where every keyed dispatch carries its key.
+ */
+export const turnFailureFor = (session: Pick<Session, 'messages' | 'status' | 'lastError'>, idempotencyKey: string): string | undefined => {
+  if (session.status !== 'failed') {
+    return undefined;
+  }
+  const latest = session.messages.findLast(
+    (message) => message.role === 'user' && !(message.overheard === true && message.idempotencyKey === undefined),
+  );
+  return latest?.idempotencyKey === idempotencyKey ? session.lastError ?? 'The turn failed.' : undefined;
+};
+
+/**
  * A user message's text as a prompt should carry it. The one place an
  * overheard message is framed, so the API providers' per-message blocks
  * and the two harness renderers cannot drift on what "not spoken to"

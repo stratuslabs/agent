@@ -711,20 +711,26 @@ export interface DispatchInput {
    */
   idempotencyKey?: string;
   /**
-   * Called, before the dispatch resolves, when it attaches to a turn another
-   * dispatch with the same key started in this process and is still
-   * waiting on. That dispatch is alive to render the reply, so a caller
-   * with a reply of its own in progress takes it down and posts nothing.
+   * Called, before the dispatch resolves, when it repeats a turn rather
+   * than starting or continuing one, and says which kind of repeat:
    *
-   * Not called for any repeat this process has no live dispatch for. A
-   * finished turn's reply may never have been posted — the process can
-   * die between the turn's last write and the channel's — and nothing
-   * durable says whether it was, so that caller posts
-   * `turnReplyFor(session, key)` itself: a reply said twice beats one
-   * never said. Nor for a repeat that continues a turn a crash left
-   * unfinished, which nobody else is rendering.
+   * - `live` — it attached to a turn another dispatch with the same key
+   *   started in this process and is still waiting on. That dispatch is
+   *   alive to render the outcome, so a caller with a reply of its own in
+   *   progress takes it down and posts nothing.
+   * - `finished` — the turn is over and nothing ran. Its outcome may never
+   *   have been posted — the process can die between the turn's last write
+   *   and the channel's — and nothing durable says whether it was, so the
+   *   caller posts it from the session: `turnReplyFor`, `turnFilesFor`, and
+   *   `turnFailureFor` from `@stratusagent/core`, since the session may
+   *   have moved on and no event will carry any of it. Said twice beats
+   *   never said.
+   *
+   * Not called for a repeat that continues a turn a crash left unfinished:
+   * that turn runs, its events are this caller's, and nobody else is
+   * rendering it.
    */
-  onRepeat?: () => void;
+  onRepeat?: (repeat: 'live' | 'finished') => void;
 }
 
 export interface ObserveInput {
@@ -3309,6 +3315,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     sessionId: string,
     idempotencyKey: string,
     turnId: string | undefined,
+    onRepeat: DispatchInput['onRepeat'],
   ): Promise<Session | undefined> => {
     const session = await store.get(sessionId);
     const state = session === undefined ? undefined : workItemState(session, idempotencyKey);
@@ -3316,6 +3323,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return undefined;
     }
     if (state === 'finished') {
+      onRepeat?.('finished');
       return session;
     }
     // Run now, on this caller's behalf, so its events are this caller's
@@ -3454,14 +3462,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // another caller's turn land in between and then find a finished item.
     const live = idempotencyKey !== undefined ? liveWorkItems.get(input.sessionId)?.get(idempotencyKey) : undefined;
     if (live !== undefined) {
-      input.onRepeat?.();
+      input.onRepeat?.('live');
       return live;
     }
 
     const turn = onSessionChain(input.sessionId, async () => {
       // Before `activeTurns` is touched: a repeat that runs nothing must
       // not claim the session's turn id, even for the instant it takes.
-      const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, turnId) : undefined;
+      const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, turnId, input.onRepeat) : undefined;
       if (repeated !== undefined) {
         return repeated;
       }
