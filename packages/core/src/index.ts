@@ -5802,6 +5802,18 @@ export class AgentRunner {
     if (!session || session.status !== 'running') {
       return undefined;
     }
+    // Judged on the last response as a whole, before reconciliation splices
+    // results into it: a response's parts are saved together and its tool
+    // results after them all, so the trailing run of assistant messages is
+    // that one response. Any call in it — even one followed by text, which
+    // a provider may send in that order — means the loop owes the model
+    // another turn.
+    const lastResponse: Message[] = [];
+    for (let index = session.messages.length - 1; index >= 0 && session.messages[index]?.role === 'assistant'; index -= 1) {
+      lastResponse.push(session.messages[index]!);
+    }
+    const answered = lastResponse.length > 0
+      && lastResponse.every((candidate) => candidate.toolCalls === undefined || candidate.toolCalls.length === 0);
     this.reconcileInterruptedToolCalls(session);
     const message = session.messages.findLast((candidate) => candidate.role === 'user');
     if (message !== undefined) {
@@ -5814,8 +5826,7 @@ export class AgentRunner {
 
     await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
 
-    const last = working.messages.at(-1);
-    if (last?.role === 'assistant' && (last.toolCalls === undefined || last.toolCalls.length === 0)) {
+    if (answered) {
       return this.completeTurn(working);
     }
     return this.executeTurns(working, options.signal, undefined, options.runtime);

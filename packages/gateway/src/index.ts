@@ -3248,15 +3248,42 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       activeTurns.set(sessionId, turnId);
     }
     try {
-      if (session.status === 'pending_approval') {
-        await recoverParked(sessionId, orphanedAtStart.has(sessionId));
-        return (await store.get(sessionId)) ?? session;
-      }
-      return await settleAbandonedTurn(session);
+      return await settleUnfinished(session);
     } finally {
       if (turnId !== undefined) {
         activeTurns.delete(sessionId);
       }
+    }
+  };
+
+  /** An unfinished item with no live turn, settled the way the start-up sweeps would. */
+  const settleUnfinished = async (session: Session): Promise<Session> => {
+    if (session.status === 'pending_approval') {
+      await recoverParked(session.id, orphanedAtStart.has(session.id));
+      return (await store.get(session.id)) ?? session;
+    }
+    return settleAbandonedTurn(session);
+  };
+
+  /**
+   * Settles a keyed item the last process left unfinished before any other
+   * message joins its session. Channels are up before the sweeps reach it,
+   * and a different message resumed onto it would become the session's
+   * newest, so `workItemState` would call the old item finished: its
+   * redelivery would then run nothing although its turn never finished.
+   *
+   * Keyed items only. An unkeyed turn's caller was promised nothing, and a
+   * message resuming it is the long-standing way such a session recovers.
+   */
+  const settleOrphanedItem = async (sessionId: string): Promise<void> => {
+    const session = await store.get(sessionId);
+    const key = session?.messages.findLast((candidate) => candidate.role === 'user')?.idempotencyKey;
+    if (session !== undefined && key !== undefined && workItemState(session, key) === 'unfinished') {
+      // A continuation that fails has failed its session, which is settled
+      // too; the message waiting behind it runs either way.
+      await settleUnfinished(session).catch((error: unknown) => {
+        warn(`could not settle ${sessionId}'s unfinished turn before the next message: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }
   };
 
@@ -3353,6 +3380,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (repeated !== undefined) {
         return repeated;
       }
+      await settleOrphanedItem(input.sessionId);
       if (turnId === undefined) {
         return dispatchInternal(input);
       }

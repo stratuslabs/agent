@@ -4973,3 +4973,101 @@ test('a keyed turn whose agent is gone is failed, not left running for every lat
   const event = await failed.seen;
   assert.equal(event.type === 'session.failed' ? event.error : '', ABANDONED_TURN_ERROR);
 });
+
+test('a different message that beats the sweep waits for the keyed turn it would have buried', async () => {
+  // Resumed onto the unfinished turn, the new message would become the
+  // session's newest, and the old key would read finished: its redelivery
+  // would then run nothing although its turn never did.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-buried-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'first', createdAt: new Date().toISOString(), idempotencyKey: 'msg-1' }],
+  });
+  before.close();
+
+  let final: Array<{ role: string; content: string; key?: string }> = [];
+  const adapter: GatewayChannelAdapter = {
+    name: 'fake',
+    async start(gw) {
+      const session = await gw.dispatch({ sessionId: 'keyed-buried-1', agentId: 'ava', userMessage: 'second', idempotencyKey: 'msg-2' });
+      final = session.messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+        ...(message.idempotencyKey !== undefined ? { key: message.idempotencyKey } : {}),
+      }));
+    },
+    async stop() {},
+  };
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+      return openAiText(`answer to ${body.messages.at(-1)?.content ?? ''}`);
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, channels: [adapter], warn: () => {} });
+  await gateway.start();
+  await gateway.stop();
+
+  assert.deepEqual(final, [
+    { role: 'user', content: 'first', key: 'msg-1' },
+    { role: 'assistant', content: 'answer to first' },
+    { role: 'user', content: 'second', key: 'msg-2' },
+    { role: 'assistant', content: 'answer to second' },
+  ]);
+});
+
+test('a continued turn whose last response held a call before its text goes back to the provider', async () => {
+  // A provider may put text after a tool call in one response. Cut off
+  // before the call's result was recorded, that response is not an answer:
+  // the model is owed the (interrupted) result and another turn.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const stateDir = path.join(home, 'state');
+
+  const now = new Date().toISOString();
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-call-then-text-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'do the thing', createdAt: now, idempotencyKey: 'msg-1' },
+      { id: 'a1', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'call-1', toolName: 'demo.echo', input: {} }] },
+      { id: 'a2', role: 'assistant', content: 'checking now', createdAt: now },
+    ],
+  });
+  before.close();
+
+  let calls = 0;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => {
+      calls += 1;
+      return openAiText('it was interrupted; here is where things stand');
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, warn: () => {} });
+  const completed = eventGate(gateway, (event) => event.type === 'session.completed' && event.sessionId === 'keyed-call-then-text-1');
+  await gateway.start();
+  await gateway.stop().then(() => completed.give_up('the turn was never completed'));
+  await completed.seen;
+
+  const after = new ShardedSessionStore({ stateDir });
+  const session = await after.get('keyed-call-then-text-1');
+  after.close();
+  assert.equal(calls, 1);
+  assert.equal(session?.messages.at(-1)?.content, 'it was interrupted; here is where things stand');
+  assert.ok(session?.messages.some((message) => message.role === 'tool' && message.toolResult?.callId === 'call-1' && message.toolResult.ok === false));
+});
