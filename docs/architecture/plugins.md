@@ -461,7 +461,8 @@ capability rather than an assumption:
 - `GatewayLike.dispatch` takes an `idempotencyKey`: the platform's message
   id. A redelivery — after a crash included — never starts a second turn,
   and a turn the daemon died inside is continued from its transcript at
-  the next start instead of failed. Without it, an adapter delivering at
+  the next start instead of failed (unless it runs on a harness, whose own
+  tool loop may already have acted on the prompt). Without it, an adapter delivering at
   least once has only in-memory dedupe, which a restart erases.
 
 The rest of Slack's turn and render lifecycle — draining in `stop()`, the

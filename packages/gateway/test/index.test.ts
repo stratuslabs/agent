@@ -4785,6 +4785,7 @@ test('a redelivery that beats the sweep continues the turn it repeats, and start
         agentId: 'ava',
         userMessage: 'the turn that died',
         idempotencyKey: 'msg-1',
+        turnId: 'turn-redelivered',
       });
       redelivered = {
         status: session.status,
@@ -4796,19 +4797,71 @@ test('a redelivery that beats the sweep continues the turn it repeats, and start
   };
 
   let calls = 0;
+  let turnDuringCall: string | undefined;
+  let gatewayRef: { activeTurnId: (sessionId: string) => string | undefined } | undefined;
   const env = {
     homeDir: home,
     cwd: home,
     processEnv: { OPENAI_API_KEY: 'sk-o' },
     fetch: (async () => {
       calls += 1;
+      // The continuation runs on the redelivery's behalf, so its events
+      // are that caller's turn.
+      turnDuringCall = gatewayRef?.activeTurnId('keyed-raced-1');
       return openAiText('finished on the redelivery');
     }) as typeof fetch,
   };
   const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, channels: [adapter], warn: () => {} });
+  gatewayRef = gateway;
   await gateway.start();
   await gateway.stop();
 
   assert.deepEqual(redelivered, { status: 'completed', users: 1, reply: 'finished on the redelivery' });
   assert.equal(calls, 1);
+  assert.equal(turnDuringCall, 'turn-redelivered');
+});
+
+test('a keyed turn on a harness is failed, not continued, since its prompt may already have run tools there', async () => {
+  // The subscription path runs the whole tool loop inside one provider
+  // call and keeps its own conversation. A crash mid-call can leave tools
+  // run that the transcript never recorded; continuing would send the
+  // prompt again and run them twice.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\n---\n\nYou are Ava.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-test' } }),
+  );
+  const stateDir = path.join(home, 'state');
+
+  const before = new ShardedSessionStore({ stateDir });
+  await before.create({
+    id: 'keyed-harness-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'push the branch', createdAt: new Date().toISOString(), idempotencyKey: 'msg-1' }],
+  });
+  before.close();
+
+  let queried = 0;
+  const queryFn = (() => {
+    queried += 1;
+    return (async function* () {
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'pushed again', session_id: 'sdk-1' };
+    })();
+  }) as never;
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {}, queryFn },
+    idleTimeoutMs: 0,
+    stateDir,
+    warn: () => {},
+  });
+  const failed = eventGate(gateway, (event) => event.type === 'session.failed' && event.sessionId === 'keyed-harness-1');
+  await gateway.start();
+  await gateway.stop().then(() => failed.give_up('the harness turn was never settled'));
+
+  const event = await failed.seen;
+  assert.equal(event.type === 'session.failed' ? event.error : '', ABANDONED_TURN_ERROR);
+  assert.equal(queried, 0);
 });

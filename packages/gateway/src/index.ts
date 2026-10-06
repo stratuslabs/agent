@@ -150,6 +150,7 @@ import {
   resolveConfigLocation,
   resolveConfiguredSoul,
   resolveRuntimeConfig,
+  runsOnHarness,
   applySoulPins,
   assertStateCompatible,
   stratusHomePath,
@@ -679,7 +680,9 @@ export interface DispatchInput {
    * once it has finished the repeat resolves with the session as it stands,
    * running nothing and emitting nothing; and a turn whose process died
    * mid-run is continued, once (`AgentRunner.continueTurn`), by whichever
-   * comes first — the repeat or the next start's sweep.
+   * comes first — the repeat or the next start's sweep. Not on a harness
+   * (`runsOnHarness`), whose own tool loop may already have acted on the
+   * prompt: that turn is failed, as an unkeyed one is.
    *
    * Stored on the user message in the write that accepts it
    * (`Message.idempotencyKey`), so it lasts as long as the transcript does.
@@ -3142,9 +3145,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const settleAbandonedTurn = async (session: Session): Promise<Session> => {
     const message = session.messages.findLast((candidate) => candidate.role === 'user');
     if (message?.idempotencyKey !== undefined && message.continuedAfterCrash !== true) {
-      log(`${session.id}: continuing a keyed turn the last stratusd was still running`);
       return continueAbandonedTurn(session);
     }
+    return failAbandoned(session);
+  };
+
+  const failAbandoned = async (session: Session): Promise<Session> => {
     session.status = 'failed';
     session.lastError = ABANDONED_TURN_ERROR;
     await store.save(session);
@@ -3159,14 +3165,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * call like any turn's. The definition is refreshed and saved first, as
    * `recoverOne` does and for the same reason: an allowlist is a permission
    * boundary, and a tool dropped while the daemon was down must not run.
+   *
+   * Not on a harness (`runsOnHarness`). One runs its own tool loop inside a
+   * single provider call and keeps its own conversation, so the prompt the
+   * dead turn sent may already have run tools there that the transcript
+   * never saw, and continuing would send it again. That turn is failed as
+   * an unkeyed one is — the same answer as before keys existed.
    */
   const continueAbandonedTurn = async (session: Session): Promise<Session> => {
     const source = await refreshAgent(session.agent.id);
+    const config = await runtimeForAgent(source);
+    const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(session, config);
+    if (runsOnHarness(switchedToFallback && config.provider !== 'demo' && config.fallback !== undefined ? config.fallback : config)) {
+      log(`${session.id}: a keyed turn the last stratusd was running is on a harness, which cannot be continued; failing it`);
+      return failAbandoned(session);
+    }
+    log(`${session.id}: continuing a keyed turn the last stratusd was still running`);
     session.agent = source.definition;
     await store.save(session);
-    const config = await runtimeForAgent(source);
     const runner = runnerFor(config);
-    const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(session, config);
     return withWatchdog(session.id, undefined, effectiveStreams, fallbackStreams, async (signal) =>
       await runner.continueTurn(session.id, {
         runtime: runtimeContextFor(source, config, switchedToFallback, session.metadata),
@@ -3185,7 +3202,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * the start-up sweep that would have settled it: settled now, the way
    * that sweep would, which then finds it no longer needs anything.
    */
-  const settleRepeat = async (sessionId: string, idempotencyKey: string): Promise<Session | undefined> => {
+  const settleRepeat = async (
+    sessionId: string,
+    idempotencyKey: string,
+    turnId: string | undefined,
+  ): Promise<Session | undefined> => {
     const session = await store.get(sessionId);
     const state = session === undefined ? undefined : workItemState(session, idempotencyKey);
     if (session === undefined || state === undefined) {
@@ -3194,11 +3215,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (state === 'finished') {
       return session;
     }
-    if (session.status === 'pending_approval') {
-      await recoverParked(sessionId, orphanedAtStart.has(sessionId));
-      return (await store.get(sessionId)) ?? session;
+    // Run now, on this caller's behalf, so its events are this caller's
+    // turn — the adapter waiting on them has no other way to claim them.
+    if (turnId !== undefined) {
+      activeTurns.set(sessionId, turnId);
     }
-    return settleAbandonedTurn(session);
+    try {
+      if (session.status === 'pending_approval') {
+        await recoverParked(sessionId, orphanedAtStart.has(sessionId));
+        return (await store.get(sessionId)) ?? session;
+      }
+      return await settleAbandonedTurn(session);
+    } finally {
+      if (turnId !== undefined) {
+        activeTurns.delete(sessionId);
+      }
+    }
   };
 
   /**
@@ -3290,7 +3322,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const turn = onSessionChain(input.sessionId, async () => {
       // Before `activeTurns` is touched: a repeat that runs nothing must
       // not claim the session's turn id, even for the instant it takes.
-      const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey) : undefined;
+      const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, turnId) : undefined;
       if (repeated !== undefined) {
         return repeated;
       }

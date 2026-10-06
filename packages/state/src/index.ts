@@ -234,6 +234,7 @@ export {
   describeServingModel,
   type RegisteredProviders,
   createRuntimeProvider,
+  runsOnHarness,
 } from './provider-runtime.ts';
 
 export {

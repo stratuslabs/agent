@@ -39,7 +39,9 @@ needs, each with Slack as the existing consumer and unchanged by it.
 - `GatewayLike.dispatch` takes an `idempotencyKey`. A redelivered message
   never runs twice, and a turn the daemon died inside is continued at the
   next start rather than failed, so delivery is at least once to the
-  gateway and exactly once as a turn.
+  gateway and exactly once as a turn. The exception is an agent on a
+  harness (`codex`, a Claude subscription), whose own tool loop may already
+  have acted on the prompt; its turn is failed, as before.
 - A channel may be bound by trusted config (its plugin block's `agents`)
   as well as by stored secrets; `stratus setup` shows either.
 - `stratus channel set|list|remove` stores a plugin channel's secrets, and
