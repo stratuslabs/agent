@@ -2072,15 +2072,25 @@ export const applyPerAgentWorkspaces = async (
       // the read: either one swapped for a link with the right text and then
       // restored would be taken for our recreate, retiring the records of
       // peers that still name what is really there.
-      const ownerDirectory = await steadyDirectory(path.dirname(target));
+      //
+      // Both containing directories too, by change time as well as identity:
+      // `agents/<id>` or `workspaces/` renamed aside, a stand-in supplying
+      // the matching link, and the original put back, would leave every
+      // entry stamp above matching while the proof was read somewhere else.
+      const ownerDirectory = await steadyStamp(path.dirname(target));
+      const legacyBefore = await lstat(legacy).then(stampOf, () => undefined);
+      const parentsSteady = async (): Promise<boolean> => ownerDirectory !== undefined
+        && legacyBefore !== undefined
+        && await steadyStamp(path.dirname(target)) === ownerDirectory
+        && await lstat(legacy).then(stampOf, () => undefined) === legacyBefore;
       const destinationBefore = await lstat(target).then(stampOf, () => undefined);
       const sourceBefore = await lstat(from).then(stampOf, () => undefined);
       const ourRecreate = leadsNowhere && ownerDirectory !== undefined
         && destinationBefore !== undefined && sourceBefore !== undefined
         && await destinationIsOurRecreate(from, target)
-        && await steadyDirectory(path.dirname(target)) === ownerDirectory
         && await lstat(target).then(stampOf, () => undefined) === destinationBefore
-        && await lstat(from).then(stampOf, () => undefined) === sourceBefore;
+        && await lstat(from).then(stampOf, () => undefined) === sourceBefore
+        && await parentsSteady();
       if (leadsNowhere && !ourRecreate) {
         // Staying put, whatever was announced: a cycle batch adds every
         // member to `moved` before any of it moves, and a member found here
@@ -2102,15 +2112,15 @@ export const applyPerAgentWorkspaces = async (
         // Finished, then, as surely as a move that just landed: a link
         // recorded naming the new path names this very workspace, and stays
         // right once the old path's link is gone. Retired only on a reading
-        // through the directory checked for the recreate above, and of the
-        // two entries seen before it, for the same reason as there: either
+        // through the two directories checked for the recreate above, and of
+        // the two entries seen before it, for the same reason as there: either
         // one swapped for an alias of the other and restored would read as
         // finished while the restored one names something else. Unsteady is
         // kept, not retired — the records repair nothing that is right.
-        if (ownerDirectory !== undefined && await steadyDirectory(path.dirname(target)) === ownerDirectory
-          && destinationBefore !== undefined && sourceBefore !== undefined
+        if (destinationBefore !== undefined && sourceBefore !== undefined
           && await lstat(target).then(stampOf, () => undefined) === destinationBefore
-          && await lstat(from).then(stampOf, () => undefined) === sourceBefore) {
+          && await lstat(from).then(stampOf, () => undefined) === sourceBefore
+          && await parentsSteady()) {
           await retireRecordsNaming(agentId);
         }
         report.quarantined.push(`${agentId} — ${there} already resolves to ${here}, so it was left as it is`);
