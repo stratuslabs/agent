@@ -5629,3 +5629,42 @@ test('a repeat naming the agent a live dispatch left unnamed attaches to it, and
     await gateway.stop();
   }
 });
+
+test('a repeat attached to an unnamed live dispatch whose turn fails is still told it repeated, or refused', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nprovider: openai\nmodel: model-a\n---\n\nYou are Blair.\n');
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => new Response(JSON.stringify({ error: { message: 'bad request' } }), { status: 400 })) as typeof fetch,
+  };
+  // Blair is the default, so the dispatch naming nobody runs on a provider
+  // that fails it.
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {}, selection: { soul: path.join(home, '.stratus', 'agents', 'blair.md') } });
+  await gateway.start();
+  try {
+    const repeats: string[] = [];
+    const first = gateway.dispatch({ sessionId: 'unnamed-fail-1', userMessage: 'hello', idempotencyKey: 'k1' });
+    const named = gateway.dispatch({
+      sessionId: 'unnamed-fail-1',
+      agentId: 'blair',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(`blair: ${kind}`),
+    });
+    const other = gateway.dispatch({
+      sessionId: 'unnamed-fail-1',
+      agentId: 'cora',
+      userMessage: 'hello',
+      idempotencyKey: 'k1',
+      onRepeat: (kind) => repeats.push(`cora: ${kind}`),
+    });
+    await assert.rejects(first);
+    await assert.rejects(named, (error: unknown) => !(error instanceof Error && /never cross agent identities/.test(error.message)));
+    await assert.rejects(other, /belongs to agent blair, not cora/);
+    assert.deepEqual(repeats, ['blair: live']);
+  } finally {
+    await gateway.stop();
+  }
+});

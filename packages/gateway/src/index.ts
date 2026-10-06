@@ -3518,13 +3518,32 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // told it repeated only if that agent owns the session, refused if not.
     const claimed = input.agentId;
     if (live !== undefined && live.agentId === undefined && claimed !== undefined) {
-      return live.turn.then((session) => {
-        if (session.agent.id !== claimed) {
-          throw crossIdentityError(input.sessionId, session.agent.id, claimed);
+      const shared = live.turn;
+      // Whichever way the turn ends: a failed one is still that agent's,
+      // its owner read from the store, and a repeat of it is still told so
+      // — or refused, rather than handed another agent's error.
+      const attach = async (): Promise<Session> => {
+        let outcome: { session: Session } | { error: unknown };
+        try {
+          outcome = { session: await shared };
+        } catch (error) {
+          outcome = { error };
         }
-        input.onRepeat?.('live');
-        return session;
-      });
+        const owner = 'session' in outcome ? outcome.session.agent.id : (await store.get(input.sessionId))?.agent.id;
+        if (owner !== undefined && owner !== claimed) {
+          throw crossIdentityError(input.sessionId, owner, claimed);
+        }
+        // No owner means the dispatch failed before its session was ever
+        // written: there is no turn to have repeated, only its error.
+        if (owner !== undefined) {
+          input.onRepeat?.('live');
+        }
+        if ('error' in outcome) {
+          throw outcome.error;
+        }
+        return outcome.session;
+      };
+      return attach();
     }
 
     const turn = onSessionChain(input.sessionId, async () => {
