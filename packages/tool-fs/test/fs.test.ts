@@ -517,3 +517,38 @@ test('searching a fifo is refused rather than waited on', async () => {
   const walked = await run(tools, 'fs.search', { query: 'kettle' }, session) as JsonObject;
   assert.equal((walked.matches as unknown[]).length, 1);
 });
+
+test('fs.read shows an image file to the model, and says so', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-'));
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+  // Named .txt on purpose: the format is read from the bytes, not the name.
+  await writeFile(path.join(root, 'shot.txt'), png);
+  const tools = await registryFor({ roots: [root], maxBytes: 1 });
+  const tool = tools.get('fs.read') as Tool;
+  const attached: Array<{ mediaType: string; data: string; name?: string }> = [];
+
+  const shown = await tool.execute({ path: 'shot.txt' }, sessionFor('ava'), { attachImage: (image) => attached.push(image) }) as JsonObject;
+  assert.deepEqual(shown.image, { mediaType: 'image/png', shown: true });
+  // Whole, past the text cap.
+  assert.deepEqual(attached, [{ mediaType: 'image/png', data: png.toString('base64'), name: 'shot.txt' }]);
+
+  const refused = await tool.execute({ path: 'shot.txt' }, sessionFor('ava'), {
+    attachImage: () => {
+      throw new Error('too wide');
+    },
+  }) as JsonObject;
+  assert.deepEqual(refused.image, { mediaType: 'image/png', shown: false, reason: 'too wide' });
+
+  const noSink = await tool.execute({ path: 'shot.txt' }, sessionFor('ava')) as JsonObject;
+  assert.equal((noSink.image as JsonObject).shown, false);
+  assert.equal(noSink.binary, true);
+});
+
+test('fs.read reads a text file that happens to start with GIF8 as text', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-'));
+  await writeFile(path.join(root, 'notes.md'), 'GIF8 notes: compare with webp');
+  const tools = await registryFor({ roots: [root] });
+  const read = await (tools.get('fs.read') as Tool).execute({ path: 'notes.md' }, sessionFor('ava'), { attachImage: () => assert.fail('not an image') }) as JsonObject;
+  assert.equal(read.content, 'GIF8 notes: compare with webp');
+  assert.equal(read.image, undefined);
+});

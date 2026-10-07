@@ -1199,3 +1199,23 @@ test('a run whose result carries no modelUsage reports nothing', async () => {
   assert.deepEqual(reported, []);
   assert.equal(response.usage, undefined);
 });
+
+test('a bridged result shows its images as MCP images, and one already let go of as a note', async () => {
+  const session = createSession();
+  const executeTool = async (_session: Session, call: ToolCall): Promise<ToolResult> => ({
+    callId: call.id,
+    toolName: call.toolName,
+    ok: true,
+    output: { file: 'a.png' },
+    images: [
+      { mediaType: 'image/png', data: 'iVBORw0KGgo=', name: 'a.png' },
+      { mediaType: 'image/png', data: '', omitted: true, name: 'old.png' },
+    ],
+  });
+  const [tool] = bridgeKernelTools([{ name: 'browser.screenshot' }], session, executeTool);
+  const shown = await tool!.handler({}, {});
+  assert.equal(shown.content.length, 3);
+  assert.deepEqual(shown.content[1], { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' });
+  assert.equal(shown.content[2]?.type, 'text');
+  assert.match(JSON.stringify(shown.content[2]), /old\.png/);
+});
