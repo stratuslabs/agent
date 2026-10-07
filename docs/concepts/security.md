@@ -10,7 +10,8 @@ linked own the full story.
   tool-shell's `env` block), `~/.stratus/gateway-token`, `~/.stratus/gateway.json`,
   `~/.stratus/logs/stratusd.jsonl`, and everything in each agent's own
   directory — its `sessions.db`, its `memory.jsonl`, and its
-  `whitelist.json`. The directory itself is `0700`.
+  `whitelist.json`. The directory itself is `0700`, and so is each
+  plugin's own state directory under `~/.stratus/plugins/`.
 - **An agent's durable state is structurally its own.** Sessions, memories,
   and grants live under `~/.stratus/agents/<id>/`, so a store is opened on
   one agent's path and there is no query another agent's rows could come

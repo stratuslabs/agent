@@ -1,3 +1,4 @@
+import { isPackageName } from '@stratusagent/plugins';
 import type {
   InstalledVersionReader,
   PackageInstallResult,
@@ -129,8 +130,9 @@ export const compareVersions = (a: string, b: string): number => {
  */
 export const npmNeedsShell = (platform: NodeJS.Platform): boolean => platform === 'win32';
 
-export const isPackageName = (name: string): boolean =>
-  name.length <= 214 && /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name);
+// Moved to `@stratusagent/plugins` once a plugin's state directory needed
+// it too; re-exported here so no importer of the CLI breaks.
+export { isPackageName };
 
 /**
  * A package name, optionally with a plain version — what npm may be handed.

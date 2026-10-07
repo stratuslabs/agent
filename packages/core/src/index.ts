@@ -4268,6 +4268,30 @@ export interface AgentWorkspaces {
   all(): Promise<readonly string[]>;
 }
 
+/**
+ * Where one plugin keeps durable state of its own, answered by the host.
+ *
+ * A seam for the reason {@link AgentWorkspaces} is one: the layout is the
+ * host's to own. A plugin that needs to remember something across restarts
+ * — a channel's read position in a store it does not own, a cursor into a
+ * vendor's event log — would otherwise join a path onto `~/.stratus` itself,
+ * and every plugin doing so is one more copy of the layout to find when it
+ * moves. Per plugin, never per agent: what a plugin remembers is its own,
+ * and it makes whatever structure it needs beneath this.
+ */
+export interface PluginStateDirectory {
+  /**
+   * The directory, created and with its permissions settled, for a caller
+   * about to write. Private to the daemon's user, because what a plugin
+   * keeps is the daemon's business, and a plugin cannot be expected to know
+   * the mode the rest of the state is held to.
+   *
+   * Asked per write rather than captured at setup: a daemon runs for weeks,
+   * and the directory can be removed or replaced with a link under it.
+   */
+  prepare(): string;
+}
+
 export interface MemoryRegistrationHandle {
   register(contribution: MemoryStoreContribution): void;
 }
@@ -4320,6 +4344,15 @@ export interface PluginContext {
    * read as though it did.
    */
   workspaces?: AgentWorkspaces;
+  /**
+   * Where this plugin may keep durable state. See {@link PluginStateDirectory}.
+   *
+   * A host that omits it gives the plugin nowhere to remember anything
+   * across a restart. Such a plugin must say what it gives up — a channel
+   * that cannot store its read position cannot promise a message is handled
+   * once — and must never choose a directory of its own instead.
+   */
+  stateDirectory?: PluginStateDirectory;
   /**
    * The host's log, for what a plugin has to say after `setup` returns —
    * a server that dropped, a reconnect that failed. The daemon's is the

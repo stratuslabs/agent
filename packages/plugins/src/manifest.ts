@@ -150,6 +150,17 @@ const parseRisk = (raw: unknown, where: string): ToolRisk => {
 };
 
 /**
+ * Whether `name` is an npm package name — scoped or not, with no version.
+ *
+ * What may be installed, imported, and joined onto a path: a valid name
+ * has no `..` segment, no leading dot, and at most one `/`, after a scope,
+ * which is what lets `~/.stratus/plugins/<name>/` hold a plugin's state
+ * without the name choosing where that is.
+ */
+export const isPackageName = (name: string): boolean =>
+  name.length <= 214 && /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name);
+
+/**
  * Read the `stratus` field of a package.json into a manifest, or refuse it.
  *
  * Nothing here imports the package — that is the property the manifest

@@ -51,6 +51,7 @@ export {
   agentWorkspaceIn,
   agentStateDirPath,
   agentStateDirIn,
+  pluginStateDirPath,
   agentsDirIn,
   agentSessionDbPath,
   agentSessionDbIn,
@@ -284,3 +285,4 @@ export {
 } from '@stratusagent/permissions';
 
 export { createAgentWorkspaces } from './workspaces.ts';
+export { createPluginStateDirectories } from './plugin-state.ts';

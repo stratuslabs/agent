@@ -89,6 +89,10 @@ go** below. A host that omits it leaves a plugin falling back to a
 `workspaceRoot` an operator configured, and with neither, failing the call
 naming what is missing.
 
+And a `stateDirectory` slot: where this plugin keeps what it remembers
+across restarts — see **Where a plugin keeps its own state** below. A host
+that omits it leaves the plugin with nowhere durable to keep anything.
+
 A tool also says **where its output comes from**, and that is part of the
 contract rather than a courtesy: a result written by a party the operator
 has not authorized — a web page, a search snippet, an MCP server's response,
@@ -185,6 +189,21 @@ output by writing it down is supported. Use `workspaceResolver` from
 precedence, and a host that supplies neither gets `undefined` back, which a
 plugin reports as a call it cannot make rather than picking a directory of
 its own.
+
+**Where a plugin keeps its own state is asked too.** `setup` receives
+`context.stateDirectory`, whose `prepare()` answers with
+`~/.stratus/plugins/<package>/` — a scoped package nested under its scope,
+`plugins/@stratusagent/channel-imessage/` — created `0700` at every level
+below the home, and refused if any of them is a link. It exists for the
+same reason `workspaces` does: the first plugin with something to remember
+across a restart, a channel's read position in a store it does not own,
+would otherwise have joined its own path onto `~/.stratus`. It is per
+plugin, never per agent, and the plugin makes what it needs beneath it.
+The loader binds it to the package name in the plugin's manifest, so no
+plugin is handed another's; a name that is not an npm package name has no
+directory at all. A plugin whose host gave it none says what it gives up —
+a channel that cannot store its read position cannot promise a message is
+handled once — and never picks a directory of its own.
 
 **`ledgerRoot` is the host's key and is stripped**, the way `toolRisks` is,
 so a plugin's code never sees it. Two plugins write the filesystem

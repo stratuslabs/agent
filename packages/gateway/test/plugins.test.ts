@@ -48,6 +48,7 @@ test('a configured plugin is loaded before dispatch, and reported with its prove
   let disposed = 0;
   let workspaceRoot: unknown;
   let seenWorkspace: unknown;
+  let seenStateDirectory: unknown;
 
   const host = await hostFor({
     'stratus-plugin-notes': {
@@ -66,8 +67,10 @@ test('a configured plugin is loaded before dispatch, and reported with its prove
             setup(context: {
               tools: { register(tool: unknown): void };
               workspaces?: { forAgent(agentId: string): string };
+              stateDirectory?: { prepare(): string };
             }) {
               seenWorkspace = context.workspaces?.forAgent('ava');
+              seenStateDirectory = context.stateDirectory?.prepare();
               context.tools.register({
                 name: 'notes.read',
                 description: 'Read a note.',
@@ -117,6 +120,8 @@ test('a configured plugin is loaded before dispatch, and reported with its prove
     // `workspaceRoot` key on its behalf any more.
     assert.equal(workspaceRoot, undefined);
     assert.equal(seenWorkspace, path.join(home, '.stratus', 'agents', 'ava', 'workspace'));
+    // And for what the plugin keeps across restarts, by its package name.
+    assert.equal(seenStateDirectory, path.join(home, '.stratus', 'plugins', 'stratus-plugin-notes'));
 
     const plugins = gateway.plugins();
     assert.equal(plugins.find((plugin) => plugin.package === 'stratus-plugin-notes')?.tools?.length, 1);

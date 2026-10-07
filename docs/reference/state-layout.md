@@ -19,6 +19,7 @@ what moves when you rename an agent.
 | `grants.lock` | Held for a moment while a grant file is read by the daemon or rewritten by `stratus grants revoke`, so a daemon never reads one halfway through a revoke. Empty; safe to delete when nothing is running. |
 | `logs/` | `stratusd.jsonl`, the structured trace [`stratus logs`](../guides/logs.md) reads, plus the macOS LaunchAgent's stdout/stderr redirects. `0700`. |
 | `skills/` | Operator-installed [skills](../guides/skills.md), one directory each. |
+| `plugins/<package>/` | What one [plugin](../architecture/plugins.md) keeps across restarts, such as a channel's read position, by package name; a scoped package nests under its scope (`plugins/@scope/name/`). Created only when a plugin asks for it. `0700` at every level. |
 | `agents/` | One `<id>.md` soul per agent, plus one directory per agent — below. |
 
 ## One directory per agent
