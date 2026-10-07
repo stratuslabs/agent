@@ -731,3 +731,53 @@ test('a multi-hook tool cannot fall back to a tool-wide grant either', async () 
   assert.equal(await remote.approve(call(both())), true);
   assert.deepEqual(requests[0], { oneShot: true });
 });
+
+test('a tool judged by the URL in its input is scoped to that site, one call at a time', async () => {
+  // `web.fetch`'s half: the origin comes from the call, because for a fetch
+  // the URL is the action itself. The engine must pass each call's input,
+  // so one grant covers that site and never the next URL the agent picks.
+  const granted: OriginScope[] = [];
+  const asked: string[] = [];
+  const fetchTool: Tool = {
+    name: 'web.fetch',
+    risk: 'gated',
+    originFor: (_session, input) => (typeof input.url === 'string' ? new URL(input.url).origin : undefined),
+    async execute() {
+      return null;
+    },
+  };
+  const fetchOf = (url: string): ApprovalContext => ({
+    session: sessionFor('ava'),
+    call: { id: `call-${url}`, toolName: 'web.fetch', input: { url } },
+    tool: fetchTool,
+    risk: 'gated',
+  });
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async (question) => {
+      asked.push(question);
+      return 'always';
+    },
+    origins: {
+      whitelist: {
+        originsFor: async () => [...granted],
+        rememberOrigin: async (_agentId, scope) => {
+          granted.push(scope);
+        },
+      },
+    },
+  });
+
+  assert.equal(await policy.approve(fetchOf('https://docs.example.com/a?q=1')), true);
+  assert.deepEqual(granted, [{ origin: 'https://docs.example.com' }]);
+  assert.match(asked[0] ?? '', /web\.fetch on https:\/\/docs\.example\.com/);
+
+  // Same site, another path: no question.
+  assert.equal(await policy.approve(fetchOf('https://docs.example.com/b')), true);
+  assert.equal(asked.length, 1);
+
+  // Another site asks again, and the earlier "always" was not a tool-wide grant.
+  assert.equal(await policy.approve(fetchOf('https://evil.example.net/')), true);
+  assert.equal(asked.length, 2);
+  assert.deepEqual(granted.map((scope) => scope.origin), ['https://docs.example.com', 'https://evil.example.net']);
+});

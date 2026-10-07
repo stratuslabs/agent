@@ -764,7 +764,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             ...(origins?.whitelist ? await origins.whitelist.originsFor(session.agent.id) : []),
           ]
         : [];
-      const reportedOrigin = scopedByOrigin ? context.tool.originFor?.(session) : undefined;
+      const reportedOrigin = scopedByOrigin ? context.tool.originFor?.(session, call.input) : undefined;
       // Read through the same normalizer a grant file is read through,
       // rather than taken as written. The hook's contract is an origin, but
       // this is what a grant is compared against — a plugin that hands back
@@ -1019,7 +1019,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         if (!scopedByOrigin) {
           return report(context, true, reason, forCommand, undefined, origin);
         }
-        const settled = originScopeFor(context.tool.originFor?.(session) ?? '')?.origin;
+        const settled = originScopeFor(context.tool.originFor?.(session, call.input) ?? '')?.origin;
         if (settled === origin) {
           return report(context, true, reason, forCommand, undefined, origin);
         }
