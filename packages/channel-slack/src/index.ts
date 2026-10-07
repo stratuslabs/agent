@@ -2629,7 +2629,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         return false;
       }
       if (message.bot_id !== undefined || message.subtype === 'bot_message') {
-        return true;
+        // Under `admit: 'principals'` an unlisted integration is as kept out
+        // as an unlisted person. This fleet's own agents are not: they are
+        // the conversation the mention joins.
+        return admitsSender(connection.config, message.user ?? '')
+          || (message.user !== undefined && connections.some((peer) => peer.botUserId === message.user));
       }
       return message.user !== undefined
         && isPersonSpeaking({ type: 'message', ts: message.ts, channel, ...(message.subtype ? { subtype: message.subtype } : {}) })
