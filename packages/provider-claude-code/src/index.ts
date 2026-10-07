@@ -660,6 +660,8 @@ export const createClaudeCodeProvider = ({
       // documents `modelUsage` as the running total for the query() call, so
       // adding two results together would double-count the first.
       let attemptUsage: Record<string, ClaudeCodeModelUsage> | undefined;
+      // Set when this attempt ran out of turns with a session to wrap up.
+      let ranOutOfTurns = false;
       try {
         for await (const message of queryFn({
           prompt: runPrompt(
@@ -711,12 +713,25 @@ export const createClaudeCodeProvider = ({
           // there is nothing to wrap up, and it fails as before.
           if (message.subtype === 'error_max_turns' && message.session_id && !refuseTools) {
             outOfTurns = message.session_id;
+            ranOutOfTurns = true;
             continue;
           }
           throw new Error(
             `Claude Code run failed (${message.subtype ?? 'unknown error'})${message.result ? `: ${message.result}` : ''}`,
           );
         }
+      } catch (error) {
+        // The SDK does not stop at the out-of-turns result: the CLI then
+        // exits non-zero, and the SDK raises that exit as "Claude Code
+        // returned an error result: Reached maximum number of turns (40)".
+        // That reached Slack verbatim as "Something went wrong", in place
+        // of the wrap-up the result above already asked for. The result is
+        // the answer; the exit after it is the same event again. An abort
+        // still fails, because a cancelled turn must not start a wrap-up.
+        if (ranOutOfTurns && !controller.signal.aborted) {
+          return;
+        }
+        throw error;
       } finally {
         // In a finally so a thrown attempt still reports: the SDK put the
         // counts on the error result, and a failed harness turn that
