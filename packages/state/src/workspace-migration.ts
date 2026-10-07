@@ -1394,8 +1394,14 @@ const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promis
   };
   try {
     await writeFile(replacement, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
+    const written = inodeOf(await lstat(replacement));
     await rename(replacement, file);
-    record.stamp = await linkRecordStamp(file);
+    // Adopted only if it is still the file just written: one swapped in
+    // right after the rename is somebody else's, and taking its stamp would
+    // let the next save overwrite it. A stamp nothing matches makes that
+    // save stop instead.
+    const landed = await lstat(file).catch(() => undefined);
+    record.stamp = landed !== undefined && inodeOf(landed) === written ? stampOf(landed) : 'replaced';
   } catch (error) {
     await rm(replacement, { force: true });
     throw error;
