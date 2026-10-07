@@ -375,6 +375,20 @@ test('a run that uses every turn still wraps up when the SDK then throws the CLI
   assert.equal(calls[1]!.options?.resume, 'sdk-3');
 });
 
+test('any other failure after running out of turns still fails the turn', async () => {
+  let calls = 0;
+  const queryFn: ClaudeCodeQueryFn = () => {
+    calls += 1;
+    return (async function* () {
+      yield { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-4' } as ClaudeCodeStreamMessage;
+      throw new Error('stream reset by peer');
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn });
+  await assert.rejects(provider.generate({ session: createSession() }), /stream reset by peer/);
+  assert.equal(calls, 1);
+});
+
 test('a tool called while wrapping up is refused and never runs', async () => {
   const executed: ToolCall[] = [];
   let run = 0;

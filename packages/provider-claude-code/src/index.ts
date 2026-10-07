@@ -451,6 +451,14 @@ const forwardDelta = async (
   await onDelta({ type: 'progress' });
 };
 
+/**
+ * The SDK's rethrow of the CLI's non-zero exit after an error result. It
+ * carries the result's text behind this fixed prefix (`readMessages` in the
+ * Agent SDK), so it is recognized by that prefix and nothing looser.
+ */
+const isErrorResultExit = (error: unknown): boolean =>
+  error instanceof Error && error.message.startsWith('Claude Code returned an error result: ');
+
 export const createClaudeCodeProvider = ({
   authToken,
   model = DEFAULT_CLAUDE_CODE_MODEL,
@@ -728,7 +736,9 @@ export const createClaudeCodeProvider = ({
         // of the wrap-up the result above already asked for. The result is
         // the answer; the exit after it is the same event again. An abort
         // still fails, because a cancelled turn must not start a wrap-up.
-        if (ranOutOfTurns && !controller.signal.aborted) {
+        // Only that exit: any other failure after the result, such as a
+        // consumer rejecting a late delta, is still a failure.
+        if (ranOutOfTurns && !controller.signal.aborted && isErrorResultExit(error)) {
           return;
         }
         throw error;
