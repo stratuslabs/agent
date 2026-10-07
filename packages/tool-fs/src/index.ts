@@ -21,12 +21,14 @@ import {
   ledgerContentTrust,
   ledgerGuard,
   ledgerTrustOfContent,
+  protectedPathGuard,
   resolvePluginAgentConfig,
   workspaceResolver,
   workspacePreparer,
   allAgentWorkspaces,
   type FileIdentity,
   type LedgerGuard,
+  type ProtectedPathGuard,
   type TaintedWriteLedger,
 } from '@stratusagent/plugins';
 
@@ -127,6 +129,26 @@ const looksBinary = (buffer: Buffer): boolean => buffer.includes(0);
 
 const relativeTo = (root: string, target: string): string => path.relative(root, target) || '.';
 
+/**
+ * Refuse a resolved path the host keeps from every agent, whatever this
+ * agent's roots say. Roots are the operator's choice of where an agent
+ * works, and a broad one (`~`) is an ordinary choice. It should not also
+ * hand over the credential store inside it. See `ProtectedPaths`.
+ */
+const refuseProtected = async (
+  isProtected: () => Promise<ProtectedPathGuard>,
+  resolved: ResolvedPath,
+  requested: string,
+): Promise<void> => {
+  const match = await (await isProtected())(resolved.path, resolved.identity);
+  if (match !== undefined) {
+    throw new Error(
+      `Refusing ${requested}: it is inside ${match}, which Stratus keeps from every agent whatever its roots allow. `
+      + 'Work in a workspace or another directory under your roots instead.',
+    );
+  }
+};
+
 const readContained = async (
   resolved: ResolvedPath,
   maxBytes: number,
@@ -200,6 +222,7 @@ const createReadTool = (
   ledger: TaintedWriteLedger,
   isLedger: () => Promise<LedgerGuard>,
   serialized: KeyedSerializer,
+  isProtected: () => Promise<ProtectedPathGuard>,
 ): Tool => ({
   name: 'fs.read',
   description: 'Read a UTF-8 text file inside one of this agent’s roots.',
@@ -216,6 +239,7 @@ const createReadTool = (
     const settings = settingsFor(config, session);
     const requested = requireString(input, 'path');
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
+    await refuseProtected(isProtected, resolved, requested);
     const maxBytes = narrowed(input.maxBytes, settings.maxBytes);
     // Per call, not per tool: most files an agent reads are its operator's,
     // and only the ones a tainted session wrote carry a label — see the
@@ -377,7 +401,11 @@ const lowest = (...labels: Array<TrustLevel | undefined>): TrustLevel | undefine
   return defined.length > 0 ? leastTrusted(...defined) : undefined;
 };
 
-const createListTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool => ({
+const createListTool = (
+  config: JsonObject,
+  ledger: TaintedWriteLedger,
+  isProtected: () => Promise<ProtectedPathGuard>,
+): Tool => ({
   name: 'fs.list',
   description: 'List a directory inside one of this agent’s roots.',
   risk: 'safe',
@@ -391,6 +419,7 @@ const createListTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool =>
     const settings = settingsFor(config, session);
     const requested = typeof input.path === 'string' && input.path.length > 0 ? input.path : '.';
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
+    await refuseProtected(isProtected, resolved, requested);
     if (!(await isRealDirectory(resolved.path))) {
       throw new Error(`${requested} is not a directory; use fs.read.`);
     }
@@ -709,6 +738,7 @@ const createSearchTool = (
   config: JsonObject,
   ledger: TaintedWriteLedger,
   isLedger: () => Promise<LedgerGuard>,
+  isProtected: () => Promise<ProtectedPathGuard>,
 ): Tool => ({
   name: 'fs.search',
   description: 'Search file contents for literal text under one of this agent’s roots.',
@@ -729,6 +759,9 @@ const createSearchTool = (
     const query = requireString(input, 'query');
     const requested = typeof input.path === 'string' && input.path.length > 0 ? input.path : '.';
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
+    await refuseProtected(isProtected, resolved, requested);
+    // Built once per call: the walk below asks it about every file.
+    const protectedBy = await isProtected();
     const limit = narrowed(input.maxMatches, settings.maxMatches);
     const pattern = matcherFor(query, {
       caseSensitive: input.caseSensitive === true,
@@ -882,6 +915,13 @@ const createSearchTool = (
         try {
           const info = await handle.stat();
           identity = { dev: info.dev, ino: info.ino };
+          // A walk from a broad root passes through the protected home on
+          // its way to the workspaces inside it. Named in the result like
+          // any other skip, so an empty search says why, but never read.
+          if ((await protectedBy(file, identity)) !== undefined) {
+            skip({ path: relativeTo(resolved.root, file), bytes: info.size, reason: 'kept from every agent by Stratus' }, identity);
+            continue;
+          }
           if (info.size > DEFAULT_MAX_SEARCH_FILE_BYTES) {
             skip({
               path: relativeTo(resolved.root, file),
@@ -918,6 +958,7 @@ const createWriteTool = (
   ledger: TaintedWriteLedger,
   isLedger: () => Promise<LedgerGuard>,
   serialized: KeyedSerializer,
+  isProtected: () => Promise<ProtectedPathGuard>,
 ): Tool => ({
   name: 'fs.write',
   description: 'Write a UTF-8 text file inside one of this agent’s roots.',
@@ -941,6 +982,7 @@ const createWriteTool = (
       home: settings.home,
       allowMissing: true,
     });
+    await refuseProtected(isProtected, resolved, requested);
 
     // The ledger is the daemon's record of what this agent wrote while
     // tainted. An agent whose roots cover its own workspace could otherwise
@@ -1034,6 +1076,9 @@ const createWriteTool = (
         if (present.path !== resolved.path) {
           throw new Error(`${resolved.path} changed between the containment check and the open; try again.`);
         }
+        // A hard link to a protected file planted under the empty name is the
+        // same trap as one to the ledger, so it gets the same second look.
+        await refuseProtected(isProtected, present, requested);
         if (await (await isLedger())(present.path, present.identity)) {
           throw ledgerRefusal(present.path);
         }
@@ -1113,10 +1158,13 @@ export const createFsPlugin = (config: JsonObject = {}): Plugin => {
         // yet still has its ledger path reserved. See `ledgerGuard`.
         ledgerRoot !== undefined ? [ledgerRoot] : [],
       );
-      context.tools.register(createReadTool(config, ledger, isLedger, serialized));
-      context.tools.register(createListTool(config, ledger));
-      context.tools.register(createSearchTool(config, ledger, isLedger));
-      context.tools.register(createWriteTool(config, ledger, isLedger, serialized));
+      // Asked per call, like the ledger guard: what the host protects is
+      // re-read so a change under a running daemon holds from the next call.
+      const isProtected = (): Promise<ProtectedPathGuard> => protectedPathGuard(context.protectedPaths);
+      context.tools.register(createReadTool(config, ledger, isLedger, serialized, isProtected));
+      context.tools.register(createListTool(config, ledger, isProtected));
+      context.tools.register(createSearchTool(config, ledger, isLedger, isProtected));
+      context.tools.register(createWriteTool(config, ledger, isLedger, serialized, isProtected));
     },
   };
 };
