@@ -265,8 +265,14 @@ export interface SlackThreadMessage {
  * opening turn or dropping the message that started it.
  */
 const EARLIER_MESSAGE_LIMIT = 40;
-/** The most messages read from Slack for that, a page of 200 at a time. */
-const EARLIER_READ_LIMIT = 1000;
+/** The most pages of 200 read from a thread for that: 4,000 replies. */
+const EARLIER_THREAD_PAGES = 20;
+/**
+ * At the top of a channel, how many of its most recent messages a mention
+ * opens with, and how many are read to find them.
+ */
+const EARLIER_CHANNEL_LIMIT = 20;
+const EARLIER_CHANNEL_READ = 100;
 
 /** The slice of Slack's file object the adapter reads. */
 export interface SlackInboundFile {
@@ -409,6 +415,14 @@ export interface SlackWebLike {
       messages?: SlackThreadMessage[];
       has_more?: boolean;
       response_metadata?: { next_cursor?: string };
+    }>;
+    /**
+     * A channel's messages, newest first. Read once, when a top-level
+     * mention opens a new conversation, so it holds what the channel was
+     * just talking about — see `earlierContext`. Same scopes as `replies`.
+     */
+    history?(args: { channel: string; latest?: string; inclusive?: boolean; limit?: number }): Promise<{
+      messages?: SlackThreadMessage[];
     }>;
   };
   users: {
@@ -2569,10 +2583,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
-   * What was said in a thread before an agent was mentioned into it, for
-   * the dispatch that creates its session (`earlier` on the gateway's
-   * dispatch). Without it an agent named partway through a conversation
-   * holds one message — "can you do this?" — and nothing it refers to.
+   * What was said before an agent was mentioned, for the dispatch that
+   * creates its session (`earlier` on the gateway's dispatch). Without it
+   * an agent named partway through a conversation holds one message —
+   * "can you do this?" — and nothing it refers to. In a thread that is the
+   * thread so far: its parent and the newest messages before the mention.
+   * At the top of a channel it is the channel's most recent messages,
+   * which is where a channel-per-client or channel-per-project keeps the
+   * context a mention leans on.
    *
    * Each message keeps its own speaker and its own trust, so the session
    * starts at the least trusted of everyone in it: a principal's mention
@@ -2580,83 +2598,125 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * label. Under `admit: 'principals'` a sender the operator did not list
    * gets no place here, as they get none anywhere else. A bot's message —
    * another agent, an integration — is `unknown`: nothing here can say
-   * what its words were built from.
+   * what its words were built from. Messages that will not be shown are
+   * dropped before the cap is applied, so they never crowd out ones that
+   * would.
    *
-   * Read only when the session does not exist yet, asked of the host when
-   * it can say; a host that cannot gets the list anyway and ignores it for
-   * a session that exists. A read that fails warns and returns nothing:
-   * the turn still runs, on the one message, as it did before this.
+   * A read that fails warns and returns nothing: the turn still runs, on
+   * the one message, as it did before this.
    */
-  const earlierInThread = async (
+  const earlierContext = async (
     connection: AgentConnection,
     channel: string,
-    thread: string,
+    thread: string | undefined,
     before: string,
   ): Promise<Array<{ message: string; metadata: JsonObject }>> => {
-    const replies = connection.web.conversations.replies;
-    if (!replies) {
-      return [];
-    }
-    const read: SlackThreadMessage[] = [];
+    const usable = (message: SlackThreadMessage): boolean => {
+      if (message.ts === undefined || !(Number(message.ts) < Number(before))) {
+        return false;
+      }
+      if ((message.text ?? '').trim().length === 0 && (message.files ?? []).length === 0) {
+        return false;
+      }
+      if (message.bot_id !== undefined || message.subtype === 'bot_message') {
+        return true;
+      }
+      return message.user !== undefined
+        && isPersonSpeaking({ type: 'message', ts: message.ts, channel, ...(message.subtype ? { subtype: message.subtype } : {}) })
+        && admitsSender(connection.config, message.user);
+    };
+    let kept: SlackThreadMessage[] = [];
+    let omitted = 0;
+    let more = false;
     try {
-      let cursor: string | undefined;
-      do {
-        const page = await replies.call(connection.web.conversations, {
+      if (thread !== undefined) {
+        const replies = connection.web.conversations.replies;
+        if (!replies) {
+          return [];
+        }
+        // Slack pages a thread oldest first, so the whole thread is walked
+        // and only a bounded tail is held: the newest messages are the
+        // last ones read.
+        let parent: SlackThreadMessage | undefined;
+        const tail: SlackThreadMessage[] = [];
+        let cursor: string | undefined;
+        let pages = 0;
+        do {
+          const page: { messages?: SlackThreadMessage[]; has_more?: boolean; response_metadata?: { next_cursor?: string } } = await replies.call(connection.web.conversations, {
+            channel,
+            ts: thread,
+            latest: before,
+            inclusive: false,
+            limit: 200,
+            ...(cursor ? { cursor } : {}),
+          });
+          pages += 1;
+          for (const message of page.messages ?? []) {
+            if (!usable(message)) {
+              continue;
+            }
+            if (message.ts === thread) {
+              parent = message;
+              continue;
+            }
+            tail.push(message);
+            if (tail.length > EARLIER_MESSAGE_LIMIT - 1) {
+              tail.shift();
+              omitted += 1;
+            }
+          }
+          cursor = page.has_more ? page.response_metadata?.next_cursor || undefined : undefined;
+        } while (cursor && pages < EARLIER_THREAD_PAGES);
+        more = cursor !== undefined;
+        kept = parent !== undefined ? [parent, ...tail] : tail;
+      } else {
+        const history = connection.web.conversations.history;
+        if (!history) {
+          return [];
+        }
+        // Newest first, one page: the most recent usable messages, put
+        // back in the order they were said.
+        const page = await history.call(connection.web.conversations, {
           channel,
-          ts: thread,
           latest: before,
           inclusive: false,
-          limit: 200,
-          ...(cursor ? { cursor } : {}),
+          limit: EARLIER_CHANNEL_READ,
         });
-        read.push(...(page.messages ?? []));
-        cursor = page.has_more ? page.response_metadata?.next_cursor || undefined : undefined;
-      } while (cursor && read.length < EARLIER_READ_LIMIT);
+        const recent = (page.messages ?? []).filter(usable);
+        kept = recent.slice(0, EARLIER_CHANNEL_LIMIT).reverse();
+      }
     } catch (error) {
       warn(
-        `slack: ${connection.config.agentId} could not read the earlier messages in a thread in ${channel}, so it sees only the message that named it: `
+        `slack: ${connection.config.agentId} could not read the earlier messages in ${channel}, so it sees only the message that named it: `
         + `${error instanceof Error ? error.message : String(error)} (the history scopes are channels:history, groups:history, and mpim:history)`,
       );
       return [];
     }
-    // Strictly before the mention, whatever the API returned: `latest` is
-    // a bound Slack applies, and a message after this one is the next
-    // turn's, not this one's.
-    const prior = read.filter((message) => message.ts !== undefined && Number(message.ts) < Number(before));
-    const kept = prior.length > EARLIER_MESSAGE_LIMIT
-      ? [prior[0], ...prior.slice(prior.length - (EARLIER_MESSAGE_LIMIT - 1))]
-      : prior;
-    const omitted = prior.length - kept.length;
     const entries: Array<{ message: string; metadata: JsonObject }> = [];
     for (const [index, message] of kept.entries()) {
-      if (message === undefined) {
-        continue;
-      }
       const bot = message.bot_id !== undefined || message.subtype === 'bot_message';
-      if (!bot && (message.user === undefined || !isPersonSpeaking({ type: 'message', ts: message.ts ?? '', channel, ...(message.subtype ? { subtype: message.subtype } : {}) }))) {
-        continue;
-      }
-      if (!bot && !admitsSender(connection.config, message.user as string)) {
-        continue;
-      }
       const text = await humanizeMentions(connection, message.text ?? '');
       const files = message.files ?? [];
-      if (text.length === 0 && files.length === 0) {
-        continue;
-      }
       const author = bot
         ? message.user === connection.botUserId
           ? 'you'
           : boundedDisplayName(message.bot_profile?.name ?? message.username ?? 'a bot')
         : await authorFor(connection, message.user as string);
       const reasons: UnreadReasons = new Map(files.map((file) => [file, 'not-opened' as const]));
-      const gap = index === 1 && omitted > 0 ? `[${omitted} earlier messages in this thread are not shown.]\n` : '';
+      let note = '';
+      if (thread === undefined && index === 0) {
+        note = `[The ${kept.length} most recent messages in this channel before you were mentioned, oldest first:]\n`;
+      } else if (thread !== undefined && index === 1 && (omitted > 0 || more)) {
+        note = more
+          ? '[Earlier messages in this long thread are not shown.]\n'
+          : `[${omitted} earlier messages in this thread are not shown.]\n`;
+      }
       entries.push({
-        message: `${gap}${author}: ${text}${attachmentNote(files, reasons)}`,
+        message: `${note}${author}: ${text}${attachmentNote(files, reasons)}`,
         metadata: {
           channel: 'slack',
           slackChannel: channel,
-          slackThread: thread,
+          ...(thread !== undefined ? { slackThread: thread } : {}),
           ...(message.user !== undefined ? { slackUser: message.user } : {}),
           [SENDER_TRUST_METADATA_KEY]: bot ? 'unknown' : senderTrustFor(connection.config, message.user as string),
         },
@@ -2714,6 +2774,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           : info.is_private === true ? 'private' : 'public';
       return {
         kind,
+        ...(kind !== 'direct' ? { id: channel } : {}),
+        ...(kind !== 'direct' && typeof info.name === 'string' ? { name: info.name } : {}),
         ...(kind !== 'direct' && typeof info.num_members === 'number' ? { members: info.num_members } : {}),
         ...(kind !== 'direct' && (info.is_ext_shared === true || info.is_org_shared === true) ? { shared: true } : {}),
       };
@@ -4618,9 +4680,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // said before this. Inside the chain, before the placeholder, so the
       // read cannot reorder this message against the next one.
       let earlier: Array<{ message: string; metadata: JsonObject }> = [];
-      if (!isDm && thread !== undefined && thread !== event.ts) {
+      if (!isDm && thread !== undefined) {
+        // A top-level mention roots its own session, so it is new but for
+        // a redelivery, which the gateway answers without reading this.
         let exists = false;
-        if (gateway.sessionRouting) {
+        if (thread !== event.ts && gateway.sessionRouting) {
           try {
             exists = (await gateway.sessionRouting(sessionId)) !== undefined;
           } catch {
@@ -4629,7 +4693,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           }
         }
         if (!exists) {
-          earlier = await earlierInThread(connection, event.channel, thread, event.ts);
+          // A mention that starts its own thread follows the channel; one
+          // inside a thread follows that thread.
+          earlier = await earlierContext(connection, event.channel, thread === event.ts ? undefined : thread, event.ts);
         }
       }
 

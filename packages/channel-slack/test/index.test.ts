@@ -8002,7 +8002,7 @@ test('with no principals configured, a DM names nobody: a display name never rea
   await adapter.stop();
 });
 
-test('each turn says what kind of room it is in now and how many are in it, never its name', async () => {
+test('each turn says what kind of room it is in now, its name and id, and how many are in it', async () => {
   // An agent in a DM told the person they were "talking on the terminal",
   // and would have answered a thousand-person channel the same way.
   const socket = createFakeSocket();
@@ -8044,19 +8044,19 @@ test('each turn says what kind of room it is in now and how many are in it, neve
   // channel made private, or shared with another workspace, since the last
   // message is described as it is now.
   await socket.deliver('app_mention', mention('<@B-AVA> status?'));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 1042, thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', id: 'C1', name: 'general', members: 1042, thread: true });
   web.knownConversations.set('C1', { is_member: true, is_private: true, name: 'general', num_members: 12, is_org_shared: true });
   await socket.deliver('message', mention('and now?', { type: 'message', channel_type: 'group', ts: '100.2', thread_ts: '100.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 12, thread: true, shared: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'private', id: 'C1', name: 'general', members: 12, thread: true, shared: true });
   assert.equal(infoCalls, 2);
 
   await socket.deliver('app_mention', mention('<@B-AVA> review this', { channel: 'G1', ts: '200.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 6, thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'private', id: 'G1', name: 'design-crit', members: 6, thread: true });
 
   // Shared beyond the workspace: said by the lookup, or by the event itself.
   web.knownConversations.set('C7', { is_member: true, num_members: 40, is_ext_shared: true });
   await socket.deliver('app_mention', mention('<@B-AVA> hi partners', { channel: 'C7', ts: '500.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 40, thread: true, shared: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', id: 'C7', members: 40, thread: true, shared: true });
   await socket.deliver('message', {
     ...mention('<@B-AVA> hello', { type: 'message', channel: 'C1', channel_type: 'channel', ts: '600.1' }),
     body: { team_id: 'T1', event_id: 'evt-connect', is_ext_shared_channel: true },
@@ -8763,17 +8763,31 @@ test('after a restart, an agent that took a message keeps it though it listens d
 const threadAdapter = (
   messages: Array<Record<string, unknown>>,
   agent: Record<string, unknown> = {},
-  options: { exists?: boolean; fail?: boolean } = {},
+  options: { exists?: boolean; fail?: boolean; pageSize?: number; channel?: Array<Record<string, unknown>> } = {},
 ) => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const reads: Array<Record<string, unknown>> = [];
+  const historyReads: Array<Record<string, unknown>> = [];
   (web.conversations as Record<string, unknown>).replies = async (args: Record<string, unknown>) => {
     reads.push(args);
     if (options.fail) {
       throw new Error('missing_scope');
     }
-    return { messages, has_more: false };
+    // Oldest first, a page at a time, as Slack pages a thread.
+    const size = options.pageSize ?? messages.length;
+    const from = args.cursor === undefined ? 0 : Number(args.cursor);
+    const next = from + size;
+    return {
+      messages: messages.slice(from, next),
+      has_more: next < messages.length,
+      response_metadata: { next_cursor: next < messages.length ? String(next) : '' },
+    };
+  };
+  (web.conversations as Record<string, unknown>).history = async (args: Record<string, unknown>) => {
+    historyReads.push(args);
+    // Newest first, as Slack returns a channel.
+    return { messages: [...(options.channel ?? [])].reverse() };
   };
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'on it'));
   gateway.sessionRouting = async () => (options.exists ? { agentId: 'ava', metadata: {} } : undefined);
@@ -8785,7 +8799,7 @@ const threadAdapter = (
     createSocketClient: () => socket,
     createWebClient: () => web,
   });
-  return { socket, web, gateway, adapter, reads, warnings };
+  return { socket, web, gateway, adapter, reads, historyReads, warnings };
 };
 
 const EARLIER_THREAD = [
@@ -8835,14 +8849,55 @@ test('a thread the agent already has a session for is not read again', async () 
   assert.equal(gateway.dispatches[0]?.earlier, undefined);
 });
 
-test('a top-level mention reads no thread', async () => {
-  const { socket, gateway, adapter, reads } = threadAdapter(EARLIER_THREAD);
+test('a top-level mention opens with the channel\'s most recent messages, not a thread', async () => {
+  const channel = [
+    { ts: '590.1', user: 'U-DYLAN', text: 'site is deploying from main on vercel' },
+    { ts: '590.2', user: 'U-DYLAN', subtype: 'channel_join', text: 'joined' },
+    { ts: '590.3', user: 'U-DYLAN', text: 'prod is https://example.test' },
+  ];
+  const { socket, gateway, adapter, reads, historyReads } = threadAdapter(EARLIER_THREAD, {}, { channel });
   await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> hello', { ts: '600.1' }));
+  await socket.deliver('app_mention', mention('<@B-AVA> can you implement this now', { ts: '600.1' }));
   await adapter.stop();
 
   assert.equal(reads.length, 0);
-  assert.equal(gateway.dispatches[0]?.earlier, undefined);
+  assert.deepEqual(historyReads.map((read) => [read.channel, read.latest, read.inclusive]), [['C1', '600.1', false]]);
+  assert.deepEqual(gateway.dispatches[0]?.earlier?.map((entry) => entry.message), [
+    '[The 2 most recent messages in this channel before you were mentioned, oldest first:]\nDylan: site is deploying from main on vercel',
+    'Dylan: prod is https://example.test',
+  ]);
+});
+
+test('messages that will not be shown never crowd out ones that will', async () => {
+  // A principal's reply, then 45 from an unlisted sender under admit: principals.
+  const thread = [
+    { ts: '800.001', user: 'U-DYLAN', text: 'parent' },
+    { ts: '800.002', user: 'U-DYLAN', text: 'the production URL is https://example.test' },
+    ...Array.from({ length: 45 }, (_, index) => ({ ts: `800.${String(index + 3).padStart(3, '0')}`, user: 'U-STRANGER', text: `noise ${index}` })),
+  ];
+  const { socket, gateway, adapter } = threadAdapter(thread, { principals: ['U-DYLAN'], admit: 'principals' });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> what is prod?', { ts: '800.999', thread_ts: '800.001' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches[0]?.earlier?.map((entry) => entry.message), [
+    'Dylan: parent',
+    'Dylan: the production URL is https://example.test',
+  ]);
+});
+
+test('a thread longer than a page is read to its newest messages', async () => {
+  const long = Array.from({ length: 450 }, (_, index) => ({ ts: `900.${String(index + 1).padStart(3, '0')}`, user: 'U-DYLAN', text: `message ${index + 1}` }));
+  const { socket, gateway, adapter, reads } = threadAdapter(long, {}, { pageSize: 200 });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> summarize', { ts: '900.999', thread_ts: '900.001' }));
+  await adapter.stop();
+
+  assert.equal(reads.length, 3);
+  const earlier = gateway.dispatches[0]?.earlier ?? [];
+  assert.equal(earlier[0]?.message, 'Dylan: message 1');
+  assert.equal(earlier[1]?.message, '[410 earlier messages in this thread are not shown.]\nDylan: message 412');
+  assert.equal(earlier.at(-1)?.message, 'Dylan: message 450');
 });
 
 test('a thread read that fails warns, and the turn still runs on the one message', async () => {
