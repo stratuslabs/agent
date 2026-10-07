@@ -543,3 +543,12 @@ test('fs.read shows an image file to the model, and says so', async () => {
   assert.equal((noSink.image as JsonObject).shown, false);
   assert.equal(noSink.binary, true);
 });
+
+test('fs.read reads a text file that happens to start with GIF8 as text', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-'));
+  await writeFile(path.join(root, 'notes.md'), 'GIF8 notes: compare with webp');
+  const tools = await registryFor({ roots: [root] });
+  const read = await (tools.get('fs.read') as Tool).execute({ path: 'notes.md' }, sessionFor('ava'), { attachImage: () => assert.fail('not an image') }) as JsonObject;
+  assert.equal(read.content, 'GIF8 notes: compare with webp');
+  assert.equal(read.image, undefined);
+});

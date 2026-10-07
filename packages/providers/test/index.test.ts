@@ -1658,3 +1658,9 @@ test('createOpenAICompatibleProvider names a tool\'s images for a model without 
   assert.match(tool.content, /\[Attached: a\.png\. This runtime cannot see images/);
   assert.equal(JSON.stringify(bodies[0]).includes('image_url'), false);
 });
+
+test('renderTranscriptPrompt names a tool\'s images it cannot carry', () => {
+  const rendered = renderTranscriptPrompt(requestWithToolImage());
+  assert.match(rendered, /\[tool browser\.screenshot\] .*\[This call returned an image \(a\.png\) that this replay cannot show you; say so rather than guessing at it\.\]/);
+  assert.doesNotMatch(rendered, /iVBORw0KGgo/);
+});

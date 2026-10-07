@@ -1057,7 +1057,14 @@ export const renderTranscriptPrompt = (request: ProviderRequest, options: Prompt
       // `content` — that is the whole record, label as a bare field, and a
       // session moved onto a harness would replay a fetched page unmarked.
       const content = message.toolResult !== undefined ? renderToolResultContent(message.toolResult) : message.content;
-      lines.push(`[tool ${message.name ?? 'result'}] ${content}`);
+      // A flattened replay carries no pixels, and a result that says
+      // `shown: true` must not read as if this run had seen the image.
+      const images = message.images ?? [];
+      const names = images.map((image) => image.name ?? `a ${image.mediaType} image`).join(', ');
+      const note = images.length > 0
+        ? ` [This call returned ${images.length === 1 ? 'an image' : `${images.length} images`} (${names}) that this replay cannot show you; say so rather than guessing at ${images.length === 1 ? 'it' : 'them'}.]`
+        : '';
+      lines.push(`[tool ${message.name ?? 'result'}] ${content}${note}`);
       continue;
     }
     // A tool call is part of the assistant's turn: without it, the next
