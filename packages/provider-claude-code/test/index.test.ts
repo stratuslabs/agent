@@ -389,6 +389,22 @@ test('any other failure after running out of turns still fails the turn', async 
   assert.equal(calls, 1);
 });
 
+test('another error result after running out of turns is not mistaken for the max-turns exit', async () => {
+  // The SDK puts every error result behind the same prefix, so an auth
+  // failure arriving after the max-turns result must still fail the turn.
+  let calls = 0;
+  const queryFn: ClaudeCodeQueryFn = () => {
+    calls += 1;
+    return (async function* () {
+      yield { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-5' } as ClaudeCodeStreamMessage;
+      throw new Error('Claude Code returned an error result: Invalid API key');
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn });
+  await assert.rejects(provider.generate({ session: createSession() }), /Invalid API key/);
+  assert.equal(calls, 1);
+});
+
 test('a tool called while wrapping up is refused and never runs', async () => {
   const executed: ToolCall[] = [];
   let run = 0;

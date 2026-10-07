@@ -452,12 +452,14 @@ const forwardDelta = async (
 };
 
 /**
- * The SDK's rethrow of the CLI's non-zero exit after an error result. It
- * carries the result's text behind this fixed prefix (`readMessages` in the
- * Agent SDK), so it is recognized by that prefix and nothing looser.
+ * The SDK's rethrow of the CLI's non-zero exit after the max-turns result.
+ * `readMessages` in the Agent SDK puts any error result's text behind the
+ * same prefix — an auth failure or an interruption included — so the
+ * max-turns text is matched too, and any other error still propagates.
  */
-const isErrorResultExit = (error: unknown): boolean =>
-  error instanceof Error && error.message.startsWith('Claude Code returned an error result: ');
+const isMaxTurnsExit = (error: unknown): boolean =>
+  error instanceof Error
+  && /^Claude Code returned an error result: Reached maximum number of turns\b/.test(error.message);
 
 export const createClaudeCodeProvider = ({
   authToken,
@@ -738,7 +740,7 @@ export const createClaudeCodeProvider = ({
         // still fails, because a cancelled turn must not start a wrap-up.
         // Only that exit: any other failure after the result, such as a
         // consumer rejecting a late delta, is still a failure.
-        if (ranOutOfTurns && !controller.signal.aborted && isErrorResultExit(error)) {
+        if (ranOutOfTurns && !controller.signal.aborted && isMaxTurnsExit(error)) {
           return;
         }
         throw error;
