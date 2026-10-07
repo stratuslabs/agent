@@ -523,7 +523,7 @@ test('fs.read shows an image file to the model, and says so', async () => {
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
   // Named .txt on purpose: the format is read from the bytes, not the name.
   await writeFile(path.join(root, 'shot.txt'), png);
-  const tools = await registryFor({ roots: [root], maxBytes: 16 });
+  const tools = await registryFor({ roots: [root], maxBytes: 1 });
   const tool = tools.get('fs.read') as Tool;
   const attached: Array<{ mediaType: string; data: string; name?: string }> = [];
 

@@ -321,9 +321,11 @@ const rejectedImageAddress = (error: unknown): { message: number; block: number;
   if (!(error instanceof Anthropic.BadRequestError)) {
     return undefined;
   }
-  // A tool's image sits one level down, inside its tool_result:
-  // `messages.3.content.0.content.1.image…`.
-  const match = /messages\.(\d+)\.content\.(\d+)(?:\.content\.(\d+))?\.image\b/.exec(error.message);
+  // A tool's image sits one level down, inside its tool_result, and the
+  // API may or may not name the block type on the way:
+  // `messages.3.content.0.content.1.image…` or
+  // `messages.3.content.0.tool_result.content.1.image…`.
+  const match = /messages\.(\d+)\.content\.(\d+)(?:\.tool_result)?(?:\.content\.(\d+))?\.image\b/.exec(error.message);
   return match
     ? { message: Number(match[1]), block: Number(match[2]), ...(match[3] !== undefined ? { nested: Number(match[3]) } : {}) }
     : undefined;

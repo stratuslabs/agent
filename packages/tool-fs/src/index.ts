@@ -165,20 +165,26 @@ const readContained = async (
     if (info.isDirectory()) {
       throw new Error(`${resolved.path} is a directory; use fs.list.`);
     }
+    // An image is recognized from its own header, read apart from the text
+    // cap (a cap shorter than a PNG signature would hide it), and read
+    // whole up to the per-image cap: a third of a PNG is no picture at
+    // all. Over that cap it stays a binary file, and the result says so.
+    const header = Buffer.alloc(Math.min(info.size, 16));
+    const { bytesRead: headerRead } = await handle.read(header, 0, header.length, 0);
+    const mediaType = imageMediaTypeOf(header.subarray(0, headerRead));
+    if (mediaType !== undefined) {
+      if (info.size <= IMAGE_ATTACHMENT_MAX_BYTES) {
+        const whole = Buffer.alloc(info.size);
+        const { bytesRead: wholeRead } = await handle.read(whole, 0, info.size, 0);
+        return { content: '', truncated: false, bytes: wholeRead, size: info.size, binary: true, image: { mediaType, data: whole.subarray(0, wholeRead) } };
+      }
+      return { content: '', truncated: false, bytes: 0, size: info.size, binary: true, image: { mediaType, data: Buffer.alloc(0) } };
+    }
     const length = Math.min(info.size, maxBytes);
     const buffer = Buffer.alloc(length);
     const { bytesRead } = await handle.read(buffer, 0, length, 0);
     const slice = buffer.subarray(0, bytesRead);
     if (looksBinary(slice)) {
-      // An image is read whole, to the per-image cap rather than the text
-      // cap: a third of a PNG is no picture at all. Over the cap it stays
-      // a binary file, and the result says why it was not shown.
-      const mediaType = imageMediaTypeOf(slice);
-      if (mediaType !== undefined && info.size <= IMAGE_ATTACHMENT_MAX_BYTES) {
-        const whole = Buffer.alloc(info.size);
-        const { bytesRead: wholeRead } = await handle.read(whole, 0, info.size, 0);
-        return { content: '', truncated: false, bytes: wholeRead, size: info.size, binary: true, image: { mediaType, data: whole.subarray(0, wholeRead) } };
-      }
       return { content: '', truncated: false, bytes: bytesRead, size: info.size, binary: true };
     }
     return {
@@ -301,6 +307,9 @@ const showImage = (
 ): JsonObject => {
   if (image === undefined) {
     return {};
+  }
+  if (image.data.length === 0) {
+    return { image: { mediaType: image.mediaType, shown: false, reason: `The image is over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit for one image.` } };
   }
   if (!context?.attachImage) {
     return { image: { mediaType: image.mediaType, shown: false, reason: 'This runtime cannot show images to the model.' } };

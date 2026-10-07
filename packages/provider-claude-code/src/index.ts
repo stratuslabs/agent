@@ -16,6 +16,7 @@ import {
   TURN_LIMIT_NOTE,
   omitImage,
   renderSystemPromptSections,
+  droppedImageNote,
   renderToolResultContent,
   type JsonObject,
   type ModelProvider,
@@ -153,7 +154,11 @@ export const bridgeKernelTools = (
             },
             // What the call showed, as MCP carries an image: the harness
             // hands it to the model as that tool's output.
-            ...(result.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mediaType })),
+            // An image the replay budget already let go of is a note, never
+            // an empty image block.
+            ...(result.images ?? []).map((image) => (image.omitted === true || image.data.length === 0
+              ? { type: 'text' as const, text: droppedImageNote(image) }
+              : { type: 'image' as const, data: image.data, mimeType: image.mediaType })),
           ],
           ...(result.ok ? {} : { isError: true }),
         };

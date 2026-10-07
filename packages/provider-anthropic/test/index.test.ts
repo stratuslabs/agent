@@ -1635,3 +1635,38 @@ test('an image a tool returned rides inside its tool_result, after the text', as
     ],
   });
 });
+
+test('a tool image the API cannot process is dropped from inside its tool_result, by either address', async () => {
+  for (const address of ['messages.2.content.0.content.1.image', 'messages.2.content.0.tool_result.content.1.image']) {
+    const bodies: Array<Record<string, any>> = [];
+    const fetchImpl = (async (_input: any, init?: any) => {
+      const body = JSON.parse(init?.body ?? '{}');
+      bodies.push(body);
+      if (JSON.stringify(body).includes('BADBADBA')) {
+        return new Response(
+          JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: `${address}.source.base64.data: Could not process image` } }),
+          { status: 400, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify(apiMessage([{ type: 'text', text: 'Could not see it.' }])), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+    const bad = { mediaType: 'image/png' as const, data: 'BADBADBA', name: 'shot.png' };
+    const session = createSession();
+    session.messages.push(
+      { id: 'a', role: 'assistant', content: '', createdAt: new Date().toISOString(), toolCalls: [{ id: 'toolu_s', toolName: 'browser.screenshot', input: {} }] },
+      {
+        id: 't', role: 'tool', name: 'browser.screenshot', content: '{}', createdAt: new Date().toISOString(),
+        toolResult: { callId: 'toolu_s', toolName: 'browser.screenshot', ok: true, output: {}, trust: 'agent' },
+        images: [bad],
+      },
+    );
+
+    const response = await provider.generate({ session });
+
+    assert.deepEqual(response.parts, [{ type: 'text', text: 'Could not see it.' }], address);
+    assert.equal(bodies.length, 2);
+    assert.match(bodies[1]!.messages[2].content[0].content[1].text, /\(shot\.png\) is no longer sent/);
+    assert.deepEqual(session.messages[2]!.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'shot.png' }]);
+  }
+});
