@@ -121,10 +121,14 @@ const optionalId = (input: JsonObject, key: string): string | undefined => {
  * catch up on a channel it was not mentioned in.
  *
  * `gated`, like `message.send`: what a channel says is the people in it's,
- * and an agent talking somewhere else would carry it there. An operator
- * who wants a channel watched grants it once (always allow is a standing
- * per-tool grant) and the channel's own rule decides which conversations
- * are readable at all. Output is `external`: the messages are written by
+ * and an agent talking somewhere else would carry it there. Judged by its
+ * source (`destinationFor`) for the same reason as a send: a durable
+ * per-tool grant would be a standing yes to every conversation the app is
+ * in, which anyone who can talk to the agent could then have it quote
+ * anywhere. So **Always allow** lasts for this session only, and a
+ * schedule approved with a destination may read that one conversation
+ * unattended. The channel's own rule decides which conversations are
+ * readable at all. Output is `external`: the messages are written by
  * whoever is in the conversation, not by the operator.
  */
 export const createMessageReadTool = (read: ConversationReader): Tool => ({
@@ -150,6 +154,10 @@ export const createMessageReadTool = (read: ConversationReader): Tool => ({
       limit: { type: 'integer', description: `How many messages, ${MESSAGE_READ_DEFAULT_LIMIT} by default, at most ${MESSAGE_READ_MAX_LIMIT}.` },
     },
     required: ['source'],
+  },
+  destinationFor(input: JsonObject) {
+    const source = parseDestinationInput(input.source);
+    return source ? canonicalDestination(source) : undefined;
   },
   async execute(input: JsonObject, session: Session) {
     const source = parseDestinationInput(input.source);

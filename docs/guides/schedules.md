@@ -16,8 +16,9 @@ always-on daemon into agents that act on their own:
   outside the current conversation:
   `{ source: { channel: "slack", to: "C0123456789" }, thread?, after?, before?, limit? }`.
   What lets a scheduled turn catch up on a channel nobody mentioned it in.
-  `gated`, with `external` output; **Always allow** grants it for good (it
-  names no destination). On Slack it reads only channels the agent's own
+  `gated`, with `external` output, and judged by its source like a send:
+  **Always allow** lasts for the session, and a schedule approved with a
+  destination may read that one conversation unattended. On Slack it reads only channels the agent's own
   app is a member of, and never DMs — see the
   [Slack adapter](../../packages/channel-slack/README.md#reading-a-channel).
 

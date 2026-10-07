@@ -256,7 +256,6 @@ test('message.read is gated and external, reads as the calling agent, and bounds
 
   assert.equal(tool.risk, 'gated');
   assert.equal(tool.outputTrust, 'external');
-  assert.equal(tool.destinationFor, undefined, 'a read grant is per tool, not per destination');
 
   await assert.rejects(() => tool.execute({ source: { channel: 'slack' } }, sessionFor('ava')), /requires "source"/);
   await assert.rejects(() => tool.execute({ source: { channel: 'slack', to: 'C9' }, thread: '' }, sessionFor('ava')), /"thread" must be/);
@@ -272,6 +271,12 @@ test('message.read is gated and external, reads as the calling agent, and bounds
 
   await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava'));
   assert.equal(reads[1]?.limit, 50);
+});
+
+test('message.read is judged by its source, so always-allow cannot become a standing grant to every conversation', () => {
+  const tool = createMessageReadTool(async () => ({ messages: [], more: false }));
+  assert.equal(tool.destinationFor?.({ source: { channel: 'slack', to: 'C0123456789' } }), 'slack:C0123456789');
+  assert.equal(tool.destinationFor?.({}), undefined);
 });
 
 test('message.read stops at its text budget and says there is more, cutting only a message too big to fit alone', async () => {

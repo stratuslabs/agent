@@ -2670,13 +2670,33 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * for a principal or the agent's own app, for the reason
    * `humanizeMentions` gives; anyone else stays their stable id.
    */
-  const plainSlackText = async (connection: AgentConnection, text: string): Promise<string> => {
+  const nameableMentions = (connection: AgentConnection, text: string): string[] => {
     const principals = new Set(connection.config.principals ?? []);
-    const names = new Map<string, string>();
+    const ids = new Set<string>();
     for (const match of text.matchAll(/<@([^|<>]+)(?:\|[^<>]*)?>/g)) {
       const id = match[1]!;
-      if (!names.has(id) && (principals.has(id) || id === connection.botUserId)) {
-        names.set(id, boundedDisplayName(await displayNameFor(connection, id)));
+      if (principals.has(id) || id === connection.botUserId) {
+        ids.add(id);
+      }
+    }
+    return [...ids];
+  };
+
+  /**
+   * `resolved` is the only source of names: the caller has already looked
+   * them up under its own bound (`readConversation`), and a mention it did
+   * not resolve stays an id rather than costing a lookup here.
+   */
+  const plainSlackText = (
+    connection: AgentConnection,
+    text: string,
+    resolved: ReadonlyMap<string, string>,
+  ): string => {
+    const names = new Map<string, string>();
+    for (const id of nameableMentions(connection, text)) {
+      const name = resolved.get(id);
+      if (name !== undefined) {
+        names.set(id, boundedDisplayName(name));
       }
     }
     return text
@@ -3067,15 +3087,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       more = true;
     }
     // History rarely embeds profiles, so names mostly come from users.info.
-    // Cached names are free; at most READ_NAME_LOOKUPS uncached authors are
-    // looked up per read, together, and the rest keep their id, so a read of
-    // many strangers never waits through a rate limit one call at a time.
+    // Cached names are free; at most READ_NAME_LOOKUPS uncached people —
+    // authors and the mentions in their text together — are looked up per
+    // read, at once, and the rest keep their id, so a read of many strangers
+    // never waits through a rate limit one call at a time.
     const lookups = new Map<string, Promise<string>>();
     let fresh = 0;
-    for (const message of raw) {
-      const user = message.user;
-      if (!user || lookups.has(user) || message.user_profile?.display_name || message.user_profile?.real_name) {
-        continue;
+    const want = (user: string): void => {
+      if (lookups.has(user)) {
+        return;
       }
       const cached = displayNames.get(`${connection.teamId}:${user}`);
       if (cached) {
@@ -3083,6 +3103,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       } else if (fresh < READ_NAME_LOOKUPS) {
         fresh += 1;
         lookups.set(user, displayNameFor(connection, user));
+      }
+    };
+    for (const message of raw) {
+      const user = message.user;
+      if (user && !message.user_profile?.display_name && !message.user_profile?.real_name) {
+        want(user);
+      }
+    }
+    for (const message of raw) {
+      for (const id of nameableMentions(connection, message.text ?? '')) {
+        want(id);
       }
     }
     const names = new Map<string, string>();
@@ -3105,7 +3136,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       messages.push({
         id: message.ts,
         author,
-        text: await plainSlackText(connection, message.text ?? ''),
+        text: plainSlackText(connection, message.text ?? '', names),
         ...(name && name !== author ? { authorName: boundedDisplayName(name) } : {}),
         ...(Number.isFinite(at) ? { at: new Date(at * 1000).toISOString() } : {}),
         ...(message.thread_ts && message.thread_ts !== message.ts ? { thread: message.thread_ts } : {}),

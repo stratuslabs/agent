@@ -8896,6 +8896,37 @@ test('readConversation looks up a bounded number of uncached authors, together, 
   await adapter.stop();
 });
 
+test('readConversation counts mentioned principals against the same lookup bound as authors', async () => {
+  const principals = Array.from({ length: 25 }, (_, index) => `U-M${index}`);
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-BUSY', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: [{ ts: '300.000001', user: 'U-AUTHOR', user_profile: { display_name: 'Author' }, text: principals.map((id) => `<@${id}>`).join(' ') }],
+  });
+  let looked = 0;
+  web.users.info = async ({ user }: { user: string }) => {
+    looked += 1;
+    return { user: { profile: { display_name: `Name ${user}` } } };
+  };
+  const socket = createFakeSocket();
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused')));
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-BUSY', limit: 5 });
+  assert.equal(looked, 10);
+  const text = result.messages[0]?.text ?? '';
+  assert.match(text, /^@Name U-M0 /);
+  assert.match(text, /@U-M24$/);
+  await adapter.stop();
+});
+
 test('readConversation refuses DMs and group DMs, even ones the app is in', async () => {
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('D-DYLAN', { is_im: true, is_member: true });
