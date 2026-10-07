@@ -684,6 +684,32 @@ test('a DM queued behind a running turn shows its own status at once', async () 
   assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'second answer']);
 });
 
+test('a top-level DM reply takes down the loading status it was answered under', async () => {
+  // The reported bug: a DM reply posts beside the message it answers, not
+  // under it, so Slack never clears the status keyed to that message, and
+  // "is working…" stood under every DM after the reply had landed.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hi back'));
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', mention('hi', { type: 'message', ts: '300.1', channel: 'D1', channel_type: 'im' }));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['hi back', undefined]]);
+  assert.deepEqual(statuses, [
+    { channel_id: 'D1', thread_ts: '300.1', status: 'is thinking…' },
+    { channel_id: 'D1', thread_ts: '300.1', status: '' },
+  ]);
+});
+
 test('an agent on the stream reply mode still posts a placeholder and edits it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
