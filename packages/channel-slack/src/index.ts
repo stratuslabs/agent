@@ -2632,6 +2632,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     let kept: SlackThreadMessage[] = [];
     let omitted = 0;
     let more = false;
+    let firstOfTail = 0;
     try {
       if (thread !== undefined) {
         const replies = connection.web.conversations.replies;
@@ -2664,7 +2665,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
               continue;
             }
             tail.push(message);
-            if (tail.length > EARLIER_MESSAGE_LIMIT - 1) {
+            if (tail.length > EARLIER_MESSAGE_LIMIT) {
               tail.shift();
               omitted += 1;
             }
@@ -2672,7 +2673,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           cursor = page.has_more ? page.response_metadata?.next_cursor || undefined : undefined;
         } while (cursor && pages < EARLIER_THREAD_PAGES);
         more = cursor !== undefined;
+        // The parent takes a slot only when it is shown.
+        while (tail.length > (parent !== undefined ? EARLIER_MESSAGE_LIMIT - 1 : EARLIER_MESSAGE_LIMIT)) {
+          tail.shift();
+          omitted += 1;
+        }
         kept = parent !== undefined ? [parent, ...tail] : tail;
+        firstOfTail = parent !== undefined ? 1 : 0;
       } else {
         const history = connection.web.conversations.history;
         if (!history) {
@@ -2719,7 +2726,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       let note = '';
       if (thread === undefined && index === 0) {
         note = `[The ${kept.length} most recent messages in this channel before you were mentioned, oldest first:]\n`;
-      } else if (thread !== undefined && index === 1 && (omitted > 0 || more)) {
+      } else if (thread !== undefined && index === firstOfTail && (omitted > 0 || more)) {
         note = more
           ? '[Earlier messages in this long thread are not shown.]\n'
           : `[${omitted} earlier messages in this thread are not shown.]\n`;

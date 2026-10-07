@@ -8950,3 +8950,19 @@ test('a channel read pages on until it has enough messages worth showing', async
   assert.match(earlier[0]!.message, /Dylan: context 6$/);
   assert.equal(earlier.at(-1)?.message, 'Dylan: context 25');
 });
+
+test('a thread whose first message is not shown gives its slot to the replies, and still says what it left out', async () => {
+  const thread = [
+    { ts: '810.001', user: 'U-STRANGER', text: 'parent from someone unlisted' },
+    ...Array.from({ length: 45 }, (_, index) => ({ ts: `810.${String(index + 2).padStart(3, '0')}`, user: 'U-DYLAN', text: `reply ${index + 1}` })),
+  ];
+  const { socket, gateway, adapter } = threadAdapter(thread, { principals: ['U-DYLAN'], admit: 'principals' });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> so?', { ts: '810.999', thread_ts: '810.001' }));
+  await adapter.stop();
+
+  const earlier = gateway.dispatches[0]?.earlier ?? [];
+  assert.equal(earlier.length, 40);
+  assert.equal(earlier[0]?.message, '[5 earlier messages in this thread are not shown.]\nDylan: reply 6');
+  assert.equal(earlier.at(-1)?.message, 'Dylan: reply 45');
+});
