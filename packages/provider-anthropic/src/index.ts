@@ -4,6 +4,7 @@ import type {
   ContentBlockParam,
   Message,
   MessageParam,
+  ImageBlockParam,
   TextBlockParam,
   Tool as AnthropicTool,
 } from '@anthropic-ai/sdk/resources/messages/messages';
@@ -316,12 +317,16 @@ const overflowedContext = (error: unknown): boolean =>
  * and try again, rather than fail a turn that will fail the same way on
  * every replay after it.
  */
-const rejectedImageAddress = (error: unknown): { message: number; block: number } | undefined => {
+const rejectedImageAddress = (error: unknown): { message: number; block: number; nested?: number } | undefined => {
   if (!(error instanceof Anthropic.BadRequestError)) {
     return undefined;
   }
-  const match = /messages\.(\d+)\.content\.(\d+)\.image\b/.exec(error.message);
-  return match ? { message: Number(match[1]), block: Number(match[2]) } : undefined;
+  // A tool's image sits one level down, inside its tool_result:
+  // `messages.3.content.0.content.1.image…`.
+  const match = /messages\.(\d+)\.content\.(\d+)(?:\.content\.(\d+))?\.image\b/.exec(error.message);
+  return match
+    ? { message: Number(match[1]), block: Number(match[2]), ...(match[3] !== undefined ? { nested: Number(match[3]) } : {}) }
+    : undefined;
 };
 
 type RawTurns = Record<string, ContentBlock[]>;
@@ -367,20 +372,26 @@ const rawTurnsFrom = (session: ProviderRequest['session']): RawTurns => {
  * text block is added only when there is text, and a message with neither
  * still sends one so the turn is never an empty content array.
  */
+const imageBlocksFor = (
+  images: readonly ImageAttachment[],
+  replayed: ReadonlySet<ImageAttachment>,
+  imageOf: WeakMap<ContentBlockParam, ImageAttachment>,
+): Array<TextBlockParam | ImageBlockParam> => images.map((image) => {
+  if (!replayed.has(image)) {
+    return { type: 'text', text: droppedImageNote(image) };
+  }
+  const block: ImageBlockParam = { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } };
+  imageOf.set(block, image);
+  return block;
+});
+
 const userBlocks = (
   content: string,
   images: readonly ImageAttachment[] | undefined,
   replayed: ReadonlySet<ImageAttachment>,
   imageOf: WeakMap<ContentBlockParam, ImageAttachment>,
 ): ContentBlockParam[] => {
-  const blocks: ContentBlockParam[] = (images ?? []).map((image) => {
-    if (!replayed.has(image)) {
-      return { type: 'text', text: droppedImageNote(image) };
-    }
-    const block: ContentBlockParam = { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } };
-    imageOf.set(block, image);
-    return block;
-  });
+  const blocks: ContentBlockParam[] = imageBlocksFor(images ?? [], replayed, imageOf);
   if (content.length > 0 || blocks.length === 0) {
     blocks.push({ type: 'text', text: content });
   }
@@ -466,11 +477,18 @@ const createAnthropicMessages = (
       if (!result) {
         continue;
       }
+      // A call that returned images answers with them inside its own
+      // result, where the model reads them as that call's output rather
+      // than as something a person sent. Text first, as the API orders a
+      // result: what the call said, then what it showed.
+      const images = message.images ?? [];
       push('user', [
         {
           type: 'tool_result',
           tool_use_id: result.callId,
-          content: renderToolResultContent(result),
+          content: images.length === 0
+            ? renderToolResultContent(result)
+            : [{ type: 'text', text: renderToolResultContent(result) }, ...imageBlocksFor(images, replayed, imageOf)],
           ...(result.ok ? {} : { is_error: true }),
         },
       ]);
@@ -523,13 +541,19 @@ const createAnthropicMessages = (
   }
 
   const imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }> = [];
-  for (const group of groups) {
-    group.blocks.forEach((block, index) => {
+  const collect = (holder: ContentBlockParam[]): void => {
+    holder.forEach((block, index) => {
       const image = imageOf.get(block);
       if (image !== undefined) {
-        imageBlocks.push({ holder: group.blocks, index, image });
+        imageBlocks.push({ holder, index, image });
+      } else if (block.type === 'tool_result' && Array.isArray(block.content)) {
+        // A tool's images sit inside its result, and give way there.
+        collect(block.content as ContentBlockParam[]);
       }
     });
+  };
+  for (const group of groups) {
+    collect(group.blocks);
   }
   // The content arrays are the groups' own, so a block swapped in a holder
   // is swapped in the request.
@@ -850,14 +874,19 @@ export const createAnthropicProvider = ({
           // and left alone it would fail every later turn the same way —
           // and the turn goes on with a note in its place.
           const address = rejectedImageAddress(error);
-          const content = address === undefined ? undefined : params.messages[address.message]?.content;
-          const block = Array.isArray(content) ? content[address!.block] : undefined;
+          const outer = address === undefined ? undefined : params.messages[address.message]?.content;
+          const outerBlock = Array.isArray(outer) ? outer[address!.block] : undefined;
+          const content = address?.nested === undefined
+            ? outer
+            : outerBlock?.type === 'tool_result' && Array.isArray(outerBlock.content) ? outerBlock.content : undefined;
+          const at = address?.nested ?? address?.block;
+          const block = Array.isArray(content) && at !== undefined ? content[at] : undefined;
           const image = block === undefined ? undefined : imageOf.get(block as ContentBlockParam);
-          if (image === undefined || block === undefined) {
+          if (image === undefined || block === undefined || at === undefined) {
             throw error;
           }
           omitImage(image);
-          (content as ContentBlockParam[])[address!.block] = { type: 'text', text: droppedImageNote(image) };
+          (content as ContentBlockParam[])[at] = { type: 'text', text: droppedImageNote(image) };
           continue;
         }
       }

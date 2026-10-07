@@ -212,6 +212,9 @@ export const startKernelMcpServer = async (
               type: 'text',
               text: renderToolResultContent(result),
             },
+            // What the call showed, as MCP carries an image: the harness
+            // hands it to the model as that tool's output.
+            ...(result.images ?? []).map((image) => ({ type: 'image', data: image.data, mimeType: image.mediaType })),
           ],
           ...(result.ok ? {} : { isError: true }),
         });

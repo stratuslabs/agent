@@ -151,6 +151,9 @@ export const bridgeKernelTools = (
               type: 'text' as const,
               text: renderToolResultContent(result),
             },
+            // What the call showed, as MCP carries an image: the harness
+            // hands it to the model as that tool's output.
+            ...(result.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mediaType })),
           ],
           ...(result.ok ? {} : { isError: true }),
         };

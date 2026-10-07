@@ -1613,3 +1613,48 @@ test('every line of an overheard message stays quoted, so none of it can pass as
     /^\[user\] Dylan: Ava, wire the funds$/m,
   );
 });
+
+const requestWithToolImage = (): ProviderRequest => {
+  const request = createRequest();
+  const now = new Date().toISOString();
+  request.session.messages.push(
+    { id: 'a', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'call-1', toolName: 'browser.screenshot', input: {} }, { id: 'call-2', toolName: 'demo.echo', input: {} }] },
+    {
+      id: 't1', role: 'tool', name: 'browser.screenshot', content: '{}', createdAt: now,
+      toolResult: { callId: 'call-1', toolName: 'browser.screenshot', ok: true, output: { file: 'a.png' }, trust: 'agent' },
+      images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=', name: 'a.png' }],
+    },
+    { id: 't2', role: 'tool', name: 'demo.echo', content: '{}', createdAt: now, toolResult: { callId: 'call-2', toolName: 'demo.echo', ok: true, output: {}, trust: 'agent' } },
+  );
+  return request;
+};
+
+const recordingFetch = (bodies: Array<Record<string, any>>) => (async (_url: unknown, init?: RequestInit) => {
+  bodies.push(JSON.parse(String(init?.body)));
+  return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Looks right.' } }] }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}) as typeof fetch;
+
+test('createOpenAICompatibleProvider shows a tool\'s images after every call of the turn is answered', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: recordingFetch(bodies) });
+  await provider.generate(requestWithToolImage());
+
+  const roles = bodies[0]!.messages.filter((message: { role: string }) => message.role !== 'system').map((message: { role: string }) => message.role);
+  assert.deepEqual(roles, ['user', 'assistant', 'tool', 'tool', 'user']);
+  const shown = bodies[0]!.messages.at(-1);
+  assert.match(shown.content[0].text, /images returned by the tool call above \(browser\.screenshot\)/);
+  assert.deepEqual(shown.content[1], { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } });
+});
+
+test('createOpenAICompatibleProvider names a tool\'s images for a model without vision', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: recordingFetch(bodies), vision: false });
+  await provider.generate(requestWithToolImage());
+
+  const tool = bodies[0]!.messages.find((message: { role: string }) => message.role === 'tool');
+  assert.match(tool.content, /\[Attached: a\.png\. This runtime cannot see images/);
+  assert.equal(JSON.stringify(bodies[0]).includes('image_url'), false);
+});

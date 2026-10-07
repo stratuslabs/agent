@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
@@ -428,14 +428,14 @@ const createTools = (
 
   const screenshot: Tool = {
     name: 'browser.screenshot',
-    description: 'Save a screenshot of the current page and return its path.',
+    description: 'Save a screenshot of the current page, return its path, and show it to you as an image.',
     risk: 'gated',
     outputTrust: 'external',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string' }, fullPage: { type: 'boolean' } },
     },
-    async execute(input, session) {
+    async execute(input, session, context) {
       const settings = settingsFor(config, session, workspaces);
       const page = await runtime.pageFor(session);
       if (typeof input.url === 'string' && input.url.length > 0) {
@@ -443,6 +443,18 @@ const createTools = (
       }
       const target = await screenshotPathFor(settings.workspace(), Date.now());
       await page.screenshot({ path: target, fullPage: input.fullPage === true });
+      // Shown, not only saved: an agent asked whether a page looks right
+      // has to see it. Said either way, so a screenshot the model was not
+      // shown is never answered as if it had been.
+      let shown: JsonObject = { shown: false, reason: 'This runtime cannot show images to the model.' };
+      if (context?.attachImage) {
+        try {
+          context.attachImage({ mediaType: 'image/png', data: (await readFile(target)).toString('base64'), name: path.basename(target) });
+          shown = { shown: true };
+        } catch (error) {
+          shown = { shown: false, reason: error instanceof Error ? error.message : String(error) };
+        }
+      }
       // `file`, because that is the key a channel already acts on: an ok
       // result carrying `file` (or `files`) is delivered as an attachment,
       // which is how "screenshot example.com and show me" ends with a
@@ -455,6 +467,7 @@ const createTools = (
         file: target,
         url: page.url(),
         title,
+        image: shown,
         ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
       };
     },

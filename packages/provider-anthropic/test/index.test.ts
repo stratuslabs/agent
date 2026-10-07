@@ -1595,3 +1595,43 @@ test('an image is only swapped for a note when the note is smaller', async () =>
     { type: 'text', text: 'tiny' },
   ]);
 });
+
+test('an image a tool returned rides inside its tool_result, after the text', async () => {
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'It looks fine.' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const session = createSession();
+  session.messages.push(
+    {
+      id: 'session-1:assistant:2',
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      toolCalls: [{ id: 'toolu_shot', toolName: 'browser.screenshot', input: {} }],
+    },
+    {
+      id: 'session-1:tool:toolu_shot',
+      role: 'tool',
+      name: 'browser.screenshot',
+      content: '{}',
+      createdAt: new Date().toISOString(),
+      toolResult: { callId: 'toolu_shot', toolName: 'browser.screenshot', ok: true, output: { file: 'a.png' }, trust: 'agent' },
+      images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=', name: 'a.png' }],
+    },
+  );
+
+  await provider.generate({ session });
+
+  assert.deepEqual(requests[0]!.body.messages[2], {
+    role: 'user',
+    content: [
+      {
+        type: 'tool_result',
+        tool_use_id: 'toolu_shot',
+        content: [
+          { type: 'text', text: JSON.stringify({ file: 'a.png' }) },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
+        ],
+      },
+    ],
+  });
+});
