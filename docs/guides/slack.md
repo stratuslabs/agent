@@ -49,14 +49,16 @@ since. The agent that stood down keeps
 listening: what you say to its colleague in that thread, and what the
 colleague answers, go into its own session, marked as said to somebody
 else, so when you turn back to it, it answers as someone who followed
-along. And an agent hears a thread from the mention that brought it in, not
-before — say what it needs in that message. The full set of rules, and the
+along. An agent mentioned partway into a thread opens with the thread's
+parent and newest earlier messages, and one mentioned at the top of a channel
+opens with the channel's most recent messages, when its app has the history
+scopes. The full set of rules, and the
 two edges around them, is [Who a message is
 for](../../packages/channel-slack/README.md#who-a-message-is-for).
 
 **It knows which room it is in.** Each turn tells the agent whether it is in
 a direct message (with whom, when they are a principal), a group DM, a private channel, or a public
-channel, and how many people are in it — so a
+channel, how many people are in it, and the channel's id and `#name` — so a
 conversation that moves from a DM into `#general` is not answered as though
 it were still a DM, and something said to it privately stays out of a
 channel. The lookup behind it uses scopes the app manifest already asks for

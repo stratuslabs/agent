@@ -2778,7 +2778,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       lookup = lookupRoom(connection, channel).finally(() => roomLookups.delete(key));
       roomLookups.set(key, lookup);
     }
-    return (await lookup) ?? (fromEvent !== undefined ? { kind: fromEvent } : undefined);
+    // A failed lookup still knows where the message came from: the event
+    // names the channel, and an agent with an id can read it.
+    return (await lookup) ?? (fromEvent !== undefined ? { kind: fromEvent, id: channel } : undefined);
   };
 
   const lookupRoom = async (connection: AgentConnection, channel: string): Promise<JsonObject | undefined> => {

@@ -154,10 +154,12 @@ here, too large, not downloaded or not in time, not readable, or not opened
 because the message was overheard), which is what lets it answer honestly
 instead of as though it had read them, or guessing at why. Such a file dropped
 in with nothing said is not a question, and gets no reply. 
-Sessions are still per agent: an agent hears a thread from the mention
-that brought it in, and what was said before that — to the other agent, or
-by it — is not backfilled ([#147](https://github.com/stratuslabs/agent/issues/147)).
-Bring it up to speed in the message that tags it. A colleague's reply is
+Sessions are still per agent, but a new one opens with what was said
+before the mention that created it: in a thread, its parent and newest
+earlier messages, and at the top of a channel, the channel's most recent
+messages (see the overview above for the limits and the trust rules). That
+needs the history scopes; without them an agent hears a thread only from
+the mention that brought it in. A colleague's reply is
 heard by the daemon that posted it, not through Slack — an agent served by
 another daemon is a stranger's bot to this one, and its replies are not
 heard at all.
@@ -191,9 +193,11 @@ name is text anyone can set, and this lands in the system prompt), a group DM, a
 its member count, whether the message is in a thread, and whether the
 channel is shared with people outside the workspace (`is_ext_shared` /
 `is_org_shared` from the lookup, or the event's own `is_ext_shared_channel`,
-which is current on every turn). Never the
-channel's name, for the same reason: whoever created or renamed the
-channel chose it. The agent writes for that audience: a public channel of a thousand
+which is current on every turn). It also carries the channel's id, and its
+name as a `#label` only when the name is in Slack's own channel alphabet
+(lowercase letters, digits, `-`, `_`): whoever created or renamed the
+channel chose it, so nothing with spaces or punctuation reaches the prompt,
+though a hyphenated phrase still can. The agent writes for that audience: a public channel of a thousand
 people is not the DM it was in a minute ago, and what it was told in one does
 not belong in the other. The kind comes from the event; the count
 comes from `conversations.info` with `include_num_members`, the same call and
