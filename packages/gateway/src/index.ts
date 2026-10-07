@@ -3767,10 +3767,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       stateDirectories: createPluginStateDirectories(env),
       // The daemon's home, minus the agents' workspaces, whatever roots a
       // plugin's config grants. See `createHostProtectedPaths`.
-      protectedPaths: createHostProtectedPaths(
-        env,
-        options.selection?.configPath ? { configPath: options.selection.configPath } : {},
-      ),
+      protectedPaths: createHostProtectedPaths(env, {
+        ...(options.selection?.configPath ? { configPath: options.selection.configPath } : {}),
+        // Where the stores were actually opened, when a host moved them.
+        ...(options.stateDir !== undefined ? { stateDir } : {}),
+      }),
       // The structured log, so a plugin's lifecycle lines — an MCP server
       // that dropped, a reconnect that failed — are in `stratus logs` and
       // not only on a stderr the service manager owns.

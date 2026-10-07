@@ -36,10 +36,14 @@ import { createAgentWorkspaces } from './workspaces.ts';
  * protected wherever it is. A project-local `stratus.config.json` is not:
  * it is untrusted, ships in a repository, and is the agent's to read like
  * any other file there.
+ *
+ * An embedding host can open the stores somewhere else (the gateway's
+ * `stateDir`). Sessions and `fleet.db` then live there, so that directory
+ * is protected as well.
  */
 export const createHostProtectedPaths = (
   env: StateEnvironment,
-  selection: Pick<RuntimeSelection, 'configPath'> = {},
+  selection: Pick<RuntimeSelection, 'configPath'> & { stateDir?: string } = {},
 ): ProtectedPaths => {
   const workspaces = createAgentWorkspaces(env);
   return {
@@ -51,8 +55,11 @@ export const createHostProtectedPaths = (
         gatewayInfoPath(env),
         globalConfigPath(env),
       ];
+      if (selection.stateDir !== undefined && !listed.includes(selection.stateDir)) {
+        listed.push(selection.stateDir);
+      }
       try {
-        const location = await resolveConfigLocation(selection, env);
+        const location = await resolveConfigLocation(selection.configPath !== undefined ? { configPath: selection.configPath } : {}, env);
         if (location?.trusted === true && !listed.includes(location.path)) {
           listed.push(location.path);
         }

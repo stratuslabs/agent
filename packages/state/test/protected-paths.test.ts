@@ -51,3 +51,11 @@ test('a trusted config chosen outside the home is protected where it is; a proje
   const local = await createHostProtectedPaths({ homeDir: home, cwd: project, processEnv: {} }).all();
   assert.equal(local.includes(path.join(project, 'stratus.config.json')), false);
 });
+
+test('a state directory a host moved the stores to is protected too', async () => {
+  const home = await newHome();
+  const stateDir = path.join(home, 'var', 'stratus');
+  const all = await createHostProtectedPaths({ homeDir: home, cwd: home, processEnv: {} }, { stateDir }).all();
+  assert.ok(all.includes(stateDir));
+  assert.ok(all.includes(path.join(home, '.stratus')));
+});
