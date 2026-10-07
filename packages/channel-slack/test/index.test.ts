@@ -8966,3 +8966,16 @@ test('a thread whose first message is not shown gives its slot to the replies, a
   assert.equal(earlier[0]?.message, '[5 earlier messages in this thread are not shown.]\nDylan: reply 6');
   assert.equal(earlier.at(-1)?.message, 'Dylan: reply 45');
 });
+
+test('a thread past the read bound shows its parent and says the rest was not read, never a middle slice', async () => {
+  const huge = Array.from({ length: 4100 }, (_, index) => ({ ts: `${1000 + index}.000001`, user: 'U-DYLAN', text: `message ${index + 1}` }));
+  const { socket, gateway, adapter, reads } = threadAdapter(huge, {}, { pageSize: 200 });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and?', { ts: '9999.000001', thread_ts: '1000.000001' }));
+  await adapter.stop();
+
+  assert.equal(reads.length, 20);
+  const earlier = gateway.dispatches[0]?.earlier ?? [];
+  assert.equal(earlier.length, 1);
+  assert.match(earlier[0]!.message, /^Dylan: message 1\n\[This thread is too long to read here/);
+});

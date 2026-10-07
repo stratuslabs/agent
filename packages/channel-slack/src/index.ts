@@ -2673,6 +2673,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           cursor = page.has_more ? page.response_metadata?.next_cursor || undefined : undefined;
         } while (cursor && pages < EARLIER_THREAD_PAGES);
         more = cursor !== undefined;
+        if (more) {
+          // Past the read bound the newest replies were never reached, and a
+          // slice from the middle must not pass for them: the parent alone,
+          // and the note says the rest was not read.
+          omitted += tail.length;
+          tail.length = 0;
+        }
         // The parent takes a slot only when it is shown.
         while (tail.length > (parent !== undefined ? EARLIER_MESSAGE_LIMIT - 1 : EARLIER_MESSAGE_LIMIT)) {
           tail.shift();
@@ -2726,10 +2733,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       let note = '';
       if (thread === undefined && index === 0) {
         note = `[The ${kept.length} most recent messages in this channel before you were mentioned, oldest first:]\n`;
-      } else if (thread !== undefined && index === firstOfTail && (omitted > 0 || more)) {
-        note = more
-          ? '[Earlier messages in this long thread are not shown.]\n'
-          : `[${omitted} earlier messages in this thread are not shown.]\n`;
+      } else if (thread !== undefined && index === firstOfTail && omitted > 0 && !more) {
+        note = `[${omitted} earlier messages in this thread are not shown.]\n`;
       }
       entries.push({
         message: `${note}${author}: ${text}${attachmentNote(files, reasons)}`,
@@ -2741,6 +2746,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           [SENDER_TRUST_METADATA_KEY]: bot ? 'unknown' : senderTrustFor(connection.config, message.user as string),
         },
       });
+    }
+    if (more && entries.length > 0) {
+      entries[entries.length - 1]!.message += '\n[This thread is too long to read here: the replies after its first message are not shown. Ask for what you need.]';
     }
     return entries;
   };
