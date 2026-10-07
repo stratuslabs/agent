@@ -2084,6 +2084,27 @@ test('a link record restored while the gate surveys is still repaired', async ()
   assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
+test('a link record replaced while the pass runs is not overwritten with the stale copy', async () => {
+  // A backup restores a different record after the pass has read its own.
+  // Saving the in-memory copy over it would lose the entries only the
+  // replacement holds, so the pass stops and leaves the file alone.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  const replacement = `${JSON.stringify({ links: { cid: 'workspaces/dee' }, pending: {}, moving: {} }, null, 2)}\n`;
+  const env = {
+    homeDir: home,
+    async beforeWorkspaceMove(): Promise<void> {
+      await writeFile(`${recordFile}.restored`, replacement);
+      await rename(`${recordFile}.restored`, recordFile);
+    },
+  };
+  assert.ok((await readdir(legacyDir)).length > 0);
+
+  await assert.rejects(applyPerAgentWorkspaces(env), /changed while this start was using it/);
+  assert.equal(await readFile(recordFile, 'utf8'), replacement);
+});
+
 test('a link record survives the home being moved to another path', async () => {
   // A home restored from backup, or moved to a new disk, keeps its relative
   // links resolving. The record has to keep matching them, or the next

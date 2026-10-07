@@ -1227,6 +1227,16 @@ interface LinkRecord {
   links: Map<string, string>;
   pending: Map<string, string>;
   moving: Map<string, MoveProof>;
+  /**
+   * The file this record was read from, or last saved as: its stamp, or
+   * `null` when there was none. A save checks it first, so a record
+   * replaced in between, by a backup restoring one say, is not overwritten
+   * with this stale copy and the entries only it holds are not lost. The
+   * check and the write are two calls, as with the destination check before
+   * a move: this narrows the window to one syscall, which is as far as Node
+   * can take it.
+   */
+  stamp: string | null;
 }
 
 /**
@@ -1277,6 +1287,7 @@ const readLinkRecord = async (env: StateEnvironment, seenBefore: boolean): Promi
     + 'Fix it, or remove it to go on without that check, and start again.',
   );
   let raw: string | undefined;
+  let stamp: string | undefined;
   let reason = 'it is a symbolic link';
   // Seen by the gate that decided to run this pass, or by the `lstat` below:
   // either way it was there, and gone now is a rename aside, not "nothing
@@ -1296,6 +1307,7 @@ const readLinkRecord = async (env: StateEnvironment, seenBefore: boolean): Promi
         const opened = await handle.stat();
         if (opened.isFile() && inodeOf(opened) === inodeOf(stats)) {
           raw = (await handle.readFile()).toString('utf8');
+          stamp = stampOf(opened);
         } else {
           reason = 'it was replaced while being read';
         }
@@ -1308,11 +1320,11 @@ const readLinkRecord = async (env: StateEnvironment, seenBefore: boolean): Promi
     // read was renamed aside for a moment, and taken for "nothing recorded"
     // it would start without repairing what it records.
     if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !seen) {
-      return { links: new Map(), pending: new Map(), moving: new Map() };
+      return { links: new Map(), pending: new Map(), moving: new Map(), stamp: null };
     }
     reason = (error as Error).message;
   }
-  if (raw === undefined) {
+  if (raw === undefined || stamp === undefined) {
     throw unreadable(reason);
   }
   let parsed: unknown;
@@ -1340,14 +1352,36 @@ const readLinkRecord = async (env: StateEnvironment, seenBefore: boolean): Promi
     pending: resolved(pending),
     moving: new Map(Object.entries(moving as Record<string, MoveProof>)
       .map(([agentId, proof]) => [agentId, 'link' in proof ? { link: path.resolve(home, proof.link) } : proof])),
+    stamp,
   };
+};
+
+/** A full sentence naming its own fix, so it is passed on as it is. */
+class LinkRecordChangedError extends Error {}
+
+const linkRecordStamp = async (file: string): Promise<string | null> => {
+  try {
+    return stampOf(await lstat(file));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
 };
 
 /** Replaced in one step, never rewritten in place, and removed once empty. */
 const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promise<void> => {
   const file = linkRecordPath(env);
+  if (await linkRecordStamp(file) !== record.stamp) {
+    throw new LinkRecordChangedError(
+      `${file} changed while this start was using it, so it was left as it is rather than overwritten with `
+      + 'an older copy that may be missing entries. Start again to repair from what it holds now.',
+    );
+  }
   if (record.links.size === 0 && record.pending.size === 0) {
     await rm(file, { force: true });
+    record.stamp = null;
     return;
   }
   const replacement = `${file}.${randomUUID()}.tmp`;
@@ -1361,6 +1395,7 @@ const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promis
   try {
     await writeFile(replacement, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
     await rename(replacement, file);
+    record.stamp = await linkRecordStamp(file);
   } catch (error) {
     await rm(replacement, { force: true });
     throw error;
@@ -2351,7 +2386,7 @@ export const applyPerAgentWorkspaces = async (
       // finished by the next run from what it can see.
       // Already a full sentence naming its own fix, and a different fix
       // from the one below: nothing of this agent's has moved.
-      if (error instanceof WorkspaceDestinationTakenError) {
+      if (error instanceof WorkspaceDestinationTakenError || error instanceof LinkRecordChangedError) {
         throw error;
       }
       // Loud, and not quarantined, which is the opposite of how an id with
