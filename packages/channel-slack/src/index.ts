@@ -2655,6 +2655,56 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return result.trim();
   };
 
+  /**
+   * Slack's stored `mrkdwn` as the plain text a read promises
+   * (`ConversationMessage.text`): `<@U…>` mentions, `<#C…|name>` channels,
+   * `<!here>`-style broadcasts, `<!date^…|fallback>` dates, and
+   * `<url|label>` links, then the `&lt; &gt; &amp;` escapes, decoded last
+   * so text someone typed is never read as markup. A mention is named only
+   * for a principal or the agent's own app, for the reason
+   * `humanizeMentions` gives; anyone else stays their stable id.
+   */
+  const plainSlackText = async (connection: AgentConnection, text: string): Promise<string> => {
+    const principals = new Set(connection.config.principals ?? []);
+    const names = new Map<string, string>();
+    for (const match of text.matchAll(/<@([^|<>]+)(?:\|[^<>]*)?>/g)) {
+      const id = match[1]!;
+      if (!names.has(id) && (principals.has(id) || id === connection.botUserId)) {
+        names.set(id, boundedDisplayName(await displayNameFor(connection, id)));
+      }
+    }
+    return text
+      .replace(/<([^<>]*)>/g, (_whole, inner: string) => {
+        const bar = inner.indexOf('|');
+        const target = bar === -1 ? inner : inner.slice(0, bar);
+        const label = bar === -1 ? undefined : inner.slice(bar + 1);
+        if (target.startsWith('@')) {
+          const id = target.slice(1);
+          return `@${names.get(id) ?? id}`;
+        }
+        if (target.startsWith('#')) {
+          return `#${label || target.slice(1)}`;
+        }
+        if (target.startsWith('!')) {
+          const command = target.slice(1);
+          if (command.startsWith('subteam^')) {
+            return label || `@${command.slice('subteam^'.length)}`;
+          }
+          if (command.startsWith('date^')) {
+            return label ?? command;
+          }
+          return `@${command}`;
+        }
+        if (label && label !== target) {
+          return `${label} (${target})`;
+        }
+        return target;
+      })
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&amp;', '&');
+  };
+
   const connectionFor = (agentId: string): AgentConnection | undefined =>
     connections.find((candidate) => candidate.config.agentId === agentId);
 
@@ -3026,7 +3076,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       messages.push({
         id: message.ts,
         author,
-        text: message.text ?? '',
+        text: await plainSlackText(connection, message.text ?? ''),
         ...(name && name !== author ? { authorName: boundedDisplayName(name) } : {}),
         ...(Number.isFinite(at) ? { at: new Date(at * 1000).toISOString() } : {}),
         ...(message.thread_ts && message.thread_ts !== message.ts ? { thread: message.thread_ts } : {}),

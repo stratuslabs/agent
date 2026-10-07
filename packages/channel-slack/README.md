@@ -471,7 +471,11 @@ what the gateway's `message.read` tool reads through: a channel's top level
 (`conversations.history`, newest first) or one thread
 (`conversations.replies`, root first), paged up to the call's limit. It uses
 the `channels:history` / `groups:history` and `users:read` scopes already in
-the manifest, so nothing needs reinstalling.
+the manifest, so nothing needs reinstalling. Message text comes back as
+plain text: mentions, channel links, links, dates, and `&lt;`-style escapes
+are decoded, and a mention is named only for a principal or the agent
+itself. `message.read` also stops at 40,000 characters of text per call and
+says `more`, so a channel of long posts cannot outgrow the model's context.
 
 The boundary is the outbound one plus a rule for DMs:
 

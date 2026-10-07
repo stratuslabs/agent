@@ -8811,6 +8811,37 @@ test('readConversation reads top-level history within a window and stops at the 
   await adapter.stop();
 });
 
+test('readConversation returns plain text, not Slack markup, and names only principals', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: [{
+      ts: '200.000001',
+      user: 'U-DYLAN',
+      text: '<@U-DYLAN> and <@U-STRANGER> see <#C-OPS|ops> and <https://example.com/a?b=1&amp;c=2|the doc>, '
+        + 'also <https://example.com>, <!here>, <!subteam^S1|@oncall>, <!date^1791332967^{date}|Oct 6>. 1 &lt; 2 &amp;&amp; 3 &gt; 2',
+    }],
+  });
+  const socket = createFakeSocket();
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused')));
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 5 });
+  assert.equal(
+    result.messages[0]?.text,
+    '@Dylan and @U-STRANGER see #ops and the doc (https://example.com/a?b=1&c=2), '
+      + 'also https://example.com, @here, @oncall, Oct 6. 1 < 2 && 3 > 2',
+  );
+  await adapter.stop();
+});
+
 test('readConversation refuses DMs and group DMs, even ones the app is in', async () => {
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('D-DYLAN', { is_im: true, is_member: true });

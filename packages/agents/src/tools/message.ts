@@ -68,6 +68,15 @@ export const MESSAGE_READ_TOOL_NAME = 'message.read';
 /** The most messages one `message.read` call returns. */
 export const MESSAGE_READ_MAX_LIMIT = 200;
 const MESSAGE_READ_DEFAULT_LIMIT = 50;
+/**
+ * The most message text, in characters, one call returns. A count alone
+ * does not bound a read: fifty long posts can outgrow a model's context,
+ * and the result is kept in the transcript and sent on every later turn.
+ * A read that reaches it stops at the last whole message that fit and
+ * says `more`, so the agent pages on with `before`/`after`.
+ */
+export const MESSAGE_READ_TEXT_BUDGET = 40_000;
+const TRUNCATED_MARK = ' [... the rest of this message is not shown]';
 
 /**
  * Reads one conversation, or one thread in it, through the agent's own
@@ -124,7 +133,8 @@ export const createMessageReadTool = (read: ConversationReader): Tool => ({
     + 'Without thread: the top level, newest first. With thread: that thread\'s root and replies, oldest first. '
     + 'For Slack, ids are channel ids and message ts values; a permalink '
     + '…/archives/C0123456789/p1791332967606559 is channel C0123456789 and message 1791332967.606559, '
-    + 'and a thread_ts in the link is the thread to read.',
+    + 'and a thread_ts in the link is the thread to read. '
+    + 'When more is true, page on with before (top level) or after (thread) set to the last id returned.',
   risk: 'gated',
   outputTrust: 'external',
   parameters: {
@@ -160,12 +170,29 @@ export const createMessageReadTool = (read: ConversationReader): Tool => ({
       ...(after !== undefined ? { after } : {}),
       ...(before !== undefined ? { before } : {}),
     });
+    const messages: Array<Awaited<ReturnType<ConversationReader>>['messages'][number]> = [];
+    let used = 0;
+    let more = result.more;
+    for (const message of result.messages) {
+      if (used + message.text.length <= MESSAGE_READ_TEXT_BUDGET) {
+        messages.push({ ...message });
+        used += message.text.length;
+        continue;
+      }
+      // One message bigger than the whole budget is cut rather than
+      // dropped, or the read could never get past it.
+      if (messages.length === 0) {
+        messages.push({ ...message, text: message.text.slice(0, MESSAGE_READ_TEXT_BUDGET) + TRUNCATED_MARK });
+      }
+      more = true;
+      break;
+    }
     return {
       source: canonicalDestination(source),
       ...(thread !== undefined ? { thread } : {}),
-      count: result.messages.length,
-      more: result.more,
-      messages: result.messages.map((message) => ({ ...message })),
+      count: messages.length,
+      more,
+      messages,
     } as JsonObject;
   },
 });

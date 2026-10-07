@@ -8,6 +8,7 @@ import {
   createMessageSendTool,
   createScheduleTools,
   MESSAGE_READ_MAX_LIMIT,
+  MESSAGE_READ_TEXT_BUDGET,
   describeCadence,
   nextFireAfter,
   parseCronExpression,
@@ -271,4 +272,30 @@ test('message.read is gated and external, reads as the calling agent, and bounds
 
   await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava'));
   assert.equal(reads[1]?.limit, 50);
+});
+
+test('message.read stops at its text budget and says there is more, cutting only a message too big to fit alone', async () => {
+  const half = 'x'.repeat(MESSAGE_READ_TEXT_BUDGET / 2);
+  const tool = createMessageReadTool(async () => ({
+    messages: [
+      { id: '3.000001', author: 'U1', text: half },
+      { id: '2.000001', author: 'U1', text: half },
+      { id: '1.000001', author: 'U1', text: 'one too many' },
+    ],
+    more: false,
+  }));
+  const result = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  assert.equal(result.count, 2);
+  assert.equal(result.more, true);
+
+  const huge = createMessageReadTool(async () => ({
+    messages: [{ id: '1.000001', author: 'U1', text: 'y'.repeat(MESSAGE_READ_TEXT_BUDGET * 2) }, { id: '0.000001', author: 'U1', text: 'next' }],
+    more: false,
+  }));
+  const cut = await huge.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  const messages = cut.messages as Array<{ text: string }>;
+  assert.equal(messages.length, 1);
+  assert.ok(messages[0]!.text.length < MESSAGE_READ_TEXT_BUDGET + 100);
+  assert.match(messages[0]!.text, /the rest of this message is not shown\]$/);
+  assert.equal(cut.more, true);
 });
