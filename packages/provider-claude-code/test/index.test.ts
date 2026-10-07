@@ -349,6 +349,62 @@ test('a run that uses every turn resumes once to say where it got to', async () 
   assert.equal(calls[1]!.options?.maxTurns, 1);
 });
 
+test('a run that uses every turn still wraps up when the SDK then throws the CLI’s exit', async () => {
+  const calls: Array<{ prompt: string; options?: Record<string, unknown> }> = [];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    calls.push(params as { prompt: string; options?: Record<string, unknown> });
+    const current = calls.length;
+    return (async function* () {
+      if (current === 1) {
+        yield { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-3' } as ClaudeCodeStreamMessage;
+        // What the real SDK does next: the CLI exits non-zero after an
+        // error result, and the iterator rethrows that exit with the
+        // result's text. This reached Slack verbatim.
+        throw new Error('Claude Code returned an error result: Reached maximum number of turns (40)');
+      }
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'Got halfway; reply to carry on.', session_id: 'sdk-3' } as ClaudeCodeStreamMessage;
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn });
+
+  const response = await provider.generate({ session: createSession() });
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Got halfway; reply to carry on.' }]);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]!.prompt, TURN_LIMIT_NOTE);
+  assert.equal(calls[1]!.options?.resume, 'sdk-3');
+});
+
+test('any other failure after running out of turns still fails the turn', async () => {
+  let calls = 0;
+  const queryFn: ClaudeCodeQueryFn = () => {
+    calls += 1;
+    return (async function* () {
+      yield { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-4' } as ClaudeCodeStreamMessage;
+      throw new Error('stream reset by peer');
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn });
+  await assert.rejects(provider.generate({ session: createSession() }), /stream reset by peer/);
+  assert.equal(calls, 1);
+});
+
+test('another error result after running out of turns is not mistaken for the max-turns exit', async () => {
+  // The SDK puts every error result behind the same prefix, so an auth
+  // failure arriving after the max-turns result must still fail the turn.
+  let calls = 0;
+  const queryFn: ClaudeCodeQueryFn = () => {
+    calls += 1;
+    return (async function* () {
+      yield { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-5' } as ClaudeCodeStreamMessage;
+      throw new Error('Claude Code returned an error result: Invalid API key');
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn });
+  await assert.rejects(provider.generate({ session: createSession() }), /Invalid API key/);
+  assert.equal(calls, 1);
+});
+
 test('a tool called while wrapping up is refused and never runs', async () => {
   const executed: ToolCall[] = [];
   let run = 0;

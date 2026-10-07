@@ -1263,9 +1263,12 @@ class ReplyRenderer {
         this.placeText(this.ref?.ts);
       }
     }
-    // A reply posted clears the status itself; one Slack refused would
-    // leave "is thinking…" standing over a turn that has ended.
-    if (hadStatus && !landed) {
+    // A reply posted into the status's thread clears the status itself;
+    // one Slack refused would leave "is thinking…" standing over a turn
+    // that has ended. So would one posted anywhere else: a top-level DM
+    // reply keys its status to the message it answers (`statusThread`),
+    // but posts beside it rather than under it, and Slack never clears it.
+    if (hadStatus && (!landed || this.threadTs !== this.statusThread)) {
       this.setStatus('');
       // Awaited: the turn queued behind this one re-shows its own status
       // once this renderer is done, and a clear that reached Slack after
