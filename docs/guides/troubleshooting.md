@@ -65,6 +65,13 @@ subscription sign-in to per-token billing.
   wrote it at your umask's mode, and it can hold secrets (tool-shell's `env`
   block is the usual one). Run `chmod 600 ~/.stratus/config.json`; every
   save from this build writes it `0600`, and tightens a loose one.
+- **`stratus update` upgraded, then said `State migration failed: The
+  requested module '@stratusagent/state' does not provide an export named
+  …`** — the upgrade itself landed; the build doing the updating mixed its
+  own modules with the newly installed ones (fixed in the release after
+  0.11.7, which only helps updates *from* it). Run `stratus update` again:
+  the CLI is now the new build, so it finishes the migrations and rewrites
+  the service unit.
 - **The agents stopped answering after a node upgrade** — the service unit
   points at an interpreter that no longer exists. `stratus update` repairs
   it; [Updating](./updating.md) explains why.

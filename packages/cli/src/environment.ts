@@ -57,6 +57,8 @@ export interface CliEnvironment {
   packageVersionFetcher?: PackageVersionFetcher;
   /** Reads the version an installed package declares. Injected so tests do not assert on their own node_modules. */
   installedVersionReader?: InstalledVersionReader;
+  /** Loads `@stratusagent/gateway` for `stratus update` (tests observe when). Default a dynamic `import()`. */
+  gatewayLoader?: () => Promise<typeof import('@stratusagent/gateway')>;
 }
 
 /**
