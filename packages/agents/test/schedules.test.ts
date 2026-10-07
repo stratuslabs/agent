@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import type { JsonObject, Session } from '@stratusagent/core';
 import {
   canonicalDestination,
+  createMessageReadTool,
   createMessageSendTool,
   createScheduleTools,
+  MESSAGE_READ_MAX_LIMIT,
   describeCadence,
   nextFireAfter,
   parseCronExpression,
@@ -242,4 +244,31 @@ test('message.send is gated and names its destination for the policy', async () 
   ) as JsonObject;
   assert.deepEqual(sends, [{ agentId: 'ava', destination: { channel: 'slack', to: 'C9' }, text: 'all green' }]);
   assert.equal(result.destination, 'slack:C9');
+});
+
+test('message.read is gated and external, reads as the calling agent, and bounds the limit', async () => {
+  const reads: Array<Parameters<Parameters<typeof createMessageReadTool>[0]>[0]> = [];
+  const tool = createMessageReadTool(async (input) => {
+    reads.push(input);
+    return { messages: [{ id: '1.000001', author: 'U1', text: 'hi' }], more: false };
+  });
+
+  assert.equal(tool.risk, 'gated');
+  assert.equal(tool.outputTrust, 'external');
+  assert.equal(tool.destinationFor, undefined, 'a read grant is per tool, not per destination');
+
+  await assert.rejects(() => tool.execute({ source: { channel: 'slack' } }, sessionFor('ava')), /requires "source"/);
+  await assert.rejects(() => tool.execute({ source: { channel: 'slack', to: 'C9' }, thread: '' }, sessionFor('ava')), /"thread" must be/);
+  assert.equal(reads.length, 0, 'a malformed call reads nothing');
+
+  const result = await tool.execute(
+    { source: { channel: 'Slack', to: 'C9' }, thread: '1.000001', limit: 10_000 },
+    sessionFor('ava'),
+  ) as JsonObject;
+  assert.deepEqual(reads, [{ agentId: 'ava', source: { channel: 'slack', to: 'C9' }, thread: '1.000001', limit: MESSAGE_READ_MAX_LIMIT }]);
+  assert.equal(result.source, 'slack:C9');
+  assert.equal(result.count, 1);
+
+  await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava'));
+  assert.equal(reads[1]?.limit, 50);
 });

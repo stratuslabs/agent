@@ -8758,3 +8758,84 @@ test('after a restart, an agent that took a message keeps it though it listens d
 
   assert.deepEqual(gateway.dispatches, []);
 });
+
+// ---- conversation reads (message.read) -------------------------------------
+
+test('readConversation reads a thread the app can see, paging and naming authors', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-FEEDBACK', { is_member: true });
+  const calls: Array<{ ts: string; cursor?: string; limit?: number }> = [];
+  web.conversations.replies = async (args) => {
+    calls.push({ ts: args.ts, ...(args.cursor ? { cursor: args.cursor } : {}), ...(args.limit !== undefined ? { limit: args.limit } : {}) });
+    return args.cursor
+      ? { messages: [{ ts: '1791333032.874939', thread_ts: '1791332967.606559', user: 'U-DYLAN', text: 'detail', files: [{ name: 'x.png' }] }] }
+      : {
+        messages: [{ ts: '1791332967.606559', thread_ts: '1791332967.606559', bot_id: 'B-BLAIR', bot_profile: { name: 'Blair' }, text: 'Summary', reply_count: 1 }],
+        response_metadata: { next_cursor: 'page-2' },
+      };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-FEEDBACK', thread: '1791332967.606559', limit: 50 });
+  assert.deepEqual(calls.map((call) => call.cursor), [undefined, 'page-2']);
+  assert.equal(calls[0]?.ts, '1791332967.606559');
+  assert.equal(result.more, false);
+  assert.deepEqual(result.messages[0], {
+    id: '1791332967.606559',
+    author: 'B-BLAIR',
+    authorName: 'Blair',
+    text: 'Summary',
+    at: new Date(1791332967606.559).toISOString(),
+    replies: 1,
+  });
+  assert.equal(result.messages[1]?.authorName, 'Dylan');
+  assert.equal(result.messages[1]?.thread, '1791332967.606559');
+  assert.deepEqual(result.messages[1]?.files, ['x.png']);
+  await adapter.stop();
+});
+
+test('readConversation reads top-level history within a window and stops at the limit', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true, is_private: true });
+  const seen: Array<{ oldest?: string; latest?: string; limit?: number; inclusive?: boolean }> = [];
+  web.conversations.history = async (args) => {
+    seen.push({ ...(args.oldest ? { oldest: args.oldest } : {}), ...(args.latest ? { latest: args.latest } : {}), ...(args.limit !== undefined ? { limit: args.limit } : {}), ...(args.inclusive !== undefined ? { inclusive: args.inclusive } : {}) });
+    return { messages: [{ ts: '200.000001', user: 'U-X', text: 'b' }, { ts: '199.000001', user: 'U-X', text: 'a' }], has_more: true, response_metadata: { next_cursor: 'next' } };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', after: '100.000000', before: '300.000000', limit: 2 });
+  assert.deepEqual(seen, [{ oldest: '100.000000', latest: '300.000000', limit: 2, inclusive: false }]);
+  assert.equal(result.messages.length, 2);
+  assert.equal(result.more, true);
+  await adapter.stop();
+});
+
+test('readConversation refuses DMs and group DMs, even ones the app is in', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('D-DYLAN', { is_im: true, is_member: true });
+  web.knownConversations.set('G-GROUP', { is_mpim: true, is_member: true });
+  let read = false;
+  web.conversations.history = async () => {
+    read = true;
+    return { messages: [] };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'D-DYLAN', limit: 10 }), /direct message/);
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'G-GROUP', limit: 10 }), /direct message/);
+  assert.equal(read, false, 'nothing is read on a refusal');
+  await adapter.stop();
+});
+
+test('readConversation refuses a channel the app is not a member of, or cannot see', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-OTHER', { is_member: false });
+  web.conversations.history = async () => ({ messages: [] });
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'C-OTHER', limit: 10 }), /not a member of C-OTHER — invite it/);
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'C-NOWHERE', limit: 10 }), /cannot see C-NOWHERE/);
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'nobody', conversation: 'C-OTHER', limit: 10 }), /has no Slack app/);
+  await adapter.stop();
+});

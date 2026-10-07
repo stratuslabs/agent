@@ -4080,6 +4080,27 @@ export interface ChannelAdapterLike {
   resolveOutbound?(address: { agentId: string; to: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
+  /** See `@stratusagent/channels`' `ChannelAdapter.readConversation`. */
+  readConversation?(request: {
+    agentId: string;
+    conversation: string;
+    thread?: string;
+    after?: string;
+    before?: string;
+    limit: number;
+  }): Promise<{
+    messages: Array<{
+      id: string;
+      author: string;
+      authorName?: string;
+      text: string;
+      at?: string;
+      thread?: string;
+      replies?: number;
+      files?: string[];
+    }>;
+    more: boolean;
+  }>;
 }
 
 /**

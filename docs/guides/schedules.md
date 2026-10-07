@@ -12,6 +12,14 @@ always-on daemon into agents that act on their own:
   conversation:
   `{ destination: { channel: "slack", to: "C0123456789" }, text }`.
   Without it a scheduled turn works in silence.
+- **`message.read`** — read a channel's recent messages, or one thread,
+  outside the current conversation:
+  `{ source: { channel: "slack", to: "C0123456789" }, thread?, after?, before?, limit? }`.
+  What lets a scheduled turn catch up on a channel nobody mentioned it in.
+  `gated`, with `external` output; **Always allow** grants it for good (it
+  names no destination). On Slack it reads only channels the agent's own
+  app is a member of, and never DMs — see the
+  [Slack adapter](../../packages/channel-slack/README.md#reading-a-channel).
 
 Souls opt in like any other tool:
 
