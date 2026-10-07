@@ -46,7 +46,6 @@ Two consequences for what ranks first:
 | 32 | [Context management: a conversation that never has to end](./32-context-management.md) | Partly shipped — the unrecoverable half is closed: `ContextOverflowError` as the one provider failure the kernel can act on, a durable monotonic `contextFloor` raised by halving until the request fits, `messagesWithinContextFloor` windowing on a turn boundary and riding beside the session as `ProviderRequest.messages` — never as a shortened session, which providers persist — read through `transcriptOf`, the note the model is given in place of what left, and `session.context-trimmed` on the bus. Summarizing what leaves the window, and the Anthropic path's native compaction, are the spec's remaining scope | A long conversation narrows instead of dying — and, once the rest lands, remembers what it narrowed past |
 | 20 | [Discord channel: the second adapter](./20-channel-discord.md) | Not started — **Next** | A second surface, and the proof that `@stratusagent/channels` is a contract rather than a Slack-shaped hole |
 | 33 | [Backups: a nightly, model-free copy of a home somewhere else](./33-backups.md) | Not started — **Next** | `stratus backup` pushing souls, skills, memory, and schedules to a private git repository every night, with every known secret replaced before commit |
-| 34 | [iMessage channel: text your agent](./34-imessage-channel.md) | Contract prep shipped — `edit` optional, sender admission shared in `@stratusagent/channels`, an idempotency key on dispatch that also continues a keyed turn a crash left running, channels bound by trusted config, and `stratus channel set`; the adapter itself is next, in its own repository | Your agent, a text away: Messages.app on the daemon's Mac by default, or a hosted line |
 | 26 | [Fleet introspection: read-only tools for an agent watching the fleet](./26-fleet-introspection.md) | Not started — **Later** | `fleet.*` reads, so a fleet-watcher is a soul with a schedule rather than a subsystem |
 | 08 | [Deployment profiles: single-tenant VM, hosted multi-tenant, credential leases](./08-deployment-profiles.md) | Not started | Non-local deployments as configurations of the framework |
 
@@ -60,7 +59,6 @@ shape to be written against.
 
 - **[16](./16-templates.md) — templates.** The highest-leverage item on this page. It removes the onboarding cost *without weakening either gate*, which is the only acceptable way to remove it: a template answers both gates as one bundle somebody reviewed, rather than removing either gate.
 - **[17](./17-fleet-console.md) — fleet console.** The API and the dashboard both exist; this makes the dashboard the surface rather than a viewer, for the operator who is never going to run `stratus schedules` at a prompt.
-- **[34](./34-imessage-channel.md) — iMessage channel.** A roster reachable from a phone, and the contract's second consumer. Its contract prep shipped here; the adapter is built in its own repository against the published packages, which is the first test of the rule below that a plugin moves out once its contract stops moving.
 
 ### Next — compound what a fleet can do
 

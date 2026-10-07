@@ -789,4 +789,3 @@ the ecosystem non-empty on the day it lands.
 - [10 — proactive agents: schedules and outbound messages](../roadmap/10-proactive.md)
 - [11 — MCP bridge](../roadmap/11-mcp.md)
 - [20 — Discord channel: the second adapter](../roadmap/20-channel-discord.md)
-- [34 — iMessage channel](../roadmap/34-imessage-channel.md)
