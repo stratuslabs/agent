@@ -59,7 +59,17 @@ export interface CliEnvironment {
   installedVersionReader?: InstalledVersionReader;
   /** Loads `@stratusagent/gateway` for `stratus update` (tests observe when). Default a dynamic `import()`. */
   gatewayLoader?: () => Promise<typeof import('@stratusagent/gateway')>;
+  /**
+   * Runs the rest of `stratus update` — migrations, unit rewrite, restart —
+   * in a fresh process on the build npm just installed (tests). Resolves
+   * with its exit code, or `undefined` when it could not be started. The
+   * default spawns this CLI's own entrypoint.
+   */
+  updateContinuation?: (resume: UpdateResume) => Promise<number | undefined>;
 }
+
+/** Whether the daemon was running when the update that stopped it began. */
+export type UpdateResume = 'running' | 'stopped';
 
 /**
  * A dashboard session as it crosses the restart hand-off: structurally the
