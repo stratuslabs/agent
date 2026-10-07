@@ -2632,6 +2632,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     let kept: SlackThreadMessage[] = [];
     let omitted = 0;
     let more = false;
+    // The channel read stopped at its page bound short of enough messages.
+    let historyCut = false;
     let firstOfTail = 0;
     try {
       if (thread !== undefined) {
@@ -2710,6 +2712,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           recent.push(...(page.messages ?? []).filter(usable));
           cursor = page.has_more ? page.response_metadata?.next_cursor || undefined : undefined;
         } while (cursor && recent.length < EARLIER_CHANNEL_LIMIT && pages < EARLIER_CHANNEL_PAGES);
+        historyCut = cursor !== undefined && recent.length < EARLIER_CHANNEL_LIMIT;
         kept = recent.slice(0, EARLIER_CHANNEL_LIMIT).reverse();
       }
     } catch (error) {
@@ -2732,7 +2735,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const reasons: UnreadReasons = new Map(files.map((file) => [file, 'not-opened' as const]));
       let note = '';
       if (thread === undefined && index === 0) {
-        note = `[The ${kept.length} most recent messages in this channel before you were mentioned, oldest first:]\n`;
+        note = historyCut
+          ? `[The ${kept.length} messages found in this channel's recent history before you were mentioned, oldest first. Older history was not read; ask for what you need.]\n`
+          : `[The ${kept.length} most recent messages in this channel before you were mentioned, oldest first:]\n`;
       } else if (thread !== undefined && index === firstOfTail && omitted > 0 && !more) {
         note = `[${omitted} earlier messages in this thread are not shown.]\n`;
       }
@@ -2745,6 +2750,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           ...(message.user !== undefined ? { slackUser: message.user } : {}),
           [SENDER_TRUST_METADATA_KEY]: bot ? 'unknown' : senderTrustFor(connection.config, message.user as string),
         },
+      });
+    }
+    if (historyCut && entries.length === 0) {
+      entries.push({
+        message: '[None of this channel\'s recent history before you were mentioned could be shown, and older history was not read. Ask for what you need.]',
+        metadata: { channel: 'slack', slackChannel: channel, [SENDER_TRUST_METADATA_KEY]: 'unknown' },
       });
     }
     if (more) {

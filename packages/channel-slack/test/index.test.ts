@@ -8996,3 +8996,17 @@ test('a thread past the read bound whose first message is not shown still says t
   assert.match(earlier[0]!.message, /^\[This thread is too long to read here/);
   assert.equal(earlier[0]!.metadata?.slackThread, '1000.000001');
 });
+
+test('a channel read that stops at its page bound says older history was not read', async () => {
+  const strangers = Array.from({ length: 1500 }, (_, index) => ({ ts: `${5000 + index}.000001`, user: 'U-STRANGER', text: `noise ${index}` }));
+  const some = [{ ts: '4000.000001', user: 'U-DYLAN', text: 'old context' }, ...strangers.slice(0, 1200), { ts: '6999.000001', user: 'U-DYLAN', text: 'recent' }];
+  for (const [channel, expectFirst] of [[strangers, /^\[None of this channel's recent history/], [some, /Older history was not read; ask for what you need\.\]\nDylan: recent$/]] as const) {
+    const { socket, gateway, adapter } = threadAdapter([], { principals: ['U-DYLAN'], admit: 'principals' }, { channel: [...channel], pageSize: 100 });
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> what now?', { ts: '9000.1' }));
+    await adapter.stop();
+    const earlier = gateway.dispatches[0]?.earlier ?? [];
+    assert.equal(earlier.length, 1);
+    assert.match(earlier[0]!.message, expectFirst);
+  }
+});
