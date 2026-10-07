@@ -48,7 +48,7 @@ From a checkout of the release you want to run:
 
 ```bash
 git clone https://github.com/stratuslabs/agent && cd agent
-git checkout v0.11.6                        # the release tag you want
+git checkout v0.11.7                        # the release tag you want
 cd deploy/docker
 cp stratusd.env.example stratusd.env && chmod 600 stratusd.env
 $EDITOR stratusd.env                        # a provider, and its key — see below
@@ -300,8 +300,8 @@ server:
    it holds the home, before it opens a store.
 
    ```bash
-   docker tag stratusd:slim stratusd:v0.11.6    # the image you are leaving, for a rollback
-   git fetch --tags && git checkout v0.11.7
+   docker tag stratusd:slim stratusd:v0.11.7    # the image you are leaving, for a rollback
+   git fetch --tags && git checkout v0.11.8
    cd deploy/docker && docker compose up -d --build --wait
    docker compose exec stratusd stratus health
    docker compose logs stratusd | grep 'state migration'
