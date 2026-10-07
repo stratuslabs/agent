@@ -2619,7 +2619,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (message.ts === undefined || !(Number(message.ts) < Number(before))) {
         return false;
       }
-      if ((message.text ?? '').trim().length === 0 && (message.files ?? []).length === 0) {
+      // The agent's own mention is stripped when the message is shown, so
+      // a bare ping is as empty as no text, and takes no slot.
+      const text = (message.text ?? '').replaceAll(`<@${connection.botUserId}>`, '').trim();
+      if (text.length === 0 && (message.files ?? []).length === 0) {
         return false;
       }
       if (message.bot_id !== undefined || message.subtype === 'bot_message') {

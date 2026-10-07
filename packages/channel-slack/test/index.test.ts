@@ -8876,6 +8876,22 @@ test('a top-level mention opens with the channel\'s most recent messages, not a 
   ]);
 });
 
+test('a bare ping of the agent takes no place among the earlier messages', async () => {
+  const channel = [
+    { ts: '590.1', user: 'U-DYLAN', text: 'prod is https://example.test' },
+    { ts: '590.2', user: 'U-DYLAN', text: '<@B-AVA>' },
+    { ts: '590.3', user: 'U-DYLAN', text: ' <@B-AVA> ' },
+  ];
+  const { socket, gateway, adapter } = threadAdapter(EARLIER_THREAD, {}, { channel });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> what is prod?', { ts: '600.1' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches[0]?.earlier?.map((entry) => entry.message), [
+    '[The 1 most recent messages in this channel before you were mentioned, oldest first:]\nDylan: prod is https://example.test',
+  ]);
+});
+
 test('messages that will not be shown never crowd out ones that will', async () => {
   // A principal's reply, then 45 from an unlisted sender under admit: principals.
   const thread = [
