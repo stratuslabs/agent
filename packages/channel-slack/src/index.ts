@@ -2747,8 +2747,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         },
       });
     }
-    if (more && entries.length > 0) {
-      entries[entries.length - 1]!.message += '\n[This thread is too long to read here: the replies after its first message are not shown. Ask for what you need.]';
+    if (more) {
+      // With no first message to show (unusable, or from someone the room
+      // does not admit), the notice stands alone: an empty backfill would
+      // read as a thread with nothing before the mention. It has no speaker,
+      // so it carries the least trust rather than anyone's.
+      const notice = '[This thread is too long to read here: the replies after its first message are not shown. Ask for what you need.]';
+      if (entries.length > 0) {
+        entries[entries.length - 1]!.message += `\n${notice}`;
+      } else {
+        entries.push({
+          message: notice,
+          metadata: { channel: 'slack', slackChannel: channel, ...(thread !== undefined ? { slackThread: thread } : {}), [SENDER_TRUST_METADATA_KEY]: 'unknown' },
+        });
+      }
     }
     return entries;
   };

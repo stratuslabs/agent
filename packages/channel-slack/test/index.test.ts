@@ -8979,3 +8979,20 @@ test('a thread past the read bound shows its parent and says the rest was not re
   assert.equal(earlier.length, 1);
   assert.match(earlier[0]!.message, /^Dylan: message 1\n\[This thread is too long to read here/);
 });
+
+test('a thread past the read bound whose first message is not shown still says the rest was not read', async () => {
+  const huge = [
+    { ts: '1000.000001', user: 'U-STRANGER', text: 'parent from someone unlisted' },
+    ...Array.from({ length: 4099 }, (_, index) => ({ ts: `${1001 + index}.000001`, user: 'U-DYLAN', text: `message ${index + 2}` })),
+  ];
+  const { socket, gateway, adapter, reads } = threadAdapter(huge, { principals: ['U-DYLAN'], admit: 'principals' }, { pageSize: 200 });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and?', { ts: '9999.000001', thread_ts: '1000.000001' }));
+  await adapter.stop();
+
+  assert.equal(reads.length, 20);
+  const earlier = gateway.dispatches[0]?.earlier ?? [];
+  assert.equal(earlier.length, 1);
+  assert.match(earlier[0]!.message, /^\[This thread is too long to read here/);
+  assert.equal(earlier[0]!.metadata?.slackThread, '1000.000001');
+});
