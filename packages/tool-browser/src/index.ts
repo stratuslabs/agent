@@ -1,8 +1,9 @@
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
   originOf,
+  IMAGE_ATTACHMENT_MAX_BYTES,
   type AgentWorkspaces,
   type JsonObject,
   type JsonValue,
@@ -449,6 +450,13 @@ const createTools = (
       let shown: JsonObject = { shown: false, reason: 'This runtime cannot show images to the model.' };
       if (context?.attachImage) {
         try {
+          // Sized before it is read: a full-page capture of a long page can
+          // run to tens of megabytes, and encoding that only to refuse it
+          // is a memory spike for nothing.
+          const { size } = await stat(target);
+          if (size > IMAGE_ATTACHMENT_MAX_BYTES) {
+            throw new Error(`The screenshot is ${size} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit for one image; try without fullPage.`);
+          }
           context.attachImage({ mediaType: 'image/png', data: (await readFile(target)).toString('base64'), name: path.basename(target) });
           shown = { shown: true };
         } catch (error) {
