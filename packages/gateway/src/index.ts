@@ -46,6 +46,7 @@ import {
   type Executor,
   type ExecutorContribution,
   type ImageAttachment,
+  type ObserveEntry,
   type JsonObject,
   type MemoryStoreContribution,
   type ProviderContribution,
@@ -676,6 +677,13 @@ export interface DispatchInput {
    * nothing; omitted, the turn is one somebody asked for.
    */
   addressed?: boolean;
+  /**
+   * What was said before this message that the agent never heard — see
+   * `RunInput.earlier` in `@stratusagent/core`. Used only when this
+   * dispatch creates the session; a session that already exists ignores
+   * it, so a caller that cannot tell which case it is in may always send it.
+   */
+  earlier?: ObserveEntry[];
   metadata?: JsonObject;
   signal?: AbortSignal;
   /**
@@ -2951,6 +2959,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
         ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
         ...(hostedLoop ? { hostedLoop } : {}),
+        ...(input.earlier !== undefined && input.earlier.length > 0 ? { earlier: input.earlier } : {}),
         metadata,
         runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
         signal,

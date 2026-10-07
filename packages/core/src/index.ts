@@ -5570,6 +5570,18 @@ export interface RunInput {
    * it resolved for the turn; the runner only records it.
    */
   hostedLoop?: boolean;
+  /**
+   * What was said in the conversation before this message, oldest first,
+   * that the agent never heard — a thread it is mentioned into partway.
+   * Stored ahead of the opening message exactly as `observe` stores an
+   * overheard one (`overheard`, `observed`, no turn run on it), and each
+   * entry's metadata is read for its speaker's trust: the session starts
+   * at the least trusted of everyone it holds, so a principal's mention
+   * cannot carry a stranger's earlier words in under the principal's
+   * label. Only `run` reads it — a session that already exists heard
+   * what it heard, and `resume` has no use for it.
+   */
+  earlier?: ObserveEntry[];
   metadata?: JsonObject;
   /**
    * What the host can say about how this agent is run, rendered as the
@@ -5609,6 +5621,14 @@ export interface ResumeInput {
   runtime?: AgentRuntimeContext;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
   signal?: AbortSignal;
+}
+
+/** One message heard without a turn run on it — see `RunInput.earlier`. */
+export interface ObserveEntry {
+  /** What was said, speaker included — see `ObserveInput.message`. */
+  message: string;
+  /** Read for the speaker's trust (`SENDER_TRUST_METADATA_KEY`); never merged. */
+  metadata?: JsonObject;
 }
 
 export interface ObserveInput {
@@ -5930,11 +5950,26 @@ export class AgentRunner {
     // and kept out of the persisted metadata, where a later reader would
     // take the first sender's label for every turn that follows.
     const { [SENDER_TRUST_METADATA_KEY]: _sender, ...persisted } = input.metadata ?? {};
-    const senderTrust = senderTrustOf(input.metadata);
+    const earlier = input.earlier ?? [];
+    // Everyone whose words open the transcript, not only the one who
+    // asked: see `RunInput.earlier`.
+    const senderTrust = earlier.reduce<TrustLevel>(
+      (lowest, entry) => leastTrusted(lowest, senderTrustOf(entry.metadata)),
+      senderTrustOf(input.metadata),
+    );
+    const createdAt = new Date().toISOString();
+    const heard: Message[] = earlier.map((entry, index) => ({
+      id: `${input.sessionId}:user:${index + 1}`,
+      role: 'user',
+      content: entry.message,
+      createdAt,
+      overheard: true,
+      observed: true,
+    }));
     // The first stored turn is held to the window like every later one:
     // a one-shot session is a row too.
     const opening: Message = {
-      id: `${input.sessionId}:user:1`,
+      id: `${input.sessionId}:user:${heard.length + 1}`,
       role: 'user',
       content: input.userMessage,
       createdAt: new Date().toISOString(),
@@ -5948,7 +5983,7 @@ export class AgentRunner {
       id: input.sessionId,
       agent: input.agent,
       status: 'running',
-      messages: [opening],
+      messages: [...heard, opening],
       // Labelled from the first write, whatever the dispatching surface
       // put in `metadata` under this key: the label is the runner's to
       // write, and a fresh session starts at the top of the lattice lowered
