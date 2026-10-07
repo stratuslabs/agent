@@ -264,6 +264,11 @@ stratus update --check    # report all of it, change nothing (exits 1 when
                           # something is actionable, for scripts and cron)
 ```
 
+(It manages the npm install and the user service that `stratus service
+install` wrote. A Docker image or a system unit is upgraded by replacing the
+image or the packages instead — [Deployment](./deployment.md#upgrade) has
+both.)
+
 The service stop comes first so no daemon holds a session database while
 state changes, and the unit rewrite is the step nothing else performs: the
 unit runs the daemon by **absolute paths** (see

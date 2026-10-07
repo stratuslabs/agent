@@ -125,6 +125,7 @@ export const serveArgv = (command: ParsedServeCommand): string[] => [
   ...(command.approvals !== undefined ? ['--approvals', command.approvals] : []),
   ...(command.events ? [] : ['--no-events']),
   ...(command.logToFile === false ? ['--no-log-file'] : []),
+  ...(command.logFormat !== undefined ? ['--log-format', command.logFormat] : []),
   ...(command.api === false ? ['--no-api'] : command.api === true ? ['--api'] : []),
   ...(command.apiPort !== undefined ? ['--api-port', String(command.apiPort)] : []),
   ...(command.apiHost !== undefined ? ['--api-host', command.apiHost] : []),
@@ -241,7 +242,12 @@ export const superviseRestarts = async (
   let handoff = first;
   let result: RespawnResult;
   do {
-    writeLine(streams.stdout, 'Restarting stratusd.');
+    // Not a log record, so not said at all under `--log-format json`: that
+    // stdout is parsed line by line, and the daemon being replaced has
+    // already logged the restart as a record of its own.
+    if (command.logFormat !== 'json') {
+      writeLine(streams.stdout, 'Restarting stratusd.');
+    }
     result = await respawn(serveArgv(command), handoff);
     handoff = {
       ...(result.boundApiPort !== undefined || handoff.boundApiPort !== undefined

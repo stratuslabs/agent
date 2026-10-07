@@ -159,6 +159,7 @@ When a stored key "isn't found", check in this order:
   - A restart is needed after a change to `plugins` (a plugin's `env` included), `approvals`, `api`, `principals`, `slack`, `maxTurns`, `executor`, or `memoryStore`, and after new channel secrets (Slack's tokens or a channel plugin's).
   - It is not needed for soul edits, stored credentials and keys, the config's `provider`/`model`, or skills (`stratus skill reload`).
   - `stratus update` stops and starts the service itself. Only a daemon someone started with `stratus serve` needs restarting by hand.
+- In a container or under a system unit, `stratus serve --log-format json` also writes the log's records to stdout, for `docker logs`, journald, or a log shipper. `stratus health` is the probe.
 - **`stratus logs`** (`-f` to follow, `--agent`, `--session`) reads the structured log. It records that tools ran and sessions finished, never prompts or replies. One exception: a failed session keeps the provider's error text, so skim a log before sharing it.
   - A daemon that fails *before* it starts serving writes nothing there. Its error is in `~/.stratus/logs/stratusd.err.log` on macOS, in `journalctl --user-unit=stratusd.service` on Linux, or on the terminal that ran `stratus serve`.
 - **The control API** is a separate install, `@stratusagent/control-api`, serving `/api/v1` on `127.0.0.1:4123`. The web dashboard is another, `@stratusagent/dashboard`, opened with `stratus dashboard`, which starts a daemon if none is running.
@@ -182,6 +183,7 @@ When a stored key "isn't found", check in this order:
 | `stratus service install\|uninstall\|start\|stop\|status` | Keep the daemon running as a background service |
 | `stratus restart` | Announced drain-and-restart of the running daemon |
 | `stratus logs` | Read the daemon's log |
+| `stratus health` | Whether the running daemon is serving: exit 0 if so, for a container healthcheck or a probe |
 | `stratus doctor` | What a run would use, and why |
 | `stratus update` | Update Stratus and its companion packages (`--check` to look first) |
 | `stratus dashboard` | Open the web dashboard with a one-time sign-in link |

@@ -18,6 +18,7 @@ stratus run --prompt "use the echo tool" --format json
 stratus serve                          # stratusd: the whole roster, always on; exits 78 on a config it cannot load
 stratus serve --idle-timeout 120 --no-events
 stratus serve --approvals remote       # ask a human in Slack instead of refusing
+stratus serve --log-format json        # the log's records as JSON lines on stdout, for docker logs / journald
 stratus service install                # keep stratusd running under launchd/systemd
 stratus service status                 # asks the service manager; exits non-zero when not running
 stratus service start
@@ -42,6 +43,8 @@ stratus skill reload                   # a running daemon re-reads ~/.stratus/sk
 stratus plugins                        # installed → enabled → granted → what approvals does with it (also: stratus plugin list)
 stratus plugins --format json          # the same chain as data
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
+stratus health                         # is the running daemon serving? one line, exit 0/1 — for health checks
+stratus health --format json           # the daemon's /health answer as data
 printf %s "$KEY" | stratus credential set search.apiKey   # store a named credential (value from stdin, never a flag)
 stratus credential set search.apiKey --agent blair       # one agent's own key, over the shared one
 stratus credentials                    # stored names, never values (also: stratus credential list)
@@ -85,6 +88,7 @@ stratus dashboard                      # local browser dashboard
 | `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
 | `channel set`, `channels`, `channel remove` | [Extending](../guides/extending.md#channels), [Slack](../guides/slack.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
+| `health` | [Deployment](../guides/deployment.md#health-checks) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `grants`, `grants revoke` | [Approvals](../guides/approvals.md#standing-grants) |
 | `memory list`, `memory search`, `memory audit`, `memory forget` | [Memory](../concepts/memory.md#searching-it-yourself) — every `memory` subcommand works the built-in store, and refuses against a fleet whose config selects another |
@@ -113,11 +117,12 @@ stratus dashboard                      # local browser dashboard
 | `--idle-timeout` | `stratus serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |
 | `--no-log-file` | `stratus serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
+| `--log-format` | `stratus serve`: `text` (default) — human lines on stdout — or `json`: every record written to the log file, also written to stdout as one JSON line, and nothing else there. For `docker logs`, journald, and log shippers; see [Logs](../guides/logs.md#logs-on-stdout-for-a-container-or-journald) |
 | `--no-api` | `stratus serve`: do not serve the control API |
 | `--api` | `stratus serve`: serve it even where the config says `api.enabled: false` (what `stratus dashboard` asks of the daemon it starts) |
 | `--api-host` | `stratus serve`: control API interface (default `127.0.0.1`) |
 | `--api-port` | `stratus serve`: control API port (default `4123`; `0` picks any free port). A port the daemon cannot bind stops it — it does not serve without the API |
-| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`, `grants`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names; `grants` reads the files instead when none is serving) |
+| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`, `grants`, `health`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names; `grants` reads the files instead when none is serving) |
 | `--tool`, `--scope`, `--origin` | `stratus grants revoke`: which grant goes — exactly one of them |
 | `--trust <level>` | `stratus memory list`: show only entries at this label. `stratus memory reassert`: the label to record — `user`, `agent`, `unknown`, or `external` |
 | `--all-unknown` | `stratus memory reassert`: every live entry with no recorded origin, the upgrade case; ids may be given as well |

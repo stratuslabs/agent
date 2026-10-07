@@ -1,0 +1,17 @@
+# The Docker build (deploy/docker/Dockerfile) installs and builds from
+# source inside the image, so nothing built or installed on the host belongs
+# in the context — a host's node_modules holds native binaries for the wrong
+# platform, and a stale dist/ would be packed as if it were this commit.
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.git
+.claude
+**/.DS_Store
+**/*.log
+**/*.tgz
+# Secrets an operator keeps next to the compose file. The image never needs
+# them; they reach the container through env_file at run time.
+deploy/docker/stratusd.env
+**/*.env
+!deploy/docker/stratusd.env.example
