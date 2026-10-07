@@ -8786,8 +8786,16 @@ const threadAdapter = (
   };
   (web.conversations as Record<string, unknown>).history = async (args: Record<string, unknown>) => {
     historyReads.push(args);
-    // Newest first, as Slack returns a channel.
-    return { messages: [...(options.channel ?? [])].reverse() };
+    // Newest first, a page at a time, as Slack returns a channel.
+    const newest = [...(options.channel ?? [])].reverse();
+    const size = options.pageSize ?? newest.length;
+    const from = args.cursor === undefined ? 0 : Number(args.cursor);
+    const next = from + size;
+    return {
+      messages: newest.slice(from, next),
+      has_more: next < newest.length,
+      response_metadata: { next_cursor: next < newest.length ? String(next) : '' },
+    };
   };
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'on it'));
   gateway.sessionRouting = async () => (options.exists ? { agentId: 'ava', metadata: {} } : undefined);
@@ -8923,4 +8931,22 @@ test('a long thread keeps its first message and the newest ones, and says what i
   assert.equal(earlier[0]?.message, 'Dylan: message 1');
   assert.equal(earlier[1]?.message, '[20 earlier messages in this thread are not shown.]\nDylan: message 22');
   assert.equal(earlier.at(-1)?.message, 'Dylan: message 60');
+});
+
+test('a channel read pages on until it has enough messages worth showing', async () => {
+  // The newest page is all joins; the context is on the page behind it.
+  const channel = [
+    ...Array.from({ length: 25 }, (_, index) => ({ ts: `400.${String(index + 1).padStart(3, '0')}`, user: 'U-DYLAN', text: `context ${index + 1}` })),
+    ...Array.from({ length: 30 }, (_, index) => ({ ts: `401.${String(index + 1).padStart(3, '0')}`, user: 'U-DYLAN', subtype: 'channel_join', text: 'joined' })),
+  ];
+  const { socket, gateway, adapter, historyReads } = threadAdapter([], {}, { channel, pageSize: 30 });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> what now?', { ts: '500.1' }));
+  await adapter.stop();
+
+  assert.equal(historyReads.length, 2);
+  const earlier = gateway.dispatches[0]?.earlier ?? [];
+  assert.equal(earlier.length, 20);
+  assert.match(earlier[0]!.message, /Dylan: context 6$/);
+  assert.equal(earlier.at(-1)?.message, 'Dylan: context 25');
 });

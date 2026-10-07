@@ -273,6 +273,8 @@ const EARLIER_THREAD_PAGES = 20;
  */
 const EARLIER_CHANNEL_LIMIT = 20;
 const EARLIER_CHANNEL_READ = 100;
+/** The most pages read to find them: 1,000 messages. */
+const EARLIER_CHANNEL_PAGES = 10;
 
 /** The slice of Slack's file object the adapter reads. */
 export interface SlackInboundFile {
@@ -421,8 +423,10 @@ export interface SlackWebLike {
      * mention opens a new conversation, so it holds what the channel was
      * just talking about — see `earlierContext`. Same scopes as `replies`.
      */
-    history?(args: { channel: string; latest?: string; inclusive?: boolean; limit?: number }): Promise<{
+    history?(args: { channel: string; latest?: string; inclusive?: boolean; limit?: number; cursor?: string }): Promise<{
       messages?: SlackThreadMessage[];
+      has_more?: boolean;
+      response_metadata?: { next_cursor?: string };
     }>;
   };
   users: {
@@ -2674,15 +2678,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         if (!history) {
           return [];
         }
-        // Newest first, one page: the most recent usable messages, put
-        // back in the order they were said.
-        const page = await history.call(connection.web.conversations, {
-          channel,
-          latest: before,
-          inclusive: false,
-          limit: EARLIER_CHANNEL_READ,
-        });
-        const recent = (page.messages ?? []).filter(usable);
+        // Newest first, paged until enough usable messages are found (joins
+        // and bots' chatter do not count against the limit), then put back
+        // in the order they were said.
+        const recent: SlackThreadMessage[] = [];
+        let cursor: string | undefined;
+        let pages = 0;
+        do {
+          const page: { messages?: SlackThreadMessage[]; has_more?: boolean; response_metadata?: { next_cursor?: string } } = await history.call(connection.web.conversations, {
+            channel,
+            latest: before,
+            inclusive: false,
+            limit: EARLIER_CHANNEL_READ,
+            ...(cursor ? { cursor } : {}),
+          });
+          pages += 1;
+          recent.push(...(page.messages ?? []).filter(usable));
+          cursor = page.has_more ? page.response_metadata?.next_cursor || undefined : undefined;
+        } while (cursor && recent.length < EARLIER_CHANNEL_LIMIT && pages < EARLIER_CHANNEL_PAGES);
         kept = recent.slice(0, EARLIER_CHANNEL_LIMIT).reverse();
       }
     } catch (error) {
