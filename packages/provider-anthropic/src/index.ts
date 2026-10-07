@@ -28,7 +28,36 @@ import {
   promptTextOf,
 } from '@stratusagent/core';
 
-export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5';
+export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
+
+/**
+ * Models whose thinking blocks are bound to the conversation that produced
+ * them ("preserved thinking"): the API checks that the `system` prompt, the
+ * `tools`, and every message before a replayed block are byte-identical to
+ * when it was made, and for accounts created on or after 2026-08-31 a
+ * mismatch is a 400 rather than a quiet drop. Claude Mythos 5.1 binds to the
+ * model only, so it is not here.
+ */
+const PREFIX_BOUND_THINKING_MODEL = /^claude-(?:opus-5-5|fable-5-1|sonnet-5-5)(?:$|[-@])/;
+
+/** Whether `model` binds its thinking blocks to the conversation prefix; see above. */
+const bindsThinkingToConversation = (model: string): boolean =>
+  PREFIX_BOUND_THINKING_MODEL.test(model.replace(/^anthropic\./, ''));
+
+/**
+ * What lets this provider replay thinking on those models without a 400:
+ * the API drops a block whose prefix changed — and every block after it —
+ * rather than refusing the request. This provider does edit the prefix, if
+ * rarely now: a remembered fact rewrites the system block, an oversized
+ * image is swapped for a note, a conversation that outgrows the model is
+ * trimmed. Losing that reasoning for one turn is the cost; a conversation
+ * that stops answering is the alternative.
+ */
+const THINKING_BINDING_BETA = 'thinking-binding-controls-2026-08-01';
+const DROP_MISMATCHED_THINKING = {
+  type: 'adaptive',
+  block_binding: { prefix_mismatch_behavior: 'drop_block' },
+} as const;
 /**
  * The per-turn output cap the API requires, when nothing else names one.
  *
@@ -74,7 +103,7 @@ export interface AnthropicProviderConfig {
    * token minted from a Claude Pro/Max subscription (`claude setup-token`).
    */
   authToken?: string;
-  /** Defaults to claude-opus-5, Anthropic's most capable generally available model. */
+  /** Defaults to claude-opus-5-5, the current Opus. */
   model?: string;
   name?: string;
   /** Response token cap per turn (Anthropic requires one). Default 16000. */
@@ -83,8 +112,10 @@ export interface AnthropicProviderConfig {
   systemPrompt?: string;
   baseUrl?: string;
   /**
-   * Claude Opus 5 thinks adaptively by default. Pass 'disabled' to turn
-   * thinking off (e.g. for older models or latency-sensitive runs).
+   * Current Claude models think adaptively by default. Pass 'disabled' to
+   * turn thinking off on a model that still accepts it (Claude Opus 5 at
+   * `high` effort or below, and older models). Claude Opus 5.5, Fable 5.1
+   * and Sonnet 5.5 refuse it, so the provider refuses it for them up front.
    */
   thinking?: 'default' | 'disabled';
   /**
@@ -612,6 +643,10 @@ export const createAnthropicProvider = ({
   if (!apiKey && !authToken) {
     throw new Error('The Anthropic provider needs an apiKey or an authToken.');
   }
+  const prefixBound = bindsThinkingToConversation(model);
+  if (prefixBound && thinking === 'disabled') {
+    throw new Error(`${model} always thinks and rejects disabled thinking. Leave thinking at its default for this model.`);
+  }
 
   const client = new Anthropic({
     // Explicit nulls stop the SDK from falling back to ambient env vars.
@@ -626,7 +661,12 @@ export const createAnthropicProvider = ({
   // instance: the alternative is one wasted round trip per turn rather than
   // one per process. Never promoted back — a model does not grow the feature
   // mid-run, and retrying would reintroduce the cost this remembers away.
-  let memoryAtTailSupported = true;
+  //
+  // Never on a model that binds thinking to the conversation, though: the
+  // tail message is rebuilt for every request and gone from the next, which
+  // edits the history every block after it was made in. There memory rides
+  // in the system block, which changes only when a memory does.
+  let memoryAtTailSupported = !prefixBound;
 
   return {
     name,
@@ -657,8 +697,9 @@ export const createAnthropicProvider = ({
           ...(prompt.system.length > 0 ? { system: prompt.system } : {}),
           ...(prompt.tools.length > 0 ? { tools: prompt.tools } : {}),
           ...(prompt.tools.length > 0 && request.toolChoice === 'none' ? { tool_choice: { type: 'none' as const } } : {}),
-          // Claude Opus 5 thinks adaptively when `thinking` is omitted.
+          // Current models think adaptively when `thinking` is omitted.
           ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
+          ...(prefixBound ? { thinking: DROP_MISMATCHED_THINKING } : {}),
           messages: prompt.memoryMessage === undefined
             ? messages
             : [...messages, { role: 'system' as const, content: prompt.memoryMessage }],
@@ -691,7 +732,12 @@ export const createAnthropicProvider = ({
       }
       // The turn's abort signal cancels the underlying HTTP request — the
       // kernel contract is that aborting stops the work, not just the wait.
-      const requestOptions = request.signal ? { signal: request.signal } : undefined;
+      const requestOptions = request.signal || prefixBound
+        ? {
+            ...(request.signal ? { signal: request.signal } : {}),
+            ...(prefixBound ? { headers: { 'anthropic-beta': THINKING_BINDING_BETA } } : {}),
+          }
+        : undefined;
 
       const send = async (attempt: typeof params) => {
         if (request.onDelta) {

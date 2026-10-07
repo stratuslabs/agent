@@ -41,7 +41,7 @@ import {
 // and the documented import paths keep working.
 export { bridgedToolNames, hasHostedToolSideEffects, markHostedToolSideEffects };
 
-export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5';
+export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5-5';
 
 
 const MCP_SERVER_NAME = 'stratus';
@@ -278,7 +278,7 @@ export interface ClaudeCodeProviderConfig {
    * subscription. Omit to use the machine's existing Claude Code sign-in.
    */
   authToken?: string;
-  /** Defaults to claude-opus-5. */
+  /** Defaults to claude-opus-5-5. */
   model?: string;
   name?: string;
   /** Extra system prompt, rendered before the agent's own persona. */

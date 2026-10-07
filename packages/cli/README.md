@@ -72,7 +72,7 @@ Full reference with every subcommand:
 | --- | --- |
 | `--soul <file>` | Run as the agent defined by a soul file (also `STRATUS_SOUL` / config `soul` key) |
 | `--provider` | `anthropic`, `openai`, `codex`, or `demo` (offline, no account) |
-| `--model` | Model for real providers (anthropic default: `claude-opus-5`, codex default: `gpt-5.5`) |
+| `--model` | Model for real providers (anthropic default: `claude-opus-5-5`, codex default: `gpt-5.5`) |
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |
 | `--approvals` | `run`/`chat`: `always`, `ask`, or `never`. `serve`: `headless` (refuse gated calls) or `remote` (ask in Slack) |

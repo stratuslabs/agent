@@ -15,7 +15,7 @@ Stratus Agent — what a run would use right now
 
   provider  anthropic
             from ~/.stratus/agents/blair.md (soul frontmatter)
-  model     claude-opus-5
+  model     claude-opus-5-5
             from ~/.stratus/agents/blair.md (soul frontmatter)
   soul      ~/.stratus/agents/blair.md
             from ~/.stratus/config.json

@@ -46,6 +46,12 @@ const createMockFetch = (responses: Array<Record<string, unknown>>) => {
   return { fetchImpl, requests };
 };
 
+/**
+ * A model that takes memory at the tail. The default no longer does: it binds
+ * thinking to the conversation, and a tail rebuilt per request edits it.
+ */
+const TAIL_MEMORY_MODEL = 'claude-opus-5';
+
 const apiMessage = (content: unknown[], stopReason = 'end_turn') => ({
   id: 'msg_test',
   type: 'message',
@@ -85,7 +91,7 @@ test('generate sends the persona in the system block and memory at the tail', as
     apiMessage([{ type: 'text', text: 'Hi! Lovely to meet you.' }]),
   ]);
 
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const provider = createAnthropicProvider({ model: TAIL_MEMORY_MODEL, apiKey: 'test-key', fetch: fetchImpl });
   const memory: MemoryEntry[] = [
     {
       id: 'ava:memory:1',
@@ -102,7 +108,7 @@ test('generate sends the persona in the system block and memory at the tail', as
   assert.deepEqual(response.parts[0], { type: 'text', text: 'Hi! Lovely to meet you.' });
 
   const body = requests[0]!.body;
-  assert.equal(body.model, DEFAULT_ANTHROPIC_MODEL);
+  assert.equal(body.model, TAIL_MEMORY_MODEL);
   // The stable sections travel as one system block, joined exactly as they
   // always were, carrying the single cache breakpoint.
   assert.match(body.system[0].text, /You are Ava\. Be warm and concise\./);
@@ -115,6 +121,41 @@ test('generate sends the persona in the system block and memory at the tail', as
     { role: 'system', content: 'Things you remember from previous conversations (your own long-term memory):\n- The user prefers short answers.' },
   ]);
   assert.equal(requests[0]!.headers['x-api-key'], 'test-key');
+});
+
+test('the default model keeps the replayed history unedited: memory in the system block, mismatched thinking dropped', async () => {
+  // Claude Opus 5.5 binds each thinking block to the conversation before it,
+  // and for new accounts an edit there is a 400. A memory section rebuilt at
+  // the tail of every request and gone from the next is such an edit, so it
+  // rides in the system block, which changes only when a memory does; and
+  // what does still change is dropped rather than refused.
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hi!' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const memory: MemoryEntry[] = [
+    { id: 'ava:memory:1', agentId: 'ava', content: 'The user prefers short answers.', createdAt: new Date().toISOString(), trust: 'agent' },
+  ];
+  await provider.generate({ session: createSession(), memory });
+
+  const { body, headers } = requests[0]!;
+  assert.equal(body.model, 'claude-opus-5-5');
+  assert.match(body.system[0].text, /The user prefers short answers\./);
+  assert.deepEqual(body.messages, [{ role: 'user', content: [{ type: 'text', text: 'Hello there' }] }]);
+  assert.deepEqual(body.thinking, { type: 'adaptive', block_binding: { prefix_mismatch_behavior: 'drop_block' } });
+  assert.match(headers['anthropic-beta'] ?? '', /thinking-binding-controls-2026-08-01/);
+});
+
+test('a model that binds thinking refuses disabled thinking up front, and an older one still sends neither', async () => {
+  for (const model of ['claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5-5']) {
+    assert.throws(
+      () => createAnthropicProvider({ apiKey: 'test-key', model, thinking: 'disabled' }),
+      /always thinks and rejects disabled thinking/,
+    );
+  }
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hi!' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', model: 'claude-haiku-4-5', fetch: fetchImpl });
+  await provider.generate({ session: createSession() });
+  assert.equal(requests[0]!.body.thinking, undefined);
+  assert.equal(requests[0]!.headers['anthropic-beta'], undefined);
 });
 
 test('generate advertises tools with sanitized wire names and maps calls back', async () => {
@@ -981,7 +1022,7 @@ test('a memory write leaves the cached head byte-identical', async () => {
     apiMessage([{ type: 'text', text: 'One.' }]),
     apiMessage([{ type: 'text', text: 'Two.' }]),
   ]);
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const provider = createAnthropicProvider({ model: TAIL_MEMORY_MODEL, apiKey: 'test-key', fetch: fetchImpl });
   const entry = (content: string): MemoryEntry => ({
     id: `ava:memory:${content.length}`,
     agentId: 'ava',
@@ -1006,7 +1047,7 @@ test('a memory write leaves the cached head byte-identical', async () => {
 
 test('all three memory blocks reach the tail as exactly one memory section', async () => {
   const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'One.' }])]);
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const provider = createAnthropicProvider({ model: TAIL_MEMORY_MODEL, apiKey: 'test-key', fetch: fetchImpl });
   const entry = (id: string, content: string): MemoryEntry => ({
     id,
     agentId: 'ava',
@@ -1097,7 +1138,7 @@ test('a model that rejects a system message falls back, and does not pay for it 
     });
   }) as typeof fetch;
 
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, maxTokens: 64 });
+  const provider = createAnthropicProvider({ model: TAIL_MEMORY_MODEL, apiKey: 'test-key', fetch: fetchImpl, maxTokens: 64 });
   const memory: MemoryEntry[] = [
     { id: 'm1', agentId: 'ava', content: 'Remembered.', createdAt: new Date().toISOString() },
   ];
@@ -1205,7 +1246,7 @@ test('a retry does not carry the previous attempt\'s tool breakpoint', async () 
     });
   }) as typeof fetch;
 
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const provider = createAnthropicProvider({ model: TAIL_MEMORY_MODEL, apiKey: 'test-key', fetch: fetchImpl });
   await provider.generate({
     session: createSession({ agent: { id: 'bare', name: 'Bare' } }),
     tools: [{ name: 'a.one', description: 'One.', parameters: { type: 'object', properties: {} } }],

@@ -62,7 +62,7 @@ structured parts, prose for the personality:
 ---
 name: Blair
 provider: anthropic
-model: claude-opus-5
+model: claude-opus-5-5
 tools: [fs.read, fs.search, web.fetch, memory.*]
 skills: [code-review]
 listens: judge

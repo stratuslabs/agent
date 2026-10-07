@@ -7,7 +7,7 @@ import { createClaudeCodeProvider } from '@stratusagent/provider-claude-code';
 
 const provider = createClaudeCodeProvider({
   authToken: process.env.CLAUDE_CODE_OAUTH_TOKEN, // from `claude setup-token`
-  model: 'claude-opus-5',                          // default
+  model: 'claude-opus-5-5',                          // default
 });
 ```
 

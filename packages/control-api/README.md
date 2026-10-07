@@ -361,7 +361,7 @@ order the calls completed.
 ```jsonc
 {
   "usage": [
-    { "turnId": "s-42:turn:1", "provider": "anthropic", "model": "claude-opus-5",
+    { "turnId": "s-42:turn:1", "provider": "anthropic", "model": "claude-opus-5-5",
       "inputTokens": 40, "outputTokens": 210, "cacheReadTokens": 9100, "cacheWriteTokens": 300 },
     { "turnId": "s-42:turn:2", "provider": "openai", "model": "gpt-5.5",
       "inputTokens": 12, "outputTokens": 88 }
