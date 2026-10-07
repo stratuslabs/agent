@@ -2355,6 +2355,9 @@ interface AgentConnection {
  * those were in it receives only `app_mention` and behaves as it always
  * did, which makes the workspace's own grant the switch.
  */
+/** Uncached author names one `message.read` looks up; the rest keep their id. */
+const READ_NAME_LOOKUPS = 10;
+
 export const createSlackChannelAdapter = (options: SlackAdapterOptions): ChannelAdapter => {
   const log = options.log ?? (() => {});
   const warn = options.warn ?? (() => {});
@@ -3060,6 +3063,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       raw.length = request.limit;
       more = true;
     }
+    // History rarely embeds profiles, so names mostly come from users.info.
+    // Cached names are free; at most READ_NAME_LOOKUPS uncached authors are
+    // looked up per read, together, and the rest keep their id, so a read of
+    // many strangers never waits through a rate limit one call at a time.
+    const lookups = new Map<string, Promise<string>>();
+    let fresh = 0;
+    for (const message of raw) {
+      const user = message.user;
+      if (!user || lookups.has(user) || message.user_profile?.display_name || message.user_profile?.real_name) {
+        continue;
+      }
+      const cached = displayNames.get(`${connection.teamId}:${user}`);
+      if (cached) {
+        lookups.set(user, Promise.resolve(cached));
+      } else if (fresh < READ_NAME_LOOKUPS) {
+        fresh += 1;
+        lookups.set(user, displayNameFor(connection, user));
+      }
+    }
+    const names = new Map<string, string>();
+    for (const [user, name] of lookups) {
+      names.set(user, await name);
+    }
     const messages: ConversationMessage[] = [];
     for (const message of raw) {
       if (!message.ts) {
@@ -3070,7 +3096,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         || message.user_profile?.real_name
         || message.bot_profile?.name
         || message.username
-        || (message.user ? await displayNameFor(connection, message.user) : undefined);
+        || (message.user ? names.get(message.user) : undefined);
       const at = Number.parseFloat(message.ts);
       const files = (message.files ?? []).map((file) => file.name ?? file.title ?? file.id ?? 'file');
       messages.push({

@@ -8842,6 +8842,34 @@ test('readConversation returns plain text, not Slack markup, and names only prin
   await adapter.stop();
 });
 
+test('readConversation looks up a bounded number of uncached authors, together, and leaves the rest as ids', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-BUSY', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: Array.from({ length: 30 }, (_, index) => ({ ts: `${300 - index}.000001`, user: `U-P${index}`, text: `m${index}` })),
+  });
+  let looked = 0;
+  let inFlight = 0;
+  let peak = 0;
+  web.users.info = async ({ user }: { user: string }) => {
+    looked += 1;
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight -= 1;
+    return { user: { profile: { display_name: `Name ${user}` } } };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-BUSY', limit: 50 });
+  assert.equal(looked, 10);
+  assert.ok(peak > 1, 'the lookups overlap rather than run one at a time');
+  assert.equal(result.messages[0]?.authorName, 'Name U-P0');
+  assert.equal(result.messages[29]?.authorName, undefined);
+  assert.equal(result.messages[29]?.author, 'U-P29');
+  await adapter.stop();
+});
+
 test('readConversation refuses DMs and group DMs, even ones the app is in', async () => {
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('D-DYLAN', { is_im: true, is_member: true });
