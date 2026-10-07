@@ -1094,10 +1094,19 @@ export const workspaceRepairPending = async (env: StateEnvironment): Promise<boo
  * repairing the links it holds. Asked separately, that observation is lost
  * between the two awaits.
  */
-export const repairWorkspacesIfPending = async (env: StateEnvironment): Promise<string | undefined> => {
-  const linkRecordSeen = !(await pathIsFree(linkRecordPath(env)));
-  if (!linkRecordSeen && !(await surveyLegacyWorkspaces(env)).present) {
-    return undefined;
+export const repairWorkspacesIfPending = async (
+  env: StateEnvironment,
+  survey: (env: StateEnvironment) => Promise<{ present: boolean }> = surveyLegacyWorkspaces,
+): Promise<string | undefined> => {
+  let linkRecordSeen = !(await pathIsFree(linkRecordPath(env)));
+  if (!linkRecordSeen && !(await survey(env)).present) {
+    // The record may have been away only for the first look, renamed aside
+    // by a backup and restored while the survey ran. Ask again before
+    // skipping, so a returned record still gets its links repaired.
+    linkRecordSeen = !(await pathIsFree(linkRecordPath(env)));
+    if (!linkRecordSeen) {
+      return undefined;
+    }
   }
   return applyPerAgentWorkspaces(env, { linkRecordSeen });
 };

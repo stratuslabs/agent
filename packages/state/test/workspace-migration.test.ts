@@ -10,6 +10,7 @@ import { createFileLedger, LEDGER_FILENAME } from '@stratusagent/plugins';
 import {
   STATE_SCHEMA_VERSION,
   applyPerAgentWorkspaces,
+  repairWorkspacesIfPending,
   surveyLegacyWorkspaces,
   workspaceRepairPending,
   agentStateDirPath,
@@ -2057,6 +2058,30 @@ test('a link record the gate saw is asked for even once workspaces/ itself is go
   await rename(recordFile, `${recordFile}.bak`);
 
   await assert.rejects(applyPerAgentWorkspaces(env, { linkRecordSeen: true }), /workspace-links\.json could not be read/);
+});
+
+test('a link record restored while the gate surveys is still repaired', async () => {
+  // A backup has the record renamed aside for the gate's first look and
+  // restores it while the survey runs, in a home with no workspaces/ left
+  // and bea's new path taken by something else. Skipping on the first look
+  // would leave ava naming that unrelated workspace for the life of serve.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  await rm(legacyDir, { recursive: true });
+  await mkdir(agentWorkspacePath(env, 'bea'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'bea'), 'theirs.md'), 'not ava\'s');
+  await rename(recordFile, `${recordFile}.bak`);
+  const restoringSurvey = async (e: Parameters<typeof surveyLegacyWorkspaces>[0]) => {
+    const result = await surveyLegacyWorkspaces(e);
+    await rename(`${recordFile}.bak`, recordFile);
+    return result;
+  };
+
+  await repairWorkspacesIfPending(env, restoringSurvey);
+
+  assert.equal(await reachedFrom(env, 'ava'), path.join(legacyDir, 'bea'));
 });
 
 test('a link record survives the home being moved to another path', async () => {
