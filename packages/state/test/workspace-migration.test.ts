@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -2103,6 +2104,37 @@ test('a link record replaced while the pass runs is not overwritten with the sta
 
   await assert.rejects(applyPerAgentWorkspaces(env), /changed while this start was using it/);
   assert.equal(await readFile(recordFile, 'utf8'), replacement);
+});
+
+test('a link record swapped after the start first saw it is refused, not read in its place', async () => {
+  // A backup renames the record aside and puts a stale but valid one in
+  // its place while the pass runs. Read as the record, it would repair
+  // nothing the original holds.
+  const home = await newHome();
+  const legacyDir = await stoppedAtBea(home);
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  await rm(legacyDir, { recursive: true });
+  const seen = await lstat(recordFile);
+  const original = await readFile(recordFile, 'utf8');
+  await rename(recordFile, `${recordFile}.bak`);
+  await writeFile(recordFile, `${JSON.stringify({ links: {}, pending: { cid: 'workspaces/dee' }, moving: {} })}\n`);
+
+  await assert.rejects(
+    applyPerAgentWorkspaces(env, { linkRecordStamp: `${seen.dev}:${seen.ino}:${seen.ctimeMs}` }),
+    /replaced after this start first saw it/,
+  );
+  assert.equal(await readFile(`${recordFile}.bak`, 'utf8'), original);
+});
+
+test('a link record that is not a regular file is refused without being opened', async () => {
+  // A FIFO would block the open for good, holding the home with it.
+  const home = await newHome();
+  const env = { homeDir: home };
+  const recordFile = path.join(home, '.stratus', 'workspace-links.json');
+  execFileSync('mkfifo', [recordFile]);
+
+  await assert.rejects(applyPerAgentWorkspaces(env), /not a regular file/);
 });
 
 test('a link record survives the home being moved to another path', async () => {

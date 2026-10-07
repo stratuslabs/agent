@@ -1098,17 +1098,20 @@ export const repairWorkspacesIfPending = async (
   env: StateEnvironment,
   survey: (env: StateEnvironment) => Promise<{ present: boolean }> = surveyLegacyWorkspaces,
 ): Promise<string | undefined> => {
-  let linkRecordSeen = !(await pathIsFree(linkRecordPath(env)));
-  if (!linkRecordSeen && !(await survey(env)).present) {
+  // The record's stamp, not just that it was there: the pass then reads
+  // only this record, and one swapped in between, a stale copy a backup put
+  // in place for a moment, is refused rather than taken for it.
+  let linkRecordStamp = await stampOfLinkRecord(linkRecordPath(env));
+  if (linkRecordStamp === null && !(await survey(env)).present) {
     // The record may have been away only for the first look, renamed aside
     // by a backup and restored while the survey ran. Ask again before
     // skipping, so a returned record still gets its links repaired.
-    linkRecordSeen = !(await pathIsFree(linkRecordPath(env)));
-    if (!linkRecordSeen) {
+    linkRecordStamp = await stampOfLinkRecord(linkRecordPath(env));
+    if (linkRecordStamp === null) {
       return undefined;
     }
   }
-  return applyPerAgentWorkspaces(env, { linkRecordSeen });
+  return applyPerAgentWorkspaces(env, linkRecordStamp === null ? {} : { linkRecordStamp });
 };
 
 /**
@@ -1279,7 +1282,11 @@ const inodeOf = (stats: { dev: number; ino: number }): string => `${stats.dev}:$
 const stampOf = (stats: { dev: number; ino: number; ctimeMs: number }): string =>
   `${inodeOf(stats)}:${stats.ctimeMs}`;
 
-const readLinkRecord = async (env: StateEnvironment, seenBefore: boolean): Promise<LinkRecord> => {
+const readLinkRecord = async (
+  env: StateEnvironment,
+  seenBefore: boolean,
+  expectedStamp?: string,
+): Promise<LinkRecord> => {
   const file = linkRecordPath(env);
   const unreadable = (reason: string): Error => new Error(
     `${file} could not be read (${reason}). It records which workspace links the upgrade move pointed `
@@ -1297,7 +1304,11 @@ const readLinkRecord = async (env: StateEnvironment, seenBefore: boolean): Promi
     // Derived state under the home is never read through a link.
     const stats = await lstat(file);
     seen = true;
-    if (!stats.isSymbolicLink()) {
+    if (!stats.isSymbolicLink() && !stats.isFile()) {
+      // Never opened: a FIFO here would block the open for a writer that
+      // never comes, and hang the start while it holds the home.
+      reason = 'it is not a regular file';
+    } else if (!stats.isSymbolicLink()) {
       // Read through a handle proven to be the entry just checked: replaced
       // in between, by a link or by another file, the name would hand over
       // bytes nobody vouched for, and a stale record makes an operator's
@@ -1326,6 +1337,9 @@ const readLinkRecord = async (env: StateEnvironment, seenBefore: boolean): Promi
   }
   if (raw === undefined || stamp === undefined) {
     throw unreadable(reason);
+  }
+  if (expectedStamp !== undefined && stamp !== expectedStamp) {
+    throw unreadable('it was replaced after this start first saw it');
   }
   let parsed: unknown;
   try {
@@ -1359,7 +1373,7 @@ const readLinkRecord = async (env: StateEnvironment, seenBefore: boolean): Promi
 /** A full sentence naming its own fix, so it is passed on as it is. */
 class LinkRecordChangedError extends Error {}
 
-const linkRecordStamp = async (file: string): Promise<string | null> => {
+const stampOfLinkRecord = async (file: string): Promise<string | null> => {
   try {
     return stampOf(await lstat(file));
   } catch (error) {
@@ -1373,7 +1387,7 @@ const linkRecordStamp = async (file: string): Promise<string | null> => {
 /** Replaced in one step, never rewritten in place, and removed once empty. */
 const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promise<void> => {
   const file = linkRecordPath(env);
-  if (await linkRecordStamp(file) !== record.stamp) {
+  if (await stampOfLinkRecord(file) !== record.stamp) {
     throw new LinkRecordChangedError(
       `${file} changed while this start was using it, so it was left as it is rather than overwritten with `
       + 'an older copy that may be missing entries. Start again to repair from what it holds now.',
@@ -1410,7 +1424,7 @@ const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promis
 
 export const applyPerAgentWorkspaces = async (
   env: StateEnvironment,
-  options: { linkRecordSeen?: boolean } = {},
+  options: { linkRecordSeen?: boolean; linkRecordStamp?: string } = {},
 ): Promise<string | undefined> => {
   // Whether the link record has been seen — by the caller's gate, or here,
   // first thing: once it has, gone when it is read is a rename aside rather
@@ -1420,7 +1434,10 @@ export const applyPerAgentWorkspaces = async (
   // a record renamed aside during that work would otherwise read as never
   // there. Nothing between here and the read removes it legitimately: only
   // this pass does, once it is empty.
-  let linkRecordSeen = options.linkRecordSeen === true || !(await pathIsFree(linkRecordPath(env)));
+  const firstStamp = options.linkRecordStamp
+    ?? (await stampOfLinkRecord(linkRecordPath(env)).catch(() => undefined)) ?? undefined;
+  let linkRecordSeen = options.linkRecordSeen === true || firstStamp !== undefined
+    || !(await pathIsFree(linkRecordPath(env)));
   // Before anything else: a previous run may have moved a workspace and
   // died before its ledger followed, and there is nothing in `workspaces/`
   // left to say so.
@@ -1608,7 +1625,7 @@ export const applyPerAgentWorkspaces = async (
   // ordinary command happened to create.
   const moved = new Set<string>();
   /** See `linkRecordPath`: this run's retargeted links and every earlier run's. */
-  const record = await readLinkRecord(env, linkRecordSeen);
+  const record = await readLinkRecord(env, linkRecordSeen, firstStamp);
   const written = record.links;
   /**
    * The workspaces this run finished moving — positive evidence, unlike a
