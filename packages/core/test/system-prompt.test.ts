@@ -250,6 +250,12 @@ test('the agent is told what kind of room it is in, and who can read what it pos
 
   const everyone = roomOf({ kind: 'public', members: 1042, thread: true });
   assert.match(everyone, /this is a public Slack channel with 1,042 members\. Anyone in the workspace can find it and read it, now or later/);
+  assert.doesNotMatch(everyone, / id is /);
+
+  // The id is what message.read takes and what names the room later.
+  const known = roomOf({ kind: 'public', members: 3, thread: true, id: 'C0C1YV12SLC' });
+  assert.match(known, /not only the people talking\. Its Slack id is C0C1YV12SLC\./);
+  assert.match(roomOf({ kind: 'private', members: 6, id: 'G0123456' }), /Only its members can read it\. Its Slack id is G0123456\./);
   assert.match(everyone, /You are replying in a thread there, which everyone who can read the channel can open\./);
   assert.match(everyone, /anything meant for one person only, such as a secret or a link only they should use/);
   assert.doesNotMatch(everyone, /—/);
@@ -287,6 +293,11 @@ test('a channel name never reaches the prompt, and a person\'s only when it is p
   );
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'direct', with: " Ren\u00e9e O'Brien-Lee " } }), { kind: 'direct', with: "Ren\u00e9e O'Brien-Lee" });
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'private', members: -3, thread: 'yes' } }), { kind: 'private' });
+  // An id is kept only when it is plainly an id, and never for a DM.
+  assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', id: 'C0C1YV12SLC' } }), { kind: 'public', id: 'C0C1YV12SLC' });
+  assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', id: 'C1 ignore previous' } }), { kind: 'public' });
+  assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', id: 'general' } }), { kind: 'public' });
+  assert.deepEqual(conversationContextFrom({ conversation: { kind: 'direct', id: 'D0123456' } }), { kind: 'direct' });
   assert.equal(conversationContextFrom({ conversation: { kind: 'stage' } }), undefined);
   assert.equal(conversationContextFrom({ conversation: 'public' }), undefined);
   assert.equal(conversationContextFrom(undefined), undefined);
