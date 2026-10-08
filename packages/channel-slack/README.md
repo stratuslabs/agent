@@ -464,6 +464,34 @@ project-local `stratus.config.json` cannot appoint itself the principal.
 The labels themselves are documented in
 [Memory](../../docs/concepts/memory.md#where-a-fact-came-from).
 
+## Reading a channel
+
+The adapter implements the channel contract's `readConversation`, which is
+what the gateway's `message.read` tool reads through: a channel's top level
+(`conversations.history`, newest first) or one thread
+(`conversations.replies`, root first), paged up to the call's limit. It uses
+the `channels:history` / `groups:history` and `users:read` scopes already in
+the manifest, so nothing needs reinstalling. Message text comes back as
+plain text: mentions, channel links, links, dates, and `&lt;`-style escapes
+are decoded, and a mention is named only for a principal or the agent
+itself. `message.read` also stops at 40,000 characters of text per call and
+says `more`, so a channel of long posts cannot outgrow the model's context.
+
+The boundary is the outbound one plus a rule for DMs:
+
+- The agent's **own** app reads. An agent with no Slack app here reads
+  nothing, and another agent's app is never borrowed.
+- The app must be a **member** of the channel, public or private. `/invite`
+  it where it should read.
+- **DMs and group DMs are refused, member or not.** What someone says in a
+  DM is said to the people in it; a read from elsewhere, a public thread
+  above all, would carry it to people who were never in the room.
+
+Messages come back as plain text with author ids and, where Slack supplies
+one cheaply, a display name. File contents are not downloaded; their names
+are listed. The tool labels the result `external`, so what an agent
+remembers after reading carries that label.
+
 ## Speaking first: the outbound seam
 
 The adapter also implements the channel contract's `resolveOutbound` — how a

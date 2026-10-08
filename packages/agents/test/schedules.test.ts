@@ -4,8 +4,11 @@ import assert from 'node:assert/strict';
 import type { JsonObject, Session } from '@stratusagent/core';
 import {
   canonicalDestination,
+  createMessageReadTool,
   createMessageSendTool,
   createScheduleTools,
+  MESSAGE_READ_MAX_LIMIT,
+  MESSAGE_READ_TEXT_BUDGET,
   describeCadence,
   nextFireAfter,
   parseCronExpression,
@@ -242,4 +245,87 @@ test('message.send is gated and names its destination for the policy', async () 
   ) as JsonObject;
   assert.deepEqual(sends, [{ agentId: 'ava', destination: { channel: 'slack', to: 'C9' }, text: 'all green' }]);
   assert.equal(result.destination, 'slack:C9');
+});
+
+test('message.read is gated and external, reads as the calling agent, and bounds the limit', async () => {
+  const reads: Array<Parameters<Parameters<typeof createMessageReadTool>[0]>[0]> = [];
+  const tool = createMessageReadTool(async (input) => {
+    reads.push(input);
+    return { messages: [{ id: '1.000001', author: 'U1', text: 'hi' }], more: false };
+  });
+
+  assert.equal(tool.risk, 'gated');
+  assert.equal(tool.outputTrust, 'external');
+
+  await assert.rejects(() => tool.execute({ source: { channel: 'slack' } }, sessionFor('ava')), /requires "source"/);
+  await assert.rejects(() => tool.execute({ source: { channel: 'slack', to: 'C9' }, thread: '' }, sessionFor('ava')), /"thread" must be/);
+  assert.equal(reads.length, 0, 'a malformed call reads nothing');
+
+  const result = await tool.execute(
+    { source: { channel: 'Slack', to: 'C9' }, thread: '1.000001', limit: 10_000 },
+    sessionFor('ava'),
+  ) as JsonObject;
+  assert.deepEqual(reads, [{ agentId: 'ava', source: { channel: 'slack', to: 'C9' }, thread: '1.000001', limit: MESSAGE_READ_MAX_LIMIT }]);
+  assert.equal(result.source, 'slack:C9');
+  assert.equal(result.count, 1);
+
+  await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava'));
+  assert.equal(reads[1]?.limit, 50);
+});
+
+test('message.read is judged by its source, so always-allow cannot become a standing grant to every conversation', () => {
+  const tool = createMessageReadTool(async () => ({ messages: [], more: false }));
+  assert.equal(tool.destinationFor?.({ source: { channel: 'slack', to: 'C0123456789' } }), 'slack:C0123456789');
+  assert.equal(tool.destinationFor?.({}), undefined);
+});
+
+test('message.read stops at its text budget and says there is more, cutting only a message too big to fit alone', async () => {
+  // The budget counts the whole message as returned, so leave room for
+  // its id and author beside the text.
+  const half = 'x'.repeat(MESSAGE_READ_TEXT_BUDGET / 2 - JSON.stringify({ id: '3.000001', author: 'U1', text: '' }).length);
+  const tool = createMessageReadTool(async () => ({
+    messages: [
+      { id: '3.000001', author: 'U1', text: half },
+      { id: '2.000001', author: 'U1', text: half },
+      { id: '1.000001', author: 'U1', text: 'one too many' },
+    ],
+    more: false,
+  }));
+  const result = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  assert.equal(result.count, 2);
+  assert.equal(result.more, true);
+
+  const huge = createMessageReadTool(async () => ({
+    messages: [{ id: '1.000001', author: 'U1', text: 'y'.repeat(MESSAGE_READ_TEXT_BUDGET * 2) }, { id: '0.000001', author: 'U1', text: 'next' }],
+    more: false,
+  }));
+  const cut = await huge.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  const messages = cut.messages as Array<{ text: string }>;
+  assert.equal(messages.length, 1);
+  assert.ok(messages[0]!.text.length < MESSAGE_READ_TEXT_BUDGET + 100);
+  assert.match(messages[0]!.text, /the rest of this message is not shown\]$/);
+  assert.equal(cut.more, true);
+});
+
+test('message.read counts names and file lists against its budget, not only the text', async () => {
+  // Short posts with long attachment lists outgrew a text-only budget.
+  const files = Array.from({ length: 200 }, (_, index) => `attachment-${index}-${'f'.repeat(80)}.pdf`);
+  const tool = createMessageReadTool(async () => ({
+    messages: Array.from({ length: 10 }, (_, index) => ({ id: `${index}.000001`, author: 'U1', authorName: 'Blair', text: 'see attached', files })),
+    more: false,
+  }));
+  const result = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  assert.ok(JSON.stringify(result.messages).length <= MESSAGE_READ_TEXT_BUDGET + 100);
+  assert.ok((result.count as number) < 10);
+  assert.equal(result.more, true);
+
+  // One message whose list alone is past the budget says how many files
+  // it had rather than listing them.
+  const many = Array.from({ length: 2000 }, (_, index) => `attachment-${index}-${'f'.repeat(80)}.pdf`);
+  const single = createMessageReadTool(async () => ({ messages: [{ id: '1.000001', author: 'U1', text: 'all of them', files: many }], more: false }));
+  const cut = await single.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  const first = (cut.messages as Array<{ text: string; files?: string[] }>)[0]!;
+  assert.deepEqual(first.files, ['2000 files, not listed']);
+  assert.ok(JSON.stringify(cut.messages).length <= MESSAGE_READ_TEXT_BUDGET);
+  assert.equal(cut.more, true);
 });
