@@ -68,6 +68,29 @@ const spellingsOf = async (listed: readonly string[]): Promise<Array<{ spelling:
   return spellings;
 };
 
+/**
+ * Both spellings of each exemption, where the canonical one resolves the
+ * exemption's *ancestors* and never the exemption itself. A home behind a
+ * link still needs its workspaces exempt under the real spelling, but a
+ * workspace that is itself a link names wherever it points, and if that is
+ * `agents/juno` inside the protected home, following it would exempt Juno's
+ * sessions, memory, and grants. A link pointing outside the home needs no
+ * exemption, since nothing there is protected.
+ */
+const exemptSpellingsOf = async (listed: readonly string[]): Promise<Array<{ spelling: string; named: string }>> => {
+  const spellings: Array<{ spelling: string; named: string }> = [];
+  for (const named of listed) {
+    const absolute = path.resolve(named);
+    spellings.push({ spelling: absolute, named: absolute });
+    const parent = path.dirname(absolute);
+    const canonical = parent === absolute ? absolute : path.join(await canonicalOf(parent), path.basename(absolute));
+    if (canonical !== absolute) {
+      spellings.push({ spelling: canonical, named: absolute });
+    }
+  }
+  return spellings;
+};
+
 /** The deepest of `spellings` that `candidate` lies within, if any. */
 const deepestMatch = (
   spellings: ReadonlyArray<{ spelling: string; named: string }>,
@@ -109,7 +132,7 @@ export const protectedPathGuard = async (paths: ProtectedPaths | undefined): Pro
     return async () => undefined;
   }
   const protectedSpellings = await spellingsOf(listed);
-  const exemptSpellings = await spellingsOf(await (paths as ProtectedPaths).exempt());
+  const exemptSpellings = await exemptSpellingsOf(await (paths as ProtectedPaths).exempt());
   const identities = new Map<string, string>();
   for (const named of listed) {
     try {

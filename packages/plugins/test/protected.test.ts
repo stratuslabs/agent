@@ -77,3 +77,29 @@ test('a path that does not exist yet under a protected directory is protected, s
   assert.equal(await guard(path.join(home, 'agents', 'ava', 'whitelist.json')), home);
   assert.equal(await guard(path.join(workspace, 'new.md')), undefined);
 });
+
+test('a workspace that is a link into the protected home exempts nothing there', async () => {
+  const { home } = await newHome();
+  const juno = path.join(home, 'agents', 'juno');
+  await mkdir(juno, { recursive: true });
+  await writeFile(path.join(juno, 'sessions.db'), 'private');
+  const bea = path.join(home, 'agents', 'bea');
+  await mkdir(bea, { recursive: true });
+  const linked = path.join(bea, 'workspace');
+  await symlink('../juno', linked);
+  const guard = await protectedPathGuard(fakeProtected([home], [linked]));
+  // The root resolver hands the guard the canonical path, which is Juno's.
+  assert.equal(await guard(path.join(juno, 'sessions.db')), home);
+});
+
+test('a workspace under a home behind a link stays exempt under the real spelling', async () => {
+  const { base, home, workspace } = await newHome();
+  const linkedHome = path.join(base, 'linked-stratus');
+  await symlink(home, linkedHome);
+  const guard = await protectedPathGuard(fakeProtected(
+    [linkedHome],
+    [path.join(linkedHome, 'agents', 'ava', 'workspace')],
+  ));
+  assert.equal(await guard(path.join(workspace, 'notes.md')), undefined);
+  assert.equal(await guard(path.join(home, 'credentials.json')), linkedHome);
+});
