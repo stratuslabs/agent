@@ -59,6 +59,8 @@ import {
   createForgetTool,
   createPinTool,
   createMessageSendTool,
+  createMessageReadTool,
+  type ConversationReader,
   createRecallTool,
   createRememberTool,
   createScheduleTools,
@@ -233,6 +235,21 @@ export interface GatewayChannelAdapter {
   resolveOutbound?(address: { agentId: string; to: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
+  /**
+   * The read side of an addressable conversation, mirroring
+   * `@stratusagent/channels`' `ChannelAdapter.readConversation`. Optional:
+   * an adapter without it cannot be read through `message.read`.
+   * Implementations MUST reject a conversation their app may not read,
+   * with a sentence for the agent.
+   */
+  readConversation?(request: {
+    agentId: string;
+    conversation: string;
+    thread?: string;
+    after?: string;
+    before?: string;
+    limit: number;
+  }): ReturnType<ConversationReader>;
   /**
    * Shows a person a form for a credential an agent asked for, mirroring
    * `@stratusagent/channels`' `ChannelAdapter.requestCredential`. Optional:
@@ -2021,6 +2038,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   tools.register(createMessageSendTool(async ({ agentId, destination, text }) => {
     const connection = await outboundFor(agentId, destination);
     await connection.post(text);
+  }));
+  tools.register(createMessageReadTool(async ({ agentId, source, ...window }) => {
+    // The same carrying rule as outbound: a read goes through the app of
+    // the agent asking, never whichever adapter of that kind is running,
+    // because membership is the read boundary and it is per app.
+    const { adapter, carriesOthers } = channelCarrying(source.channel, agentId, (candidate) => candidate.readConversation !== undefined);
+    if (!adapter?.readConversation) {
+      throw new Error(carriesOthers
+        ? `No running '${source.channel}' channel carries agent ${agentId}, so it has no app to read ${source.to} with.`
+        : `No running channel can read '${source.channel}' conversations.`);
+    }
+    return adapter.readConversation({ agentId, conversation: source.to, ...window });
   }));
   /**
    * Credential requests waiting on a person, by request id.
