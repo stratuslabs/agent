@@ -226,7 +226,7 @@ decision came through the control API:
 {
   "version": 1,
   "scopes": [{ "command": "git", "args": ["push"], "denyRefspecForms": true }],
-  "origins": [{ "origin": "https://app.example.com" }],
+  "origins": [{ "origin": "https://app.example.com", "tool": "browser.act" }],
   "tools": [
     { "tool": "fs.write", "package": "@stratusagent/tool-fs", "grantedAt": "2026-09-07T09:14:36.000Z", "grantedBy": "U01DYLAN" }
   ]

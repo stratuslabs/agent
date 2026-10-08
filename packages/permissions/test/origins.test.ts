@@ -109,7 +109,7 @@ test('always allow on a page widens that site and nothing else', async () => {
   });
 
   assert.equal(await policy.approve(actOn(() => page)), true);
-  assert.deepEqual(remembered, [{ origin: 'https://app.example.com' }]);
+  assert.deepEqual(remembered, [{ origin: 'https://app.example.com', tool: 'browser.act' }]);
 
   // The approver was shown where the click lands. A selector says nothing
   // about that, and "always" is widening exactly this.
@@ -221,7 +221,7 @@ test('origin grants persist beside command scopes in one whitelist file', async 
   // One file, both kinds of grant — and writing the second must not drop
   // the first, which is the failure a separate write path would have.
   assert.equal(stored.version, 1);
-  assert.deepEqual(stored.origins, [{ origin: 'https://app.example.com' }]);
+  assert.deepEqual(stored.origins, [{ origin: 'https://app.example.com', tool: 'browser.act' }]);
   assert.deepEqual(stored.scopes[0]?.args, ['push']);
   // It decides what happens with nobody watching, so nobody else on the
   // machine may append a line to it.
@@ -433,8 +433,8 @@ test('a page that moves while the approval is outstanding runs nothing and grant
   // What the approver read and said always to is remembered, and it is the
   // only thing that is: a grant for the site the page ran away to would be
   // a permission nobody was ever shown.
-  assert.deepEqual(remembered, [{ origin: 'https://app.example.com' }]);
-  assert.deepEqual(granted, [{ origin: 'https://app.example.com' }]);
+  assert.deepEqual(remembered, [{ origin: 'https://app.example.com', tool: 'browser.act' }]);
+  assert.deepEqual(granted, [{ origin: 'https://app.example.com', tool: 'browser.act' }]);
 });
 
 test('a page closed while the approval is outstanding says so rather than clicking a fresh one', async () => {
@@ -547,7 +547,7 @@ test('a page that moves while the grant is being written still does not get clic
   assert.match(decisions[0]?.reason ?? '', /approved on https:\/\/app\.example\.com/);
   assert.match(decisions[0]?.reason ?? '', /on https:\/\/checkout\.example\.com now/);
   // The grant is the site the approver read, and only that one.
-  assert.deepEqual(granted, [{ origin: 'https://app.example.com' }]);
+  assert.deepEqual(granted, [{ origin: 'https://app.example.com', tool: 'browser.act' }]);
 });
 
 test('the prompt offers only the grant the answer will actually create', async () => {
@@ -769,7 +769,7 @@ test('a tool judged by the URL in its input is scoped to that site, one call at 
   });
 
   assert.equal(await policy.approve(fetchOf('https://docs.example.com/a?q=1')), true);
-  assert.deepEqual(granted, [{ origin: 'https://docs.example.com' }]);
+  assert.deepEqual(granted, [{ origin: 'https://docs.example.com', tool: 'web.fetch' }]);
   assert.match(asked[0] ?? '', /web\.fetch on https:\/\/docs\.example\.com/);
 
   // Same site, another path: no question.
@@ -780,4 +780,39 @@ test('a tool judged by the URL in its input is scoped to that site, one call at 
   assert.equal(await policy.approve(fetchOf('https://evil.example.net/')), true);
   assert.equal(asked.length, 2);
   assert.deepEqual(granted.map((scope) => scope.origin), ['https://docs.example.com', 'https://evil.example.net']);
+});
+
+test('a site approved for one tool is not approved for another', async () => {
+  // Always allow on a fetch of a site must not let the browser click there:
+  // a GET and a button press are different permissions on the same origin.
+  const granted: OriginScope[] = [{ origin: 'https://app.example.com', tool: 'web.fetch' }];
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    origins: {
+      whitelist: {
+        originsFor: async () => [...granted],
+        rememberOrigin: async () => {},
+      },
+    },
+  });
+  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/settings')), false);
+
+  // A grant from before grants named a tool covers every origin-scoped tool,
+  // the way it always did, so an upgrade withdraws nothing.
+  granted.splice(0, 1, { origin: 'https://app.example.com' });
+  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/settings')), true);
+
+  // And one named for the browser covers the browser.
+  granted.splice(0, 1, { origin: 'https://app.example.com', tool: 'browser.act' });
+  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/settings')), true);
+});
+
+test('a grant file keeps the tool beside the origin, and drops a malformed one', () => {
+  assert.deepEqual(
+    parseOriginScope({ origin: 'https://APP.example.com/x', tool: 'web.fetch' }),
+    { origin: 'https://app.example.com', tool: 'web.fetch' },
+  );
+  assert.deepEqual(parseOriginScope({ origin: 'https://app.example.com' }), { origin: 'https://app.example.com' });
+  assert.equal(parseOriginScope({ origin: 'https://app.example.com', tool: '' }), undefined);
+  assert.equal(parseOriginScope({ origin: 'https://app.example.com', tool: 7 }), undefined);
 });
