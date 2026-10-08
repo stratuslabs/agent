@@ -151,6 +151,14 @@ export interface ParsedRestartCommand {
   token?: string;
 }
 
+export interface ParsedHealthCommand {
+  command: 'health';
+  /** A daemon's control API URL; default: the one `~/.stratus/gateway.json` names. */
+  gateway?: string;
+  token?: string;
+  format: 'text' | 'json';
+}
+
 export interface ParsedAgentsCommand {
   command: 'agents';
   format: 'text' | 'json';
@@ -285,6 +293,13 @@ export interface ParsedServeCommand {
   events: boolean;
   /** Write the structured log to ~/.stratus/logs. Defaults to true. */
   logToFile?: boolean;
+  /**
+   * What stdout carries. Absent means `text`: the human lines a terminal
+   * wants. `json` writes every structured log record to stdout as one JSON
+   * line instead, for a container runtime or journald that ships stdout —
+   * and nothing else, since a stray human line is a parse error there.
+   */
+  logFormat?: 'text' | 'json';
   /** Serve the control API. Defaults to true when the package is installed. */
   api?: boolean;
   /** Overrides `api.port` in the config file. */
@@ -317,6 +332,7 @@ export type ParsedCommand =
   | ParsedCredentialCommand
   | ParsedChannelCommand
   | ParsedRestartCommand
+  | ParsedHealthCommand
   | ParsedSchedulesCommand
   | ParsedGrantsCommand
   | ParsedMemoryCommand
@@ -436,6 +452,15 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--no-log-file') {
         parsed.logToFile = false;
+        continue;
+      }
+      if (token === '--log-format') {
+        const value = readOptionValue(rest, index, '--log-format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported --log-format: ${value}. Use text or json.`);
+        }
+        parsed.logFormat = value;
+        index += 1;
         continue;
       }
       if (token === '--no-api') {
@@ -1347,6 +1372,40 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
           throw new Error(`Invalid value for --drain-timeout: ${rest[index + 1] ?? '(missing)'}`);
         }
         parsed.drainTimeoutMs = Math.round(seconds * 1000);
+        index += 1;
+        continue;
+      }
+      if (token === '--gateway') {
+        parsed.gateway = readOptionValue(rest, index, '--gateway');
+        index += 1;
+        continue;
+      }
+      if (token === '--token') {
+        parsed.token = readOptionValue(rest, index, '--token');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return parsed;
+  }
+
+  if (command === 'health') {
+    const parsed: ParsedHealthCommand = { command: 'health', format: 'text' };
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(rest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        parsed.format = value;
         index += 1;
         continue;
       }

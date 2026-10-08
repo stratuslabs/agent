@@ -1,0 +1,34 @@
+{
+  "approvals": {
+    "mode": "remote",
+    "timeoutMs": 900000,
+    "slackApprovers": ["U01APPROVER"],
+    "slackChannel": "C01APPROVALS"
+  },
+  "principals": {
+    "slackUsers": ["U01APPROVER", "U01OPERATOR", "U01TEAMMATE"],
+    "admit": "principals"
+  },
+  "api": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 4123
+  },
+  "plugins": {
+    "@stratusagent/tool-fs": {
+      "enabled": true,
+      "agents": {
+        "ops": { "roots": ["~/.stratus/agents/ops/workspace"] }
+      }
+    },
+    "@stratusagent/tool-shell": {
+      "enabled": true
+    },
+    "@stratusagent/tool-web": {
+      "enabled": true
+    },
+    "@stratusagent/tool-browser": {
+      "enabled": true
+    }
+  }
+}

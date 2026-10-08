@@ -720,7 +720,7 @@ export const runSetup = async (
         if ((providerPart === 'anthropic' || providerPart === 'openai' || providerPart === 'codex') && id) {
           return { provider: providerPart, id };
         }
-        writeLine(streams.stdout, 'Use provider:model, e.g. anthropic:claude-opus-5 or codex:gpt-5.5.');
+        writeLine(streams.stdout, 'Use provider:model, e.g. anthropic:claude-opus-5-5 or codex:gpt-5.5.');
         return undefined;
       }
       // A typed id that appears in the collected list belongs to that

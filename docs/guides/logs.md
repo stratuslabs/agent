@@ -33,6 +33,46 @@ Session ids are the channel's own key —
 is exactly what `--session` wants, and the same conversation keeps it
 across daemon restarts.
 
+## Logs on stdout, for a container or journald
+
+In a container, or under a system unit, stdout is not gone — it is the
+log pipeline. `docker logs`, a Docker logging driver, journald, and
+shippers like Vector or Fluent Bit all read it line by line, and they want
+one JSON object per line rather than the terminal's aligned text:
+
+```bash
+stratus serve --log-format json
+```
+
+```json
+{"ts":"2026-09-29T09:14:02.114Z","level":"info","msg":"stratusd ready — 3 agents, slack connected"}
+{"ts":"2026-09-29T09:14:31.020Z","level":"event","event":"session.created","sessionId":"slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456","agentId":"ava"}
+{"ts":"2026-09-29T09:14:36.482Z","level":"event","event":"tool.called","sessionId":"slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456","detail":{"tool":"web.fetch"},"agentId":"ava"}
+```
+
+- **The same records as the file, not a second stream.** Every record
+  written to `stratusd.jsonl` is written to stdout as it is, in the same
+  order — so everything below about what the log does and does not hold
+  applies to the stream too. With `--no-log-file` the file is skipped and
+  stdout still carries them.
+- **Nothing else goes to stdout.** The human lines are not printed, and
+  neither are warnings on stderr — a warning is already a record, and both
+  streams land in the same `docker logs`. `--no-events` has nothing to hide
+  in this mode: the event lines it suppresses are not printed anyway, and
+  the event *records* are the file's, which it never touched.
+- **What comes before the daemon is a record too.** A state migration's
+  notice on the first start after an upgrade, a refused or failed start, a
+  flag that does not parse, and a log file that cannot be written are each
+  a `warn` record on stdout. Those from before the daemon started serving
+  are on stdout only: the file was not open yet (see
+  [below](#when-the-log-is-empty)). What can still reach stderr is what
+  Node itself prints, for a crash the CLI never caught — keep stderr in
+  whatever collects stdout.
+- **`stratus logs` still works** inside the container, reading the file,
+  as long as the file is being written.
+
+The [Docker image](./deployment.md) starts the daemon this way.
+
 ## A trace, not a transcript
 
 The log records that a tool ran and that a session completed, with the
@@ -76,12 +116,15 @@ or `--session` to narrow it to the run you actually mean.
 A daemon that fails *before* it starts serving — a broken install, an
 unreadable credentials file — never gets as far as opening the structured
 log, so `stratus logs` shows nothing or shows yesterday. Those errors go to
-stderr, and where stderr lands is the service manager's business, so it
-differs by platform:
+stderr — or, under `--log-format json`, to stdout as `warn` records — and
+where either lands is the service manager's business, so it differs by
+platform:
 
 ```bash
 tail ~/.stratus/logs/stratusd.err.log      # macOS
 journalctl --user-unit=stratusd.service    # Linux
+docker logs stratusd                       # the Docker image — stdout and stderr both
+journalctl -u stratusd.service             # the system unit in deploy/systemd
 ```
 
 That is where a restart loop explains itself. On macOS the LaunchAgent

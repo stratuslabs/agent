@@ -104,8 +104,8 @@ repository once the contract has stopped moving.
   obvious answer and is exactly the sort of thing that should be discovered by
   the second implementation rather than designed by the first.
 
-  The second implementation turned out to be iMessage
-  ([34](./34-imessage-channel.md)), and it answered the part about edits:
+  The second implementation turned out to be iMessage, and it answered the
+  part about edits:
   `OutboundConnection.edit` and `upload` are optional, and the capability is
   whether the method is there — the way `resolveOutbound` already worked —
   so no descriptor object was needed for them. Threads, presence, and

@@ -8,12 +8,15 @@ import {
   isTaintedTrust,
   leastTrusted,
   sessionTrustOf,
+  type ExecutionContext,
   type JsonObject,
   type JsonValue,
   type Plugin,
   type Session,
   type Tool,
   type TrustLevel,
+  IMAGE_ATTACHMENT_MAX_BYTES,
+  type ImageAttachmentMediaType,
 } from '@stratusagent/core';
 import {
   createFileLedger,
@@ -149,10 +152,23 @@ const refuseProtected = async (
   }
 };
 
+/**
+ * The image format a file's own first bytes declare, for the four the
+ * model APIs take — never its extension, which anyone can choose.
+ */
+const imageMediaTypeOf = (bytes: Uint8Array): ImageAttachmentMediaType | undefined => {
+  const ascii = (at: number, length: number): string => String.fromCharCode(...bytes.subarray(at, at + length));
+  if (bytes.length >= 8 && bytes[0] === 0x89 && ascii(1, 3) === 'PNG') return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 6 && (ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a')) return 'image/gif';
+  if (bytes.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 4) === 'WEBP') return 'image/webp';
+  return undefined;
+};
+
 const readContained = async (
   resolved: ResolvedPath,
   maxBytes: number,
-): Promise<{ content: string; truncated: boolean; bytes: number; size: number; binary: boolean }> => {
+): Promise<{ content: string; truncated: boolean; bytes: number; size: number; binary: boolean; image?: { mediaType: ImageAttachmentMediaType; data: Buffer } }> => {
   if (resolved.kind === 'directory') {
     throw new Error(`${resolved.path} is a directory; use fs.list.`);
   }
@@ -170,6 +186,21 @@ const readContained = async (
     const info = await handle.stat();
     if (info.isDirectory()) {
       throw new Error(`${resolved.path} is a directory; use fs.list.`);
+    }
+    // An image is recognized from its own header, read apart from the text
+    // cap (a cap shorter than a PNG signature would hide it), and read
+    // whole up to the per-image cap: a third of a PNG is no picture at
+    // all. Over that cap it stays a binary file, and the result says so.
+    const header = Buffer.alloc(Math.min(info.size, 16));
+    const { bytesRead: headerRead } = await handle.read(header, 0, header.length, 0);
+    const mediaType = imageMediaTypeOf(header.subarray(0, headerRead));
+    if (mediaType !== undefined) {
+      if (info.size <= IMAGE_ATTACHMENT_MAX_BYTES) {
+        const whole = Buffer.alloc(info.size);
+        const { bytesRead: wholeRead } = await handle.read(whole, 0, info.size, 0);
+        return { content: '', truncated: false, bytes: wholeRead, size: info.size, binary: true, image: { mediaType, data: whole.subarray(0, wholeRead) } };
+      }
+      return { content: '', truncated: false, bytes: 0, size: info.size, binary: true, image: { mediaType, data: Buffer.alloc(0) } };
     }
     const length = Math.min(info.size, maxBytes);
     const buffer = Buffer.alloc(length);
@@ -225,7 +256,7 @@ const createReadTool = (
   isProtected: () => Promise<ProtectedPathGuard>,
 ): Tool => ({
   name: 'fs.read',
-  description: 'Read a UTF-8 text file inside one of this agent’s roots.',
+  description: 'Read a UTF-8 text file inside one of this agent’s roots. A PNG, JPEG, GIF, or WebP image (a screenshot, say) is shown to you as an image, up to 5 MB.',
   risk: 'safe',
   parameters: {
     type: 'object',
@@ -274,7 +305,7 @@ const createReadTool = (
       path: relativeTo(resolved.root, resolved.path),
       absolutePath: resolved.path,
       ...(result.binary
-        ? { binary: true, bytes: result.size }
+        ? { binary: true, bytes: result.size, ...showImage(result.image, path.basename(resolved.path), context) }
         : {
             content: result.content,
             bytes: result.bytes,
@@ -287,6 +318,33 @@ const createReadTool = (
     };
   },
 });
+
+/**
+ * Hands an image file to the model through the call's `attachImage`
+ * sink, and says in the result whether it did — and why not, so an agent
+ * told a file is a PNG never answers as if it had looked at it.
+ */
+const showImage = (
+  image: { mediaType: ImageAttachmentMediaType; data: Buffer } | undefined,
+  name: string,
+  context: ExecutionContext | undefined,
+): JsonObject => {
+  if (image === undefined) {
+    return {};
+  }
+  if (image.data.length === 0) {
+    return { image: { mediaType: image.mediaType, shown: false, reason: `The image is over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit for one image.` } };
+  }
+  if (!context?.attachImage) {
+    return { image: { mediaType: image.mediaType, shown: false, reason: 'This runtime cannot show images to the model.' } };
+  }
+  try {
+    context.attachImage({ mediaType: image.mediaType, data: image.data.toString('base64'), name });
+    return { image: { mediaType: image.mediaType, shown: true } };
+  } catch (error) {
+    return { image: { mediaType: image.mediaType, shown: false, reason: error instanceof Error ? error.message : String(error) } };
+  }
+};
 
 const entryKind = (entry: { isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean }): string => {
   if (entry.isSymbolicLink()) return 'symlink';

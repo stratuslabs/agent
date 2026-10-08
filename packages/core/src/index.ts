@@ -284,9 +284,11 @@ export interface Message {
   toolCalls?: ToolCall[];
   toolResult?: ToolResult;
   /**
-   * Images sent with a user message. Present only on `user` messages that
-   * carried one; a provider that can show the model an image sends these
-   * alongside the text, and one that cannot names them instead.
+   * Images sent with a user message, or returned by a tool call (moved
+   * here off `ToolResult.images` as the result is recorded). Present only
+   * on `user` and `tool` messages that carried one; a provider that can
+   * show the model an image sends these alongside the text, and one that
+   * cannot names them instead.
    */
   images?: ImageAttachment[];
   /**
@@ -624,6 +626,15 @@ export interface ToolResult {
    * already hold hostile page content. A new result always carries one.
    */
   trust?: TrustLevel;
+  /**
+   * Images the call handed back through `ExecutionContext.attachImage` — a
+   * screenshot, an image file read from disk. In flight only: the runner
+   * moves them onto the tool message's `images` as it records the result,
+   * so they are stored, budgeted, and trimmed exactly as a user message's
+   * images are, and never serialized into the message content or carried
+   * on a bus event.
+   */
+  images?: ImageAttachment[];
 }
 
 /**
@@ -2703,10 +2714,18 @@ export interface ConversationContext {
    * direct message.
    */
   shared?: boolean;
+  /**
+   * The channel's own id for the room, such as Slack's `C0123456789`: what
+   * `message.read` and `message.send` take, and what lets an agent say or
+   * remember which room this is. Never set for a direct message, where the
+   * id names nothing the agent can use elsewhere.
+   */
+  id?: string;
   // No channel name, deliberately: anyone who can create or rename a
   // channel chooses it, and this reaches the system prompt, where a name
   // like `ignore-all-previous-instructions` would outrank the soul. The
-  // kind and the count are what decide how to write, and neither is text.
+  // kind, the count, and the id are what it needs, and none of them is text
+  // a person chose.
 }
 
 /**
@@ -2721,6 +2740,9 @@ const CONVERSATION_KINDS: readonly string[] = ['direct', 'group', 'private', 'pu
 // vouched for, but still typed, so anything that is not plainly a name is
 // dropped rather than quoted.
 const CONVERSATION_WITH_PATTERN = /^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} .'\u2019-]{0,63}$/u;
+// A platform-assigned id, never a word anyone typed: Slack's are capitals
+// and digits. Anything else is dropped rather than quoted.
+const CONVERSATION_ID_PATTERN = /^[A-Z0-9]{6,32}$/;
 
 /**
  * The room a turn's metadata describes, keeping only what is safe to put
@@ -2731,7 +2753,7 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
   }
-  const { kind, members, with: withWhom, thread, shared } = raw as Record<string, unknown>;
+  const { kind, members, with: withWhom, thread, shared, id } = raw as Record<string, unknown>;
   if (typeof kind !== 'string' || !CONVERSATION_KINDS.includes(kind)) {
     return undefined;
   }
@@ -2741,6 +2763,7 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
     ...(kind === 'direct' && typeof withWhom === 'string' && CONVERSATION_WITH_PATTERN.test(withWhom.trim()) ? { with: withWhom.trim() } : {}),
     ...(thread === true ? { thread: true } : {}),
     ...(kind !== 'direct' && shared === true ? { shared: true } : {}),
+    ...(kind !== 'direct' && typeof id === 'string' && CONVERSATION_ID_PATTERN.test(id) ? { id } : {}),
   };
 };
 
@@ -2921,7 +2944,84 @@ export interface ExecutionContext {
    * no sink gets whatever `outputTrust` declares.
    */
   markTrust?: (trust: TrustLevel) => void;
+  /**
+   * Hand the model an image with this call's result — a screenshot a tool
+   * took, an image file it read — so the agent can actually look at it
+   * rather than be told a path. Checked as it is attached: a format the
+   * model APIs refuse, an image over `IMAGE_ATTACHMENT_MAX_BYTES` or
+   * `IMAGE_ATTACHMENT_MAX_DIMENSION`, bytes that are not the image they
+   * claim to be, or more than `IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES` in one
+   * call throws, so the tool can say so in its own result. Absent when the
+   * host cannot carry images; a tool then says it has no way to show one.
+   *
+   * The result's trust label covers the image too: a screenshot of a web
+   * page is the page's content.
+   */
+  attachImage?: (image: ImageAttachment) => void;
 }
+
+/**
+ * Collects what a tool attaches through `ExecutionContext.attachImage`,
+ * held to the limits that sink documents.
+ */
+export const createImageCollector = (): { attach: (image: ImageAttachment) => void; images: () => ImageAttachment[] } => {
+  const images: ImageAttachment[] = [];
+  let total = 0;
+  return {
+    attach: (image) => {
+      if (!isImageAttachmentMediaType(image.mediaType)) {
+        throw new Error(`An image of type ${String(image.mediaType)} cannot be shown to the model; it takes ${IMAGE_ATTACHMENT_MEDIA_TYPES.join(', ')}.`);
+      }
+      const bytes = Buffer.from(image.data, 'base64');
+      if (bytes.length === 0) {
+        throw new Error('The image is empty.');
+      }
+      if (bytes.length > IMAGE_ATTACHMENT_MAX_BYTES) {
+        throw new Error(`The image is ${bytes.length} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit for one image.`);
+      }
+      if (total + bytes.length > IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES) {
+        throw new Error(`One call can return at most ${IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES} bytes of images.`);
+      }
+      const dimensions = imageDimensions(bytes, image.mediaType);
+      if (dimensions === undefined) {
+        throw new Error(`The bytes are not a complete ${image.mediaType} image.`);
+      }
+      if (dimensions.width > IMAGE_ATTACHMENT_MAX_DIMENSION || dimensions.height > IMAGE_ATTACHMENT_MAX_DIMENSION) {
+        throw new Error(`The image is ${dimensions.width}×${dimensions.height}, over the ${IMAGE_ATTACHMENT_MAX_DIMENSION}-pixel side the model can take.`);
+      }
+      total += bytes.length;
+      images.push({ mediaType: image.mediaType, data: image.data, ...(image.name !== undefined ? { name: image.name } : {}) });
+    },
+    images: () => [...images],
+  };
+};
+
+/**
+ * The transcript message for a tool result: its images moved off the
+ * result onto the message, where the replay budget and the trim already
+ * look, so the stored content and the result stay text.
+ */
+const toolResultMessage = (session: Session, result: ToolResult): Message => {
+  const { images, ...stored } = result;
+  return {
+    id: `${session.id}:tool:${result.callId}`,
+    role: 'tool',
+    name: result.toolName,
+    content: JSON.stringify(stored),
+    createdAt: new Date().toISOString(),
+    toolResult: stored,
+    ...(images !== undefined && images.length > 0 ? { images } : {}),
+  };
+};
+
+/** A result as the bus carries it: never the image bytes. */
+const withoutImages = (result: ToolResult): ToolResult => {
+  if (result.images === undefined) {
+    return result;
+  }
+  const { images: _images, ...rest } = result;
+  return rest;
+};
 
 export interface Tool {
   name: string;
@@ -3991,6 +4091,27 @@ export interface ChannelAdapterLike {
   required?: boolean;
   resolveOutbound?(address: { agentId: string; to: string }): Promise<{
     post(text: string): Promise<unknown>;
+  }>;
+  /** See `@stratusagent/channels`' `ChannelAdapter.readConversation`. */
+  readConversation?(request: {
+    agentId: string;
+    conversation: string;
+    thread?: string;
+    after?: string;
+    before?: string;
+    limit: number;
+  }): Promise<{
+    messages: Array<{
+      id: string;
+      author: string;
+      authorName?: string;
+      text: string;
+      at?: string;
+      thread?: string;
+      replies?: number;
+      files?: string[];
+    }>;
+    more: boolean;
   }>;
 }
 
@@ -5127,6 +5248,7 @@ export const renderChannelSection = (
  */
 const describeRoom = (room: ConversationContext, channel: string): string => {
   const count = room.members !== undefined ? room.members.toLocaleString('en-US') : undefined;
+  const idNote = room.id !== undefined ? ` Its ${channel} id is ${room.id}.` : '';
   const inThread = room.thread === true ? ' You are replying in a thread there, which everyone who can read the channel can open.' : '';
   const outside = room.shared === true
     ? ' It is shared with people outside this workspace, through Slack Connect or another workspace of the organization, and they read it too.'
@@ -5139,13 +5261,13 @@ const describeRoom = (room: ConversationContext, channel: string): string => {
         + 'Only the two of you can read it, so you are talking to one person.';
     case 'group':
       return `this is a group direct message in ${channel}${count !== undefined ? ` with ${count} members, you included` : ''}. `
-        + `Only they can read it.${outside}${inThread} ${forEveryone}`;
+        + `Only they can read it.${idNote}${outside}${inThread} ${forEveryone}`;
     case 'private':
       return `this is a private ${channel} channel${count !== undefined ? ` with ${count} members, you included` : ''}. `
-        + `Only its members can read it.${outside}${inThread} ${forEveryone}`;
+        + `Only its members can read it.${idNote}${outside}${inThread} ${forEveryone}`;
     case 'public':
       return `this is a public ${channel} channel${count !== undefined ? ` with ${count} members` : ''}. `
-        + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${outside}${inThread} ${forEveryone}`;
+        + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${idNote}${outside}${inThread} ${forEveryone}`;
   }
 };
 
@@ -6753,14 +6875,8 @@ export class AgentRunner {
    * longer re-enterable, the two facts belong in one write.
    */
   private async recordToolResult(session: Session, result: ToolResult): Promise<void> {
-    session.messages.push({
-      id: `${session.id}:tool:${result.callId}`,
-      role: 'tool',
-      name: result.toolName,
-      content: JSON.stringify(result),
-      createdAt: new Date().toISOString(),
-      toolResult: result,
-    });
+    session.messages.push(toolResultMessage(session, result));
+    omitImagesOutsideReplayBudget(session.messages, this.imageReplayBudget);
 
     if (readPendingApproval(session)?.call.id === result.callId) {
       const metadata = { ...(session.metadata ?? {}) };
@@ -6839,14 +6955,8 @@ export class AgentRunner {
       recoverable: false,
     });
 
-    session.messages.push({
-      id: `${session.id}:tool:${result.callId}`,
-      role: 'tool',
-      name: result.toolName,
-      content: JSON.stringify(result),
-      createdAt: new Date().toISOString(),
-      toolResult: result,
-    });
+    session.messages.push(toolResultMessage(session, result));
+    omitImagesOutsideReplayBudget(session.messages, this.imageReplayBudget);
     await this.store.save(session);
 
     return result;
@@ -7064,7 +7174,15 @@ export class AgentRunner {
       return result;
     }
 
-    const result = await this.executor.execute(call, tool, session, signal ? { signal } : undefined);
+    const collector = createImageCollector();
+    const executed = await this.executor.execute(call, tool, session, {
+      ...(signal ? { signal } : {}),
+      attachImage: collector.attach,
+    });
+    // Only a call that succeeded shows what it attached: a failure's error
+    // is the result, and an image ahead of it would read as the answer.
+    const attached = executed.ok ? collector.images() : [];
+    const result: ToolResult = attached.length > 0 ? { ...executed, images: attached } : withoutImages(executed);
     // Where tools execute, not in the provider loop above: this path also
     // serves `executeHostedToolCall`, through which `provider-claude-code`
     // and `provider-codex` run their bridged kernel tools. A hook in
@@ -7073,7 +7191,7 @@ export class AgentRunner {
     // wrong. An executor that returned no label is read as `unknown` —
     // absence of provenance is not evidence of trust, here either.
     await this.taint(session, result.trust ?? 'unknown', call.toolName);
-    await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
+    await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result: withoutImages(result) });
     return result;
   }
 }

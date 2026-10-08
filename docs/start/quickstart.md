@@ -42,7 +42,7 @@ export ANTHROPIC_API_KEY=your-key
 stratus run --provider anthropic "say hello"
 ```
 
-The Claude provider defaults to `claude-opus-5` and handles multi-turn tool
+The Claude provider defaults to `claude-opus-5-5` and handles multi-turn tool
 calling, the agent's persona and memory, and adaptive thinking out of the
 box.
 
@@ -73,7 +73,7 @@ Or with a config file `stratus.config.json` (start from
 ```json
 {
   "provider": "anthropic",
-  "model": "claude-opus-5",
+  "model": "claude-opus-5-5",
   "apiKeyEnv": "ANTHROPIC_API_KEY",
   "soul": "./examples/souls/blair.md"
 }

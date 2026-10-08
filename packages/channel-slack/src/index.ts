@@ -37,6 +37,9 @@ import {
   type AdmitPolicy,
   type ChannelAdapter,
   type ChannelCredentialRequest,
+  type ConversationMessage,
+  type ConversationReadRequest,
+  type ConversationReadResult,
   type GatewayLike,
   type OutboundAddress,
   type OutboundConnection,
@@ -311,6 +314,35 @@ export interface SlackUploadResult {
   }>;
 }
 
+export interface SlackHistoryArgs {
+  channel: string;
+  oldest?: string;
+  latest?: string;
+  inclusive?: boolean;
+  limit?: number;
+  cursor?: string;
+}
+
+/** The fields of a Slack message a read returns; everything else is dropped. */
+export interface SlackHistoryMessage {
+  ts?: string;
+  user?: string;
+  bot_id?: string;
+  username?: string;
+  bot_profile?: { name?: string };
+  user_profile?: { display_name?: string; real_name?: string };
+  text?: string;
+  thread_ts?: string;
+  reply_count?: number;
+  files?: Array<{ name?: string; title?: string; id?: string }>;
+}
+
+export interface SlackHistoryPage {
+  messages?: SlackHistoryMessage[];
+  has_more?: boolean;
+  response_metadata?: { next_cursor?: string };
+}
+
 export interface SlackWebLike {
   auth: { test(): Promise<{ user_id?: string; team_id?: string }> };
   chat: {
@@ -375,6 +407,15 @@ export interface SlackWebLike {
       members?: string[];
       response_metadata?: { next_cursor?: string };
     }>;
+    /**
+     * A conversation's top level, newest first, a page at a time — what
+     * `message.read` without a thread reads. Needs the history scopes the
+     * manifest already asks for. Optional so an older fake still runs; an
+     * adapter without it says the conversation cannot be read.
+     */
+    history?(args: SlackHistoryArgs): Promise<SlackHistoryPage>;
+    /** One thread, root first, a page at a time. Same scopes as `history`. */
+    replies?(args: SlackHistoryArgs & { ts: string }): Promise<SlackHistoryPage>;
   };
   users: {
     info(args: { user: string }): Promise<{ user?: { name?: string; profile?: { display_name?: string; real_name?: string } } }>;
@@ -1222,9 +1263,12 @@ class ReplyRenderer {
         this.placeText(this.ref?.ts);
       }
     }
-    // A reply posted clears the status itself; one Slack refused would
-    // leave "is thinking…" standing over a turn that has ended.
-    if (hadStatus && !landed) {
+    // A reply posted into the status's thread clears the status itself;
+    // one Slack refused would leave "is thinking…" standing over a turn
+    // that has ended. So would one posted anywhere else: a top-level DM
+    // reply keys its status to the message it answers (`statusThread`),
+    // but posts beside it rather than under it, and Slack never clears it.
+    if (hadStatus && (!landed || this.threadTs !== this.statusThread)) {
       this.setStatus('');
       // Awaited: the turn queued behind this one re-shows its own status
       // once this renderer is done, and a clear that reached Slack after
@@ -2314,6 +2358,9 @@ interface AgentConnection {
  * those were in it receives only `app_mention` and behaves as it always
  * did, which makes the workspace's own grant the switch.
  */
+/** Uncached author names one `message.read` looks up; the rest keep their id. */
+const READ_NAME_LOOKUPS = 10;
+
 export const createSlackChannelAdapter = (options: SlackAdapterOptions): ChannelAdapter => {
   const log = options.log ?? (() => {});
   const warn = options.warn ?? (() => {});
@@ -2584,6 +2631,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         kind,
         ...(kind !== 'direct' && typeof info.num_members === 'number' ? { members: info.num_members } : {}),
         ...(kind !== 'direct' && (info.is_ext_shared === true || info.is_org_shared === true) ? { shared: true } : {}),
+        ...(kind !== 'direct' && typeof info.id === 'string' ? { id: info.id } : {}),
       };
     } catch {
       return undefined;
@@ -2612,6 +2660,76 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
     }
     return result.trim();
+  };
+
+  /**
+   * Slack's stored `mrkdwn` as the plain text a read promises
+   * (`ConversationMessage.text`): `<@U…>` mentions, `<#C…|name>` channels,
+   * `<!here>`-style broadcasts, `<!date^…|fallback>` dates, and
+   * `<url|label>` links, then the `&lt; &gt; &amp;` escapes, decoded last
+   * so text someone typed is never read as markup. A mention is named only
+   * for a principal or the agent's own app, for the reason
+   * `humanizeMentions` gives; anyone else stays their stable id.
+   */
+  const nameableMentions = (connection: AgentConnection, text: string): string[] => {
+    const principals = new Set(connection.config.principals ?? []);
+    const ids = new Set<string>();
+    for (const match of text.matchAll(/<@([^|<>]+)(?:\|[^<>]*)?>/g)) {
+      const id = match[1]!;
+      if (principals.has(id) || id === connection.botUserId) {
+        ids.add(id);
+      }
+    }
+    return [...ids];
+  };
+
+  /**
+   * `resolved` is the only source of names: the caller has already looked
+   * them up under its own bound (`readConversation`), and a mention it did
+   * not resolve stays an id rather than costing a lookup here.
+   */
+  const plainSlackText = (
+    connection: AgentConnection,
+    text: string,
+    resolved: ReadonlyMap<string, string>,
+  ): string => {
+    const names = new Map<string, string>();
+    for (const id of nameableMentions(connection, text)) {
+      const name = resolved.get(id);
+      if (name !== undefined) {
+        names.set(id, boundedDisplayName(name));
+      }
+    }
+    return text
+      .replace(/<([^<>]*)>/g, (_whole, inner: string) => {
+        const bar = inner.indexOf('|');
+        const target = bar === -1 ? inner : inner.slice(0, bar);
+        const label = bar === -1 ? undefined : inner.slice(bar + 1);
+        if (target.startsWith('@')) {
+          const id = target.slice(1);
+          return `@${names.get(id) ?? id}`;
+        }
+        if (target.startsWith('#')) {
+          return `#${label || target.slice(1)}`;
+        }
+        if (target.startsWith('!')) {
+          const command = target.slice(1);
+          if (command.startsWith('subteam^')) {
+            return label || `@${command.slice('subteam^'.length)}`;
+          }
+          if (command.startsWith('date^')) {
+            return label ?? command;
+          }
+          return `@${command}`;
+        }
+        if (label && label !== target) {
+          return `${label} (${target})`;
+        }
+        return target;
+      })
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&amp;', '&');
   };
 
   const connectionFor = (agentId: string): AgentConnection | undefined =>
@@ -2903,6 +3021,131 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         });
       },
     };
+  };
+
+  /**
+   * The read side of the same boundary `resolveOutbound` draws: a channel
+   * the agent's own app is a member of, public or private. DMs and group
+   * DMs are refused outright, member or not. Their only members are the
+   * people in them, and a read from a conversation elsewhere — a public
+   * thread above all — would carry what they said to people who were never
+   * in the room. A thread in a channel is fine for the same reason the
+   * channel is.
+   */
+  const readConversation = async (request: ConversationReadRequest): Promise<ConversationReadResult> => {
+    const channel = request.conversation.trim();
+    if (!channel) {
+      throw new Error('slack: a read needs a channel id (C…/G…).');
+    }
+    const connection = connectionFor(request.agentId);
+    if (!connection) {
+      throw new Error(configuredAgents.has(request.agentId)
+        ? `slack: ${request.agentId}'s Slack app is not connected right now, so ${channel} cannot be read.`
+        : `slack: agent ${request.agentId} has no Slack app, so it cannot read Slack at all.`);
+    }
+    let info: { id?: string; is_member?: boolean; is_im?: boolean; is_mpim?: boolean } | undefined;
+    try {
+      info = (await connection.web.conversations.info({ channel })).channel;
+    } catch (error) {
+      throw new Error(
+        `slack: ${request.agentId}'s app cannot see ${channel} (${error instanceof Error ? error.message : String(error)}). `
+        + 'Use the channel id, not a name.',
+      );
+    }
+    if (!info?.id) {
+      throw new Error(`slack: ${request.agentId}'s app cannot see a conversation ${channel}.`);
+    }
+    if (info.is_im === true || info.is_mpim === true) {
+      throw new Error(`slack: ${channel} is a direct message, and direct messages are never read from outside them.`);
+    }
+    if (info.is_member !== true) {
+      throw new Error(`slack: ${request.agentId}'s app is not a member of ${channel} — invite it there before it can read.`);
+    }
+    const { history, replies } = connection.web.conversations;
+    const fetchPage = request.thread !== undefined
+      ? (replies ? (args: SlackHistoryArgs) => replies({ ...args, ts: request.thread as string }) : undefined)
+      : history;
+    if (!fetchPage) {
+      throw new Error(`slack: this Slack client cannot read ${request.thread !== undefined ? 'threads' : 'channel history'}.`);
+    }
+    const base: SlackHistoryArgs = {
+      channel: info.id,
+      inclusive: false,
+      ...(request.after !== undefined ? { oldest: request.after } : {}),
+      ...(request.before !== undefined ? { latest: request.before } : {}),
+    };
+    const raw: SlackHistoryMessage[] = [];
+    let cursor: string | undefined;
+    let more = false;
+    do {
+      const page = await fetchPage({ ...base, limit: Math.min(200, request.limit - raw.length), ...(cursor ? { cursor } : {}) });
+      raw.push(...(page.messages ?? []));
+      cursor = page.response_metadata?.next_cursor || undefined;
+      more = cursor !== undefined || page.has_more === true;
+    } while (cursor && raw.length < request.limit);
+    if (raw.length > request.limit) {
+      raw.length = request.limit;
+      more = true;
+    }
+    // History rarely embeds profiles, so names mostly come from users.info.
+    // Cached names are free; at most READ_NAME_LOOKUPS uncached people —
+    // authors and the mentions in their text together — are looked up per
+    // read, at once, and the rest keep their id, so a read of many strangers
+    // never waits through a rate limit one call at a time.
+    const lookups = new Map<string, Promise<string>>();
+    let fresh = 0;
+    const want = (user: string): void => {
+      if (lookups.has(user)) {
+        return;
+      }
+      const cached = displayNames.get(`${connection.teamId}:${user}`);
+      if (cached) {
+        lookups.set(user, Promise.resolve(cached));
+      } else if (fresh < READ_NAME_LOOKUPS) {
+        fresh += 1;
+        lookups.set(user, displayNameFor(connection, user));
+      }
+    };
+    for (const message of raw) {
+      const user = message.user;
+      if (user && !message.user_profile?.display_name && !message.user_profile?.real_name) {
+        want(user);
+      }
+    }
+    for (const message of raw) {
+      for (const id of nameableMentions(connection, message.text ?? '')) {
+        want(id);
+      }
+    }
+    const names = new Map<string, string>();
+    for (const [user, name] of lookups) {
+      names.set(user, await name);
+    }
+    const messages: ConversationMessage[] = [];
+    for (const message of raw) {
+      if (!message.ts) {
+        continue;
+      }
+      const author = message.user ?? message.bot_id ?? 'unknown';
+      const name = message.user_profile?.display_name
+        || message.user_profile?.real_name
+        || message.bot_profile?.name
+        || message.username
+        || (message.user ? names.get(message.user) : undefined);
+      const at = Number.parseFloat(message.ts);
+      const files = (message.files ?? []).map((file) => file.name ?? file.title ?? file.id ?? 'file');
+      messages.push({
+        id: message.ts,
+        author,
+        text: plainSlackText(connection, message.text ?? '', names),
+        ...(name && name !== author ? { authorName: boundedDisplayName(name) } : {}),
+        ...(Number.isFinite(at) ? { at: new Date(at * 1000).toISOString() } : {}),
+        ...(message.thread_ts && message.thread_ts !== message.ts ? { thread: message.thread_ts } : {}),
+        ...(message.reply_count ? { replies: message.reply_count } : {}),
+        ...(files.length > 0 ? { files } : {}),
+      });
+    }
+    return { messages, more };
   };
 
   /**
@@ -4689,6 +4932,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   return {
     name: 'slack',
     resolveOutbound,
+    readConversation,
     requestCredential,
 
     async start(gateway) {

@@ -844,3 +844,32 @@ test('a call judged on no page at all is still refused if one appears before it 
   const result = await act.execute({ action: 'click', selector: '#submit' }, unjudged) as JsonObject;
   assert.equal(result.action, 'click');
 });
+
+test('a screenshot is handed to the model as an image, and the result says whether it was', async (t) => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-shots-'));
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'], workspaceRoot }, emptyRecorder());
+  t.after(() => plugin.dispose());
+
+  const attached: Array<{ mediaType: string; data: string; name?: string }> = [];
+  const shown = await tool('browser.screenshot').execute(
+    { url: 'https://example.com/' },
+    sessionFor('s', 'ava'),
+    { attachImage: (image) => attached.push(image) },
+  ) as JsonObject;
+  assert.deepEqual(shown.image, { shown: true });
+  assert.equal(attached.length, 1);
+  assert.equal(attached[0]?.mediaType, 'image/png');
+  assert.equal(attached[0]?.data, Buffer.from('png').toString('base64'));
+  assert.equal(attached[0]?.name, path.basename(String(shown.file)));
+
+  // A refusal from the sink is the result's to report, never a failed call.
+  const refused = await tool('browser.screenshot').execute(
+    { url: 'https://example.com/' },
+    sessionFor('s', 'ava'),
+    { attachImage: () => { throw new Error('The bytes are not a complete image/png image.'); } },
+  ) as JsonObject;
+  assert.deepEqual(refused.image, { shown: false, reason: 'The bytes are not a complete image/png image.' });
+
+  const noSink = await tool('browser.screenshot').execute({ url: 'https://example.com/' }, sessionFor('s', 'ava')) as JsonObject;
+  assert.equal((noSink.image as JsonObject).shown, false);
+});

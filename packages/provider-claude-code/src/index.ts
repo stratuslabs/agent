@@ -16,6 +16,7 @@ import {
   TURN_LIMIT_NOTE,
   omitImage,
   renderSystemPromptSections,
+  droppedImageNote,
   renderToolResultContent,
   type JsonObject,
   type ModelProvider,
@@ -41,7 +42,7 @@ import {
 // and the documented import paths keep working.
 export { bridgedToolNames, hasHostedToolSideEffects, markHostedToolSideEffects };
 
-export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5';
+export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5-5';
 
 
 const MCP_SERVER_NAME = 'stratus';
@@ -151,6 +152,13 @@ export const bridgeKernelTools = (
               type: 'text' as const,
               text: renderToolResultContent(result),
             },
+            // What the call showed, as MCP carries an image: the harness
+            // hands it to the model as that tool's output.
+            // An image the replay budget already let go of is a note, never
+            // an empty image block.
+            ...(result.images ?? []).map((image) => (image.omitted === true || image.data.length === 0
+              ? { type: 'text' as const, text: droppedImageNote(image) }
+              : { type: 'image' as const, data: image.data, mimeType: image.mediaType })),
           ],
           ...(result.ok ? {} : { isError: true }),
         };
@@ -278,7 +286,7 @@ export interface ClaudeCodeProviderConfig {
    * subscription. Omit to use the machine's existing Claude Code sign-in.
    */
   authToken?: string;
-  /** Defaults to claude-opus-5. */
+  /** Defaults to claude-opus-5-5. */
   model?: string;
   name?: string;
   /** Extra system prompt, rendered before the agent's own persona. */
@@ -442,6 +450,16 @@ const forwardDelta = async (
   // still the stream moving.
   await onDelta({ type: 'progress' });
 };
+
+/**
+ * The SDK's rethrow of the CLI's non-zero exit after the max-turns result.
+ * `readMessages` in the Agent SDK puts any error result's text behind the
+ * same prefix — an auth failure or an interruption included — so the
+ * max-turns text is matched too, and any other error still propagates.
+ */
+const isMaxTurnsExit = (error: unknown): boolean =>
+  error instanceof Error
+  && /^Claude Code returned an error result: Reached maximum number of turns\b/.test(error.message);
 
 export const createClaudeCodeProvider = ({
   authToken,
@@ -652,6 +670,8 @@ export const createClaudeCodeProvider = ({
       // documents `modelUsage` as the running total for the query() call, so
       // adding two results together would double-count the first.
       let attemptUsage: Record<string, ClaudeCodeModelUsage> | undefined;
+      // Set when this attempt ran out of turns with a session to wrap up.
+      let ranOutOfTurns = false;
       try {
         for await (const message of queryFn({
           prompt: runPrompt(
@@ -703,12 +723,27 @@ export const createClaudeCodeProvider = ({
           // there is nothing to wrap up, and it fails as before.
           if (message.subtype === 'error_max_turns' && message.session_id && !refuseTools) {
             outOfTurns = message.session_id;
+            ranOutOfTurns = true;
             continue;
           }
           throw new Error(
             `Claude Code run failed (${message.subtype ?? 'unknown error'})${message.result ? `: ${message.result}` : ''}`,
           );
         }
+      } catch (error) {
+        // The SDK does not stop at the out-of-turns result: the CLI then
+        // exits non-zero, and the SDK raises that exit as "Claude Code
+        // returned an error result: Reached maximum number of turns (40)".
+        // That reached Slack verbatim as "Something went wrong", in place
+        // of the wrap-up the result above already asked for. The result is
+        // the answer; the exit after it is the same event again. An abort
+        // still fails, because a cancelled turn must not start a wrap-up.
+        // Only that exit: any other failure after the result, such as a
+        // consumer rejecting a late delta, is still a failure.
+        if (ranOutOfTurns && !controller.signal.aborted && isMaxTurnsExit(error)) {
+          return;
+        }
+        throw error;
       } finally {
         // In a finally so a thrown attempt still reports: the SDK put the
         // counts on the error result, and a failed harness turn that

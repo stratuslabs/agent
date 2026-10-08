@@ -4,6 +4,7 @@ import type {
   ContentBlockParam,
   Message,
   MessageParam,
+  ImageBlockParam,
   TextBlockParam,
   Tool as AnthropicTool,
 } from '@anthropic-ai/sdk/resources/messages/messages';
@@ -28,7 +29,36 @@ import {
   promptTextOf,
 } from '@stratusagent/core';
 
-export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5';
+export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
+
+/**
+ * Models whose thinking blocks are bound to the conversation that produced
+ * them ("preserved thinking"): the API checks that the `system` prompt, the
+ * `tools`, and every message before a replayed block are byte-identical to
+ * when it was made, and for accounts created on or after 2026-08-31 a
+ * mismatch is a 400 rather than a quiet drop. Claude Mythos 5.1 binds to the
+ * model only, so it is not here.
+ */
+const PREFIX_BOUND_THINKING_MODEL = /^claude-(?:opus-5-5|fable-5-1|sonnet-5-5)(?:$|[-@])/;
+
+/** Whether `model` binds its thinking blocks to the conversation prefix; see above. */
+const bindsThinkingToConversation = (model: string): boolean =>
+  PREFIX_BOUND_THINKING_MODEL.test(model.replace(/^anthropic\./, ''));
+
+/**
+ * What lets this provider replay thinking on those models without a 400:
+ * the API drops a block whose prefix changed — and every block after it —
+ * rather than refusing the request. This provider does edit the prefix, if
+ * rarely now: a remembered fact rewrites the system block, an oversized
+ * image is swapped for a note, a conversation that outgrows the model is
+ * trimmed. Losing that reasoning for one turn is the cost; a conversation
+ * that stops answering is the alternative.
+ */
+const THINKING_BINDING_BETA = 'thinking-binding-controls-2026-08-01';
+const DROP_MISMATCHED_THINKING = {
+  type: 'adaptive',
+  block_binding: { prefix_mismatch_behavior: 'drop_block' },
+} as const;
 /**
  * The per-turn output cap the API requires, when nothing else names one.
  *
@@ -74,7 +104,7 @@ export interface AnthropicProviderConfig {
    * token minted from a Claude Pro/Max subscription (`claude setup-token`).
    */
   authToken?: string;
-  /** Defaults to claude-opus-5, Anthropic's most capable generally available model. */
+  /** Defaults to claude-opus-5-5, the current Opus. */
   model?: string;
   name?: string;
   /** Response token cap per turn (Anthropic requires one). Default 16000. */
@@ -83,8 +113,10 @@ export interface AnthropicProviderConfig {
   systemPrompt?: string;
   baseUrl?: string;
   /**
-   * Claude Opus 5 thinks adaptively by default. Pass 'disabled' to turn
-   * thinking off (e.g. for older models or latency-sensitive runs).
+   * Current Claude models think adaptively by default. Pass 'disabled' to
+   * turn thinking off on a model that still accepts it (Claude Opus 5 at
+   * `high` effort or below, and older models). Claude Opus 5.5, Fable 5.1
+   * and Sonnet 5.5 refuse it, so the provider refuses it for them up front.
    */
   thinking?: 'default' | 'disabled';
   /**
@@ -285,12 +317,18 @@ const overflowedContext = (error: unknown): boolean =>
  * and try again, rather than fail a turn that will fail the same way on
  * every replay after it.
  */
-const rejectedImageAddress = (error: unknown): { message: number; block: number } | undefined => {
+const rejectedImageAddress = (error: unknown): { message: number; block: number; nested?: number } | undefined => {
   if (!(error instanceof Anthropic.BadRequestError)) {
     return undefined;
   }
-  const match = /messages\.(\d+)\.content\.(\d+)\.image\b/.exec(error.message);
-  return match ? { message: Number(match[1]), block: Number(match[2]) } : undefined;
+  // A tool's image sits one level down, inside its tool_result, and the
+  // API may or may not name the block type on the way:
+  // `messages.3.content.0.content.1.image…` or
+  // `messages.3.content.0.tool_result.content.1.image…`.
+  const match = /messages\.(\d+)\.content\.(\d+)(?:\.tool_result)?(?:\.content\.(\d+))?\.image\b/.exec(error.message);
+  return match
+    ? { message: Number(match[1]), block: Number(match[2]), ...(match[3] !== undefined ? { nested: Number(match[3]) } : {}) }
+    : undefined;
 };
 
 type RawTurns = Record<string, ContentBlock[]>;
@@ -336,20 +374,26 @@ const rawTurnsFrom = (session: ProviderRequest['session']): RawTurns => {
  * text block is added only when there is text, and a message with neither
  * still sends one so the turn is never an empty content array.
  */
+const imageBlocksFor = (
+  images: readonly ImageAttachment[],
+  replayed: ReadonlySet<ImageAttachment>,
+  imageOf: WeakMap<ContentBlockParam, ImageAttachment>,
+): Array<TextBlockParam | ImageBlockParam> => images.map((image) => {
+  if (!replayed.has(image)) {
+    return { type: 'text', text: droppedImageNote(image) };
+  }
+  const block: ImageBlockParam = { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } };
+  imageOf.set(block, image);
+  return block;
+});
+
 const userBlocks = (
   content: string,
   images: readonly ImageAttachment[] | undefined,
   replayed: ReadonlySet<ImageAttachment>,
   imageOf: WeakMap<ContentBlockParam, ImageAttachment>,
 ): ContentBlockParam[] => {
-  const blocks: ContentBlockParam[] = (images ?? []).map((image) => {
-    if (!replayed.has(image)) {
-      return { type: 'text', text: droppedImageNote(image) };
-    }
-    const block: ContentBlockParam = { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } };
-    imageOf.set(block, image);
-    return block;
-  });
+  const blocks: ContentBlockParam[] = imageBlocksFor(images ?? [], replayed, imageOf);
   if (content.length > 0 || blocks.length === 0) {
     blocks.push({ type: 'text', text: content });
   }
@@ -435,11 +479,18 @@ const createAnthropicMessages = (
       if (!result) {
         continue;
       }
+      // A call that returned images answers with them inside its own
+      // result, where the model reads them as that call's output rather
+      // than as something a person sent. Text first, as the API orders a
+      // result: what the call said, then what it showed.
+      const images = message.images ?? [];
       push('user', [
         {
           type: 'tool_result',
           tool_use_id: result.callId,
-          content: renderToolResultContent(result),
+          content: images.length === 0
+            ? renderToolResultContent(result)
+            : [{ type: 'text', text: renderToolResultContent(result) }, ...imageBlocksFor(images, replayed, imageOf)],
           ...(result.ok ? {} : { is_error: true }),
         },
       ]);
@@ -492,13 +543,19 @@ const createAnthropicMessages = (
   }
 
   const imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }> = [];
-  for (const group of groups) {
-    group.blocks.forEach((block, index) => {
+  const collect = (holder: ContentBlockParam[]): void => {
+    holder.forEach((block, index) => {
       const image = imageOf.get(block);
       if (image !== undefined) {
-        imageBlocks.push({ holder: group.blocks, index, image });
+        imageBlocks.push({ holder, index, image });
+      } else if (block.type === 'tool_result' && Array.isArray(block.content)) {
+        // A tool's images sit inside its result, and give way there.
+        collect(block.content as ContentBlockParam[]);
       }
     });
+  };
+  for (const group of groups) {
+    collect(group.blocks);
   }
   // The content arrays are the groups' own, so a block swapped in a holder
   // is swapped in the request.
@@ -612,6 +669,10 @@ export const createAnthropicProvider = ({
   if (!apiKey && !authToken) {
     throw new Error('The Anthropic provider needs an apiKey or an authToken.');
   }
+  const prefixBound = bindsThinkingToConversation(model);
+  if (prefixBound && thinking === 'disabled') {
+    throw new Error(`${model} always thinks and rejects disabled thinking. Leave thinking at its default for this model.`);
+  }
 
   const client = new Anthropic({
     // Explicit nulls stop the SDK from falling back to ambient env vars.
@@ -626,7 +687,12 @@ export const createAnthropicProvider = ({
   // instance: the alternative is one wasted round trip per turn rather than
   // one per process. Never promoted back — a model does not grow the feature
   // mid-run, and retrying would reintroduce the cost this remembers away.
-  let memoryAtTailSupported = true;
+  //
+  // Never on a model that binds thinking to the conversation, though: the
+  // tail message is rebuilt for every request and gone from the next, which
+  // edits the history every block after it was made in. There memory rides
+  // in the system block, which changes only when a memory does.
+  let memoryAtTailSupported = !prefixBound;
 
   return {
     name,
@@ -657,8 +723,9 @@ export const createAnthropicProvider = ({
           ...(prompt.system.length > 0 ? { system: prompt.system } : {}),
           ...(prompt.tools.length > 0 ? { tools: prompt.tools } : {}),
           ...(prompt.tools.length > 0 && request.toolChoice === 'none' ? { tool_choice: { type: 'none' as const } } : {}),
-          // Claude Opus 5 thinks adaptively when `thinking` is omitted.
+          // Current models think adaptively when `thinking` is omitted.
           ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
+          ...(prefixBound ? { thinking: DROP_MISMATCHED_THINKING } : {}),
           messages: prompt.memoryMessage === undefined
             ? messages
             : [...messages, { role: 'system' as const, content: prompt.memoryMessage }],
@@ -691,7 +758,12 @@ export const createAnthropicProvider = ({
       }
       // The turn's abort signal cancels the underlying HTTP request — the
       // kernel contract is that aborting stops the work, not just the wait.
-      const requestOptions = request.signal ? { signal: request.signal } : undefined;
+      const requestOptions = request.signal || prefixBound
+        ? {
+            ...(request.signal ? { signal: request.signal } : {}),
+            ...(prefixBound ? { headers: { 'anthropic-beta': THINKING_BINDING_BETA } } : {}),
+          }
+        : undefined;
 
       const send = async (attempt: typeof params) => {
         if (request.onDelta) {
@@ -804,14 +876,19 @@ export const createAnthropicProvider = ({
           // and left alone it would fail every later turn the same way —
           // and the turn goes on with a note in its place.
           const address = rejectedImageAddress(error);
-          const content = address === undefined ? undefined : params.messages[address.message]?.content;
-          const block = Array.isArray(content) ? content[address!.block] : undefined;
+          const outer = address === undefined ? undefined : params.messages[address.message]?.content;
+          const outerBlock = Array.isArray(outer) ? outer[address!.block] : undefined;
+          const content = address?.nested === undefined
+            ? outer
+            : outerBlock?.type === 'tool_result' && Array.isArray(outerBlock.content) ? outerBlock.content : undefined;
+          const at = address?.nested ?? address?.block;
+          const block = Array.isArray(content) && at !== undefined ? content[at] : undefined;
           const image = block === undefined ? undefined : imageOf.get(block as ContentBlockParam);
-          if (image === undefined || block === undefined) {
+          if (image === undefined || block === undefined || at === undefined) {
             throw error;
           }
           omitImage(image);
-          (content as ContentBlockParam[])[address!.block] = { type: 'text', text: droppedImageNote(image) };
+          (content as ContentBlockParam[])[at] = { type: 'text', text: droppedImageNote(image) };
           continue;
         }
       }

@@ -62,7 +62,7 @@ structured parts, prose for the personality:
 ---
 name: Blair
 provider: anthropic
-model: claude-opus-5
+model: claude-opus-5-5
 tools: [fs.read, fs.search, web.fetch, memory.*]
 skills: [code-review]
 listens: judge
@@ -113,6 +113,7 @@ The trust model behind that is in
 | Give agents real capability, safely | [Tools](docs/guides/tools.md) · [Shell commands](docs/guides/shell.md) · [Browser actions](docs/guides/browser.md) · [Approvals](docs/guides/approvals.md) |
 | Let agents act on a schedule | [Schedules](docs/guides/schedules.md) |
 | Run it as a service, read its logs, upgrade it | [Always on](docs/guides/always-on.md) · [Logs](docs/guides/logs.md) · [Updating](docs/guides/updating.md) |
+| Run it on a server, in Docker or under a system unit | [Deployment](docs/guides/deployment.md) |
 | Fix a surprise | [Troubleshooting](docs/guides/troubleshooting.md) |
 | Look up any command, flag, or config key | [CLI reference](docs/reference/cli.md) · [Configuration](docs/reference/config.md) |
 | Know what is on disk, and what belongs to one agent | [State layout](docs/reference/state-layout.md) |

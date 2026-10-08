@@ -1,0 +1,73 @@
+# stratusd on one machine, from this checkout. From this directory:
+#
+#   cp stratusd.env.example stratusd.env    # then fill in a provider key
+#   docker compose up -d --build --wait      # returns once `stratus health` passes
+#   docker compose exec stratusd stratus health
+#
+# The whole recipe — first run, Slack, logs, backups, upgrades, hardening —
+# is docs/guides/deployment.md.
+
+name: stratus
+
+services:
+  stratusd:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      # `browser` adds Chromium for @stratusagent/tool-browser (and a few
+      # hundred MB). Change both lines together.
+      target: slim
+    image: stratusd:slim
+    container_name: stratusd
+    # Provider keys and anything else the daemon reads from its environment.
+    # Kept out of this file, and out of the image.
+    env_file: stratusd.env
+    # The daemon's whole state. A named volume, not a bind mount into a
+    # synced or network folder: the session stores are SQLite in WAL mode,
+    # which needs working file locks and shared memory, and Docker Desktop's
+    # file sharing (virtiofs, gRPC FUSE) and network filesystems do not
+    # promise either — the failure is a corrupt database, not an error.
+    volumes:
+      - stratus-home:/home/node/.stratus
+    # The control API on the host's loopback only. Reach it from elsewhere
+    # through a tunnel (Tailscale, SSH), never by widening this.
+    ports:
+      - "127.0.0.1:4123:4123"
+    # Reaps the processes the shell tool's commands leave behind; the daemon
+    # itself handles SIGTERM.
+    init: true
+    restart: unless-stopped
+    # Longer than the daemon's 30-second drain, or SIGKILL cuts it short and
+    # the turns still running are failed rather than finished.
+    stop_grace_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 512
+    # Chromium's shared memory, for the `browser` target. Harmless otherwise.
+    shm_size: 256m
+    healthcheck:
+      test: ["CMD", "stratus", "health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      # Checked this often until the first success, so `up --wait` returns
+      # as soon as the daemon serves rather than after a full interval.
+      start_interval: 2s
+      retries: 3
+    # json-file keeps everything forever unless told otherwise. stdout is
+    # the structured log (--log-format json), so it is also what a logging
+    # driver ships; the same records stay in the volume for `stratus logs`.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+volumes:
+  stratus-home:

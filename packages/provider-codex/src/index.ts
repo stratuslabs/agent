@@ -7,6 +7,7 @@ import {
   markPromptDelivered,
   isUnaddressedTurn,
   renderSystemPromptSections,
+  droppedImageNote,
   renderToolResultContent,
   uncachedInputTokens,
   type ExecutionContext,
@@ -212,6 +213,13 @@ export const startKernelMcpServer = async (
               type: 'text',
               text: renderToolResultContent(result),
             },
+            // What the call showed, as MCP carries an image: the harness
+            // hands it to the model as that tool's output.
+            // An image the replay budget already let go of is a note, never
+            // an empty image block.
+            ...(result.images ?? []).map((image) => (image.omitted === true || image.data.length === 0
+              ? { type: 'text', text: droppedImageNote(image) }
+              : { type: 'image', data: image.data, mimeType: image.mediaType })),
           ],
           ...(result.ok ? {} : { isError: true }),
         });

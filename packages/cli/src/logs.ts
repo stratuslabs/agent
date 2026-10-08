@@ -1,6 +1,8 @@
 import { appendFile, chmod, mkdir, open, readdir, rename, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
+import type { CliStreams } from './environment.ts';
+
 /**
  * One line of `~/.stratus/logs/stratusd.jsonl`. Structured rather than
  * pretty-printed because the interesting questions are filters — what did
@@ -20,6 +22,46 @@ export interface LogRecord {
   /** Event-specific fields: tool name, status, part count, error text. */
   detail?: Record<string, unknown>;
 }
+
+/**
+ * Streams for `stratus serve --log-format json` from the first line the
+ * CLI writes, not only from the daemon's own logger on.
+ *
+ * Before `serve` builds that logger, `runCli` has already had its say on
+ * stderr: a state migration's notice on the first start of an upgrade, a
+ * refusal of a home a newer build stamped, a start that failed. Docker and
+ * journald collect stderr beside stdout, so each of those plain lines lands
+ * in the stream a shipper parses as JSON — at an upgrade or a failed start,
+ * which is when the log is read. Here every stderr line becomes a `warn`
+ * record on stdout instead, the same shape the daemon's own warnings take.
+ */
+export const jsonRecordStreams = (streams: CliStreams, now: () => Date = () => new Date()): CliStreams => {
+  let pending = '';
+  const emit = (line: string): void => {
+    if (line.trim().length > 0) {
+      streams.stdout.write(`${JSON.stringify({ ts: now().toISOString(), level: 'warn', msg: line } satisfies LogRecord)}\n`);
+    }
+  };
+  return {
+    stdout: streams.stdout,
+    stderr: {
+      write(chunk: string | Uint8Array): boolean {
+        const lines = (pending + (typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'))).split('\n');
+        pending = lines.pop() ?? '';
+        lines.forEach(emit);
+        return true;
+      },
+    },
+  };
+};
+
+/**
+ * Whether this invocation is `stratus serve --log-format json`, read from
+ * argv itself: the answer is needed before parsing, so a command line that
+ * fails to parse is still reported as a record.
+ */
+export const wantsJsonLog = (argv: readonly string[]): boolean =>
+  argv[0] === 'serve' && argv.some((token, index) => token === '--log-format' && argv[index + 1] === 'json');
 
 export const LOG_FILENAME = 'stratusd.jsonl';
 /** Rotate past this size. Small enough to stay greppable, large enough to hold a busy day. */

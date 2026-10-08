@@ -103,7 +103,7 @@ When a stored key "isn't found", check in this order:
 
 ## Tools, plugins, and approvals
 
-- **Built in everywhere:** `memory.*` (remember, recall, forget, pin) and `skill.read`, which every agent has because this skill counts. **Only under the daemon:** `schedule.*`, `message.send`, `agent.delegate`, and `credential.request`, so `stratus run` and `stratus chat` cannot call them.
+- **Built in everywhere:** `memory.*` (remember, recall, forget, pin) and `skill.read`, which every agent has because this skill counts. **Only under the daemon:** `schedule.*`, `message.send`, `message.read`, `agent.delegate`, and `credential.request`, so `stratus run` and `stratus chat` cannot call them.
 - **Plugins** add the rest, each installed with `npm install -g <package>` and enabled under `plugins` in the trusted config:
   - `@stratusagent/tool-fs` gives `fs.*`, inside configured roots only, so with no roots there is no filesystem. Whatever the roots, `fs.*` never reaches `~/.stratus` outside the agents' workspaces (credentials, config, logs, sessions, memories, souls, skills, grants), so a refusal there is by design, not a roots problem. Roots go in `"@stratusagent/tool-fs": { "enabled": true, "roots": ["~/notes"] }`, or under `"agents": { "<id>": { "roots": [...] } }` for one agent.
   - `@stratusagent/tool-shell` gives `shell.run`.
@@ -114,10 +114,10 @@ When a stored key "isn't found", check in this order:
 - Enabled is not granted: your soul's `tools:` must also cover a plugin's tools. `stratus plugins` walks the whole chain for each tool (installed, enabled, granted to which agents, and what approvals do with a call), so it answers "why can't you use X" in one command.
 - **Risk.** Every tool is `safe`, `gated`, or `dangerous`. The daemon runs `safe` tools unattended, among them `memory.*`, `skill.read`, `credential.request`, `agent.delegate`, `schedule.list`, `schedule.cancel`, and `fs.read`, `fs.list`, and `fs.search`. Gated tools include:
   - `web.fetch`, `fs.write`, `shell.run`, `browser.*`, and `mcp.*`;
-  - `schedule.every`, `schedule.at`, and `message.send`;
+  - `schedule.every`, `schedule.at`, `message.send`, and `message.read` (which reads a channel your Slack app is in, never a DM, and labels what it returns `external`);
   - every third-party tool, `web.search` included.
   - What happens to a gated call depends on the approvals mode. Under `headless` (the default) it is refused. Under `remote` the people in `approvals.slackApprovers` are asked in Slack (or through the control API's `/approvals`) with **Allow once**, **Always allow**, and **Deny**. Under `remote` with nobody to ask, it is refused too.
-  - Either way, what was already approved still runs unattended. For `shell.run` that is a command scope plus a built-in safe list of read-only commands (`git status`, `git log`, `git diff`, `pwd`, and a few more; not `ls`). For `browser.act` it is an approved site, and for other gated tools a standing grant.
+  - Either way, what was already approved still runs unattended. For `shell.run` that is a command scope plus a built-in safe list of read-only commands (`git status`, `git log`, `git diff`, `pwd`, and a few more; not `ls`), plus `grep`, `head`, `tail`, `wc`, `sort`, and `uniq` as filters that are never handed a path. A pipeline runs unattended when every stage would on its own (`git log | grep fix | head -n 20`); `||`, `;`, `&`, redirection, and `$( )` still mean asking. For `browser.act` it is an approved site, and for other gated tools a standing grant.
   - The exception is `approvals.externalContent: "gate"`, set for every agent or per agent under `approvals.agents.<id>`. Once your conversation has read external content (`web.fetch`, `browser.*`, `web.search`, or an `mcp.*` tool), no grant applies for the rest of it: every gated call is asked or, headless, refused, and **Always allow** is not offered. `safe` tools, the built-in read-only commands, and a schedule's pre-authorized destination still run. Your next conversation starts with its grants again.
   - **Always allow** writes one of those to `agents/<id>/whitelist.json`, except for a tool that names a destination, such as `message.send`, where it lasts for the conversation. A `dangerous` call is never offered it.
   - `stratus grants <id>` lists the grants, and `stratus grants revoke <id> --tool|--scope|--origin` takes one back. There is no command to add one: a headless daemon asks nobody, so it never creates a grant, and a call nobody has approved yet needs `remote` mode first.
@@ -159,6 +159,7 @@ When a stored key "isn't found", check in this order:
   - A restart is needed after a change to `plugins` (a plugin's `env` included), `approvals`, `api`, `principals`, `slack`, `maxTurns`, `executor`, or `memoryStore`, and after new channel secrets (Slack's tokens or a channel plugin's).
   - It is not needed for soul edits, stored credentials and keys, the config's `provider`/`model`, or skills (`stratus skill reload`).
   - `stratus update` stops and starts the service itself. Only a daemon someone started with `stratus serve` needs restarting by hand.
+- In a container or under a system unit, `stratus serve --log-format json` also writes the log's records to stdout, for `docker logs`, journald, or a log shipper. `stratus health` is the probe.
 - **`stratus logs`** (`-f` to follow, `--agent`, `--session`) reads the structured log. It records that tools ran and sessions finished, never prompts or replies. One exception: a failed session keeps the provider's error text, so skim a log before sharing it.
   - A daemon that fails *before* it starts serving writes nothing there. Its error is in `~/.stratus/logs/stratusd.err.log` on macOS, in `journalctl --user-unit=stratusd.service` on Linux, or on the terminal that ran `stratus serve`.
 - **The control API** is a separate install, `@stratusagent/control-api`, serving `/api/v1` on `127.0.0.1:4123`. The web dashboard is another, `@stratusagent/dashboard`, opened with `stratus dashboard`, which starts a daemon if none is running.
@@ -182,6 +183,7 @@ When a stored key "isn't found", check in this order:
 | `stratus service install\|uninstall\|start\|stop\|status` | Keep the daemon running as a background service |
 | `stratus restart` | Announced drain-and-restart of the running daemon |
 | `stratus logs` | Read the daemon's log |
+| `stratus health` | Whether the running daemon is serving: exit 0 if so, for a container healthcheck or a probe |
 | `stratus doctor` | What a run would use, and why |
 | `stratus update` | Update Stratus and its companion packages (`--check` to look first) |
 | `stratus dashboard` | Open the web dashboard with a one-time sign-in link |

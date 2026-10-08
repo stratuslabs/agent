@@ -14,6 +14,7 @@ import { runChannel } from './commands/channel.ts';
 import { runDashboard } from './commands/dashboard.ts';
 import { runDoctor } from './commands/doctor.ts';
 import { runGrants } from './commands/grants.ts';
+import { runHealth } from './commands/health.ts';
 import { runLogs } from './commands/logs.ts';
 import { runMemory } from './commands/memory.ts';
 import { runPlugins } from './commands/plugins.ts';
@@ -28,6 +29,7 @@ import { runTemplateAdd } from './commands/template.ts';
 import { runUpdate } from './commands/update.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
 import { HELP_TEXT } from './help.ts';
+import { jsonRecordStreams, wantsJsonLog } from './logs.ts';
 import { writeLine, readPromptFromStdin } from './io.ts';
 import { CLI_VERSION } from './npm.ts';
 import { parseCommand, defaultApprovalMode, memoryCommandWritesState } from './parse.ts';
@@ -46,7 +48,10 @@ export interface CliRunOptions {
   env?: CliEnvironment;
 }
 
-export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {
+export const runCli = async ({ argv, streams: given = process, env = {} }: CliRunOptions): Promise<number> => {
+  // Chosen before anything can write — see `jsonRecordStreams`.
+  const jsonLog = wantsJsonLog(argv);
+  const streams = jsonLog ? jsonRecordStreams(given) : given;
   try {
     const resolvedEnv = argv.includes('--stdin') && env.stdin === undefined
       ? {
@@ -67,6 +72,15 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     if (command.command === 'version') {
       writeLine(streams.stdout, `stratus ${CLI_VERSION}`);
       return 0;
+    }
+
+    // Above the migrations too. A probe is run every few seconds for the
+    // life of a deployment by whatever supervises the daemon, and it asks
+    // the running process a question over HTTP — the home's format is the
+    // daemon's business, and a liveness check must not be the thing that
+    // advances it (or fails because it could not).
+    if (command.command === 'health') {
+      return await runHealth(command, streams, resolvedEnv);
     }
 
     // Migrations run on first use of a newer build — every command, every
@@ -276,8 +290,12 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     writeLine(streams.stderr, `Error: ${message}`);
-    writeLine(streams.stderr, '');
-    writeLine(streams.stderr, HELP_TEXT);
+    // The help is for a person at a terminal; under a log shipper it would
+    // be a hundred records burying the one that says what failed.
+    if (!jsonLog) {
+      writeLine(streams.stderr, '');
+      writeLine(streams.stderr, HELP_TEXT);
+    }
     return 1;
   }
 };

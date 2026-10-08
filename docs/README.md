@@ -24,6 +24,7 @@ tree is where the depth lives.
 | See what an agent may do unattended, and take a grant back | [Approvals](./guides/approvals.md#standing-grants) |
 | Let agents act on their own schedule | [Schedules](./guides/schedules.md) |
 | Keep the daemon running after I close the terminal | [Always on](./guides/always-on.md) |
+| Run it on a server — Docker or a system unit, backups, upgrades, hardening | [Deployment](./guides/deployment.md) |
 | See what the daemon did overnight | [Logs](./guides/logs.md) |
 | Upgrade without losing anything | [Updating](./guides/updating.md) |
 | Figure out why a run used the wrong provider | [Troubleshooting](./guides/troubleshooting.md) |
