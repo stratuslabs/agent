@@ -2631,6 +2631,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         kind,
         ...(kind !== 'direct' && typeof info.num_members === 'number' ? { members: info.num_members } : {}),
         ...(kind !== 'direct' && (info.is_ext_shared === true || info.is_org_shared === true) ? { shared: true } : {}),
+        ...(kind !== 'direct' && typeof info.id === 'string' ? { id: info.id } : {}),
       };
     } catch {
       return undefined;

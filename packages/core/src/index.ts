@@ -2714,10 +2714,18 @@ export interface ConversationContext {
    * direct message.
    */
   shared?: boolean;
+  /**
+   * The channel's own id for the room, such as Slack's `C0123456789`: what
+   * `message.read` and `message.send` take, and what lets an agent say or
+   * remember which room this is. Never set for a direct message, where the
+   * id names nothing the agent can use elsewhere.
+   */
+  id?: string;
   // No channel name, deliberately: anyone who can create or rename a
   // channel chooses it, and this reaches the system prompt, where a name
   // like `ignore-all-previous-instructions` would outrank the soul. The
-  // kind and the count are what decide how to write, and neither is text.
+  // kind, the count, and the id are what it needs, and none of them is text
+  // a person chose.
 }
 
 /**
@@ -2732,6 +2740,9 @@ const CONVERSATION_KINDS: readonly string[] = ['direct', 'group', 'private', 'pu
 // vouched for, but still typed, so anything that is not plainly a name is
 // dropped rather than quoted.
 const CONVERSATION_WITH_PATTERN = /^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} .'\u2019-]{0,63}$/u;
+// A platform-assigned id, never a word anyone typed: Slack's are capitals
+// and digits. Anything else is dropped rather than quoted.
+const CONVERSATION_ID_PATTERN = /^[A-Z0-9]{6,32}$/;
 
 /**
  * The room a turn's metadata describes, keeping only what is safe to put
@@ -2742,7 +2753,7 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
   }
-  const { kind, members, with: withWhom, thread, shared } = raw as Record<string, unknown>;
+  const { kind, members, with: withWhom, thread, shared, id } = raw as Record<string, unknown>;
   if (typeof kind !== 'string' || !CONVERSATION_KINDS.includes(kind)) {
     return undefined;
   }
@@ -2752,6 +2763,7 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
     ...(kind === 'direct' && typeof withWhom === 'string' && CONVERSATION_WITH_PATTERN.test(withWhom.trim()) ? { with: withWhom.trim() } : {}),
     ...(thread === true ? { thread: true } : {}),
     ...(kind !== 'direct' && shared === true ? { shared: true } : {}),
+    ...(kind !== 'direct' && typeof id === 'string' && CONVERSATION_ID_PATTERN.test(id) ? { id } : {}),
   };
 };
 
@@ -5198,6 +5210,7 @@ export const renderChannelSection = (
  */
 const describeRoom = (room: ConversationContext, channel: string): string => {
   const count = room.members !== undefined ? room.members.toLocaleString('en-US') : undefined;
+  const idNote = room.id !== undefined ? ` Its ${channel} id is ${room.id}.` : '';
   const inThread = room.thread === true ? ' You are replying in a thread there, which everyone who can read the channel can open.' : '';
   const outside = room.shared === true
     ? ' It is shared with people outside this workspace, through Slack Connect or another workspace of the organization, and they read it too.'
@@ -5210,13 +5223,13 @@ const describeRoom = (room: ConversationContext, channel: string): string => {
         + 'Only the two of you can read it, so you are talking to one person.';
     case 'group':
       return `this is a group direct message in ${channel}${count !== undefined ? ` with ${count} members, you included` : ''}. `
-        + `Only they can read it.${outside}${inThread} ${forEveryone}`;
+        + `Only they can read it.${idNote}${outside}${inThread} ${forEveryone}`;
     case 'private':
       return `this is a private ${channel} channel${count !== undefined ? ` with ${count} members, you included` : ''}. `
-        + `Only its members can read it.${outside}${inThread} ${forEveryone}`;
+        + `Only its members can read it.${idNote}${outside}${inThread} ${forEveryone}`;
     case 'public':
       return `this is a public ${channel} channel${count !== undefined ? ` with ${count} members` : ''}. `
-        + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${outside}${inThread} ${forEveryone}`;
+        + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${idNote}${outside}${inThread} ${forEveryone}`;
   }
 };
 

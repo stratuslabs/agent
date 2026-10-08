@@ -280,7 +280,9 @@ test('message.read is judged by its source, so always-allow cannot become a stan
 });
 
 test('message.read stops at its text budget and says there is more, cutting only a message too big to fit alone', async () => {
-  const half = 'x'.repeat(MESSAGE_READ_TEXT_BUDGET / 2);
+  // The budget counts the whole message as returned, so leave room for
+  // its id and author beside the text.
+  const half = 'x'.repeat(MESSAGE_READ_TEXT_BUDGET / 2 - JSON.stringify({ id: '3.000001', author: 'U1', text: '' }).length);
   const tool = createMessageReadTool(async () => ({
     messages: [
       { id: '3.000001', author: 'U1', text: half },
@@ -302,5 +304,28 @@ test('message.read stops at its text budget and says there is more, cutting only
   assert.equal(messages.length, 1);
   assert.ok(messages[0]!.text.length < MESSAGE_READ_TEXT_BUDGET + 100);
   assert.match(messages[0]!.text, /the rest of this message is not shown\]$/);
+  assert.equal(cut.more, true);
+});
+
+test('message.read counts names and file lists against its budget, not only the text', async () => {
+  // Short posts with long attachment lists outgrew a text-only budget.
+  const files = Array.from({ length: 200 }, (_, index) => `attachment-${index}-${'f'.repeat(80)}.pdf`);
+  const tool = createMessageReadTool(async () => ({
+    messages: Array.from({ length: 10 }, (_, index) => ({ id: `${index}.000001`, author: 'U1', authorName: 'Blair', text: 'see attached', files })),
+    more: false,
+  }));
+  const result = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  assert.ok(JSON.stringify(result.messages).length <= MESSAGE_READ_TEXT_BUDGET + 100);
+  assert.ok((result.count as number) < 10);
+  assert.equal(result.more, true);
+
+  // One message whose list alone is past the budget says how many files
+  // it had rather than listing them.
+  const many = Array.from({ length: 2000 }, (_, index) => `attachment-${index}-${'f'.repeat(80)}.pdf`);
+  const single = createMessageReadTool(async () => ({ messages: [{ id: '1.000001', author: 'U1', text: 'all of them', files: many }], more: false }));
+  const cut = await single.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  const first = (cut.messages as Array<{ text: string; files?: string[] }>)[0]!;
+  assert.deepEqual(first.files, ['2000 files, not listed']);
+  assert.ok(JSON.stringify(cut.messages).length <= MESSAGE_READ_TEXT_BUDGET);
   assert.equal(cut.more, true);
 });

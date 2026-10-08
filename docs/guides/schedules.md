@@ -30,6 +30,7 @@ name: Blair
 tools:
   - schedule.*
   - message.send
+  - message.read
 ---
 ```
 

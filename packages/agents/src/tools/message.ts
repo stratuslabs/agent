@@ -69,11 +69,12 @@ export const MESSAGE_READ_TOOL_NAME = 'message.read';
 export const MESSAGE_READ_MAX_LIMIT = 200;
 const MESSAGE_READ_DEFAULT_LIMIT = 50;
 /**
- * The most message text, in characters, one call returns. A count alone
- * does not bound a read: fifty long posts can outgrow a model's context,
- * and the result is kept in the transcript and sent on every later turn.
- * A read that reaches it stops at the last whole message that fit and
- * says `more`, so the agent pages on with `before`/`after`.
+ * The most a call returns, in characters of the serialized messages: text,
+ * names, file names, and ids together. A count alone does not bound a
+ * read: fifty long posts can outgrow a model's context, and the result is
+ * kept in the transcript and sent on every later turn. A read that reaches
+ * it stops at the last whole message that fit and says `more`, so the
+ * agent pages on with `before`/`after`.
  */
 export const MESSAGE_READ_TEXT_BUDGET = 40_000;
 const TRUNCATED_MARK = ' [... the rest of this message is not shown]';
@@ -182,15 +183,23 @@ export const createMessageReadTool = (read: ConversationReader): Tool => ({
     let used = 0;
     let more = result.more;
     for (const message of result.messages) {
-      if (used + message.text.length <= MESSAGE_READ_TEXT_BUDGET) {
+      const size = JSON.stringify(message).length;
+      if (used + size <= MESSAGE_READ_TEXT_BUDGET) {
         messages.push({ ...message });
-        used += message.text.length;
+        used += size;
         continue;
       }
       // One message bigger than the whole budget is cut rather than
-      // dropped, or the read could never get past it.
+      // dropped, or the read could never get past it. Its file list goes
+      // too, said by count, since a list can be as long as any text.
       if (messages.length === 0) {
-        messages.push({ ...message, text: message.text.slice(0, MESSAGE_READ_TEXT_BUDGET) + TRUNCATED_MARK });
+        const { files, ...rest } = message;
+        const cut = {
+          ...rest,
+          text: message.text.slice(0, MESSAGE_READ_TEXT_BUDGET / 2) + TRUNCATED_MARK,
+          ...(files && files.length > 0 ? { files: [`${files.length} files, not listed`] } : {}),
+        };
+        messages.push(cut);
       }
       more = true;
       break;
