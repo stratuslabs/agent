@@ -49,6 +49,7 @@ test('a configured plugin is loaded before dispatch, and reported with its prove
   let workspaceRoot: unknown;
   let seenWorkspace: unknown;
   let seenStateDirectory: unknown;
+  let seenProtected: Promise<readonly string[]> | undefined;
 
   const host = await hostFor({
     'stratus-plugin-notes': {
@@ -68,9 +69,11 @@ test('a configured plugin is loaded before dispatch, and reported with its prove
               tools: { register(tool: unknown): void };
               workspaces?: { forAgent(agentId: string): string };
               stateDirectory?: { prepare(): string };
+              protectedPaths?: { all(): Promise<readonly string[]> };
             }) {
               seenWorkspace = context.workspaces?.forAgent('ava');
               seenStateDirectory = context.stateDirectory?.prepare();
+              seenProtected = context.protectedPaths?.all();
               context.tools.register({
                 name: 'notes.read',
                 description: 'Read a note.',
@@ -122,6 +125,8 @@ test('a configured plugin is loaded before dispatch, and reported with its prove
     assert.equal(seenWorkspace, path.join(home, '.stratus', 'agents', 'ava', 'workspace'));
     // And for what the plugin keeps across restarts, by its package name.
     assert.equal(seenStateDirectory, path.join(home, '.stratus', 'plugins', 'stratus-plugin-notes'));
+    // And for what no plugin may hand an agent: the daemon's whole home.
+    assert.ok((await seenProtected)?.includes(path.join(home, '.stratus')));
 
     const plugins = gateway.plugins();
     assert.equal(plugins.find((plugin) => plugin.package === 'stratus-plugin-notes')?.tools?.length, 1);

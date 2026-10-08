@@ -286,3 +286,4 @@ export {
 
 export { createAgentWorkspaces } from './workspaces.ts';
 export { createPluginStateDirectories } from './plugin-state.ts';
+export { createHostProtectedPaths } from './protected-paths.ts';
