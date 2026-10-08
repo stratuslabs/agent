@@ -8872,3 +8872,36 @@ test('a channel two agents call home stays with the first, with a warning, so no
     'slack: C1 is a home channel for both ava and bea; ava keeps it, and bea answers there only when mentioned.',
   ]);
 });
+
+test('a reply under a home-channel message reaches its owner even when another socket hears it first', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // No durable routing yet: the owner's first turn has not written any.
+  gateway.sessionRouting = async () => undefined;
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', homeChannels: ['C1'] },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const opening = channelMessage({ text: 'what changed overnight?', ts: '730.1' });
+  await socketBea.deliver('message', opening);
+  await socketAva.deliver('message', opening);
+  const reply = channelMessage({ text: 'and the deploy?', ts: '730.2', thread: '730.1' });
+  await socketBea.deliver('message', reply);
+  await socketAva.deliver('message', reply);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: what changed overnight?'],
+    ['ava', 'Dylan: and the deploy?'],
+  ]);
+});

@@ -175,6 +175,7 @@ export {
   resolveAgentApprovals,
   resolveAgentPrincipals,
   resolveAgentSlack,
+  homeChannelOwners,
   saveConfigFile,
 } from './config-file.ts';
 

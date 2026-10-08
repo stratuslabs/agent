@@ -4158,12 +4158,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // which hands it to them exactly as it would anywhere. Top-level only:
     // inside a thread the soul's `listens` already says what an untagged
     // reply is, and the home channel does not overrule it.
-    const addressed = mentioned || (
-      !isDm
-      && event.thread_ts === undefined
-      && named === undefined
-      && homeOwners.get(event.channel) === connection.config.agentId
-    );
+    const homeOwner = !isDm && event.thread_ts === undefined && named === undefined
+      ? homeOwners.get(event.channel)
+      : undefined;
+    const addressed = mentioned || homeOwner === connection.config.agentId;
     // The key one Slack MESSAGE is known by, whichever delivery carried
     // it; see the dedupe below for why it is not the event id.
     const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
@@ -4178,6 +4176,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Ava's transcript; only the map learns who holds the thread.
     if (threadKey && handoverTo) {
       rememberAddressee(threadKey, handoverTo, event.ts);
+    }
+    // A home-channel message hands its new thread to the channel's owner
+    // the way a mention would, and is recorded by every socket for the same
+    // reason: a reply in that thread can reach another agent's socket before
+    // the owner's first turn has written any session routing, and without
+    // this record every agent would stand down and the reply would be lost.
+    // On the owner's admission, as a handover is.
+    if (threadKey && homeOwner !== undefined && admitsSender(agentConfigFor(homeOwner), sender)) {
+      rememberAddressee(threadKey, homeOwner, event.ts);
     }
 
     // Who may speak at all, judged before anything below remembers this
