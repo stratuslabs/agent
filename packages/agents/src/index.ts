@@ -106,6 +106,11 @@ export {
   MESSAGE_SEND_TOOL_NAME,
   type OutboundMessenger,
   createMessageSendTool,
+  MESSAGE_READ_TOOL_NAME,
+  MESSAGE_READ_MAX_LIMIT,
+  MESSAGE_READ_TEXT_BUDGET,
+  type ConversationReader,
+  createMessageReadTool,
 } from './tools/message.ts';
 
 export {

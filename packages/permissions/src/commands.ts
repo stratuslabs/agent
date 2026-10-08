@@ -56,6 +56,28 @@ export interface CommandScope {
    * ordinary push.
    */
   denyRefspecForms?: boolean;
+  /**
+   * At most this many positional arguments, where `listOnly` allows none.
+   * `grep` reads its pattern from the first positional and a *file* from
+   * every one after it, so a `grep` that may only filter what is piped to
+   * it is a `grep` with one.
+   */
+  maxPositionals?: number;
+  /**
+   * Flags whose value is the next token (`-n 20`), so that token is read
+   * as the flag's value rather than counted as a positional. Matched as
+   * the token is spelled, whole: `-n` takes a value, a bundle like `-vn`
+   * does not, and its next token counts as a positional.
+   */
+  flagsWithValue?: string[];
+  /**
+   * Refuse any token the shell would expand: an unquoted glob, brace,
+   * `~`, `$`, or backslash. A filter limited to one positional is only
+   * limited to one if the shell agrees — unquoted `grep *` is `grep`
+   * handed every file in the directory, the first as its pattern and the
+   * rest to read.
+   */
+  literal?: boolean;
 }
 
 /**
@@ -120,6 +142,12 @@ const DESTRUCTIVE_FLAGS = [
  * error text, which the shell tool returns. A command that can be handed a
  * path is a file reader wearing another name.
  */
+/**
+ * An `allowedFlags` entry admitting a flag that is only a number, the way
+ * `head -20` spells `head -n 20`. Not a letter, so no bundle can spell it.
+ */
+export const NUMERIC_FLAG = '-<number>';
+
 export const SAFE_COMMAND_SCOPES: CommandScope[] = [
   { command: 'git', args: ['status'] },
   { command: 'git', args: ['log'] },
@@ -169,6 +197,67 @@ export const SAFE_COMMAND_SCOPES: CommandScope[] = [
     allowedFlags: ['--verbose', 'v'],
     deniedArgs: ['add', 'remove', 'rm', 'rename', 'set-url', 'set-head', 'set-branches', 'prune', 'update'],
   },
+  // Filters: what they read is stdin, which is what makes them safe at the
+  // end of a pipeline whose first command is. Each is held to its listing
+  // shape, a named set of flags, and no token the shell would expand, so
+  // none of them can be handed a path: `tail -n 50 log` asks, and
+  // `git log | tail -n 50` does not. `grep` keeps its one positional, the
+  // pattern, and not `-e`, `-f`, or `-r`, each of which would turn the next
+  // positional or the directory into something it reads. No `c` letter in
+  // any of them: `-c` is refused in every scope for `git -c`'s sake, so
+  // the counting forms are spelled long (`uniq --count`, `wc --bytes`).
+  {
+    command: 'grep',
+    maxPositionals: 1,
+    literal: true,
+    allowedFlags: [
+      '--ignore-case', '--invert-match', '--line-number', '--count', '--word-regexp', '--line-regexp',
+      '--only-matching', '--extended-regexp', '--fixed-strings', '--basic-regexp', '--max-count',
+      '--after-context', '--before-context', '--context', '--color', '--colour', '--quiet', '--silent',
+      '--no-messages',
+      'i', 'v', 'n', 'w', 'x', 'o', 'E', 'F', 'G', 'm', 'A', 'B', 'C', 'q', 's',
+    ],
+    flagsWithValue: ['-m', '-A', '-B', '-C', '--max-count', '--after-context', '--before-context', '--context'],
+  },
+  {
+    command: 'head',
+    listOnly: true,
+    literal: true,
+    allowedFlags: ['--lines', '--bytes', '--quiet', '--silent', 'n', 'q', NUMERIC_FLAG],
+    flagsWithValue: ['-n', '--lines', '--bytes'],
+  },
+  {
+    command: 'tail',
+    listOnly: true,
+    literal: true,
+    allowedFlags: ['--lines', '--bytes', '--quiet', '--silent', 'n', 'q', 'r', NUMERIC_FLAG],
+    flagsWithValue: ['-n', '--lines', '--bytes'],
+  },
+  {
+    command: 'wc',
+    listOnly: true,
+    literal: true,
+    allowedFlags: ['--lines', '--words', '--bytes', '--chars', 'l', 'w', 'm'],
+  },
+  {
+    command: 'sort',
+    listOnly: true,
+    literal: true,
+    // Not `-o`, which writes a file, nor `--compress-program`, which runs one.
+    allowedFlags: [
+      '--reverse', '--numeric-sort', '--unique', '--ignore-case', '--human-numeric-sort', '--version-sort',
+      '--stable', '--key', '--field-separator',
+      'r', 'n', 'u', 'f', 'h', 'V', 's', 'k', 't',
+    ],
+    flagsWithValue: ['-k', '-t', '--key', '--field-separator'],
+  },
+  {
+    command: 'uniq',
+    listOnly: true,
+    literal: true,
+    // `uniq in out` writes `out`; listOnly is what refuses that.
+    allowedFlags: ['--count', '--repeated', '--unique', '--ignore-case', 'd', 'u', 'i'],
+  },
   { command: 'pwd' },
   { command: 'whoami' },
   { command: 'uname' },
@@ -196,9 +285,20 @@ const CONTROL_OPERATORS: Array<{ pattern: RegExp; name: string }> = [
 export interface CommandAnalysis {
   /** The command as written, for messages and prompts. */
   command: string;
-  /** The base command, absent when the string could not be tokenized. */
+  /** The base command, absent when the string could not be tokenized or is a pipeline. */
   base?: string;
   tokens: string[];
+  /**
+   * Per token, whether the shell would expand it (an unquoted glob, brace,
+   * `~`, `$`, or backslash). Absent reads as "nothing expands", which only
+   * a scope marked `literal` consults.
+   */
+  expands?: boolean[];
+  /**
+   * The commands of a pipeline (`a | b`), each analyzed on its own. Present,
+   * the invocation is covered only when every one of them is.
+   */
+  pipeline?: CommandAnalysis[];
   /**
    * Why this invocation cannot be auto-approved at all — a control
    * operator, an unbalanced quote, an absolute path. Undefined means it is
@@ -207,11 +307,15 @@ export interface CommandAnalysis {
   disqualifiedBy?: string;
 }
 
-const tokenize = (command: string): string[] | undefined => {
+const EXPANDING = /[*?[\]{}~$\\]/;
+
+const tokenize = (command: string): { tokens: string[]; expands: boolean[] } | undefined => {
   const tokens: string[] = [];
+  const expands: boolean[] = [];
   let current = '';
   let quote: '"' | "'" | undefined;
   let started = false;
+  let expanding = false;
 
   for (const char of command) {
     if (quote) {
@@ -230,10 +334,15 @@ const tokenize = (command: string): string[] | undefined => {
     if (char === ' ' || char === '\t') {
       if (started) {
         tokens.push(current);
+        expands.push(expanding);
         current = '';
         started = false;
+        expanding = false;
       }
       continue;
+    }
+    if (EXPANDING.test(char)) {
+      expanding = true;
     }
     current += char;
     started = true;
@@ -245,37 +354,107 @@ const tokenize = (command: string): string[] | undefined => {
   }
   if (started) {
     tokens.push(current);
+    expands.push(expanding);
   }
-  return tokens;
+  return { tokens, expands };
+};
+
+/**
+ * Split on the pipes the shell would split on: outside quotes, and never
+ * `||`, which is a conditional rather than a pipe. Undefined when there is
+ * no reading of the string that this parser and `sh` would agree on.
+ */
+const splitPipeline = (command: string): string[] | undefined => {
+  const segments: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | undefined;
+  for (const char of command) {
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      }
+      current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === '|') {
+      segments.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (quote) {
+    return undefined;
+  }
+  segments.push(current);
+  return segments;
 };
 
 /** Read a command string as far as it can be read safely. */
 export const analyzeCommand = (command: string): CommandAnalysis => {
+  const segments = splitPipeline(command);
+  if (segments && segments.length > 1) {
+    return analyzePipeline(command, segments);
+  }
+  return analyzeSimple(command);
+};
+
+/**
+ * A pipeline is judged command by command, and nothing about it is
+ * trusted that would not be trusted of its parts. Every other control
+ * operator still disqualifies the whole: `||` and `|&` included, since
+ * the first is a conditional and the second pipes stderr. A backslash
+ * anywhere does too, because `\|` is a literal to `sh` and a split here,
+ * and a parser that splits where the shell does not is judging commands
+ * nobody runs.
+ */
+const analyzePipeline = (command: string, segments: string[]): CommandAnalysis => {
+  if (command.includes('\\')) {
+    return { command, tokens: [], disqualifiedBy: 'it pipes a command containing a backslash' };
+  }
+  const pipeline: CommandAnalysis[] = [];
+  for (const segment of segments) {
+    if (segment.trim().length === 0) {
+      return { command, tokens: [], disqualifiedBy: 'it contains an empty pipeline stage (|| or a stray |)' };
+    }
+    const analysis = analyzeSimple(segment.trim());
+    if (analysis.disqualifiedBy) {
+      return { command, tokens: [], disqualifiedBy: analysis.disqualifiedBy };
+    }
+    pipeline.push(analysis);
+  }
+  return { command, tokens: [], pipeline };
+};
+
+const analyzeSimple = (command: string): CommandAnalysis => {
   for (const operator of CONTROL_OPERATORS) {
     if (operator.pattern.test(command)) {
       return { command, tokens: [], disqualifiedBy: `it contains ${operator.name}` };
     }
   }
 
-  const tokens = tokenize(command);
-  if (!tokens || tokens.length === 0) {
+  const read = tokenize(command);
+  if (!read || read.tokens.length === 0) {
     return { command, tokens: [], disqualifiedBy: 'it could not be read as a command' };
   }
+  const { tokens, expands } = read;
 
   const base = tokens[0] as string;
   if (base.includes('/') || base.includes('\\')) {
     // A scope names a command, and `/usr/bin/git` is not that name. Refusing
     // beats resolving: `./git` in a cloned repository is a different program
     // with the same basename.
-    return { command, tokens, disqualifiedBy: 'it names a path rather than a command' };
+    return { command, tokens, expands, disqualifiedBy: 'it names a path rather than a command' };
   }
   if (base.startsWith('-') || base.includes('=')) {
     // `FOO=bar cmd` is an environment assignment, which is the shell's job
     // and not this parser's.
-    return { command, tokens, disqualifiedBy: 'it does not start with a command' };
+    return { command, tokens, expands, disqualifiedBy: 'it does not start with a command' };
   }
 
-  return { command, base, tokens };
+  return { command, base, tokens, expands };
 };
 
 const flagsOf = (token: string): { long?: string; shorts: string[] } => {
@@ -313,7 +492,10 @@ const allowsFlag = (allowed: string[], token: string): boolean => {
     return allowed.includes(long);
   }
   const letters = shorts.filter((letter) => !/[0-9]/.test(letter));
-  return letters.length > 0 && letters.every((letter) => allowed.includes(letter));
+  if (letters.length === 0) {
+    return shorts.length > 0 && allowed.includes(NUMERIC_FLAG);
+  }
+  return letters.every((letter) => allowed.includes(letter));
 };
 
 /** Whether an invocation falls inside one scope. */
@@ -354,8 +536,13 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
       return false;
     }
   }
+  if (scope.literal && analysis.expands?.some((expands) => expands)) {
+    return false;
+  }
   const rest = args.slice(required.length);
-  for (const token of rest) {
+  let positionals = 0;
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index] as string;
     if (token.startsWith('-')) {
       if (deniesFlag(denied, token)) {
         return false;
@@ -363,9 +550,19 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
       if (scope.allowedFlags && !allowsFlag(scope.allowedFlags, token)) {
         return false;
       }
+      if (scope.flagsWithValue?.includes(token)) {
+        if (index + 1 >= rest.length) {
+          return false;
+        }
+        index += 1;
+      }
       continue;
     }
     if (scope.listOnly) {
+      return false;
+    }
+    positionals += 1;
+    if (scope.maxPositionals !== undefined && positionals > scope.maxPositionals) {
       return false;
     }
     if (scope.deniedArgs?.includes(token)) {
@@ -376,6 +573,26 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
     }
   }
   return true;
+};
+
+/**
+ * The scopes covering an invocation, one per command of a pipeline and one
+ * for a plain command, or undefined unless every command is covered.
+ */
+export const findCoveringScopes = (
+  analysis: CommandAnalysis,
+  scopes: readonly CommandScope[],
+): CommandScope[] | undefined => {
+  const commands = analysis.pipeline ?? [analysis];
+  const covering: CommandScope[] = [];
+  for (const command of commands) {
+    const scope = findMatchingScope(command, scopes);
+    if (!scope) {
+      return undefined;
+    }
+    covering.push(scope);
+  }
+  return covering;
 };
 
 /** The first scope covering this invocation, if any covers it. */
@@ -538,6 +755,9 @@ const normalizeForCompare = (scope: CommandScope) => ({
   denyRefspecForms: scope.denyRefspecForms ?? false,
   listOnly: scope.listOnly ?? false,
   allowedFlags: [...(scope.allowedFlags ?? [])].sort(),
+  maxPositionals: scope.maxPositionals ?? null,
+  flagsWithValue: [...(scope.flagsWithValue ?? [])].sort(),
+  literal: scope.literal ?? false,
 });
 
 /** Read one scope out of a whitelist file, or refuse it. */
@@ -556,6 +776,11 @@ export const parseCommandScope = (raw: unknown): CommandScope | undefined => {
   const deniedFlags = strings(source.deniedFlags);
   const deniedArgs = strings(source.deniedArgs);
   const allowedFlags = strings(source.allowedFlags);
+  const flagsWithValue = strings(source.flagsWithValue);
+  const maxPositionals = typeof source.maxPositionals === 'number'
+    && Number.isInteger(source.maxPositionals) && source.maxPositionals >= 0
+    ? source.maxPositionals
+    : undefined;
   return {
     command: source.command,
     ...(args ? { args } : {}),
@@ -564,5 +789,8 @@ export const parseCommandScope = (raw: unknown): CommandScope | undefined => {
     ...(source.denyRefspecForms === true ? { denyRefspecForms: true } : {}),
     ...(source.listOnly === true ? { listOnly: true } : {}),
     ...(allowedFlags ? { allowedFlags } : {}),
+    ...(maxPositionals !== undefined ? { maxPositionals } : {}),
+    ...(flagsWithValue ? { flagsWithValue } : {}),
+    ...(source.literal === true ? { literal: true } : {}),
   };
 };

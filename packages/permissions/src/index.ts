@@ -23,9 +23,10 @@ export { atLeastAsRisky } from '@stratusagent/core';
 import {
   analyzeCommand,
   describeCommandScope,
-  findMatchingScope,
+  findCoveringScopes,
   normalizeCommandScope,
   SAFE_COMMAND_SCOPES,
+  type CommandAnalysis,
   type CommandScope,
 } from './commands.ts';
 import {
@@ -49,9 +50,11 @@ import {
 export {
   analyzeCommand,
   describeCommandScope,
+  findCoveringScopes,
   findMatchingScope,
   matchesScope,
   normalizeCommandScope,
+  NUMERIC_FLAG,
   parseCommandScope,
   sameScope,
   SAFE_COMMAND_SCOPES,
@@ -605,6 +608,23 @@ const awaitRemote = async (
  * and it is the only path a scope-less gated tool has to running in
  * `headless`, which is the mode every installed service runs in.
  */
+/**
+ * What a log line may say an invocation runs: its base command, never its
+ * arguments, which is what keeps a refusal out of the transcript business.
+ */
+const commandNames = (analysis: CommandAnalysis | undefined): string | undefined => {
+  if (!analysis) {
+    return undefined;
+  }
+  if (analysis.pipeline) {
+    // Not the stage names: the first is the agent's own choice, but the
+    // rest of a pipeline is where a composed command puts the part a page
+    // talked it into, and the log is a trace rather than a transcript.
+    return 'a pipeline';
+  }
+  return analysis.base;
+};
+
 export const createPermissionPolicy = (options: PermissionPolicyOptions): ApprovalPolicy => {
   const { mode, ask, request, onDecision, commands, destinations, origins, grants, gateExternalContent } = options;
   if (mode === 'interactive' && !ask) {
@@ -800,12 +820,16 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             ...granted,
             ...(commands?.safeScopes ?? SAFE_COMMAND_SCOPES),
           ];
-          const scope = findMatchingScope(analysis, candidates);
-          if (scope) {
+          // One scope per command of a pipeline, so `git log | grep fix`
+          // runs because both halves would on their own, and is named that way.
+          const covering = findCoveringScopes(analysis, candidates);
+          if (covering) {
             return report(
               context,
               true,
-              `${call.toolName} ran inside the approved scope "${describeCommandScope(scope)}"`,
+              covering.length === 1
+                ? `${call.toolName} ran inside the approved scope "${describeCommandScope(covering[0] as CommandScope)}"`
+                : `${call.toolName} ran a pipeline inside the approved scopes ${covering.map((scope) => `"${describeCommandScope(scope)}"`).join(' | ')}`,
               command,
             );
           }
@@ -890,7 +914,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               + ' set to "gate" no grant covers it, and nobody is available to approve it'
             : command !== undefined
               ? `${call.toolName} was called outside every approved scope`
-                + `${analysis?.base ? ` (${analysis.base})` : ''} and nobody is available to approve it`
+                + `${commandNames(analysis) ? ` (${commandNames(analysis)})` : ''} and nobody is available to approve it`
               : origin !== undefined
                 // Named, because it is the actionable half: an operator
                 // reading this at 3am needs to know which site to grant, and

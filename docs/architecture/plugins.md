@@ -471,6 +471,10 @@ capability rather than an assumption:
 - `OutboundConnection.edit` and `upload` are optional. `post` is the whole
   of what the gateway's `message.send` and schedule delivery use; a channel
   without `edit` posts the finished reply instead of streaming it in place.
+- `ChannelAdapter.readConversation` is optional too: it is what
+  `message.read` reads through, and a channel without it cannot be read.
+  An adapter that has it decides which conversations are readable at all
+  and refuses the rest — Slack reads only channels its app is in, never DMs.
 - Who counts as the operator is one rule in `@stratusagent/channels`, not
   one per adapter: `isPrincipal`, `admitsSender` (the `admit` policy), and
   `senderTrustFor` (the `user`/`unknown` label a turn carries). Which
