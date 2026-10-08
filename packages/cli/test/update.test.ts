@@ -1239,3 +1239,34 @@ test('a new build that dies before taking over does not answer for the update', 
   assert.equal(await defaultUpdateContinuation(env, missing)('running'), undefined);
   assert.equal(await defaultUpdateContinuation(env, takesOver)('running'), 3);
 });
+
+test('a resumed update that throws after taking over still restarts the daemon it inherited stopped', async () => {
+  // The first half stopped the daemon and handed over; the version lookup
+  // here throws before any step with its own recovery runs.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-resume-throw-'));
+  const starts: string[][] = [];
+  const runner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && (args.includes('start') || args.includes('restart'))) {
+      starts.push([command, ...args]);
+    }
+    return runningServiceRunner(command, args);
+  };
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { STRATUS_UPDATE_RESUME: 'running' },
+      servicePlatform: 'linux',
+      serviceRunner: runner,
+      packageVersionFetcher: async () => {
+        throw new Error('EIO reading the registry cache');
+      },
+    },
+  });
+  assert.equal(code, 1);
+  assert.match(output.stderr, /Update failed: EIO/);
+  assert.ok(starts.length > 0, 'the daemon the first half stopped must be started again');
+});

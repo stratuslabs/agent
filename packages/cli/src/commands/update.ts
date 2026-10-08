@@ -163,15 +163,45 @@ export const runUpdate = async (
   streams: CliStreams,
   env: CliEnvironment,
 ): Promise<number> => {
-  const serviceEnv = serviceEnvFor(env);
-  const out = (line: string): void => writeLine(streams.stdout, line);
   // Set when this process is the second half of an update an older build
   // began: the daemon is already stopped and the packages already
   // installed, so neither happens again.
   const resume = command.check ? undefined : readResume(env);
-  if (resume !== undefined) {
-    await announceResumed();
+  if (resume === undefined) {
+    return runUpdateSteps(command, streams, env, undefined);
   }
+  // Once this process says it took over, its exit is the update's answer,
+  // and the first half will not restart anything. So from here every way
+  // out has to leave a daemon that was running running again — including a
+  // throw from a version lookup, a status read, or a state file, none of
+  // which have a recovery of their own. Starting a service that the steps
+  // already restarted is harmless; leaving the fleet down is not.
+  await announceResumed();
+  try {
+    return await runUpdateSteps(command, streams, env, resume);
+  } catch (error) {
+    writeLine(streams.stderr, `Update failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (resume === 'running') {
+      const restarted = await startService(serviceEnvFor(env));
+      for (const message of restarted.messages) {
+        writeLine(restarted.ok ? streams.stdout : streams.stderr, message);
+      }
+      writeLine(streams.stderr, restarted.ok
+        ? 'stratusd was restarted. Fix the failure and run `stratus update` again.'
+        : 'stratusd could not be restarted either — bring it back with `stratus service start`.');
+    }
+    return 1;
+  }
+};
+
+const runUpdateSteps = async (
+  command: ParsedUpdateCommand,
+  streams: CliStreams,
+  env: CliEnvironment,
+  resume: UpdateResume | undefined,
+): Promise<number> => {
+  const serviceEnv = serviceEnvFor(env);
+  const out = (line: string): void => writeLine(streams.stdout, line);
 
   const latest = await (env.packageVersionFetcher ?? defaultPackageVersionFetcher)(CLI_PACKAGE_NAME);
   const upgradeAvailable = latest !== undefined && compareVersions(latest, CLI_VERSION) > 0;
