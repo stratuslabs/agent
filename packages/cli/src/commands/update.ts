@@ -101,6 +101,9 @@ const readResume = (env: CliEnvironment): UpdateResume | undefined => {
   return value === 'running' || value === 'stopped' ? value : undefined;
 };
 
+/** What the second half sends up once it is running, so a crash before it is not mistaken for its answer. */
+export const UPDATE_RESUMED_MESSAGE = 'stratus.update.resumed';
+
 /**
  * Run `stratus update` again on the build npm just put on disk, and wait.
  *
@@ -113,18 +116,46 @@ const readResume = (env: CliEnvironment): UpdateResume | undefined => {
  * 0.11.8's `createPluginStateDirectories`. Preloading one module at a time
  * only fixes the import someone already tripped over; a fresh process has
  * nothing cached and runs the new build whole.
+ *
+ * Its exit code is the update's only once it has said it took over. A new
+ * build that dies before that, on a missing entrypoint or a module that
+ * throws as it loads, exits without ever reaching the recovery that
+ * restarts the daemon, so it resolves `undefined` and this process
+ * finishes the update itself instead.
  */
-const defaultUpdateContinuation = (env: CliEnvironment) => (resume: UpdateResume): Promise<number | undefined> =>
-  new Promise((resolve) => {
+export const defaultUpdateContinuation = (
+  env: CliEnvironment,
+  entrypoint: string = (() => {
     const modulePath = fileURLToPath(import.meta.url);
-    const entrypoint = path.join(path.dirname(modulePath), '..', `bin${path.extname(modulePath)}`);
+    return path.join(path.dirname(modulePath), '..', `bin${path.extname(modulePath)}`);
+  })(),
+) => (resume: UpdateResume): Promise<number | undefined> =>
+  new Promise((resolve) => {
+    let resumed = false;
     const child = spawn(process.execPath, [...process.execArgv, entrypoint, 'update'], {
-      stdio: 'inherit',
+      stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
       cwd: env.cwd ?? process.cwd(),
       env: { ...(env.processEnv ?? process.env), [UPDATE_RESUME_ENV]: resume },
     });
+    child.on('message', (message) => {
+      if (message === UPDATE_RESUMED_MESSAGE) {
+        resumed = true;
+        // The channel would keep the child alive; it has said all it needs to.
+        child.disconnect();
+      }
+    });
     child.once('error', () => resolve(undefined));
-    child.once('exit', (code) => resolve(code ?? 1));
+    child.once('exit', (code) => resolve(resumed ? code ?? 1 : undefined));
+  });
+
+/** Tell the first half this process has taken over the update. */
+const announceResumed = (): Promise<void> =>
+  new Promise((resolve) => {
+    if (typeof process.send !== 'function' || !process.connected) {
+      resolve();
+      return;
+    }
+    process.send(UPDATE_RESUMED_MESSAGE, undefined, {}, () => resolve());
   });
 
 export const runUpdate = async (
@@ -138,6 +169,9 @@ export const runUpdate = async (
   // began: the daemon is already stopped and the packages already
   // installed, so neither happens again.
   const resume = command.check ? undefined : readResume(env);
+  if (resume !== undefined) {
+    await announceResumed();
+  }
 
   const latest = await (env.packageVersionFetcher ?? defaultPackageVersionFetcher)(CLI_PACKAGE_NAME);
   const upgradeAvailable = latest !== undefined && compareVersions(latest, CLI_VERSION) > 0;
@@ -342,9 +376,10 @@ export const runUpdate = async (
       if (code !== undefined) {
         return code;
       }
-      // Could not start it: carry on here rather than leave a stopped
-      // daemon behind. The new build migrates on its first start anyway.
-      writeLine(streams.stderr, 'Could not start the new build to finish the update — continuing on this one.');
+      // It never took over: it could not be started, or died loading.
+      // Carry on here rather than leave a stopped daemon behind; this run
+      // restarts it if its own migration fails.
+      writeLine(streams.stderr, 'The new build did not take over the update — continuing on this one.');
     } else if (installed.ok) {
       // Only companions changed. This process's own modules are untouched,
       // so the rest of the update is safe to run here.

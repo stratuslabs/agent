@@ -17,6 +17,7 @@ import {
   type CliEnvironment,
   type ServiceRunner,
 } from '../src/index.ts';
+import { defaultUpdateContinuation } from '../src/commands/update.ts';
 import {
   credentialsPath,
   readStateStamp,
@@ -1217,4 +1218,24 @@ test('the second half of an update restarts a daemon it refuses to migrate under
   assert.match(output.stderr, /newer Stratus build/);
   assert.match(output.stderr, /restarted on its previous unit/);
   assert.ok(starts.length > 0, 'the daemon the first half stopped must be restarted');
+});
+
+test('a new build that dies before taking over does not answer for the update', async () => {
+  // `spawn` reports a child that started and then threw while loading as an
+  // exit, not an error. Taken as the update's answer, it left the daemon the
+  // first half had stopped down, since the child never reached the restart.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-continuation-'));
+  const crashes = path.join(dir, 'crashes.mjs');
+  await writeFile(crashes, "throw new Error('does not provide an export named x');\n");
+  const missing = path.join(dir, 'missing.mjs');
+  const takesOver = path.join(dir, 'takes-over.mjs');
+  await writeFile(takesOver, [
+    "if (process.env.STRATUS_UPDATE_RESUME !== 'running') process.exit(9);",
+    "process.send('stratus.update.resumed', undefined, {}, () => process.exit(3));",
+    '',
+  ].join('\n'));
+  const env = { cwd: dir, processEnv: {} };
+  assert.equal(await defaultUpdateContinuation(env, crashes)('running'), undefined);
+  assert.equal(await defaultUpdateContinuation(env, missing)('running'), undefined);
+  assert.equal(await defaultUpdateContinuation(env, takesOver)('running'), 3);
 });
