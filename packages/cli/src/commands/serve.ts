@@ -385,6 +385,7 @@ const serveHeldHome = async (
         agents: slackAgents.map(([agentId, tokens]) => {
           const route = resolveAgentApprovals(approvalsConfig, agentId);
           const principals = resolveAgentPrincipals(principalsConfig, agentId);
+          const presentation = resolveAgentSlack(slackConfig, agentId);
           return {
             agentId,
             appToken: tokens.appToken,
@@ -393,7 +394,8 @@ const serveHeldHome = async (
             ...(route.slackChannel ? { approvalChannel: route.slackChannel } : {}),
             ...(principals.slackUsers ? { principals: principals.slackUsers } : {}),
             ...(principals.admit ? { admit: principals.admit } : {}),
-            replies: resolveAgentSlack(slackConfig, agentId).replies,
+            replies: presentation.replies,
+            ...(presentation.homeChannels.length > 0 ? { homeChannels: presentation.homeChannels } : {}),
           };
         }),
         log,

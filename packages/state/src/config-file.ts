@@ -531,7 +531,12 @@ export const resolveAgentPrincipals = (
   return { ...(slackUsers ? { slackUsers } : {}), ...(admit ? { admit } : {}) };
 };
 
-const parseSlackEntry = (raw: unknown, configPath: string, where: string): AgentSlackConfig | undefined => {
+const parseSlackEntry = (
+  raw: unknown,
+  configPath: string,
+  where: string,
+  perAgent: boolean,
+): AgentSlackConfig | undefined => {
   if (raw === undefined) {
     return undefined;
   }
@@ -550,11 +555,30 @@ const parseSlackEntry = (raw: unknown, configPath: string, where: string): Agent
     }
     entry.replies = source.replies;
   }
+  if (source.homeChannels !== undefined) {
+    // A home channel shared by every agent would have each of them answer
+    // every message there; the per-agent entry is the only place it means
+    // one thing.
+    if (!perAgent) {
+      throw new Error(
+        `Invalid ${where}.homeChannels in config ${configPath}: homeChannels is per-agent; set it under slack.agents.<agentId>.homeChannels.`,
+      );
+    }
+    if (
+      !Array.isArray(source.homeChannels)
+      || !source.homeChannels.every((id) => typeof id === 'string' && /^[CG][A-Z0-9]+$/.test(id))
+    ) {
+      throw new Error(
+        `Invalid ${where}.homeChannels in config ${configPath}: expected an array of Slack channel ids like "C0123ABCD", received ${JSON.stringify(source.homeChannels)}.`,
+      );
+    }
+    entry.homeChannels = [...new Set(source.homeChannels as string[])];
+  }
   return entry;
 };
 
 const parseSlackConfig = (raw: unknown, configPath: string): SlackConfig | undefined => {
-  const shared = parseSlackEntry(raw, configPath, 'slack');
+  const shared = parseSlackEntry(raw, configPath, 'slack', false);
   if (!shared) {
     return undefined;
   }
@@ -568,7 +592,7 @@ const parseSlackConfig = (raw: unknown, configPath: string): SlackConfig | undef
     }
     const agents: Record<string, AgentSlackConfig> = {};
     for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
-      const parsed = parseSlackEntry(entry, configPath, `slack.agents.${agentId}`);
+      const parsed = parseSlackEntry(entry, configPath, `slack.agents.${agentId}`, true);
       if (parsed) {
         agents[agentId] = parsed;
       }
@@ -591,6 +615,7 @@ export const resolveAgentSlack = (
   agentId: string,
 ): Required<AgentSlackConfig> => ({
   replies: slack?.agents?.[agentId]?.replies ?? slack?.replies ?? 'final',
+  homeChannels: slack?.agents?.[agentId]?.homeChannels ?? [],
 });
 
 // ---------------------------------------------------------------------------

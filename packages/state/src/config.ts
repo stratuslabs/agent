@@ -117,6 +117,14 @@ export type SlackReplyMode = 'final' | 'stream';
 /** One agent's Slack presentation settings. */
 export interface AgentSlackConfig {
   replies?: SlackReplyMode;
+  /**
+   * Channel ids where this agent answers every new top-level message from
+   * an admitted sender without being mentioned — a channel that is "the
+   * place you talk to this agent". Threads there follow the soul's
+   * `listens` like anywhere else. Per-agent only: the top-level `slack`
+   * block refuses it, since one channel cannot be every agent's home.
+   */
+  homeChannels?: string[];
 }
 
 /**

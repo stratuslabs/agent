@@ -112,6 +112,40 @@ once (the manifest `stratus setup` prints already has them) — until then it
 answers mentions and DMs and nothing else, which is also how you keep an
 agent mention-only on purpose.
 
+## A home channel
+
+A channel can be the place you talk to one agent, so nobody has to `@` it
+there. List it under that agent's `homeChannels` and every new top-level
+message in it from someone the agent [admits](../../packages/channel-slack/README.md#who-counts-as-the-operator)
+is addressed to it, exactly as if it had been mentioned: the reply opens a
+thread under the message.
+
+```jsonc
+// ~/.stratus/config.json — trusted configs only
+{
+  "slack": {
+    "agents": {
+      "atlas": { "homeChannels": ["C0123ABCD"] }  // channel ids, not names
+    }
+  }
+}
+```
+
+- A message there that names another agent is that agent's, not both.
+- Threads are unchanged: an untagged reply follows the soul's
+  [`listens`](#how-an-agent-listens), as in any other channel.
+- One channel has one home agent. If two list it, the first in the
+  configuration keeps it and the daemon warns at startup; the other answers
+  there only when mentioned. It is per-agent only: the top-level `slack`
+  block refuses `homeChannels`.
+- Mentions of people are not mentions of agents, so `@Kai can you look?`
+  posted top-level in the channel still goes to the home agent.
+- Under the default `admit: "anyone"`, every member who can post in the
+  channel starts a turn, which costs a model call each. Set
+  `admit: "principals"` for a busy public channel.
+- It uses the same `channels:history` / `groups:history` scopes and
+  `message.*` events as thread follow-through, and takes effect on restart.
+
 ## How replies appear
 
 By default an agent posts **once**, when its reply is finished. While it

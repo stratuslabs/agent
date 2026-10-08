@@ -8784,3 +8784,91 @@ test('after a restart, an agent that took a message keeps it though it listens d
 
   assert.deepEqual(gateway.dispatches, []);
 });
+
+test('a home channel hands its agent every new top-level message, except one that names another agent', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', homeChannels: ['C1'] },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Untagged, top-level, in Ava's home: hers, threaded under the message
+  // exactly as a mention would be.
+  const untagged = channelMessage({ text: 'what changed overnight?', ts: '700.1' });
+  await socketAva.deliver('message', untagged);
+  await socketBea.deliver('message', untagged);
+
+  // The same words anywhere else are still the room, not a question.
+  const elsewhere = { ...channelMessage({ text: 'lunch anyone?', ts: '700.2' }) };
+  elsewhere.event = { ...elsewhere.event, channel: 'C2' };
+  await socketAva.deliver('message', elsewhere);
+  await socketBea.deliver('message', elsewhere);
+
+  // Naming Bea in Ava's home asks Bea, and only Bea.
+  const forBea = channelMessage({ text: '<@B-BEA> can you look?', ts: '700.3' });
+  await socketAva.deliver('message', forBea);
+  await socketBea.deliver('app_mention', { ...forBea, event: { ...forBea.event, type: 'app_mention' } });
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.sessionId, dispatch.userMessage]), [
+    ['ava', 'slack:ava:T1:C1:700.1', 'Dylan: what changed overnight?'],
+    ['bea', 'slack:bea:T1:C1:700.3', 'Dylan: can you look?'],
+  ]);
+});
+
+test('a home channel admits only who the agent admits', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const logged: string[] = [];
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN'], admit: 'principals', homeChannels: ['C1'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: (line) => logged.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'hey', ts: '710.1', user: 'U-STRANGER' }));
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches, []);
+  assert.equal(logged.filter((line) => /refused a message from U-STRANGER/.test(line)).length, 1);
+});
+
+test('a channel two agents call home stays with the first, with a warning, so nobody gets two answers', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const warned: string[] = [];
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', homeChannels: ['C1'] },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', homeChannels: ['C1'] },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    warn: (line) => warned.push(line),
+  });
+  await adapter.start(gateway);
+  const untagged = channelMessage({ text: 'status?', ts: '720.1' });
+  await socketAva.deliver('message', untagged);
+  await socketBea.deliver('message', untagged);
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId), ['ava']);
+  assert.deepEqual(warned.filter((line) => line.includes('home channel')), [
+    'slack: C1 is a home channel for both ava and bea; ava keeps it, and bea answers there only when mentioned.',
+  ]);
+});
