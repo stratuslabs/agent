@@ -4413,6 +4413,34 @@ export interface PluginStateDirectory {
   prepare(): string;
 }
 
+/**
+ * Files and directories on this machine that no plugin may hand an agent,
+ * answered by the host.
+ *
+ * A seam for the reason {@link AgentWorkspaces} is one: which files hold
+ * the daemon's own secrets is the host's layout, not a plugin's. Before it,
+ * nothing kept them out of a tool whose roots happened to cover them: an
+ * operator who gave an agent `roots: ["~"]` gave it `fs.read` of
+ * `~/.stratus/credentials.json`, which `fs.read` answers ungated. Roots are
+ * the operator's choice of where an agent may work; this is the short list
+ * of places no choice of roots opens.
+ *
+ * Paths, not a promise that each exists: a caller canonicalizes and
+ * tolerates what is missing. Re-read rather than cached, so a file the host
+ * starts keeping under a running daemon is protected from the next call.
+ */
+export interface ProtectedPaths {
+  /** What is protected. A directory protects everything beneath it. */
+  all(): Promise<readonly string[]>;
+  /**
+   * Directories beneath a protected one that stay reachable. The daemon
+   * protects its whole home and exempts the agents' workspaces, which live
+   * inside it and are where agents are meant to work. Whether a given agent
+   * reaches a given workspace is still its roots' decision.
+   */
+  exempt(): Promise<readonly string[]>;
+}
+
 export interface MemoryRegistrationHandle {
   register(contribution: MemoryStoreContribution): void;
 }
@@ -4474,6 +4502,16 @@ export interface PluginContext {
    * once — and must never choose a directory of its own instead.
    */
   stateDirectory?: PluginStateDirectory;
+  /**
+   * What no plugin may hand an agent, whatever the agent's own roots say.
+   * See {@link ProtectedPaths}.
+   *
+   * A host that omits it protects nothing beyond what each plugin's own
+   * configuration excludes: a file-reading plugin with roots above the
+   * host's state reads the host's secrets there. The daemon and `stratus
+   * run` both supply it.
+   */
+  protectedPaths?: ProtectedPaths;
   /**
    * The host's log, for what a plugin has to say after `setup` returns —
    * a server that dropped, a reconnect that failed. The daemon's is the

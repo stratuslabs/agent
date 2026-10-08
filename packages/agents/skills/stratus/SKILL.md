@@ -105,7 +105,7 @@ When a stored key "isn't found", check in this order:
 
 - **Built in everywhere:** `memory.*` (remember, recall, forget, pin) and `skill.read`, which every agent has because this skill counts. **Only under the daemon:** `schedule.*`, `message.send`, `message.read`, `agent.delegate`, and `credential.request`, so `stratus run` and `stratus chat` cannot call them.
 - **Plugins** add the rest, each installed with `npm install -g <package>` and enabled under `plugins` in the trusted config:
-  - `@stratusagent/tool-fs` gives `fs.*`, inside configured roots only, so with no roots there is no filesystem. Roots go in `"@stratusagent/tool-fs": { "enabled": true, "roots": ["~/notes"] }`, or under `"agents": { "<id>": { "roots": [...] } }` for one agent.
+  - `@stratusagent/tool-fs` gives `fs.*`, inside configured roots only, so with no roots there is no filesystem. Whatever the roots, `fs.*` never reaches `~/.stratus` outside the agents' workspaces (credentials, config, logs, sessions, memories, souls, skills, grants), so a refusal there is by design, not a roots problem. Roots go in `"@stratusagent/tool-fs": { "enabled": true, "roots": ["~/notes"] }`, or under `"agents": { "<id>": { "roots": [...] } }` for one agent.
   - `@stratusagent/tool-shell` gives `shell.run`.
   - `@stratusagent/tool-web` gives `web.fetch`. `web.search` is not first-party: it comes from a search backend plugin someone else publishes, and needs `search.apiKey`.
   - `@stratusagent/tool-browser` gives `browser.*`.
