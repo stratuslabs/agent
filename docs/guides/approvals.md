@@ -332,7 +332,7 @@ Like local git, it stops once the external-content gate closes.
 **What local git and push trust.** Turning these on trusts the agent's own
 repositories, not only its command lines. Git runs programs named in a
 repository's config and files: hooks, `diff.external` and textconv
-drivers, `core.sshCommand`, `core.fsmonitor`, merge drivers, and objects
+drivers, clean and smudge filters (run by `git add` and checkout), `core.sshCommand`, `core.fsmonitor`, merge drivers, and objects
 borrowed through `objects/info/alternates`. Git config in your home
 directory (`~/.gitconfig`) applies too, including `push.followTags` and
 `remote.*.push`. The checks above refuse the forms they can see on the
