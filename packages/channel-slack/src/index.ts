@@ -180,6 +180,16 @@ export interface SlackAgentConfig {
    * a `…` placeholder at once and edits it as the reply is written.
    */
   replies?: 'final' | 'stream';
+  /**
+   * Channel ids where a new top-level message from an admitted sender is
+   * this agent's to answer without a mention: the channel people come to
+   * when they want this agent. A message there that names another agent
+   * is that agent's. Threads follow the soul's `listens` as anywhere else.
+   * One channel has one home agent: when two in the same workspace list
+   * it, neither owns it, both answer there only when mentioned, and the
+   * adapter warns at startup.
+   */
+  homeChannels?: string[];
 }
 
 // The thin surfaces of the Slack SDKs the adapter touches — injectable so
@@ -2740,6 +2750,44 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     options.agents.find((candidate) => candidate.agentId === agentId);
 
   /**
+   * Which agent each home channel belongs to, keyed `team:channel` because
+   * a channel id is unique only within its workspace. Settled at start,
+   * once every app has authenticated and its team is known. A channel two
+   * agents in one workspace both call home belongs to neither: two agents
+   * answering every message there is the double reply the thread rules
+   * exist to prevent, and picking one would hang on an order the config
+   * file does not reliably carry (JSON objects enumerate integer-like keys
+   * numerically). Both still answer there when mentioned, and a startup
+   * warning says so.
+   */
+  const homeOwners = new Map<string, string>();
+  const settleHomeOwners = (): void => {
+    homeOwners.clear();
+    const claims = new Map<string, string[]>();
+    for (const agent of options.agents) {
+      const teamId = botIdentities.get(agent.agentId)?.teamId;
+      if (teamId === undefined) {
+        continue;
+      }
+      for (const channelId of agent.homeChannels ?? []) {
+        const key = `${teamId}:${channelId}`;
+        claims.set(key, [...(claims.get(key) ?? []), agent.agentId]);
+      }
+    }
+    for (const [key, claimants] of claims) {
+      const agentIds = [...new Set(claimants)];
+      if (agentIds.length === 1) {
+        homeOwners.set(key, agentIds[0]!);
+        continue;
+      }
+      const channelId = key.slice(key.indexOf(':') + 1);
+      warn(
+        `slack: ${channelId} is a home channel for ${agentIds.join(' and ')}; a channel can be home to one agent, so none of them answers there unless mentioned.`,
+      );
+    }
+  };
+
+  /**
    * How an agent listens, from its soul — read per message, so a roster
    * reload takes effect on the next one. `thread` when the soul says
    * nothing, which is every soul written before there was a choice.
@@ -4340,7 +4388,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       : undefined;
 
     const text = event.text ?? '';
-    const addressed = isDm || mentions(text, connection.botUserId);
+    const mentioned = isDm || mentions(text, connection.botUserId);
 
     // Who this message hands the thread to — worked out by EVERY connection
     // that sees it, not only by the one being named, and recorded before any
@@ -4364,6 +4412,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // no policy, and nobody's to refuse here, so it admits.
     const handoverTo = agentNamedIn(text, team, (agentId) => admitsSender(agentConfigFor(agentId), sender));
     const named = handoverTo ?? agentNamedIn(text, team);
+    // A new top-level message in this agent's home channel is addressed to
+    // it as surely as a mention would be — unless it names somebody else,
+    // which hands it to them exactly as it would anywhere. Top-level only:
+    // inside a thread the soul's `listens` already says what an untagged
+    // reply is, and the home channel does not overrule it.
+    const homeOwner = !isDm && event.thread_ts === undefined && named === undefined
+      ? homeOwners.get(`${team}:${event.channel}`)
+      : undefined;
+    const addressed = mentioned || homeOwner === connection.config.agentId;
     // The key one Slack MESSAGE is known by, whichever delivery carried
     // it; see the dedupe below for why it is not the event id.
     const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
@@ -4378,6 +4435,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Ava's transcript; only the map learns who holds the thread.
     if (threadKey && handoverTo) {
       rememberAddressee(threadKey, handoverTo, event.ts);
+    }
+    // A home-channel message hands its new thread to the channel's owner
+    // the way a mention would, and is recorded by every socket for the same
+    // reason: a reply in that thread can reach another agent's socket before
+    // the owner's first turn has written any session routing, and without
+    // this record every agent would stand down and the reply would be lost.
+    // On the owner's admission, as a handover is.
+    if (threadKey && homeOwner !== undefined && admitsSender(agentConfigFor(homeOwner), sender)) {
+      rememberAddressee(threadKey, homeOwner, event.ts);
     }
 
     // Who may speak at all, judged before anything below remembers this
@@ -5086,6 +5152,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         }
       }
 
+      settleHomeOwners();
+
       for (const connection of authenticated) {
         const { config, socket } = connection;
         try {
@@ -5150,6 +5218,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       coldVerdicts.clear();
       pendingObserves.clear();
       botIdentities.clear();
+      homeOwners.clear();
       rendering.clear();
       resolvedWhileRendering.clear();
       credentialsPosting.clear();

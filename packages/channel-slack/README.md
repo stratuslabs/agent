@@ -35,7 +35,11 @@ they are the whole model:
    is durable, so a daemon restart mid-thread forgets nothing.
 3. **The room is not a conversation.** A channel message outside any thread
    is never a follow-up, however much of the channel the app can see. An
-   agent that has not been spoken to does not join in.
+   agent that has not been spoken to does not join in. The one exception is
+   an agent's **home channel** (`slack.agents.<id>.homeChannels` in the
+   [config](../../docs/guides/slack.md#a-home-channel)): there every new
+   top-level message from someone it admits is addressed to it, unless the
+   message names another agent.
 4. **In a thread with several agents, an untagged reply goes to whoever
    spoke last.** The same rule people use: you are answering the voice that
    just answered you. Naming another agent moves the conversation to them —

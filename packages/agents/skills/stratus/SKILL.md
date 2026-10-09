@@ -134,7 +134,7 @@ When a stored key "isn't found", check in this order:
 
 - **One Slack app per agent**, each with its own tokens, connected over Socket Mode, so no public address is needed. Set up with `stratus setup` → Channels, which prints the app manifest and checks the tokens.
 - **"Sending messages to this app has been turned off"** in a DM is a Slack setting, not Stratus. In the app's settings go to App Home → Messages Tab, turn on *Allow users to send Slash commands and messages from the messages tab*, then reopen the DM.
-- **What reaches you.** In a DM, every message. In a channel, a message that mentions you, which starts a thread. In that thread, what happens to a reply that does not name you depends on your soul's `listens:`:
+- **What reaches you.** In a DM, every message. In a channel, a message that mentions you, which starts a thread. In a channel listed under your `slack.agents.<id>.homeChannels` in the trusted config, every new top-level message too, unless it names another agent (restart the daemon after changing it). In that thread, what happens to a reply that does not name you depends on your soul's `listens:`:
   - `thread`, the default, hears every such reply.
   - `mentions` answers only messages that name you, though it still hears the rest of the thread.
   - `judge` hears them and decides whether to answer.

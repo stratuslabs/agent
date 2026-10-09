@@ -1669,11 +1669,11 @@ test('the slack block sets each agent\'s reply mode, per agent over the default,
     slack: { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {} } },
   }, 'test-config');
   assert.deepEqual(config.slack, { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {} } });
-  assert.deepEqual(resolveAgentSlack(config.slack, 'ava'), { replies: 'stream' });
-  assert.deepEqual(resolveAgentSlack(config.slack, 'bea'), { replies: 'final' });
-  assert.deepEqual(resolveAgentSlack(config.slack, 'cy'), { replies: 'stream' });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'ava'), { replies: 'stream', homeChannels: [] });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'bea'), { replies: 'final', homeChannels: [] });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'cy'), { replies: 'stream', homeChannels: [] });
   // No block at all: the default is the reply posted once, finished.
-  assert.deepEqual(resolveAgentSlack(undefined, 'ava'), { replies: 'final' });
+  assert.deepEqual(resolveAgentSlack(undefined, 'ava'), { replies: 'final', homeChannels: [] });
   // A misspelling is refused rather than read as the default, which would
   // look like the setting silently did nothing.
   assert.throws(
@@ -1684,6 +1684,26 @@ test('the slack block sets each agent\'s reply mode, per agent over the default,
     () => validateConfigFile({ slack: { agents: { ava: { replies: 'live' } } } }, 'test-config'),
     /Invalid slack\.agents\.ava\.replies/,
   );
+});
+
+test('slack homeChannels is per-agent, deduplicated, and refuses anything but channel ids', () => {
+  const config = validateConfigFile({
+    slack: { agents: { atlas: { homeChannels: ['C0C1YV12SLC', 'C0C1YV12SLC', 'G0PRIVATE1'] } } },
+  }, 'test-config');
+  assert.deepEqual(resolveAgentSlack(config.slack, 'atlas'), { replies: 'final', homeChannels: ['C0C1YV12SLC', 'G0PRIVATE1'] });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'blair'), { replies: 'final', homeChannels: [] });
+  // A shared home channel would have every agent answer every message.
+  assert.throws(
+    () => validateConfigFile({ slack: { homeChannels: ['C0C1YV12SLC'] } }, 'test-config'),
+    /Invalid slack\.homeChannels in config test-config: homeChannels is per-agent/,
+  );
+  // A channel name, a DM id, or a bare string is a typo that would silently do nothing.
+  for (const homeChannels of ['C0C1YV12SLC', ['#stratus-agent'], ['D0123ABCD'], [42]]) {
+    assert.throws(
+      () => validateConfigFile({ slack: { agents: { atlas: { homeChannels } } } }, 'test-config'),
+      /Invalid slack\.agents\.atlas\.homeChannels/,
+    );
+  }
 });
 
 test('api.publicUrl loads as an http(s) address without a trailing slash, and anything else is refused', async () => {
