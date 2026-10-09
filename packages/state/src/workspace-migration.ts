@@ -2396,10 +2396,14 @@ export const applyPerAgentWorkspaces = async (
               // the directory it was made in: anything else there now is
               // not this run's to delete.
               written.delete(agentId);
+              // Text first, identity after, so both describe the one entry
+              // the unlink then removes; the unlink itself is the one step
+              // left unguarded, as at every rename here.
+              const text = await readlink(target).catch(() => undefined);
               const now = await lstat(target).catch(() => undefined);
-              if (made !== undefined && now !== undefined && now.isSymbolicLink() && inodeOf(now) === inodeOf(made)
-                && parentBeforeLink !== undefined && await steadyDirectory(targetParent) === parentBeforeLink
-                && await readlink(target).catch(() => undefined) === linkText) {
+              if (text === linkText && made !== undefined && now !== undefined && now.isSymbolicLink()
+                && inodeOf(now) === inodeOf(made)
+                && parentBeforeLink !== undefined && await steadyDirectory(targetParent) === parentBeforeLink) {
                 await unlink(target);
               }
               throw error;
