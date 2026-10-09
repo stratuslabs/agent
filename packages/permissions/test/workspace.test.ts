@@ -54,6 +54,11 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     'grep -n export src/main.ts -i',
     // A quoted backslash is text: grep's own alternation.
     'grep -n "export\\|^type X\\|interface" src/main.ts',
+    // sed as a line printer, and only that.
+    'sed -n 1p src/main.ts',
+    "sed -n '1,80p' src/main.ts",
+    'sed --quiet 2,3p src/main.ts src/main.ts',
+    "sed -n '1,5p'",
   ]) {
     assert.equal(await inside(command), true, `should be inside: ${command}`);
   }
@@ -103,7 +108,22 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     // Commands that aren't readers at all.
     'cp src/main.ts /tmp/x',
     'rm src/main.ts',
-    'sed -n 1p src/main.ts',
+    // sed in any form but printing lines: it edits, writes, and runs.
+    "sed -i '' -e 's/x/y/' src/main.ts",
+    "sed -i 's/x/y/' src/main.ts",
+    "sed -n 's/x/y/w out.txt' src/main.ts",
+    "sed -n 's/x/y/e' src/main.ts",
+    "sed -n '1p;e id' src/main.ts",
+    "sed -n '1w out.txt' src/main.ts",
+    "sed -n '/x/p' src/main.ts",
+    'sed -f script.sed src/main.ts',
+    "sed -e '1,5p' src/main.ts",
+    "sed -n '1,5p' src/main.ts -i",
+    "sed -n '1,5p' src/main.ts --",
+    "sed -n '$p' src/main.ts",
+    'sed -n 1p leak.txt',
+    `sed -n 1p ${outside}`,
+    'sed -n',
     // grep with no file and no -r reads stdin: not this rule's call.
     'grep',
   ]) {
@@ -144,6 +164,9 @@ test('autonomy lets reads run unattended for the agents it is on for, pipelines 
   assert.match(decisions.at(-1) ?? '', /autonomy: workspace/);
   assert.equal(await policy.approve(contextFor('nova', 'git log | grep export')), true);
   assert.equal(await policy.approve(contextFor('nova', 'cat src/main.ts | wc -l')), true);
+  assert.equal(await policy.approve(contextFor('nova', "git diff | sed -n '1,80p'")), true);
+  assert.equal(await policy.approve(contextFor('nova', "sed -n '10,40p' src/main.ts")), true);
+  assert.equal(await policy.approve(contextFor('nova', "git diff | sed -i '' src/main.ts")), false);
   // Off for this agent: the same read asks (and headless refuses).
   assert.equal(await policy.approve(contextFor('blair', 'grep -rn export src')), false);
   // On, but not a read, or not inside.
@@ -209,6 +232,13 @@ test('local git in a repository inside the workspace is judged inside, and publi
     'git tag v1.2.3',
     'git cherry-pick -x abc123',
     'git rebase --continue',
+    // A message read from a file inside the workspace.
+    'git commit -F msg.txt',
+    'git commit -aF msg.txt',
+    'git commit -Fmsg.txt',
+    'git commit --file msg.txt',
+    'git commit --file=msg.txt',
+    `git -C ${repo} commit -F ${path.join(workspace, 'msg.txt')}`,
   ]) {
     assert.equal(await inside(command), true, `should be inside: ${command}`);
   }
@@ -255,6 +285,13 @@ test('local git in a repository inside the workspace is judged inside, and publi
     'git fetch origin :refs/heads/main',
     // A message from a file, possibly outside.
     'git commit -F /etc/passwd',
+    'git commit -F leak.txt',
+    'git commit -Fleak.txt',
+    'git commit --file=/etc/passwd',
+    'git commit --file ../../../../secret.txt',
+    'git commit -aF up/secret.txt',
+    'git commit -F -',
+    'git commit --file=',
     // Repositories and worktrees outside the workspace.
     `git -C ${root} status`,
     'git -C up status',

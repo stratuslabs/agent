@@ -260,8 +260,10 @@ With `autonomy: "workspace"`, a command that only reads, and only reads
 paths inside the agent's workspace (`~/.stratus/agents/<id>/workspace`, or
 `<workspaceRoot>/<id>` when `tool-shell` has its own `workspaceRoot`),
 runs without asking. That covers `cat`, `ls`, `head`, `tail`, `wc`, `grep`,
-`rg`, and `find`, and each stage of a pipeline is judged on its own, so
-`cat src/main.ts | wc -l` runs too. Each path is resolved through its
+`rg`, `find`, and `sed` as a line printer only (`sed -n '10,40p' file`: a
+line or range of lines and `p`, with no flag but `-n` or `--quiet`), and each stage of a
+pipeline is judged on its own, so `cat src/main.ts | wc -l` and
+`git diff | sed -n '1,80p'` run too. Each path is resolved through its
 symlinks, so a link that points out of the workspace is outside. The
 shell's working directory has to be inside the workspace as well, so an
 agent with a configured `cwd` elsewhere gets nothing from this.
@@ -269,7 +271,9 @@ agent with a configured `cwd` elsewhere gets nothing from this.
 What still asks: a path outside the workspace, a glob or `~` or `$` (the
 shell expands those into paths the engine never saw), and any flag that
 would follow links out, run a program, or write a file (`grep -R`,
-`rg --follow`, `rg --pre`, `find -exec`, `find -delete`, `tail -f`). An
+`rg --follow`, `rg --pre`, `find -exec`, `find -delete`, `tail -f`), and
+any other `sed` (`-i`, `-f`, or a script with `w`, `e`, `s///`, or a
+pattern address). An
 unknown flag asks too. `rg` runs only with `--no-ignore` (or `-u`), because
 otherwise it reads ignore files outside the workspace: above it, in your
 home directory, and in a linked worktree's git directory.
@@ -292,7 +296,7 @@ Local git runs too, in a repository inside the workspace (the cwd, or
 `merge`, `rebase`, `cherry-pick`, `reset`, `fetch`, `pull`, `tag`, `mv`,
 and `rm`, plus the read-only ones. Each subcommand has a list of the flags it may use, and anything else
 asks: `--force`, `--hard`, `-D`, `--no-verify`, `stash drop`/`clear`,
-options that read a file or run a program (`commit -F`, `tag -F`,
+options that read a file or run a program (`tag -F`, `merge -F`,
 `rebase -x`, `--pathspec-from-file`), interactive forms (`add -p`,
 `rebase -i`), and any flag nobody listed. So do any option before the
 subcommand except `-C` and `--no-pager`, a `+` or `:` refspec on fetch or
@@ -300,7 +304,8 @@ pull, `push` except as below, and any subcommand not on the list
 (`config`, `clean`, `filter-branch`). The repository git will actually use has to be inside too: a `.git` file
 or link naming one elsewhere asks. Fetch and pull take a configured remote,
 never a path. A commit or annotated tag needs its message on the command
-line, and the shell sets `GIT_EDITOR` and `GIT_SEQUENCE_EDITOR` to `true`
+line, or for a commit in a file inside the workspace (`commit -F msg.txt`,
+resolved from where git runs, through its symlinks), and the shell sets `GIT_EDITOR` and `GIT_SEQUENCE_EDITOR` to `true`
 for every command, since an editor can only hang without a terminal or run
 whatever a repository's config names. Unlike reads, local git stops
 running unattended once the conversation reads web content under

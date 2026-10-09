@@ -103,6 +103,38 @@ const FIND_PATH_TESTS = new Set(['-newer', '-anewer', '-cnewer', '-samefile']);
 
 const isNumericFlag = (token: string): boolean => /^-\d+$/.test(token);
 
+/**
+ * `sed` only as a line printer: `sed -n '10,40p' file`. Its script language
+ * also writes files (`w`, `s///w`), runs programs (`e`, `s///e`), and its
+ * flags edit in place (`-i`) or read a script file (`-f`), so the script is
+ * held to one shape, a line or a range of lines and `p`, and the only flag
+ * is `-n` before it. Any dash token after the script asks: BSD sed reads it
+ * as a file, GNU sed as a flag, and neither reading can be checked as both.
+ */
+const SED_PRINT = /^\d+(?:,\d+)?p$/;
+
+const sedPrintPaths = (args: string[]): string[] | undefined => {
+  let script: string | undefined;
+  const files: string[] = [];
+  for (const token of args) {
+    if (script === undefined && (token === '-n' || token === '--quiet' || token === '--silent')) {
+      continue;
+    }
+    if (token.startsWith('-') && token !== '-') {
+      return undefined;
+    }
+    if (script === undefined) {
+      if (!SED_PRINT.test(token)) {
+        return undefined;
+      }
+      script = token;
+      continue;
+    }
+    files.push(token);
+  }
+  return script === undefined ? undefined : files;
+};
+
 /** Short flags may be bundled (`-rn`); each letter must be allowed on its own. */
 const flagAllowed = (reader: Reader, token: string): boolean => {
   if (reader.flags.includes(token)) {
@@ -151,6 +183,9 @@ const readPaths = (base: string, args: string[]): string[] | undefined => {
     return paths.length === 0 ? ['.'] : paths;
   }
 
+  if (base === 'sed') {
+    return sedPrintPaths(args);
+  }
   const reader = READERS[base];
   if (!reader) {
     return undefined;
@@ -389,7 +424,7 @@ const GIT_SUBCOMMANDS: Record<string, GitSubcommand> = {
   'ls-files': { flags: ['-m', '-o', '-d', '-s', '-c', '-u', '--others', '--modified', '--deleted', '--cached', '--stage', '--unmerged', '--exclude-standard', '-z', '--full-name'] },
   describe: { flags: ['--tags', '--always', '--dirty', '--long', '--all'], values: ['--abbrev', '--match', '--exclude'] },
   add: { flags: ['-A', '--all', '-u', '--update', '-N', '--intent-to-add', '-v', '--verbose', '-n', '--dry-run', '--renormalize'] },
-  commit: { flags: ['-a', '--all', '--amend', '--no-edit', '-s', '--signoff', '-q', '--quiet', '--allow-empty', '-v', '--verbose', '--no-verify-signatures'], values: ['-m', '--message', '--fixup', '--squash', '--author', '--date'] },
+  commit: { flags: ['-a', '--all', '--amend', '--no-edit', '-s', '--signoff', '-q', '--quiet', '--allow-empty', '-v', '--verbose', '--no-verify-signatures'], values: ['-m', '--message', '-F', '--file', '--fixup', '--squash', '--author', '--date'] },
   switch: { flags: ['--detach', '-d', '--track', '-t', '--no-track', '--guess', '--no-guess', '-q', '--quiet'], values: ['-c', '--create'] },
   checkout: { flags: ['--detach', '--track', '-t', '--no-track', '-q', '--quiet'], values: ['-b'] },
   restore: { flags: ['--staged', '-S', '--worktree', '-W', '-q', '--quiet'], values: ['--source', '-s'] },
@@ -415,8 +450,18 @@ const GIT_SUBCOMMANDS: Record<string, GitSubcommand> = {
   rm: { flags: ['--cached', '-r', '-q', '--quiet', '-n', '--dry-run'] },
 };
 
-/** The flags of one subcommand, or undefined when one isn't on its list. */
-const gitPositionals = (spec: GitSubcommand, rest: string[]): string[] | undefined => {
+/**
+ * The positionals of one subcommand, or undefined when a flag isn't on its
+ * list. `onValue` hears each value flag and the value git will give it, in
+ * every spelling this accepts (`-F f`, `-Ff`, `-aF f`, `--file f`,
+ * `--file=f`), so a check of a value reads exactly what this parse let
+ * through.
+ */
+const gitPositionals = (
+  spec: GitSubcommand,
+  rest: string[],
+  onValue: (flag: string, value: string) => void = () => undefined,
+): string[] | undefined => {
   const flags = spec.flags ?? [];
   const values = spec.values ?? [];
   const positionals: string[] = [];
@@ -439,12 +484,16 @@ const gitPositionals = (spec: GitSubcommand, rest: string[]): string[] | undefin
         if (!values.includes(name ?? '') && !flags.includes(name ?? '')) {
           return undefined;
         }
+        if (values.includes(name ?? '')) {
+          onValue(name as string, token.slice((name as string).length + 1));
+        }
         continue;
       }
       if (values.includes(token)) {
         if (rest[index + 1] === undefined) {
           return undefined;
         }
+        onValue(token, rest[index + 1] as string);
         index += 1;
         continue;
       }
@@ -460,12 +509,14 @@ const gitPositionals = (spec: GitSubcommand, rest: string[]): string[] | undefin
       if (rest[index + 1] === undefined) {
         return undefined;
       }
+      onValue(token, rest[index + 1] as string);
       index += 1;
       continue;
     }
     // An attached value (`-mmsg`, `-U3`), or a bundle of flags (`-sb`)
     // whose last letter may take the next token as its value (`-am msg`).
     if (values.includes(token.slice(0, 2))) {
+      onValue(token.slice(0, 2), token.slice(2));
       continue;
     }
     const letters = [...token.slice(1)];
@@ -477,6 +528,7 @@ const gitPositionals = (spec: GitSubcommand, rest: string[]): string[] | undefin
       if (rest[index + 1] === undefined) {
         return undefined;
       }
+      onValue(last, rest[index + 1] as string);
       index += 1;
       continue;
     }
@@ -609,7 +661,13 @@ export const gitInsideWorkspace = async (
   if (subcommand === undefined || spec === undefined) {
     return false;
   }
-  const positionals = gitPositionals(spec, args.slice(index + 1));
+  // `commit -F <file>` reads its message from a file: it must land inside.
+  const messageFiles: string[] = [];
+  const positionals = gitPositionals(spec, args.slice(index + 1), (flag, value) => {
+    if (flag === '-F' || flag === '--file') {
+      messageFiles.push(value);
+    }
+  });
   if (positionals === undefined) {
     return false;
   }
@@ -627,7 +685,7 @@ export const gitInsideWorkspace = async (
     || token.startsWith(`${name}=`)
     // `-mmsg`, or a short bundle ending in it (`-am msg`).
     || (name.length === 2 && !token.startsWith('--') && token.startsWith('-') && token.slice(1).includes(name.slice(1)))));
-  if (subcommand === 'commit' && !said(['-m', '--message', '--no-edit', '--fixup'])) {
+  if (subcommand === 'commit' && !said(['-m', '--message', '-F', '--file', '--no-edit', '--fixup'])) {
     return false;
   }
   if (subcommand === 'tag' && said(['-a', '--annotate']) && !said(['-m', '--message'])) {
@@ -660,6 +718,14 @@ export const gitInsideWorkspace = async (
     const remotes = await configuredRemotes(dirs.commonDir, 'fetch');
     const named = positionals.length > 0 ? positionals[0] as string : await upstreamRemote(dirs);
     if (remotes === undefined || named === undefined || !remotes.includes(named)) {
+      return false;
+    }
+  }
+  // Relative to where git runs, after every `-C`. `-` is standard input,
+  // which nothing here can see.
+  for (const file of messageFiles) {
+    const landed = file === '' || file === '-' ? undefined : await walk(repoDir, file);
+    if (landed === undefined || !within(root, landed)) {
       return false;
     }
   }
