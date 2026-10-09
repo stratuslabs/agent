@@ -374,8 +374,10 @@ What runs without asking:
 - **`web.fetch`** of a page under a trusted domain. It still doesn't follow
   a redirect to another site.
 - Under `autonomy: workspace`, **a plain download**: `curl` fetching one
-  https URL with a GET, written to a file inside the workspace or to
-  stdout. The site has to be under a trusted domain, or one already
+  plain https URL (a host, then a path, with no `@`, backslash, or curl
+  glob like `{a,b}` or `[1-9]`) with a GET, written with `-o` to a file
+  inside the workspace, or to stdout. `-O` and `--output-dir` ask, since
+  curl names that file itself. The site has to be under a trusted domain, or one already
   approved for `web.fetch` with **Always allow**. Flags that send data
   (`-d`, `-F`, `-T`, `-X`), carry headers or credentials (`-H`, `-u`, `-b`),
   read a config (`-K`), skip TLS checks (`-k`), or let the server pick the

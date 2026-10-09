@@ -1,4 +1,4 @@
-import { access, readFile, realpath } from 'node:fs/promises';
+import { access, lstat, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { CommandAnalysis } from './commands.ts';
@@ -954,10 +954,13 @@ const DOWNLOADERS: Record<string, Downloader> = {
   curl: {
     flags: [
       '-s', '--silent', '-S', '--show-error', '-L', '--location', '-f', '--fail', '--fail-with-body', '--compressed',
-      '-#', '--progress-bar', '-R', '--remote-time', '-O', '--remote-name', '--create-dirs', '-I', '--head', '-v', '--verbose',
+      '-#', '--progress-bar', '-R', '--remote-time', '--create-dirs', '-I', '--head', '-v', '--verbose',
       '-i', '--include', '--no-progress-meter',
     ],
-    pathValues: ['-o', '--output', '--output-dir'],
+    // `-O` and `--output-dir` aren't here: the file they write is named by
+    // the URL and joined in curl's own way, so the path checked would not
+    // be the path written.
+    pathValues: ['-o', '--output'],
     values: ['-m', '--max-time', '--connect-timeout', '--retry', '--retry-delay', '--max-redirs', '-A', '--user-agent'],
     dashIsStdout: true,
   },
@@ -981,6 +984,53 @@ const userConfigFiles = (env: NodeJS.ProcessEnv, workspace: string): string[] =>
 };
 
 const exists = async (file: string): Promise<boolean> => access(file).then(() => true, () => false);
+
+/**
+ * Where a write to `target` lands, or undefined when that can't be known.
+ * `walk` is for reads, where a link to nowhere reads nothing; a write
+ * follows it and creates its target, wherever that is. So any component
+ * that is a symlink which doesn't resolve refuses here.
+ */
+const writeTarget = async (base: string, target: string): Promise<string | undefined> => {
+  let current = path.isAbsolute(target) ? await resolveReal(path.parse(target).root) : await resolveReal(base);
+  if (current === undefined) {
+    return undefined;
+  }
+  for (const segment of target.split(path.sep)) {
+    if (segment === '' || segment === '.') {
+      continue;
+    }
+    if (segment === '..') {
+      current = path.dirname(current);
+      continue;
+    }
+    const next: string = path.join(current, segment);
+    const stat = await lstat(next).catch(() => undefined);
+    if (stat === undefined) {
+      current = next;
+      continue;
+    }
+    if (stat.isSymbolicLink()) {
+      const resolved = await realpath(next).catch(() => undefined);
+      if (resolved === undefined) {
+        return undefined;
+      }
+      current = resolved;
+      continue;
+    }
+    current = next;
+  }
+  return current;
+};
+
+/**
+ * The one URL shape judged here, read the same way by curl and by `URL`: a
+ * host of letters, digits, dots, and hyphens, an optional `:443`, then a
+ * path. No backslash (curl reads `https://a.com\\@b.com` as userinfo for
+ * `b.com`; `URL` as a path on `a.com`), no `@` anywhere, and none of curl's
+ * glob characters (`{}`, `[]`), which would turn one URL into several.
+ */
+const PLAIN_HTTPS_URL = /^https:\/\/[A-Za-z0-9.-]+(?::443)?(?:[/?#][^\s\\@{}[\]]*)?$/;
 
 export const downloadInsideWorkspace = async (
   analysis: CommandAnalysis,
@@ -1076,7 +1126,7 @@ export const downloadInsideWorkspace = async (
       break;
     }
   }
-  if (urls.length !== 1) {
+  if (urls.length !== 1 || !PLAIN_HTTPS_URL.test(urls[0] as string)) {
     return undefined;
   }
   let url: URL;
@@ -1091,8 +1141,7 @@ export const downloadInsideWorkspace = async (
   }
   const root = await resolveReal(workspace);
   const here = await resolveReal(cwd);
-  // With no path, curl -O writes into the working directory, so it
-  // must be inside too.
+  // The working directory must be inside, for relative output paths.
   if (root === undefined || here === undefined || !within(root, here)) {
     return undefined;
   }
@@ -1100,7 +1149,7 @@ export const downloadInsideWorkspace = async (
     if (target === '-' && downloader.dashIsStdout) {
       continue;
     }
-    const resolved = await walk(here, target);
+    const resolved = await writeTarget(here, target);
     if (resolved === undefined || !within(root, resolved) || resolved === root) {
       return undefined;
     }

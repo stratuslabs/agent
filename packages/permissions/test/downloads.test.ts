@@ -29,6 +29,9 @@ const layout = async () => {
   await mkdir(path.join(workspace, 'refs'), { recursive: true });
   await mkdir(path.join(root, 'elsewhere'), { recursive: true });
   await symlink(path.join(root, 'elsewhere'), path.join(workspace, 'out'));
+  // An existing file that is a link out: curl writes through it.
+  await symlink(path.join(root, 'elsewhere', 'target.html'), path.join(workspace, 'refs', 'link.html'));
+  await symlink(path.join(root, 'nowhere'), path.join(workspace, 'refs', 'gone'));
   return { root, workspace };
 };
 
@@ -67,7 +70,6 @@ test('a plain download into the workspace is recognized, and its site is what it
     'curl -sSLo refs/page.html https://developers.openai.com/codex/mcp',
     'curl --silent --location --output=refs/page.html https://developers.openai.com/codex/mcp',
     'curl -sL https://developers.openai.com/codex/mcp',
-    'curl -sLO https://developers.openai.com/codex/mcp.md',
     'curl -sL --create-dirs -o refs/new/page.html https://developers.openai.com/x',
     'curl -sL -m 30 --retry 2 -o refs/page.html https://developers.openai.com/x',
     'curl -sL -o - https://developers.openai.com/x',
@@ -99,6 +101,17 @@ test('anything that sends, authenticates, reconfigures, or writes outside is not
     `curl -o ../../../x.html ${url}`,
     `curl -o out/x.html ${url}`,
     `curl --output-dir ${root} -O ${url}`,
+    `curl -sLO ${url}`,
+    `curl --remote-name ${url}`,
+    `curl --output-dir refs -o a.html ${url}`,
+    "curl -s 'https://developers.openai.com\\@evil.com/'",
+    'curl -s https://developers.openai.com/x@evil.com',
+    "curl -s -o refs/a 'https://{developers.openai.com,evil.com}/'",
+    "curl -s -o refs/a 'https://developers.openai.com/[1-9]'",
+    'curl -s https://developers.openai.com:8443/x',
+    'curl -o refs/link.html https://developers.openai.com/x',
+    'curl -o refs/gone/x.html https://developers.openai.com/x',
+    'curl --create-dirs -o refs/gone/new/x.html https://developers.openai.com/x',
     `curl -o refs/a ${url} https://developers.openai.com/y`,
     'curl -o refs/a http://developers.openai.com/x',
     'curl -o refs/a https://me:pw@developers.openai.com/x',
@@ -119,8 +132,8 @@ test('anything that sends, authenticates, reconfigures, or writes outside is not
   ]) {
     assert.equal(await site(command), undefined, command);
   }
-  // curl -O writes into the working directory, so it must be inside.
-  assert.equal(await site(`curl -sLO ${url}`, root), undefined);
+  // The working directory must be inside, for relative output paths.
+  assert.equal(await site(`curl -sL -o a.html ${url}`, root), undefined);
 });
 
 const shell: Tool = {
