@@ -5,7 +5,7 @@ import { assertDerivedStatePath } from './state-directory.ts';
 
 import { describeCommandScope, parseCommandScope, sameScope, type CommandScope } from './commands.ts';
 import { parseToolGrant, sameToolGrant, type ToolGrant } from './grants.ts';
-import { parseOriginScope, sameOriginScope, type OriginScope } from './origins.ts';
+import { describeOriginScope, parseOriginScope, sameOriginScope, type OriginScope } from './origins.ts';
 
 /**
  * What one agent may run unattended, beyond the built-in safe list.
@@ -64,13 +64,17 @@ export interface AgentGrants {
  */
 export interface AgentGrantsListing {
   scopes: Array<{ description: string; scope: CommandScope }>;
-  origins: Array<{ origin: string }>;
+  origins: Array<{ origin: string; tool?: string; description: string }>;
   tools: ToolGrant[];
 }
 
 export const describeAgentGrants = (grants: AgentGrants): AgentGrantsListing => ({
   scopes: grants.scopes.map((scope) => ({ description: describeCommandScope(scope), scope })),
-  origins: grants.origins.map((scope) => ({ origin: scope.origin })),
+  origins: grants.origins.map((scope) => ({
+    origin: scope.origin,
+    ...(scope.tool !== undefined ? { tool: scope.tool } : {}),
+    description: describeOriginScope(scope),
+  })),
   tools: [...grants.tools],
 });
 

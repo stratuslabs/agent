@@ -10,6 +10,7 @@ One gateway owns:
 - **Approval recovery** — a turn parked on a human is a durable checkpoint, not a lost turn. The runner records the parked call and the calls queued behind it *before* asking, and clears it before the tool runs, so the record covers exactly the window in which nothing has happened. On start the gateway sweeps for `pending_approval` sessions and finishes them: the parked call is re-asked (or refused, if its window ran out while the process was down), and the queue behind it drains, so every `tool_use` still ends with a `tool_result`. Earlier calls are never replayed — their results were already durable, and a re-asked request keeps the remainder of its original window rather than starting a new one. Calls made through a provider that drives its own inner loop are deliberately excluded: recovery re-enters the *kernel* loop and cannot rebuild that provider's, so those fail cleanly instead (see [04](../../docs/roadmap/04-agent-sdk-bridge.md)).
 - **An activity watchdog** — progress-based, not wall-clock: any event from the session resets it, and an idle turn is aborted cleanly (the abort cancels the underlying provider request and kills tool subprocesses).
 - **Single-flight per session** — a second message to a busy session queues behind the in-flight turn; different sessions run concurrently.
+- **Idempotent dispatch** — a dispatch may carry an `idempotencyKey` (a channel passes the platform's message id), stored on the user message in the write that accepts it. A repeat never starts a second turn: it resolves with the live turn, or with the finished session, running nothing — which may have moved on since, so the repeated message's own outcome is read by its key: `turnReplyFor`, `turnFilesFor`, and `turnFailureFor` from `@stratusagent/core`. `onRepeat` says which repeat it was: `live` (another dispatch in this process is still waiting on the turn and posts its outcome, so a channel posts nothing) or `finished` (the outcome may never have been posted before a crash, so the caller posts it from the session). A failed turn's error is kept on its own user message (`Message.turnError`), so a later turn replacing the session's `lastError` does not lose it. A repeat naming another agent is refused like any dispatch, before anything is returned, and one arriving within an hour of a rollover is found in the archived transcript rather than run again. A keyed turn left `running` by a crash is continued from its transcript at the next start, once, instead of failed — except on a harness (`codex`, or a Claude subscription), whose own tool loop may already have acted on the prompt. Every other abandoned turn is failed as `ABANDONED_TURN_ERROR` says.
 - **Live-refresh** — souls are re-read on each dispatch, so an edited persona or allowlist reaches existing conversations on their next turn. Sessions pin an agent *id* and never cross identities.
 
 ```ts
@@ -18,8 +19,8 @@ import { createGateway } from '@stratusagent/gateway';
 const gateway = createGateway();
 await gateway.start();
 const session = await gateway.dispatch({
-  sessionId: 'slack:ava:T1:C1:171234.5678', // stable → resumable
-  agentId: 'ava',
+  sessionId: 'slack:blair:T1:C1:171234.5678', // stable → resumable
+  agentId: 'blair',
   userMessage: 'morning!',
 });
 await gateway.stop(); // drains in-flight turns first

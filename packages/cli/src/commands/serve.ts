@@ -29,21 +29,24 @@ import {
   runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
+  trustedConfigError,
   grantReadSerializer,
   grantWriteSerializer,
 } from '@stratusagent/state';
-import { createLogWriter, truncateRedirectLogs, type LogWriter } from '../logs.ts';
+import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
 import { describePrincipals, describeApprovers } from '../approvals.ts';
+import { createOperatorCommands } from '../operator-commands.ts';
 import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
 import { formatEvent, eventDetail } from '../events.ts';
 import { writeLine } from '../io.ts';
-import { loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
+import { hostChannelClaimsFor, loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
 import { CLI_VERSION } from '../npm.ts';
 import type { ParsedServeCommand } from '../parse.ts';
 import { warnOnCredentialOverride, warnOnUntrustedConfig, warnOnIgnoredConfig } from '../runtime.ts';
 import {
+  CONFIG_INVALID_EXIT_CODE,
   RESTART_EXIT_CODE,
   UNDRAINED_RESTART_EXIT_CODE,
   SUPERVISED_ENV,
@@ -58,6 +61,7 @@ import {
   loadServeApi,
   loadServePlugins,
   loadServeRuntimeSelection,
+  loadServeAgentMaxTurns,
   loadServeMaxTurns,
 } from '../trusted-config.ts';
 
@@ -73,6 +77,26 @@ export const runServe = async (
   // that case.
   if (command.logToFile !== false) {
     await truncateRedirectLogs(logsDirPath(env)).catch(() => undefined);
+  }
+
+  // Refused before anything else reads it. Every trusted block degrades on
+  // its own when the file will not load — no plugins, the built-in soul, no
+  // approvers, every Slack sender refused — so a daemon started on a broken
+  // config answered in Slack with no persona and no tools, and looked
+  // healthy while doing it; one install lost an hour to a stray comma that
+  // only stratusd.err.log mentioned (#214). Only at start: a file broken
+  // mid-edit under a running daemon is the gateway's to ride out on its
+  // last good snapshot, and stopping a fleet over a half-saved file is the
+  // worse failure there.
+  const configError = await trustedConfigError(env, command.configPath);
+  if (configError) {
+    writeLine(streams.stderr, `Error: ${configError.message}`);
+    writeLine(
+      streams.stderr,
+      'stratusd will not start on a config it cannot read: every agent would come up without its soul, plugins, '
+      + 'and approvers. Fix the file (`stratus doctor` names the problem), then start it again.',
+    );
+    return CONFIG_INVALID_EXIT_CODE;
   }
 
   // Loaded lazily: the gateway pulls in node:sqlite, which every other CLI
@@ -141,22 +165,47 @@ const serveHeldHome = async (
   // Under a service manager the daemon's stdout is gone, so everything it
   // says is also written to ~/.stratus/logs — that file is what `stratus
   // logs` reads, and the only record of an overnight run.
+  const jsonOut = command.logFormat === 'json';
   const logWriter: LogWriter | undefined = command.logToFile === false
     ? undefined
     : createLogWriter({
         dir: logsDirPath(env),
-        onError: (error) => writeLine(
-          streams.stderr,
-          `Warning: could not write the log file (${error instanceof Error ? error.message : String(error)}); continuing.`,
-        ),
+        // Under `--log-format json` a failing file is reported as a record
+        // on stdout like every other warning: a full disk is exactly when a
+        // shipper must not be handed a line it cannot parse.
+        onError: (error) => {
+          const message = `could not write the log file (${error instanceof Error ? error.message : String(error)}); continuing.`;
+          if (jsonOut) {
+            writeLine(streams.stdout, JSON.stringify({ ts: new Date().toISOString(), level: 'warn', msg: message } satisfies LogRecord));
+          } else {
+            writeLine(streams.stderr, `Warning: ${message}`);
+          }
+        },
       });
+  // `--log-format json` puts the file's records on stdout as well — the
+  // same objects, built once, so what a log shipper sees can never say more
+  // than the file does (a trace, not a transcript). The human lines go:
+  // a container runtime or journald reads stdout line by line, and one line
+  // that is not JSON breaks the parser for everything after it. Warnings go
+  // with them rather than to stderr, because both streams land in the same
+  // `docker logs` and the warning is already a record.
+  const record = (entry: LogRecord): Promise<void> => {
+    if (jsonOut) {
+      writeLine(streams.stdout, JSON.stringify(entry));
+    }
+    return logWriter?.write(entry) ?? Promise.resolve();
+  };
   const log = (line: string): void => {
-    writeLine(streams.stdout, line);
-    void logWriter?.write({ ts: new Date().toISOString(), level: 'info', msg: line });
+    if (!jsonOut) {
+      writeLine(streams.stdout, line);
+    }
+    void record({ ts: new Date().toISOString(), level: 'info', msg: line });
   };
   const warn = (line: string): void => {
-    writeLine(streams.stderr, `Warning: ${line}`);
-    void logWriter?.write({ ts: new Date().toISOString(), level: 'warn', msg: line });
+    if (!jsonOut) {
+      writeLine(streams.stderr, `Warning: ${line}`);
+    }
+    void record({ ts: new Date().toISOString(), level: 'warn', msg: line });
   };
 
   // With the home claim in hand, this daemon is the exclusive holder of the
@@ -201,6 +250,10 @@ const serveHeldHome = async (
   // config block, resolved once here: the daemon must not answer "who can
   // approve this" differently from "is anyone being asked at all".
   const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
+  // What the operator declared in approvals.commands, matched as scopes
+  // ahead of what was remembered, and reported by the control API so
+  // `stratus grants` shows this daemon's list rather than its own config's.
+  const operatorCommands = createOperatorCommands(approvalsConfig, warn);
   const approvalMode = command.approvals ?? approvalsConfig.mode ?? 'headless';
   const principalsConfig = await loadServePrincipals(env, command.configPath, warn);
   const slackConfig = await loadServeSlack(env, command.configPath, warn);
@@ -219,6 +272,7 @@ const serveHeldHome = async (
   // `stratus run` flag, so a served fleet was held to the kernel default
   // with no override.
   const maxTurns = await loadServeMaxTurns(env, command.configPath, warn);
+  const agentMaxTurns = await loadServeAgentMaxTurns(env, command.configPath, warn);
 
   // Every kind of grant an agent holds — command scopes, origins, standing
   // tool grants — in one file per agent beside its soul, through one store
@@ -276,6 +330,7 @@ const serveHeldHome = async (
         ...(command.configPath ? { configPath: command.configPath } : {}),
         ...(apiConfig.publicUrl !== undefined ? { publicUrl: apiConfig.publicUrl } : {}),
         grants: grantStore,
+        configCommands: (agentId: string) => operatorCommands.declaredFor(agentId),
         log,
         warn,
       });
@@ -433,8 +488,14 @@ const serveHeldHome = async (
   // installed. Wired unconditionally because it costs nothing without one:
   // a tool that carries no command string is judged by its risk exactly as
   // before. The whitelist lives beside the agent's soul, per agent.
+  // Only the read is widened: an "always allow" still lands in the
+  // whitelist file, and the file's own methods (list, revoke) still see
+  // only what is in it.
   const commands = {
-    whitelist: grantStore,
+    whitelist: {
+      scopesFor: async (agentId: string) => [...operatorCommands.scopesFor(agentId), ...await grantStore.scopesFor(agentId)],
+      remember: (agentId: string, scope: CommandScope) => grantStore.remember(agentId, scope),
+    },
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
       // An approval that widens what runs unattended, for every future
       // session, is precisely the decision that must not be the one leaving
@@ -481,6 +542,13 @@ const serveHeldHome = async (
     );
   };
 
+  const declared = operatorCommands.describe();
+  if (declared) {
+    log(declared);
+  }
+  if (Object.keys(agentMaxTurns).length > 0) {
+    log(`maxTurns: ${Object.entries(agentMaxTurns).map(([agentId, turns]) => `${agentId} ${turns}`).join(', ')}; ${maxTurns ?? 'the default'} for the rest (agentMaxTurns)`);
+  }
   if (approvalMode === 'remote') {
     // Only agents whose channel actually came up can be asked: tokens on
     // disk with the Slack package missing means nothing renders the
@@ -521,6 +589,19 @@ const serveHeldHome = async (
       restart = outcome;
       requestShutdown();
     },
+    // The replacement asks the same question at its start and exits 78 on
+    // the answer, which systemd will not retry — so a restart over a
+    // half-saved file is refused here, while this daemon can stay up on its
+    // last good snapshot, rather than drained into an outage.
+    restartPreflight: async () => {
+      const configError = await trustedConfigError(env, command.configPath);
+      if (configError) {
+        throw new Error(
+          `${configError.message} A restarted stratusd would refuse to start on it, so this one keeps serving. `
+          + 'Fix the file (`stratus doctor` names the problem), then restart again.',
+        );
+      }
+    },
     ...(Object.keys(pluginsConfig).length > 0
       ? {
           plugins: pluginsConfig,
@@ -541,16 +622,17 @@ const serveHeldHome = async (
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
+    ...(Object.keys(agentMaxTurns).length > 0 ? { maxTurnsFor: (agentId: string) => agentMaxTurns[agentId] } : {}),
     ...(channels.length > 0 ? { channels } : {}),
     // The Slack adapter is host-wired, so its (agent, kind) claims are
     // declared here; a plugin channel claiming one of them is refused at
     // load rather than started beside it.
-    ...(slackAdapterUp ? { hostChannelClaims: [{ kind: 'slack', agents: slackAgents.map(([agentId]) => agentId) }] } : {}),
+    ...(slackAdapterUp ? { hostChannelClaims: hostChannelClaimsFor(slackAgents.map(([agentId]) => agentId), slackAdapterUp) } : {}),
     log,
     warn,
   });
 
-  if (command.events) {
+  if (command.events && !jsonOut) {
     gateway.bus.subscribe((event) => {
       const line = formatEvent(event);
       if (line) {
@@ -559,7 +641,7 @@ const serveHeldHome = async (
     });
   }
 
-  if (logWriter) {
+  if (logWriter || jsonOut) {
     // Only session.created carries the agent id, so it seeds a map the
     // later events in that session read from. A session resumed after a
     // restart never re-creates, so an unmapped id falls back to the
@@ -589,7 +671,7 @@ const serveHeldHome = async (
       };
       const known = agentBySession.get(event.sessionId);
       if (known) {
-        void logWriter.write({ ...base, agentId: known });
+        void record({ ...base, agentId: known });
       } else {
         // A session resumed after a restart never re-creates, so its agent
         // is only in the store. That lookup is deferred off this path; the
@@ -600,9 +682,9 @@ const serveHeldHome = async (
             if (agentId) {
               agentBySession.set(event.sessionId, agentId);
             }
-            return logWriter.write({ ...base, ...(agentId ? { agentId } : {}) });
+            return record({ ...base, ...(agentId ? { agentId } : {}) });
           })
-          .catch(() => logWriter.write(base));
+          .catch(() => record(base));
       }
       if (event.type === 'session.completed' || event.type === 'session.failed') {
         agentBySession.delete(event.sessionId);
@@ -643,7 +725,9 @@ const serveHeldHome = async (
       }
     }
 
-    writeLine(streams.stdout, 'Press Ctrl+C to stop.');
+    if (!jsonOut) {
+      writeLine(streams.stdout, 'Press Ctrl+C to stop.');
+    }
 
     // And periodically, for a long-running daemon that warns steadily
     // without ever writing enough records to rotate. Unref'd, so it never
@@ -736,7 +820,7 @@ const serveHeldHome = async (
       } else {
         log(`restarting stratusd${restart.reason ? ` (${restart.reason})` : ''}`);
       }
-    } else {
+    } else if (!jsonOut) {
       writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
     }
   } finally {

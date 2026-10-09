@@ -21,7 +21,7 @@ npm install @stratusagent/tool-fs
       "enabled": true,
       "roots": ["~/notes"],
       "agents": {
-        "ava":  { "roots": ["~/work/ava"] },
+        "blair":  { "roots": ["~/work/blair"] },
         "juno": { "roots": ["~/work/juno", "~/shared"] }
       }
     }
@@ -38,7 +38,7 @@ second gate, and the per-identity one:
 
 ```markdown
 ---
-id: ava
+id: blair
 tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 ---
 ```
@@ -132,6 +132,25 @@ the thread it is on, so the expressive form is gone rather than bounded.
 regex-shaped is a `grep` away through
 [`@stratusagent/tool-shell`](../tool-shell), where a human approves the
 command and the executor can kill it.
+
+## What no root opens
+
+The daemon keeps its own home, `~/.stratus`, from every agent, except
+the agents' workspaces inside it. An agent with `roots: ["~"]` can read,
+list, search, and write the rest of your home directory. It cannot read
+`credentials.json`, the control API token, the config, the logs, another
+agent's sessions or memories, or any soul, skill, or grant file, and it
+cannot write there either. A hard link to one of the secret files from
+inside a root is refused too. A trusted config chosen with `--config` or
+`STRATUS_CONFIG` is protected wherever it lives.
+
+A search from a broad root lists each protected file it passed under
+`skipped`, with the reason, and never shows its content. A read of one
+fails with a sentence naming what protected it. Whether an agent may
+reach a given workspace is still its roots' decision.
+
+This list comes from the host (`PluginContext.protectedPaths`). A host
+that wires this plugin by hand without it gets roots alone.
 
 ## The containment rule
 

@@ -5,6 +5,11 @@ import {
   type Message,
   filePathsOf,
   isUnaddressedTurn,
+  workItemState,
+  lastResponseIsAnswer,
+  MAX_IDEMPOTENCY_KEY_LENGTH,
+  recordTurnFailure,
+  completeAnsweredTurn,
   abortErrorFor,
   AgentRegistry,
   AgentRunner,
@@ -54,6 +59,8 @@ import {
   createForgetTool,
   createPinTool,
   createMessageSendTool,
+  createMessageReadTool,
+  type ConversationReader,
   createRecallTool,
   createRememberTool,
   createScheduleTools,
@@ -149,11 +156,14 @@ import {
   resolveConfigLocation,
   resolveConfiguredSoul,
   resolveRuntimeConfig,
+  runsOnHarness,
   applySoulPins,
   assertStateCompatible,
   stratusHomePath,
   fleetDbIn,
   createAgentWorkspaces,
+  createPluginStateDirectories,
+  createHostProtectedPaths,
   type FallbackRuntime,
   type OperatorSkillInfo,
   type RosterEntry,
@@ -226,6 +236,21 @@ export interface GatewayChannelAdapter {
   resolveOutbound?(address: { agentId: string; to: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
+  /**
+   * The read side of an addressable conversation, mirroring
+   * `@stratusagent/channels`' `ChannelAdapter.readConversation`. Optional:
+   * an adapter without it cannot be read through `message.read`.
+   * Implementations MUST reject a conversation their app may not read,
+   * with a sentence for the agent.
+   */
+  readConversation?(request: {
+    agentId: string;
+    conversation: string;
+    thread?: string;
+    after?: string;
+    before?: string;
+    limit: number;
+  }): ReturnType<ConversationReader>;
   /**
    * Shows a person a form for a credential an agent asked for, mirroring
    * `@stratusagent/channels`' `ChannelAdapter.requestCredential`. Optional:
@@ -567,6 +592,12 @@ export interface GatewayOptions {
    */
   maxTurns?: number;
   /**
+   * One agent's own budget, replacing `maxTurns` for its messages and the
+   * sub-sessions it delegates to that agent. Undefined means the shared one.
+   * `stratus serve` fills it from the trusted config's `agentMaxTurns`.
+   */
+  maxTurnsFor?: (agentId: string) => number | undefined;
+  /**
    * The activity watchdog: abort a turn when no event for its session has
    * arrived for this long. Progress-based, not wall-clock — any delta, tool
    * event, or response resets it. 0 disables. Default 120s.
@@ -635,6 +666,16 @@ export interface GatewayOptions {
    * up `restart()`, which then throws `RestartUnsupportedError`.
    */
   onRestart?: (outcome: RestartOutcome) => void | Promise<void>;
+  /**
+   * Asked by {@link Gateway.checkRestart} before a restart is announced,
+   * while this daemon still serves: a throw refuses the restart with its
+   * message and leaves the daemon up. `stratus serve` checks here that the
+   * trusted config will load, because the replacement refuses to start on
+   * one that will not (#214) — and a restart that drained first would turn
+   * a half-saved file into an outage. A host that omits this restarts
+   * unchecked.
+   */
+  restartPreflight?: () => Promise<void>;
   /** The drain window a `restart()` uses when the request names none. Default 30s. */
   restartDrainTimeoutMs?: number;
   log?: (line: string) => void;
@@ -671,6 +712,52 @@ export interface DispatchInput {
    * whatever arrives for the conversation it is watching.
    */
   turnId?: string;
+  /**
+   * The caller's name for this message, unique within the session — for a
+   * channel, the platform's own message id. A repeat never starts a second
+   * turn: while the first is queued or running the repeat resolves with it;
+   * once it has finished the repeat resolves with the session as it stands,
+   * running nothing and emitting nothing — which may have moved on since,
+   * so the repeated message's own reply is `turnReplyFor(session, key)`,
+   * not `latestTurnReply`; and a turn whose process died
+   * mid-run is continued, once (`AgentRunner.continueTurn`), by whichever
+   * comes first — the repeat or the next start's sweep. Not on a harness
+   * (`runsOnHarness`), whose own tool loop may already have acted on the
+   * prompt: that turn is failed, as an unkeyed one is.
+   *
+   * Stored on the user message in the write that accepts it
+   * (`Message.idempotencyKey`), so it lasts as long as the transcript does.
+   * A repeat's other fields are not compared, and its `signal` does not
+   * reach a turn it attaches to; a failed turn stays failed, and retrying
+   * it takes a new key.
+   *
+   * Optional, and a host that omits it gives up crash-safe dedupe: a
+   * channel that delivers at least once can only dedupe in memory, which a
+   * restart erases, and a turn that was running when the process died is
+   * failed at the next start instead of finished.
+   */
+  idempotencyKey?: string;
+  /**
+   * Called, before the dispatch resolves, when it repeats a turn rather
+   * than starting or continuing one, and says which kind of repeat:
+   *
+   * - `live` — it attached to a turn another dispatch with the same key
+   *   started in this process and is still waiting on. That dispatch is
+   *   alive to render the outcome, so a caller with a reply of its own in
+   *   progress takes it down and posts nothing.
+   * - `finished` — the turn is over and nothing ran. Its outcome may never
+   *   have been posted — the process can die between the turn's last write
+   *   and the channel's — and nothing durable says whether it was, so the
+   *   caller posts it from the session: `turnReplyFor`, `turnFilesFor`, and
+   *   `turnFailureFor` from `@stratusagent/core`, since the session may
+   *   have moved on and no event will carry any of it. Said twice beats
+   *   never said.
+   *
+   * Not called for a repeat that continues a turn a crash left unfinished:
+   * that turn runs, its events are this caller's, and nobody else is
+   * rendering it.
+   */
+  onRepeat?: (repeat: 'live' | 'finished') => void;
 }
 
 export interface ObserveInput {
@@ -752,6 +839,14 @@ export interface Gateway {
    * close it.
    */
   restart(request?: RestartRequest): RestartStatus;
+  /**
+   * Whether a `restart()` now would bring the daemon back, as the host
+   * judges it (`restartPreflight`): rejects with the host's refusal,
+   * resolves when there is none. Separate from `restart()`, which stays
+   * synchronous and idempotent, so a caller asks this first — `POST
+   * /restart` does.
+   */
+  checkRestart(): Promise<void>;
   /**
    * The turn currently running on a session, if the caller that started it
    * named one. Single-flight per session is what makes this exact: at most
@@ -838,6 +933,16 @@ export interface Gateway {
    */
   sessionRouting(sessionId: string): Promise<SessionRouting | undefined>;
   /**
+   * Whether a session already accepted the message an idempotency key names,
+   * as addressed to it: a turn was started for it, finished, running or
+   * still queued, here or in the transcript a recent rollover archived
+   * (`settleRepeat` reads the same). A turn nobody asked for
+   * (`addressed: false`) does not count — that agent heard the message, it
+   * did not take it. Lets a channel route a redelivered message to the agent
+   * that accepted it rather than to whoever its routing rule picks now.
+   */
+  holdsMessage(sessionId: string, idempotencyKey: string): Promise<boolean>;
+  /**
    * Start a conversation over under the same id, leaving its transcript so
    * far behind as an archived session.
    *
@@ -922,11 +1027,17 @@ export const ABANDONED_TURN_ERROR =
   'stratusd stopped while this turn was still running; it was not resumed. Send the message again.';
 
 /**
+ * The longest `DispatchInput.idempotencyKey` accepted. A platform message id
+ * is far shorter; the bound is so a key cannot be used to grow every row it
+ * is stored on.
+ */
+
+/**
  * Recorded on a delegated sub-session that was parked on a human when the
  * previous process died.
  *
  * Its parent — the turn whose `agent.delegate` call was awaiting the reply
- * — was running, so the restart fails it as abandoned (above). Recovering
+ * — was running, so the restart settles it as abandoned (above). Recovering
  * the child anyway would re-ask a person to approve a call whose result no
  * turn will ever read, and then run it: a command executed, tokens spent,
  * and a reply delivered to nobody. Distinguishable from the parent's error
@@ -957,6 +1068,33 @@ export const ROLLED_OVER_FROM_METADATA_KEY = 'rolledOverFrom';
 export const ROLLED_OVER_TO_METADATA_KEY = 'rolledOverTo';
 /** The segment a rollover mints into the archived transcript's id. */
 export const ROLLED_OVER_SESSION_ID_MARKER = ':rolledover:';
+
+/**
+ * How long after a rollover a repeated key is still looked for in the
+ * archived transcript. A rollover moves every keyed message out of the
+ * live row, so a redelivery arriving after one would otherwise read as a
+ * new message and run again. Platforms redeliver within minutes — Slack
+ * gives up after about five — and past the window the archive is not
+ * loaded at all, since every new message to the fresh row would pay for a
+ * read that can no longer find anything.
+ */
+const ROLLOVER_REPEAT_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * The one refusal for a dispatch naming an agent other than its session's.
+ * Its own type so a repeat attached to a claimant can tell the claimant was
+ * refused for who it named — the item then still has no owner — from the
+ * claimant's turn failing. Internal: callers read the message.
+ */
+class CrossIdentityError extends Error {
+  constructor(sessionId: string, owner: string, claimed: string) {
+    super(`Session ${sessionId} belongs to agent ${owner}, not ${claimed} — sessions never cross agent identities.`);
+    this.name = 'CrossIdentityError';
+  }
+}
+
+const crossIdentityError = (sessionId: string, owner: string, claimed: string): Error =>
+  new CrossIdentityError(sessionId, owner, claimed);
 
 /** Where the session's tool calls ran: `local-command`, or a contributed executor's registered name. */
 export const EXECUTOR_METADATA_KEY = 'executor';
@@ -1908,6 +2046,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const connection = await outboundFor(agentId, destination);
     await connection.post(text);
   }));
+  tools.register(createMessageReadTool(async ({ agentId, source, ...window }) => {
+    // The same carrying rule as outbound: a read goes through the app of
+    // the agent asking, never whichever adapter of that kind is running,
+    // because membership is the read boundary and it is per app.
+    const { adapter, carriesOthers } = channelCarrying(source.channel, agentId, (candidate) => candidate.readConversation !== undefined);
+    if (!adapter?.readConversation) {
+      throw new Error(carriesOthers
+        ? `No running '${source.channel}' channel carries agent ${agentId}, so it has no app to read ${source.to} with.`
+        : `No running channel can read '${source.channel}' conversations.`);
+    }
+    return adapter.readConversation({ agentId, conversation: source.to, ...window });
+  }));
   /**
    * Credential requests waiting on a person, by request id.
    *
@@ -2207,8 +2357,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return createHash('sha256').update(JSON.stringify(providerInputs)).digest('hex');
   };
 
-  const runnerFor = (config: RuntimeConfig): AgentRunner => {
-    const key = runnerKeyFor(config);
+  const runnerFor = (config: RuntimeConfig, agentId: string): AgentRunner => {
+    // The budget is a provider-construction input too (the harness
+    // runtimes take it as their inner limit), so it is part of the key:
+    // two agents on one model with different budgets get their own runners.
+    const maxTurns = options.maxTurnsFor?.(agentId) ?? options.maxTurns;
+    const key = `${runnerKeyFor(config)}:${maxTurns ?? 'default'}`;
     const existing = runners.get(key);
     if (existing) {
       return existing;
@@ -2227,7 +2381,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         }
         return hostedRunner.executeHostedToolCall(session, call, context);
       },
-      options.maxTurns,
+      maxTurns,
       // The sticky-fallback switch is durable the moment it happens, not
       // when the turn's next save lands — a daemon killed mid-fallback
       // must not retry the primary on restart.
@@ -2249,7 +2403,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       skills: skillCatalog,
       memory,
       streaming: true,
-      ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
+      ...(maxTurns !== undefined ? { maxTurns } : {}),
     });
     hostedRunner = runner;
     runners.set(key, runner);
@@ -2578,6 +2732,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * session sufficient.
    */
   const activeTurns = new Map<string, string>();
+  /**
+   * Keyed dispatches not yet settled, by session and key — what a repeat
+   * attaches to. In memory on purpose: it only has to cover the turns this
+   * process is running, and the transcript covers the rest.
+   */
+  // Nested rather than one joined string: both halves are the caller's, and
+  // no separator is one a caller cannot also put inside a key. The agent
+  // the dispatch named rides along, so a repeat naming another is not
+  // handed a session that is not its agent's.
+  // `confirmed` once the chain has seen the dispatch past the identity
+  // check with a key the session had not seen (`claimLiveItem`); until
+  // then the entry is a claim that may yet be refused. `addressed` is false
+  // for a turn nobody asked for, which `holdsMessage` does not count.
+  const liveWorkItems = new Map<string, Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean; addressed: boolean }>>();
+  /** The start-up snapshot `recoverParkedTurns` judges orphans from, for a repeat that gets there first. */
+  let orphanedAtStart: ReadonlySet<string> = new Set();
 
   /**
    * The runtime one agent would run on right now — config snapshot, soul
@@ -2654,6 +2824,38 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return resolveRuntimeConfig(selection, resolveEnv);
   };
 
+  /**
+   * Whether the turn about to run streams deltas, which arms the idle
+   * watchdog — on the sticky fallback when the session already switched to
+   * it, since that is the provider the turn will be served by.
+   */
+  const watchdogStreamsFor = (
+    session: Session | undefined,
+    config: RuntimeConfig,
+  ): { switchedToFallback: boolean; effectiveStreams: boolean; fallbackStreams: boolean } => {
+    const switchedToFallback = session?.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true;
+    const fallbackStreams = config.provider !== 'demo' && config.fallback
+      ? fallbackStreamsDeltas(config.fallback)
+      : false;
+    const effectiveStreams = switchedToFallback && config.provider !== 'demo' && config.fallback
+      ? fallbackStreamsDeltas(config.fallback)
+      : streamsDeltas(config);
+    return { switchedToFallback, effectiveStreams, fallbackStreams };
+  };
+
+  /**
+   * Whether a turn on this config could be served by a harness
+   * (`runsOnHarness`): the primary or, since a turn can switch mid-run, the
+   * fallback. Once a session has switched for good the primary is never
+   * called again, and only the fallback counts.
+   */
+  const reachesHarness = (config: RuntimeConfig, switchedToFallback: boolean): boolean => {
+    const fallback = config.provider !== 'demo' ? config.fallback : undefined;
+    return switchedToFallback && fallback !== undefined
+      ? runsOnHarness(fallback)
+      : runsOnHarness(config) || (fallback !== undefined && runsOnHarness(fallback));
+  };
+
   const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
     // Re-read on every turn, not once at start: a newer build that stamps
     // the home while this daemon is serving has formats this build does not
@@ -2691,7 +2893,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
 
     const config = await runtimeForAgent(source);
-    const runner = runnerFor(config);
+    const runner = runnerFor(config, source.definition.id);
     // Which executor the turn's tool calls run through — the built-in
     // under the name `stratus run` has always recorded, a contributed one
     // under its registered name — so a transcript says where a command
@@ -2711,18 +2913,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     };
 
     if (existing && existing.agent.id !== agent.id) {
-      throw new Error(
-        `Session ${input.sessionId} belongs to agent ${existing.agent.id}, not ${agent.id} — sessions never cross agent identities.`,
-      );
+      throw crossIdentityError(input.sessionId, existing.agent.id, agent.id);
     }
 
-    const switchedToFallback = existing?.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true;
-    const fallbackStreams = config.provider !== 'demo' && config.fallback
-      ? fallbackStreamsDeltas(config.fallback)
-      : false;
-    const effectiveStreams = switchedToFallback && config.provider !== 'demo' && config.fallback
-      ? fallbackStreamsDeltas(config.fallback)
-      : streamsDeltas(config);
+    const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(existing, config);
+    // Recorded with a keyed message so a restart judges the turn by what it
+    // could have run on, not by whatever the config resolves to by then.
+    // The fallback counts: a turn can switch to it mid-run. Once a session
+    // has switched for good, the primary is never called again, and only
+    // the fallback counts.
+    const hostedLoop = input.idempotencyKey !== undefined && reachesHarness(config, switchedToFallback);
 
     return withWatchdog(input.sessionId, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
       // The preflight above (agent refresh, config resolution, session
@@ -2775,6 +2975,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           userMessage: input.userMessage,
           ...(input.images !== undefined ? { images: input.images } : {}),
           ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
+          ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+          ...(hostedLoop ? { hostedLoop } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
           runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
           signal,
@@ -2787,6 +2989,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         userMessage: input.userMessage,
         ...(input.images !== undefined ? { images: input.images } : {}),
         ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
+        ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+        ...(hostedLoop ? { hostedLoop } : {}),
         metadata,
         runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
         signal,
@@ -2875,117 +3079,134 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   const recoverOne = (sessionId: string, orphaned: boolean): Promise<void> =>
-    onSessionChain(sessionId, async () => {
-      if (stopping) {
+    onSessionChain(sessionId, () => recoverParked(sessionId, orphaned));
+
+  /**
+   * `recoverOne`'s work, for a caller already on the session's chain: a
+   * repeated idempotency key that reached the chain before the parked sweep
+   * did, and would otherwise wait on a turn nothing is running yet.
+   */
+  const recoverParked = async (sessionId: string, orphaned: boolean): Promise<void> => {
+    if (stopping) {
+      return;
+    }
+    try {
+      const session = await store.get(sessionId);
+      if (!session) {
         return;
       }
-      try {
-        const session = await store.get(sessionId);
-        if (!session) {
-          return;
-        }
-        const record = readPendingApproval(session);
-        // A delegated sub-session is only ever awaited by its parent's
-        // `agent.delegate` call, and that parent was running when the last
-        // process died — it is in the abandoned sweep, not in this one.
-        // Nothing will read the reply, so the parked call is not re-asked:
-        // a person would be approving a command that runs for no one.
-        //
-        // Judged on the re-read, on the chain: the channels are up before
-        // this sweep starts, so a message for this id can have taken the
-        // chain first and moved the session on — and a turn that finished
-        // normally must not be rewritten as failed. The delegation metadata
-        // is durable, so it proves what the session is, not what state it
-        // is in; the status and the checkpoint say that.
-        //
-        // Whether it IS an orphan was decided before the channels started
-        // (`listOrphanedDelegations`), from the parent's transcript, which
-        // a message arriving since may already have rewritten.
-        if (orphaned && isDelegatedSession(session) && session.status === 'pending_approval' && record) {
-          log(`${sessionId}: parked on ${record.call.toolName} for a delegating turn the last stratusd was still running; failing it`);
-          await failOrphanedDelegation(session);
-          return;
-        }
-        // A wait that outlived its window while the daemon was down is
-        // honoured, not restarted: the request really did go unanswered for
-        // the whole time it was configured to wait, and downtime is not a
-        // reason to extend a security decision. Measured from when the turn
-        // parked against this daemon's timeout — the transport's original
-        // deadline was chosen after the checkpoint was written and is gone
-        // with the process that chose it. Denying goes through the same
-        // recovery path, so the queue behind it still drains.
-        const parkedAt = record ? Date.parse(record.parkedAt) : Number.NaN;
-        const expired = effectiveApprovalTimeoutMs > 0
-          && Number.isFinite(parkedAt)
-          && Date.now() - parkedAt >= effectiveApprovalTimeoutMs;
-        if (expired) {
-          log(`${sessionId}: the approval for ${record?.call.toolName} outlived its window while the daemon was down; denying it`);
-        }
-
-        // Resolved the way a dispatch for this agent would resolve it, so a
-        // recovered turn finishes on the same provider, model, and
-        // credentials it was parked on.
-        const source = await refreshAgent(session.agent.id);
-
-        // And on the CURRENT definition, saved before recovery reads the
-        // session back. An allowlist is a permission boundary: a soul that
-        // dropped a tool while the daemon was down must not have that tool
-        // executed by the turn that outlived the change, and
-        // `allowedToolsFor` reads the definition frozen into the session
-        // ahead of the registry. Dispatch refreshes it the same way before
-        // resuming.
-        session.agent = source.definition;
-        await store.save(session);
-
-        const recoveredConfig = await runtimeForAgent(source);
-        const runner = runnerFor(recoveredConfig);
-        // Tracked like a dispatched turn's controller: a recovered turn
-        // that runs on past its approval is a turn like any other, and a
-        // restart's window has to be able to cut it short with the same
-        // reason — or it runs unseen to the second window and the restart
-        // reports undrained for a turn it could have finished cleanly.
-        const controller = new AbortController();
-        turnControllers.add(controller);
-        if (abortingTurns) {
-          controller.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
-        }
-        try {
-          await runner.recoverPendingApproval(sessionId, {
-            denyPending: expired,
-            runtime: runtimeContextFor(source, recoveredConfig, session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true, session.metadata),
-            signal: controller.signal,
-          });
-        } finally {
-          turnControllers.delete(controller);
-          // A recovered firing's row outlived the process that would have
-          // retired it, and the firing is over either way — a recovery that
-          // failed has durably failed its session, which is as finished as
-          // completing. The scheduler decides whether there is a row to
-          // retire, and only this firing's own.
-          const scheduleId = session.metadata?.[SCHEDULE_ID_METADATA_KEY];
-          if (typeof scheduleId === 'string') {
-            scheduler.retireSpentOneShot(scheduleId, sessionId);
-          }
-        }
-      } catch (error) {
-        warn(`could not recover parked session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      const record = readPendingApproval(session);
+      // A delegated sub-session is only ever awaited by its parent's
+      // `agent.delegate` call, and that parent was running when the last
+      // process died — it is in the abandoned sweep, not in this one.
+      // Nothing will read the reply, so the parked call is not re-asked:
+      // a person would be approving a command that runs for no one.
+      //
+      // Judged on the re-read, on the chain: the channels are up before
+      // this sweep starts, so a message for this id can have taken the
+      // chain first and moved the session on — and a turn that finished
+      // normally must not be rewritten as failed. The delegation metadata
+      // is durable, so it proves what the session is, not what state it
+      // is in; the status and the checkpoint say that.
+      //
+      // Whether it IS an orphan was decided before the channels started
+      // (`listOrphanedDelegations`), from the parent's transcript, which
+      // a message arriving since may already have rewritten.
+      if (orphaned && isDelegatedSession(session) && session.status === 'pending_approval' && record) {
+        log(`${sessionId}: parked on ${record.call.toolName} for a delegating turn the last stratusd was still running; failing it`);
+        await failOrphanedDelegation(session);
+        return;
       }
-    });
+      // A wait that outlived its window while the daemon was down is
+      // honoured, not restarted: the request really did go unanswered for
+      // the whole time it was configured to wait, and downtime is not a
+      // reason to extend a security decision. Measured from when the turn
+      // parked against this daemon's timeout — the transport's original
+      // deadline was chosen after the checkpoint was written and is gone
+      // with the process that chose it. Denying goes through the same
+      // recovery path, so the queue behind it still drains.
+      const parkedAt = record ? Date.parse(record.parkedAt) : Number.NaN;
+      const expired = effectiveApprovalTimeoutMs > 0
+        && Number.isFinite(parkedAt)
+        && Date.now() - parkedAt >= effectiveApprovalTimeoutMs;
+      if (expired) {
+        log(`${sessionId}: the approval for ${record?.call.toolName} outlived its window while the daemon was down; denying it`);
+      }
+
+      // Resolved the way a dispatch for this agent would resolve it, so a
+      // recovered turn finishes on the same provider, model, and
+      // credentials it was parked on.
+      const source = await refreshAgent(session.agent.id);
+
+      // And on the CURRENT definition, saved before recovery reads the
+      // session back. An allowlist is a permission boundary: a soul that
+      // dropped a tool while the daemon was down must not have that tool
+      // executed by the turn that outlived the change, and
+      // `allowedToolsFor` reads the definition frozen into the session
+      // ahead of the registry. Dispatch refreshes it the same way before
+      // resuming.
+      session.agent = source.definition;
+      await store.save(session);
+
+      const recoveredConfig = await runtimeForAgent(source);
+      const runner = runnerFor(recoveredConfig, source.definition.id);
+      // Tracked like a dispatched turn's controller: a recovered turn
+      // that runs on past its approval is a turn like any other, and a
+      // restart's window has to be able to cut it short with the same
+      // reason — or it runs unseen to the second window and the restart
+      // reports undrained for a turn it could have finished cleanly.
+      const controller = new AbortController();
+      turnControllers.add(controller);
+      if (abortingTurns) {
+        controller.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
+      }
+      try {
+        await runner.recoverPendingApproval(sessionId, {
+          denyPending: expired,
+          runtime: runtimeContextFor(source, recoveredConfig, session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true, session.metadata),
+          signal: controller.signal,
+        });
+      } finally {
+        turnControllers.delete(controller);
+        // A recovered firing's row outlived the process that would have
+        // retired it, and the firing is over either way — a recovery that
+        // failed has durably failed its session, which is as finished as
+        // completing. The scheduler decides whether there is a row to
+        // retire, and only this firing's own.
+        const scheduleId = session.metadata?.[SCHEDULE_ID_METADATA_KEY];
+        if (typeof scheduleId === 'string') {
+          scheduler.retireSpentOneShot(scheduleId, sessionId);
+        }
+      }
+    } catch (error) {
+      warn(`could not recover parked session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      // A keyed item is a promise to its caller, and one whose recovery
+      // cannot even start (its agent gone, its provider unresolvable) would
+      // otherwise stay parked for every later start and redelivery to try
+      // again. An unkeyed one keeps waiting for a sweep that can, as before.
+      const after = await store.get(sessionId).catch(() => undefined);
+      const key = after?.messages.findLast((candidate) => candidate.role === 'user')?.idempotencyKey;
+      if (after !== undefined && key !== undefined && after.status === 'pending_approval' && workItemState(after, key) === 'unfinished') {
+        await failParked(after, ABANDONED_TURN_ERROR).catch(() => {});
+      }
+    }
+  };
 
   /**
    * Closes an orphaned sub-session the way the abandoned sweep closes its
    * parent: durably failed, with the checkpoint retired so no later sweep
    * can find a call to re-enter, and announced where surfaces can hear it.
    */
-  const failOrphanedDelegation = async (session: Session): Promise<void> => {
+  const failOrphanedDelegation = (session: Session): Promise<void> => failParked(session, ORPHANED_DELEGATION_ERROR);
+
+  const failParked = async (session: Session, error: string): Promise<void> => {
     const metadata = { ...(session.metadata ?? {}) };
     delete metadata[PENDING_APPROVAL_METADATA_KEY];
     session.metadata = metadata;
-    session.status = 'failed';
-    session.lastError = ORPHANED_DELEGATION_ERROR;
+    recordTurnFailure(session, error);
     await store.save(session);
     await bus.emit({ type: 'session.updated', sessionId: session.id, status: 'failed' });
-    await bus.emit({ type: 'session.failed', sessionId: session.id, error: ORPHANED_DELEGATION_ERROR });
+    await bus.emit({ type: 'session.failed', sessionId: session.id, error });
   };
 
   /**
@@ -2998,9 +3219,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * hosts its own loop — the approval wait too, since a hosted call is
    * deliberately not checkpointed (`executeHostedToolCall` passes
    * `recoverable: false`, because the SDK's inner loop is not something a
-   * restart can rebuild). None of those can be resumed, and nothing else
-   * sweeps them, so the record goes on claiming the turn is running for as
-   * long as the session exists.
+   * restart can rebuild). None of those can be re-entered where they
+   * stopped, and nothing else sweeps them, so the record would go on
+   * claiming the turn is running for as long as the session exists. A turn
+   * whose caller gave it an idempotency key is continued from its
+   * transcript instead, with its dangling calls closed as interrupted
+   * (`settleAbandonedTurn`); the rest are failed.
    *
    * Note what this is *not* for. A graceful stop denies everything parked
    * and drains the turns those denials release, so an operator restarting
@@ -3015,7 +3239,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   /**
-   * Marks each of them failed, with a reason that says what happened.
+   * Settles each of them — continued if keyed, otherwise marked failed with
+   * a reason that says what happened.
    *
    * Read BEFORE the channels start and applied after, which is the only
    * ordering that is both honest and safe. Reading first means the list is
@@ -3043,7 +3268,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (abandoned.length === 0) {
       return;
     }
-    log(`failing ${abandoned.length} turn(s) left running by the last stratusd`);
+    log(`settling ${abandoned.length} turn(s) left running by the last stratusd`);
     await Promise.allSettled(abandoned.map((id) => failAbandonedTurn(id)));
   };
 
@@ -3060,15 +3285,211 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         if (!session || session.status !== 'running') {
           return;
         }
-        session.status = 'failed';
-        session.lastError = ABANDONED_TURN_ERROR;
-        await store.save(session);
-        await bus.emit({ type: 'session.updated', sessionId: id, status: 'failed' });
-        await bus.emit({ type: 'session.failed', sessionId: id, error: ABANDONED_TURN_ERROR });
+        await settleAbandonedTurn(session);
       } catch (error) {
-        warn(`could not fail abandoned turn ${id}: ${error instanceof Error ? error.message : String(error)}`);
+        warn(`could not settle abandoned turn ${id}: ${error instanceof Error ? error.message : String(error)}`);
       }
     });
+
+  /**
+   * A turn left `running` with nothing running it, read on its chain.
+   *
+   * One whose message carries an idempotency key is a work item its caller
+   * was promised would finish, so it is continued from the transcript
+   * (`AgentRunner.continueTurn`) — once. A turn that already was, and is
+   * here again, took the last process down with it, and continuing it again
+   * would do the same on every start; it is failed like an unkeyed one,
+   * whose caller was never promised anything and is told to send again.
+   */
+  const settleAbandonedTurn = async (session: Session): Promise<Session> => {
+    const message = session.messages.findLast((candidate) => candidate.role === 'user');
+    if (message?.idempotencyKey === undefined) {
+      return failAbandoned(session);
+    }
+    // An answer already in the transcript is completed whatever came before
+    // — a second crash, a harness, an agent or provider gone since —
+    // because completing it needs none of them and runs nothing again;
+    // failing it would throw away a finished reply.
+    if (lastResponseIsAnswer(session)) {
+      log(`${session.id}: a keyed turn the last stratusd was running had saved its answer; completing it`);
+      return completeAnsweredTurn(session, store, bus);
+    }
+    if (message.continuedAfterCrash === true) {
+      return failAbandoned(session);
+    }
+    if (message.hostedLoop === true) {
+      log(`${session.id}: a keyed turn the last stratusd was running could reach a harness, which cannot be continued; failing it`);
+      return failAbandoned(session);
+    }
+    return continueAbandonedTurn(session);
+  };
+
+  const failAbandoned = async (session: Session): Promise<Session> => {
+    recordTurnFailure(session, ABANDONED_TURN_ERROR);
+    await store.save(session);
+    await bus.emit({ type: 'session.updated', sessionId: session.id, status: 'failed' });
+    await bus.emit({ type: 'session.failed', sessionId: session.id, error: ABANDONED_TURN_ERROR });
+    return session;
+  };
+
+  /**
+   * Continues an abandoned turn on the configuration a dispatch for its
+   * agent would resolve now, and under the same watchdog — it is a provider
+   * call like any turn's. The definition is refreshed and saved first, as
+   * `recoverOne` does and for the same reason: an allowlist is a permission
+   * boundary, and a tool dropped while the daemon was down must not run.
+   *
+   * Not on a harness (`runsOnHarness`) — neither one the turn could have
+   * run on (`Message.hostedLoop`, recorded when it was accepted) nor one it
+   * would continue on. A harness runs its own tool loop inside a single
+   * provider call and keeps its own conversation, so the prompt the dead
+   * turn sent may already have run tools there that the transcript never
+   * saw, and continuing would send it again. That turn is failed as an
+   * unkeyed one is — the same answer as before keys existed. (A turn whose
+   * answer is already saved never gets here: `settleAbandonedTurn`
+   * completes it first.)
+   */
+  const continueAbandonedTurn = async (session: Session): Promise<Session> => {
+    // Settled either way: a turn whose agent left the roster, or whose
+    // provider no longer resolves, must not stay `running` for every later
+    // start and every redelivery to find unfinished and trip over again.
+    let source: AgentSource;
+    let config: RuntimeConfig;
+    try {
+      source = await refreshAgent(session.agent.id);
+      config = await runtimeForAgent(source);
+    } catch (error) {
+      log(`${session.id}: a keyed turn the last stratusd was running cannot be continued (${error instanceof Error ? error.message : String(error)}); failing it`);
+      return failAbandoned(session);
+    }
+    const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(session, config);
+    // The message's own record covers the runtimes the turn could have run
+    // on; this covers the ones it would continue on — a fallback included —
+    // which a changed config may make a harness.
+    if (reachesHarness(config, switchedToFallback)) {
+      log(`${session.id}: a keyed turn the last stratusd was running would continue on a harness; failing it`);
+      return failAbandoned(session);
+    }
+    log(`${session.id}: continuing a keyed turn the last stratusd was still running`);
+    session.agent = source.definition;
+    await store.save(session);
+    const runner = runnerFor(config, source.definition.id);
+    return withWatchdog(session.id, undefined, effectiveStreams, fallbackStreams, async (signal) =>
+      await runner.continueTurn(session.id, {
+        runtime: runtimeContextFor(source, config, switchedToFallback, session.metadata),
+        signal,
+      }) ?? session);
+  };
+
+  /**
+   * A repeated idempotency key that reached the session's chain, so nothing
+   * else is running on the session. `undefined` means the key is new here
+   * and the dispatch runs as any other; otherwise this is the session to
+   * resolve with, and no new turn starts.
+   *
+   * An unfinished item here has no live turn — the live map would have
+   * answered first — so it is one the last process left, reached before
+   * the start-up sweep that would have settled it: settled now, the way
+   * that sweep would, which then finds it no longer needs anything.
+   */
+  const settleRepeat = async (
+    sessionId: string,
+    idempotencyKey: string,
+    agentId: string | undefined,
+    turnId: string | undefined,
+    onRepeat: DispatchInput['onRepeat'],
+  ): Promise<Session | undefined> => {
+    const session = await store.get(sessionId);
+    if (session === undefined) {
+      return undefined;
+    }
+    // Before anything is returned: the turn a dispatch would run is refused
+    // for naming another agent, and the one it would repeat is no less that
+    // agent's — a repeat is not a way to read its transcript.
+    if (agentId !== undefined && session.agent.id !== agentId) {
+      throw crossIdentityError(sessionId, session.agent.id, agentId);
+    }
+    const state = workItemState(session, idempotencyKey);
+    if (state === undefined) {
+      const archived = await archivedRepeat(session, idempotencyKey);
+      if (archived !== undefined) {
+        onRepeat?.('finished');
+      }
+      return archived;
+    }
+    if (state === 'finished') {
+      onRepeat?.('finished');
+      return session;
+    }
+    // Run now, on this caller's behalf, so its events are this caller's
+    // turn — the adapter waiting on them has no other way to claim them.
+    if (turnId !== undefined) {
+      activeTurns.set(sessionId, turnId);
+    }
+    try {
+      return await settleUnfinished(session);
+    } finally {
+      if (turnId !== undefined) {
+        activeTurns.delete(sessionId);
+      }
+    }
+  };
+
+  /**
+   * The archived transcript holding a key the live row does not, when the
+   * row is a rollover's fresh one made inside `ROLLOVER_REPEAT_WINDOW_MS`.
+   * Only the one rollover back: a second inside the window is a redelivery
+   * outliving two deliberate resets, and the chain is not walked for it.
+   * Always finished — a rollover refuses a session with a turn in flight.
+   */
+  const archivedRepeat = async (session: Session, idempotencyKey: string): Promise<Session | undefined> => {
+    const archivedAs = session.metadata?.[ROLLED_OVER_FROM_METADATA_KEY];
+    if (typeof archivedAs !== 'string' || Date.now() - Date.parse(session.createdAt) > ROLLOVER_REPEAT_WINDOW_MS) {
+      return undefined;
+    }
+    const archived = await store.get(archivedAs);
+    return archived !== undefined && workItemState(archived, idempotencyKey) !== undefined ? archived : undefined;
+  };
+
+  /** An unfinished item with no live turn, settled the way the start-up sweeps would. */
+  const settleUnfinished = async (session: Session): Promise<Session> => {
+    if (session.status === 'pending_approval') {
+      await recoverParked(session.id, orphanedAtStart.has(session.id));
+      return (await store.get(session.id)) ?? session;
+    }
+    return settleAbandonedTurn(session);
+  };
+
+  /**
+   * Settles a keyed item the last process left unfinished before any other
+   * message joins its session. Channels are up before the sweeps reach it,
+   * and a different message resumed onto it would become the session's
+   * newest, so `workItemState` would call the old item finished: its
+   * redelivery would then run nothing although its turn never finished.
+   *
+   * Keyed items only. An unkeyed turn's caller was promised nothing, and a
+   * message resuming it is the long-standing way such a session recovers.
+   */
+  const settleOrphanedItem = async (sessionId: string): Promise<void> => {
+    const session = await store.get(sessionId);
+    const key = session?.messages.findLast((candidate) => candidate.role === 'user')?.idempotencyKey;
+    if (session !== undefined && key !== undefined && workItemState(session, key) === 'unfinished') {
+      // A continuation that fails has failed its session, which is settled
+      // too; the message waiting behind it runs either way.
+      await settleUnfinished(session).catch((error: unknown) => {
+        warn(`could not settle ${sessionId}'s unfinished turn before the next message: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      // Settling can leave it unfinished — a shutdown that began after this
+      // message was accepted skips recovery — and the message must not run
+      // over it then, or the old key reads finished with its turn never run.
+      const after = await store.get(sessionId);
+      if (after !== undefined && workItemState(after, key) === 'unfinished') {
+        throw stopping
+          ? refusal()
+          : new Error(`Session ${sessionId} has an unfinished turn that could not be settled, so this message was not added behind it. Send it again.`);
+      }
+    }
+  };
 
   /**
    * Runs `work` as the session's next turn: queued behind whatever that
@@ -3143,12 +3564,128 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       );
     }
 
-    const { turnId } = input;
-    if (turnId === undefined) {
-      return onSessionChain(input.sessionId, () => dispatchInternal(input));
+    const { turnId, idempotencyKey } = input;
+    if (idempotencyKey !== undefined && (idempotencyKey.length === 0 || idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH)) {
+      throw new Error(`An idempotency key is 1 to ${MAX_IDEMPOTENCY_KEY_LENGTH} characters; this one is ${idempotencyKey.length}.`);
+    }
+    // A repeat of a dispatch still queued or running is that dispatch: it
+    // resolves with it rather than queueing behind it, which would let
+    // another caller's turn land in between and then find a finished item.
+    // Attached only when it names no other agent than the live dispatch
+    // did; otherwise it queues, and `settleRepeat` refuses it there.
+    const live = idempotencyKey !== undefined ? liveWorkItems.get(input.sessionId)?.get(idempotencyKey) : undefined;
+    // A claim naming an agent other than this delivery does, that the chain
+    // has not yet confirmed — this delivery naming nobody, or someone else.
+    // The claim may be refused for who it named, and then the item is still
+    // unowned: inheriting the refusal would drop a valid message, and
+    // queueing behind it would leave this delivery to find the turn that a
+    // later valid delivery runs `finished`, and answer it twice. So it
+    // waits for the claim to settle and decides then: a claim that stood
+    // is repeated, by a delivery naming its owner or nobody, and refuses
+    // anyone else; a claim that left the item unowned is dispatched again,
+    // where the first delivery to get there runs it and the rest attach.
+    if (live !== undefined && !live.confirmed && live.agentId !== undefined && input.agentId !== live.agentId) {
+      const claim = live.turn;
+      const claimedBy = input.agentId;
+      const repeatOf = (owner: string): void => {
+        if (claimedBy !== undefined && claimedBy !== owner) {
+          throw crossIdentityError(input.sessionId, owner, claimedBy);
+        }
+        input.onRepeat?.('live');
+      };
+      return claim.then(
+        (session) => {
+          repeatOf(session.agent.id);
+          return session;
+        },
+        async (error: unknown) => {
+          // Refused for who it named, or failed before its keyed message was
+          // ever written (an agent gone, a provider it could not build): the
+          // item is still unowned, and there is no turn to have repeated.
+          const stored = error instanceof CrossIdentityError || idempotencyKey === undefined ? undefined : await store.get(input.sessionId);
+          const owned = stored !== undefined && idempotencyKey !== undefined && workItemState(stored, idempotencyKey) !== undefined;
+          if (owned) {
+            repeatOf(stored.agent.id);
+            throw error;
+          }
+          // Its own cleanup runs a tick later; the dispatch below must not
+          // find the dead claim still standing and wait on it again.
+          const items = liveWorkItems.get(input.sessionId);
+          if (idempotencyKey !== undefined && items?.get(idempotencyKey)?.turn === claim) {
+            items.delete(idempotencyKey);
+            if (items.size === 0) {
+              liveWorkItems.delete(input.sessionId);
+            }
+          }
+          return dispatch(input);
+        },
+      );
+    }
+    if (live !== undefined && (input.agentId === undefined || input.agentId === live.agentId)) {
+      input.onRepeat?.('live');
+      return live.turn;
+    }
+    // The live dispatch named no agent, so whose session it is is known
+    // only once its turn resolves. Queueing instead would make this a
+    // `finished` repeat of a turn the live caller is still rendering — two
+    // answers — so it attaches, and is held to the agent it named then:
+    // told it repeated only if that agent owns the session, refused if not.
+    const claimed = input.agentId;
+    if (live !== undefined && live.agentId === undefined && claimed !== undefined) {
+      const shared = live.turn;
+      // Whichever way the turn ends: a failed one is still that agent's,
+      // its owner read from the store, and a repeat of it is still told so
+      // — or refused, rather than handed another agent's error.
+      const attach = async (): Promise<Session> => {
+        let outcome: { session: Session } | { error: unknown };
+        try {
+          outcome = { session: await shared };
+        } catch (error) {
+          outcome = { error };
+        }
+        const owner = 'session' in outcome ? outcome.session.agent.id : (await store.get(input.sessionId))?.agent.id;
+        if (owner !== undefined && owner !== claimed) {
+          throw crossIdentityError(input.sessionId, owner, claimed);
+        }
+        // No owner means the dispatch failed before its session was ever
+        // written: there is no turn to have repeated, only its error.
+        if (owner !== undefined) {
+          input.onRepeat?.('live');
+        }
+        if ('error' in outcome) {
+          throw outcome.error;
+        }
+        return outcome.session;
+      };
+      return attach();
     }
 
-    return onSessionChain(input.sessionId, async () => {
+    // Reads `turn` only once it is assigned: the registration below runs
+    // after it, and the chain's work runs in a later tick (`.then`).
+    const claimLiveItem = (key: string, confirmed: boolean): void => {
+      const items = liveWorkItems.get(input.sessionId) ?? new Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean; addressed: boolean }>();
+      items.set(key, { turn, agentId: input.agentId, confirmed, addressed: input.addressed !== false });
+      liveWorkItems.set(input.sessionId, items);
+    };
+    const turn: Promise<Session> = onSessionChain(input.sessionId, async () => {
+      // Before `activeTurns` is touched: a repeat that runs nothing must
+      // not claim the session's turn id, even for the instant it takes.
+      const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, input.agentId, turnId, input.onRepeat) : undefined;
+      if (repeated !== undefined) {
+        return repeated;
+      }
+      // Past the identity check with a key the session has not seen, so this
+      // dispatch owns the item: it becomes the live entry even if a claimant
+      // that was then refused registered first, or a repeat arriving while
+      // this turn runs would find nothing to attach to, queue, and read the
+      // turn as finished — a second answer beside this caller's.
+      if (idempotencyKey !== undefined) {
+        claimLiveItem(idempotencyKey, true);
+      }
+      await settleOrphanedItem(input.sessionId);
+      if (turnId === undefined) {
+        return dispatchInternal(input);
+      }
       activeTurns.set(input.sessionId, turnId);
       try {
         return await dispatchInternal(input);
@@ -3159,6 +3696,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         activeTurns.delete(input.sessionId);
       }
     });
+    if (idempotencyKey !== undefined) {
+      // A repeat that queued instead of attaching — it named another agent,
+      // and is about to be refused — must not displace the turn it repeats.
+      // The first registration is provisional; the chain confirms it
+      // (`claimLiveItem` above) once the dispatch is known to own the item.
+      if (liveWorkItems.get(input.sessionId)?.has(idempotencyKey) !== true) {
+        claimLiveItem(idempotencyKey, false);
+      }
+      void turn.catch(() => {}).finally(() => {
+        const current = liveWorkItems.get(input.sessionId);
+        if (current?.get(idempotencyKey)?.turn === turn) {
+          current.delete(idempotencyKey);
+          if (current.size === 0) {
+            liveWorkItems.delete(input.sessionId);
+          }
+        }
+      });
+    }
+    return turn;
   };
 
   const observe = async (input: ObserveInput): Promise<Session | undefined> => {
@@ -3193,9 +3749,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         return undefined;
       }
       if (input.agentId !== undefined && existing.agent.id !== input.agentId) {
-        throw new Error(
-          `Session ${input.sessionId} belongs to agent ${existing.agent.id}, not ${input.agentId} — sessions never cross agent identities.`,
-        );
+        throw crossIdentityError(input.sessionId, existing.agent.id, input.agentId);
       }
       const continuedAs = existing.metadata?.[ROLLED_OVER_TO_METADATA_KEY];
       if (typeof continuedAs === 'string') {
@@ -3249,6 +3803,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // fleet's shared one.
       credentials: createFileCredentialResolver(env),
       workspaces: agentWorkspaces,
+      stateDirectories: createPluginStateDirectories(env),
+      // The daemon's home, minus the agents' workspaces, whatever roots a
+      // plugin's config grants. See `createHostProtectedPaths`.
+      protectedPaths: createHostProtectedPaths(env, {
+        ...(options.selection?.configPath ? { configPath: options.selection.configPath } : {}),
+        // Where the stores were actually opened, when a host moved them.
+        ...(options.stateDir !== undefined ? { stateDir } : {}),
+      }),
       // The structured log, so a plugin's lifecycle lines — an MCP server
       // that dropped, a reconnect that failed — are in `stratus logs` and
       // not only on a stderr the service manager owns.
@@ -3403,6 +3965,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // agent.delegate call is only answerable while nothing can resume that
     // parent. See listOrphanedDelegations.
     const orphaned = await listOrphanedDelegations();
+    orphanedAtStart = orphaned;
 
     // Channels come up after the roster so their first inbound message
     // already has agents to dispatch to. One failing adapter must not
@@ -3685,6 +4248,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     dispatch,
     observe,
 
+    async holdsMessage(sessionId: string, idempotencyKey: string) {
+      // A dispatch still queued behind another turn holds the message too:
+      // its key reaches the transcript only when the chain gets to it. By
+      // the same rule as the transcript below — a judged turn still waiting
+      // to run did not take the message either.
+      if (liveWorkItems.get(sessionId)?.get(idempotencyKey)?.addressed === true) {
+        return true;
+      }
+      const session = await store.get(sessionId);
+      if (session === undefined) {
+        return false;
+      }
+      const transcript = workItemState(session, idempotencyKey) !== undefined ? session : await archivedRepeat(session, idempotencyKey);
+      // Accepted as addressed: a turn nobody asked for (`addressed: false`,
+      // stored overheard) was this agent hearing the message, not taking it.
+      const keyed = transcript?.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+      return keyed !== undefined && keyed.overheard !== true;
+    },
+
     async sessionRouting(sessionId: string) {
       const session = await store.get(sessionId);
       if (!session) {
@@ -3890,6 +4472,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           warn(`restart failed: ${error instanceof Error ? error.message : String(error)}`);
         });
       return status;
+    },
+
+    async checkRestart() {
+      await options.restartPreflight?.();
     },
 
     activeTurnId(sessionId) {

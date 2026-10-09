@@ -10,7 +10,8 @@ linked own the full story.
   tool-shell's `env` block), `~/.stratus/gateway-token`, `~/.stratus/gateway.json`,
   `~/.stratus/logs/stratusd.jsonl`, and everything in each agent's own
   directory — its `sessions.db`, its `memory.jsonl`, and its
-  `whitelist.json`. The directory itself is `0700`.
+  `whitelist.json`. The directory itself is `0700`, and so is each
+  plugin's own state directory under `~/.stratus/plugins/`.
 - **An agent's durable state is structurally its own.** Sessions, memories,
   and grants live under `~/.stratus/agents/<id>/`, so a store is opened on
   one agent's path and there is no query another agent's rows could come
@@ -146,7 +147,9 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
   ([`tool-web`](../../packages/tool-web/README.md#settings))
 - **Third-party text is labelled as such, end to end.** Every tool result
   carries a trust label — `web.fetch`, the four `browser.*` tools,
-  `web.search`, and every MCP-bridged tool declare their output `external`,
+  `web.search`, and every MCP-bridged tool declare their output `external`
+  (an MCP server you run yourself can be labelled `agent` or `unknown` by
+  you, in trusted config, and never `user`),
   and `fs.read` marks a file a tainted session wrote — and the label follows
   the content: into the session (which only ever gets less trusted), across a
   restart, across a delegation in both directions, and into every fact the

@@ -54,7 +54,7 @@ at your permissions. Anything not granted asks, and in
 [`headless` mode](./approvals.md) anything not granted is refused:
 
 ```text
-09:14:36  —  warning: ava: browser.act was called on https://app.example.com, which no approved site covers, and nobody is available to approve it (session slack:ava:…)
+09:14:36  —  warning: blair: browser.act was called on https://app.example.com, which no approved site covers, and nobody is available to approve it (session slack:blair:…)
 ```
 
 ## Granting a site
@@ -62,7 +62,7 @@ at your permissions. Anything not granted asks, and in
 In `remote` mode, **Always allow** on a `browser.act` request persists that
 origin, and a saved one **survives a restart**, like every other kind of
 grant (see [Standing grants](./approvals.md#standing-grants) — `stratus
-grants ava` lists the sites beside the rest, and `stratus grants revoke ava
+grants blair` lists the sites beside the rest, and `stratus grants revoke blair
 --origin https://app.example.com` withdraws one). The prompt names
 the site: the arguments are a selector and say nothing about where the
 click lands, so the site is shown next to the tool name rather than left
@@ -80,15 +80,22 @@ For a `headless` daemon nothing is ever asked, so the grant is written by
 hand. The file is per agent, `0600`, and read once at startup:
 
 ```jsonc
-// ~/.stratus/agents/ava/whitelist.json
+// ~/.stratus/agents/blair/whitelist.json
 {
   "version": 1,
   "scopes": [],
   "origins": [
-    { "origin": "https://app.example.com" }
+    { "origin": "https://app.example.com", "tool": "browser.act" }
   ]
 }
 ```
+
+A site grant names the tool it was made for: one written by **Always allow**
+on `web.fetch` lets the agent fetch that site, not click there. Leave
+`tool` out and the grant covers every tool judged by site, which is also how
+a grant written before grants named a tool is read. `stratus grants revoke
+<id> --origin <origin>` takes back every grant for that site, whatever tool
+it names.
 
 Restart the daemon after editing it — grants are cached once read, which is
 the right way round for a file whose edits widen what runs unattended.
@@ -113,7 +120,7 @@ has exactly one spelling and a homograph is not a second way to write it.
 ## What this does not cover
 
 - **A grant is per agent**, like every other grant beside the soul. A site
-  approved for `ava` is not a site `juno` may act on.
+  approved for `blair` is not a site `juno` may act on.
 - **A page with no origin is never covered.** A conversation that has not
   navigated yet is on `about:blank`, which has no origin — so the call asks,
   and an "always" answered on it runs the call and widens nothing.

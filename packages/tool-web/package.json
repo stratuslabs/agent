@@ -1,6 +1,6 @@
 {
   "name": "@stratusagent/tool-web",
-  "version": "0.11.6",
+  "version": "0.11.8",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,7 +17,8 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit --project tsconfig.test.json",
-    "test": "node --test --experimental-strip-types"
+    "test": "node --test --experimental-strip-types",
+    "render-in-chromium": "node --experimental-strip-types scripts/render-in-chromium.ts"
   },
   "engines": {
     "node": ">=22.13 <23 || >=23.4"
@@ -29,6 +30,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
+    "playwright-core": "^1.62.1",
     "typescript": "^5.9.3"
   },
   "license": "MIT",

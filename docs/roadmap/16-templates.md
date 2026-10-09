@@ -103,4 +103,4 @@ directories, and reuses those helpers rather than growing new ones.
   and install one on click, over this command. That is [17](./17-fleet-console.md).
 - **Trusting a source.** Today the review is the whole answer: a template can
   name any npm package, and installing one runs that package's install
-  scripts. Signing, pinning, or a curated index is [12](./12-plugin-registry.md).
+  scripts. Signing, pinning, or a curated index is later work.

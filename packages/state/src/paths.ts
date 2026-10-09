@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { isValidAgentId } from '@stratusagent/agents';
+import { isPackageName } from '@stratusagent/plugins';
 import { type StateEnvironment, readHomeDirectory } from './environment.ts';
 
 export const DEFAULT_CONFIG_FILENAME = 'stratus.config.json';
@@ -26,6 +27,8 @@ const FLEET_DB_FILENAME = 'fleet.db';
 
 const LOGS_DIRNAME = 'logs';
 
+const PLUGINS_DIRNAME = 'plugins';
+
 const GATEWAY_TOKEN_FILENAME = 'gateway-token';
 
 const GATEWAY_INFO_FILENAME = 'gateway.json';
@@ -45,6 +48,20 @@ export const globalConfigPath = (env: StateEnvironment): string =>
  */
 export const grantsLockPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), GRANTS_LOCK_FILENAME);
+
+/**
+ * `~/.stratus/plugins/<package>/`: where one plugin keeps durable state of
+ * its own (`PluginContext.stateDirectory`). Keyed by the package name, a
+ * scoped one nesting under its scope the way `node_modules` does, so two
+ * plugins never share a directory and a name cannot choose a path: one
+ * that is not an npm package name is refused.
+ */
+export const pluginStateDirPath = (env: StateEnvironment, packageName: string): string => {
+  if (!isPackageName(packageName)) {
+    throw new Error(`${JSON.stringify(packageName)} is not an npm package name, so it has no plugin state directory.`);
+  }
+  return path.join(stratusHomePath(env), PLUGINS_DIRNAME, ...packageName.split('/'));
+};
 
 /** Where `stratus serve` keeps its structured log, and `stratus logs` reads it. */
 export const logsDirPath = (env: StateEnvironment): string =>

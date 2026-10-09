@@ -20,6 +20,7 @@ what moves when you rename an agent.
 | `workspace-links.json` | Only while the upgrade move of `workspaces/` is unfinished: which workspace links that move pointed somewhere new, so a later start can point them back if their target turns out to stay put. An entry saved just before its link is written is held as pending until the link exists, and a start that finds that very link there with the entry still pending refuses, since it cannot tell the link from one you made yourself — the error names the file and how to settle it. An entry is dropped once its target has moved, and the file once it holds none; `workspaces/` being gone does not settle it, since a command of an older build can make an entry again. One that will not read stops the move, naming the file, rather than being skipped. `0600`. |
 | `logs/` | `stratusd.jsonl`, the structured trace [`stratus logs`](../guides/logs.md) reads, plus the macOS LaunchAgent's stdout/stderr redirects. `0700`. |
 | `skills/` | Operator-installed [skills](../guides/skills.md), one directory each. |
+| `plugins/<package>/` | What one [plugin](../architecture/plugins.md) keeps across restarts, such as a channel's read position, by package name; a scoped package nests under its scope (`plugins/@scope/name/`). Created only when a plugin asks for it. `0700` at every level. |
 | `agents/` | One `<id>.md` soul per agent, plus one directory per agent — below. |
 
 ## One directory per agent
@@ -100,7 +101,7 @@ that are worth knowing:
   in `agents/` may be a link too (see
   [Templates](../guides/templates.md)).
 - **Two ids a filesystem reads as one name are one directory**, because
-  macOS and Windows fold `agents/Ava/` and `agents/ava/` onto the same name
+  macOS and Windows fold `agents/Blair/` and `agents/blair/` onto the same name
   — and APFS folds Unicode normalization too, so an accent written as one
   code point and as a combining pair land there as well. One directory
   holding two agents is the sessions, the memories, and the unattended
@@ -134,7 +135,9 @@ Two things deliberately do not shard, and both live in `fleet.db`:
 Copy the whole directory. The SQLite files are in WAL mode, so copy them
 with the daemon stopped (`stratus service stop`) or copy `*-wal` and
 `*-shm` alongside each database; otherwise the newest turns are the ones
-you lose.
+you lose. On a server the home is a Docker volume or
+`/var/lib/stratus/.stratus`; [Deployment](../guides/deployment.md#back-up-and-restore)
+has the archive-and-restore procedure and a drill that proves it.
 
 An install upgrading from before this layout is migrated on first use — see
 [Updating](../guides/updating.md), which also says why the sessions,

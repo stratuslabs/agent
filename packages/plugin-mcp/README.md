@@ -40,7 +40,7 @@ Then allowlist the tools in a soul, exactly as for any other toolset:
 
 ```markdown
 ---
-id: ava
+id: blair
 tools: [mcp.linear.*, fs.read]
 ---
 ```
@@ -67,13 +67,21 @@ manifest declares the namespace (`toolsDiscovered: [{ "namespace": "mcp.*",
 "risk": "gated" }]`) and the plugin host enforces it at registration, on
 first connect and identically on reconnect.
 
-Provenance is a different question with one answer: whatever a bridged tool
-returns is the server's text, so every bridged result is labelled
-`external`, and the session that read it — and every fact it remembers
-afterwards — carries the label
-([Memory](../../docs/concepts/memory.md#where-a-fact-came-from)). No
-override lowers that; it is a statement about who wrote the bytes, not
-about how risky the call was.
+Provenance is a different question: whatever a bridged tool returns is the
+server's text, so by default every bridged result is labelled `external`,
+and the session that read it — and every fact it remembers afterwards —
+carries the label
+([Memory](../../docs/concepts/memory.md#where-a-fact-came-from)). `toolRisks`
+doesn't lower it; it says who wrote the bytes, not how risky the call was.
+
+**Only the operator can vouch for a server, with `outputTrust`.** For a
+server you run yourself, set `outputTrust: "agent"` (output as good as the
+agent's own work) or `"unknown"` (yours, but relaying text from elsewhere).
+Without it, an agent doing real work through MCP labels everything it
+remembers after its first call as a stranger's, which makes the label
+meaningless. It can't be set to `"user"`, which means a person said it.
+The setting lives in the `plugins` block, which is read only from a trusted
+config, so neither a cloned repository nor the server can raise it.
 
 What a server *advertises* — its tool names, descriptions, and input
 schemas — is not labelled. It reaches the model as part of the tool
@@ -110,6 +118,7 @@ this package's code:
 | `headers` | HTTP | Headers sent with every request — where a bearer token goes. |
 | `connectTimeoutMs` | both | One budget for the connect handshake *and* the whole tool-discovery walk (default 15000), so a server can stall startup neither by being unreachable nor by paginating slowly. |
 | `callTimeoutMs` | both | Per-call budget (default 60000). |
+| `outputTrust` | both | The label this server's results carry: `external` (the default), `unknown`, or `agent`. Also the label on files its binary blocks write, unless the calling session's own label is lower. Never `user`. See above. |
 | `maxResultChars` | both | One allowance for a whole result, in characters (default 100000, minimum 512 — a smaller one is raised, since a cap that cannot hold an account of what it cut can only be approximated), spent in order across the joined text blocks, the JSON of `structuredContent`, and the `resource_link` list — not a separate cap per field, since the transcript pays their sum. Cuts are announced with the original size named. A `structuredContent` that does not fit arrives as `structuredText`, because a truncated object is not an object; resource links that do not fit are dropped whole and counted in `resourcesTruncated`, because half a URI is no use. A failing call's message is bounded by the same number, including a JSON-RPC or transport error that never produces a result. Binary blocks' bytes go to the workspace, but the path each returns is counted like any other string, and blocks past the allowance are not written — `filesTruncated` says how many. Everything is charged as the transcript carries it: lists pay for their separators and envelope, text pays for the JSON escaping it will get (a NUL costs six characters, a quote two), an attachment's path is measured rather than reserved for, and stratus's own truncation markers and notes come out of the allowance before a server spends any of it — so the number bounds the whole result, not just the parts a server wrote. |
 
 A setting on the wrong transport kind — `headers` on a stdio server, `env`
@@ -249,9 +258,13 @@ Tool results normalize into plain values:
   returned under `files` — the key channels deliver as attachments, so an
   image from a bridged tool reaches Slack like a screenshot does. Each such
   file is a server's bytes on disk, so it is recorded in the agent's
-  filesystem provenance ledger at `external` before it is written — the
+  filesystem provenance ledger at the server's `outputTrust` (`external`
+  unless you set it), or at the calling session's own label if that is
+  lower, before it is written — the
   same ledger `@stratusagent/tool-fs` reads — and a later `fs.read` of it
-  carries the label the tool result did.
+  carries that label. Vouching for a server covers what it returns, not
+  what a session that has read a stranger's text asked of it, so the file
+  is recorded the way `fs.write` would record it from that session.
 
   Where the bytes land and where the record lands are answered separately,
   on purpose. A `workspaceRoot` in this plugin's config block moves the

@@ -47,8 +47,8 @@ union, and the gateway's `streamsDeltas`. That is what shipping a provider
 costs today, and it is why nobody outside this repository will ship one.
 
 It is also the gate on everything downstream. [20](./20-channel-discord.md)
-should register itself rather than be wired in; [12](./12-plugin-registry.md)
-is pointless while the interesting plugin kinds cannot be loaded; and
+should register itself rather than be wired in; plugin discovery and
+distribution is pointless while the interesting plugin kinds cannot be loaded; and
 [15](./15-agent-isolation.md)'s layers B and C want an executor that arrives as
 a package.
 

@@ -70,5 +70,6 @@ export const KERNEL_TOOL_NAMES = [
   'schedule.list',
   'schedule.cancel',
   'message.send',
+  'message.read',
   'agent.delegate',
 ];

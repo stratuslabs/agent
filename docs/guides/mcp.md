@@ -31,6 +31,12 @@ soul's allowlist — `tools: [mcp.linear.*]` grants one server:
   itself — the operator's per-tool `toolRisks` entry is the only thing that
   lowers one. A server's self-description is not a security decision your
   daemon inherits.
+- **A server's replies are labelled `external` unless you vouch for it.**
+  Everything an agent remembers after reading one carries that label, so
+  for a server you run yourself, set `"outputTrust": "agent"` on its entry
+  (or `"unknown"` if it relays text from elsewhere). Only you can, since
+  the setting lives in trusted config, and never as `"user"`. See the
+  [package README](../../packages/plugin-mcp/README.md).
 - **A server's tool descriptions are bounded before the model sees them.**
   They are the server's prose, re-read on every reconnect, and they land
   in the tool block of every turn. Each is capped at 1024 characters with

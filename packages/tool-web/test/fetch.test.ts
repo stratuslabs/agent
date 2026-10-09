@@ -4,10 +4,10 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Worker } from 'node:worker_threads';
 
-import { HOSTILE_URLS } from '@stratusagent/egress';
+import { HOSTILE_URLS, egressPolicyFrom } from '@stratusagent/egress';
 import { ToolRegistry, type JsonObject, type Session, type Tool } from '@stratusagent/core';
 
-import { createWebPlugin, extractTitle, htmlToText } from '../src/index.ts';
+import { createWebPlugin, extractTitle, fetchThroughPolicy, htmlToText } from '../src/index.ts';
 
 const session: Session = {
   id: 'session-web',
@@ -146,10 +146,15 @@ test('a redirect into an internal address is refused at the hop, not at the firs
   // The same redirect written as a *name* rather than an address: nothing
   // in either URL is an address, so the refusal can only come from the
   // resolution the connection itself used.
+  // `fetchThroughPolicy` without `stayOnSite`, because `web.fetch` now stops
+  // at this hop before connecting (it leaves the site), which would hide
+  // whether the resolution check still holds for a caller that follows.
   await assert.rejects(
-    () => tool.execute({ url: `http://127.0.0.1:${baitPort}/by-name` }, session),
+    () => fetchThroughPolicy(`http://127.0.0.1:${baitPort}/by-name`, { policy: egressPolicyFrom({ allowedHosts: ['127.0.0.1'] }) }),
     /Refusing to connect to localhost/,
   );
+  const stopped = await tool.execute({ url: `http://127.0.0.1:${baitPort}/by-name` }, session) as JsonObject;
+  assert.equal(stopped.redirectedTo, `http://localhost:${internalPort}/latest/meta-data/`);
 
   // And the internal service was genuinely reachable, so the refusals above
   // are the policy's doing rather than a port nothing was listening on.
@@ -869,4 +874,57 @@ test('a comment ends where the HTML tokenizer ends it', () => {
   assert.equal(htmlToText('<div hidden>gone<!-- x > </div> --!>still hidden</div><p>shown</p>'), 'shown');
   assert.equal(htmlToText('<p>a<!-->b</p>'), 'ab');
   assert.equal(htmlToText('<p>a<!--->b</p>'), 'ab');
+});
+
+test('web.fetch is judged by the origin of its URL', async () => {
+  const tool = await fetchTool();
+  assert.equal(tool.originFor?.(session, { url: 'https://Docs.Example.com/a/b?c=d#e' }), 'https://docs.example.com');
+  assert.equal(tool.originFor?.(session, { url: 'http://example.com:8080/' }), 'http://example.com:8080');
+  // No nameable origin: the engine asks rather than matching a grant.
+  assert.equal(tool.originFor?.(session, { url: 'file:///etc/passwd' }), undefined);
+  assert.equal(tool.originFor?.(session, {}), undefined);
+});
+
+test('a redirect to another site is reported, not followed', async (t) => {
+  // An open redirect on a granted site must not carry the call anywhere
+  // else: `localhost` and `127.0.0.1` are different origins, and the second
+  // server must never be reached.
+  let otherReached = false;
+  const other = http.createServer((_request, response) => {
+    otherReached = true;
+    response.end('elsewhere');
+  });
+  await new Promise<void>((resolve) => other.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => other.close(() => resolve())));
+  const otherPort = (other.address() as AddressInfo).port;
+
+  const server = http.createServer((request, response) => {
+    if (request.url === '/same') {
+      response.writeHead(302, { location: '/landed' });
+      response.end();
+      return;
+    }
+    if (request.url === '/away') {
+      response.writeHead(302, { location: `http://127.0.0.1:${otherPort}/x` });
+      response.end();
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('landed');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+
+  const tool = await fetchTool({ allowedHosts: ['localhost', '127.0.0.1'] });
+
+  const same = await tool.execute({ url: `http://localhost:${port}/same` }, session) as JsonObject;
+  assert.equal(same.status, 200);
+  assert.equal(same.text, 'landed');
+
+  const away = await tool.execute({ url: `http://localhost:${port}/away` }, session) as JsonObject;
+  assert.equal(away.status, 302);
+  assert.equal(away.redirectedTo, `http://127.0.0.1:${otherPort}/x`);
+  assert.match(String(away.text), /not followed/);
+  assert.equal(otherReached, false);
 });

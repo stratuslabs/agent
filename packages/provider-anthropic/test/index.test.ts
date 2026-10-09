@@ -46,6 +46,12 @@ const createMockFetch = (responses: Array<Record<string, unknown>>) => {
   return { fetchImpl, requests };
 };
 
+/**
+ * A model that takes memory at the tail. The default no longer does: it binds
+ * thinking to the conversation, and a tail rebuilt per request edits it.
+ */
+const TAIL_MEMORY_MODEL = 'claude-opus-5';
+
 const apiMessage = (content: unknown[], stopReason = 'end_turn') => ({
   id: 'msg_test',
   type: 'message',
@@ -85,7 +91,7 @@ test('generate sends the persona in the system block and memory at the tail', as
     apiMessage([{ type: 'text', text: 'Hi! Lovely to meet you.' }]),
   ]);
 
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const provider = createAnthropicProvider({ model: TAIL_MEMORY_MODEL, apiKey: 'test-key', fetch: fetchImpl });
   const memory: MemoryEntry[] = [
     {
       id: 'ava:memory:1',
@@ -102,7 +108,7 @@ test('generate sends the persona in the system block and memory at the tail', as
   assert.deepEqual(response.parts[0], { type: 'text', text: 'Hi! Lovely to meet you.' });
 
   const body = requests[0]!.body;
-  assert.equal(body.model, DEFAULT_ANTHROPIC_MODEL);
+  assert.equal(body.model, TAIL_MEMORY_MODEL);
   // The stable sections travel as one system block, joined exactly as they
   // always were, carrying the single cache breakpoint.
   assert.match(body.system[0].text, /You are Ava\. Be warm and concise\./);
@@ -115,6 +121,41 @@ test('generate sends the persona in the system block and memory at the tail', as
     { role: 'system', content: 'Things you remember from previous conversations (your own long-term memory):\n- The user prefers short answers.' },
   ]);
   assert.equal(requests[0]!.headers['x-api-key'], 'test-key');
+});
+
+test('the default model keeps the replayed history unedited: memory in the system block, mismatched thinking dropped', async () => {
+  // Claude Opus 5.5 binds each thinking block to the conversation before it,
+  // and for new accounts an edit there is a 400. A memory section rebuilt at
+  // the tail of every request and gone from the next is such an edit, so it
+  // rides in the system block, which changes only when a memory does; and
+  // what does still change is dropped rather than refused.
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hi!' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const memory: MemoryEntry[] = [
+    { id: 'ava:memory:1', agentId: 'ava', content: 'The user prefers short answers.', createdAt: new Date().toISOString(), trust: 'agent' },
+  ];
+  await provider.generate({ session: createSession(), memory });
+
+  const { body, headers } = requests[0]!;
+  assert.equal(body.model, 'claude-opus-5-5');
+  assert.match(body.system[0].text, /The user prefers short answers\./);
+  assert.deepEqual(body.messages, [{ role: 'user', content: [{ type: 'text', text: 'Hello there' }] }]);
+  assert.deepEqual(body.thinking, { type: 'adaptive', block_binding: { prefix_mismatch_behavior: 'drop_block' } });
+  assert.match(headers['anthropic-beta'] ?? '', /thinking-binding-controls-2026-08-01/);
+});
+
+test('a model that binds thinking refuses disabled thinking up front, and an older one still sends neither', async () => {
+  for (const model of ['claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5-5']) {
+    assert.throws(
+      () => createAnthropicProvider({ apiKey: 'test-key', model, thinking: 'disabled' }),
+      /always thinks and rejects disabled thinking/,
+    );
+  }
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hi!' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', model: 'claude-haiku-4-5', fetch: fetchImpl });
+  await provider.generate({ session: createSession() });
+  assert.equal(requests[0]!.body.thinking, undefined);
+  assert.equal(requests[0]!.headers['anthropic-beta'], undefined);
 });
 
 test('generate advertises tools with sanitized wire names and maps calls back', async () => {
@@ -981,7 +1022,7 @@ test('a memory write leaves the cached head byte-identical', async () => {
     apiMessage([{ type: 'text', text: 'One.' }]),
     apiMessage([{ type: 'text', text: 'Two.' }]),
   ]);
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const provider = createAnthropicProvider({ model: TAIL_MEMORY_MODEL, apiKey: 'test-key', fetch: fetchImpl });
   const entry = (content: string): MemoryEntry => ({
     id: `ava:memory:${content.length}`,
     agentId: 'ava',
@@ -1006,7 +1047,7 @@ test('a memory write leaves the cached head byte-identical', async () => {
 
 test('all three memory blocks reach the tail as exactly one memory section', async () => {
   const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'One.' }])]);
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const provider = createAnthropicProvider({ model: TAIL_MEMORY_MODEL, apiKey: 'test-key', fetch: fetchImpl });
   const entry = (id: string, content: string): MemoryEntry => ({
     id,
     agentId: 'ava',
@@ -1097,7 +1138,7 @@ test('a model that rejects a system message falls back, and does not pay for it 
     });
   }) as typeof fetch;
 
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, maxTokens: 64 });
+  const provider = createAnthropicProvider({ model: TAIL_MEMORY_MODEL, apiKey: 'test-key', fetch: fetchImpl, maxTokens: 64 });
   const memory: MemoryEntry[] = [
     { id: 'm1', agentId: 'ava', content: 'Remembered.', createdAt: new Date().toISOString() },
   ];
@@ -1205,7 +1246,7 @@ test('a retry does not carry the previous attempt\'s tool breakpoint', async () 
     });
   }) as typeof fetch;
 
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const provider = createAnthropicProvider({ model: TAIL_MEMORY_MODEL, apiKey: 'test-key', fetch: fetchImpl });
   await provider.generate({
     session: createSession({ agent: { id: 'bare', name: 'Bare' } }),
     tools: [{ name: 'a.one', description: 'One.', parameters: { type: 'object', properties: {} } }],
@@ -1553,4 +1594,79 @@ test('an image is only swapped for a note when the note is smaller', async () =>
     { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
     { type: 'text', text: 'tiny' },
   ]);
+});
+
+test('an image a tool returned rides inside its tool_result, after the text', async () => {
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'It looks fine.' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const session = createSession();
+  session.messages.push(
+    {
+      id: 'session-1:assistant:2',
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      toolCalls: [{ id: 'toolu_shot', toolName: 'browser.screenshot', input: {} }],
+    },
+    {
+      id: 'session-1:tool:toolu_shot',
+      role: 'tool',
+      name: 'browser.screenshot',
+      content: '{}',
+      createdAt: new Date().toISOString(),
+      toolResult: { callId: 'toolu_shot', toolName: 'browser.screenshot', ok: true, output: { file: 'a.png' }, trust: 'agent' },
+      images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=', name: 'a.png' }],
+    },
+  );
+
+  await provider.generate({ session });
+
+  assert.deepEqual(requests[0]!.body.messages[2], {
+    role: 'user',
+    content: [
+      {
+        type: 'tool_result',
+        tool_use_id: 'toolu_shot',
+        content: [
+          { type: 'text', text: JSON.stringify({ file: 'a.png' }) },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
+        ],
+      },
+    ],
+  });
+});
+
+test('a tool image the API cannot process is dropped from inside its tool_result, by either address', async () => {
+  for (const address of ['messages.2.content.0.content.1.image', 'messages.2.content.0.tool_result.content.1.image']) {
+    const bodies: Array<Record<string, any>> = [];
+    const fetchImpl = (async (_input: any, init?: any) => {
+      const body = JSON.parse(init?.body ?? '{}');
+      bodies.push(body);
+      if (JSON.stringify(body).includes('BADBADBA')) {
+        return new Response(
+          JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: `${address}.source.base64.data: Could not process image` } }),
+          { status: 400, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify(apiMessage([{ type: 'text', text: 'Could not see it.' }])), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+    const bad = { mediaType: 'image/png' as const, data: 'BADBADBA', name: 'shot.png' };
+    const session = createSession();
+    session.messages.push(
+      { id: 'a', role: 'assistant', content: '', createdAt: new Date().toISOString(), toolCalls: [{ id: 'toolu_s', toolName: 'browser.screenshot', input: {} }] },
+      {
+        id: 't', role: 'tool', name: 'browser.screenshot', content: '{}', createdAt: new Date().toISOString(),
+        toolResult: { callId: 'toolu_s', toolName: 'browser.screenshot', ok: true, output: {}, trust: 'agent' },
+        images: [bad],
+      },
+    );
+
+    const response = await provider.generate({ session });
+
+    assert.deepEqual(response.parts, [{ type: 'text', text: 'Could not see it.' }], address);
+    assert.equal(bodies.length, 2);
+    assert.match(bodies[1]!.messages[2].content[0].content[1].text, /\(shot\.png\) is no longer sent/);
+    assert.deepEqual(session.messages[2]!.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'shot.png' }]);
+  }
 });

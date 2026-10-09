@@ -294,6 +294,72 @@ test('outbound speech goes to the adapter that carries the agent when one kind h
   }
 });
 
+test('message.read goes through the adapter that carries the calling agent, and is labelled external', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: reader\ntools: [message.read]\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'mia.md', '---\nname: Mia\nid: mia\nprovider: reader\ntools: [message.read]\n---\n\nYou are Mia.\n');
+  const reads: string[] = [];
+  const host = await hostFor({
+    'stratus-plugin-chan-a': {
+      manifest: manifest({ channels: [{ name: 'fixture' }] }),
+      module: plugin('a', (context) => {
+        context.channels!.register({
+          agents: ['ava'],
+          adapter: {
+            name: 'fixture',
+            async start() {},
+            async stop() {},
+            async readConversation(request) {
+              reads.push(`${request.agentId}:${request.conversation}:${request.thread ?? '-'}:${request.limit}`);
+              return { messages: [{ id: '1', author: 'U1', text: 'feedback here' }], more: false };
+            },
+          },
+        });
+      }),
+    },
+    'stratus-plugin-reader': {
+      manifest: manifest({ providers: [{ name: 'reader' }] }),
+      module: plugin('reader', (context) => {
+        context.providers!.register({
+          name: 'reader',
+          create: () => ({
+            name: 'reader',
+            async generate({ session }): Promise<ProviderResponse> {
+              if (session.messages.at(-1)?.role === 'tool') {
+                return { parts: [{ type: 'text', text: 'read' }] };
+              }
+              return { parts: [{ type: 'tool-call', call: { id: `${session.id}:read`, toolName: 'message.read', input: { source: { channel: 'fixture', to: 'C1' }, thread: 'T1' } } }] };
+            },
+          }),
+        });
+      }),
+    },
+  });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-reader': {} },
+    pluginHost: host,
+    log: () => {},
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    const ava = await gateway.dispatch({ sessionId: 'read-ava', agentId: 'ava', userMessage: 'catch up' });
+    assert.deepEqual(reads, ['ava:C1:T1:50']);
+    const result = ava.messages.find((message) => message.role === 'tool');
+    assert.match(JSON.stringify(result), /feedback here/);
+    assert.match(JSON.stringify(result), /"trust":"external"/);
+    // No adapter carries mia, so there is no app whose membership could
+    // bound the read: refused, never served by ava's adapter.
+    const mia = await gateway.dispatch({ sessionId: 'read-mia', agentId: 'mia', userMessage: 'catch up' });
+    assert.match(JSON.stringify(mia.messages), /No running 'fixture' channel carries agent mia/);
+    assert.deepEqual(reads, ['ava:C1:T1:50']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a plugin executor selected by the config runs the commands, and a selection nothing registers refuses to start', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');

@@ -4,7 +4,8 @@ The Claude provider for [Stratus Agent](https://github.com/stratuslabs/agent), b
 
 - **Multi-turn tool calling** — advertises kernel tools with wire-safe names, parses `tool_use` blocks, and replays results as `tool_result` blocks.
 - **Persona and memory** — the agent's identity and long-term memory are rendered as the system prompt, so an agent is the same person on every provider.
-- **Adaptive thinking, handled correctly** — `claude-opus-5` (the default) thinks adaptively; the thinking blocks that precede tool calls are persisted in session metadata and replayed verbatim, surviving tool waits, provider restarts, and resuming a session in another process. Use `redactAnthropicRawTurns(session)` before showing a session to people — replay state is never meant to be displayed.
+- **Adaptive thinking, handled correctly** — `claude-opus-5-5` (the default) thinks adaptively; the thinking blocks that precede tool calls are persisted in session metadata and replayed verbatim, surviving tool waits, provider restarts, and resuming a session in another process. Use `redactAnthropicRawTurns(session)` before showing a session to people — replay state is never meant to be displayed.
+- **Preserved thinking** — Claude Opus 5.5, Fable 5.1 and Sonnet 5.5 bind each thinking block to the conversation before it, and for accounts created on or after 2026-08-31 an edited history is a 400. On those models the provider keeps memory in the system block (which changes only when a memory does) instead of the tail, and asks the API to drop a mismatched block rather than refuse the request (`thinking-binding-controls-2026-08-01`, `drop_block`). They also always think, so `thinking: 'disabled'` is refused for them when the provider is created.
 - **Auth** — an Anthropic API key (`apiKey`), or an OAuth bearer token (`authToken`). Note: Claude Pro/Max setup tokens are only honored by Anthropic inside the Claude Code harness, so they do not work against the raw Messages API this provider calls — for subscription-billed runs use `@stratusagent/provider-claude-code`, which the Stratus CLI selects automatically for subscription sign-ins.
 
 ## Usage
@@ -14,7 +15,7 @@ import { createAnthropicProvider } from '@stratusagent/provider-anthropic';
 
 const provider = createAnthropicProvider({
   apiKey: process.env.ANTHROPIC_API_KEY,
-  model: 'claude-opus-5',                  // default
+  model: 'claude-opus-5-5',                  // default
 });
 ```
 

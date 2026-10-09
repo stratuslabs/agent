@@ -14,12 +14,12 @@ stratus doctor --format json
 Stratus Agent — what a run would use right now
 
   provider  anthropic
-            from ~/.stratus/agents/ava.md (soul frontmatter)
-  model     claude-opus-5
-            from ~/.stratus/agents/ava.md (soul frontmatter)
-  soul      ~/.stratus/agents/ava.md
+            from ~/.stratus/agents/blair.md (soul frontmatter)
+  model     claude-opus-5-5
+            from ~/.stratus/agents/blair.md (soul frontmatter)
+  soul      ~/.stratus/agents/blair.md
             from ~/.stratus/config.json
-  agent     Ava (ava)
+  agent     Blair (blair)
 
 Files
   config    ~/.stratus/config.json
@@ -65,6 +65,13 @@ subscription sign-in to per-token billing.
   wrote it at your umask's mode, and it can hold secrets (tool-shell's `env`
   block is the usual one). Run `chmod 600 ~/.stratus/config.json`; every
   save from this build writes it `0600`, and tightens a loose one.
+- **`stratus update` upgraded, then said `State migration failed: The
+  requested module '@stratusagent/state' does not provide an export named
+  …`** — the upgrade itself landed; the build doing the updating mixed its
+  own modules with the newly installed ones (fixed in the release after
+  0.11.7, which only helps updates *from* it). Run `stratus update` again:
+  the CLI is now the new build, so it finishes the migrations and rewrites
+  the service unit.
 - **The agents stopped answering after a node upgrade** — the service unit
   points at an interpreter that no longer exists. `stratus update` repairs
   it; [Updating](./updating.md) explains why.
@@ -74,6 +81,11 @@ subscription sign-in to per-token billing.
   names any that are behind, and so do `stratus doctor` and the warnings
   `stratus serve` prints when it starts. `stratus update` brings them up, and
   then restart the daemon: a running daemon keeps the version it loaded.
+- **The daemon won't start and says it cannot use its config** — the
+  trusted config has a syntax or validation error, and `stratus serve`
+  refuses to run without it rather than starting every agent bare. The
+  message names the file and position; `stratus doctor` says the same.
+  See [Always on](./always-on.md#a-config-that-will-not-load-stops-the-daemon).
 - **`stratus logs` shows nothing, but the daemon won't start** — a daemon
   that fails before it starts serving never opens the structured log. See
   [When the log is empty](./logs.md#when-the-log-is-empty) for where those
@@ -113,7 +125,8 @@ subscription sign-in to per-token billing.
   Slack instead.
 - **An agent stops to say it is out of steps** — the task used every tool
   turn one message allows (`maxTurns`, default 40). Reply "continue" to
-  carry on; raise `maxTurns` for agents that do long work. The error
+  carry on; give an agent that does long work its own budget with
+  `agentMaxTurns`. The error
   **"Session exceeded the maximum of N provider turns"** means the model
   called a tool on the wrap-up call it was told not to, and is fixed the
   same way.

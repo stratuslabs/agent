@@ -50,14 +50,16 @@ stratus skill add owner/repo           # install skills from GitHub (validated a
 stratus skill validate ./my-skill      # check a skill against the spec without installing it
 stratus plugins                        # installed → enabled → granted → what approvals does with it
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
+stratus health                         # is the running daemon serving? exit 0/1, for container and probe health checks
 stratus credentials                    # stored credential names (never values)
+stratus channel set imessage --agent blair apiKey  # a channel plugin's secrets for one agent, asked without echo (also `channels`, `channel remove`)
 stratus schedules                      # what the fleet has scheduled, and where it reports
-stratus grants ava                     # what ava may do unattended, and `grants revoke` to take one back
-stratus memory list ava                # every live fact, with its trust label, pin, and validity
-stratus memory search ava deploy pipeline               # the way the agent searches it
-stratus memory pin ava <id>...         # keep facts in the prompt every turn (also `memory unpin`)
-stratus memory export ava --file ava.jsonl              # move an agent's memory (also `memory import`)
-stratus memory reassert ava --trust user --all-unknown   # vouch for the facts with no recorded origin
+stratus grants blair                   # what blair may do unattended, and `grants revoke` to take one back
+stratus memory list blair              # every live fact, with its trust label, pin, and validity
+stratus memory search blair deploy pipeline             # the way the agent searches it
+stratus memory pin blair <id>...       # keep facts in the prompt every turn (also `memory unpin`)
+stratus memory export blair --file blair.jsonl          # move an agent's memory (also `memory import`)
+stratus memory reassert blair --trust user --all-unknown  # vouch for the facts with no recorded origin
 stratus session rollover <session-id>  # archive a conversation's transcript and start the same id over
 stratus dashboard                      # web dashboard, signed in via a one-time link
 ```
@@ -71,7 +73,7 @@ Full reference with every subcommand:
 | --- | --- |
 | `--soul <file>` | Run as the agent defined by a soul file (also `STRATUS_SOUL` / config `soul` key) |
 | `--provider` | `anthropic`, `openai`, `codex`, or `demo` (offline, no account) |
-| `--model` | Model for real providers (anthropic default: `claude-opus-5`, codex default: `gpt-5.5`) |
+| `--model` | Model for real providers (anthropic default: `claude-opus-5-5`, codex default: `gpt-5.5`) |
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |
 | `--approvals` | `run`/`chat`: `always`, `ask`, or `never`. `serve`: `headless` (refuse gated calls) or `remote` (ask in Slack) |
@@ -80,15 +82,16 @@ Full reference with every subcommand:
 | `--idle-timeout` | `serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |
 | `--no-log-file` | `serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
+| `--log-format` | `serve`: `text` (default) or `json` — the log's records as JSON lines on stdout, for `docker logs` and journald |
 | `--no-api` | `serve`: do not serve the control API |
 | `--api-host`, `--api-port` | `serve`: control API bind (default `127.0.0.1:4123`) |
-| `--gateway <url>`, `--token` | `agents`, `skill reload`, `restart`, `session rollover`, `grants`: a running daemon's control API |
+| `--gateway <url>`, `--token` | `agents`, `skill reload`, `restart`, `session rollover`, `grants`, `health`: a running daemon's control API |
 | `--tool`, `--scope`, `--origin` | `grants revoke`: which grant goes — exactly one |
 | `--trust <level>` | `memory list`: show only that label; `memory reassert`: the label to record (`user`, `agent`, `unknown`, `external`) |
 | `--all-unknown` | `memory reassert`: every live fact with no recorded origin |
 | `--limit <n>` | `memory search`: maximum hits |
 | `--file <path>`, `--preserve-trust` | `memory export` / `memory import`: the JSONL, and keeping each recorded label instead of landing entries `external` |
-| `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one |
+| `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one; `channel set`/`remove`: whose binding it is |
 | `--port`, `--host`, `--no-open` | `dashboard`: where a daemon it starts should bind; skip opening the browser |
 | `--no-login` | `service install`: install without the start-at-login trigger |
 | `--version`, `-v` | Print this build's version and exit |
@@ -140,6 +143,7 @@ The reasoning:
 | Let agents act on their own schedule | [Schedules](https://github.com/stratuslabs/agent/blob/main/docs/guides/schedules.md) |
 | Teach an agent a procedure | [Skills](https://github.com/stratuslabs/agent/blob/main/docs/guides/skills.md) |
 | Run it as a service, read its logs, upgrade it | [Always on](https://github.com/stratuslabs/agent/blob/main/docs/guides/always-on.md) · [Logs](https://github.com/stratuslabs/agent/blob/main/docs/guides/logs.md) · [Updating](https://github.com/stratuslabs/agent/blob/main/docs/guides/updating.md) |
+| Run it on a server, in Docker or under a system unit | [Deployment](https://github.com/stratuslabs/agent/blob/main/docs/guides/deployment.md) |
 | Understand souls, ids, and memory | [Agents](https://github.com/stratuslabs/agent/blob/main/docs/concepts/agents.md) · [Memory](https://github.com/stratuslabs/agent/blob/main/docs/concepts/memory.md) |
 | Fix a surprise | [Troubleshooting](https://github.com/stratuslabs/agent/blob/main/docs/guides/troubleshooting.md) |
 

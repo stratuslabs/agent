@@ -18,7 +18,7 @@ npm install -g @stratusagent/tool-fs @stratusagent/tool-shell \
       "enabled": true,
       "roots": ["~/notes"],
       "agents": {
-        "ava":  { "roots": ["~/work/ava"] },
+        "blair":  { "roots": ["~/work/blair"] },
         "juno": { "roots": ["~/work/juno", "~/shared"] }
       }
     },
@@ -34,6 +34,12 @@ sub-block over the defaults above them — the same shape
 [`approvals`](./approvals.md) already uses, and it matters more here: for
 `tool-fs` those values are an access boundary between agents rather than a
 preference.
+
+An agent's entry replaces each key it sets, with one exception: tool-shell's
+`env`, where an agent's variables are added to the shared ones (its names
+win, and `null` withholds a name from that agent, `passEnv` included). Giving one agent a
+token no longer costs it the `PATH` everyone else gets. See
+[tool-shell](../../packages/tool-shell/README.md).
 
 **Only a config you chose may list plugins** — `--config`, `STRATUS_CONFIG`,
 or the global `~/.stratus/config.json`. A plugin runs in the daemon's own
@@ -53,7 +59,7 @@ The soul's allowlist is the second gate, and the per-identity one:
 
 ```markdown
 ---
-id: ava
+id: blair
 tools: [fs.read, fs.search, web.fetch]
 ---
 ```
@@ -88,7 +94,7 @@ it cannot, since the allowlist only ever narrows what is registered. Both
 entries in an agent's list that select no registered tool:
 
 ```
-agent ava lists tools nothing registered provides: fs.* — check the names, or install the plugin that provides them
+agent blair lists tools nothing registered provides: fs.* — check the names, or install the plugin that provides them
 ```
 
 If *every* entry is like that, a second line says so, because the
@@ -118,14 +124,14 @@ nothing: the reader loads a skill's instructions, and the tools those
 instructions call for are still not there.
 
 **A daemon tool named in a local run is a right name in the wrong
-process.** `schedule.*`, `message.send`, `agent.delegate`, and
+process.** `schedule.*`, `message.send`, `message.read`, `agent.delegate`, and
 `credential.request` need the
 dispatcher, the store, and the channels, so only `stratus serve` registers
 them. A soul that uses them is correct; `stratus run` just cannot call it,
 and says which it is rather than sending you after a plugin:
 
 ```
-agent ava lists schedule.*, message.send, which only the daemon provides — the names are right, but stratus run cannot call them; stratus serve can
+agent blair lists schedule.*, message.send, which only the daemon provides — the names are right, but stratus run cannot call them; stratus serve can
 ```
 
 A namespace a plugin discovers into is never reported this way. An MCP
@@ -142,7 +148,7 @@ entries alone.
 | [`@stratusagent/tool-fs`](../../packages/tool-fs) | `fs.read`, `fs.list`, `fs.search` | `safe` inside the agent's roots |
 | | `fs.write` | `gated` |
 | [`@stratusagent/tool-shell`](../../packages/tool-shell) | `shell.run` | `gated`, then [judged per command](./shell.md) |
-| [`@stratusagent/tool-web`](../../packages/tool-web) | `web.fetch` | `gated` |
+| [`@stratusagent/tool-web`](../../packages/tool-web) | `web.fetch` | `gated`, then [judged per site](./approvals.md) |
 | [`@stratusagent/tool-browser`](../../packages/tool-browser) | `browser.goto`, `.read`, `.screenshot` | `gated` |
 | | `browser.act` | `gated`, then [judged per site](./browser.md) |
 | [`@stratusagent/plugin-mcp`](../../packages/plugin-mcp) | `mcp.<server>.<tool>` — any MCP server's tools, [discovered at connect](./mcp.md) | `gated`, whatever the server says; per-tool `toolRisks` overrides |
@@ -360,7 +366,7 @@ printf %s "$SEARCH_KEY" | stratus credential set search.apiKey
 
 ```markdown
 ---
-id: ava
+id: blair
 tools: [web.fetch, web.search]
 credentials: [search.apiKey]
 ---

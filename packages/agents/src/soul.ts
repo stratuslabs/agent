@@ -26,7 +26,7 @@ export interface ParsedSoul {
   agent: AgentDefinition;
   /** Provider the soul prefers (e.g. "anthropic"). Runtimes may override. */
   provider?: string;
-  /** Model the soul prefers (e.g. "claude-opus-5"). Runtimes may override. */
+  /** Model the soul prefers (e.g. "claude-opus-5-5"). Runtimes may override. */
   model?: string;
   /**
    * The language this agent writes in (`en-GB`), over the config file's

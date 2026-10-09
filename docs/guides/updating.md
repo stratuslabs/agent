@@ -138,8 +138,8 @@ place or the other and never both; a workspace an operator relocated behind
 a symlink is moved *as the link*, so their files stay where they put them.
 A link pointing at another agent's workspace is followed to where that
 workspace is going — including through an alias outside `~/.stratus`, such
-as `workspaces/ava -> /srv/stratus/shared -> workspaces/bea`, since the
-alias is not this migration's to rewrite and keeping it would leave `ava`
+as `workspaces/blair -> /srv/stratus/shared -> workspaces/bea`, since the
+alias is not this migration's to rewrite and keeping it would leave `blair`
 naming nothing. That agent's link is retargeted at the workspace itself, so
 repointing the alias afterwards no longer moves it.
 Two links that name each other (`ava -> bea`, `bea -> ava`) move together,
@@ -294,6 +294,11 @@ stratus update --check    # report all of it, change nothing (exits 1 when
                           # something is actionable, for scripts and cron)
 ```
 
+(It manages the npm install and the user service that `stratus service
+install` wrote. A Docker image or a system unit is upgraded by replacing the
+image or the packages instead — [Deployment](./deployment.md#upgrade) has
+both.)
+
 The service stop comes first so no daemon holds a session database while
 state changes, and the unit rewrite is the step nothing else performs: the
 unit runs the daemon by **absolute paths** (see
@@ -312,6 +317,18 @@ the unit rewrite, whether the migrations themselves or the step that
 establishes exclusive access to the home before them, restarts the daemon
 on the unit it was already running and reports the failure; the rewrite is
 skipped, because it must not run over state that was not migrated.
+
+When the CLI itself was upgraded, everything after the install (the
+migrations, the unit rewrite, the restart) runs in a fresh `stratus update`
+process on the new build, and the old one waits for it and exits with its
+code. The process that ran npm is still the old build, and a module it
+loads for the first time after the install is new code wired to the old
+modules it already holds, which fails on any export the old ones lack. A
+build older than the one that added this hand-off still finishes in the
+old process, so an upgrade from it can report `State migration failed: …
+does not provide an export named …`. The daemon is restarted either way.
+Run `stratus update` again: the new build is installed by then, so it
+finishes the migrations.
 
 ## The companion packages go up with it
 

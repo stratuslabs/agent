@@ -1,11 +1,16 @@
-import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { lstat, open, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
 import {
   filePathsOf,
+  isLatestTurn,
   latestTurnReply,
+  MAX_IDEMPOTENCY_KEY_LENGTH,
+  turnFailureFor,
+  turnFilesFor,
+  turnReplyFor,
   CONVERSATION_METADATA_KEY,
   SENDER_TRUST_METADATA_KEY,
   sessionWriteTrust,
@@ -26,9 +31,15 @@ import {
   type ToolResult,
 } from '@stratusagent/core';
 import {
+  admitsSender,
   channelSessionKey,
+  senderTrustFor,
+  type AdmitPolicy,
   type ChannelAdapter,
   type ChannelCredentialRequest,
+  type ConversationMessage,
+  type ConversationReadRequest,
+  type ConversationReadResult,
   type GatewayLike,
   type OutboundAddress,
   type OutboundConnection,
@@ -162,7 +173,7 @@ export interface SlackAgentConfig {
    * would be in the transcript, which is what this mode exists to keep
    * out. The label above is provenance; this is authorization.
    */
-  admit?: 'anyone' | 'principals';
+  admit?: AdmitPolicy;
   /**
    * How replies appear. `final` (the default) shows Slack's loading status
    * while the turn runs and posts the reply once, finished; `stream` posts
@@ -282,7 +293,7 @@ export interface SlackFileDownload {
 export type SlackFileFetcher = (url: string, botToken: string, signal: AbortSignal, maxBytes: number) => Promise<SlackFileDownload>;
 
 export interface SlackSocketLike {
-  on(eventName: string, listener: (args: SlackSocketEventArgs) => void): void;
+  on(eventName: string, listener: (args: SlackSocketEventArgs) => unknown): void;
   start(): Promise<unknown>;
   disconnect(): Promise<void>;
 }
@@ -301,6 +312,35 @@ export interface SlackUploadResult {
       private?: Record<string, Array<{ ts?: string }>>;
     };
   }>;
+}
+
+export interface SlackHistoryArgs {
+  channel: string;
+  oldest?: string;
+  latest?: string;
+  inclusive?: boolean;
+  limit?: number;
+  cursor?: string;
+}
+
+/** The fields of a Slack message a read returns; everything else is dropped. */
+export interface SlackHistoryMessage {
+  ts?: string;
+  user?: string;
+  bot_id?: string;
+  username?: string;
+  bot_profile?: { name?: string };
+  user_profile?: { display_name?: string; real_name?: string };
+  text?: string;
+  thread_ts?: string;
+  reply_count?: number;
+  files?: Array<{ name?: string; title?: string; id?: string }>;
+}
+
+export interface SlackHistoryPage {
+  messages?: SlackHistoryMessage[];
+  has_more?: boolean;
+  response_metadata?: { next_cursor?: string };
 }
 
 export interface SlackWebLike {
@@ -367,6 +407,15 @@ export interface SlackWebLike {
       members?: string[];
       response_metadata?: { next_cursor?: string };
     }>;
+    /**
+     * A conversation's top level, newest first, a page at a time — what
+     * `message.read` without a thread reads. Needs the history scopes the
+     * manifest already asks for. Optional so an older fake still runs; an
+     * adapter without it says the conversation cannot be read.
+     */
+    history?(args: SlackHistoryArgs): Promise<SlackHistoryPage>;
+    /** One thread, root first, a page at a time. Same scopes as `history`. */
+    replies?(args: SlackHistoryArgs & { ts: string }): Promise<SlackHistoryPage>;
   };
   users: {
     info(args: { user: string }): Promise<{ user?: { name?: string; profile?: { display_name?: string; real_name?: string } } }>;
@@ -516,6 +565,84 @@ interface ReplyOutcome {
 }
 
 /**
+ * The dispatch's idempotency key for a message's dedupe key: the key itself
+ * when it fits the gateway's bound, and a digest of it when it does not —
+ * an agent id is not length-bounded (overlong ids that predate validation
+ * are kept), and a key over the bound would refuse every message for that
+ * agent. Deterministic, so a redelivery after a restart maps to the same.
+ */
+const dispatchKeyFor = (eventKey: string): string =>
+  eventKey.length <= MAX_IDEMPOTENCY_KEY_LENGTH ? eventKey : `slack-sha256:${createHash('sha256').update(eventKey).digest('hex')}`;
+
+/**
+ * What the report of a turn nobody was rendering got into the thread, part
+ * by part: whether its text was said in full (or there was none to say),
+ * and which of its files landed. A redelivery waiting behind the report
+ * posts only what is missing from it.
+ */
+interface ReportedOutcome {
+  said: boolean;
+  landed: readonly string[];
+}
+
+const NOTHING_REPORTED: ReportedOutcome = { said: false, landed: [] };
+
+/**
+ * How far a file's change time may run past the record of the tool result
+ * naming it: the rest of the millisecond the record was stamped in, since
+ * the record is whole milliseconds and the file time is finer. No more,
+ * because any window is one an overwrite fits inside — two seconds was, in
+ * review. A filesystem that rounds file times up, coarser than that, fails
+ * closed: the file is warned about and not uploaded, which a repeat can
+ * afford and a wrong attachment cannot.
+ */
+const PRODUCED_AT_SLACK_MS = 1;
+
+/**
+ * A file a finished turn produced, read for a repeat of it — refused unless
+ * it is provably the file the turn left there. The transcript keeps a path,
+ * not the bytes, and a repeat can come after a later turn or another
+ * process has written the same path; uploading what is there now would
+ * answer the old message with a different file, or a sensitive one.
+ *
+ * The change time, not the modification time, is what is compared: it
+ * moves on every write, on a rename into the path, and on `utimes` itself,
+ * so neither an older file renamed in nor a backdated one passes. Then the
+ * path has to name the same file before and after it is opened — the open
+ * handle's file, when it is not a link — and the handle has to be unchanged
+ * after the read, so a swap or a write landing between the checks and the
+ * read is caught rather than uploaded.
+ */
+const readUnchangedSince = async (filePath: string, producedAt: number): Promise<Buffer> => {
+  // Exclusive: a change time at or past it was a change after the record.
+  const writtenBefore = producedAt + PRODUCED_AT_SLACK_MS;
+  const changed = (): Error =>
+    new Error('it was changed after the turn that produced it, so it may hold another file now; it was not uploaded.');
+  const named = await lstat(filePath);
+  if (named.ctimeMs >= writtenBefore) {
+    throw changed();
+  }
+  const handle = await open(filePath, 'r');
+  try {
+    const opened = await handle.stat();
+    const stillNamed = await lstat(filePath);
+    const samePath = stillNamed.ino === named.ino && stillNamed.dev === named.dev && stillNamed.ctimeMs === named.ctimeMs;
+    const sameFile = named.isSymbolicLink() || (opened.ino === named.ino && opened.dev === named.dev);
+    if (!samePath || !sameFile || opened.ctimeMs >= writtenBefore) {
+      throw changed();
+    }
+    const data = await handle.readFile();
+    const after = await handle.stat();
+    if (after.ctimeMs !== opened.ctimeMs || after.size !== data.length) {
+      throw changed();
+    }
+    return data;
+  } finally {
+    await handle.close();
+  }
+};
+
+/**
  * A clock reading as a Slack timestamp, for a file whose upload answered
  * with no share ts. Slack timestamps are epoch seconds with six decimals,
  * so the clock's reading compares with them as long as the two agree to
@@ -581,6 +708,15 @@ class ReplyRenderer {
    * writes into the fresh one rather than over the reply it was given to.
    */
   private handover: Promise<void> = Promise.resolve();
+  /**
+   * The report of a turn nobody was rendering, made ahead of this renderer
+   * while it waited — through its placeholder or as messages of their own
+   * — resolving to what of that outcome reached the thread. Set when the
+   * report is claimed, before the turn it reports lets this renderer's
+   * dispatch go, so a repeat resolving after it can tell its own turn was
+   * that one, and post only what the report did not.
+   */
+  outcomeReportedAhead: Promise<ReportedOutcome> | undefined;
   /**
    * Bumped by a handover. An edit scheduled before it carries the text of
    * the turn that was handed over — the recovery's stream, routed to this
@@ -894,11 +1030,22 @@ class ReplyRenderer {
     }
   }
 
+  /**
+   * Upload files a turn produced that no event delivered: a repeat of a
+   * finished turn has only the session to read them from (`turnFilesFor`),
+   * and a path written since then is refused (see `readUnchangedSince`).
+   */
+  queueFiles(files: ReadonlyArray<{ path: string; producedAt: string }>): void {
+    for (const file of files) {
+      this.queueUpload(file.path, Date.parse(file.producedAt));
+    }
+  }
+
   // Tool results that reference local output files (a screenshot, a
   // generated report) become real attachments in the conversation — the
   // channel contract's upload operation. Uploads chain so they land in
   // order and finalize() waits for them.
-  private queueUpload(filePath: string): void {
+  private queueUpload(filePath: string, producedAt?: number): void {
     // Behind a handover in progress, for the same reason edits and the
     // finalize are: the turn being handed the placeholder has its own
     // attachments to put in the thread first, and an upload is a message
@@ -916,7 +1063,7 @@ class ReplyRenderer {
       // not a path, and a missing file surfaces as this upload's own
       // failure instead of an unhandled stream error.
       .then(async () => {
-        const data = await readFile(filePath);
+        const data = producedAt === undefined ? await readFile(filePath) : await readUnchangedSince(filePath, producedAt);
         // Where the file will sit is Slack's to say — the ts of the
         // message it becomes, in the shares the upload answers with. When
         // the answer carries none, the clock stands in, read BEFORE the
@@ -1116,9 +1263,12 @@ class ReplyRenderer {
         this.placeText(this.ref?.ts);
       }
     }
-    // A reply posted clears the status itself; one Slack refused would
-    // leave "is thinking…" standing over a turn that has ended.
-    if (hadStatus && !landed) {
+    // A reply posted into the status's thread clears the status itself;
+    // one Slack refused would leave "is thinking…" standing over a turn
+    // that has ended. So would one posted anywhere else: a top-level DM
+    // reply keys its status to the message it answers (`statusThread`),
+    // but posts beside it rather than under it, and Slack never clears it.
+    if (hadStatus && (!landed || this.threadTs !== this.statusThread)) {
       this.setStatus('');
       // Awaited: the turn queued behind this one re-shows its own status
       // once this renderer is done, and a clear that reached Slack after
@@ -1170,6 +1320,44 @@ class ReplyRenderer {
     this.edited = false;
     this.textAt = undefined;
     return true;
+  }
+
+  /**
+   * Stand down without saying anything: the message this renderer was
+   * opened for repeated one whose turn another delivery in this process
+   * is still waiting on, and that delivery posts the answer. Whatever this
+   * renderer put up — a placeholder, a loading status — comes down, so a
+   * redelivery leaves no trace.
+   */
+  async withdraw(): Promise<void> {
+    try {
+      await this.handover;
+      const hadStatus = this.statusTimer !== undefined;
+      this.stopLoading();
+      this.finalized = true;
+      // The barrier `finalizeInOrder` takes, for the same reason: the turn
+      // queued behind this one waits on `posted`, and settling it before
+      // the reply ahead has posted would let that turn's reply overtake it.
+      if (!this.streaming) {
+        await this.after;
+        await this.statusChain;
+      }
+      if (this.pendingEdit) {
+        clearTimeout(this.pendingEdit);
+        this.pendingEdit = undefined;
+      }
+      await this.editChain;
+      // A repeat can queue files the report ahead of it could not post
+      // and then stand down: they land before it settles.
+      await this.uploadChain;
+      await this.retract();
+      if (hadStatus) {
+        this.setStatus('');
+        await this.statusChain;
+      }
+    } finally {
+      this.settle();
+    }
   }
 
   async fail(message: string): Promise<ReplyOutcome> {
@@ -1411,10 +1599,6 @@ const messageText = (text: string): string => truncateForSlack(toSlackMrkdwn(tex
  * no rewrite is ever asked to span a boundary.
  */
 const messageChunks = (text: string): string[] => splitForSlack(toSlackMrkdwn(text));
-
-// One rule with the gateway's `sessionRouting`, which posts the same
-// message for a turn this adapter did not start.
-const lastAssistantReply = (session: Session): string => latestTurnReply(session) ?? NO_REPLY_TEXT;
 
 const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
   stratus_approve_once: 'once',
@@ -2118,6 +2302,13 @@ interface Admission {
   thread?: string;
   /** Absent for a DM, which has one agent by construction. */
   threadKey?: string;
+  /**
+   * The key the message is known by whichever delivery carried it — the
+   * dedupe key, and the dispatch's idempotency key, so a redelivery the
+   * in-memory dedupe has forgotten (a restart, an eviction) still starts
+   * no second turn.
+   */
+  eventKey: string;
   settled: boolean;
   /**
    * In the thread, if at all, as a listener: the message is somebody
@@ -2167,6 +2358,9 @@ interface AgentConnection {
  * those were in it receives only `app_mention` and behaves as it always
  * did, which makes the workspace's own grant the switch.
  */
+/** Uncached author names one `message.read` looks up; the rest keep their id. */
+const READ_NAME_LOOKUPS = 10;
+
 export const createSlackChannelAdapter = (options: SlackAdapterOptions): ChannelAdapter => {
   const log = options.log ?? (() => {});
   const warn = options.warn ?? (() => {});
@@ -2437,6 +2631,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         kind,
         ...(kind !== 'direct' && typeof info.num_members === 'number' ? { members: info.num_members } : {}),
         ...(kind !== 'direct' && (info.is_ext_shared === true || info.is_org_shared === true) ? { shared: true } : {}),
+        ...(kind !== 'direct' && typeof info.id === 'string' ? { id: info.id } : {}),
       };
     } catch {
       return undefined;
@@ -2467,25 +2662,82 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return result.trim();
   };
 
+  /**
+   * Slack's stored `mrkdwn` as the plain text a read promises
+   * (`ConversationMessage.text`): `<@U…>` mentions, `<#C…|name>` channels,
+   * `<!here>`-style broadcasts, `<!date^…|fallback>` dates, and
+   * `<url|label>` links, then the `&lt; &gt; &amp;` escapes, decoded last
+   * so text someone typed is never read as markup. A mention is named only
+   * for a principal or the agent's own app, for the reason
+   * `humanizeMentions` gives; anyone else stays their stable id.
+   */
+  const nameableMentions = (connection: AgentConnection, text: string): string[] => {
+    const principals = new Set(connection.config.principals ?? []);
+    const ids = new Set<string>();
+    for (const match of text.matchAll(/<@([^|<>]+)(?:\|[^<>]*)?>/g)) {
+      const id = match[1]!;
+      if (principals.has(id) || id === connection.botUserId) {
+        ids.add(id);
+      }
+    }
+    return [...ids];
+  };
+
+  /**
+   * `resolved` is the only source of names: the caller has already looked
+   * them up under its own bound (`readConversation`), and a mention it did
+   * not resolve stays an id rather than costing a lookup here.
+   */
+  const plainSlackText = (
+    connection: AgentConnection,
+    text: string,
+    resolved: ReadonlyMap<string, string>,
+  ): string => {
+    const names = new Map<string, string>();
+    for (const id of nameableMentions(connection, text)) {
+      const name = resolved.get(id);
+      if (name !== undefined) {
+        names.set(id, boundedDisplayName(name));
+      }
+    }
+    return text
+      .replace(/<([^<>]*)>/g, (_whole, inner: string) => {
+        const bar = inner.indexOf('|');
+        const target = bar === -1 ? inner : inner.slice(0, bar);
+        const label = bar === -1 ? undefined : inner.slice(bar + 1);
+        if (target.startsWith('@')) {
+          const id = target.slice(1);
+          return `@${names.get(id) ?? id}`;
+        }
+        if (target.startsWith('#')) {
+          return `#${label || target.slice(1)}`;
+        }
+        if (target.startsWith('!')) {
+          const command = target.slice(1);
+          if (command.startsWith('subteam^')) {
+            return label || `@${command.slice('subteam^'.length)}`;
+          }
+          if (command.startsWith('date^')) {
+            return label ?? command;
+          }
+          return `@${command}`;
+        }
+        if (label && label !== target) {
+          return `${label} (${target})`;
+        }
+        return target;
+      })
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&amp;', '&');
+  };
+
   const connectionFor = (agentId: string): AgentConnection | undefined =>
     connections.find((candidate) => candidate.config.agentId === agentId);
 
   /** An agent's configuration, whether or not its socket came up. */
   const agentConfigFor = (agentId: string): SlackAgentConfig | undefined =>
     options.agents.find((candidate) => candidate.agentId === agentId);
-
-  /**
-   * Whether an agent takes a message from this sender at all — judged on
-   * its configuration, not on a live connection: an agent whose socket
-   * failed to start is still recognizable in a mention, and its door is
-   * still its own. An agent this adapter was never configured for is
-   * nobody's to refuse here, so it admits — the answer from before the
-   * door existed.
-   */
-  const admitsSender = (config: SlackAgentConfig | undefined, userId: string): boolean =>
-    config === undefined
-    || config.admit !== 'principals'
-    || (config.principals ?? []).includes(userId);
 
   /**
    * How an agent listens, from its soul — read per message, so a roster
@@ -2769,6 +3021,131 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         });
       },
     };
+  };
+
+  /**
+   * The read side of the same boundary `resolveOutbound` draws: a channel
+   * the agent's own app is a member of, public or private. DMs and group
+   * DMs are refused outright, member or not. Their only members are the
+   * people in them, and a read from a conversation elsewhere — a public
+   * thread above all — would carry what they said to people who were never
+   * in the room. A thread in a channel is fine for the same reason the
+   * channel is.
+   */
+  const readConversation = async (request: ConversationReadRequest): Promise<ConversationReadResult> => {
+    const channel = request.conversation.trim();
+    if (!channel) {
+      throw new Error('slack: a read needs a channel id (C…/G…).');
+    }
+    const connection = connectionFor(request.agentId);
+    if (!connection) {
+      throw new Error(configuredAgents.has(request.agentId)
+        ? `slack: ${request.agentId}'s Slack app is not connected right now, so ${channel} cannot be read.`
+        : `slack: agent ${request.agentId} has no Slack app, so it cannot read Slack at all.`);
+    }
+    let info: { id?: string; is_member?: boolean; is_im?: boolean; is_mpim?: boolean } | undefined;
+    try {
+      info = (await connection.web.conversations.info({ channel })).channel;
+    } catch (error) {
+      throw new Error(
+        `slack: ${request.agentId}'s app cannot see ${channel} (${error instanceof Error ? error.message : String(error)}). `
+        + 'Use the channel id, not a name.',
+      );
+    }
+    if (!info?.id) {
+      throw new Error(`slack: ${request.agentId}'s app cannot see a conversation ${channel}.`);
+    }
+    if (info.is_im === true || info.is_mpim === true) {
+      throw new Error(`slack: ${channel} is a direct message, and direct messages are never read from outside them.`);
+    }
+    if (info.is_member !== true) {
+      throw new Error(`slack: ${request.agentId}'s app is not a member of ${channel} — invite it there before it can read.`);
+    }
+    const { history, replies } = connection.web.conversations;
+    const fetchPage = request.thread !== undefined
+      ? (replies ? (args: SlackHistoryArgs) => replies({ ...args, ts: request.thread as string }) : undefined)
+      : history;
+    if (!fetchPage) {
+      throw new Error(`slack: this Slack client cannot read ${request.thread !== undefined ? 'threads' : 'channel history'}.`);
+    }
+    const base: SlackHistoryArgs = {
+      channel: info.id,
+      inclusive: false,
+      ...(request.after !== undefined ? { oldest: request.after } : {}),
+      ...(request.before !== undefined ? { latest: request.before } : {}),
+    };
+    const raw: SlackHistoryMessage[] = [];
+    let cursor: string | undefined;
+    let more = false;
+    do {
+      const page = await fetchPage({ ...base, limit: Math.min(200, request.limit - raw.length), ...(cursor ? { cursor } : {}) });
+      raw.push(...(page.messages ?? []));
+      cursor = page.response_metadata?.next_cursor || undefined;
+      more = cursor !== undefined || page.has_more === true;
+    } while (cursor && raw.length < request.limit);
+    if (raw.length > request.limit) {
+      raw.length = request.limit;
+      more = true;
+    }
+    // History rarely embeds profiles, so names mostly come from users.info.
+    // Cached names are free; at most READ_NAME_LOOKUPS uncached people —
+    // authors and the mentions in their text together — are looked up per
+    // read, at once, and the rest keep their id, so a read of many strangers
+    // never waits through a rate limit one call at a time.
+    const lookups = new Map<string, Promise<string>>();
+    let fresh = 0;
+    const want = (user: string): void => {
+      if (lookups.has(user)) {
+        return;
+      }
+      const cached = displayNames.get(`${connection.teamId}:${user}`);
+      if (cached) {
+        lookups.set(user, Promise.resolve(cached));
+      } else if (fresh < READ_NAME_LOOKUPS) {
+        fresh += 1;
+        lookups.set(user, displayNameFor(connection, user));
+      }
+    };
+    for (const message of raw) {
+      const user = message.user;
+      if (user && !message.user_profile?.display_name && !message.user_profile?.real_name) {
+        want(user);
+      }
+    }
+    for (const message of raw) {
+      for (const id of nameableMentions(connection, message.text ?? '')) {
+        want(id);
+      }
+    }
+    const names = new Map<string, string>();
+    for (const [user, name] of lookups) {
+      names.set(user, await name);
+    }
+    const messages: ConversationMessage[] = [];
+    for (const message of raw) {
+      if (!message.ts) {
+        continue;
+      }
+      const author = message.user ?? message.bot_id ?? 'unknown';
+      const name = message.user_profile?.display_name
+        || message.user_profile?.real_name
+        || message.bot_profile?.name
+        || message.username
+        || (message.user ? names.get(message.user) : undefined);
+      const at = Number.parseFloat(message.ts);
+      const files = (message.files ?? []).map((file) => file.name ?? file.title ?? file.id ?? 'file');
+      messages.push({
+        id: message.ts,
+        author,
+        text: plainSlackText(connection, message.text ?? '', names),
+        ...(name && name !== author ? { authorName: boundedDisplayName(name) } : {}),
+        ...(Number.isFinite(at) ? { at: new Date(at * 1000).toISOString() } : {}),
+        ...(message.thread_ts && message.thread_ts !== message.ts ? { thread: message.thread_ts } : {}),
+        ...(message.reply_count ? { replies: message.reply_count } : {}),
+        ...(files.length > 0 ? { files } : {}),
+      });
+    }
+    return { messages, more };
   };
 
   /**
@@ -3091,7 +3468,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     channel: string,
     thread: string | undefined,
     paths: readonly string[],
-  ): Promise<void> => {
+  ): Promise<string[]> => {
+    // Which files landed: a redelivery waiting behind this report posts
+    // the rest (`outcomeReportedAhead`), since a file that did not land is
+    // one only it can still post — and only the rest, or it would post
+    // twice the ones that did.
+    const landed: string[] = [];
     for (const filePath of paths) {
       try {
         const data = await readFile(filePath);
@@ -3101,20 +3483,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           filename: path.basename(filePath),
           ...(thread ? { thread_ts: thread } : {}),
         });
+        landed.push(filePath);
       } catch (error) {
         warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    return landed;
   };
 
   const reportUnrenderedFailure = async (
     event: Extract<StratusEvent, { type: 'session.failed' }>,
     behind: HandoverClaim | undefined,
     files: readonly string[],
-  ): Promise<void> => {
+  ): Promise<ReportedOutcome> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
-      return;
+      return NOTHING_REPORTED;
     }
     let routing;
     try {
@@ -3124,17 +3508,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // the turn is already failed — there is nothing here to salvage
       // beyond saying why the thread stayed quiet.
       warn(`slack: could not read the routing for a failed turn: ${error instanceof Error ? error.message : String(error)}`);
-      return;
+      return NOTHING_REPORTED;
     }
     const metadata = routing?.metadata;
     // Another surface's session, or one with no conversation to speak
     // into. Not this adapter's to answer either way.
     if (!routing || metadata?.channel !== 'slack' || typeof metadata.slackChannel !== 'string') {
-      return;
+      return NOTHING_REPORTED;
     }
     const connection = connectionFor(routing.agentId);
     if (!connection) {
-      return;
+      return NOTHING_REPORTED;
     }
     const channel = metadata.slackChannel;
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
@@ -3155,17 +3539,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // interruption it existed to avoid; a line left standing happens
       // only to a turn that had already chosen to speak.
       warn(`slack: a turn nobody asked for failed before saying anything: ${event.error}`);
-      await uploadUnrenderedFiles(connection, channel, thread, files);
-      return;
+      return { said: true, landed: await uploadUnrenderedFiles(connection, channel, thread, files) };
     }
-    await postAheadOf(
+    let landed: string[] = [];
+    const said = await postAheadOf(
       behind,
       connection,
       channel,
       thread,
       messageChunks(`Something went wrong: ${event.error}`),
-      () => uploadUnrenderedFiles(connection, channel, thread, files),
+      async () => {
+        landed = await uploadUnrenderedFiles(connection, channel, thread, files);
+      },
     );
+    return { said, landed };
   };
 
   /**
@@ -3181,25 +3568,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     event: Extract<StratusEvent, { type: 'session.completed' }>,
     behind: HandoverClaim | undefined,
     files: readonly string[],
-  ): Promise<void> => {
+  ): Promise<ReportedOutcome> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
-      return;
+      return NOTHING_REPORTED;
     }
     let routing;
     try {
       routing = await gateway.sessionRouting(event.sessionId);
     } catch (error) {
       warn(`slack: could not read the routing for a finished turn: ${error instanceof Error ? error.message : String(error)}`);
-      return;
+      return NOTHING_REPORTED;
     }
     const metadata = routing?.metadata;
     if (!routing || metadata?.channel !== 'slack' || typeof metadata.slackChannel !== 'string') {
-      return;
+      return NOTHING_REPORTED;
     }
     const connection = connectionFor(routing.agentId);
     if (!connection) {
-      return;
+      return NOTHING_REPORTED;
     }
     const channel = metadata.slackChannel;
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
@@ -3212,10 +3599,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // order to keep and nothing to say, so the files go on their own.
     const chunks = routing.reply ? messageChunks(routing.reply) : [];
     const posting = chunks.length > 0 ? chunks : (behind && files.length > 0 ? [NO_REPLY_TEXT] : []);
-    const uploads = (): Promise<void> => uploadUnrenderedFiles(connection, channel, thread, files);
+    let landed: string[] = [];
+    const uploads = async (): Promise<void> => {
+      landed = await uploadUnrenderedFiles(connection, channel, thread, files);
+    };
     if (posting.length === 0) {
       await uploads();
-      return;
+      // Nothing was said. A turn nobody asked for chose that; an addressed
+      // one is owed `(no reply)`, which a rendered turn would have posted,
+      // so a redelivery waiting behind this report is left to post it.
+      return { said: routing.unaddressed === true, landed };
     }
     // A reply the thread's other agents hear like any other, taking their
     // place for it before the post, as `handleInbound` does.
@@ -3223,9 +3616,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const heard = routing.reply !== undefined && thread !== undefined
       ? overhearReply(connection, channel, thread, routing.reply, routing, published)
       : undefined;
-    await published;
+    const delivered = await published;
     await heard;
     log(`slack: posted the reply of a turn finished after a restart to ${channel}`);
+    return { said: delivered, landed };
   };
 
   /**
@@ -3752,10 +4146,40 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const resolveFollowUpWinner = async (
     parts: { team: string; conversation: string; thread: string },
+    ts: string,
   ): Promise<string | undefined> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting || !parts.thread) {
       return undefined;
+    }
+    // A message an agent already accepted is that agent's, whoever has spoken
+    // since. Nothing in memory says so after a restart, and the order below
+    // would hand a redelivery to the newer speaker — whose session holds no
+    // key for it, so it would run the message as new. Asked of every
+    // configured agent, whatever it listens to now and whether or not it is
+    // connected, unlike the order below: what counts is that it took the
+    // message as addressed to it (a judging agent's turn nobody asked for
+    // does not), an operator may have changed how it listens since, and an
+    // owner whose app failed to come back after the restart still started
+    // that turn — the live agents stand down for it rather than run it again.
+    // Its workspace is the one it last authenticated in, when known.
+    if (gateway.holdsMessage) {
+      for (const agentId of configuredAgents) {
+        const teamId = botIdentities.get(agentId)?.teamId;
+        if (teamId !== undefined && teamId !== parts.team) {
+          continue;
+        }
+        const sessionId = channelSessionKey({
+          channel: 'slack',
+          agentId,
+          team: parts.team,
+          conversation: parts.conversation,
+          thread: parts.thread,
+        });
+        if (await gateway.holdsMessage(sessionId, dispatchKeyFor(`${agentId}:${parts.conversation}:${ts}`))) {
+          return agentId;
+        }
+      }
     }
     const engaged: Array<{ agentId: string; lastSpokeAt?: string }> = [];
     // Live connections in this message's OWN workspace. Live, because an
@@ -3838,7 +4262,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (existing) {
       return existing.verdict;
     }
-    const entry = { verdict: resolveFollowUpWinner(parts), settled: false };
+    const entry = { verdict: resolveFollowUpWinner(parts, ts), settled: false };
     coldVerdicts.set(key, entry);
     void entry.verdict.then(
       () => {
@@ -3934,6 +4358,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // answer it and hold the thread. One naming only agents that refuse
     // the sender is still theirs and not this agent's to answer — so the
     // refusing agent stays `named`, and only the handover is withheld.
+    // Judged on configuration, not on a live connection: an agent whose
+    // socket failed to start is still recognizable in a mention, and its
+    // door is still its own. One this adapter was never configured for has
+    // no policy, and nobody's to refuse here, so it admits.
     const handoverTo = agentNamedIn(text, team, (agentId) => admitsSender(agentConfigFor(agentId), sender));
     const named = handoverTo ?? agentNamedIn(text, team);
     // The key one Slack MESSAGE is known by, whichever delivery carried
@@ -4028,6 +4456,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       event,
       isDm,
       team,
+      eventKey,
       userId: event.user,
       sessionId: channelSessionKey({
         channel: 'slack',
@@ -4132,7 +4561,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (!gateway) {
       return;
     }
-    const { event, isDm, team, userId, thread, sessionId, threadKey } = admitted;
+    const { event, isDm, team, userId, thread, sessionId, threadKey, eventKey } = admitted;
+    // What the gateway knows this message by (see `dispatchKeyFor`).
+    const dispatchKey = dispatchKeyFor(eventKey);
 
     // Everything up to (and including) the dispatch call is serialized per
     // session in Slack receipt order: the user lookups and placeholder
@@ -4238,7 +4669,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // `unknown` exactly as a channel mention would be. The same label
       // whether the agent answers or only hears: the text is in its
       // transcript either way.
-      const senderTrust = (connection.config.principals ?? []).includes(userId) ? 'user' : 'unknown';
+      const senderTrust = senderTrustFor(connection.config, userId);
       // Who can read this, so the agent writes for them, and a thread says
       // it is one. A DM names the other person only when they are one of
       // the operator's principals: this lands in the system prompt, and
@@ -4334,6 +4765,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // stopped until the reply ahead of it posted. In a channel thread the
       // key is shared, and the running turn's status stays up instead.
       renderer.showLoading(queue.length === 1 || queue[0]?.statusThread !== renderer.statusThread);
+      let repeat: 'live' | 'finished' | undefined;
       const turn = gateway.dispatch({
         sessionId,
         agentId: connection.config.agentId,
@@ -4342,8 +4774,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ...(judged ? { addressed: false } : {}),
         turnId: renderer.turnId,
         metadata,
+        // A redelivery this process no longer remembers (it restarted, or
+        // the dedupe evicted it) is still the message it was: the gateway
+        // runs no second turn for it, and says so through `onRepeat`.
+        idempotencyKey: dispatchKey,
+        onRepeat: (kind) => {
+          repeat = kind;
+        },
       });
-      return { renderer, turn };
+      return { renderer, turn, repeat: () => repeat };
     });
 
     const started = await intake;
@@ -4361,7 +4800,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
       return;
     }
-    const { renderer, turn } = started;
+    const { renderer, turn, repeat } = started;
 
     const removeFromQueue = (): void => {
       const current = renderers.get(sessionId);
@@ -4388,15 +4827,75 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // the potentially slow final edit, uploads, and overflow posts.
     removeFromQueue();
 
+    // The turn is a live earlier delivery's, and that delivery's renderer
+    // posts its answer, or its failure: this one takes down whatever it put
+    // up and says nothing.
+    if (repeat() === 'live') {
+      await renderer.withdraw();
+      renderers.get(sessionId)?.[0]?.refreshLoading();
+      return;
+    }
+    // A finished one's outcome is posted here, because nothing says the
+    // delivery that ran it lived to post it, and no event will carry its
+    // files: they are read from the session, like its reply below.
+    //
+    // Less what the start-up sweep already said, when it finished this
+    // message's turn while the redelivery waited behind it: that outcome
+    // was reported ahead of this renderer as a turn nobody was rendering,
+    // and posting it again would say it twice. It was this message's turn
+    // if it is the session's latest — anything finished after it would be
+    // the latest instead — and the report says, part by part, what reached
+    // the thread: the files it landed are not posted again, and the text
+    // only if it was not said in full.
+    const finished = repeat() === 'finished';
+    const reportedAhead = session && finished && renderer.outcomeReportedAhead !== undefined && isLatestTurn(session, dispatchKey)
+      ? await renderer.outcomeReportedAhead
+      : undefined;
+    if (session && finished) {
+      // Counted, not a set: a turn can produce one path twice, and each
+      // result is an upload of its own, so one landing does not cover both.
+      const landed = new Map<string, number>();
+      for (const filePath of reportedAhead?.landed ?? []) {
+        landed.set(filePath, (landed.get(filePath) ?? 0) + 1);
+      }
+      renderer.queueFiles(turnFilesFor(session, dispatchKey).filter((file) => {
+        const left = landed.get(file.path) ?? 0;
+        if (left > 0) {
+          landed.set(file.path, left - 1);
+          return false;
+        }
+        return true;
+      }));
+    }
+    if (reportedAhead?.said === true) {
+      await renderer.withdraw();
+      renderers.get(sessionId)?.[0]?.refreshLoading();
+      return;
+    }
+
+    // A dispatch whose turn fails rejects, but one that repeats a turn that
+    // already failed — or continues a crashed one the gateway could only
+    // fail — resolves with the failed session. Its failure is posted as the
+    // original delivery's would have been, not as a reply that says nothing.
+    const failedWith = session ? turnFailureFor(session, dispatchKey) : undefined;
+    if (failedWith !== undefined) {
+      failure = new Error(failedWith);
+      session = undefined;
+    }
+
     if (session) {
       // The reply is final here, so this is when the thread's other agents
       // take their place for it — before the final edit and the overflow
       // posts, which are network I/O a later message must not overtake.
       // A DM has no thread, and nobody else in it.
-      const reply = latestTurnReply(session);
+      // A finished repeat's session may have moved on since; its own turn
+      // is found by the key.
+      const reply = finished ? turnReplyFor(session, dispatchKey) : latestTurnReply(session);
       // A turn nobody asked for that said nothing posts nothing; every
-      // other turn says `(no reply)` where its answer would have gone.
-      const finalized = renderer.finalize(renderer.lazy ? reply ?? '' : lastAssistantReply(session));
+      // other turn says `(no reply)` where its answer would have gone — one
+      // rule with the gateway's `sessionRouting`, which posts the same
+      // message for a turn this adapter did not start.
+      const finalized = renderer.finalize(renderer.lazy ? reply ?? '' : reply ?? NO_REPLY_TEXT);
       const heard = thread !== undefined && reply !== undefined
         ? overhearReply(connection, event.channel, thread, reply, session, finalized.then((outcome) => outcome.published))
         : undefined;
@@ -4433,6 +4932,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   return {
     name: 'slack',
     resolveOutbound,
+    readConversation,
     requestCredential,
 
     async start(gateway) {
@@ -4523,7 +5023,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // connection — never leaves the queued reply stalled behind it.
         if (event.type === 'session.failed' && !rendered) {
           const claim = head?.reserveHandover();
-          track(reportUnrenderedFailure(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => {
+          const report = reportUnrenderedFailure(event, claim, takeUnrenderedFiles(event.sessionId));
+          if (head) {
+            head.outcomeReportedAhead = report.catch(() => NOTHING_REPORTED);
+          }
+          track(report.then(() => {}).finally(() => {
             claim?.release();
             head?.refreshLoading();
           }));
@@ -4531,7 +5035,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         }
         if (event.type === 'session.completed' && !rendered) {
           const claim = head?.reserveHandover();
-          track(reportUnrenderedReply(event, claim, takeUnrenderedFiles(event.sessionId)).finally(() => {
+          const report = reportUnrenderedReply(event, claim, takeUnrenderedFiles(event.sessionId));
+          if (head) {
+            head.outcomeReportedAhead = report.catch(() => NOTHING_REPORTED);
+          }
+          track(report.then(() => {}).finally(() => {
             claim?.release();
             head?.refreshLoading();
           }));
@@ -4581,19 +5089,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       for (const connection of authenticated) {
         const { config, socket } = connection;
         try {
-          const onEvent = (args: SlackSocketEventArgs): void => {
+          // Returns the work it started: the SDK ignores it, and a test's fake
+          // socket waits on it rather than guessing how long it takes.
+          const onEvent = (args: SlackSocketEventArgs): Promise<void> => {
             const handled = handleInbound(connection, args).catch((error) => {
               warn(`slack event handling failed: ${error instanceof Error ? error.message : String(error)}`);
             });
             inflight.add(handled);
             void handled.finally(() => inflight.delete(handled));
+            return handled;
           };
           socket.on('app_mention', onEvent);
           socket.on('message', onEvent);
-          socket.on('interactive', (args: SlackSocketEventArgs) => {
-            track(handleInteractive(connection, args).catch((error) => {
+          socket.on('interactive', (args: SlackSocketEventArgs): Promise<void> => {
+            const handled = handleInteractive(connection, args).catch((error) => {
               warn(`slack interaction handling failed: ${error instanceof Error ? error.message : String(error)}`);
-            }));
+            });
+            track(handled);
+            return handled;
           });
           await socket.start();
           connections.push(connection);

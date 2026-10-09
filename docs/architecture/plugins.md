@@ -89,6 +89,10 @@ go** below. A host that omits it leaves a plugin falling back to a
 `workspaceRoot` an operator configured, and with neither, failing the call
 naming what is missing.
 
+And a `stateDirectory` slot: where this plugin keeps what it remembers
+across restarts — see **Where a plugin keeps its own state** below. A host
+that omits it leaves the plugin with nowhere durable to keep anything.
+
 A tool also says **where its output comes from**, and that is part of the
 contract rather than a courtesy: a result written by a party the operator
 has not authorized — a web page, a search snippet, an MCP server's response,
@@ -185,6 +189,34 @@ output by writing it down is supported. Use `workspaceResolver` from
 precedence, and a host that supplies neither gets `undefined` back, which a
 plugin reports as a call it cannot make rather than picking a directory of
 its own.
+
+**Where a plugin keeps its own state is asked too.** `setup` receives
+`context.stateDirectory`, whose `prepare()` answers with
+`~/.stratus/plugins/<package>/` — a scoped package nested under its scope,
+`plugins/@stratusagent/channel-imessage/` — created `0700` at every level
+below the home, and refused if any of them is a link. It exists for the
+same reason `workspaces` does: the first plugin with something to remember
+across a restart, a channel's read position in a store it does not own,
+would otherwise have joined its own path onto `~/.stratus`. It is per
+plugin, never per agent, and the plugin makes what it needs beneath it.
+The loader binds it to the package name in the plugin's manifest, so no
+plugin is handed another's; a name that is not an npm package name has no
+directory at all. A plugin whose host gave it none says what it gives up —
+a channel that cannot store its read position cannot promise a message is
+handled once — and never picks a directory of its own.
+
+**What no plugin may hand an agent is asked too.** `setup` receives
+`context.protectedPaths`: `all()` answers with the daemon's whole home and
+the secret files in it, plus a trusted config chosen with `--config` or
+`STRATUS_CONFIG` wherever it is, and `exempt()` answers with the agents'
+workspaces. A plugin that reads or writes files for an agent checks every
+path with `protectedPathGuard` from `@stratusagent/plugins`, which matches
+both spellings of each path and a protected file by inode, so a hard link
+does not get around it. It is asked per call, like the workspaces. Roots
+are the operator's choice of where an agent works, and a broad one such as
+`~` should not also open the credential store, another agent's sessions,
+or the agent's own soul. A host that omits it protects nothing beyond each
+plugin's own configuration. `tool-fs` is the first consumer.
 
 **`ledgerRoot` is the host's key and is stripped**, the way `toolRisks` is,
 so a plugin's code never sees it. Two plugins write the filesystem
@@ -331,8 +363,8 @@ from being a wildcard:
 
 The cost is real and belongs in the open: a namespace tells an operator
 strictly less than a list. They learn *where* a plugin may register and under
-what risk, not *what*. That is why [12](../roadmap/12-plugin-registry.md) has
-`stratus plugin install` render such a declaration as what it is — "registers
+what risk, not *what*. That is why a future
+`stratus plugin install` should render such a declaration as what it is — "registers
 tools under `mcp.*`, discovered at runtime, all `gated`" — rather than showing
 an empty tool list and implying the plugin contributes nothing.
 
@@ -423,6 +455,70 @@ while the daemon runs is there at the next start. Read what this does and
 does not buy, the same way the credential resolver's section does: it is
 the honest path, not an isolation boundary.
 
+**A channel may be bound by trusted config, not only by stored secrets.**
+`ChannelContribution.agents` is the plugin's to compute, and the secrets
+are one input to it, not the definition. A channel that needs no secret —
+iMessage through Messages.app on the daemon's own Mac — has nothing to
+store, and carries the agents its own config block lists under `agents`
+(plus any with secrets, for a delivery that does need them). That block is
+part of `plugins`, which is read only from a trusted config, so a cloned
+repository can no more bind an agent to a channel than it can load the
+plugin. `stratus setup` shows either kind of binding, and `stratus channel
+set` stores the secrets kind.
+
+**A channel plugin's approvers live in its own config block.** The trusted
+`approvals` block's `slackApprovers` and `slackChannel` are Slack's ids and
+stay Slack's. A channel plugin takes its approver list in its own block —
+fleet-wide and per agent under `agents`, in the channel's own id space —
+and decides who may answer itself, as `GatewayLike.resolveApproval` already
+requires of every adapter. That needs no contract change and inherits the
+trusted-only rule above. Generalizing `approvals` to
+`approvals.channels.<kind>` was the alternative; it waits for a reason one
+block has to see across channels.
+
+**What the contract gives an adapter beyond Slack's shape.** Slack edits a
+placeholder, renders buttons, and is reachable only from a workspace; a
+text-message channel does none of that, so the contract states each as a
+capability rather than an assumption:
+
+- `OutboundConnection.edit` and `upload` are optional. `post` is the whole
+  of what the gateway's `message.send` and schedule delivery use; a channel
+  without `edit` posts the finished reply instead of streaming it in place.
+- `ChannelAdapter.readConversation` is optional too: it is what
+  `message.read` reads through, and a channel without it cannot be read.
+  An adapter that has it decides which conversations are readable at all
+  and refuses the rest — Slack reads only channels its app is in, never DMs.
+- Who counts as the operator is one rule in `@stratusagent/channels`, not
+  one per adapter: `isPrincipal`, `admitsSender` (the `admit` policy), and
+  `senderTrustFor` (the `user`/`unknown` label a turn carries). Which
+  `admit` applies when config gives none stays the adapter's call — Slack
+  defaults to `anyone`, because only its workspace can reach it; a channel
+  anyone in the world can message should default to `principals`.
+- `GatewayLike.dispatch` takes an `idempotencyKey`: the platform's message
+  id. A redelivery — after a crash included — never starts a second turn,
+  and a turn the daemon died inside is continued from its transcript at
+  the next start instead of failed (unless it runs on a harness, whose own
+  tool loop may already have acted on the prompt). `onRepeat` says which
+  repeat a dispatch was: `live`, attached to a turn another of the
+  adapter's dispatches is still waiting on, so it posts nothing; or
+  `finished`, so it posts the turn's outcome from the session
+  (`turnReplyFor`, `turnFilesFor`, `turnFailureFor`), since nothing says it
+  was posted before a crash. Slack does all of it. Without it, an adapter delivering at
+  least once has only in-memory dedupe, which a restart erases.
+- `GatewayLike.holdsMessage(sessionId, key)` says whether a session already
+  accepted a key's message as addressed to it: a turn started for it, or
+  still queued (a turn nobody asked for does not count). An adapter that picks between agents for one
+  message asks it first: a message an agent already accepted stays that
+  agent's, whoever its routing rule would pick now. Slack asks it before the
+  "whoever spoke last" rule, which after a restart would otherwise hand a
+  redelivery to an agent that has spoken since — and that agent, holding no
+  key for it, would run it again.
+
+The rest of Slack's turn and render lifecycle — draining in `stop()`, the
+approval outcome texts, finishing a reply after a restart through
+`sessionRouting` — stays inside `channel-slack` until a second adapter
+needs the same code, rather than becoming a framework ahead of it.
+
 **Selection is deterministic and the operator's.** Load order is the
 `plugins` block's order, so a fleet whose behavior depended on which plugin
 loaded first is a fleet whose config shows it. `executor` and `memoryStore`
@@ -462,7 +558,7 @@ put a plugin that adds a channel and a memory store.
   "enabled": true,
   "roots": ["~/notes"],
   "agents": {
-    "ava":  { "roots": ["~/work/ava"] },
+    "blair":  { "roots": ["~/work/blair"] },
     "juno": { "roots": ["~/work/juno", "~/shared"] }
   }
 }
@@ -709,4 +805,4 @@ the ecosystem non-empty on the day it lands.
 - [09 — skills](../roadmap/09-skills.md)
 - [10 — proactive agents: schedules and outbound messages](../roadmap/10-proactive.md)
 - [11 — MCP bridge](../roadmap/11-mcp.md)
-- [12 — plugin discovery and distribution](../roadmap/12-plugin-registry.md)
+- [20 — Discord channel: the second adapter](../roadmap/20-channel-discord.md)

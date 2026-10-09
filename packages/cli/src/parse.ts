@@ -1,6 +1,6 @@
 import { isTrustLevel, TRUST_LEVELS, type TrustLevel } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
-import { CREDENTIAL_NAME_PATTERN, parseProviderName, type StratusProviderName } from '@stratusagent/state';
+import { CHANNEL_KIND_PATTERN, CREDENTIAL_NAME_PATTERN, parseProviderName, type StratusProviderName } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 
 export type CliProviderName = StratusProviderName;
@@ -120,6 +120,20 @@ export interface ParsedCredentialCommand {
   agentId?: string;
 }
 
+export interface ParsedChannelCommand {
+  command: 'channel';
+  action: 'set' | 'list' | 'remove';
+  /** The channel kind a plugin declares — `slack`, `imessage`. */
+  kind?: string;
+  /** The agent whose binding this is; required for set and remove. */
+  agentId?: string;
+  /**
+   * The secret names to store, in the order their values are asked for
+   * or read. Empty for Slack means its two tokens.
+   */
+  keys: string[];
+}
+
 export interface ParsedSkillReloadCommand {
   command: 'skill-reload';
   /** A daemon's control API URL; default: the one `~/.stratus/gateway.json` names. */
@@ -135,6 +149,14 @@ export interface ParsedRestartCommand {
   drainTimeoutMs?: number;
   gateway?: string;
   token?: string;
+}
+
+export interface ParsedHealthCommand {
+  command: 'health';
+  /** A daemon's control API URL; default: the one `~/.stratus/gateway.json` names. */
+  gateway?: string;
+  token?: string;
+  format: 'text' | 'json';
 }
 
 export interface ParsedAgentsCommand {
@@ -160,6 +182,12 @@ export interface ParsedSchedulesCommand {
 
 export interface ParsedGrantsCommand {
   command: 'grants';
+  /**
+   * The config a stopped daemon would start with, for the `approvals.commands`
+   * part of the listing. A serving daemon reports its own; this only matters
+   * when the files are read. Default: what `stratus serve` would find.
+   */
+  configPath?: string;
   action: 'list' | 'revoke';
   agentId: string;
   /** revoke: exactly one of the three names what goes. */
@@ -271,6 +299,13 @@ export interface ParsedServeCommand {
   events: boolean;
   /** Write the structured log to ~/.stratus/logs. Defaults to true. */
   logToFile?: boolean;
+  /**
+   * What stdout carries. Absent means `text`: the human lines a terminal
+   * wants. `json` writes every structured log record to stdout as one JSON
+   * line instead, for a container runtime or journald that ships stdout —
+   * and nothing else, since a stray human line is a parse error there.
+   */
+  logFormat?: 'text' | 'json';
   /** Serve the control API. Defaults to true when the package is installed. */
   api?: boolean;
   /** Overrides `api.port` in the config file. */
@@ -301,7 +336,9 @@ export type ParsedCommand =
   | ParsedSkillsCommand
   | ParsedSkillReloadCommand
   | ParsedCredentialCommand
+  | ParsedChannelCommand
   | ParsedRestartCommand
+  | ParsedHealthCommand
   | ParsedSchedulesCommand
   | ParsedGrantsCommand
   | ParsedMemoryCommand
@@ -421,6 +458,15 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--no-log-file') {
         parsed.logToFile = false;
+        continue;
+      }
+      if (token === '--log-format') {
+        const value = readOptionValue(rest, index, '--log-format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported --log-format: ${value}. Use text or json.`);
+        }
+        parsed.logFormat = value;
+        index += 1;
         continue;
       }
       if (token === '--no-api') {
@@ -806,6 +852,77 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     };
   }
 
+  if (command === 'channel' || command === 'channels') {
+    const [subcommand, ...channelRest] = command === 'channels' ? ['list', ...rest] : rest;
+    if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+      return { command: 'help' };
+    }
+    if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove') {
+      throw new Error(`No channel subcommand named ${JSON.stringify(subcommand)}. It is set, list, or remove.`);
+    }
+    const positional: string[] = [];
+    let agentId: string | undefined;
+    for (let index = 0; index < channelRest.length; index += 1) {
+      const token = channelRest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--agent') {
+        agentId = readOptionValue(channelRest, index, '--agent');
+        index += 1;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      positional.push(token);
+    }
+    const [kind, ...keys] = positional;
+    if (subcommand === 'list') {
+      if (positional.length > 0 || agentId !== undefined) {
+        throw new Error('channel list takes no arguments; it lists every channel with stored secrets.');
+      }
+      return { command: 'channel', action: 'list', keys: [] };
+    }
+    if (kind === undefined) {
+      throw new Error(`channel ${subcommand} needs a channel kind — the name its plugin declares, such as imessage.`);
+    }
+    if (!CHANNEL_KIND_PATTERN.test(kind)) {
+      throw new Error(`${JSON.stringify(kind)} is not a channel kind. Use the kind a channel plugin declares (lowercase, hyphens).`);
+    }
+    if (agentId === undefined) {
+      throw new Error(`channel ${subcommand} needs --agent: channel secrets are one set per agent, since each agent is its own identity on the channel.`);
+    }
+    // The same rule the credential command keeps, for the same reason: an
+    // entry under an id no agent can have is a binding nothing resolves.
+    if (!isValidAgentId(agentId)) {
+      throw new Error(`${JSON.stringify(agentId)} cannot be an agent id, so a binding stored under it could never be resolved.`);
+    }
+    if (subcommand === 'remove') {
+      if (keys.length > 0) {
+        throw new Error('channel remove takes the kind and --agent only; it removes everything stored for that agent on that channel.');
+      }
+      return { command: 'channel', action: 'remove', kind, agentId, keys: [] };
+    }
+    if (kind !== 'slack' && keys.length === 0) {
+      throw new Error(
+        `channel set ${kind} needs the names of the secrets to store, from the plugin's README — for example \`stratus channel set ${kind} --agent ${agentId} apiKey apiSecret\`.`,
+      );
+    }
+    const bad = keys.find((key) => !CREDENTIAL_NAME_PATTERN.test(key));
+    if (bad !== undefined) {
+      throw new Error(`${JSON.stringify(bad)} is not a secret name. Use letters, digits, dots, dashes, or underscores, starting with a letter.`);
+    }
+    const repeated = keys.find((key, index) => keys.indexOf(key) !== index);
+    if (repeated !== undefined) {
+      throw new Error(`${repeated} is named twice; each secret is stored once.`);
+    }
+    return { command: 'channel', action: 'set', kind, agentId, keys };
+  }
+
   if (command === 'plugins' || (command === 'plugin' && rest[0] === 'list')) {
     const pluginsRest = command === 'plugins' ? rest : rest.slice(1);
     let format: 'text' | 'json' = 'text';
@@ -1025,6 +1142,11 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--token') {
         parsed.token = readOptionValue(tokens, index, '--token');
+        index += 1;
+        continue;
+      }
+      if (token === '--config') {
+        parsed.configPath = readOptionValue(tokens, index, '--config');
         index += 1;
         continue;
       }
@@ -1261,6 +1383,40 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
           throw new Error(`Invalid value for --drain-timeout: ${rest[index + 1] ?? '(missing)'}`);
         }
         parsed.drainTimeoutMs = Math.round(seconds * 1000);
+        index += 1;
+        continue;
+      }
+      if (token === '--gateway') {
+        parsed.gateway = readOptionValue(rest, index, '--gateway');
+        index += 1;
+        continue;
+      }
+      if (token === '--token') {
+        parsed.token = readOptionValue(rest, index, '--token');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return parsed;
+  }
+
+  if (command === 'health') {
+    const parsed: ParsedHealthCommand = { command: 'health', format: 'text' };
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(rest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        parsed.format = value;
         index += 1;
         continue;
       }

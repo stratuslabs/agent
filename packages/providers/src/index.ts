@@ -766,7 +766,31 @@ const createOpenAICompatibleMessages = (
 
   const transcript = transcriptOf(request);
   const latest = latestUserMessageOf(transcript);
+  // Images tool calls returned, held until the run of tool messages ends:
+  // a chat-completions tool message is text only, and every call of an
+  // assistant turn has to be answered before any other message — so they
+  // follow the last answer, as one user message that says whose they are.
+  let toolImages: Array<{ toolName: string; image: ImageAttachment }> = [];
+  const flushToolImages = (): void => {
+    if (toolImages.length === 0) {
+      return;
+    }
+    const names = [...new Set(toolImages.map((entry) => entry.toolName))].join(', ');
+    messages.push({
+      role: 'user',
+      content: [
+        { type: 'text', text: `[The images returned by the tool call${toolImages.length > 1 ? 's' : ''} above (${names}), shown here because a tool result cannot carry an image. Nobody sent this message.]` },
+        ...toolImages.map(({ image }) => (replayed.has(image)
+          ? { type: 'image_url' as const, image_url: { url: `data:${image.mediaType};base64,${image.data}` } }
+          : { type: 'text' as const, text: droppedImageNote(image) })),
+      ],
+    });
+    toolImages = [];
+  };
   for (const message of transcript) {
+    if (message.role !== 'tool') {
+      flushToolImages();
+    }
     if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
       const wireCalls = message.toolCalls.map((call) => ({
         id: call.id,
@@ -796,13 +820,15 @@ const createOpenAICompatibleMessages = (
 
     if (message.role === 'tool') {
       const result = message.toolResult;
+      const images = message.images ?? [];
       messages.push({
         role: 'tool',
-        content: result
-          ? renderToolResultContent(result)
-          : message.content,
+        content: `${result ? renderToolResultContent(result) : message.content}${vision ? '' : describeImageAttachments(images)}`,
         ...(result ? { tool_call_id: result.callId } : {}),
       });
+      if (vision) {
+        toolImages.push(...images.map((image) => ({ toolName: message.name ?? result?.toolName ?? 'tool', image })));
+      }
       continue;
     }
 
@@ -824,6 +850,7 @@ const createOpenAICompatibleMessages = (
       ...(message.name ? { name: message.name } : {}),
     });
   }
+  flushToolImages();
 
   return { messages, sent };
 };
@@ -1030,7 +1057,14 @@ export const renderTranscriptPrompt = (request: ProviderRequest, options: Prompt
       // `content` — that is the whole record, label as a bare field, and a
       // session moved onto a harness would replay a fetched page unmarked.
       const content = message.toolResult !== undefined ? renderToolResultContent(message.toolResult) : message.content;
-      lines.push(`[tool ${message.name ?? 'result'}] ${content}`);
+      // A flattened replay carries no pixels, and a result that says
+      // `shown: true` must not read as if this run had seen the image.
+      const images = message.images ?? [];
+      const names = images.map((image) => image.name ?? `a ${image.mediaType} image`).join(', ');
+      const note = images.length > 0
+        ? ` [This call returned ${images.length === 1 ? 'an image' : `${images.length} images`} (${names}) that this replay cannot show you; say so rather than guessing at ${images.length === 1 ? 'it' : 'them'}.]`
+        : '';
+      lines.push(`[tool ${message.name ?? 'result'}] ${content}${note}`);
       continue;
     }
     // A tool call is part of the assistant's turn: without it, the next

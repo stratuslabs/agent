@@ -2,7 +2,7 @@
 
 Talk to your agents in Slack — **each agent as its own Slack app**, with its
 own avatar, presence, and DMs. Threads are resumable conversations that
-survive daemon restarts (a turn parked on an approval when the daemon died is re-asked afterwards and its reply still lands in the thread), and a reply arrives once it is finished, with Slack's own "is thinking…" status while the agent works. Socket Mode
+survive daemon restarts (a turn parked on an approval when the daemon died is re-asked afterwards, one that was still running is continued, and either reply still lands in the thread; a Slack redelivery of a message already answered starts no second turn), and a reply arrives once it is finished, with Slack's own "is thinking…" status while the agent works. Socket Mode
 means no public ingress: a Mac Mini behind NAT is fine.
 
 ## Install the channel
@@ -35,7 +35,7 @@ which is canonical for the Slack surface.
 
 ## Talking to an agent
 
-Mention it — `@Ava what's blocking the release?` — and it answers in a
+Mention it — `@Blair what's blocking the release?` — and it answers in a
 thread. **Inside that thread you do not have to mention it again**: replies
 reach it the way replying to a colleague reaches them, and so do replies
 from anyone else in the thread. Outside a thread it stays quiet; a channel
@@ -43,7 +43,9 @@ message nobody addressed to it is not its business.
 
 Threads with more than one agent follow the rule people already use: an
 untagged reply goes to **whoever spoke last**, and mentioning another agent
-moves the conversation to them. The agent that stood down keeps
+moves the conversation to them. A reply an agent already took stays its own,
+even if Slack delivers it again after a restart and someone else has spoken
+since. The agent that stood down keeps
 listening: what you say to its colleague in that thread, and what the
 colleague answers, go into its own session, marked as said to somebody
 else, so when you turn back to it, it answers as someone who followed
@@ -71,7 +73,7 @@ agent *is*, next to `tools:` and `skills:`, not a deployment setting:
 
 ```markdown
 ---
-name: Ava
+name: Blair
 listens: judge
 ---
 ```
@@ -91,7 +93,7 @@ listens: judge
   ends first; past that a message is heard for free with no model call, and
   mentioning it starts the window again. Speaking up on its own does not —
   an agent cannot extend its own attention, or a talkative one would never
-  drift out. So "thanks Ava, we've got it from here" works because it is a
+  drift out. So "thanks Blair, we've got it from here" works because it is a
   sentence the agent read, and a mention is still the way to be sure.
 
 Judging costs a model call per message inside the window, which is why the
@@ -137,7 +139,7 @@ before `final` existed.
   "slack": {
     "replies": "final",              // the default; or "stream"
     "agents": {
-      "ava": { "replies": "stream" }  // per agent, over the default
+      "blair": { "replies": "stream" }  // per agent, over the default
     }
   }
 }

@@ -23,7 +23,7 @@ Then the agent's soul decides, per identity:
 
 ```markdown
 ---
-id: ava
+id: blair
 tools: [web.fetch]
 ---
 ```
@@ -32,7 +32,7 @@ tools: [web.fetch]
 
 | Tool | Risk | What approval mode does |
 | --- | --- | --- |
-| `web.fetch` | `gated` | `interactive` asks at the terminal, `remote` asks in Slack, `headless` refuses. It reaches a service outside Stratus at an address the agent chose, which is the line 03 draws. |
+| `web.fetch` | `gated` | `interactive` asks at the terminal, `remote` asks in Slack, `headless` refuses. It reaches a service outside Stratus at an address the agent chose, which is the line 03 draws. Judged per site: **Always allow** grants the URL's origin, not every URL, and a redirect to another site is returned as `redirectedTo` instead of followed. |
 
 Every result is labelled `external`: the body and the page-supplied title
 are a document somebody else wrote, and the session that read it — and
@@ -50,8 +50,9 @@ asides, and forms are dropped whole, and block boundaries become line
 breaks. So is what a browser would not show — an element with the
 `hidden` attribute (unless its inline `style` sets `display` again) or an
 inline `style` of `display: none`, `visibility: hidden`, or
-`content-visibility: hidden` — and what it withholds from a screen
-reader, `aria-hidden="true"`. That is to match what a reader of the rendered page
+`content-visibility: hidden` (which, like `hidden="until-found"`, hides
+nothing on an inline element such as a `span`, as in a browser) — and
+what it withholds from a screen reader, `aria-hidden="true"`. That is to match what a reader of the rendered page
 gets, not a defence against prompt injection: text hidden by a
 stylesheet, a class, or a zero font size still comes through, which is
 why every result is labelled `external`. `raw: true` returns the body as
@@ -59,13 +60,18 @@ received.
 
 Each element is judged where a browser's parser puts it, misnested and
 unclosed markup included, so text moved out of a hidden element is kept
-and text moved into one is not. Two exceptions are deliberate, and both
-keep text a browser would not show: an element still open at the end of
-the page keeps what it holds, so a closing rule this extraction does not
-model cannot erase the article after it; and a hidden `html` or `body`
-hides nothing, because a page that hides its whole document until a
-script runs is showing all of it — hiding everything hides nothing from
-a reader that the page shows anyone else.
+and text moved into one is not. The tests hold this to Chromium: some
+1,700 pages, hand-written and generated, with what Chromium shows of each
+recorded in [`test/rendered-in-chromium.json`](test/rendered-in-chromium.json)
+by [`scripts/render-in-chromium.ts`](scripts/render-in-chromium.ts).
+
+Two exceptions are deliberate, and both keep text a browser would not
+show: an element still open at the end of the page keeps what it holds,
+so a closing rule this extraction does not model cannot erase the
+article after it; and a hidden `html` or `body` hides nothing, because a
+page that hides its whole document until a script runs is showing all of
+it — hiding everything hides nothing from a reader that the page shows
+anyone else.
 
 ## Settings
 

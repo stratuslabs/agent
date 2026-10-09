@@ -81,12 +81,17 @@ There is one now, and it is the vocabulary the address policy already
 speaks: the **origin of the page the conversation is on**.
 
 ```jsonc
-// ~/.stratus/agents/ava/whitelist.json — in the agent's own directory, 0600
-{ "version": 1, "scopes": [], "origins": [{ "origin": "https://app.example.com" }] }
+// ~/.stratus/agents/blair/whitelist.json — in the agent's own directory, 0600
+{ "version": 1, "scopes": [], "origins": [{ "origin": "https://app.example.com", "tool": "browser.act" }] }
 ```
 
-`Tool.originFor` is how the tool answers, and it is deliberately **not**
-given the call's input. An origin parameter would be the model's claim
+Name the tool. A grant without `tool` covers every tool judged by site,
+`web.fetch` included, which is how a grant written before grants named a
+tool keeps working, and not what a hand-written browser grant should mean.
+
+`Tool.originFor` is how the tool answers. It is handed the call's input,
+because `web.fetch` is judged by the URL it was asked for, but the browser
+deliberately **ignores** it. An origin parameter would be the model's claim
 about where it is, which is precisely what a grant must not take on trust;
 the pool already tracks a page per conversation, so the origin comes from
 there. A conversation that has not navigated has no origin, so nothing

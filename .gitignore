@@ -8,3 +8,6 @@ stratus.config.json
 
 # Local agent state (per-agent long-term memory)
 .stratus/
+
+# The deployment env file holds provider keys (copy from deploy/docker/stratusd.env.example)
+deploy/docker/stratusd.env

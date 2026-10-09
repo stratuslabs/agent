@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -36,13 +36,20 @@ interface FakeSocket extends SlackSocketLike {
    * come back in either order.
    */
   deliver(eventName: string, args: Omit<SlackSocketEventArgs, 'ack'>, ack?: () => Promise<void>): Promise<void>;
+  /**
+   * Resolves once the adapter has finished handling every delivery so far —
+   * the work its listeners return. A gate for a test whose next message
+   * depends on the last one's outcome, where `deliver` alone is not.
+   */
+  settled(): Promise<void>;
   started: boolean;
   disconnected: boolean;
   acks: number;
 }
 
 const createFakeSocket = (): FakeSocket => {
-  const listeners = new Map<string, Array<(args: SlackSocketEventArgs) => void>>();
+  const listeners = new Map<string, Array<(args: SlackSocketEventArgs) => unknown>>();
+  const started: Promise<unknown>[] = [];
   const socket: FakeSocket = {
     started: false,
     disconnected: false,
@@ -58,12 +65,22 @@ const createFakeSocket = (): FakeSocket => {
     async disconnect() {
       socket.disconnected = true;
     },
+    async settled() {
+      // Until nothing new has started: handling one delivery can be what
+      // another is waiting on.
+      while (started.length > 0) {
+        await Promise.all(started.splice(0));
+      }
+    },
     async deliver(eventName, args, ack) {
       const handlers = listeners.get(eventName) ?? [];
       for (const handler of handlers) {
-        handler({ ...args, ack: ack ?? (async () => { socket.acks += 1; }) });
+        started.push(Promise.resolve(handler({ ...args, ack: ack ?? (async () => { socket.acks += 1; }) })));
       }
-      // Handlers run async work after acking; let it settle.
+      // Lets the handlers get past admission, which is what most tests mean
+      // by a message having arrived — they release a turn's gate only after
+      // this. It is no promise the handlers have finished: a loaded runner
+      // outran it once. A test that needs that awaits `settled()`.
       await new Promise((resolve) => setTimeout(resolve, 20));
     },
   };
@@ -665,6 +682,32 @@ test('a DM queued behind a running turn shows its own status at once', async () 
   await Promise.all([first, second]);
   await adapter.stop();
   assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'second answer']);
+});
+
+test('a top-level DM reply takes down the loading status it was answered under', async () => {
+  // The reported bug: a DM reply posts beside the message it answers, not
+  // under it, so Slack never clears the status keyed to that message, and
+  // "is working…" stood under every DM after the reply had landed.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hi back'));
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', mention('hi', { type: 'message', ts: '300.1', channel: 'D1', channel_type: 'im' }));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['hi back', undefined]]);
+  assert.deepEqual(statuses, [
+    { channel_id: 'D1', thread_ts: '300.1', status: 'is thinking…' },
+    { channel_id: 'D1', thread_ts: '300.1', status: '' },
+  ]);
 });
 
 test('an agent on the stream reply mode still posts a placeholder and edits it', async () => {
@@ -3080,6 +3123,10 @@ test('a judged turn whose file landed but whose words Slack refused has spoken, 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
   await both(channelMessage({ text: 'chart please', ts: '1080.1', thread: '1080.0' }));
+  // Who 'nice' is for depends on where Ava's file landed, which her turn
+  // records once it has finished — so it waits for that, not for a delay
+  // her real file read and upload once outran on a loaded runner.
+  await Promise.all([socketAva.settled(), socketBea.settled()]);
   await both(channelMessage({ text: 'nice', ts: '1080.2', thread: '1080.0' }));
   await adapter.stop();
 
@@ -7980,7 +8027,7 @@ test('with no principals configured, a DM names nobody: a display name never rea
   await adapter.stop();
 });
 
-test('each turn says what kind of room it is in now and how many are in it, never its name', async () => {
+test('each turn says what kind of room it is in now, how many are in it, and its id, never its name', async () => {
   // An agent in a DM told the person they were "talking on the terminal",
   // and would have answered a thousand-person channel the same way.
   const socket = createFakeSocket();
@@ -8022,19 +8069,19 @@ test('each turn says what kind of room it is in now and how many are in it, neve
   // channel made private, or shared with another workspace, since the last
   // message is described as it is now.
   await socket.deliver('app_mention', mention('<@B-AVA> status?'));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 1042, thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 1042, thread: true, id: 'C1' });
   web.knownConversations.set('C1', { is_member: true, is_private: true, name: 'general', num_members: 12, is_org_shared: true });
   await socket.deliver('message', mention('and now?', { type: 'message', channel_type: 'group', ts: '100.2', thread_ts: '100.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 12, thread: true, shared: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 12, thread: true, shared: true, id: 'C1' });
   assert.equal(infoCalls, 2);
 
   await socket.deliver('app_mention', mention('<@B-AVA> review this', { channel: 'G1', ts: '200.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 6, thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 6, thread: true, id: 'G1' });
 
   // Shared beyond the workspace: said by the lookup, or by the event itself.
   web.knownConversations.set('C7', { is_member: true, num_members: 40, is_ext_shared: true });
   await socket.deliver('app_mention', mention('<@B-AVA> hi partners', { channel: 'C7', ts: '500.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 40, thread: true, shared: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 40, thread: true, shared: true, id: 'C7' });
   await socket.deliver('message', {
     ...mention('<@B-AVA> hello', { type: 'message', channel: 'C1', channel_type: 'channel', ts: '600.1' }),
     body: { team_id: 'T1', event_id: 'evt-connect', is_ext_shared_channel: true },
@@ -8044,5 +8091,867 @@ test('each turn says what kind of room it is in now and how many are in it, neve
   // A lookup that fails keeps what the event said, and nothing more.
   await socket.deliver('message', mention('<@B-AVA> hello', { type: 'message', channel: 'C9', channel_type: 'channel', ts: '400.1' }));
   assert.deepEqual(rooms.at(-1), { kind: 'public', thread: true });
+  await adapter.stop();
+});
+
+test('a redelivery after a restart passes its message key and posts its own turn\'s reply and files, not the newest', async () => {
+  // The in-memory dedupe dies with the process, and so may the delivery
+  // that ran the turn — after the turn's last write and before its reply
+  // reached Slack. Nothing says which, so the redelivery posts the reply,
+  // and the reply it posts is the one its own message got, though the
+  // session has moved on since.
+  const keys: Array<string | undefined> = [];
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-finished-repeat-'));
+  const chart = path.join(dir, 'chart.png');
+  const later = path.join(dir, 'later.png');
+  await writeFile(chart, 'png');
+  await writeFile(later, 'png');
+  const finished = (sessionId: string, key: string): Session => {
+    const now = new Date().toISOString();
+    return {
+      id: sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: key },
+        { id: 't1', role: 'tool', content: '', createdAt: now, toolResult: { callId: 'c1', toolName: 'shell.run', ok: true, output: { file: chart } } },
+        { id: 'a1', role: 'assistant', content: 'hello from Ava', createdAt: now },
+        { id: 'u2', role: 'user', content: 'and later', createdAt: now, idempotencyKey: 'ava:C1:200.1' },
+        { id: 't2', role: 'tool', content: '', createdAt: now, toolResult: { callId: 'c2', toolName: 'shell.run', ok: true, output: { file: later } } },
+        { id: 'a2', role: 'assistant', content: 'a newer reply', createdAt: now },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+  const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  const gateway: StubGateway = {
+    ...stub,
+    async dispatch(input) {
+      keys.push(input.idempotencyKey);
+      // What the gateway does for a finished repeat: no turn, no events,
+      // and the session as it stands.
+      input.onRepeat?.('finished');
+      return finished(input.sessionId, input.idempotencyKey ?? '');
+    },
+  };
+
+  for (const replies of ['stream', 'final'] as const) {
+    keys.length = 0;
+    const web = createFakeWeb('B-AVA', 'T1');
+    const socket = createFakeSocket();
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
+      editIntervalMs: 0,
+      createSocketClient: () => socket,
+      createWebClient: () => web,
+    });
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+    await adapter.stop();
+    const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+    assert.ok(said.includes('hello from Ava'), `${replies}: the reply was not posted`);
+    assert.ok(!said.includes('a newer reply'), `${replies}: a newer turn's reply answered the message`);
+    assert.deepEqual(web.uploads.map((upload) => upload.filename), ['chart.png'], `${replies}: not exactly its own turn's file`);
+    assert.deepEqual(keys, ['ava:C1:100.1']);
+  }
+});
+
+test('a repeat of a turn another delivery is still waiting on posts nothing', async () => {
+  // That delivery posts the answer; this one takes down what it put up.
+  const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hello from Ava'));
+  const gateway: StubGateway = {
+    ...stub,
+    async dispatch(input) {
+      input.onRepeat?.('live');
+      return sessionWithReply(input.sessionId, 'hello from Ava');
+    },
+  };
+
+  for (const replies of ['stream', 'final'] as const) {
+    const web = createFakeWeb('B-AVA', 'T1');
+    const socket = createFakeSocket();
+    const statuses = recordStatuses(web);
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
+      editIntervalMs: 0,
+      createSocketClient: () => socket,
+      createWebClient: () => web,
+    });
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+    await adapter.stop();
+    assert.equal(web.posts.length, web.deletes.length, `${replies}: a placeholder stayed up`);
+    assert.ok(!web.updates.some((update) => update.text === 'hello from Ava'), `${replies}: the answer was written`);
+    assert.ok(!web.posts.some((post) => post.text === 'hello from Ava'), `${replies}: the answer was posted`);
+    assert.equal(statuses.at(-1)?.status ?? '', '', `${replies}: a loading status stayed up`);
+  }
+});
+
+test('a repeat of a failed turn posts the failure, and a live repeat of one posts nothing', async () => {
+  const failed = (sessionId: string, key: string): Session => {
+    const now = new Date().toISOString();
+    return {
+      id: sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'failed',
+      lastError: 'the provider refused the request',
+      messages: [{ id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: key }],
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+  for (const live of [false, true]) {
+    for (const replies of ['stream', 'final'] as const) {
+      const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+      const gateway: StubGateway = {
+        ...stub,
+        async dispatch(input) {
+          if (live) {
+            // Attached to a turn another delivery is waiting on, which then
+            // failed: that delivery says so.
+            input.onRepeat?.('live');
+            throw new Error('the provider refused the request');
+          }
+          // Finished and failed: the session as it stands, not a rejection.
+          input.onRepeat?.('finished');
+          return failed(input.sessionId, input.idempotencyKey ?? '');
+        },
+      };
+      const web = createFakeWeb('B-AVA', 'T1');
+      const socket = createFakeSocket();
+      const adapter = createAdapterAsShipped({
+        agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
+        editIntervalMs: 0,
+        createSocketClient: () => socket,
+        createWebClient: () => web,
+      });
+      await adapter.start(gateway);
+      await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+      await adapter.stop();
+      const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+      const label = `${live ? 'live' : 'finished'}, ${replies}`;
+      if (live) {
+        assert.ok(!said.some((text) => text?.includes('provider refused')), `${label}: the failure was posted twice`);
+        assert.equal(web.posts.length, web.deletes.length, `${label}: a placeholder stayed up`);
+      } else {
+        assert.ok(said.includes('Something went wrong: the provider refused the request'), `${label}: the failure was not posted`);
+        assert.ok(!said.includes('(no reply)'), `${label}: a failure read as a reply that said nothing`);
+      }
+    }
+  }
+});
+
+test('a final reply is not overtaken by a turn queued behind a repeat that withdrew', async () => {
+  // first (slow to post) → a repeat that withdraws → third. The third waits
+  // on the repeat's place in line, so the repeat must hold it until the
+  // first has posted.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-withdraw-order-'));
+  const shot = path.join(dir, 'build.log');
+  await writeFile(shot, 'log');
+  let releaseUpload!: () => void;
+  const uploadGate = new Promise<void>((resolve) => {
+    releaseUpload = resolve;
+  });
+  const upload = web.files.uploadV2.bind(web.files);
+  web.files.uploadV2 = async (args) => {
+    await uploadGate;
+    return upload(args);
+  };
+  const stub: StubGateway = createStubGateway(async ({ sessionId, userMessage }) => {
+    if (/first/.test(userMessage)) {
+      await stub.bus.emit({
+        type: 'tool.completed',
+        sessionId,
+        result: { callId: 'c1', toolName: 'shell.run', ok: true, output: { file: shot } },
+      });
+      return sessionWithReply(sessionId, 'first answer');
+    }
+    return sessionWithReply(sessionId, /repeat/.test(userMessage) ? 'repeat answer' : 'third answer');
+  });
+  const gateway: StubGateway = {
+    ...stub,
+    async dispatch(input) {
+      if (/repeat/.test(input.userMessage)) {
+        input.onRepeat?.('live');
+      }
+      return stub.dispatch(input);
+    },
+  };
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  const delivered = Promise.all([
+    socket.deliver('app_mention', mention('<@B-AVA> first', { ts: '100.1' })),
+    socket.deliver('app_mention', mention('<@B-AVA> repeat', { ts: '100.2', thread_ts: '100.1' })),
+    socket.deliver('app_mention', mention('<@B-AVA> third', { ts: '100.3', thread_ts: '100.1' })),
+  ]);
+  for (let tick = 0; tick < 50; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(web.posts.map((post) => post.text), []);
+  releaseUpload();
+  await delivered;
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'third answer']);
+});
+
+const finishedTurnWithFile = (file: string, recorded: number) =>
+  async (input: Parameters<StubGateway['dispatch']>[0]): Promise<Session> => {
+    input.onRepeat?.('finished');
+    const at = new Date(recorded).toISOString();
+    return {
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: at, idempotencyKey: input.idempotencyKey ?? '' },
+        { id: 't1', role: 'tool', content: '', createdAt: at, toolResult: { callId: 'c1', toolName: 'shell.run', ok: true, output: { file } } },
+        { id: 'a1', role: 'assistant', content: 'here is the chart', createdAt: at },
+      ],
+      createdAt: at,
+      updatedAt: at,
+    };
+  };
+
+const replayWith = async (dispatch: StubGateway['dispatch']) => {
+  const warnings: string[] = [];
+  const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  const gateway: StubGateway = { ...stub, dispatch };
+  const web = createFakeWeb('B-AVA', 'T1');
+  const socket = createFakeSocket();
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (message) => warnings.push(message),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+  return { web, warnings };
+};
+
+test('a repeat does not upload a file changed after the turn that produced it, however soon after', async () => {
+  // The transcript keeps the path, not the bytes. Changed since, the path
+  // may hold a later turn's file, and the old message is not answered with
+  // it — half a second later as surely as an hour: a grace window is one
+  // an overwrite fits inside.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-stale-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'a later turn wrote this');
+  const { ctimeMs } = await stat(chart);
+  const { web, warnings } = await replayWith(finishedTurnWithFile(chart, Math.floor(ctimeMs) - 500));
+  assert.deepEqual(web.uploads, []);
+  assert.ok(web.posts.some((post) => post.text === 'here is the chart'), 'the reply was not posted');
+  assert.ok(warnings.some((message) => message.includes('changed after the turn that produced it')), 'the refusal was not said');
+});
+
+test('a repeat does not upload a file whose times were set back to before its turn', async () => {
+  // A modification time is the writer's to set; the change time is not,
+  // and moves when it is set — as it does when an older file is renamed in.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-backdated-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'something else entirely');
+  const recorded = Date.now() - 60 * 60 * 1000;
+  await utimes(chart, new Date(recorded - 60_000), new Date(recorded - 60_000));
+  const { web } = await replayWith(finishedTurnWithFile(chart, recorded));
+  assert.deepEqual(web.uploads, []);
+});
+
+test('a redelivery the start-up sweep finished while it waited posts that outcome once, whoever posts it', async () => {
+  // The sweep takes the session's chain first and finishes this message's
+  // turn; its outcome is reported ahead of the queued redelivery as a turn
+  // nobody was rendering. The redelivery then finds the key finished, and
+  // stands down only if that report reached the thread — one that could
+  // not read the routing leaves the redelivery to say it.
+  for (const [replies, reported] of [['stream', true], ['final', true], ['stream', false], ['final', false]] as const) {
+    const socket = createFakeSocket();
+    const web = createFakeWeb('B-AVA', 'T1');
+    const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+    gateway.sessionRouting = async () => {
+      if (!reported) {
+        throw new Error('the store is unavailable');
+      }
+      return {
+        agentId: 'ava',
+        metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+        reply: 'the recovered answer',
+      };
+    };
+    gateway.dispatch = async (input) => {
+      await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+      input.onRepeat?.('finished');
+      const now = new Date().toISOString();
+      return {
+        id: input.sessionId,
+        agent: { id: 'ava', name: 'Ava' },
+        status: 'completed',
+        messages: [
+          { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: input.idempotencyKey ?? '' },
+          { id: 'a1', role: 'assistant', content: 'the recovered answer', createdAt: now },
+        ],
+        createdAt: now,
+        updatedAt: now,
+      };
+    };
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
+      editIntervalMs: 0,
+      createSocketClient: () => socket,
+      createWebClient: () => web,
+      warn: () => {},
+    });
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+    await adapter.stop();
+    const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+    const times = said.filter((text) => text === 'the recovered answer').length;
+    assert.equal(times, 1, `${replies}, ${reported ? 'reported' : 'report failed'}: said ${times} times`);
+  }
+});
+
+test('a redelivery the start-up sweep finished posts the file that sweep could not', async () => {
+  // The sweep's report said the reply, but the file it produced did not
+  // land. Standing down on that report would lose the file for good; the
+  // redelivery is the one left to post it.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-sweep-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'png bytes');
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let attempts = 0;
+  const upload = web.files.uploadV2.bind(web.files);
+  web.files.uploadV2 = async (args) => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw new Error('ratelimited');
+    }
+    return upload(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered answer',
+  });
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({
+      type: 'tool.completed',
+      sessionId: input.sessionId,
+      result: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: chart } },
+    });
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    input.onRepeat?.('finished');
+    const now = new Date().toISOString();
+    return {
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: input.idempotencyKey ?? '' },
+        { id: 't1', role: 'tool', content: '', createdAt: now, toolResult: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: chart } } },
+        { id: 'a1', role: 'assistant', content: 'the recovered answer', createdAt: now },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+  assert.deepEqual(web.uploads.map((entry) => entry.filename), ['chart.png']);
+  // Only the part the sweep missed: its words reached the thread.
+  const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+  assert.equal(said.filter((text) => text === 'the recovered answer').length, 1);
+});
+
+test('a redelivery the start-up sweep finished posts only the files that sweep could not, once each', async () => {
+  // Two files: the first lands from the sweep's report, the second does
+  // not. The redelivery posts the second and nothing else.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-sweep-files-'));
+  const first = path.join(dir, 'first.png');
+  const second = path.join(dir, 'second.png');
+  await writeFile(first, 'one');
+  await writeFile(second, 'two');
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let attempts = 0;
+  const upload = web.files.uploadV2.bind(web.files);
+  web.files.uploadV2 = async (args) => {
+    attempts += 1;
+    if (attempts === 2) {
+      throw new Error('ratelimited');
+    }
+    return upload(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered answer',
+  });
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({
+      type: 'tool.completed',
+      sessionId: input.sessionId,
+      result: { callId: 'c1', toolName: 'chart.render', ok: true, output: { files: [first, second] } },
+    });
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    input.onRepeat?.('finished');
+    const now = new Date().toISOString();
+    return {
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: input.idempotencyKey ?? '' },
+        { id: 't1', role: 'tool', content: '', createdAt: now, toolResult: { callId: 'c1', toolName: 'chart.render', ok: true, output: { files: [first, second] } } },
+        { id: 'a1', role: 'assistant', content: 'the recovered answer', createdAt: now },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+  assert.deepEqual(web.uploads.map((entry) => entry.filename), ['first.png', 'second.png']);
+  const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+  assert.equal(said.filter((text) => text === 'the recovered answer').length, 1);
+});
+
+test('a message for an agent with an overlong id is dispatched with a key the gateway accepts, the same after a restart', async () => {
+  const longId = `agent-${'x'.repeat(300)}`;
+  const keys: Array<string | undefined> = [];
+  for (let run = 0; run < 2; run += 1) {
+    const socket = createFakeSocket();
+    const web = createFakeWeb('B-AVA', 'T1');
+    const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hi'));
+    gateway.agents = () => [{ id: longId, name: 'Long' }];
+    const dispatch = gateway.dispatch;
+    gateway.dispatch = async (input) => {
+      keys.push(input.idempotencyKey);
+      return dispatch.call(gateway, input);
+    };
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: longId, appToken: 'xapp-1', botToken: 'xoxb-1' }],
+      editIntervalMs: 0,
+      createSocketClient: () => socket,
+      createWebClient: () => web,
+    });
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+    await adapter.stop();
+  }
+  assert.equal(keys.length, 2);
+  assert.ok((keys[0] ?? '').length > 0 && (keys[0] ?? '').length <= 256, `key length ${(keys[0] ?? '').length}`);
+  assert.equal(keys[0], keys[1]);
+});
+
+test('a redelivery the start-up sweep finished posts each occurrence of a file the sweep could not, even one path twice', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-sweep-same-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'png bytes');
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let attempts = 0;
+  const upload = web.files.uploadV2.bind(web.files);
+  web.files.uploadV2 = async (args) => {
+    attempts += 1;
+    if (attempts === 2) {
+      throw new Error('ratelimited');
+    }
+    return upload(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered answer',
+  });
+  gateway.dispatch = async (input) => {
+    for (const callId of ['c1', 'c2']) {
+      await gateway.bus.emit({
+        type: 'tool.completed',
+        sessionId: input.sessionId,
+        result: { callId, toolName: 'chart.render', ok: true, output: { file: chart } },
+      });
+    }
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    input.onRepeat?.('finished');
+    const now = new Date().toISOString();
+    return {
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: input.idempotencyKey ?? '' },
+        { id: 't1', role: 'tool', content: '', createdAt: now, toolResult: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: chart } } },
+        { id: 't2', role: 'tool', content: '', createdAt: now, toolResult: { callId: 'c2', toolName: 'chart.render', ok: true, output: { file: chart } } },
+        { id: 'a1', role: 'assistant', content: 'the recovered answer', createdAt: now },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+  // Two results, two uploads: the sweep's one that landed, the redelivery's for the other.
+  assert.deepEqual(web.uploads.map((entry) => entry.filename), ['chart.png', 'chart.png']);
+});
+
+test('a redelivery the start-up sweep finished with nothing to say still says (no reply), once', async () => {
+  // An addressed turn that produced no text and no file: the sweep's
+  // report has nothing to post, and the redelivery is owed the line a
+  // rendered turn would have put there.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+  });
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    input.onRepeat?.('finished');
+    const now = new Date().toISOString();
+    return {
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: now, idempotencyKey: input.idempotencyKey ?? '' },
+        { id: 'a1', role: 'assistant', content: '', createdAt: now },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+  const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+  assert.equal(said.filter((text) => text === '(no reply)').length, 1, `said: ${JSON.stringify(said)}`);
+});
+
+test('after a restart, an untagged reply an agent already accepted stays that agent\'s, though another spoke since', async () => {
+  // Ava took the message before the restart; Bea has spoken in the thread
+  // since, so the newest-speaker rule alone would hand the redelivery to Bea,
+  // who holds no key for it and would run it as new.
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = async (sessionId: string) => {
+    const agentId = sessionId.split(':')[1] ?? '';
+    return { agentId, metadata: {}, lastSpokeAt: agentId === 'bea' ? '2026-01-01T00:00:09.000Z' : '2026-01-01T00:00:01.000Z' };
+  };
+  const asked: string[] = [];
+  gateway.holdsMessage = async (sessionId: string, key: string) => {
+    asked.push(key);
+    return sessionId.startsWith('slack:ava:') && key === 'ava:C1:993.1';
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const redelivered = channelMessage({ text: 'so?', ts: '993.1', thread: '993.0' });
+  await socketAva.deliver('message', redelivered);
+  await socketBea.deliver('message', redelivered);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: so?'],
+  ]);
+  assert.ok(asked.includes('ava:C1:993.1'));
+});
+
+test('after a restart, a live agent stands down for an offline one that already accepted the message', async () => {
+  // Ava took the message before the restart, and her app did not come back.
+  // Bea, live and the only one who could answer, must not run it again.
+  const socketAva = createFakeSocket();
+  socketAva.start = async () => {
+    throw new Error('socket failed to start');
+  };
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = async (sessionId: string) => {
+    const agentId = sessionId.split(':')[1] ?? '';
+    return { agentId, metadata: {}, lastSpokeAt: agentId === 'bea' ? '2026-01-01T00:00:09.000Z' : '2026-01-01T00:00:01.000Z' };
+  };
+  gateway.holdsMessage = async (sessionId: string, key: string) =>
+    sessionId.startsWith('slack:ava:') && key === 'ava:C1:994.1';
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socketBea.deliver('message', channelMessage({ text: 'so?', ts: '994.1', thread: '994.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches, []);
+});
+
+test('after a restart, an agent that took a message keeps it though it listens differently now', async () => {
+  // Ava took the reply under the thread rule; the operator has since set her
+  // to mentions only. Bea, the newer speaker, must not run it again.
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava', listens: 'mentions' },
+    { id: 'bea', name: 'Bea' },
+  ];
+  gateway.sessionRouting = async (sessionId: string) => {
+    const agentId = sessionId.split(':')[1] ?? '';
+    return { agentId, metadata: {}, lastSpokeAt: agentId === 'bea' ? '2026-01-01T00:00:09.000Z' : '2026-01-01T00:00:01.000Z' };
+  };
+  gateway.holdsMessage = async (sessionId: string, key: string) =>
+    sessionId.startsWith('slack:ava:') && key === 'ava:C1:995.1';
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const redelivered = channelMessage({ text: 'so?', ts: '995.1', thread: '995.0' });
+  await socketAva.deliver('message', redelivered);
+  await socketBea.deliver('message', redelivered);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches, []);
+});
+
+// ---- conversation reads (message.read) -------------------------------------
+
+test('readConversation reads a thread the app can see, paging and naming authors', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-FEEDBACK', { is_member: true });
+  const calls: Array<{ ts: string; cursor?: string; limit?: number }> = [];
+  web.conversations.replies = async (args) => {
+    calls.push({ ts: args.ts, ...(args.cursor ? { cursor: args.cursor } : {}), ...(args.limit !== undefined ? { limit: args.limit } : {}) });
+    return args.cursor
+      ? { messages: [{ ts: '1791333032.874939', thread_ts: '1791332967.606559', user: 'U-DYLAN', text: 'detail', files: [{ name: 'x.png' }] }] }
+      : {
+        messages: [{ ts: '1791332967.606559', thread_ts: '1791332967.606559', bot_id: 'B-BLAIR', bot_profile: { name: 'Blair' }, text: 'Summary', reply_count: 1 }],
+        response_metadata: { next_cursor: 'page-2' },
+      };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-FEEDBACK', thread: '1791332967.606559', limit: 50 });
+  assert.deepEqual(calls.map((call) => call.cursor), [undefined, 'page-2']);
+  assert.equal(calls[0]?.ts, '1791332967.606559');
+  assert.equal(result.more, false);
+  assert.deepEqual(result.messages[0], {
+    id: '1791332967.606559',
+    author: 'B-BLAIR',
+    authorName: 'Blair',
+    text: 'Summary',
+    at: new Date(1791332967606.559).toISOString(),
+    replies: 1,
+  });
+  assert.equal(result.messages[1]?.authorName, 'Dylan');
+  assert.equal(result.messages[1]?.thread, '1791332967.606559');
+  assert.deepEqual(result.messages[1]?.files, ['x.png']);
+  await adapter.stop();
+});
+
+test('readConversation reads top-level history within a window and stops at the limit', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true, is_private: true });
+  const seen: Array<{ oldest?: string; latest?: string; limit?: number; inclusive?: boolean }> = [];
+  web.conversations.history = async (args) => {
+    seen.push({ ...(args.oldest ? { oldest: args.oldest } : {}), ...(args.latest ? { latest: args.latest } : {}), ...(args.limit !== undefined ? { limit: args.limit } : {}), ...(args.inclusive !== undefined ? { inclusive: args.inclusive } : {}) });
+    return { messages: [{ ts: '200.000001', user: 'U-X', text: 'b' }, { ts: '199.000001', user: 'U-X', text: 'a' }], has_more: true, response_metadata: { next_cursor: 'next' } };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', after: '100.000000', before: '300.000000', limit: 2 });
+  assert.deepEqual(seen, [{ oldest: '100.000000', latest: '300.000000', limit: 2, inclusive: false }]);
+  assert.equal(result.messages.length, 2);
+  assert.equal(result.more, true);
+  await adapter.stop();
+});
+
+test('readConversation returns plain text, not Slack markup, and names only principals', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: [{
+      ts: '200.000001',
+      user: 'U-DYLAN',
+      text: '<@U-DYLAN> and <@U-STRANGER> see <#C-OPS|ops> and <https://example.com/a?b=1&amp;c=2|the doc>, '
+        + 'also <https://example.com>, <!here>, <!subteam^S1|@oncall>, <!date^1791332967^{date}|Oct 6>. 1 &lt; 2 &amp;&amp; 3 &gt; 2',
+    }],
+  });
+  const socket = createFakeSocket();
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused')));
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 5 });
+  assert.equal(
+    result.messages[0]?.text,
+    '@Dylan and @U-STRANGER see #ops and the doc (https://example.com/a?b=1&c=2), '
+      + 'also https://example.com, @here, @oncall, Oct 6. 1 < 2 && 3 > 2',
+  );
+  await adapter.stop();
+});
+
+test('readConversation looks up a bounded number of uncached authors, together, and leaves the rest as ids', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-BUSY', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: Array.from({ length: 30 }, (_, index) => ({ ts: `${300 - index}.000001`, user: `U-P${index}`, text: `m${index}` })),
+  });
+  let looked = 0;
+  let inFlight = 0;
+  let peak = 0;
+  web.users.info = async ({ user }: { user: string }) => {
+    looked += 1;
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight -= 1;
+    return { user: { profile: { display_name: `Name ${user}` } } };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-BUSY', limit: 50 });
+  assert.equal(looked, 10);
+  assert.ok(peak > 1, 'the lookups overlap rather than run one at a time');
+  assert.equal(result.messages[0]?.authorName, 'Name U-P0');
+  assert.equal(result.messages[29]?.authorName, undefined);
+  assert.equal(result.messages[29]?.author, 'U-P29');
+  await adapter.stop();
+});
+
+test('readConversation counts mentioned principals against the same lookup bound as authors', async () => {
+  const principals = Array.from({ length: 25 }, (_, index) => `U-M${index}`);
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-BUSY', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: [{ ts: '300.000001', user: 'U-AUTHOR', user_profile: { display_name: 'Author' }, text: principals.map((id) => `<@${id}>`).join(' ') }],
+  });
+  let looked = 0;
+  web.users.info = async ({ user }: { user: string }) => {
+    looked += 1;
+    return { user: { profile: { display_name: `Name ${user}` } } };
+  };
+  const socket = createFakeSocket();
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused')));
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-BUSY', limit: 5 });
+  assert.equal(looked, 10);
+  const text = result.messages[0]?.text ?? '';
+  assert.match(text, /^@Name U-M0 /);
+  assert.match(text, /@U-M24$/);
+  await adapter.stop();
+});
+
+test('readConversation refuses DMs and group DMs, even ones the app is in', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('D-DYLAN', { is_im: true, is_member: true });
+  web.knownConversations.set('G-GROUP', { is_mpim: true, is_member: true });
+  let read = false;
+  web.conversations.history = async () => {
+    read = true;
+    return { messages: [] };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'D-DYLAN', limit: 10 }), /direct message/);
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'G-GROUP', limit: 10 }), /direct message/);
+  assert.equal(read, false, 'nothing is read on a refusal');
+  await adapter.stop();
+});
+
+test('readConversation refuses a channel the app is not a member of, or cannot see', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-OTHER', { is_member: false });
+  web.conversations.history = async () => ({ messages: [] });
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'C-OTHER', limit: 10 }), /not a member of C-OTHER — invite it/);
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'C-NOWHERE', limit: 10 }), /cannot see C-NOWHERE/);
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'nobody', conversation: 'C-OTHER', limit: 10 }), /has no Slack app/);
   await adapter.stop();
 });

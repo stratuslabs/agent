@@ -10,6 +10,7 @@
  */
 export {
   declaredRiskFor,
+  isPackageName,
   parsePluginManifest,
   parseToolRiskOverrides,
   resolvePluginAgentConfig,
@@ -81,3 +82,4 @@ export {
 } from './provenance.ts';
 
 export { workspaceResolver, workspacePreparer, allAgentWorkspaces } from './workspace.ts';
+export { protectedPathGuard, type ProtectedPathGuard } from './protected.ts';

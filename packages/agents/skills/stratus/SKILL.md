@@ -1,6 +1,6 @@
 ---
 name: stratus
-description: Use whenever someone asks how Stratus itself works or how to set something up in it, such as where a config, credential, soul, log, or workspace lives, how to give you an API key or a new tool, why you can or cannot do something, which stratus command does what, or how Slack, approvals, plugins, or the daemon behave. Read it before you search files or guess.
+description: Use whenever someone asks how Stratus itself works or how to set something up in it, such as where a config, credential, soul, log, or workspace lives, how to give you an API key or a new tool, why you can or cannot do something, what you remember and how to make you forget it, why a reply stopped partway or came from another model, which version is running, which stratus command does what, or how Slack, approvals, plugins, or the daemon behave. Read it before you search files or guess.
 ---
 
 # How Stratus works
@@ -23,12 +23,13 @@ Everything is under `~/.stratus/` on the daemon's machine:
 | Path | What it is |
 | --- | --- |
 | `config.json` | The global config, and the trusted one (see "Config"). `0600`, because a plugin's config in it can hold secrets such as `tool-shell`'s `env`, and every save keeps it that way; `stratus doctor` flags one other users can read |
-| `credentials.json` | Provider sign-ins, channel tokens (Slack), and named credentials. `0600`, and kept that way by Stratus, which is why it is edited with `stratus credential set` rather than by hand |
+| `credentials.json` | Provider sign-ins, channel secrets (Slack's tokens and any channel plugin's, under `channels.<kind>.<agentId>`), and named credentials. `0600`, and kept that way by Stratus, which is why it is edited with `stratus credential set` and `stratus channel set` rather than by hand |
 | `agents/<file>.md` | A soul: one agent's identity and allowlists. The file name is not the id; the id is the soul's `id:`, or derived from its `name:`. Use the id your instructions give |
 | `agents/<id>/` | That agent's state: `sessions.db`, `memory.jsonl`, `whitelist.json` (its standing approvals), and `workspace/` |
 | `agents/<id>/workspace/` | The agent's own working directory, where `shell.run` starts by default |
 | `fleet.db` | Schedules, and the index of every session |
 | `skills/<id>/SKILL.md` | Skills the operator installed |
+| `plugins/<package>/` | What a plugin keeps across restarts, such as a channel's read position. `0700` |
 | `logs/stratusd.jsonl` | The daemon's structured log, read with `stratus logs` |
 | `gateway.json`, `gateway-token` | Where the control API is listening, and its bearer token. `0600` |
 | `stratusd.lock` | The running daemon's claim on this home: one daemon per home |
@@ -53,7 +54,7 @@ The config decides which provider and model run, which plugins load, and how app
 
 Which provider and model a turn uses: for `stratus run` and `stratus chat`, command-line flags beat `STRATUS_*` environment variables, which beat the soul's `provider`/`model`, which beat the file. Under `stratus serve` a soul's `provider`/`model` beats all of those, because each agent in a roster runs on its own. A changed `provider` or `model` in the config reaches the next turn without a restart.
 
-A project-local `stratus.config.json` ships inside repositories, so it is **untrusted**. It cannot set `plugins`, `approvals`, `principals`, `slack`, `api`, `maxTurns`, `apiKeyEnv`, `soul`, `systemPrompt`, `executor`, or `memoryStore`. Those are read only from `~/.stratus/config.json` or a file named by `--config` or `STRATUS_CONFIG`. A project-local file that sets one of them has it ignored, with a warning. For `principals`, `slack`, `maxTurns`, `executor`, and `memoryStore` the daemon uses `~/.stratus/config.json`'s instead; for `plugins`, `approvals`, and `api` it uses none. A project-local file that says nothing about one of those eight leaves the global one in force.
+A project-local `stratus.config.json` ships inside repositories, so it is **untrusted**. It cannot set `plugins`, `approvals`, `principals`, `slack`, `api`, `maxTurns`, `agentMaxTurns`, `apiKeyEnv`, `soul`, `systemPrompt`, `executor`, or `memoryStore`. Those are read only from `~/.stratus/config.json` or a file named by `--config` or `STRATUS_CONFIG`. A project-local file that sets one of them has it ignored, with a warning. For `principals`, `slack`, `maxTurns`, `executor`, and `memoryStore` the daemon uses `~/.stratus/config.json`'s instead; for `plugins`, `approvals`, and `api` it uses none. A project-local file that says nothing about one of those eight leaves the global one in force.
 
 When a setting "isn't taking", these say why:
 
@@ -69,8 +70,8 @@ This is the question you will be asked most. A secret reaches Stratus in one of 
 - **Channel tokens** (a Slack app's tokens): `stratus setup` → Channels, or the dashboard. No agent can read them, yours included.
 - **Named credentials**, such as `search.apiKey`, are for tools whose plugin declares that name. A web search backend is the common one: its key is always `search.apiKey`, whatever the vendor. These are the only secrets you can ask for yourself.
 - **A shell command's or an MCP server's token** is not a named credential: `shell.run` and MCP servers never read the credential store. Your operator puts it in the trusted config at the machine, and the daemon needs a restart:
-  - for the shell, in `@stratusagent/tool-shell`'s `env`, under `agents.<id>` to keep it to one agent (whose commands can then read it);
-  - for an MCP server, in `servers.<name>.headers` (HTTP) or `servers.<name>.env` (stdio), which every agent granted `mcp.<name>.*` uses.
+  - for the shell, in `@stratusagent/tool-shell`'s `env`, under `agents.<id>` to keep it to one agent (whose commands can then read it). An agent's `env` is added to the shared one rather than replacing it, its own names win, and a name set to `null` there is withheld from that agent;
+  - for an MCP server, in `servers.<name>.headers` (HTTP) or `servers.<name>.env` (stdio), which every agent granted `mcp.<name>.*` uses. Its replies are labelled `external`, and so is everything you remember after reading them, unless the operator sets `servers.<name>.outputTrust` to `agent` (or `unknown`) for a server they run; never `user`.
 
   `passEnv` beside them forwards variables, values included, from the daemon's own environment, and only ones that are not secret belong on it.
 
@@ -102,9 +103,9 @@ When a stored key "isn't found", check in this order:
 
 ## Tools, plugins, and approvals
 
-- **Built in everywhere:** `memory.*` (remember, recall, forget, pin) and `skill.read`, which every agent has because this skill counts. **Only under the daemon:** `schedule.*`, `message.send`, `agent.delegate`, and `credential.request`, so `stratus run` and `stratus chat` cannot call them.
+- **Built in everywhere:** `memory.*` (remember, recall, forget, pin) and `skill.read`, which every agent has because this skill counts. **Only under the daemon:** `schedule.*`, `message.send`, `message.read`, `agent.delegate`, and `credential.request`, so `stratus run` and `stratus chat` cannot call them.
 - **Plugins** add the rest, each installed with `npm install -g <package>` and enabled under `plugins` in the trusted config:
-  - `@stratusagent/tool-fs` gives `fs.*`, inside configured roots only, so with no roots there is no filesystem. Roots go in `"@stratusagent/tool-fs": { "enabled": true, "roots": ["~/notes"] }`, or under `"agents": { "<id>": { "roots": [...] } }` for one agent.
+  - `@stratusagent/tool-fs` gives `fs.*`, inside configured roots only, so with no roots there is no filesystem. Whatever the roots, `fs.*` never reaches `~/.stratus` outside the agents' workspaces (credentials, config, logs, sessions, memories, souls, skills, grants), so a refusal there is by design, not a roots problem. Roots go in `"@stratusagent/tool-fs": { "enabled": true, "roots": ["~/notes"] }`, or under `"agents": { "<id>": { "roots": [...] } }` for one agent.
   - `@stratusagent/tool-shell` gives `shell.run`.
   - `@stratusagent/tool-web` gives `web.fetch`. `web.search` is not first-party: it comes from a search backend plugin someone else publishes, and needs `search.apiKey`.
   - `@stratusagent/tool-browser` gives `browser.*`.
@@ -113,13 +114,21 @@ When a stored key "isn't found", check in this order:
 - Enabled is not granted: your soul's `tools:` must also cover a plugin's tools. `stratus plugins` walks the whole chain for each tool (installed, enabled, granted to which agents, and what approvals do with a call), so it answers "why can't you use X" in one command.
 - **Risk.** Every tool is `safe`, `gated`, or `dangerous`. The daemon runs `safe` tools unattended, among them `memory.*`, `skill.read`, `credential.request`, `agent.delegate`, `schedule.list`, `schedule.cancel`, and `fs.read`, `fs.list`, and `fs.search`. Gated tools include:
   - `web.fetch`, `fs.write`, `shell.run`, `browser.*`, and `mcp.*`;
-  - `schedule.every`, `schedule.at`, and `message.send`;
+  - `schedule.every`, `schedule.at`, `message.send`, and `message.read` (which reads a channel your Slack app is in, never a DM, and labels what it returns `external`);
   - every third-party tool, `web.search` included.
   - What happens to a gated call depends on the approvals mode. Under `headless` (the default) it is refused. Under `remote` the people in `approvals.slackApprovers` are asked in Slack (or through the control API's `/approvals`) with **Allow once**, **Always allow**, and **Deny**. Under `remote` with nobody to ask, it is refused too.
-  - Either way, what was already approved still runs unattended. For `shell.run` that is a command scope plus a built-in safe list of read-only commands (`git status`, `git log`, `git diff`, `pwd`, and a few more; not `ls`). For `browser.act` it is an approved site, and for other gated tools a standing grant.
+  - Either way, what was already approved still runs unattended. For `shell.run` that is a command scope plus a built-in safe list of read-only commands (`git status`, `git log`, `git diff`, `pwd`, and a few more; not `ls`), plus `grep`, `head`, `tail`, `wc`, `sort`, and `uniq` as filters that are never handed a path. A pipeline runs unattended when every stage would on its own (`git log | grep fix | head -n 20`); `||`, `;`, `&`, redirection, and `$( )` still mean asking. For `browser.act` and `web.fetch` it is an approved site (a `web.fetch` redirect to another site is reported as `redirectedTo`, not followed), and for other gated tools a standing grant.
   - The exception is `approvals.externalContent: "gate"`, set for every agent or per agent under `approvals.agents.<id>`. Once your conversation has read external content (`web.fetch`, `browser.*`, `web.search`, or an `mcp.*` tool), no grant applies for the rest of it: every gated call is asked or, headless, refused, and **Always allow** is not offered. `safe` tools, the built-in read-only commands, and a schedule's pre-authorized destination still run. Your next conversation starts with its grants again.
   - **Always allow** writes one of those to `agents/<id>/whitelist.json`, except for a tool that names a destination, such as `message.send`, where it lasts for the conversation. A `dangerous` call is never offered it.
   - `stratus grants <id>` lists the grants, and `stratus grants revoke <id> --tool|--scope|--origin` takes one back. There is no command to add one: a headless daemon asks nobody, so it never creates a grant, and a call nobody has approved yet needs `remote` mode first.
+
+## Memory
+
+- **What you have.** Every turn carries the facts you pinned, an index of the topics you know about, and a short tail of what you learned most recently. Everything else is reachable with `memory.recall`. `memory.remember` writes a fact, `memory.forget` retires one by id, and `memory.pin` keeps one in your instructions every turn (pins share a 2 KiB budget and are refused past it, never evicted).
+- **Where it lives.** By default `agents/<id>/memory.jsonl`, one agent's own. A forgotten fact stops reaching you and recall, but its line stays in the file as a record. A trusted config can select another store (`memoryStore`, from a plugin), and then the memories live wherever that store keeps them.
+- **Making you forget something.** Recall it to find its id and `memory.forget` it, then say you did. Your operator can do the same at the machine with `stratus memory list <id>` and `stratus memory forget <id> <entry>`, for the default store only: with another `memoryStore` selected, `stratus memory` refuses, and that store's own tooling is the way. Never claim a fact is gone without having forgotten it.
+- **Trust labels.** Every fact carries who wrote it: `user` (your operator at a local terminal, or a Slack sender named under `principals`, said it), `agent` (your own work in a conversation of trusted content), `unknown` (no recorded origin, or written after a message from someone not a principal, or after `shell.run`), or `external` (written after you read a web page, a search result, or an MCP reply). Label facts by what they are when you repeat them: an `external` or `unknown` one may be a stranger's words.
+- A label only ever goes down within a conversation, and only your operator can raise one, with `stratus memory reassert` at the machine. No tool can.
 
 ## Slack
 
@@ -145,25 +154,36 @@ When a stored key "isn't found", check in this order:
 - **Running it.** `stratus serve` runs the daemon in the foreground. `stratus service install` keeps it always on, with `stratus service start|stop|status|uninstall`. There is no top-level `stratus start`, `stop`, or `status`, and no `stratus service restart`.
   - On macOS it is a LaunchAgent, started at login, not at power-on. `--no-login` also gives up restarts after a crash.
   - On Linux it is a systemd user unit, which needs `loginctl enable-linger` to run while nobody is logged in.
+  - It will not start while the trusted config (`~/.stratus/config.json`, or the file `--config` names) fails to parse or validate. The error goes to stderr, not `stratus logs`: on Linux the unit then shows as failed until the file is fixed and `stratus service start` is run; on macOS launchd keeps retrying until the file is fixed. A daemon already running keeps its last good config, and `stratus service start`, `stratus update`, and `stratus restart` refuse up front with the same error rather than restart into it.
 - **`stratus restart`** drains in-flight turns and restarts, and needs the control API. Without the API, use `stratus service stop` then `stratus service start`.
-  - A restart is needed after a change to `plugins` (a plugin's `env` included), `approvals`, `api`, `principals`, `slack`, `maxTurns`, `executor`, or `memoryStore`, and after new Slack tokens.
+  - A restart is needed after a change to `plugins` (a plugin's `env` included), `approvals`, `api`, `principals`, `slack`, `maxTurns`, `executor`, or `memoryStore`, and after new channel secrets (Slack's tokens or a channel plugin's).
   - It is not needed for soul edits, stored credentials and keys, the config's `provider`/`model`, or skills (`stratus skill reload`).
   - `stratus update` stops and starts the service itself. Only a daemon someone started with `stratus serve` needs restarting by hand.
+- In a container or under a system unit, `stratus serve --log-format json` also writes the log's records to stdout, for `docker logs`, journald, or a log shipper. `stratus health` is the probe.
 - **`stratus logs`** (`-f` to follow, `--agent`, `--session`) reads the structured log. It records that tools ran and sessions finished, never prompts or replies. One exception: a failed session keeps the provider's error text, so skim a log before sharing it.
   - A daemon that fails *before* it starts serving writes nothing there. Its error is in `~/.stratus/logs/stratusd.err.log` on macOS, in `journalctl --user-unit=stratusd.service` on Linux, or on the terminal that ran `stratus serve`.
 - **The control API** is a separate install, `@stratusagent/control-api`, serving `/api/v1` on `127.0.0.1:4123`. The web dashboard is another, `@stratusagent/dashboard`, opened with `stratus dashboard`, which starts a daemon if none is running.
   - From another device, the recommended path is a tunnel such as Tailscale, with `api.publicUrl` set to that address so credential links open there.
 
+## When a reply stops or changes model
+
+- **"Out of steps."** One message may take `maxTurns` rounds of tool calls (default 40, set in the trusted config, restart to change). Past that you are told you are out of steps, get one last call with no tools, and answer with what you did and what is left. Replying "continue" carries on with a fresh allowance. An agent that does long work should have its own budget raised with `agentMaxTurns: { "<id>": 300 }` in the trusted config (restart to change), which leaves the rest of the fleet on `maxTurns`.
+- **Stopped with no reply.** On a provider that streams (Anthropic, Codex, and plugin providers that say they stream), the daemon's watchdog aborts a turn when the model reports nothing for `--idle-timeout` seconds (default 120). On one that does not, such as an OpenAI-compatible endpoint, there is no watchdog, and a silent request ends only when the provider's own request fails or times out, so `--idle-timeout` neither explains nor fixes it. The session ends failed, with `no activity for 120000ms`, and `stratus logs --agent <id>` names the last thing it heard. A tool that is running, or a call waiting on an approval, never trips it.
+- **Cut off at the output cap.** A reply longer than the model may write in one turn fails rather than being posted half-finished, and the error says so. With an Anthropic API key that cap is `maxTokens` in the config (default 16000); a Claude subscription run does not take that setting, so raising it changes nothing there. Offer a shorter answer, or, on an API key, ask for the cap to be raised. Never ask for a longer timeout.
+- **Answering on another model.** When the configured model fails a request and a `fallbackModel` is set, that conversation switches to the fallback and stays on it, even across restarts, so it never silently swaps back. Not every failure switches: a conversation too long for the window is trimmed and retried on the same model, a cancelled turn just stops, and a Codex or Claude subscription turn that fails after its tools already ran surfaces the error instead, since a retry elsewhere would run them twice. Those leave the conversation on the configured model, with nothing to roll over. Your instructions say when you are on the fallback. `stratus logs` shows the error that caused the switch, and `stratus session rollover <session id>` starts the conversation over on the configured model.
+- When asked why a reply stopped, look before you answer if you can: with `shell.run` you can run `stratus logs --agent <your id>` (it is gated, so it needs approval or a granted scope), and an `fs` root covering `~/.stratus/logs/` lets you read the file. Without either, give the likely cause from what your transcript shows (an out-of-steps answer, a message with no reply, a request for a very long answer) and the log command that confirms it, rather than a certain answer.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `stratus setup` | The menu: providers, models, an agent, plugins, channels (Slack), approvals, always-on |
+| `stratus setup` | The menu: providers, models, an agent, plugins, channels (Slack, and any channel an enabled plugin contributes), approvals, always-on |
 | `stratus chat` / `stratus run` | Talk to an agent in the terminal, as a conversation or one prompt |
 | `stratus serve` | Run the daemon in the foreground |
 | `stratus service install\|uninstall\|start\|stop\|status` | Keep the daemon running as a background service |
 | `stratus restart` | Announced drain-and-restart of the running daemon |
 | `stratus logs` | Read the daemon's log |
+| `stratus health` | Whether the running daemon is serving: exit 0 if so, for a container healthcheck or a probe |
 | `stratus doctor` | What a run would use, and why |
 | `stratus update` | Update Stratus and its companion packages (`--check` to look first) |
 | `stratus dashboard` | Open the web dashboard with a one-time sign-in link |
@@ -173,6 +193,7 @@ When a stored key "isn't found", check in this order:
 | `stratus skills` | List skills and which agents enable each |
 | `stratus plugins` | Every tool, its plugin, who is granted it, and what approvals do |
 | `stratus credential set` / `stratus credential remove` / `stratus credentials` | Store (value on stdin) or remove a named credential; list the names |
+| `stratus channel set` / `stratus channel remove` / `stratus channel list` | Store (values prompted without echo, or one per stdin line) or remove a channel's secrets for one agent; list which agents have them. A channel's secrets are never yours to read, and a running daemon picks them up at its next start |
 | `stratus grants <id>` / `stratus grants revoke <id>` | An agent's standing approvals, and taking one back |
 | `stratus schedules` / `stratus schedules cancel <id>` | Scheduled turns, and cancelling one |
 | `stratus memory list` / `stratus memory search` / `stratus memory audit` | An agent's live memories with their trust labels, searched as the agent does, and every entry ever written |
@@ -202,12 +223,15 @@ When you need one of those, ask for it precisely, once: the exact command, the f
 
 ## Going further
 
-The full documentation is at <https://github.com/stratuslabs/agent/tree/main/docs>. Link a person to the page that answers their question rather than reciting it:
+**Which version.** You are not told which version of Stratus is installed. `stratus --version` says, and `stratus update --check` says whether a newer one exists. This skill ships with the installed version, so it describes what is running.
+
+The full documentation is at <https://github.com/stratuslabs/agent/tree/main/docs>. It follows the latest code, which can be ahead of what is installed, so where a page and this skill disagree, this skill describes this install. Link a person to the page that answers their question rather than reciting it:
 
 - [Tools](https://github.com/stratuslabs/agent/blob/main/docs/guides/tools.md)
 - [Shell](https://github.com/stratuslabs/agent/blob/main/docs/guides/shell.md)
 - [Slack](https://github.com/stratuslabs/agent/blob/main/docs/guides/slack.md)
 - [Approvals](https://github.com/stratuslabs/agent/blob/main/docs/guides/approvals.md)
 - [Always on](https://github.com/stratuslabs/agent/blob/main/docs/guides/always-on.md)
+- [Memory](https://github.com/stratuslabs/agent/blob/main/docs/concepts/memory.md)
 - [Remote access](https://github.com/stratuslabs/agent/blob/main/docs/guides/remote-access.md)
 - [Troubleshooting](https://github.com/stratuslabs/agent/blob/main/docs/guides/troubleshooting.md)

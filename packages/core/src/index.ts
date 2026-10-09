@@ -284,9 +284,11 @@ export interface Message {
   toolCalls?: ToolCall[];
   toolResult?: ToolResult;
   /**
-   * Images sent with a user message. Present only on `user` messages that
-   * carried one; a provider that can show the model an image sends these
-   * alongside the text, and one that cannot names them instead.
+   * Images sent with a user message, or returned by a tool call (moved
+   * here off `ToolResult.images` as the result is recorded). Present only
+   * on `user` and `tool` messages that carried one; a provider that can
+   * show the model an image sends these alongside the text, and one that
+   * cannot names them instead.
    */
   images?: ImageAttachment[];
   /**
@@ -302,6 +304,44 @@ export interface Message {
    * — the boundary provenance draws, here at the point text enters.
    */
   overheard?: boolean;
+  /**
+   * Appended by `observe`, so it started no turn. `overheard` alone cannot
+   * say so: a turn dispatched with `addressed: false` is overheard too, and
+   * is a turn. Present only when true; a message observed before this was
+   * recorded reads as a turn, which errs toward attributing nothing to an
+   * earlier one (`isLatestTurn`).
+   */
+  observed?: boolean;
+  /**
+   * The caller's idempotency key for the dispatch that brought this user
+   * message (`RunInput.idempotencyKey`). Written in the same save as the
+   * message, so a key is never durable without its message or the other
+   * way round; `workItemState` reads it back.
+   */
+  idempotencyKey?: string;
+  /**
+   * Why the turn this user message started failed, written by
+   * `recordTurnFailure` in the save that fails it. The session's
+   * `lastError` is the latest turn's and the next turn replaces it; this
+   * stays, so `turnFailureFor` can answer for any turn a key names.
+   */
+  turnError?: string;
+  /**
+   * This message's turn was continued once after the process running it
+   * died (`AgentRunner.continueTurn`). A host fails a second such turn
+   * instead of continuing it again: a turn that takes the process down
+   * with it would otherwise do so on every start. Present only when true.
+   */
+  continuedAfterCrash?: boolean;
+  /**
+   * The turn this message started could reach a provider that runs its own
+   * tool loop (a harness): what that turn did is not all in this
+   * transcript, so a crash mid-turn cannot be continued from it. Recorded
+   * at accept time, because the runtime a crashed turn ran on is not the
+   * one a restart resolves if the configuration changed in between.
+   * Present only when true; see `RunInput.hostedLoop`.
+   */
+  hostedLoop?: boolean;
 }
 
 export interface AgentDescriptor {
@@ -586,6 +626,15 @@ export interface ToolResult {
    * already hold hostile page content. A new result always carries one.
    */
   trust?: TrustLevel;
+  /**
+   * Images the call handed back through `ExecutionContext.attachImage` — a
+   * screenshot, an image file read from disk. In flight only: the runner
+   * moves them onto the tool message's `images` as it records the result,
+   * so they are stored, budgeted, and trimmed exactly as a user message's
+   * images are, and never serialized into the message content or carried
+   * on a bus event.
+   */
+  images?: ImageAttachment[];
 }
 
 /**
@@ -623,7 +672,16 @@ export const UNTRUSTED_TOOL_RESULT_NOTE =
  * transcripts, where a changed byte is a cache miss.
  */
 export const renderToolResultContent = (result: Pick<ToolResult, 'ok' | 'output' | 'error' | 'trust'>): string => {
-  const output: JsonValue = result.ok ? result.output : { error: result.error ?? 'Tool failed' };
+  // A failure keeps what the tool returned with it. A shell command that
+  // exits 1 carries its stdout, stderr, and exit code, and without them the
+  // model cannot tell a failing test from a typo from a missing program, so
+  // it guesses or asks. A failure with no output renders exactly as before,
+  // so most persisted transcripts replay byte-identical.
+  const output: JsonValue = result.ok
+    ? result.output
+    : result.output === null || result.output === undefined
+      ? { error: result.error ?? 'Tool failed' }
+      : { error: result.error ?? 'Tool failed', output: result.output };
   return JSON.stringify(
     result.trust === 'external'
       ? { untrusted: true, untrustedNote: UNTRUSTED_TOOL_RESULT_NOTE, output }
@@ -778,8 +836,12 @@ export const originOf = (rawUrl: string): string | undefined => {
  * as written, so every comparison of an origin in this codebase is of the
  * same thing.
  */
-const originForSession = (tool: Pick<Tool, 'originFor'>, session: Session): string | undefined => {
-  const reported = tool.originFor?.(session);
+const originForSession = (
+  tool: Pick<Tool, 'originFor'>,
+  session: Session,
+  input: JsonObject,
+): string | undefined => {
+  const reported = tool.originFor?.(session, input);
   return reported === undefined ? undefined : originOf(reported);
 };
 
@@ -2665,10 +2727,18 @@ export interface ConversationContext {
    * direct message.
    */
   shared?: boolean;
+  /**
+   * The channel's own id for the room, such as Slack's `C0123456789`: what
+   * `message.read` and `message.send` take, and what lets an agent say or
+   * remember which room this is. Never set for a direct message, where the
+   * id names nothing the agent can use elsewhere.
+   */
+  id?: string;
   // No channel name, deliberately: anyone who can create or rename a
   // channel chooses it, and this reaches the system prompt, where a name
   // like `ignore-all-previous-instructions` would outrank the soul. The
-  // kind and the count are what decide how to write, and neither is text.
+  // kind, the count, and the id are what it needs, and none of them is text
+  // a person chose.
 }
 
 /**
@@ -2683,6 +2753,9 @@ const CONVERSATION_KINDS: readonly string[] = ['direct', 'group', 'private', 'pu
 // vouched for, but still typed, so anything that is not plainly a name is
 // dropped rather than quoted.
 const CONVERSATION_WITH_PATTERN = /^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} .'\u2019-]{0,63}$/u;
+// A platform-assigned id, never a word anyone typed: Slack's are capitals
+// and digits. Anything else is dropped rather than quoted.
+const CONVERSATION_ID_PATTERN = /^[A-Z0-9]{6,32}$/;
 
 /**
  * The room a turn's metadata describes, keeping only what is safe to put
@@ -2693,7 +2766,7 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
   }
-  const { kind, members, with: withWhom, thread, shared } = raw as Record<string, unknown>;
+  const { kind, members, with: withWhom, thread, shared, id } = raw as Record<string, unknown>;
   if (typeof kind !== 'string' || !CONVERSATION_KINDS.includes(kind)) {
     return undefined;
   }
@@ -2703,6 +2776,7 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
     ...(kind === 'direct' && typeof withWhom === 'string' && CONVERSATION_WITH_PATTERN.test(withWhom.trim()) ? { with: withWhom.trim() } : {}),
     ...(thread === true ? { thread: true } : {}),
     ...(kind !== 'direct' && shared === true ? { shared: true } : {}),
+    ...(kind !== 'direct' && typeof id === 'string' && CONVERSATION_ID_PATTERN.test(id) ? { id } : {}),
   };
 };
 
@@ -2883,7 +2957,84 @@ export interface ExecutionContext {
    * no sink gets whatever `outputTrust` declares.
    */
   markTrust?: (trust: TrustLevel) => void;
+  /**
+   * Hand the model an image with this call's result — a screenshot a tool
+   * took, an image file it read — so the agent can actually look at it
+   * rather than be told a path. Checked as it is attached: a format the
+   * model APIs refuse, an image over `IMAGE_ATTACHMENT_MAX_BYTES` or
+   * `IMAGE_ATTACHMENT_MAX_DIMENSION`, bytes that are not the image they
+   * claim to be, or more than `IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES` in one
+   * call throws, so the tool can say so in its own result. Absent when the
+   * host cannot carry images; a tool then says it has no way to show one.
+   *
+   * The result's trust label covers the image too: a screenshot of a web
+   * page is the page's content.
+   */
+  attachImage?: (image: ImageAttachment) => void;
 }
+
+/**
+ * Collects what a tool attaches through `ExecutionContext.attachImage`,
+ * held to the limits that sink documents.
+ */
+export const createImageCollector = (): { attach: (image: ImageAttachment) => void; images: () => ImageAttachment[] } => {
+  const images: ImageAttachment[] = [];
+  let total = 0;
+  return {
+    attach: (image) => {
+      if (!isImageAttachmentMediaType(image.mediaType)) {
+        throw new Error(`An image of type ${String(image.mediaType)} cannot be shown to the model; it takes ${IMAGE_ATTACHMENT_MEDIA_TYPES.join(', ')}.`);
+      }
+      const bytes = Buffer.from(image.data, 'base64');
+      if (bytes.length === 0) {
+        throw new Error('The image is empty.');
+      }
+      if (bytes.length > IMAGE_ATTACHMENT_MAX_BYTES) {
+        throw new Error(`The image is ${bytes.length} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit for one image.`);
+      }
+      if (total + bytes.length > IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES) {
+        throw new Error(`One call can return at most ${IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES} bytes of images.`);
+      }
+      const dimensions = imageDimensions(bytes, image.mediaType);
+      if (dimensions === undefined) {
+        throw new Error(`The bytes are not a complete ${image.mediaType} image.`);
+      }
+      if (dimensions.width > IMAGE_ATTACHMENT_MAX_DIMENSION || dimensions.height > IMAGE_ATTACHMENT_MAX_DIMENSION) {
+        throw new Error(`The image is ${dimensions.width}×${dimensions.height}, over the ${IMAGE_ATTACHMENT_MAX_DIMENSION}-pixel side the model can take.`);
+      }
+      total += bytes.length;
+      images.push({ mediaType: image.mediaType, data: image.data, ...(image.name !== undefined ? { name: image.name } : {}) });
+    },
+    images: () => [...images],
+  };
+};
+
+/**
+ * The transcript message for a tool result: its images moved off the
+ * result onto the message, where the replay budget and the trim already
+ * look, so the stored content and the result stay text.
+ */
+const toolResultMessage = (session: Session, result: ToolResult): Message => {
+  const { images, ...stored } = result;
+  return {
+    id: `${session.id}:tool:${result.callId}`,
+    role: 'tool',
+    name: result.toolName,
+    content: JSON.stringify(stored),
+    createdAt: new Date().toISOString(),
+    toolResult: stored,
+    ...(images !== undefined && images.length > 0 ? { images } : {}),
+  };
+};
+
+/** A result as the bus carries it: never the image bytes. */
+const withoutImages = (result: ToolResult): ToolResult => {
+  if (result.images === undefined) {
+    return result;
+  }
+  const { images: _images, ...rest } = result;
+  return rest;
+};
 
 export interface Tool {
   name: string;
@@ -2943,14 +3094,18 @@ export interface Tool {
    * effect lives in the page it is pointed at. In the form `originOf`
    * returns: `https://app.example.com`, scheme and host and port only.
    *
-   * **Deliberately not given the call's input**, which is the difference
-   * between this and its two siblings. A CSS selector describes nothing —
-   * `click("#submit")` is equally "load more results" and "confirm
-   * purchase" — so the only thing about a browser action that an operator
-   * can read and mean is *where* it happens, and that has to come from the
-   * page the conversation is already on. An input parameter would be the
-   * agent's claim about where it is, which is exactly the thing a scope
-   * must not take on trust.
+   * Two kinds of tool answer this, and they differ in what they may read.
+   * `browser.act` must answer from the *session*, never the input: a CSS
+   * selector describes nothing — `click("#submit")` is equally "load more
+   * results" and "confirm purchase" — so where it acts has to come from the
+   * page the conversation is already on, and an input parameter would be
+   * the agent's claim about where it is. `web.fetch` answers from the
+   * input, because its URL is not a claim about the action but the action
+   * itself. A tool may read `input` here **only** when its `execute` acts
+   * on exactly the origin it reported, and re-checks that before it leaves
+   * it (`web.fetch` stops at a redirect to another origin rather than
+   * following it), so a grant for one site never carries a call to
+   * another.
    *
    * Exposing this is a request to be judged by the origin, and it is also
    * a statement that the tool must never receive a tool-wide grant: the
@@ -2963,7 +3118,7 @@ export interface Tool {
    * grant answers only its own question, and how two of them compose on
    * one call is a decision nobody has made.
    */
-  originFor?(session: Session): string | undefined;
+  originFor?(session: Session, input: JsonObject): string | undefined;
   execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;
 }
 
@@ -3091,6 +3246,168 @@ export const latestTurnReply = (session: Pick<Session, 'messages'>): string | un
 };
 
 /**
+ * Whether a session's transcript already ends in the turn's answer: its
+ * last response holds no tool call, so the loop owed the model nothing more
+ * and only the save marking the turn completed is missing. A continuation
+ * then completes it without a provider call.
+ *
+ * Judged on the last response as a whole: a response's parts are saved
+ * together and its tool results after them all, so the trailing run of
+ * assistant messages is that one response. Any call in it — even one
+ * followed by text, which a provider may send in that order — means the
+ * model is owed another turn. Read it before `reconcileInterruptedToolCalls`
+ * splices results in.
+ */
+export const lastResponseIsAnswer = (session: Pick<Session, 'messages'>): boolean => {
+  const lastResponse: Message[] = [];
+  for (let index = session.messages.length - 1; index >= 0 && session.messages[index]?.role === 'assistant'; index -= 1) {
+    lastResponse.push(session.messages[index]!);
+  }
+  return lastResponse.length > 0
+    && lastResponse.every((candidate) => candidate.toolCalls === undefined || candidate.toolCalls.length === 0);
+};
+
+/**
+ * The end of a turn that answered: marked completed in one save, then
+ * announced. The runner's loop ends here, and so does a turn whose answer
+ * a process saved and then died before marking it completed — which needs
+ * no provider and no current agent definition to finish, so a host can do
+ * it with only its store and bus (`lastResponseIsAnswer` says when).
+ */
+export const completeAnsweredTurn = async (finished: Session, store: SessionStore, bus: EventBus): Promise<Session> => {
+  let session = finished;
+  session.status = 'completed';
+  await store.save(session);
+  const stored = await store.get(session.id);
+  session = stored ?? session;
+  await bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
+  await bus.emit({
+    type: 'session.completed',
+    sessionId: session.id,
+    // Copies all the way down — a fresh array of fresh records, not the
+    // session's own. This is durable accounting state rather than a
+    // per-event payload, so a subscriber that sorts the list, appends to
+    // it, or normalizes a count in place must not be reaching the stored
+    // record. A shallow array copy is not enough: the record objects
+    // behind it are the ones the session holds, and
+    // `InMemorySessionStore` hands the very same objects back on the
+    // next read.
+    //
+    // What this does NOT buy is isolation between subscribers. `emit`
+    // hands one event object to every handler in turn, so an earlier
+    // handler's edits are visible to later ones — true of `parts` on
+    // provider.response and of every other payload on this bus, and not
+    // a promise the bus has ever made. Copy before mutating.
+    ...(session.usage && session.usage.length > 0
+      ? { usage: session.usage.map((record) => ({ ...record })) }
+      : {}),
+  });
+  return session;
+};
+
+/**
+ * The longest idempotency key a dispatch accepts. Here rather than in the
+ * gateway that enforces it, because a channel composing keys from ids it
+ * does not bound (an agent's, a platform's) has to fit them to it.
+ */
+export const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
+
+/**
+ * The reply of the turn a keyed message started (`Message.idempotencyKey`),
+ * where `latestTurnReply` is the newest turn's. A repeated dispatch resolves
+ * with the session as it stands, which may have moved on since: an adapter
+ * answering a redelivered message reads the reply here, or it would answer
+ * the old message with a newer turn's words. Undefined when no message
+ * carries the key, or its turn produced no text.
+ */
+export const turnReplyFor = (session: Pick<Session, 'messages'>, idempotencyKey: string): string | undefined => {
+  const start = session.messages.findLastIndex((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (start < 0) {
+    return undefined;
+  }
+  const next = session.messages.findIndex((message, index) => index > start && message.role === 'user');
+  return latestTurnReply({ messages: session.messages.slice(0, next < 0 ? undefined : next) });
+};
+
+/**
+ * The files the turn a keyed message started produced (`filePathsOf` over
+ * its tool results), the other half of what `turnReplyFor` reads. A
+ * channel uploads a turn's files as the results arrive, so an adapter
+ * answering a repeat of a finished turn — no events, only the session —
+ * has this and nothing else to find them by.
+ *
+ * A path, not the bytes: the transcript never held them. `producedAt` is
+ * when the result naming it was recorded, so a reader can refuse a path
+ * that has been written since — by now it may hold a later turn's file.
+ */
+export const turnFilesFor = (
+  session: Pick<Session, 'messages'>,
+  idempotencyKey: string,
+): Array<{ path: string; producedAt: string }> => {
+  const start = session.messages.findLastIndex((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (start < 0) {
+    return [];
+  }
+  const next = session.messages.findIndex((message, index) => index > start && message.role === 'user');
+  return session.messages
+    .slice(start + 1, next < 0 ? undefined : next)
+    .flatMap((message) => (message.role === 'tool' && message.toolResult !== undefined
+      ? filePathsOf(message.toolResult).map((filePath) => ({ path: filePath, producedAt: message.createdAt }))
+      : []));
+};
+
+/**
+ * Fail a session's in-flight turn: `status` and `lastError`, and the error
+ * on the turn's own user message (`Message.turnError`), where the next
+ * turn cannot overwrite it. The one write every path that fails a turn
+ * makes — the runner's and the gateway's sweeps — so `turnFailureFor`
+ * reads the same record whichever failed it. In flight, the turn's message
+ * is the session's newest user message (`observe` refuses to append).
+ */
+export const recordTurnFailure = (session: Session, error: string): void => {
+  session.status = 'failed';
+  session.lastError = error;
+  const turn = session.messages.findLast((message) => message.role === 'user');
+  if (turn !== undefined) {
+    turn.turnError = error;
+  }
+};
+
+/**
+ * Whether the keyed message started the session's latest turn. A message
+ * `observe` appended since started no turn and is passed over
+ * (`Message.observed`); every other user message, keyed or not, addressed
+ * or not, started one.
+ */
+export const isLatestTurn = (session: Pick<Session, 'messages'>, idempotencyKey: string): boolean =>
+  session.messages.findLast((message) => message.role === 'user' && message.observed !== true)?.idempotencyKey === idempotencyKey;
+
+/**
+ * Why the turn a keyed message started failed, or undefined if it did not.
+ * Read from the message (`recordTurnFailure`), so a turn the session has
+ * moved on from still answers. A transcript written before turns carried
+ * their own failure has only the session's, which is the keyed turn's
+ * while it is the latest (`isLatestTurn`).
+ */
+export const turnFailureFor = (session: Pick<Session, 'messages' | 'status' | 'lastError'>, idempotencyKey: string): string | undefined => {
+  const keyed = session.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (keyed === undefined) {
+    return undefined;
+  }
+  if (keyed.turnError !== undefined) {
+    return keyed.turnError;
+  }
+  // A transcript with any failure stamped on its turn's message was written
+  // since turns carried their own, and the session's failure is stamped on
+  // whichever turn it was — not this one. Only an older transcript falls
+  // back to the session's.
+  if (session.status !== 'failed' || session.messages.some((message) => message.role === 'user' && message.turnError !== undefined)) {
+    return undefined;
+  }
+  return isLatestTurn(session, idempotencyKey) ? session.lastError ?? 'The turn failed.' : undefined;
+};
+
+/**
  * A user message's text as a prompt should carry it. The one place an
  * overheard message is framed, so the API providers' per-message blocks
  * and the two harness renderers cannot drift on what "not spoken to"
@@ -3140,6 +3457,33 @@ export const promptTextOf = (
  */
 export const isUnaddressedTurn = (session: Pick<Session, 'messages'>): boolean =>
   session.messages.findLast((message) => message.role === 'user')?.overheard === true;
+
+/**
+ * Where the dispatch carrying `idempotencyKey` stands in this session:
+ * `undefined` if no message carries the key, `unfinished` if its message
+ * is the one the session's in-flight turn is on, `finished` otherwise.
+ *
+ * Derived, never recorded separately, which is what makes it exact. The
+ * keyed message is written in the same save that sets the status to
+ * `running` (accepted and started are one write), and the save that moves
+ * the status off `running` or `pending_approval` is the turn's final one,
+ * so `finished` is written in the same transaction as the final save by
+ * construction. While a turn is in flight its message is the session's
+ * newest user message — `observe` refuses to append during one, and the
+ * runner's wrap-up notes never reach the store — the same reading
+ * `isUnaddressedTurn` relies on.
+ */
+export const workItemState = (
+  session: Pick<Session, 'messages' | 'status'>,
+  idempotencyKey: string,
+): 'unfinished' | 'finished' | undefined => {
+  const keyed = session.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  if (keyed === undefined) {
+    return undefined;
+  }
+  const inFlight = session.status === 'running' || session.status === 'pending_approval';
+  return inFlight && session.messages.findLast((message) => message.role === 'user') === keyed ? 'unfinished' : 'finished';
+};
 
 /**
  * A provider's way of saying a failed turn's prompt had already reached
@@ -3765,6 +4109,27 @@ export interface ChannelAdapterLike {
   resolveOutbound?(address: { agentId: string; to: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
+  /** See `@stratusagent/channels`' `ChannelAdapter.readConversation`. */
+  readConversation?(request: {
+    agentId: string;
+    conversation: string;
+    thread?: string;
+    after?: string;
+    before?: string;
+    limit: number;
+  }): Promise<{
+    messages: Array<{
+      id: string;
+      author: string;
+      authorName?: string;
+      text: string;
+      at?: string;
+      thread?: string;
+      replies?: number;
+      files?: string[];
+    }>;
+    more: boolean;
+  }>;
 }
 
 /**
@@ -4041,6 +4406,58 @@ export interface AgentWorkspaces {
   all(): Promise<readonly string[]>;
 }
 
+/**
+ * Where one plugin keeps durable state of its own, answered by the host.
+ *
+ * A seam for the reason {@link AgentWorkspaces} is one: the layout is the
+ * host's to own. A plugin that needs to remember something across restarts
+ * — a channel's read position in a store it does not own, a cursor into a
+ * vendor's event log — would otherwise join a path onto `~/.stratus` itself,
+ * and every plugin doing so is one more copy of the layout to find when it
+ * moves. Per plugin, never per agent: what a plugin remembers is its own,
+ * and it makes whatever structure it needs beneath this.
+ */
+export interface PluginStateDirectory {
+  /**
+   * The directory, created and with its permissions settled, for a caller
+   * about to write. Private to the daemon's user, because what a plugin
+   * keeps is the daemon's business, and a plugin cannot be expected to know
+   * the mode the rest of the state is held to.
+   *
+   * Asked per write rather than captured at setup: a daemon runs for weeks,
+   * and the directory can be removed or replaced with a link under it.
+   */
+  prepare(): string;
+}
+
+/**
+ * Files and directories on this machine that no plugin may hand an agent,
+ * answered by the host.
+ *
+ * A seam for the reason {@link AgentWorkspaces} is one: which files hold
+ * the daemon's own secrets is the host's layout, not a plugin's. Before it,
+ * nothing kept them out of a tool whose roots happened to cover them: an
+ * operator who gave an agent `roots: ["~"]` gave it `fs.read` of
+ * `~/.stratus/credentials.json`, which `fs.read` answers ungated. Roots are
+ * the operator's choice of where an agent may work; this is the short list
+ * of places no choice of roots opens.
+ *
+ * Paths, not a promise that each exists: a caller canonicalizes and
+ * tolerates what is missing. Re-read rather than cached, so a file the host
+ * starts keeping under a running daemon is protected from the next call.
+ */
+export interface ProtectedPaths {
+  /** What is protected. A directory protects everything beneath it. */
+  all(): Promise<readonly string[]>;
+  /**
+   * Directories beneath a protected one that stay reachable. The daemon
+   * protects its whole home and exempts the agents' workspaces, which live
+   * inside it and are where agents are meant to work. Whether a given agent
+   * reaches a given workspace is still its roots' decision.
+   */
+  exempt(): Promise<readonly string[]>;
+}
+
 export interface MemoryRegistrationHandle {
   register(contribution: MemoryStoreContribution): void;
 }
@@ -4093,6 +4510,25 @@ export interface PluginContext {
    * read as though it did.
    */
   workspaces?: AgentWorkspaces;
+  /**
+   * Where this plugin may keep durable state. See {@link PluginStateDirectory}.
+   *
+   * A host that omits it gives the plugin nowhere to remember anything
+   * across a restart. Such a plugin must say what it gives up — a channel
+   * that cannot store its read position cannot promise a message is handled
+   * once — and must never choose a directory of its own instead.
+   */
+  stateDirectory?: PluginStateDirectory;
+  /**
+   * What no plugin may hand an agent, whatever the agent's own roots say.
+   * See {@link ProtectedPaths}.
+   *
+   * A host that omits it protects nothing beyond what each plugin's own
+   * configuration excludes: a file-reading plugin with roots above the
+   * host's state reads the host's secrets there. The daemon and `stratus
+   * run` both supply it.
+   */
+  protectedPaths?: ProtectedPaths;
   /**
    * The host's log, for what a plugin has to say after `setup` returns —
    * a server that dropped, a reconnect that failed. The daemon's is the
@@ -4829,6 +5265,7 @@ export const renderChannelSection = (
  */
 const describeRoom = (room: ConversationContext, channel: string): string => {
   const count = room.members !== undefined ? room.members.toLocaleString('en-US') : undefined;
+  const idNote = room.id !== undefined ? ` Its ${channel} id is ${room.id}.` : '';
   const inThread = room.thread === true ? ' You are replying in a thread there, which everyone who can read the channel can open.' : '';
   const outside = room.shared === true
     ? ' It is shared with people outside this workspace, through Slack Connect or another workspace of the organization, and they read it too.'
@@ -4841,13 +5278,13 @@ const describeRoom = (room: ConversationContext, channel: string): string => {
         + 'Only the two of you can read it, so you are talking to one person.';
     case 'group':
       return `this is a group direct message in ${channel}${count !== undefined ? ` with ${count} members, you included` : ''}. `
-        + `Only they can read it.${outside}${inThread} ${forEveryone}`;
+        + `Only they can read it.${idNote}${outside}${inThread} ${forEveryone}`;
     case 'private':
       return `this is a private ${channel} channel${count !== undefined ? ` with ${count} members, you included` : ''}. `
-        + `Only its members can read it.${outside}${inThread} ${forEveryone}`;
+        + `Only its members can read it.${idNote}${outside}${inThread} ${forEveryone}`;
     case 'public':
       return `this is a public ${channel} channel${count !== undefined ? ` with ${count} members` : ''}. `
-        + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${outside}${inThread} ${forEveryone}`;
+        + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${idNote}${outside}${inThread} ${forEveryone}`;
   }
 };
 
@@ -5209,6 +5646,19 @@ export interface RunInput {
    * attachments instead, as an overheard one does.
    */
   addressed?: boolean;
+  /**
+   * The caller's name for this dispatch, stored on the user message
+   * (`Message.idempotencyKey`) in the same write as the message itself.
+   * The runner only records it; refusing a repeat is the host's job — see
+   * `workItemState` and the gateway's `DispatchInput.idempotencyKey`.
+   */
+  idempotencyKey?: string;
+  /**
+   * Whether this turn may run on a provider that hosts its own tool loop,
+   * stored on the user message (`Message.hostedLoop`). The host knows what
+   * it resolved for the turn; the runner only records it.
+   */
+  hostedLoop?: boolean;
   metadata?: JsonObject;
   /**
    * What the host can say about how this agent is run, rendered as the
@@ -5232,6 +5682,10 @@ export interface ResumeInput {
   images?: ImageAttachment[];
   /** See `RunInput.addressed`. */
   addressed?: boolean;
+  /** See `RunInput.idempotencyKey`. */
+  idempotencyKey?: string;
+  /** See `RunInput.hostedLoop`. */
+  hostedLoop?: boolean;
   /**
    * This turn's metadata — read for the sender's trust
    * (`SENDER_TRUST_METADATA_KEY`) and not merged into the session's. The
@@ -5512,6 +5966,89 @@ export interface AgentRunnerOptions {
  * task checks in rather than where it dies, and 40 is enough for real
  * multi-step work while still bounding what a runaway loop can spend.
  */
+/**
+ * What is wrong with a call's input against the shape its tool declared,
+ * or undefined when nothing the check reads is wrong.
+ *
+ * Deliberately shallow: required keys, the declared JSON types, `enum`,
+ * and `additionalProperties: false`, applied to nested objects too. It
+ * exists so a call the tool would reject anyway is answered with the reason
+ * before anyone is asked to approve it, not to replace a tool's own checks,
+ * which still run. A schema keyword it doesn't read is not a failure.
+ */
+/** JSON equality, member order aside, the way JSON Schema compares `enum` values. */
+const sameJson = (left: JsonValue | undefined, right: JsonValue | undefined, depth = 0): boolean => {
+  if (left === right) {
+    return true;
+  }
+  // Past any depth a real enum has, too deep to compare safely: unknown is
+  // not wrong, so it counts as a match and the tool's own checks decide.
+  if (depth > 64) {
+    return true;
+  }
+  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') {
+    return false;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => sameJson(item, right[index], depth + 1));
+  }
+  const leftKeys = Object.keys(left).filter((key) => left[key] !== undefined);
+  const rightKeys = Object.keys(right).filter((key) => right[key] !== undefined);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => sameJson(left[key], right[key], depth + 1));
+};
+
+export const inputProblem = (schema: JsonObject | undefined, input: JsonValue, where = 'input', depth = 0): string | undefined => {
+  if (schema === undefined || depth > 4) {
+    return undefined;
+  }
+  const declared = schema.type;
+  const types = Array.isArray(declared) ? declared.filter((type): type is string => typeof type === 'string') : typeof declared === 'string' ? [declared] : [];
+  if (types.length > 0) {
+    const actual = input === null ? 'null'
+      : Array.isArray(input) ? 'array'
+        : typeof input === 'number' ? (Number.isInteger(input) ? 'integer' : 'number')
+          : typeof input;
+    const fits = types.some((type) => type === actual || (type === 'number' && actual === 'integer'));
+    if (!fits) {
+      return `${where} should be ${types.join(' or ')}, not ${actual}`;
+    }
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some((option) => sameJson(option, input))) {
+    return `${where} should be one of ${schema.enum.map((option) => JSON.stringify(option)).join(', ')}`;
+  }
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return undefined;
+  }
+  const properties = schema.properties !== null && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+    ? schema.properties as Record<string, JsonValue>
+    : {};
+  for (const key of Array.isArray(schema.required) ? schema.required : []) {
+    if (typeof key === 'string' && input[key] === undefined) {
+      return `${where} is missing "${key}"`;
+    }
+  }
+  // With `patternProperties` a key may be declared by a pattern, and running
+  // a pattern a schema supplied is a regex engine on untrusted input. Not
+  // this check's job: extra keys are only judged when no pattern exists.
+  const patterned = schema.patternProperties !== undefined && schema.patternProperties !== null;
+  if (schema.additionalProperties === false && !patterned) {
+    const unknown = Object.keys(input).find((key) => !(key in properties));
+    if (unknown !== undefined) {
+      return `${where} has "${unknown}", which this tool does not take (it takes ${Object.keys(properties).map((key) => `"${key}"`).join(', ') || 'nothing'})`;
+    }
+  }
+  for (const [key, value] of Object.entries(input)) {
+    const property = properties[key];
+    if (value !== undefined && property !== null && typeof property === 'object' && !Array.isArray(property)) {
+      const problem = inputProblem(property as JsonObject, value, `${where}.${key}`, depth + 1);
+      if (problem) {
+        return problem;
+      }
+    }
+  }
+  return undefined;
+};
+
 export const DEFAULT_MAX_TURNS = 40;
 
 export class AgentRunner {
@@ -5575,6 +6112,8 @@ export class AgentRunner {
       createdAt: new Date().toISOString(),
       ...userImages(input.images),
       ...(input.addressed === false ? { overheard: true } : {}),
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
     };
     omitImagesOutsideReplayBudget([opening], this.imageReplayBudget);
     const sessionInput: Omit<Session, 'createdAt' | 'updatedAt'> = {
@@ -5676,6 +6215,8 @@ export class AgentRunner {
       // difference is only that a turn runs on it, and every renderer
       // frames it from the same mark.
       ...(input.addressed === false ? { overheard: true } : {}),
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
     });
     // Before the save below: the row that carries this turn is the row
     // that stops carrying the pixels nothing can send any more.
@@ -5698,6 +6239,77 @@ export class AgentRunner {
     await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
 
     return this.executeTurns(working, input.signal, undefined, input.runtime);
+  }
+
+  /**
+   * Picks up a turn whose process died while it was `running`: its user
+   * message is durable and its reply is not. Nothing is appended — the turn
+   * already has its message — so this is `resume` without the input.
+   * Dangling tool calls are closed as interrupted, telling the model they
+   * may not have run rather than running them again, and the loop goes back
+   * to the provider with the transcript as it stands.
+   *
+   * A transcript that already ends in the reply (the response was saved,
+   * and the process died before the save that marks the turn completed) is
+   * completed as it stands, with no provider call: asking again would send
+   * a second answer to one message.
+   *
+   * Marks the turn's message `continuedAfterCrash` in its first save, so a
+   * host can refuse to do this twice. Resolves `undefined` when the session
+   * is missing or no longer `running`. Never for a turn parked on a human:
+   * `recoverPendingApproval` re-enters the parked call, which reconciling
+   * here would close.
+   */
+  async continueTurn(
+    sessionId: string,
+    options: {
+      /** See `RunInput.runtime`. */
+      runtime?: AgentRuntimeContext;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<Session | undefined> {
+    const session = await this.store.get(sessionId);
+    if (!session || session.status !== 'running') {
+      return undefined;
+    }
+    // Before reconciliation splices results into the response it judges.
+    const answered = lastResponseIsAnswer(session);
+    this.reconcileInterruptedToolCalls(session);
+    const message = session.messages.findLast((candidate) => candidate.role === 'user');
+    if (message !== undefined) {
+      message.continuedAfterCrash = true;
+    }
+    await this.labelLegacySession(session);
+    await this.store.save(session);
+    const stored = await this.store.get(session.id);
+    const working = stored ?? session;
+
+    await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
+
+    if (answered) {
+      return this.completeTurn(working);
+    }
+    // Resumed, not restarted, for the reason `recoverPendingApproval` is: a
+    // turn that already took provider turns spends the budget it was on, and
+    // its failure streak counts the responses before the crash. Handed over
+    // as an answered call with nothing left to run, so the loop counts this
+    // message's responses (`responsesThroughCall`) and goes straight to the
+    // next provider turn — the wrap-up, if the ceiling has been reached.
+    const userIndex = working.messages.findLastIndex((candidate) => candidate.role === 'user');
+    const callIndex = working.messages.findLastIndex((candidate) => candidate.role === 'assistant' && (candidate.toolCalls?.length ?? 0) > 0);
+    const lastCall = callIndex > userIndex ? working.messages[callIndex]?.toolCalls?.at(-1) : undefined;
+    const lastResult = lastCall === undefined
+      ? undefined
+      : working.messages.slice(callIndex + 1).findLast((candidate) => candidate.toolResult?.callId === lastCall.id)?.toolResult;
+    const resumeFrom = lastCall !== undefined && lastResult !== undefined
+      ? {
+        pending: undefined,
+        remaining: [],
+        turn: responsesThroughCall(working, lastCall).length,
+        answered: { call: lastCall, result: lastResult },
+      }
+      : undefined;
+    return this.executeTurns(working, options.signal, resumeFrom, options.runtime);
   }
 
   /**
@@ -5733,6 +6345,7 @@ export class AgentRunner {
       content: input.message,
       createdAt: new Date().toISOString(),
       overheard: true,
+      observed: true,
     });
 
     // The speaker is judged like any sender: their words are in the
@@ -5750,11 +6363,18 @@ export class AgentRunner {
   }
 
   /**
-   * Appends a synthetic failed result directly after every tool call that
-   * has none — the durable trace of a turn interrupted between the call's
-   * save and its result's. The model sees an honest record ("interrupted,
-   * never ran to completion") instead of a wire-format violation, and a
-   * resume can decide to retry rather than assume the side effect landed.
+   * Adds a synthetic failed result for every tool call that has none — the
+   * durable trace of a turn interrupted between the call's save and its
+   * result's. The model sees an honest record ("interrupted, never ran to
+   * completion") instead of a wire-format violation, and a resume can
+   * decide to retry rather than assume the side effect landed.
+   *
+   * Placed where an uninterrupted turn would have written it: after the
+   * whole response the call came in — every assistant message that one
+   * save wrote — and after any results already recorded for it. Directly
+   * after the call would split a response whose text followed its call, and
+   * a provider replaying the response's raw turn (which already holds that
+   * text) would then send the text a second time.
    */
   private reconcileInterruptedToolCalls(session: Session): void {
     // Matched by OCCURRENCE, not by id alone: providers can reuse ids
@@ -5770,9 +6390,12 @@ export class AgentRunner {
       }
     }
 
+    const messages = session.messages;
+    // By the index of the message they go after.
+    const inserts = new Map<number, Message[]>();
     const callsSeen = new Map<string, number>();
-    for (let index = 0; index < session.messages.length; index += 1) {
-      const message = session.messages[index];
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index];
       if (message?.role !== 'assistant' || !message.toolCalls) {
         continue;
       }
@@ -5792,16 +6415,25 @@ export class AgentRunner {
           // The kernel's own sentence, not the tool's output.
           trust: 'agent',
         };
-        index += 1;
-        session.messages.splice(index, 0, {
+        let end = index;
+        while (messages[end + 1]?.role === 'assistant') {
+          end += 1;
+        }
+        while (messages[end + 1]?.role === 'tool') {
+          end += 1;
+        }
+        inserts.set(end, [...(inserts.get(end) ?? []), {
           id: `${session.id}:tool:${call.id}`,
           role: 'tool',
           name: call.toolName,
           content: JSON.stringify(result),
           createdAt: new Date().toISOString(),
           toolResult: result,
-        });
+        }]);
       }
+    }
+    if (inserts.size > 0) {
+      messages.splice(0, messages.length, ...messages.flatMap((message, index) => [message, ...(inserts.get(index) ?? [])]));
     }
   }
 
@@ -6205,33 +6837,7 @@ export class AgentRunner {
         countFailures(calls, results);
       }
 
-      session.status = 'completed';
-      await this.store.save(session);
-      const stored = await this.store.get(session.id);
-      session = stored ?? session;
-      await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
-      await this.bus.emit({
-        type: 'session.completed',
-        sessionId: session.id,
-        // Copies all the way down — a fresh array of fresh records, not the
-        // session's own. This is durable accounting state rather than a
-        // per-event payload, so a subscriber that sorts the list, appends to
-        // it, or normalizes a count in place must not be reaching the stored
-        // record. A shallow array copy is not enough: the record objects
-        // behind it are the ones the session holds, and
-        // `InMemorySessionStore` hands the very same objects back on the
-        // next read.
-        //
-        // What this does NOT buy is isolation between subscribers. `emit`
-        // hands one event object to every handler in turn, so an earlier
-        // handler's edits are visible to later ones — true of `parts` on
-        // provider.response and of every other payload on this bus, and not
-        // a promise the bus has ever made. Copy before mutating.
-        ...(session.usage && session.usage.length > 0
-          ? { usage: session.usage.map((record) => ({ ...record })) }
-          : {}),
-      });
-      return session;
+      return await this.completeTurn(session);
     } catch (caught) {
       // An abort can surface first from any layer (the provider's cancelled
       // request, an executor, this loop's own checks) — normalize so an
@@ -6263,8 +6869,7 @@ export class AgentRunner {
           createdAt: new Date().toISOString(),
         });
       }
-      session.status = 'failed';
-      session.lastError = lastError;
+      recordTurnFailure(session, lastError);
       await this.store.save(session);
       const stored = await this.store.get(session.id);
       session = stored ?? session;
@@ -6272,6 +6877,11 @@ export class AgentRunner {
       await this.bus.emit({ type: 'session.failed', sessionId: session.id, error: lastError });
       throw error;
     }
+  }
+
+  /** See `completeAnsweredTurn`; the loop's end and `continueTurn`'s. */
+  private async completeTurn(finished: Session): Promise<Session> {
+    return completeAnsweredTurn(finished, this.store, this.bus);
   }
 
   /**
@@ -6365,14 +6975,8 @@ export class AgentRunner {
    * longer re-enterable, the two facts belong in one write.
    */
   private async recordToolResult(session: Session, result: ToolResult): Promise<void> {
-    session.messages.push({
-      id: `${session.id}:tool:${result.callId}`,
-      role: 'tool',
-      name: result.toolName,
-      content: JSON.stringify(result),
-      createdAt: new Date().toISOString(),
-      toolResult: result,
-    });
+    session.messages.push(toolResultMessage(session, result));
+    omitImagesOutsideReplayBudget(session.messages, this.imageReplayBudget);
 
     if (readPendingApproval(session)?.call.id === result.callId) {
       const metadata = { ...(session.metadata ?? {}) };
@@ -6451,14 +7055,8 @@ export class AgentRunner {
       recoverable: false,
     });
 
-    session.messages.push({
-      id: `${session.id}:tool:${result.callId}`,
-      role: 'tool',
-      name: result.toolName,
-      content: JSON.stringify(result),
-      createdAt: new Date().toISOString(),
-      toolResult: result,
-    });
+    session.messages.push(toolResultMessage(session, result));
+    omitImagesOutsideReplayBudget(session.messages, this.imageReplayBudget);
     await this.store.save(session);
 
     return result;
@@ -6575,6 +7173,18 @@ export class AgentRunner {
       return rejected(`Tool not found: ${call.toolName}`);
     }
 
+    // A malformed call is answered before anyone is asked about it, for the
+    // reason an unknown tool is: approving a call the tool will reject is a
+    // question with no useful answer, and the model needs the reason, not a
+    // human's click, to fix it. Only for calls that would be asked about; a
+    // `safe` tool's own checks answer it as they always have.
+    if (resolveToolRisk(tool) !== 'safe') {
+      const problem = inputProblem(tool.parameters, call.input);
+      if (problem) {
+        return rejected(`Invalid input for ${call.toolName}: ${problem}. Fix the call and try again.`);
+      }
+    }
+
     // Only a call that can actually be held for a human is checkpointed:
     // a `safe` one is never asked about, and writing a record for it would
     // add a save to every unattended call to describe a wait that does not
@@ -6628,7 +7238,7 @@ export class AgentRunner {
         ...(signal ? { signal } : {}),
         ...(options.parkedAt ? { parkedAt: options.parkedAt } : {}),
       });
-      originWhenJudged = originForSession(tool, session);
+      originWhenJudged = originForSession(tool, session, call.input);
     } finally {
       // Cleared before anything executes and on every exit — an abort that
       // throws out of the policy must not leave the session looking parked
@@ -6660,7 +7270,7 @@ export class AgentRunner {
     // `tool.completed` keeps the pairing every consumer reads — the
     // watchdog's phase, the channel's live line. The agent is told plainly,
     // because this is a page that moved rather than a permission it lacks.
-    const originNow = originForSession(tool, session);
+    const originNow = originForSession(tool, session, call.input);
     if (originNow !== originWhenJudged) {
       const result: ToolResult = {
         callId: call.id,
@@ -6676,7 +7286,15 @@ export class AgentRunner {
       return result;
     }
 
-    const result = await this.executor.execute(call, tool, session, signal ? { signal } : undefined);
+    const collector = createImageCollector();
+    const executed = await this.executor.execute(call, tool, session, {
+      ...(signal ? { signal } : {}),
+      attachImage: collector.attach,
+    });
+    // Only a call that succeeded shows what it attached: a failure's error
+    // is the result, and an image ahead of it would read as the answer.
+    const attached = executed.ok ? collector.images() : [];
+    const result: ToolResult = attached.length > 0 ? { ...executed, images: attached } : withoutImages(executed);
     // Where tools execute, not in the provider loop above: this path also
     // serves `executeHostedToolCall`, through which `provider-claude-code`
     // and `provider-codex` run their bridged kernel tools. A hook in
@@ -6685,7 +7303,7 @@ export class AgentRunner {
     // wrong. An executor that returned no label is read as `unknown` —
     // absence of provenance is not evidence of trust, here either.
     await this.taint(session, result.trust ?? 'unknown', call.toolName);
-    await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
+    await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result: withoutImages(result) });
     return result;
   }
 }

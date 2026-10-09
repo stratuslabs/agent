@@ -10,7 +10,8 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "eval:room": "pnpm --filter @stratusagent/cli run eval:room",
-    "eval:defaults": "pnpm --filter @stratusagent/cli run eval:defaults"
+    "eval:defaults": "pnpm --filter @stratusagent/cli run eval:defaults",
+    "eval:skill": "pnpm --filter @stratusagent/cli run eval:skill"
   },
   "license": "MIT",
   "repository": {
@@ -21,6 +22,7 @@
     "stratus-plugin-aliased": "workspace:stratus-plugin-fixture@*",
     "stratus-plugin-fixture": "workspace:*",
     "stratus-plugin-fixture-channel": "workspace:*",
+    "stratus-plugin-fixture-channel-twin": "workspace:stratus-plugin-fixture-channel@*",
     "stratus-plugin-fixture-executor": "workspace:*",
     "stratus-plugin-fixture-memory": "workspace:*",
     "stratus-plugin-fixture-provider": "workspace:*"

@@ -56,6 +56,28 @@ export interface CommandScope {
    * ordinary push.
    */
   denyRefspecForms?: boolean;
+  /**
+   * At most this many positional arguments, where `listOnly` allows none.
+   * `grep` reads its pattern from the first positional and a *file* from
+   * every one after it, so a `grep` that may only filter what is piped to
+   * it is a `grep` with one.
+   */
+  maxPositionals?: number;
+  /**
+   * Flags whose value is the next token (`-n 20`), so that token is read
+   * as the flag's value rather than counted as a positional. Matched as
+   * the token is spelled, whole: `-n` takes a value, a bundle like `-vn`
+   * does not, and its next token counts as a positional.
+   */
+  flagsWithValue?: string[];
+  /**
+   * Refuse any token the shell would expand: an unquoted glob, brace,
+   * `~`, `$`, or backslash. A filter limited to one positional is only
+   * limited to one if the shell agrees — unquoted `grep *` is `grep`
+   * handed every file in the directory, the first as its pattern and the
+   * rest to read.
+   */
+  literal?: boolean;
 }
 
 /**
@@ -120,6 +142,12 @@ const DESTRUCTIVE_FLAGS = [
  * error text, which the shell tool returns. A command that can be handed a
  * path is a file reader wearing another name.
  */
+/**
+ * An `allowedFlags` entry admitting a flag that is only a number, the way
+ * `head -20` spells `head -n 20`. Not a letter, so no bundle can spell it.
+ */
+export const NUMERIC_FLAG = '-<number>';
+
 export const SAFE_COMMAND_SCOPES: CommandScope[] = [
   { command: 'git', args: ['status'] },
   { command: 'git', args: ['log'] },
@@ -169,6 +197,67 @@ export const SAFE_COMMAND_SCOPES: CommandScope[] = [
     allowedFlags: ['--verbose', 'v'],
     deniedArgs: ['add', 'remove', 'rm', 'rename', 'set-url', 'set-head', 'set-branches', 'prune', 'update'],
   },
+  // Filters: what they read is stdin, which is what makes them safe at the
+  // end of a pipeline whose first command is. Each is held to its listing
+  // shape, a named set of flags, and no token the shell would expand, so
+  // none of them can be handed a path: `tail -n 50 log` asks, and
+  // `git log | tail -n 50` does not. `grep` keeps its one positional, the
+  // pattern, and not `-e`, `-f`, or `-r`, each of which would turn the next
+  // positional or the directory into something it reads. No `c` letter in
+  // any of them: `-c` is refused in every scope for `git -c`'s sake, so
+  // the counting forms are spelled long (`uniq --count`, `wc --bytes`).
+  {
+    command: 'grep',
+    maxPositionals: 1,
+    literal: true,
+    allowedFlags: [
+      '--ignore-case', '--invert-match', '--line-number', '--count', '--word-regexp', '--line-regexp',
+      '--only-matching', '--extended-regexp', '--fixed-strings', '--basic-regexp', '--max-count',
+      '--after-context', '--before-context', '--context', '--color', '--colour', '--quiet', '--silent',
+      '--no-messages',
+      'i', 'v', 'n', 'w', 'x', 'o', 'E', 'F', 'G', 'm', 'A', 'B', 'C', 'q', 's',
+    ],
+    flagsWithValue: ['-m', '-A', '-B', '-C', '--max-count', '--after-context', '--before-context', '--context'],
+  },
+  {
+    command: 'head',
+    listOnly: true,
+    literal: true,
+    allowedFlags: ['--lines', '--bytes', '--quiet', '--silent', 'n', 'q', NUMERIC_FLAG],
+    flagsWithValue: ['-n', '--lines', '--bytes'],
+  },
+  {
+    command: 'tail',
+    listOnly: true,
+    literal: true,
+    allowedFlags: ['--lines', '--bytes', '--quiet', '--silent', 'n', 'q', 'r', NUMERIC_FLAG],
+    flagsWithValue: ['-n', '--lines', '--bytes'],
+  },
+  {
+    command: 'wc',
+    listOnly: true,
+    literal: true,
+    allowedFlags: ['--lines', '--words', '--bytes', '--chars', 'l', 'w', 'm'],
+  },
+  {
+    command: 'sort',
+    listOnly: true,
+    literal: true,
+    // Not `-o`, which writes a file, nor `--compress-program`, which runs one.
+    allowedFlags: [
+      '--reverse', '--numeric-sort', '--unique', '--ignore-case', '--human-numeric-sort', '--version-sort',
+      '--stable', '--key', '--field-separator',
+      'r', 'n', 'u', 'f', 'h', 'V', 's', 'k', 't',
+    ],
+    flagsWithValue: ['-k', '-t', '--key', '--field-separator'],
+  },
+  {
+    command: 'uniq',
+    listOnly: true,
+    literal: true,
+    // `uniq in out` writes `out`; listOnly is what refuses that.
+    allowedFlags: ['--count', '--repeated', '--unique', '--ignore-case', 'd', 'u', 'i'],
+  },
   { command: 'pwd' },
   { command: 'whoami' },
   { command: 'uname' },
@@ -196,9 +285,20 @@ const CONTROL_OPERATORS: Array<{ pattern: RegExp; name: string }> = [
 export interface CommandAnalysis {
   /** The command as written, for messages and prompts. */
   command: string;
-  /** The base command, absent when the string could not be tokenized. */
+  /** The base command, absent when the string could not be tokenized or is a pipeline. */
   base?: string;
   tokens: string[];
+  /**
+   * Per token, whether the shell would expand it (an unquoted glob, brace,
+   * `~`, `$`, or backslash). Absent reads as "nothing expands", which only
+   * a scope marked `literal` consults.
+   */
+  expands?: boolean[];
+  /**
+   * The commands of a pipeline (`a | b`), each analyzed on its own. Present,
+   * the invocation is covered only when every one of them is.
+   */
+  pipeline?: CommandAnalysis[];
   /**
    * Why this invocation cannot be auto-approved at all — a control
    * operator, an unbalanced quote, an absolute path. Undefined means it is
@@ -207,11 +307,15 @@ export interface CommandAnalysis {
   disqualifiedBy?: string;
 }
 
-const tokenize = (command: string): string[] | undefined => {
+const EXPANDING = /[*?[\]{}~$\\]/;
+
+const tokenize = (command: string): { tokens: string[]; expands: boolean[] } | undefined => {
   const tokens: string[] = [];
+  const expands: boolean[] = [];
   let current = '';
   let quote: '"' | "'" | undefined;
   let started = false;
+  let expanding = false;
 
   for (const char of command) {
     if (quote) {
@@ -230,10 +334,15 @@ const tokenize = (command: string): string[] | undefined => {
     if (char === ' ' || char === '\t') {
       if (started) {
         tokens.push(current);
+        expands.push(expanding);
         current = '';
         started = false;
+        expanding = false;
       }
       continue;
+    }
+    if (EXPANDING.test(char)) {
+      expanding = true;
     }
     current += char;
     started = true;
@@ -245,37 +354,173 @@ const tokenize = (command: string): string[] | undefined => {
   }
   if (started) {
     tokens.push(current);
+    expands.push(expanding);
   }
-  return tokens;
+  return { tokens, expands };
+};
+
+/**
+ * Split on the pipes the shell would split on: outside quotes, and never
+ * `||`, which is a conditional rather than a pipe. Undefined when there is
+ * no reading of the string that this parser and `sh` would agree on.
+ */
+const splitPipeline = (command: string): string[] | undefined => {
+  const segments: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | undefined;
+  for (const char of command) {
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      }
+      current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === '|') {
+      segments.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (quote) {
+    return undefined;
+  }
+  segments.push(current);
+  return segments;
 };
 
 /** Read a command string as far as it can be read safely. */
 export const analyzeCommand = (command: string): CommandAnalysis => {
+  const segments = splitPipeline(command);
+  if (segments && segments.length > 1) {
+    return analyzePipeline(command, segments);
+  }
+  return analyzeSimple(command);
+};
+
+/**
+ * A pipeline is judged command by command, and nothing about it is
+ * trusted that would not be trusted of its parts. Every other control
+ * operator still disqualifies the whole: `||` and `|&` included, since
+ * the first is a conditional and the second pipes stderr. A backslash
+ * anywhere does too, because `\|` is a literal to `sh` and a split here,
+ * and a parser that splits where the shell does not is judging commands
+ * nobody runs.
+ */
+const analyzePipeline = (command: string, segments: string[]): CommandAnalysis => {
+  if (command.includes('\\')) {
+    return { command, tokens: [], disqualifiedBy: 'it pipes a command containing a backslash' };
+  }
+  const pipeline: CommandAnalysis[] = [];
+  for (const segment of segments) {
+    if (segment.trim().length === 0) {
+      return { command, tokens: [], disqualifiedBy: 'it contains an empty pipeline stage (|| or a stray |)' };
+    }
+    const analysis = analyzeSimple(segment.trim());
+    if (analysis.disqualifiedBy) {
+      return { command, tokens: [], disqualifiedBy: analysis.disqualifiedBy };
+    }
+    pipeline.push(analysis);
+  }
+  return { command, tokens: [], pipeline };
+};
+
+/**
+ * The parts of a command the shell reads as syntax. `active` is everything
+ * outside single quotes, where `$(`, backticks and `${` still run; `bare` is
+ * everything outside any quotes, the only place `(`, `;`, `|` and the rest
+ * are operators. A quoted region is replaced by a space rather than dropped,
+ * so the text on either side of it can never join into an operator the
+ * shell would not see.
+ *
+ * Undefined when this reading could disagree with `sh`: a backslash outside
+ * single quotes escapes a quote, which this scanner does not model, and an
+ * unbalanced quote has no reading at all. The caller then checks the whole
+ * string, quotes included, the way it always has.
+ */
+const syntaxOf = (command: string): { active: string; bare: string } | undefined => {
+  let active = '';
+  let bare = '';
+  let quote: '"' | "'" | undefined;
+  for (const char of command) {
+    if (quote === "'") {
+      if (char === "'") {
+        quote = undefined;
+        active += ' ';
+        bare += ' ';
+      }
+      continue;
+    }
+    if (char === '\\') {
+      return undefined;
+    }
+    if (quote === '"') {
+      if (char === '"') {
+        quote = undefined;
+        bare += ' ';
+      } else {
+        active += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      active += ' ';
+      continue;
+    }
+    if (char === '#') {
+      // An unquoted `#` can start a comment, inside which `sh` ignores
+      // quotes up to the newline — so a quote there would put this scanner
+      // in quoted mode over text the shell runs. Not modelled; checked
+      // whole instead.
+      return undefined;
+    }
+    active += char;
+    bare += char;
+  }
+  return quote ? undefined : { active, bare };
+};
+
+/** Operators the shell still honors inside double quotes. */
+const EXPANDS_IN_DOUBLE_QUOTES = new Set(['command substitution ($( ))', 'command substitution (backticks)', 'a parameter expansion (${ })']);
+
+const analyzeSimple = (command: string): CommandAnalysis => {
+  // A `(` in a commit message is text, not a subshell: operators are looked
+  // for where the shell would read them, unless the quoting is too subtle
+  // to be sure of, in which case every character counts.
+  const syntax = syntaxOf(command);
   for (const operator of CONTROL_OPERATORS) {
-    if (operator.pattern.test(command)) {
+    const where = syntax === undefined
+      ? command
+      : EXPANDS_IN_DOUBLE_QUOTES.has(operator.name) ? syntax.active : syntax.bare;
+    if (operator.pattern.test(where)) {
       return { command, tokens: [], disqualifiedBy: `it contains ${operator.name}` };
     }
   }
 
-  const tokens = tokenize(command);
-  if (!tokens || tokens.length === 0) {
+  const read = tokenize(command);
+  if (!read || read.tokens.length === 0) {
     return { command, tokens: [], disqualifiedBy: 'it could not be read as a command' };
   }
+  const { tokens, expands } = read;
 
   const base = tokens[0] as string;
   if (base.includes('/') || base.includes('\\')) {
     // A scope names a command, and `/usr/bin/git` is not that name. Refusing
     // beats resolving: `./git` in a cloned repository is a different program
     // with the same basename.
-    return { command, tokens, disqualifiedBy: 'it names a path rather than a command' };
+    return { command, tokens, expands, disqualifiedBy: 'it names a path rather than a command' };
   }
   if (base.startsWith('-') || base.includes('=')) {
     // `FOO=bar cmd` is an environment assignment, which is the shell's job
     // and not this parser's.
-    return { command, tokens, disqualifiedBy: 'it does not start with a command' };
+    return { command, tokens, expands, disqualifiedBy: 'it does not start with a command' };
   }
 
-  return { command, base, tokens };
+  return { command, base, tokens, expands };
 };
 
 const flagsOf = (token: string): { long?: string; shorts: string[] } => {
@@ -313,8 +558,14 @@ const allowsFlag = (allowed: string[], token: string): boolean => {
     return allowed.includes(long);
   }
   const letters = shorts.filter((letter) => !/[0-9]/.test(letter));
-  return letters.length > 0 && letters.every((letter) => allowed.includes(letter));
+  if (letters.length === 0) {
+    return shorts.length > 0 && allowed.includes(NUMERIC_FLAG);
+  }
+  return letters.every((letter) => allowed.includes(letter));
 };
+
+/** Git subcommands whose own `-c` creates or reuses, never configures. */
+const GIT_SUBCOMMANDS_WITH_PLAIN_C = new Set(['switch', 'commit']);
 
 /** Whether an invocation falls inside one scope. */
 export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): boolean => {
@@ -337,12 +588,39 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   }
 
   const denied = [...ALWAYS_DENIED_FLAGS, ...(scope.deniedFlags ?? [])];
+  // `-c` is refused everywhere for `git -c`, which sets config before the
+  // subcommand. After a subcommand it is that subcommand's own flag:
+  // `git switch -c` creates a branch, `git commit -c` reuses a message.
+  // Only the tail past the subcommand is relieved; the subcommand itself is
+  // a literal required argument, so `-c` cannot be it.
+  // Only for subcommands whose `-c` is known not to set config: `clone -c`
+  // does exactly what `git -c` does (`core.sshCommand=…`).
+  // Past every leading `-C <repo>` pair: git applies each in turn.
+  let subcommandAt = 0;
+  while (scope.command === 'git' && required[subcommandAt] === '-C' && required[subcommandAt + 1] !== undefined) {
+    subcommandAt += 2;
+  }
+  // Only the `-c` the shared list contributes; a scope that names `-c` in
+  // its own `deniedFlags` still means it.
+  const deniedInTail = scope.command === 'git' && GIT_SUBCOMMANDS_WITH_PLAIN_C.has(required[subcommandAt] ?? '')
+    ? [...ALWAYS_DENIED_FLAGS.filter((flag) => flag !== '-c'), ...(scope.deniedFlags ?? [])]
+    : denied;
   // A required token can itself be a flag or a refspec — an exact scope
   // carries the whole approved command — and a whitelist file is
   // hand-editable, so the prefix is held to the same rules as the rest.
-  for (const token of args.slice(0, required.length)) {
+  for (const [index, token] of args.slice(0, required.length).entries()) {
+    // A leading `-C <repo>` in a git scope is git's own directory flag, put
+    // there by `normalizeCommandScope`; the subcommand's refusal of `-C`
+    // (`git branch -C` copies) is about the tokens after the subcommand.
+    // Its operand is a path, not an argument of the subcommand's, so the
+    // subcommand's denied arguments and git's refspec rule do not apply to
+    // it either: `git -C add remote` is the `remote` subcommand in `add`.
+    if (scope.command === 'git' && subcommandAt > 0 && required.length > subcommandAt && index < subcommandAt) {
+      continue;
+    }
     if (token.startsWith('-')) {
-      if (deniesFlag(denied, token)) {
+      // Past the subcommand, the same relief the tail gets (`['switch', '-c']`).
+      if (deniesFlag(index > subcommandAt ? deniedInTail : denied, token)) {
         return false;
       }
       continue;
@@ -354,18 +632,57 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
       return false;
     }
   }
+  if (scope.literal && analysis.expands?.some((expands) => expands)) {
+    return false;
+  }
   const rest = args.slice(required.length);
-  for (const token of rest) {
+  let positionals = 0;
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index] as string;
+    // After `--` a dash token is an operand to a program that honors it and
+    // a flag to one that doesn't, and the two can't both be checked as
+    // written: it asks.
+    // The required prefix counts: a scope may itself end in `--`.
+    if (token.startsWith('-') && args.slice(0, required.length + index).includes('--')) {
+      return false;
+    }
     if (token.startsWith('-')) {
-      if (deniesFlag(denied, token)) {
+      // `-cfix` is `-c fix`: the rest is the branch (or commit) it takes,
+      // not more flags, unless the scope itself denies `-c`.
+      // A short bundle with `c` in it (`-cfix`, `-qvcHEAD`): the letters
+      // before `c` are flags, and everything after it is `-c`'s value.
+      const at = !token.startsWith('--') ? token.indexOf('c', 1) : -1;
+      if (deniedInTail !== denied && at > 0 && token.length > at + 1) {
+        const before = [...token.slice(1, at)].map((letter) => `-${letter}`);
+        for (const flag of [...before, '-c']) {
+          // The same checks each flag meets on its own, minus reading the
+          // value as more flags; `-c` against the scope's own denials only.
+          const refusals = flag === '-c' ? scope.deniedFlags ?? [] : deniedInTail;
+          if (deniesFlag(refusals, flag) || (scope.allowedFlags && !allowsFlag(scope.allowedFlags, flag))) {
+            return false;
+          }
+        }
+        continue;
+      }
+      if (deniesFlag(deniedInTail, token)) {
         return false;
       }
       if (scope.allowedFlags && !allowsFlag(scope.allowedFlags, token)) {
         return false;
       }
+      if (scope.flagsWithValue?.includes(token)) {
+        if (index + 1 >= rest.length) {
+          return false;
+        }
+        index += 1;
+      }
       continue;
     }
     if (scope.listOnly) {
+      return false;
+    }
+    positionals += 1;
+    if (scope.maxPositionals !== undefined && positionals > scope.maxPositionals) {
       return false;
     }
     if (scope.deniedArgs?.includes(token)) {
@@ -376,6 +693,26 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
     }
   }
   return true;
+};
+
+/**
+ * The scopes covering an invocation, one per command of a pipeline and one
+ * for a plain command, or undefined unless every command is covered.
+ */
+export const findCoveringScopes = (
+  analysis: CommandAnalysis,
+  scopes: readonly CommandScope[],
+): CommandScope[] | undefined => {
+  const commands = analysis.pipeline ?? [analysis];
+  const covering: CommandScope[] = [];
+  for (const command of commands) {
+    const scope = findMatchingScope(command, scopes);
+    if (!scope) {
+      return undefined;
+    }
+    covering.push(scope);
+  }
+  return covering;
 };
 
 /** The first scope covering this invocation, if any covers it. */
@@ -423,6 +760,23 @@ export const findMatchingScope = (
 export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope | undefined => {
   if (analysis.disqualifiedBy || analysis.base === undefined) {
     return undefined;
+  }
+  // `git -C <repo> <subcommand> …` is `git <subcommand> …` run in <repo>,
+  // and an agent with worktrees spells nearly every git call this way. The
+  // repository is kept in the scope, literally, so a grant for one worktree
+  // says nothing about another; past it the subcommand is judged as it
+  // would be without -C. Only the leading position: anywhere else -C sits
+  // among flags of unknown arity, and the exact-command rule below applies.
+  if (analysis.base === 'git' && analysis.tokens[1] === '-C' && analysis.tokens.length > 3) {
+    const repo = analysis.tokens[2] as string;
+    if (repo.length > 0 && !repo.startsWith('-') && !analysis.expands?.[2] && !/[*?[\]{}~$\\#]/.test(repo)) {
+      const inner = normalizeCommandScope({
+        ...analysis,
+        tokens: ['git', ...analysis.tokens.slice(3)],
+        ...(analysis.expands ? { expands: [analysis.expands[0] ?? false, ...analysis.expands.slice(3)] } : {}),
+      });
+      return inner === undefined ? undefined : { ...inner, args: ['-C', repo, ...(inner.args ?? [])] };
+    }
   }
   const tokens = analysis.tokens.slice(1);
   const firstIndex = tokens.findIndex((token) => !token.startsWith('-'));
@@ -493,6 +847,14 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
     };
   }
 
+  // The stored argument is what the scope is named for and which safe
+  // scope's constraints it inherits, so it must be the argument the shell
+  // passes: `git \branch --list` runs `git branch --list`, and a scope
+  // stored as `git \branch` would inherit nothing of `branch`'s list-only
+  // rule while matching `git \branch release`.
+  if (first !== undefined && (analysis.expands?.[firstIndex + 1] || /[*?[\]{}~$\\#]/.test(first))) {
+    return undefined;
+  }
   const sameScope = SAFE_COMMAND_SCOPES
     .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === (first ?? ''));
   const inherited = sameScope.flatMap((scope) => scope.deniedFlags ?? []);
@@ -522,6 +884,106 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
   };
 };
 
+/**
+ * The scope an operator declares in config (`approvals.commands`): a
+ * command and, optionally, the subcommands it is limited to — `agentboard`,
+ * `pnpm test`, `gh pr`. Whatever follows the prefix may vary, the way a
+ * remembered scope's arguments do, and the same things stay refused: the
+ * destructive flags, whatever the built-in list refuses for that command,
+ * and git's refspec deletes.
+ *
+ * Only words. A flag, an operator, or a token the shell would expand has no
+ * meaning as a prefix, and guessing one would be a grant nobody wrote, so
+ * the entry is refused with the reason instead.
+ */
+export const commandScopeFromPrefix = (prefix: string): { scope: CommandScope } | { reason: string } => {
+  // Plain words only, so the entry as written is the scope as matched, and
+  // every listing and revoke can compare it word for word.
+  if (/['"]/.test(prefix)) {
+    return { reason: 'it contains quotes; write the command as plain words' };
+  }
+  const analysis = analyzeCommand(prefix.trim());
+  if (analysis.pipeline) {
+    return { reason: 'it is a pipeline; list each command on its own' };
+  }
+  if (analysis.disqualifiedBy || analysis.base === undefined) {
+    return { reason: analysis.disqualifiedBy ?? 'it could not be read as a command' };
+  }
+  const args = analysis.tokens.slice(1);
+  if (args.some((token) => token.startsWith('-'))) {
+    return { reason: 'it names a flag; list the command and its subcommands only' };
+  }
+  // A path is a program or a file, not a subcommand: `python scripts/x.py`
+  // would let any tail follow a script nobody reviewed by name.
+  if (args.some((token) => token.includes('/') || token.startsWith('.'))) {
+    return { reason: 'it names a path; list the command and its subcommands only' };
+  }
+  if (analysis.expands?.some((expands) => expands) || analysis.tokens.some((token) => /[*?[\]{}~$\\#]/.test(token))) {
+    return { reason: 'it contains something the shell would expand' };
+  }
+  const forBase = SAFE_COMMAND_SCOPES.filter((scope) => scope.command === analysis.base);
+  const declared = args.join(' ');
+  // A prefix shorter than a subcommand the built-in list limits would cover
+  // that subcommand's mutating forms: `git` would run `git branch release`,
+  // which the list's own `git branch` scope exists to refuse.
+  const narrower = forBase.find((scope) => {
+    const sub = scope.args ?? [];
+    return sub.length > args.length
+      && args.every((token, index) => sub[index] === token)
+      && (scope.listOnly || scope.allowedFlags || scope.maxPositionals !== undefined);
+  });
+  if (narrower) {
+    return { reason: `the built-in list limits \`${describeCommandScope(narrower)}\`; list the subcommands it may run instead` };
+  }
+  // Nor longer than a limited built-in scope: `grep fix` names grep's
+  // pattern, and as a prefix it would let any file follow it, which the
+  // built-in `grep` exists to refuse. The limits are about the arguments a
+  // prefix fixes in place, so there is no adjusting them; the entry is
+  // refused and the built-in scope already covers what it was safe for.
+  const extended = forBase.find((scope) => {
+    const sub = scope.args ?? [];
+    return sub.length < args.length
+      && sub.every((token, index) => args[index] === token)
+      && (scope.listOnly || scope.allowedFlags || scope.maxPositionals !== undefined || scope.literal || (scope.flagsWithValue ?? []).length > 0);
+  });
+  if (extended) {
+    return { reason: `it extends \`${describeCommandScope(extended)}\`, which the built-in list already limits; it runs unattended within those limits without an entry` };
+  }
+  // And the same prefix as a built-in scope keeps every limit it draws —
+  // list-only, the named flags, the positional count — never just the
+  // refusals: `git branch` must still not create a branch.
+  const same = forBase.filter((scope) => (scope.args ?? []).join(' ') === declared);
+  const allowedFlags = same.length > 0 && same.every((scope) => scope.allowedFlags)
+    ? [...new Set(same.flatMap((scope) => scope.allowedFlags ?? []))]
+    : undefined;
+  const flagsWithValue = [...new Set(same.flatMap((scope) => scope.flagsWithValue ?? []))];
+  const positionals = same.map((scope) => scope.maxPositionals).filter((count): count is number => count !== undefined);
+  // Refusals come only from built-in scopes on the same path as this one:
+  // `git remote` refuses `add` as its argument, which says nothing about
+  // `git add`, and copying it would refuse the entry's own subcommand.
+  const related = forBase.filter((scope) => {
+    const sub = scope.args ?? [];
+    const shorter = sub.length <= args.length ? sub : args;
+    const longer = sub.length <= args.length ? args : sub;
+    return shorter.every((token, index) => longer[index] === token);
+  });
+  const deniedArgs = related.flatMap((scope) => scope.deniedArgs ?? []);
+  return {
+    scope: {
+      command: analysis.base,
+      ...(args.length > 0 ? { args } : {}),
+      deniedFlags: [...new Set([...DESTRUCTIVE_FLAGS, ...related.flatMap((scope) => scope.deniedFlags ?? [])])],
+      ...(deniedArgs.length > 0 ? { deniedArgs: [...new Set(deniedArgs)] } : {}),
+      ...(same.some((scope) => scope.listOnly) ? { listOnly: true } : {}),
+      ...(allowedFlags ? { allowedFlags } : {}),
+      ...(flagsWithValue.length > 0 ? { flagsWithValue } : {}),
+      ...(positionals.length > 0 ? { maxPositionals: Math.min(...positionals) } : {}),
+      ...(same.some((scope) => scope.literal) ? { literal: true } : {}),
+      ...(analysis.base === 'git' ? { denyRefspecForms: true } : {}),
+    },
+  };
+};
+
 /** One line an operator can read in a log or a whitelist listing. */
 export const describeCommandScope = (scope: CommandScope): string =>
   [scope.command, ...(scope.args ?? [])].join(' ');
@@ -538,6 +1000,9 @@ const normalizeForCompare = (scope: CommandScope) => ({
   denyRefspecForms: scope.denyRefspecForms ?? false,
   listOnly: scope.listOnly ?? false,
   allowedFlags: [...(scope.allowedFlags ?? [])].sort(),
+  maxPositionals: scope.maxPositionals ?? null,
+  flagsWithValue: [...(scope.flagsWithValue ?? [])].sort(),
+  literal: scope.literal ?? false,
 });
 
 /** Read one scope out of a whitelist file, or refuse it. */
@@ -556,6 +1021,11 @@ export const parseCommandScope = (raw: unknown): CommandScope | undefined => {
   const deniedFlags = strings(source.deniedFlags);
   const deniedArgs = strings(source.deniedArgs);
   const allowedFlags = strings(source.allowedFlags);
+  const flagsWithValue = strings(source.flagsWithValue);
+  const maxPositionals = typeof source.maxPositionals === 'number'
+    && Number.isInteger(source.maxPositionals) && source.maxPositionals >= 0
+    ? source.maxPositionals
+    : undefined;
   return {
     command: source.command,
     ...(args ? { args } : {}),
@@ -564,5 +1034,8 @@ export const parseCommandScope = (raw: unknown): CommandScope | undefined => {
     ...(source.denyRefspecForms === true ? { denyRefspecForms: true } : {}),
     ...(source.listOnly === true ? { listOnly: true } : {}),
     ...(allowedFlags ? { allowedFlags } : {}),
+    ...(maxPositionals !== undefined ? { maxPositionals } : {}),
+    ...(flagsWithValue ? { flagsWithValue } : {}),
+    ...(source.literal === true ? { literal: true } : {}),
   };
 };
