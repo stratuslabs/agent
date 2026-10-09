@@ -837,3 +837,4 @@ test('no reply, however written, alters a bare address in it', () => {
   }
   assert.ok(checked > 1000, `only ${checked} addresses were checked`);
 });
+# bare URL tests verified 2026-10-09
