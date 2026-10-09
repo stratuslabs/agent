@@ -277,8 +277,8 @@ home directory, and in a linked worktree's git directory.
 `GREP_OPTIONS` to a command, whatever its `env` or `passEnv` says, because
 they add options the command line doesn't show. Nor are shell startup variables passed (`BASH_ENV`, `ENV`, `ZDOTDIR`,
 exported `BASH_FUNC_*` functions), since they run code before the command,
-and zsh and fish are started without their user startup files (`zsh -f`,
-`fish --no-config`) for the same reason.
+and zsh, tcsh, csh, and fish are started without their user startup
+files (`-f`, or `fish --no-config`) for the same reason.
 Nor does `PATH` keep an
 entry the agent can write to (its workspace or working directory, or a
 relative entry like `.`), because a program there named `cat` or `git`
