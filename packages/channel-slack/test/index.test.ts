@@ -9066,6 +9066,8 @@ test('a channel read that stops at its page bound says older history was not rea
     const earlier = gateway.dispatches[0]?.earlier ?? [];
     assert.equal(earlier.length, 1);
     assert.match(earlier[0]!.message, expectFirst);
+    // The adapter's own notice lowers nothing: a principal's session stays theirs.
+    assert.equal(earlier[0]!.metadata?.[SENDER_TRUST_METADATA_KEY], 'user');
   }
 });
 
@@ -9272,4 +9274,24 @@ test('under admit: principals a peer whose socket failed to start keeps its plac
   const shown = gateway.dispatches[0]?.earlier?.map((entry) => entry.message) ?? [];
   assert.equal(shown.length, 2);
   assert.match(shown[1] ?? '', /Bea: prod is https:\/\/example\.test/);
+});
+
+test('a backfill follows Slack\'s cursor even when a short page says nothing of has_more', async () => {
+  const thread = [
+    { ts: '530.1', user: 'U-DYLAN', text: 'parent' },
+    { ts: '530.2', user: 'U-DYLAN', text: 'first reply' },
+    { ts: '530.3', user: 'U-DYLAN', text: 'newest reply' },
+  ];
+  const { socket, web, gateway, adapter, reads } = threadAdapter(thread, {}, { pageSize: 2 });
+  const paged = (web.conversations as unknown as Record<string, (args: Record<string, unknown>) => Promise<Record<string, unknown>>>).replies!;
+  (web.conversations as Record<string, unknown>).replies = async (args: Record<string, unknown>) => {
+    const { has_more: _ignored, ...page } = await paged(args);
+    return page;
+  };
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and?', { ts: '530.9', thread_ts: '530.1' }));
+  await adapter.stop();
+
+  assert.equal(reads.length, 2);
+  assert.equal(gateway.dispatches[0]?.earlier?.at(-1)?.message, 'Dylan: newest reply');
 });

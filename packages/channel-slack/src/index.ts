@@ -29,6 +29,7 @@ import {
   type Session,
   type StratusEvent,
   type ToolResult,
+  type TrustLevel,
 } from '@stratusagent/core';
 import {
   admitsSender,
@@ -2631,6 +2632,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     channel: string,
     thread: string | undefined,
     before: string,
+    senderTrust: TrustLevel,
   ): Promise<Array<{ message: string; metadata: JsonObject }>> => {
     const usable = (message: SlackThreadMessage): boolean => {
       if (message.ts === undefined || !(Number(message.ts) < Number(before))) {
@@ -2699,7 +2701,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
               omitted += 1;
             }
           }
-          cursor = page.has_more ? page.response_metadata?.next_cursor || undefined : undefined;
+          // Slack's cursor is the signal, not `has_more`: a short page can
+          // still have more behind it.
+          cursor = page.response_metadata?.next_cursor || undefined;
         } while (cursor && pages < EARLIER_THREAD_PAGES);
         more = cursor !== undefined;
         if (more) {
@@ -2737,7 +2741,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           });
           pages += 1;
           recent.push(...(page.messages ?? []).filter(usable));
-          cursor = page.has_more ? page.response_metadata?.next_cursor || undefined : undefined;
+          cursor = page.response_metadata?.next_cursor || undefined;
         } while (cursor && recent.length < EARLIER_CHANNEL_LIMIT && pages < EARLIER_CHANNEL_PAGES);
         historyCut = cursor !== undefined && recent.length < EARLIER_CHANNEL_LIMIT;
         kept = recent.slice(0, EARLIER_CHANNEL_LIMIT).reverse();
@@ -2782,21 +2786,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (historyCut && entries.length === 0) {
       entries.push({
         message: '[None of this channel\'s recent history before you were mentioned could be shown, and older history was not read. Ask for what you need.]',
-        metadata: { channel: 'slack', slackChannel: channel, [SENDER_TRUST_METADATA_KEY]: 'unknown' },
+        // The adapter's own words, nobody else's: they carry the trust of
+        // the message they arrive with, and lower nothing.
+        metadata: { channel: 'slack', slackChannel: channel, [SENDER_TRUST_METADATA_KEY]: senderTrust },
       });
     }
     if (more) {
       // With no first message to show (unusable, or from someone the room
       // does not admit), the notice stands alone: an empty backfill would
-      // read as a thread with nothing before the mention. It has no speaker,
-      // so it carries the least trust rather than anyone's.
+      // read as a thread with nothing before the mention. It is the
+      // adapter's own words, so it carries the trust of the message it
+      // arrives with and lowers nothing.
       const notice = '[This thread is too long to read here: the replies after its first message are not shown. Ask for what you need.]';
       if (entries.length > 0) {
         entries[entries.length - 1]!.message += `\n${notice}`;
       } else {
         entries.push({
           message: notice,
-          metadata: { channel: 'slack', slackChannel: channel, ...(thread !== undefined ? { slackThread: thread } : {}), [SENDER_TRUST_METADATA_KEY]: 'unknown' },
+          metadata: { channel: 'slack', slackChannel: channel, ...(thread !== undefined ? { slackThread: thread } : {}), [SENDER_TRUST_METADATA_KEY]: senderTrust },
         });
       }
     }
@@ -4967,7 +4974,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         if (!exists) {
           // A mention that starts its own thread follows the channel; one
           // inside a thread follows that thread.
-          earlier = await earlierContext(connection, event.channel, thread === event.ts ? undefined : thread, event.ts);
+          earlier = await earlierContext(connection, event.channel, thread === event.ts ? undefined : thread, event.ts, senderTrust);
         }
       }
 
