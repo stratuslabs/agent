@@ -1109,7 +1109,7 @@ const pad = (text: string, width: number, alignment: Alignment): string => {
 const tableLabel = (header: string): string =>
   header.length === 0 ? '' : /[*_~`]/.test(header) ? header : `**${header}**`;
 
-const renderTable = (header: string[], alignments: Alignment[], rows: string[][]): string => {
+const renderTable = (header: string[], alignments: Alignment[], rows: string[][], forceList = false): string => {
   const columns = header.length;
   const fit = (row: string[]): string[] => Array.from({ length: columns }, (_, index) => row[index] ?? '');
   // One column has nothing to line up, so it is a list under its header.
@@ -1133,7 +1133,7 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
   const linked = [header, ...rows].some((row) => row.some((cell) =>
     readEmphasis(scan(cell)).links.size > 0
     || /\b(?:https?:\/\/|mailto:)\S|<[a-z][a-z0-9+.-]*:[^>\s]+>|<[@#!][^>\s]+>/i.test(cell)));
-  if (width <= TABLE_MAX_WIDTH && !linked && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
+  if (!forceList && width <= TABLE_MAX_WIDTH && !linked && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
     const line = (row: string[]): string =>
       row.map((cell, index) => pad(cell, widths[index] ?? 0, alignments[index] ?? 'left')).join(' │ ').trimEnd();
     const rule = widths.map((each) => '─'.repeat(each)).join('─┼─');
@@ -1154,6 +1154,20 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
       .join(' · '))
     .filter((line) => line.length > 0);
   return listed.length > 0 ? listed.join('\n') : headerOnly;
+};
+
+/**
+ * The leading block-quote markers of a line: zero or more `>` each followed
+ * by at most one space. An empty prefix means the line is not quoted.
+ */
+const blockQuotePrefix = (line: string): string => {
+  let at = 0;
+  while (at < line.length) {
+    if (line[at] !== '>') break;
+    at += 1;
+    if (at < line.length && line[at] === ' ') at += 1;
+  }
+  return line.slice(0, at);
 };
 
 /** Four spaces or a tab: an indented code block, which no table row may be. */
@@ -1188,23 +1202,55 @@ const renderTables = (text: string): string => {
   let at = 0;
   while (at < lines.length) {
     const headerLine = lines[at] ?? '';
-    const alignments = inCode[at] || inCode[at + 1] ? undefined : tableAlignments(lines[at + 1] ?? '');
-    const header = tableCells(headerLine);
+
+    // A run of lines sharing a block-quote prefix can hold a table whose
+    // `>` marker would otherwise become a spurious cell.
+    const prefix = blockQuotePrefix(headerLine);
+    const stripped = prefix.length > 0 ? headerLine.slice(prefix.length) : headerLine;
+    const nextRaw = lines[at + 1] ?? '';
+    const nextPrefix = blockQuotePrefix(nextRaw);
+    const nextStripped = prefix.length > 0 && nextPrefix === prefix
+      ? nextRaw.slice(prefix.length)
+      : nextRaw;
+
+    const usedPrefix = prefix.length > 0 && nextPrefix === prefix ? prefix : '';
+    const effectiveHeader = usedPrefix.length > 0 ? stripped : headerLine;
+    const effectiveNext = usedPrefix.length > 0 ? nextStripped : nextRaw;
+
+    const alignments = inCode[at] || inCode[at + 1] ? undefined : tableAlignments(effectiveNext);
+    const header = tableCells(effectiveHeader);
     // Four spaces or a tab of indentation is an indented code block, not a
     // table — GFM allows a table at most three.
-    const indented = isIndentedCode(headerLine) || isIndentedCode(lines[at + 1] ?? '');
-    if (alignments === undefined || indented || !isTableRow(headerLine) || header.length !== alignments.length) {
+    const indented = isIndentedCode(effectiveHeader) || isIndentedCode(effectiveNext);
+    if (alignments === undefined || indented || !isTableRow(effectiveHeader) || header.length !== alignments.length) {
       out.push(headerLine);
       at += 1;
       continue;
     }
     const rows: string[][] = [];
     let next = at + 2;
-    while (next < lines.length && !inCode[next] && !isIndentedCode(lines[next] ?? '') && isTableRow(lines[next] ?? '')) {
-      rows.push(tableCells(lines[next] ?? ''));
+    while (next < lines.length && !inCode[next] && !isIndentedCode(lines[next] ?? '')) {
+      const rowLine = lines[next] ?? '';
+      if (usedPrefix.length > 0) {
+        if (blockQuotePrefix(rowLine) !== usedPrefix) break;
+        const rowContent = rowLine.slice(usedPrefix.length);
+        if (!isTableRow(rowContent)) break;
+        rows.push(tableCells(rowContent));
+      } else {
+        if (!isTableRow(rowLine)) break;
+        rows.push(tableCells(rowLine));
+      }
       next += 1;
     }
-    out.push(renderTable(header, alignments, rows));
+    // A table inside a block quote always takes the list form: Slack does
+    // not reliably render a code-block grid inside `>`, and the list form
+    // reads well quoted.
+    const rendered = renderTable(header, alignments, rows, usedPrefix.length > 0);
+    if (usedPrefix.length > 0) {
+      out.push(rendered.split('\n').map((line) => usedPrefix + line).join('\n'));
+    } else {
+      out.push(rendered);
+    }
     at = next;
   }
   return out.join('\n');

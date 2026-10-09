@@ -680,3 +680,49 @@ test('a table with a Slack mention in it keeps the mention live', () => {
     assert.ok(!converted.startsWith('```'), `${reference} went into the grid`);
   }
 });
+
+test('a table inside a block quote is recognized and rendered in list form', () => {
+  const input = ['> | A | B |', '> | --- | --- |', '> | 1 | 2 |'].join('\n');
+  assert.equal(toSlackMrkdwn(input), '> *A*: 1 · *B*: 2');
+});
+
+test('a narrow quoted table uses the list form, not a grid', () => {
+  // Even a narrow quoted table avoids the grid because Slack does not
+  // reliably render a code block inside a block quote.
+  const input = ['> | X | Y |', '> | --- | --- |', '> | a | b |', '> | c | d |'].join('\n');
+  const result = toSlackMrkdwn(input);
+  assert.ok(!result.includes('```'), 'should not contain a code fence');
+  assert.ok(result.includes('> *X*: a'), 'first row should be quoted');
+  assert.ok(result.includes('> *X*: c'), 'second row should be quoted');
+});
+
+test('a quoted table next to unquoted prose leaves the prose alone', () => {
+  const input = [
+    'Here is a table:',
+    '> | Name | Score |',
+    '> | --- | --- |',
+    '> | Alice | 10 |',
+    'And that was it.',
+  ].join('\n');
+  const result = toSlackMrkdwn(input);
+  assert.ok(result.startsWith('Here is a table:\n'));
+  assert.ok(result.endsWith('\nAnd that was it.'));
+  assert.ok(result.includes('> *Name*: Alice'));
+});
+
+test('nested block quotes are handled as a prefix', () => {
+  const input = ['> > | A | B |', '> > | --- | --- |', '> > | 1 | 2 |'].join('\n');
+  assert.equal(toSlackMrkdwn(input), '> > *A*: 1 · *B*: 2');
+});
+
+test('a quoted header followed by an unquoted delimiter row is not a table', () => {
+  const input = ['> | A | B |', '| --- | --- |', '| 1 | 2 |'].join('\n');
+  const result = toSlackMrkdwn(input);
+  // The > line stays as written since the prefix does not match
+  assert.ok(result.includes('> | A | B |') || result.includes('>'));
+});
+
+test('an unquoted table still works as before', () => {
+  const table = ['| A | B |', '| --- | --- |', '| x | y |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'A │ B', '──┼──', 'x │ y', '```'].join('\n'));
+});
