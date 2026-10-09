@@ -5958,6 +5958,64 @@ export interface AgentRunnerOptions {
  * task checks in rather than where it dies, and 40 is enough for real
  * multi-step work while still bounding what a runaway loop can spend.
  */
+/**
+ * What is wrong with a call's input against the shape its tool declared,
+ * or undefined when nothing the check reads is wrong.
+ *
+ * Deliberately shallow: required keys, the declared JSON types, `enum`,
+ * and `additionalProperties: false`, applied to nested objects too. It
+ * exists so a call the tool would reject anyway is answered with the reason
+ * before anyone is asked to approve it, not to replace a tool's own checks,
+ * which still run. A schema keyword it doesn't read is not a failure.
+ */
+export const inputProblem = (schema: JsonObject | undefined, input: JsonValue, where = 'input', depth = 0): string | undefined => {
+  if (schema === undefined || depth > 4) {
+    return undefined;
+  }
+  const declared = schema.type;
+  const types = Array.isArray(declared) ? declared.filter((type): type is string => typeof type === 'string') : typeof declared === 'string' ? [declared] : [];
+  if (types.length > 0) {
+    const actual = input === null ? 'null'
+      : Array.isArray(input) ? 'array'
+        : typeof input === 'number' ? (Number.isInteger(input) ? 'integer' : 'number')
+          : typeof input;
+    const fits = types.some((type) => type === actual || (type === 'number' && actual === 'integer'));
+    if (!fits) {
+      return `${where} should be ${types.join(' or ')}, not ${actual}`;
+    }
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some((option) => JSON.stringify(option) === JSON.stringify(input))) {
+    return `${where} should be one of ${schema.enum.map((option) => JSON.stringify(option)).join(', ')}`;
+  }
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return undefined;
+  }
+  const properties = schema.properties !== null && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+    ? schema.properties as Record<string, JsonValue>
+    : {};
+  for (const key of Array.isArray(schema.required) ? schema.required : []) {
+    if (typeof key === 'string' && input[key] === undefined) {
+      return `${where} is missing "${key}"`;
+    }
+  }
+  if (schema.additionalProperties === false) {
+    const unknown = Object.keys(input).find((key) => !(key in properties));
+    if (unknown !== undefined) {
+      return `${where} has "${unknown}", which this tool does not take (it takes ${Object.keys(properties).map((key) => `"${key}"`).join(', ') || 'nothing'})`;
+    }
+  }
+  for (const [key, value] of Object.entries(input)) {
+    const property = properties[key];
+    if (value !== undefined && property !== null && typeof property === 'object' && !Array.isArray(property)) {
+      const problem = inputProblem(property as JsonObject, value, `${where}.${key}`, depth + 1);
+      if (problem) {
+        return problem;
+      }
+    }
+  }
+  return undefined;
+};
+
 export const DEFAULT_MAX_TURNS = 40;
 
 export class AgentRunner {
@@ -7080,6 +7138,18 @@ export class AgentRunner {
     const tool = this.tools.get(call.toolName);
     if (!tool) {
       return rejected(`Tool not found: ${call.toolName}`);
+    }
+
+    // A malformed call is answered before anyone is asked about it, for the
+    // reason an unknown tool is: approving a call the tool will reject is a
+    // question with no useful answer, and the model needs the reason, not a
+    // human's click, to fix it. Only for calls that would be asked about; a
+    // `safe` tool's own checks answer it as they always have.
+    if (resolveToolRisk(tool) !== 'safe') {
+      const problem = inputProblem(tool.parameters, call.input);
+      if (problem) {
+        return rejected(`Invalid input for ${call.toolName}: ${problem}. Fix the call and try again.`);
+      }
     }
 
     // Only a call that can actually be held for a human is checkpointed:
