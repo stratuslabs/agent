@@ -333,6 +333,14 @@ export interface OutboundAddress {
    * only be wrong.
    */
   to: string;
+  /**
+   * Channel-native id of a message in that conversation to reply under
+   * (for Slack, its `ts`). Absent, a post goes to the top level. Only what
+   * `post` sends is threaded: it names where the words go, not a second
+   * destination, so it is not part of what an approval or a schedule's
+   * pre-authorization compares.
+   */
+  thread?: string;
 }
 
 /**

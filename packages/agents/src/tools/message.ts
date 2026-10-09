@@ -12,12 +12,18 @@ export const MESSAGE_SEND_TOOL_NAME = 'message.send';
  * Delivers one outbound message through the agent's channel. The gateway
  * implements it over the channel contract's `resolveOutbound`; rejecting is
  * the way to say a destination cannot be served.
+ *
+ * Resolves with the channel-native id of the message it posted when the
+ * channel reports one (Slack: its `ts`), which is what lets an agent reply
+ * under its own post later — the id is the thread to name.
  */
 export type OutboundMessenger = (input: {
   agentId: string;
   destination: ScheduleDestination;
   text: string;
-}) => Promise<void>;
+  /** Channel-native id of the message to reply under, for a threaded post. */
+  thread?: string;
+}) => Promise<{ id?: string } | void>;
 
 /**
  * Post to a channel or DM outside the current conversation — what makes a
@@ -32,7 +38,9 @@ export type OutboundMessenger = (input: {
  */
 export const createMessageSendTool = (send: OutboundMessenger): Tool => ({
   name: MESSAGE_SEND_TOOL_NAME,
-  description: 'Send a message to a channel or DM you are not currently talking in. Scheduled turns may post to their schedule\'s approved destination without asking; anywhere else needs approval.',
+  description: 'Send a message to a channel or DM you are not currently talking in, at the top level or as a reply in one of its threads. '
+    + 'Returns the posted message\'s id; pass it as thread to a later send to reply under that message. '
+    + 'Scheduled turns may post to their schedule\'s approved destination without asking; anywhere else needs approval.',
   risk: 'gated',
   parameters: {
     type: 'object',
@@ -42,6 +50,10 @@ export const createMessageSendTool = (send: OutboundMessenger): Tool => ({
         description: 'Where to post: the channel kind plus the channel-native conversation id.',
       },
       text: { type: 'string', description: 'The message text.' },
+      thread: {
+        type: 'string',
+        description: 'The id of a message in that conversation to reply under (for Slack, its ts, e.g. 1791332967.606559). Omit to post at the top level.',
+      },
     },
     required: ['destination', 'text'],
   },
@@ -58,8 +70,20 @@ export const createMessageSendTool = (send: OutboundMessenger): Tool => ({
     if (!text) {
       throw new Error('message.send requires a non-empty "text".');
     }
-    await send({ agentId: session.agent.id, destination, text });
-    return { sent: true, destination: canonicalDestination(destination) };
+    const thread = optionalId(input, 'thread', MESSAGE_SEND_TOOL_NAME);
+    const posted = await send({
+      agentId: session.agent.id,
+      destination,
+      text,
+      ...(thread !== undefined ? { thread } : {}),
+    });
+    const id = posted && typeof posted.id === 'string' && posted.id.length > 0 ? posted.id : undefined;
+    return {
+      sent: true,
+      destination: canonicalDestination(destination),
+      ...(id !== undefined ? { id } : {}),
+      ...(thread !== undefined ? { thread } : {}),
+    };
   },
 });
 
@@ -106,13 +130,13 @@ export type ConversationReader = (input: {
   more: boolean;
 }>;
 
-const optionalId = (input: JsonObject, key: string): string | undefined => {
+const optionalId = (input: JsonObject, key: string, tool = MESSAGE_READ_TOOL_NAME): string | undefined => {
   const value = input[key];
   if (value === undefined || value === null) {
     return undefined;
   }
   if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new Error(`message.read: "${key}" must be a non-empty string when given.`);
+    throw new Error(`${tool}: "${key}" must be a non-empty string when given.`);
   }
   return value.trim();
 };

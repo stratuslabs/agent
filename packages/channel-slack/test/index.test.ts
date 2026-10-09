@@ -6295,6 +6295,22 @@ test('resolveOutbound posts to a channel the app is a member of, splitting overs
   await adapter.stop();
 });
 
+test('resolveOutbound with a thread posts every chunk as a reply under it', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  const adapter = await startedAdapterWith(web);
+
+  const top = await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG' })).post('report');
+  assert.equal(web.posts[0]?.thread_ts, undefined);
+
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: top.ts });
+  await connection.post(['a'.repeat(3000), 'b'.repeat(3000)].join('\n'));
+  assert.equal(web.posts.length, 3);
+  assert.deepEqual(web.posts.slice(1).map((post) => post.thread_ts), [top.ts, top.ts]);
+
+  await adapter.stop();
+});
+
 test('resolveOutbound refuses a channel the app is not a member of, naming the fix', async () => {
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('C-PRIVATE', { is_member: false });

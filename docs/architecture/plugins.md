@@ -484,6 +484,9 @@ capability rather than an assumption:
 - `OutboundConnection.edit` and `upload` are optional. `post` is the whole
   of what the gateway's `message.send` and schedule delivery use; a channel
   without `edit` posts the finished reply instead of streaming it in place.
+  `OutboundAddress.thread` is optional too: a channel that has threads posts
+  under that message id, and `post` resolves with the new message's ref,
+  whose `ts` `message.send` hands back to the agent as `id`.
 - `ChannelAdapter.readConversation` is optional too: it is what
   `message.read` reads through, and a channel without it cannot be read.
   An adapter that has it decides which conversations are readable at all

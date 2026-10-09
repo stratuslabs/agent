@@ -10,7 +10,12 @@ always-on daemon into agents that act on their own:
 - **`schedule.list` / `schedule.cancel`** — an agent's own audit and undo.
 - **`message.send`** — post to a channel or DM outside the current
   conversation:
-  `{ destination: { channel: "slack", to: "C0123456789" }, text }`.
+  `{ destination: { channel: "slack", to: "C0123456789" }, text, thread? }`.
+  The result carries the posted message's `id` (on Slack, its `ts`); pass
+  it as `thread` to a later send to reply under that message, so a
+  schedule can post a summary and put the detail in its thread. The thread
+  is where the words go, not a different destination: a schedule approved
+  for a channel may reply in that channel's threads, and nowhere else.
   Without it a scheduled turn works in silence.
 - **`message.read`** — read a channel's recent messages, or one thread,
   outside the current conversation:

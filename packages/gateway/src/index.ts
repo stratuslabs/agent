@@ -234,7 +234,7 @@ export interface GatewayChannelAdapter {
    * Implementations MUST reject a destination they could not deliver to,
    * with a message fit to show the person who named it.
    */
-  resolveOutbound?(address: { agentId: string; to: string }): Promise<{
+  resolveOutbound?(address: { agentId: string; to: string; thread?: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
   /**
@@ -1245,6 +1245,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const outboundFor = async (
     agentId: string,
     destination: ScheduleDestination,
+    thread?: string,
   ): Promise<{ post(text: string): Promise<unknown> }> => {
     const { adapter, carriesOthers } = channelCarrying(destination.channel, agentId, (candidate) => candidate.resolveOutbound !== undefined);
     if (!adapter?.resolveOutbound && carriesOthers) {
@@ -1261,7 +1262,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           : `running channels: ${startedChannels.map((candidate) => candidate.name).join(', ')}.`),
       );
     }
-    return adapter.resolveOutbound({ agentId, to: destination.to });
+    return adapter.resolveOutbound({ agentId, to: destination.to, ...(thread !== undefined ? { thread } : {}) });
   };
 
   const scheduler = createSchedulerRuntime({
@@ -2050,9 +2051,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   for (const scheduleTool of createScheduleTools(scheduler.handle)) {
     tools.register(scheduleTool);
   }
-  tools.register(createMessageSendTool(async ({ agentId, destination, text }) => {
-    const connection = await outboundFor(agentId, destination);
-    await connection.post(text);
+  tools.register(createMessageSendTool(async ({ agentId, destination, text, thread }) => {
+    const connection = await outboundFor(agentId, destination, thread);
+    const posted = await connection.post(text);
+    // The channel contract's `OutboundMessageRef`, read structurally: the
+    // gateway's mirror of the adapter types `post` loosely, and an adapter
+    // that reports no id simply has none to hand back.
+    const ts = typeof posted === 'object' && posted !== null ? (posted as { ts?: unknown }).ts : undefined;
+    return typeof ts === 'string' && ts.length > 0 ? { id: ts } : {};
   }));
   tools.register(createMessageReadTool(async ({ agentId, source, ...window }) => {
     // The same carrying rule as outbound: a read goes through the app of
