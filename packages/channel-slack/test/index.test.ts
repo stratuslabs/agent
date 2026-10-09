@@ -8132,19 +8132,19 @@ test('each turn says what kind of room it is in now, how many are in it, and its
   // channel made private, or shared with another workspace, since the last
   // message is described as it is now.
   await socket.deliver('app_mention', mention('<@B-AVA> status?'));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 1042, thread: true, id: 'C1' });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 1042, thread: true, threadRoot: '100.1', id: 'C1' });
   web.knownConversations.set('C1', { is_member: true, is_private: true, name: 'general', num_members: 12, is_org_shared: true });
   await socket.deliver('message', mention('and now?', { type: 'message', channel_type: 'group', ts: '100.2', thread_ts: '100.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 12, thread: true, shared: true, id: 'C1' });
+  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 12, thread: true, threadRoot: '100.1', shared: true, id: 'C1' });
   assert.equal(infoCalls, 2);
 
   await socket.deliver('app_mention', mention('<@B-AVA> review this', { channel: 'G1', ts: '200.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 6, thread: true, id: 'G1' });
+  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 6, thread: true, threadRoot: '200.1', id: 'G1' });
 
   // Shared beyond the workspace: said by the lookup, or by the event itself.
   web.knownConversations.set('C7', { is_member: true, num_members: 40, is_ext_shared: true });
   await socket.deliver('app_mention', mention('<@B-AVA> hi partners', { channel: 'C7', ts: '500.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 40, thread: true, shared: true, id: 'C7' });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 40, thread: true, threadRoot: '500.1', shared: true, id: 'C7' });
   await socket.deliver('message', {
     ...mention('<@B-AVA> hello', { type: 'message', channel: 'C1', channel_type: 'channel', ts: '600.1' }),
     body: { team_id: 'T1', event_id: 'evt-connect', is_ext_shared_channel: true },
@@ -8153,7 +8153,7 @@ test('each turn says what kind of room it is in now, how many are in it, and its
 
   // A lookup that fails keeps what the event said, and nothing more.
   await socket.deliver('message', mention('<@B-AVA> hello', { type: 'message', channel: 'C9', channel_type: 'channel', ts: '400.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', thread: true, threadRoot: '400.1' });
   await adapter.stop();
 });
 

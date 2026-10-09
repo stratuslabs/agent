@@ -179,6 +179,96 @@ test('a malformed destination is refused, never silently dropped', async () => {
   assert.equal(handle.created.length, 0);
 });
 
+// ---- reporting back into the thread a schedule was set from -----------------
+
+const threadSession = (room: JsonObject, channel = 'slack'): Session => ({
+  ...sessionFor('ava', 'slack:ava:T1:C0123ABCD:1791400000.000100'),
+  metadata: { channel, conversation: room },
+});
+const IN_THREAD = { kind: 'public', id: 'C0123ABCD', thread: true, threadRoot: '1791400000.000100' };
+
+test('a schedule set from a thread reports into that thread by default', async () => {
+  const handle = fakeHandle();
+  const every = toolNamed(createScheduleTools(handle), SCHEDULE_EVERY_TOOL_NAME);
+  const result = await every.execute(
+    { every: '30m', prompt: 'watch PR 72', destination: { channel: 'slack', to: 'C0123ABCD' } },
+    threadSession(IN_THREAD),
+  ) as JsonObject;
+  assert.deepEqual(handle.created[0]?.destination, { channel: 'slack', to: 'C0123ABCD', thread: '1791400000.000100' });
+  // The model and the operator see where reports go.
+  assert.equal((result.schedule as JsonObject).thread, '1791400000.000100');
+  assert.equal((result.schedule as JsonObject).destination, 'slack:C0123ABCD');
+});
+
+test('the origin thread is not applied to another conversation, a top-level origin, or a broadcast', async () => {
+  const handle = fakeHandle();
+  const every = toolNamed(createScheduleTools(handle), SCHEDULE_EVERY_TOOL_NAME);
+  const input = (to: string, extra: JsonObject = {}) => ({ every: '30m', prompt: 'p', destination: { channel: 'slack', to }, ...extra });
+
+  await every.execute(input('C9999ZZZZ'), threadSession(IN_THREAD));
+  await every.execute(input('C0123ABCD', { topLevel: true }), threadSession(IN_THREAD));
+  await every.execute(input('C0123ABCD'), threadSession({ kind: 'public', id: 'C0123ABCD' }));
+  // A direct message records no room id, so nothing is captured there.
+  await every.execute(input('D0123ABCD'), threadSession({ kind: 'direct' }));
+  // Another channel kind with the same native id is another conversation.
+  await every.execute(input('C0123ABCD'), threadSession(IN_THREAD, 'teams'));
+  // No room at all (the CLI, the control API).
+  await every.execute(input('C0123ABCD'), sessionFor('ava'));
+  for (const created of handle.created) {
+    assert.equal(created.destination?.thread, undefined, JSON.stringify(created.destination));
+  }
+});
+
+test('an explicit destination thread is kept, and contradicting topLevel is refused', async () => {
+  const handle = fakeHandle();
+  const every = toolNamed(createScheduleTools(handle), SCHEDULE_EVERY_TOOL_NAME);
+  await every.execute(
+    { every: '30m', prompt: 'p', destination: { channel: 'slack', to: 'C0123ABCD', thread: ' 1791500000.000200 ' } },
+    threadSession(IN_THREAD),
+  );
+  assert.equal(handle.created[0]?.destination?.thread, '1791500000.000200');
+  await assert.rejects(
+    () => every.execute({ every: '30m', prompt: 'p', topLevel: true, destination: { channel: 'slack', to: 'C1', thread: '1.2' } }, sessionFor('ava')),
+    /either a destination "thread" or "topLevel"/,
+  );
+  await assert.rejects(
+    () => every.execute({ every: '30m', prompt: 'p', topLevel: 'yes', destination: { channel: 'slack', to: 'C1' } }, sessionFor('ava')),
+    /"topLevel" must be true or false/,
+  );
+  assert.equal(handle.created.length, 1);
+});
+
+test('message.send goes to the host default thread only when the call names none and is not topLevel', async () => {
+  const sends: Array<Parameters<Parameters<typeof createMessageSendTool>[0]>[0]> = [];
+  const asked: string[] = [];
+  const tool = createMessageSendTool(async (input) => {
+    sends.push(input);
+    return { id: '1791600000.000300' };
+  }, {
+    defaultThread: (_session, destination) => {
+      asked.push(canonicalDestination(destination));
+      return destination.to === 'C9' ? '1791400000.000100' : undefined;
+    },
+  });
+  const report = await tool.execute({ destination: { channel: 'slack', to: 'C9' }, text: 'report' }, sessionFor('ava')) as JsonObject;
+  assert.equal(sends[0]?.thread, '1791400000.000100');
+  assert.equal(report.thread, '1791400000.000100');
+
+  await tool.execute({ destination: { channel: 'slack', to: 'C9' }, text: 'x', thread: '1.2' }, sessionFor('ava'));
+  assert.equal(sends[1]?.thread, '1.2');
+  const top = await tool.execute({ destination: { channel: 'slack', to: 'C9' }, text: 'x', topLevel: true }, sessionFor('ava')) as JsonObject;
+  assert.equal(sends[2]?.thread, undefined);
+  assert.equal(top.thread, '1791600000.000300');
+  await tool.execute({ destination: { channel: 'slack', to: 'C8' }, text: 'x' }, sessionFor('ava'));
+  assert.equal(sends[3]?.thread, undefined);
+  await assert.rejects(
+    () => tool.execute({ destination: { channel: 'slack', to: 'C9' }, text: 'x', thread: '1.2', topLevel: true }, sessionFor('ava')),
+    /either "thread" or "topLevel": true/,
+  );
+  // Asked only when the call left the thread to the host.
+  assert.deepEqual(asked, ['slack:C9', 'slack:C8']);
+});
+
 test('schedule.at refuses the past and malformed timestamps', async () => {
   const handle = fakeHandle();
   const at = toolNamed(createScheduleTools(handle), 'schedule.at');

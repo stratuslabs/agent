@@ -2068,7 +2068,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // that reports no id simply has none to hand back.
     const ts = typeof posted === 'object' && posted !== null ? (posted as { ts?: unknown }).ts : undefined;
     return typeof ts === 'string' && ts.length > 0 ? { id: ts } : {};
-  }));
+  }, { defaultThread: (session, destination) => scheduler.reportThreadFor(session, destination) }));
   tools.register(createMessageReadTool(async ({ agentId, source, ...window }) => {
     // The same carrying rule as outbound: a read goes through the app of
     // the agent asking, never whichever adapter of that kind is running,
