@@ -578,6 +578,43 @@ test('auto-continue never renews a budget of nothing', async () => {
   assert.equal(session.messages.at(-1)?.content, 'No steps to spend.');
 });
 
+test('a provider with its own loop is offered the same grants, cap and yield included', async () => {
+  const grantsFor = async (options: { autoContinue?: true | number; waiting?: boolean }): Promise<{ grants: number; offered: boolean; events: number }> => {
+    let grants = 0;
+    let offered = false;
+    const provider: ModelProvider = {
+      name: 'harness',
+      async generate(request) {
+        offered = request.mayContinue !== undefined;
+        // A harness asking at each inner budget, up to five times.
+        for (let index = 0; index < 5 && request.mayContinue?.() === true; index += 1) {
+          grants += 1;
+        }
+        return { parts: [{ type: 'text', text: 'done' }] };
+      },
+    };
+    const runner = new AgentRunner({
+      provider,
+      maxTurns: 3,
+      ...(options.autoContinue !== undefined ? { autoContinue: options.autoContinue } : {}),
+      ...(options.waiting !== undefined ? { waitingInput: () => options.waiting! } : {}),
+    });
+    let events = 0;
+    runner.bus.subscribe((event) => {
+      if (event.type === 'session.continued') {
+        events += 1;
+      }
+    });
+    await runner.run({ sessionId: `h-${Math.random()}`, agent: { id: 'ava', name: 'Ava' }, userMessage: 'Go' });
+    await new Promise((resolve) => setImmediate(resolve));
+    return { grants, offered, events };
+  };
+  assert.deepEqual(await grantsFor({}), { grants: 0, offered: false, events: 0 });
+  assert.deepEqual(await grantsFor({ autoContinue: true }), { grants: 5, offered: true, events: 5 });
+  assert.deepEqual(await grantsFor({ autoContinue: 2 }), { grants: 2, offered: true, events: 2 });
+  assert.deepEqual(await grantsFor({ autoContinue: true, waiting: true }), { grants: 0, offered: true, events: 0 });
+});
+
 test('auto-continue never extends a message stuck repeating a failure', async () => {
   const tools = new ToolRegistry();
   tools.register({ name: 'shell.run', async execute() { throw new Error('cwd /work/missing does not exist'); } });
