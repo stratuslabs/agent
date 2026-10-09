@@ -5981,6 +5981,17 @@ export interface AgentRunnerOptions {
   /** Known agent definitions; enables per-agent tool allowlists. */
   agents?: AgentRegistry;
   /**
+   * Tools every agent may call whatever its `tools:` says — `tools: []`
+   * included. For a tool whose every call only puts a question to a person
+   * who decides the outcome (`credential.request`), so a soul is not asked
+   * to list it to be able to ask.
+   *
+   * The host names them, not the tool: a flag on `Tool` would let any
+   * plugin declare itself past every allowlist, and this list is a
+   * decision about what is harmless to grant, which is the host's to make.
+   */
+  grantedToEveryAgent?: readonly string[];
+  /**
    * The skill catalog. Passing one makes `skill.read` available — the
    * runner registers it if the host has not — to exactly the agents whose
    * soul enables any skill; see the two gates in `executeTurns` and
@@ -6565,6 +6576,17 @@ export class AgentRunner {
     return session.agent.tools ?? this.agents.get(session.agent.id)?.tools;
   }
 
+  /**
+   * Whether this session's agent may call `name` under its `tools:` list,
+   * or because the host grants it to every agent. Not for `skill.read`,
+   * which has its own gate keyed on `skills:`.
+   */
+  private toolPermitted(name: string, allowedTools: readonly string[] | undefined): boolean {
+    return allowedTools === undefined
+      || (this.options.grantedToEveryAgent ?? []).includes(name)
+      || matchesToolAllowlist(name, allowedTools);
+  }
+
   /** The `skills:` entries this session's agent is held to — same sourcing as `allowedToolsFor`. */
   private skillAllowlistFor(session: Session): readonly string[] | undefined {
     return session.agent.skills ?? this.agents.get(session.agent.id)?.skills;
@@ -6639,7 +6661,7 @@ export class AgentRunner {
         .describe()
         .filter((tool) => (tool.name === SKILL_READ_TOOL_NAME
           ? enabledSkills.length > 0
-          : allowedTools === undefined || matchesToolAllowlist(tool.name, allowedTools)));
+          : this.toolPermitted(tool.name, allowedTools)));
 
       // Resumed, not restarted: a recovered turn spends the budget it was
       // already on. Starting at 1 would let a call parked on the last
@@ -7277,7 +7299,7 @@ export class AgentRunner {
       if (this.enabledSkillsFor(session).length === 0) {
         return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName} (no skills enabled)`);
       }
-    } else if (allowedTools !== undefined && !matchesToolAllowlist(call.toolName, allowedTools)) {
+    } else if (!this.toolPermitted(call.toolName, allowedTools)) {
       return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName}`);
     }
 

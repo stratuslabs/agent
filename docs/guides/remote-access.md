@@ -103,7 +103,10 @@ An agent that needs a key it does not hold asks for it with
 scheduled or HTTP turn, a direct message with someone who is not an
 approver, a private channel with no approver in it), or where the agent is
 asked for one with `via: "link"`, the control API issues a **one-time link**
-instead, and the agent is handed it to pass on:
+instead, and the agent is handed it to pass on. Every agent can ask through
+a form, but a link only goes to an agent whose soul lists
+`credential.request` under `tools:` (or has no `tools:` key), because the
+link is a bearer credential:
 
 ```
 https://mac-mini.example.ts.net/api/v1/credential-links/<token>

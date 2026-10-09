@@ -64,7 +64,8 @@ linked own the full story.
   whatever scope the key was stored under.
   ([Slack](../guides/slack.md#adding-a-credential-from-slack))
 - **A credential link is a bearer capability, by choice.** Where no form
-  can be shown, the agent is handed a one-time link to a form the control
+  can be shown, an agent whose soul lists `credential.request` (or has no
+  `tools:` key) is handed a one-time link to a form the control
   API serves, and holding the link is all it takes to answer that one
   request once, within 30 minutes: no sign-in. It goes through the same
   add-only rule and grants only the requesting agent, so its worst case is

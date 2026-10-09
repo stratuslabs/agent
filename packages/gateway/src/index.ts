@@ -47,6 +47,7 @@ import {
   type ExecutorContribution,
   type ImageAttachment,
   type ObserveEntry,
+  matchesToolAllowlist,
   type JsonObject,
   type MemoryStoreContribution,
   type ProviderContribution,
@@ -55,6 +56,7 @@ import {
   type ToolRisk,
 } from '@stratusagent/core';
 import {
+  CREDENTIAL_REQUEST_TOOL_NAME,
   createCredentialRequestTool,
   createDelegateTool,
   createForgetTool,
@@ -2139,6 +2141,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(session.metadata ? { metadata: session.metadata } : {}),
       });
     };
+    // A link only for an agent whose soul lists the tool. Every agent may
+    // ask through a form, because a form goes to an approver; a link is a
+    // bearer credential the model is handed, and whoever it reaches can
+    // store a key and amend the soul. That is the operator's to allow.
+    const allowlist = session.agent.tools ?? registry.get(agentId)?.tools;
+    const linkAllowed = allowlist === undefined || matchesToolAllowlist(CREDENTIAL_REQUEST_TOOL_NAME, allowlist);
     // Why no form went up, said to the agent beside the link that replaces
     // it, so it can tell the person why they are getting a link instead.
     let formUnavailable: string | undefined;
@@ -2180,8 +2188,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         }
       }
       if (request.via === 'form') {
-        throw new Error(`${formUnavailable} Nothing is pending. Ask for a link instead (via: "link"), or ask your operator to store ${request.name} on the machine with ${onMachine} and grant it to you.`);
+        throw new Error(`${formUnavailable} Nothing is pending. ${linkAllowed ? 'Ask for a link instead (via: "link"), or ask' : 'Ask'} your operator to store ${request.name} on the machine with ${onMachine} and grant it to you.`);
       }
+    }
+    if (!linkAllowed) {
+      throw new Error(
+        `${formUnavailable !== undefined ? `${formUnavailable} ` : ''}A one-time link needs ${CREDENTIAL_REQUEST_TOOL_NAME} in your soul's tools: list, and it is not there. Nothing is pending. `
+        + `Ask in a conversation that can show your operator a form, or ask your operator to store ${request.name} on the machine with ${onMachine} and grant it to you.`,
+      );
     }
     // A link where no form can go, from whichever adapter issues them: the
     // control API, which is not tied to any one agent's transport.
@@ -2422,6 +2436,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       store,
       bus,
       agents: registry,
+      // Asking a person for a key is harmless to grant: they decide
+      // everything after the question, so no soul has to list it.
+      grantedToEveryAgent: [CREDENTIAL_REQUEST_TOOL_NAME],
       skills: skillCatalog,
       memory,
       streaming: true,

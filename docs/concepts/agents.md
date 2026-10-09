@@ -189,7 +189,11 @@ A soul's provider/model are hints:
 
 The `tools:` list is the per-identity gate over everything a plugin
 installs — see [Tools](../guides/tools.md) — and `skills:` opts into
-procedures the same way — see [Skills](../guides/skills.md).
+procedures the same way — see [Skills](../guides/skills.md). One tool sits
+outside it: under `stratus serve` every agent can call `credential.request`,
+even with `tools: []`, to ask through an approver's form. Its one-time
+link fallback is a bearer credential, so that still needs the tool in
+`tools:`.
 
 ## Language
 
