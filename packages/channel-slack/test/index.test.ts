@@ -9446,3 +9446,95 @@ test('a backfill follows Slack\'s cursor even when a short page says nothing of 
   assert.equal(reads.length, 2);
   assert.equal(gateway.dispatches[0]?.earlier?.at(-1)?.message, 'Dylan: newest reply');
 });
+
+test('an untagged reply under an agent\'s own top-level post is that agent\'s, with no session in the thread', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const gateway = createStubGateway(async ({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // Ava posted at the top level from somewhere else (message.send, a
+  // schedule): no session is keyed to the thread under her post.
+  gateway.sessionRouting = routingOver(new Map());
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const underAva = channelMessage({ text: 'sounds good, go ahead', ts: '900.1', thread: '900.0' });
+  const reply = { ...underAva, event: { ...underAva.event, parent_user_id: 'B-AVA' } };
+  // A thread a person started is still nobody's until someone is named.
+  const underPerson = channelMessage({ text: 'anyone?', ts: '910.1', thread: '910.0' });
+  const unclaimed = { ...underPerson, event: { ...underPerson.event, parent_user_id: 'U-DYLAN' } };
+  await Promise.all([
+    socketAva.deliver('message', reply),
+    socketBea.deliver('message', reply),
+    socketAva.deliver('message', unclaimed),
+    socketBea.deliver('message', unclaimed),
+  ]);
+  await adapter.stop();
+
+  assert.deepEqual(
+    gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.sessionId]),
+    [['ava', 'slack:ava:T1:C1:900.0']],
+  );
+});
+
+test('a reply under an agent\'s own post still reaches it when another app hears it first during startup', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  // Ava's socket is still connecting after Bea's is up.
+  let releaseAva!: () => void;
+  const avaUp = new Promise<void>((resolve) => {
+    releaseAva = resolve;
+  });
+  socketAva.start = async () => {
+    await avaUp;
+    socketAva.started = true;
+  };
+  const gateway = createStubGateway(async ({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map());
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  const starting = adapter.start(gateway);
+  while (!socketBea.started) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  assert.equal(socketAva.started, false);
+
+  const underAva = channelMessage({ text: 'go ahead', ts: '950.1', thread: '950.0' });
+  const reply = { ...underAva, event: { ...underAva.event, parent_user_id: 'B-AVA' } };
+  await socketBea.deliver('message', reply);
+  await socketBea.settled();
+  releaseAva();
+  await starting;
+  await socketAva.deliver('message', reply);
+  await socketAva.settled();
+  await adapter.stop();
+
+  assert.deepEqual(
+    gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.sessionId]),
+    [['ava', 'slack:ava:T1:C1:950.0']],
+  );
+});
