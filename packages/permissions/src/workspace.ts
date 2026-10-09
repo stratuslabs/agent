@@ -534,7 +534,8 @@ const configuredRemotes = async (commonDir: string, use: 'fetch' | 'push' = 'pus
   // are paths whatever the config says.
   const sections = config.split(/^(?=\s*\[)/m);
   return sections
-    .map((section) => ({ name: /^\s*\[remote "([^"]+)"\]/.exec(section)?.[1], section }))
+    // Section names are case-insensitive to git; subsection names aren't.
+    .map((section) => ({ name: /^\s*\[remote "([^"]+)"\]/i.exec(section)?.[1], section }))
     .filter((entry): entry is { name: string; section: string } => entry.name !== undefined && entry.name !== '.' && entry.name !== '..'
       && (use === 'fetch' ? /^\s*url\s*=\s*\S/im : /^\s*(?:push)?url\s*=\s*\S/im).test(entry.section))
     .map((entry) => entry.name);
