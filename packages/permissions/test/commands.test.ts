@@ -726,6 +726,11 @@ test('git -C <repo> persists a scope for that repository and that subcommand', (
   assert.equal(normalizeCommandScope(analyzeCommand(`git -C ${repo} -c core.pager=sh log`)), undefined);
   assert.equal(normalizeCommandScope(analyzeCommand('git -C ~/repo status')), undefined);
   assert.equal(normalizeCommandScope(analyzeCommand('git -C $REPO status')), undefined);
+  // Nor when the subcommand is spelled so the shell passes something else:
+  // `\\branch` is `branch` to sh, and must not escape its list-only rule.
+  for (const command of [`git -C ${repo} \\branch --list`, 'git \\branch --list', 'git $CMD x', 'git br* --list']) {
+    assert.equal(normalizeCommandScope(analyzeCommand(command)), undefined, command);
+  }
 
   // -C does not make a command safe by itself: another repository on the
   // host is reach the built-in list never promised.

@@ -786,6 +786,14 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
     };
   }
 
+  // The stored argument is what the scope is named for and which safe
+  // scope's constraints it inherits, so it must be the argument the shell
+  // passes: `git \\branch --list` runs `git branch --list`, and a scope
+  // stored as `git \\branch` would inherit nothing of `branch`'s list-only
+  // rule while matching `git \\branch release`.
+  if (first !== undefined && (analysis.expands?.[firstIndex + 1] || /[*?[\]{}~$\\#]/.test(first))) {
+    return undefined;
+  }
   const sameScope = SAFE_COMMAND_SCOPES
     .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === (first ?? ''));
   const inherited = sameScope.flatMap((scope) => scope.deniedFlags ?? []);
