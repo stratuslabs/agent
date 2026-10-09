@@ -634,6 +634,12 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   let positionals = 0;
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] as string;
+    // After `--` a dash token is an operand to a program that honors it and
+    // a flag to one that doesn't, and the two can't both be checked as
+    // written: it asks.
+    if (token.startsWith('-') && rest.slice(0, index).includes('--')) {
+      return false;
+    }
     if (token.startsWith('-')) {
       // `-cfix` is `-c fix`: the rest is the branch (or commit) it takes,
       // not more flags, unless the scope itself denies `-c`.
