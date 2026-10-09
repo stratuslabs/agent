@@ -595,7 +595,11 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   // a literal required argument, so `-c` cannot be it.
   // Only for subcommands whose `-c` is known not to set config: `clone -c`
   // does exactly what `git -c` does (`core.sshCommand=…`).
-  const subcommandAt = required[0] === '-C' ? 2 : 0;
+  // Past every leading `-C <repo>` pair: git applies each in turn.
+  let subcommandAt = 0;
+  while (scope.command === 'git' && required[subcommandAt] === '-C' && required[subcommandAt + 1] !== undefined) {
+    subcommandAt += 2;
+  }
   // Only the `-c` the shared list contributes; a scope that names `-c` in
   // its own `deniedFlags` still means it.
   const deniedInTail = scope.command === 'git' && GIT_SUBCOMMANDS_WITH_PLAIN_C.has(required[subcommandAt] ?? '')
@@ -611,11 +615,12 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
     // Its operand is a path, not an argument of the subcommand's, so the
     // subcommand's denied arguments and git's refspec rule do not apply to
     // it either: `git -C add remote` is the `remote` subcommand in `add`.
-    if (scope.command === 'git' && required[0] === '-C' && required.length > 2 && index <= 1) {
+    if (scope.command === 'git' && subcommandAt > 0 && required.length > subcommandAt && index < subcommandAt) {
       continue;
     }
     if (token.startsWith('-')) {
-      if (deniesFlag(denied, token)) {
+      // Past the subcommand, the same relief the tail gets (`['switch', '-c']`).
+      if (deniesFlag(index > subcommandAt ? deniedInTail : denied, token)) {
         return false;
       }
       continue;
