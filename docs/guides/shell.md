@@ -143,8 +143,14 @@ approving something you cannot see.
 ## Timeouts and background processes
 
 A command is killed with its whole process group when its `timeoutMs` runs
-out — 60 seconds by default, settable per call and per agent — and the call
-comes back with `timedOut: true` and whatever it had read so far. A process
+out — 60 seconds by default, settable per call and per agent, and never more
+than the executor's ceiling, five minutes in a stock install — and the call comes back with `timedOut: true` and
+whatever it had read so far. A call that asked for longer than five minutes
+is told it was cut to the ceiling, and the tool's own description says so
+before it asks. Work that takes longer belongs in the background: start it
+with its output redirected to a file (`long-job > job.log 2>&1 &`), and the
+call returns at once while the job keeps running; read `job.log` in a later
+call to see how it is doing. A process
 the command started in its own session is outside that group and survives:
 `setsid`, or a server that detaches itself. If it inherited the command's
 output, it used to hold the call open until it exited on its own — a

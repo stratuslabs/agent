@@ -388,7 +388,7 @@ export interface SlackHistoryPage {
 }
 
 export interface SlackWebLike {
-  auth: { test(): Promise<{ user_id?: string; team_id?: string }> };
+  auth: { test(): Promise<{ user_id?: string; team_id?: string; response_metadata?: { scopes?: string[] } }> };
   chat: {
     postMessage(args: { channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[] }): Promise<{ ts?: string; channel?: string }>;
     update(args: { channel: string; ts: string; text: string; blocks?: SlackBlock[] }): Promise<unknown>;
@@ -512,6 +512,45 @@ const requireModule = createRequire(import.meta.url);
 const defaultSocketClient = (appToken: string): SlackSocketLike => {
   const { SocketModeClient } = requireModule('@slack/socket-mode') as typeof import('@slack/socket-mode');
   return new SocketModeClient({ appToken }) as unknown as SlackSocketLike;
+};
+
+/**
+ * Scopes the manifest asks for. An app created before they shipped has
+ * fewer, and some features silently break — threads are answered without
+ * their context, images arrive as names. Checked once at connect, so the
+ * operator finds out at start, not at the first broken thread.
+ *
+ * Events (`message.channels`, `message.groups`, …) cannot be read from a
+ * bot token, so the warning says they are needed too.
+ */
+const REQUIRED_SCOPES: readonly string[] = [
+  'app_mentions:read',
+  'channels:history', 'channels:read',
+  'chat:write',
+  'files:read', 'files:write',
+  'groups:history', 'groups:read',
+  'im:history', 'im:read', 'im:write',
+  'mpim:history', 'mpim:read',
+  'users:read',
+];
+
+const checkBotScopes = (
+  agentId: string,
+  granted: readonly string[],
+  warn: (message: string) => void,
+): void => {
+  const have = new Set(granted);
+  const missing = REQUIRED_SCOPES.filter((scope) => !have.has(scope));
+  if (missing.length === 0) {
+    return;
+  }
+  warn(
+    `slack: ${agentId}'s app is missing bot scopes: ${missing.join(', ')}. `
+    + 'Add them under OAuth & Permissions, add the matching message.* events '
+    + 'under Event Subscriptions, and reinstall the app to the workspace. '
+    + 'Without them, some features (thread follow-through, image viewing, '
+    + 'channel history) will silently fail.',
+  );
 };
 
 const defaultWebClient = (botToken: string): SlackWebLike => {
@@ -1711,6 +1750,32 @@ const pastCodePoint = (text: string, index: number): number => {
   return code >= 0xd800 && code <= 0xdbff ? index + 1 : index;
 };
 
+/**
+ * `cut` moved in front of any Slack markup it would land inside — a link
+ * `<https://…>` or `<https://…|label>`, a mention `<@U…>` — when that still
+ * leaves half a message. Cut through, the first message ends on an
+ * unterminated `<https://…` and the next starts with the rest of the
+ * address and a stray `>`, and neither half is a link. Markup is one line,
+ * so only the cut's own line is looked at.
+ */
+const outsideSlackMarkup = (text: string, cut: number): number => {
+  const open = text.lastIndexOf('<', cut - 1);
+  if (open <= SLACK_MAX_MESSAGE_CHARS / 2) {
+    return cut;
+  }
+  const closedBefore = text.lastIndexOf('>', cut - 1);
+  const lineBreak = text.lastIndexOf('\n', cut - 1);
+  if (closedBefore > open || lineBreak > open) {
+    return cut;
+  }
+  const close = text.indexOf('>', cut);
+  const nextLine = text.indexOf('\n', cut);
+  if (close === -1 || (nextLine !== -1 && nextLine < close)) {
+    return cut;
+  }
+  return open;
+};
+
 const truncateForSlack = (text: string): string =>
   text.length <= SLACK_MAX_MESSAGE_CHARS
     ? text
@@ -1769,8 +1834,9 @@ const splitForSlack = (text: string): string[] => {
     // point, or the step that guarantees progress lands inside an emoji.
     const fence = run !== undefined && run.closer.startsWith('\n');
     if (run === undefined || !fence || reopen === undefined || reopen.length + run.closer.length > SLACK_MAX_MESSAGE_CHARS / 4 || floor + 2 > budget) {
-      chunks.push(rest.slice(0, cut));
-      rest = rest.slice(cut).replace(/^\n+/, '');
+      const at = run === undefined ? outsideSlackMarkup(rest, cut) : cut;
+      chunks.push(rest.slice(0, at));
+      rest = rest.slice(at).replace(/^\n+/, '');
       continue;
     }
     const inner = rest.lastIndexOf('\n', budget - 1);
@@ -3445,12 +3511,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const channelId = conversation.id;
     const web = connection.web;
+    // A reply under a message rather than a post beside it. Every chunk of
+    // a long one goes to the same thread, so a split reply stays together.
+    const thread = address.thread?.trim() || undefined;
     return {
       async post(text: string): Promise<OutboundMessageRef> {
         const chunks = messageChunks(text.trim().length > 0 ? text : '(empty message)');
         let first: OutboundMessageRef | undefined;
         for (const chunk of chunks) {
-          const posted = await web.chat.postMessage({ channel: channelId, text: chunk });
+          const posted = await web.chat.postMessage({ channel: channelId, text: chunk, ...(thread ? { thread_ts: thread } : {}) });
           if (!first) {
             first = { channel: posted.channel ?? channelId, ts: posted.ts ?? '' };
           }
@@ -5618,6 +5687,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           const auth = await web.auth.test();
           const botUserId = auth.user_id ?? '';
           const teamId = auth.team_id ?? '';
+          checkBotScopes(config.agentId, auth.response_metadata?.scopes ?? [], warn);
           // Recorded before the socket is even built: an app that never
           // comes up must still be recognizable when somebody names it.
           botIdentities.set(config.agentId, { botUserId, teamId });

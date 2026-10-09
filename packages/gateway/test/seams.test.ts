@@ -9,6 +9,7 @@ import {
   InMemoryAgentMemoryStore,
   MEMORY_STORE_CONTRACT_VERSION,
   type AgentDefinition,
+  type JsonObject,
   type ModelProvider,
   type PluginContext,
   type ProviderResponse,
@@ -289,6 +290,65 @@ test('outbound speech goes to the adapter that carries the agent when one kind h
     const mia = await gateway.dispatch({ sessionId: 'out-mia', agentId: 'mia', userMessage: 'say something' });
     assert.match(JSON.stringify(mia.messages), /No running 'fixture' channel carries agent mia/);
     assert.deepEqual(posted, ['b for juno: from juno', 'a for ava: from ava']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('message.send hands the thread to the adapter and the posted id back to the model', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: sender\ntools: [message.send]\n---\n\nYou are Ava.\n');
+  const addresses: JsonObject[] = [];
+  const host = await hostFor({
+    'stratus-plugin-chan': {
+      manifest: manifest({ channels: [{ name: 'fixture' }] }),
+      module: plugin('chan', (context) => {
+        context.channels!.register({
+          agents: ['ava'],
+          adapter: {
+            name: 'fixture',
+            async start() {},
+            async stop() {},
+            async resolveOutbound(address) {
+              addresses.push({ ...address });
+              return { async post() { return { channel: address.to, ts: '1791400000.000200' }; } };
+            },
+          },
+        });
+      }),
+    },
+    'stratus-plugin-sender': {
+      manifest: manifest({ providers: [{ name: 'sender' }] }),
+      module: plugin('sender', (context) => {
+        context.providers!.register({
+          name: 'sender',
+          create: () => ({
+            name: 'sender',
+            async generate({ session }): Promise<ProviderResponse> {
+              if (session.messages.at(-1)?.role === 'tool') {
+                return { parts: [{ type: 'text', text: 'sent' }] };
+              }
+              return { parts: [{ type: 'tool-call', call: { id: `${session.id}:send`, toolName: 'message.send', input: { destination: { channel: 'fixture', to: 'C1' }, text: 'details', thread: '1791400000.000100' } } }] };
+            },
+          }),
+        });
+      }),
+    },
+  });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-chan': {}, 'stratus-plugin-sender': {} },
+    pluginHost: host,
+    log: () => {},
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    const session = await gateway.dispatch({ sessionId: 'thread-ava', agentId: 'ava', userMessage: 'reply under the report' });
+    assert.deepEqual(addresses, [{ agentId: 'ava', to: 'C1', thread: '1791400000.000100' }]);
+    const result = session.messages.find((message) => message.role === 'tool');
+    assert.match(JSON.stringify(result), /1791400000\.000200/);
   } finally {
     await gateway.stop();
   }

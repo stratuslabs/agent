@@ -98,6 +98,8 @@ interface FakeWeb extends SlackWebLike {
   userInfoDelayMs?: (callIndex: number) => number;
   /** Profile names to answer with, by user id, ahead of the default `name-<id>`. */
   displayNames?: Map<string, string>;
+  /** Scopes auth.test reports, for testing the scope check. */
+  grantedScopes: string[];
   /** Called as chat.postMessage is entered, before it awaits `postGate`. */
   onPostEnter?: () => void;
   /** Held by chat.postMessage, so a test can act while a post is in flight. */
@@ -124,6 +126,11 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
     ephemerals: [],
     views_opened: [],
     uploads: [],
+    grantedScopes: [
+      'app_mentions:read', 'channels:history', 'channels:read', 'chat:write',
+      'files:read', 'files:write', 'groups:history', 'groups:read',
+      'im:history', 'im:read', 'im:write', 'mpim:history', 'mpim:read', 'users:read',
+    ],
     views: {
       async open(args) {
         web.views_opened.push(args);
@@ -132,7 +139,7 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
     },
     auth: {
       async test() {
-        return { user_id: botUserId, team_id: teamId };
+        return { user_id: botUserId, team_id: teamId, response_metadata: { scopes: web.grantedScopes } };
       },
     },
     chat: {
@@ -6257,7 +6264,7 @@ test('an update Slack applied but never confirmed does not lose its outcome', as
 
 // ---- addressable outbound (step 10) -----------------------------------------
 
-const startedAdapterWith = async (web: FakeWeb): Promise<import('@stratusagent/channels').ChannelAdapter> => {
+const startedAdapterWith = async (web: FakeWeb, overrides?: { warn?: (msg: string) => void }): Promise<import('@stratusagent/channels').ChannelAdapter> => {
   const socket = createFakeSocket();
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
   const adapter = createSlackChannelAdapter({
@@ -6266,11 +6273,33 @@ const startedAdapterWith = async (web: FakeWeb): Promise<import('@stratusagent/c
     createSocketClient: () => socket,
     createWebClient: () => web,
     log: () => {},
-    warn: () => {},
+    warn: overrides?.warn ?? (() => {}),
   });
   await adapter.start(gateway);
   return adapter;
 };
+
+test('a missing bot scope is warned about at connect', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.grantedScopes = ['app_mentions:read', 'chat:write'];
+  const warnings: string[] = [];
+  const adapter = await startedAdapterWith(web, { warn: (msg: string) => warnings.push(msg) });
+  const scopeWarnings = warnings.filter((w) => w.includes('missing bot scopes'));
+  assert.equal(scopeWarnings.length, 1);
+  assert.match(scopeWarnings[0] ?? '', /channels:history/);
+  assert.match(scopeWarnings[0] ?? '', /files:read/);
+  assert.match(scopeWarnings[0] ?? '', /Add them under OAuth/);
+  await adapter.stop();
+});
+
+test('no warning when all scopes are present', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  const warnings: string[] = [];
+  const adapter = await startedAdapterWith(web, { warn: (msg: string) => warnings.push(msg) });
+  const scopeWarnings = warnings.filter((w) => w.includes('missing bot scopes'));
+  assert.equal(scopeWarnings.length, 0);
+  await adapter.stop();
+});
 
 test('resolveOutbound posts to a channel the app is a member of, splitting oversized text', async () => {
   const web = createFakeWeb('B-AVA', 'T1');
@@ -6291,6 +6320,38 @@ test('resolveOutbound posts to a channel the app is a member of, splitting overs
   assert.equal(web.posts.length, 3);
   assert.ok((web.posts[1]?.text.length ?? 0) <= 4000);
   assert.match(web.posts[2]?.text ?? '', /b/);
+
+  await adapter.stop();
+});
+
+test('resolveOutbound with a thread posts every chunk as a reply under it', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  const adapter = await startedAdapterWith(web);
+
+  const top = await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG' })).post('report');
+  assert.equal(web.posts[0]?.thread_ts, undefined);
+
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: top.ts });
+  await connection.post(['a'.repeat(3000), 'b'.repeat(3000)].join('\n'));
+  assert.equal(web.posts.length, 3);
+  assert.deepEqual(web.posts.slice(1).map((post) => post.thread_ts), [top.ts, top.ts]);
+
+  await adapter.stop();
+});
+
+test('a message split at Slack\'s limit never cuts through a link', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  const adapter = await startedAdapterWith(web);
+
+  const url = `https://example.com/${'p'.repeat(60)}`;
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG' });
+  // No newline to break at, and the address straddles the 4,000th character.
+  await connection.post(`${'a'.repeat(3_980)} ${url} and after`);
+  assert.equal(web.posts.length, 2);
+  assert.ok(!(web.posts[0]?.text ?? '').includes('<'), web.posts[0]?.text.slice(-40));
+  assert.ok((web.posts[1]?.text ?? '').startsWith(`<${url}>`), web.posts[1]?.text.slice(0, 40));
 
   await adapter.stop();
 });

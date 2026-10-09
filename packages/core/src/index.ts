@@ -2887,6 +2887,13 @@ export interface ProviderRequest {
    */
   onUsage?: (usage: ProviderCallUsage) => void;
   /**
+   * For a provider that runs its own tool loop (the harness runtimes): ask,
+   * when its inner budget runs out mid-work, whether to carry on with a
+   * fresh one instead of wrapping up. True grants it, and counts it against
+   * the agent's `autoContinue` cap. Absent when auto-continue is off.
+   */
+  mayContinue?: () => boolean;
+  /**
    * Abort signal for the turn. Adapters MUST cancel their underlying
    * operation (HTTP request, SDK query) when it fires — racing the promise
    * is not cancellation; the underlying work has to stop.
@@ -3561,6 +3568,13 @@ export const UNADDRESSED_TURN_NOTE =
  * the runtime speaking for one call, and a transcript that kept it would
  * read to every later turn as something the person said.
  */
+/**
+ * What a harness runtime is told when auto-continue grants it a fresh
+ * budget. The runtime speaking, never saved to the kernel's transcript.
+ */
+export const CONTINUE_NOTE =
+  'You ran out of steps for this stretch and have been given more. Carry on with the work from where you left off; do not start over or repeat what is done.';
+
 export const TURN_LIMIT_NOTE =
   'You have used every step this message allows, so you cannot call any more tools on it. Reply now, in words: say what you did, what you found, and what is left. If the work is unfinished, end by saying that replying "continue" picks it up from here.';
 
@@ -4125,7 +4139,7 @@ export interface ChannelAdapterLike {
   start(gateway: unknown): Promise<void>;
   stop(): Promise<void>;
   required?: boolean;
-  resolveOutbound?(address: { agentId: string; to: string }): Promise<{
+  resolveOutbound?(address: { agentId: string; to: string; thread?: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
   /** See `@stratusagent/channels`' `ChannelAdapter.readConversation`. */
@@ -5967,6 +5981,17 @@ export interface AgentRunnerOptions {
   /** Known agent definitions; enables per-agent tool allowlists. */
   agents?: AgentRegistry;
   /**
+   * Tools every agent may call whatever its `tools:` says — `tools: []`
+   * included. For a tool whose every call only puts a question to a person
+   * who decides the outcome (`credential.request`), so a soul is not asked
+   * to list it to be able to ask.
+   *
+   * The host names them, not the tool: a flag on `Tool` would let any
+   * plugin declare itself past every allowlist, and this list is a
+   * decision about what is harmless to grant, which is the host's to make.
+   */
+  grantedToEveryAgent?: readonly string[];
+  /**
    * The skill catalog. Passing one makes `skill.read` available — the
    * runner registers it if the host has not — to exactly the agents whose
    * soul enables any skill; see the two gates in `executeTurns` and
@@ -6551,6 +6576,17 @@ export class AgentRunner {
     return session.agent.tools ?? this.agents.get(session.agent.id)?.tools;
   }
 
+  /**
+   * Whether this session's agent may call `name` under its `tools:` list,
+   * or because the host grants it to every agent. Not for `skill.read`,
+   * which has its own gate keyed on `skills:`.
+   */
+  private toolPermitted(name: string, allowedTools: readonly string[] | undefined): boolean {
+    return allowedTools === undefined
+      || (this.options.grantedToEveryAgent ?? []).includes(name)
+      || matchesToolAllowlist(name, allowedTools);
+  }
+
   /** The `skills:` entries this session's agent is held to — same sourcing as `allowedToolsFor`. */
   private skillAllowlistFor(session: Session): readonly string[] | undefined {
     return session.agent.skills ?? this.agents.get(session.agent.id)?.skills;
@@ -6625,7 +6661,7 @@ export class AgentRunner {
         .describe()
         .filter((tool) => (tool.name === SKILL_READ_TOOL_NAME
           ? enabledSkills.length > 0
-          : allowedTools === undefined || matchesToolAllowlist(tool.name, allowedTools)));
+          : this.toolPermitted(tool.name, allowedTools)));
 
       // Resumed, not restarted: a recovered turn spends the budget it was
       // already on. Starting at 1 would let a call parked on the last
@@ -6802,6 +6838,20 @@ export class AgentRunner {
               ...(enabledSkills.length > 0 ? { skills: enabledSkills } : {}),
               ...(runtime !== undefined ? { runtime } : {}),
               ...(this.streaming ? { onDelta } : {}),
+              ...(this.options.autoContinue !== undefined
+                ? {
+                  // The same grant the loop below makes, for a provider
+                  // whose loop is its own.
+                  mayContinue: () => {
+                    if (!this.mayContinue(session.id, continued)) {
+                      return false;
+                    }
+                    continued += 1;
+                    void this.bus.emit({ type: 'session.continued', sessionId: session.id, continuation: continued, turns: this.maxTurns });
+                    return true;
+                  },
+                }
+                : {}),
               onUsage,
               ...(signal ? { signal } : {}),
             });
@@ -7249,7 +7299,7 @@ export class AgentRunner {
       if (this.enabledSkillsFor(session).length === 0) {
         return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName} (no skills enabled)`);
       }
-    } else if (allowedTools !== undefined && !matchesToolAllowlist(call.toolName, allowedTools)) {
+    } else if (!this.toolPermitted(call.toolName, allowedTools)) {
       return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName}`);
     }
 

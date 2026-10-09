@@ -525,3 +525,55 @@ test('a link that could not be issued leaves nothing pending', async () => {
     await gateway.stop();
   }
 });
+
+test('an agent whose tools: leaves out credential.request can still ask through a form, but is never handed a link', async () => {
+  const listed = '---\nname: Kai\nprovider: openai\nmodel: model-a\ntools: []\n---\n\nYou are Kai.\n';
+  const viaForm = await startRequesting({ soul: listed });
+  try {
+    const session = await viaForm.gateway.dispatch({ sessionId: 'kai-30', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const result = session.messages.find((message) => message.role === 'tool')?.toolResult;
+    assert.equal(result?.ok, true, 'the form path is granted to every agent');
+    assert.equal(viaForm.delivered.length, 1);
+  } finally {
+    await viaForm.gateway.stop();
+  }
+
+  const links = createLinkIssuer();
+  const viaLink = await startRequesting({ soul: listed, request: { name: 'github.token', via: 'link' }, also: [links.adapter] });
+  try {
+    const session = await viaLink.gateway.dispatch({ sessionId: 'kai-31', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const result = session.messages.find((message) => message.role === 'tool')?.toolResult;
+    assert.equal(result?.ok, false);
+    assert.match(result?.error ?? '', /A one-time link needs credential\.request in your soul's tools: list/);
+    assert.equal(links.issued.length, 0, 'no link was issued');
+    assert.equal(requestedIn(viaLink.events), undefined);
+  } finally {
+    await viaLink.gateway.stop();
+  }
+
+  // Where no form can go, the fallback is refused too rather than becoming a link.
+  const refusing = createFormChannel({ refuse: 'Nobody who can add it can see this conversation.' });
+  const fallback = await startRequesting({ soul: listed, channel: refusing.adapter, also: [links.adapter] });
+  try {
+    const session = await fallback.gateway.dispatch({ sessionId: 'kai-32', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const result = session.messages.find((message) => message.role === 'tool')?.toolResult;
+    assert.equal(result?.ok, false);
+    assert.match(result?.error ?? '', /^The form could not be shown here: .* A one-time link needs/);
+    assert.equal(links.issued.length, 0);
+  } finally {
+    await fallback.gateway.stop();
+  }
+
+  // A soul that lists the tool keeps the link.
+  const granted = await startRequesting({
+    soul: '---\nname: Kai\nprovider: openai\nmodel: model-a\ntools: [credential.request]\n---\n\nYou are Kai.\n',
+    request: { name: 'github.token', via: 'link' },
+    also: [links.adapter],
+  });
+  try {
+    await granted.gateway.dispatch({ sessionId: 'kai-33', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    assert.equal(links.issued.length, 1);
+  } finally {
+    await granted.gateway.stop();
+  }
+});

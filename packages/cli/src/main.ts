@@ -101,6 +101,7 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
         || command.command === 'template-add'
         || command.command === 'dashboard'
         || (command.command === 'credential' && command.action !== 'list')
+        || (command.command === 'signin' && command.action !== 'list')
         || (command.command === 'channel' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
         || (command.command === 'memory' && memoryCommandWritesState(command.action))

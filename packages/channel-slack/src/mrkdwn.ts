@@ -82,6 +82,98 @@ const LINK_DESTINATION = /^(?:https?:\/\/|mailto:)[^\s()]+$/;
  * heading has any content is asked later, of the rendered line, where the
  * answer does not depend on which token the content landed in.
  */
+/**
+ * Where a bare address may begin: a scheme Slack links, with the character
+ * before it not one that would make it the middle of something else — a
+ * word, a path, or Slack's own `<…>` and `<…|…>` markup, which is already
+ * a link and is left exactly as written. Nor a `(`: that is where a
+ * Markdown link's destination starts, and one that turns out not to be a
+ * link stays as it was written, as it always has.
+ */
+const BARE_URL_START = /^(?:https?:\/\/|mailto:)[^\s<>()[\]`"|]/i;
+const NOT_BEFORE_BARE_URL = /[\p{L}\p{N}<|(\/@&.+-]/u;
+
+/**
+ * Characters an address does not run through: whitespace, the brackets a
+ * link label and Slack's markup are spelled with, a backtick, so a snippet
+ * that follows an address is still a snippet, and `|`, which inside
+ * `<…>` is Slack's label separator — `https://x/a|FAKE` sent whole would
+ * show a link labelled FAKE. Parentheses are not among them:
+ * `…/wiki/Function_(mathematics)` is one address, and only a `)` the
+ * address never opened is cut from its end (see below).
+ */
+const BARE_URL_END = /[\s<>[\]`"|]/;
+
+/**
+ * Punctuation that ends a sentence or closes emphasis rather than ending
+ * the address, as GFM's autolinks read it: in `see **https://x/a**.` the
+ * address is `https://x/a`, and the `**.` is the sentence's. Not `;`:
+ * `https://x/path;` keeps it, and only an entity-like `&hl;` at the end
+ * comes off, whole (see `bareUrlAt`).
+ */
+const BARE_URL_TRAILING = /^[?!.,:*_~"]$/;
+
+/** How long the bare address starting at `at` is, or 0 when none starts there. */
+const bareUrlAt = (text: string, at: number): number => {
+  // Schemes are case-insensitive: `HTTPS://x/*a*` is as much an address.
+  const ch = text[at] ?? '';
+  if ((ch !== 'h' && ch !== 'H' && ch !== 'm' && ch !== 'M') || !BARE_URL_START.test(text.slice(at, at + 9))) {
+    return 0;
+  }
+  const before = text[at - 1];
+  if (before !== undefined && NOT_BEFORE_BARE_URL.test(before)) {
+    return 0;
+  }
+  let end = at;
+  while (end < text.length && !BARE_URL_END.test(text[end] ?? '')) {
+    end += 1;
+  }
+  // GFM's rule, both halves until neither applies: sentence punctuation
+  // comes off the end, and so does a `)` with no `(` of its own in the
+  // address — `(see https://x/a)` is a parenthesis around an address,
+  // `https://x/f_(m)` an address with one in it. The balance is counted
+  // once and kept as characters come off, so a reply ending in thousands
+  // of `)` is one pass, not one recount per parenthesis.
+  let opened = 0;
+  let closed = 0;
+  for (let index = at; index < end; index += 1) {
+    if (text[index] === '(') {
+      opened += 1;
+    } else if (text[index] === ')') {
+      closed += 1;
+    }
+  }
+  for (;;) {
+    const last = text[end - 1] ?? '';
+    if (end > at && BARE_URL_TRAILING.test(last)) {
+      end -= 1;
+      continue;
+    }
+    if (last === ')' && closed > opened) {
+      end -= 1;
+      closed -= 1;
+      continue;
+    }
+    // GFM again: a `;` ending something shaped like an entity reference,
+    // `&` and letters or digits, is not the address's, and goes as a unit.
+    // Any other `;` stays.
+    if (last === ';') {
+      let from = end - 2;
+      while (from > at && /[A-Za-z0-9]/.test(text[from] ?? '')) {
+        from -= 1;
+      }
+      if (from < end - 2 && text[from] === '&') {
+        end = from;
+        continue;
+      }
+    }
+    break;
+  }
+  // Nothing after the scheme once trailing punctuation is gone is not an
+  // address anybody can follow.
+  return /^(?:https?:\/\/|mailto:)./i.test(text.slice(at, end)) ? end - at : 0;
+};
+
 const HEADING_OPENER = /^ {0,3}#{1,6}[ \t]+/;
 
 /**
@@ -97,6 +189,8 @@ type Token =
   | { readonly kind: 'code'; readonly text: string; readonly closed: boolean }
   | { readonly kind: 'run'; readonly char: string; readonly length: number; readonly opens: boolean; readonly closes: boolean }
   | { readonly kind: 'punct'; readonly text: string }
+  /** A bare web address, verbatim: what stands in it is part of the address, not markup. */
+  | { readonly kind: 'url'; readonly text: string }
   | { readonly kind: 'break' };
 
 /** The characters a token was written with, whatever it came to mean. */
@@ -212,6 +306,14 @@ const scan = (text: string): Token[] => {
         closes: tight && before !== undefined && !/\s/.test(before) && (char !== '_' || !inWord(after)),
       });
       at += length;
+      continue;
+    }
+
+    const url = bareUrlAt(text, at);
+    if (url > 0) {
+      flush();
+      tokens.push({ kind: 'url', text: text.slice(at, at + url) });
+      at += url;
       continue;
     }
 
@@ -640,6 +742,9 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
   const chunks: string[] = [];
   const stack: Frame[] = [{ kind: 'range', to, loose: new Set(), unclosed: false, wraps: false }];
   let at = from;
+  // How many link labels enclose the current token. An address inside a
+  // label is the label's text: `<https://x|<https://x>>` is not a link.
+  let labels = 0;
 
   /** Text that is prose: it contributes whatever delimiters stand in it. */
   const write = (frame: Frame, text: string): void => {
@@ -692,6 +797,7 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
           }
         }
       } else {
+        labels -= 1;
         chunks[frame.slot] = `<${frame.link.destination}|`;
         chunks.push('>');
         // The destination is an address rather than markup, so its
@@ -725,6 +831,7 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
         after: link.through + 1,
         link,
       });
+      labels += 1;
       at = link.label[0];
       continue;
     }
@@ -783,6 +890,24 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
       chunks.push(token.text);
       frame.unclosed = frame.unclosed || !token.closed;
       frame.wraps = frame.wraps || token.text.includes('\n');
+      at += 1;
+      continue;
+    }
+
+    if (token.kind === 'url' && labels === 0) {
+      // Spelled as Slack's own link so nothing around it decides where it
+      // ends: written bare, `*https://x/a*` left Slack to guess whether the
+      // closing asterisk was part of the address. Not through `write`,
+      // because nothing inside the brackets is markup to Slack.
+      //
+      // Skip the wrapper when the URL alone fills a Slack message: adding
+      // `<` and `>` would push it past the 4,000-character limit, and the
+      // splitter has no way to keep a `<…>` that cannot fit in one message.
+      if (token.text.length <= 3998) {
+        chunks.push(`<${token.text}>`);
+      } else {
+        chunks.push(token.text);
+      }
       at += 1;
       continue;
     }
@@ -1109,7 +1234,7 @@ const pad = (text: string, width: number, alignment: Alignment): string => {
 const tableLabel = (header: string): string =>
   header.length === 0 ? '' : /[*_~`]/.test(header) ? header : `**${header}**`;
 
-const renderTable = (header: string[], alignments: Alignment[], rows: string[][]): string => {
+const renderTable = (header: string[], alignments: Alignment[], rows: string[][], forceList = false): string => {
   const columns = header.length;
   const fit = (row: string[]): string[] => Array.from({ length: columns }, (_, index) => row[index] ?? '');
   // One column has nothing to line up, so it is a list under its header.
@@ -1133,7 +1258,7 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
   const linked = [header, ...rows].some((row) => row.some((cell) =>
     readEmphasis(scan(cell)).links.size > 0
     || /\b(?:https?:\/\/|mailto:)\S|<[a-z][a-z0-9+.-]*:[^>\s]+>|<[@#!][^>\s]+>/i.test(cell)));
-  if (width <= TABLE_MAX_WIDTH && !linked && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
+  if (!forceList && width <= TABLE_MAX_WIDTH && !linked && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
     const line = (row: string[]): string =>
       row.map((cell, index) => pad(cell, widths[index] ?? 0, alignments[index] ?? 'left')).join(' │ ').trimEnd();
     const rule = widths.map((each) => '─'.repeat(each)).join('─┼─');
@@ -1154,6 +1279,35 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
       .join(' · '))
     .filter((line) => line.length > 0);
   return listed.length > 0 ? listed.join('\n') : headerOnly;
+};
+
+/**
+ * The block-quote depth and the content after the markers. GFM permits up
+ * to three spaces before each `>` and makes the space after it optional,
+ * so `  > > x` and `>> x` and `> >x` are all depth 2 with content `x`.
+ * Comparison is by depth, not by the raw spelling: two lines at the same
+ * depth share a logical prefix regardless of whether they wrote it the
+ * same way.
+ */
+const blockQuoteInfo = (line: string): { depth: number; contentStart: number } => {
+  let at = 0;
+  let depth = 0;
+  while (at < line.length) {
+    // Up to three leading spaces before each `>`.
+    const mark = at;
+    while (at < line.length && line[at] === ' ' && at - mark < 3) at += 1;
+    if (at >= line.length || line[at] !== '>') {
+      // The spaces were not part of a quote marker: roll back so they
+      // remain in the content and isIndentedCode can see them.
+      at = mark;
+      break;
+    }
+    at += 1;
+    depth += 1;
+    // Optional single space after `>`.
+    if (at < line.length && line[at] === ' ') at += 1;
+  }
+  return { depth, contentStart: at };
 };
 
 /** Four spaces or a tab: an indented code block, which no table row may be. */
@@ -1188,23 +1342,61 @@ const renderTables = (text: string): string => {
   let at = 0;
   while (at < lines.length) {
     const headerLine = lines[at] ?? '';
-    const alignments = inCode[at] || inCode[at + 1] ? undefined : tableAlignments(lines[at + 1] ?? '');
-    const header = tableCells(headerLine);
+
+    // A run of lines sharing a block-quote depth can hold a table whose
+    // `>` marker would otherwise become a spurious cell.
+    const bqHeader = blockQuoteInfo(headerLine);
+    const stripped = bqHeader.depth > 0 ? headerLine.slice(bqHeader.contentStart) : headerLine;
+    const nextRaw = lines[at + 1] ?? '';
+    const bqNext = blockQuoteInfo(nextRaw);
+    const nextStripped = bqHeader.depth > 0 && bqNext.depth === bqHeader.depth
+      ? nextRaw.slice(bqNext.contentStart)
+      : nextRaw;
+
+    const quoteDepth = bqHeader.depth > 0 && bqNext.depth === bqHeader.depth ? bqHeader.depth : 0;
+    const effectiveHeader = quoteDepth > 0 ? stripped : headerLine;
+    const effectiveNext = quoteDepth > 0 ? nextStripped : nextRaw;
+
+    const alignments = inCode[at] || inCode[at + 1] ? undefined : tableAlignments(effectiveNext);
+    const header = tableCells(effectiveHeader);
     // Four spaces or a tab of indentation is an indented code block, not a
     // table — GFM allows a table at most three.
-    const indented = isIndentedCode(headerLine) || isIndentedCode(lines[at + 1] ?? '');
-    if (alignments === undefined || indented || !isTableRow(headerLine) || header.length !== alignments.length) {
+    const indented = isIndentedCode(effectiveHeader) || isIndentedCode(effectiveNext);
+    if (alignments === undefined || indented || !isTableRow(effectiveHeader) || header.length !== alignments.length) {
       out.push(headerLine);
       at += 1;
       continue;
     }
     const rows: string[][] = [];
     let next = at + 2;
-    while (next < lines.length && !inCode[next] && !isIndentedCode(lines[next] ?? '') && isTableRow(lines[next] ?? '')) {
-      rows.push(tableCells(lines[next] ?? ''));
+    while (next < lines.length && !inCode[next]) {
+      const rowLine = lines[next] ?? '';
+      if (quoteDepth > 0) {
+        const bqRow = blockQuoteInfo(rowLine);
+        if (bqRow.depth !== quoteDepth) break;
+        const rowContent = rowLine.slice(bqRow.contentStart);
+        if (isIndentedCode(rowContent) || !isTableRow(rowContent)) break;
+        rows.push(tableCells(rowContent));
+      } else {
+        if (isIndentedCode(rowLine) || !isTableRow(rowLine)) break;
+        rows.push(tableCells(rowLine));
+      }
       next += 1;
     }
-    out.push(renderTable(header, alignments, rows));
+    // A table inside a block quote always takes the list form: Slack does
+    // not reliably render a code-block grid inside `>`, and the list form
+    // reads well quoted.
+    const rendered = renderTable(header, alignments, rows, quoteDepth > 0);
+    if (quoteDepth > 0) {
+      // Preserve the header line's outer indentation (from a list or
+      // another container) so the rendered table stays at the same nesting
+      // level, but normalize the > markers so the output is always `> `.
+      const leadingSpaces = headerLine.match(/^( *)/)![0];
+      const outputPrefix = leadingSpaces + '> '.repeat(quoteDepth);
+      out.push(rendered.split('\n').map((line) => outputPrefix + line).join('\n'));
+    } else {
+      out.push(rendered);
+    }
     at = next;
   }
   return out.join('\n');

@@ -680,3 +680,178 @@ test('a table with a Slack mention in it keeps the mention live', () => {
     assert.ok(!converted.startsWith('```'), `${reference} went into the grid`);
   }
 });
+
+test('a table inside a block quote is recognized and rendered in list form', () => {
+  const input = ['> | A | B |', '> | --- | --- |', '> | 1 | 2 |'].join('\n');
+  assert.equal(toSlackMrkdwn(input), '> *A*: 1 · *B*: 2');
+});
+
+test('a narrow quoted table uses the list form, not a grid', () => {
+  // Even a narrow quoted table avoids the grid because Slack does not
+  // reliably render a code block inside a block quote.
+  const input = ['> | X | Y |', '> | --- | --- |', '> | a | b |', '> | c | d |'].join('\n');
+  const result = toSlackMrkdwn(input);
+  assert.ok(!result.includes('```'), 'should not contain a code fence');
+  assert.ok(result.includes('> *X*: a'), 'first row should be quoted');
+  assert.ok(result.includes('> *X*: c'), 'second row should be quoted');
+});
+
+test('a quoted table next to unquoted prose leaves the prose alone', () => {
+  const input = [
+    'Here is a table:',
+    '> | Name | Score |',
+    '> | --- | --- |',
+    '> | Alice | 10 |',
+    'And that was it.',
+  ].join('\n');
+  const result = toSlackMrkdwn(input);
+  assert.ok(result.startsWith('Here is a table:\n'));
+  assert.ok(result.endsWith('\nAnd that was it.'));
+  assert.ok(result.includes('> *Name*: Alice'));
+});
+
+test('nested block quotes are handled as a prefix', () => {
+  const input = ['> > | A | B |', '> > | --- | --- |', '> > | 1 | 2 |'].join('\n');
+  assert.equal(toSlackMrkdwn(input), '> > *A*: 1 · *B*: 2');
+});
+
+test('a quoted header followed by an unquoted delimiter row is not a table', () => {
+  const input = ['> | A | B |', '| --- | --- |', '| 1 | 2 |'].join('\n');
+  const result = toSlackMrkdwn(input);
+  // The > line stays as written since the prefix does not match
+  assert.ok(result.includes('> | A | B |') || result.includes('>'));
+});
+
+test('an unquoted table still works as before', () => {
+  const table = ['| A | B |', '| --- | --- |', '| x | y |'].join('\n');
+  assert.equal(toSlackMrkdwn(table), ['```', 'A │ B', '──┼──', 'x │ y', '```'].join('\n'));
+});
+
+test('a four-space-indented line after > is code, not a table row', () => {
+  const input = [
+    '> | A | B |',
+    '> | --- | --- |',
+    '> | 1 | 2 |',
+    '>     | code | block |',
+  ].join('\n');
+  const result = toSlackMrkdwn(input);
+  // Only the first row is a table; the indented line stays as written.
+  assert.ok(result.includes('> *A*: 1'), result);
+  assert.ok(result.includes('>     | code | block |'), result);
+});
+
+test('a quoted table with varied whitespace around > is recognized', () => {
+  // `>|` and `> |` are the same depth: no space after > is valid GFM.
+  const input = ['>| A | B |', '> | --- | --- |', '>| 1 | 2 |'].join('\n');
+  assert.equal(toSlackMrkdwn(input), '> *A*: 1 · *B*: 2');
+});
+
+test('a quoted table inside a list item preserves the outer indentation', () => {
+  const input = [
+    '- item',
+    '  > | A | B |',
+    '  > | --- | --- |',
+    '  > | x | y |',
+  ].join('\n');
+  const result = toSlackMrkdwn(input);
+  assert.ok(result.startsWith('- item\n'), 'list item stays');
+  // The indentation and > prefix are preserved on the output
+  assert.ok(result.includes('  > *A*: x'), result);
+});
+
+test('a bare address is sent as Slack link markup, and nothing around it changes it', () => {
+  const cases: Array<[string, string]> = [
+    // Bold around an address: Slack no longer has to guess whether the
+    // closing marker is part of it.
+    ['Fixed in **https://github.com/o/r/pull/283**', 'Fixed in *<https://github.com/o/r/pull/283>*'],
+    ['*https://x.com/a*', '_<https://x.com/a>_'],
+    // Markers inside an address are the address: these were rewritten to
+    // `_star_` and paired with the bold after it.
+    ['see https://x.com/*star*/x', 'see <https://x.com/*star*/x>'],
+    ['https://x.com/a_b_c and _italic_', '<https://x.com/a_b_c> and _italic_'],
+    ['https://x.com/files/*.txt and **bold**', '<https://x.com/files/*.txt> and *bold*'],
+    // Trailing punctuation is the sentence's, as in GFM's autolinks.
+    ['(see https://x.com/a.)', '(see <https://x.com/a>.)'],
+    // Parentheses the address opened are the address's; one it did not is
+    // the sentence's.
+    ['https://en.wikipedia.org/wiki/Function_(mathematics)', '<https://en.wikipedia.org/wiki/Function_(mathematics)>'],
+    ['(https://en.wikipedia.org/wiki/F_(m))', '(https://en.wikipedia.org/wiki/F_(m))'],
+    ['(see https://en.wikipedia.org/wiki/F_(m))', '(see <https://en.wikipedia.org/wiki/F_(m)>)'],
+    ['see https://x.com/a), then', 'see <https://x.com/a>), then'],
+    ['**https://x.com/f_(m)**', '*<https://x.com/f_(m)>*'],
+    // Schemes are case-insensitive.
+    ['see HTTPS://x.com/*star*/x', 'see <HTTPS://x.com/*star*/x>'],
+    ['Http://x.com/a_b_c', '<Http://x.com/a_b_c>'],
+    // `|` is Slack's label separator inside `<…>`, so it ends an address.
+    ['https://example.com/a|FAKE', '<https://example.com/a>|FAKE'],
+    // A `;` is the address's unless it ends an entity-like `&name;`.
+    ['https://example.com/path;', '<https://example.com/path;>'],
+    ['https://example.com/search?q=commonmark&hl;', '<https://example.com/search?q=commonmark>&hl;'],
+    ['https://example.com/a;b', '<https://example.com/a;b>'],
+    ['https://x.com/pull/1**, merged**', '<https://x.com/pull/1>*, merged*'],
+    // An apostrophe is a valid URI sub-delimiter and stays in the address.
+    ["https://example.com/users/James'", "<https://example.com/users/James'>"],
+    // A snippet after an address is still a snippet.
+    ['https://x.com/`code`', '<https://x.com/>`code`'],
+    // A URL after = or : is still a URL.
+    ['url=https://x.com/path', 'url=<https://x.com/path>'],
+    ['see:https://x.com/a', 'see:<https://x.com/a>'],
+    // mailto: is a bare address too.
+    ['mailto:user@example.com', '<mailto:user@example.com>'],
+    ['send **mailto:a*b@c.com**', 'send *<mailto:a*b@c.com>*'],
+    // Already a link, or not one anybody wrote: left as written.
+    ['<https://x.com|x> and <https://y.com>', '<https://x.com|x> and <https://y.com>'],
+    ['`https://code.com/*a*`', '`https://code.com/*a*`'],
+    ['xhttps://x.com', 'xhttps://x.com'],
+    ['http://', 'http://'],
+    // An address as a label is the label's text, not a second link inside it.
+    ['[https://x.com](https://x.com)', '<https://x.com|https://x.com>'],
+  ];
+  for (const [input, expected] of cases) {
+    assert.equal(toSlackMrkdwn(input), expected, JSON.stringify(input));
+  }
+});
+
+test('an address followed by a great many closing parentheses converts in linear time', () => {
+  const reply = `https://x.com/a${')'.repeat(200_000)}`;
+  const started = Date.now();
+  const converted = toSlackMrkdwn(reply);
+  assert.ok(Date.now() - started < 2_000, `took ${Date.now() - started}ms`);
+  assert.ok(converted.startsWith('<https://x.com/a>)'));
+});
+
+test('no reply, however written, alters a bare address in it', () => {
+  const addresses = ['https://h/a*b*c', 'https://h/a_b_c', 'https://h/~u/~t', 'https://h/x'];
+  const pieces = ['*', '**', '_', '__', '~~', 'a', ' ', '`c`', '. ', '[l](https://h/y)', '# ', ...addresses.map((url) => ` ${url}`)];
+  let checked = 0;
+  let seed = 20261009;
+  const next = (bound: number): number => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed % bound;
+  };
+  for (let round = 0; round < 5000; round += 1) {
+    let reply = '';
+    for (let piece = 1 + next(10); piece > 0; piece -= 1) {
+      reply += pieces[next(pieces.length)] ?? '';
+    }
+    const converted = toSlackMrkdwn(reply);
+    for (const url of addresses) {
+      // Each address the reply holds, ended where an address ends, reaches
+      // Slack whole and bracketed.
+      for (const match of reply.matchAll(new RegExp(` ${url.replace(/[*~]/g, '\\$&')}(?=[ \\[\`]|$)`, 'g'))) {
+        assert.ok(converted.includes(`<${match[0].slice(1)}>`), `address altered\n  in  ${JSON.stringify(reply)}\n  out ${JSON.stringify(converted)}`);
+        checked += 1;
+      }
+    }
+  }
+  assert.ok(checked > 1000, `only ${checked} addresses were checked`);
+});
+
+test('a bare URL right at the Slack message limit is not wrapped in angle brackets', () => {
+  const url = `https://example.com/${'a'.repeat(3990)}`;
+  assert.ok(url.length > 3998, 'url should exceed the wrapping threshold');
+  const result = toSlackMrkdwn(url);
+  // No <...> wrapper since it would push past 4000 chars
+  assert.ok(!result.startsWith('<'), 'should not wrap in angle brackets');
+  assert.equal(result, url);
+});

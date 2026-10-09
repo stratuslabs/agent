@@ -245,6 +245,46 @@ test('message.send is gated and names its destination for the policy', async () 
   ) as JsonObject;
   assert.deepEqual(sends, [{ agentId: 'ava', destination: { channel: 'slack', to: 'C9' }, text: 'all green' }]);
   assert.equal(result.destination, 'slack:C9');
+  // A messenger that reports no id leaves none in the result, and no thread.
+  assert.equal(result.id, undefined);
+  assert.equal(result.thread, undefined);
+});
+
+test('message.send replies in a thread when given one, and returns the posted id', async () => {
+  const sends: Array<Parameters<Parameters<typeof createMessageSendTool>[0]>[0]> = [];
+  const tool = createMessageSendTool(async (input) => {
+    sends.push(input);
+    return { id: '1791400000.000100' };
+  });
+
+  const top = await tool.execute({ destination: { channel: 'slack', to: 'C9' }, text: 'report' }, sessionFor('ava')) as JsonObject;
+  assert.equal(top.id, '1791400000.000100');
+  // A top-level post is the root of its own thread.
+  assert.equal(top.thread, '1791400000.000100');
+
+  // The thread a send returned is the thread a later send names.
+  const reply = await tool.execute(
+    { destination: { channel: 'slack', to: 'C9' }, text: 'details', thread: ' 1791400000.000100 ' },
+    sessionFor('ava'),
+  ) as JsonObject;
+  assert.equal(sends[1]?.thread, '1791400000.000100');
+  // A reply hands back the root, not its own id, so a third send stays in
+  // the same thread.
+  assert.equal(reply.thread, '1791400000.000100');
+
+  // The thread does not change what is judged: the same conversation is
+  // the same destination, so a schedule's pre-authorization still matches.
+  assert.equal(tool.destinationFor?.({ destination: { channel: 'slack', to: 'C9' }, text: 'x', thread: '1.2' }), 'slack:C9');
+
+  await assert.rejects(
+    () => tool.execute({ destination: { channel: 'slack', to: 'C9' }, text: 'x', thread: '  ' }, sessionFor('ava')),
+    /message\.send: "thread" must be a non-empty string/,
+  );
+  await assert.rejects(
+    () => tool.execute({ destination: { channel: 'slack', to: 'C9' }, text: 'x', thread: 12 }, sessionFor('ava')),
+    /message\.send: "thread" must be a non-empty string/,
+  );
+  assert.equal(sends.length, 2);
 });
 
 test('message.read is gated and external, reads as the calling agent, and bounds the limit', async () => {

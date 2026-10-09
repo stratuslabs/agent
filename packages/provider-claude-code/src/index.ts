@@ -14,6 +14,7 @@ import {
   markPromptDelivered,
   isUnaddressedTurn,
   TURN_LIMIT_NOTE,
+  CONTINUE_NOTE,
   omitImage,
   renderSystemPromptSections,
   droppedImageNote,
@@ -716,7 +717,7 @@ export const createClaudeCodeProvider = ({
     // carry state of its own between turns.
     const fingerprint = authFingerprintOf(authToken);
     const resumeId = readSdkSessionId(request.session, fingerprint, authOwner !== undefined);
-    const attempt = async (resume: string | undefined): Promise<void> => {
+    const attempt = async (resume: string | undefined, carryOn = false): Promise<void> => {
       const attemptOptions: Options = { ...options, ...(resume ? { resume } : {}) };
       resetIdleTimer();
       // The LATEST result's totals, not a sum across results: the SDK
@@ -727,12 +728,16 @@ export const createClaudeCodeProvider = ({
       let ranOutOfTurns = false;
       try {
         for await (const message of queryFn({
-          prompt: runPrompt(
-            resume
-              ? latestUserMessagePrompt(request, { inlineImages: true })
-              : renderTranscriptPrompt(request, { inlineImages: true }),
-            promptImagesOf(request),
-          ),
+          prompt: carryOn
+            // A fresh budget on the same SDK session: the runtime's note,
+            // not the person's message again.
+            ? CONTINUE_NOTE
+            : runPrompt(
+              resume
+                ? latestUserMessagePrompt(request, { inlineImages: true })
+                : renderTranscriptPrompt(request, { inlineImages: true }),
+              promptImagesOf(request),
+            ),
           options: attemptOptions,
         })) {
           resetIdleTimer();
@@ -914,6 +919,15 @@ export const createClaudeCodeProvider = ({
           onResumeFailed?.(error);
           await freshAttempt();
         }
+      }
+      // Out of turns mid-work: with auto-continue on and nothing stopping
+      // it, the same SDK session carries on with a fresh budget, as many
+      // times as the kernel grants; otherwise it wraps up as before.
+      while (outOfTurns !== undefined && resultText === undefined && !controller.signal.aborted && request.mayContinue?.() === true) {
+        const sdkSessionId = outOfTurns;
+        outOfTurns = undefined;
+        toolNamesByIndex.clear();
+        await attempt(sdkSessionId, true);
       }
       if (outOfTurns !== undefined && resultText === undefined) {
         await wrapUp(outOfTurns);
