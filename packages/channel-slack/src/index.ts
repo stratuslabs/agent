@@ -1209,11 +1209,26 @@ class ReplyRenderer {
    * repeats the last of them. Read once the turn's posts have landed.
    */
   spokenText(reply: string): string {
-    const said = [...this.interimSaid];
-    if (reply.trim().length > 0 && reply.trim() !== this.lastInterim) {
-      said.push(reply);
+    const rest = this.unsaid(reply);
+    return [...this.interimSaid, ...(rest.trim().length > 0 ? [rest] : [])].join('\n\n');
+  }
+
+  /**
+   * The part of a reply not already posted as interim messages. A provider
+   * that hosts its own loop (codex) returns every message of the turn
+   * joined into one reply, so the interim messages are stripped from its
+   * front in order; one whose last words came before its final tool call
+   * returns just those words, which were posted already.
+   */
+  private unsaid(reply: string): string {
+    let rest = reply.trim();
+    for (const said of this.interimSaid) {
+      if (!rest.startsWith(said)) {
+        break;
+      }
+      rest = rest.slice(said.length).trimStart();
     }
-    return said.join('\n\n');
+    return rest === this.lastInterim ? '' : rest;
   }
 
   private currentText(): string {
@@ -1355,7 +1370,10 @@ class ReplyRenderer {
     // tool call) is not posted again, and a turn that said things along
     // the way is not followed by `(no reply)`.
     await this.uploadChain;
-    if (!this.ref && this.interimPosted && (reply.trim().length === 0 || reply.trim() === this.lastInterim)) {
+    if (this.interimPosted && !this.ref) {
+      reply = this.unsaid(reply);
+    }
+    if (!this.ref && this.interimPosted && reply.trim().length === 0) {
       // Nothing posts after this to take the status down, so it is cleared.
       if (hadStatus) {
         this.setStatus('');
@@ -5355,8 +5373,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const finalized = renderer.finalize(renderer.lazy ? reply ?? '' : reply ?? NO_REPLY_TEXT);
       // What the turn said along the way as well as its reply: interim
       // messages are in the thread, so they are in what the others hear.
+      // Heard once the posts have settled, and the reply only if it landed:
+      // interim messages already in the thread are heard either way.
+      let replyLanded = false;
+      const settled = finalized.then((outcome) => {
+        replyLanded = outcome.published;
+        return true;
+      }, () => true);
       const heard = thread !== undefined
-        ? overhearReply(connection, event.channel, thread, () => renderer.spokenText(reply ?? ''), session, finalized.then((outcome) => outcome.published))
+        ? overhearReply(connection, event.channel, thread, () => renderer.spokenText(replyLanded ? reply ?? '' : ''), session, settled)
         : undefined;
       const { spoke, spokeAt } = await finalized;
       if (spoke && threadKey !== undefined) {
@@ -5380,6 +5405,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       await heard;
     } else {
       const { spoke, spokeAt } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+      // What the turn said before it broke is in the thread, so the
+      // others hear it; the error note is the failure's, and is not. Under
+      // the session's own label where it can be read, and the least
+      // trusted one where it cannot.
+      if (thread !== undefined && renderer.spokenText('').length > 0) {
+        const routed = await gateway.sessionRouting?.(sessionId).catch(() => undefined);
+        await overhearReply(connection, event.channel, thread, renderer.spokenText(''), routed ?? { metadata: {} }, Promise.resolve(true));
+      }
       if (spoke && threadKey !== undefined) {
         // A file it posted before breaking is still the last thing said.
         rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);
