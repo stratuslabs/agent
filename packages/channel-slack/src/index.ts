@@ -748,6 +748,8 @@ class ReplyRenderer {
   private lastInterim: string | undefined;
   /** Whether any interim message landed — something said, whatever the reply's fate. */
   private interimPosted = false;
+  /** Every interim message that landed, in order, for the thread's other agents to hear. */
+  private readonly interimSaid: string[] = [];
   private turnBreakPending = false;
   private toolLine: string | undefined;
   private ref: OutboundMessageRef | undefined;
@@ -1070,12 +1072,18 @@ class ReplyRenderer {
       this.toolLine = undefined;
       this.runningTool = undefined;
       this.turnBreakPending = true;
+      // Words written before a call that was refused were still said
+      // before a tool, and must not run into the next response's.
+      this.flushInterim(ofThisTurn);
       this.scheduleEdit();
       return;
     }
     if (event.type === 'tool.completed') {
       this.toolLine = undefined;
       this.runningTool = undefined;
+      // Settled here too for a call rejected before it ran, which never
+      // reached `tool.called`; after one that did, this is empty.
+      this.flushInterim(ofThisTurn);
       // Also a boundary, and not only for symmetry: a call rejected before
       // execution settles as tool.completed without ever having emitted
       // tool.called, so this is the only mark that attempt leaves.
@@ -1187,11 +1195,25 @@ class ReplyRenderer {
         }
         this.interimPosted = true;
         this.lastInterim = text;
+        this.interimSaid.push(text);
         // A post of the app's in this thread takes the status down while
         // the turn is still working; put it back.
         this.refreshLoading();
       })
       .catch((error) => this.warn(`chat.postMessage failed for an interim message: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  /**
+   * Everything this turn said in the thread, for its other agents to hear:
+   * the interim messages that landed, then the reply unless it only
+   * repeats the last of them. Read once the turn's posts have landed.
+   */
+  spokenText(reply: string): string {
+    const said = [...this.interimSaid];
+    if (reply.trim().length > 0 && reply.trim() !== this.lastInterim) {
+      said.push(reply);
+    }
+    return said.join('\n\n');
   }
 
   private currentText(): string {
@@ -3250,12 +3272,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     speaker: AgentConnection,
     channel: string,
     thread: string,
-    reply: string,
+    reply: string | (() => string),
     spoken: Pick<Session, 'metadata'>,
     published: Promise<boolean>,
   ): Promise<void> => {
     const gateway = gatewayRef;
-    if (!gateway?.observe || reply.trim().length === 0) {
+    if (!gateway?.observe || (typeof reply === 'string' && reply.trim().length === 0)) {
       return;
     }
     const team = speaker.teamId;
@@ -3285,6 +3307,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           if (!(await published)) {
             return { observed: undefined };
           }
+          // Read now that the posts have landed: what the turn said along
+          // the way is known only once they have.
+          const text = typeof reply === 'string' ? reply : reply();
+          if (text.trim().length === 0) {
+            return { observed: undefined };
+          }
           let member: boolean | undefined;
           try {
             member = (await hearer.web.conversations.info({ channel })).channel?.is_member;
@@ -3298,7 +3326,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           // spoke, by display name. A bot user's is the app's own, set by
           // whoever installed it.
           const author = await displayNameFor(hearer, speaker.botUserId);
-          const observed = gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${reply}`, metadata });
+          const observed = gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${text}`, metadata });
           return { observed: observed === undefined ? undefined : placeObserve(sessionId, observed) };
         });
         await observed;
@@ -5325,8 +5353,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // rule with the gateway's `sessionRouting`, which posts the same
       // message for a turn this adapter did not start.
       const finalized = renderer.finalize(renderer.lazy ? reply ?? '' : reply ?? NO_REPLY_TEXT);
-      const heard = thread !== undefined && reply !== undefined
-        ? overhearReply(connection, event.channel, thread, reply, session, finalized.then((outcome) => outcome.published))
+      // What the turn said along the way as well as its reply: interim
+      // messages are in the thread, so they are in what the others hear.
+      const heard = thread !== undefined
+        ? overhearReply(connection, event.channel, thread, () => renderer.spokenText(reply ?? ''), session, finalized.then((outcome) => outcome.published))
         : undefined;
       const { spoke, spokeAt } = await finalized;
       if (spoke && threadKey !== undefined) {
