@@ -9832,3 +9832,43 @@ test('an interim heard while its session cannot be looked up, or after the turn 
     assert.equal(interim?.metadata?.senderTrust, expected, `${routing}/${taint}`);
   }
 });
+
+test('a shutdown waits for a failed turn\'s interim to reach the thread\'s other agents', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  // The peer's membership check is slow, so the forwarding is still under
+  // way when the turn has failed and the adapter is asked to stop.
+  const info = webBea.conversations.info.bind(webBea.conversations);
+  webBea.conversations.info = async (args) => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return info(args);
+  };
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Main is red.' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    throw new Error('provider exploded');
+  });
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:970.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:970.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', replies: 'final' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', replies: 'final' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  await socketAva.deliver('message', channelMessage({ text: 'check main', ts: '970.1', thread: '970.0' }));
+  await adapter.stop();
+
+  assert.ok(gateway.observes.some((observed) => observed.agentId === 'bea' && observed.message.endsWith('Main is red.')));
+});

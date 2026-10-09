@@ -5263,12 +5263,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ...(thread !== undefined
           ? {
             onInterim: (heard: () => string, landed: Promise<boolean>) => {
-              void overhearReply(connection, event.channel, thread, heard, async () => {
+              // Tracked, so a shutdown drains it like any other reaction:
+              // the text is already in the thread, whatever the turn does.
+              track(overhearReply(connection, event.channel, thread, heard, async () => {
                 const routed = await gateway.sessionRouting?.(sessionId).catch(() => undefined);
                 const stored = routed ? sessionTrustOf(routed) : 'external';
                 const live = renderer.taintedTo === undefined ? stored : leastTrusted(stored, renderer.taintedTo);
                 return { metadata: { [SESSION_TRUST_METADATA_KEY]: live } };
-              }, landed);
+              }, landed));
             },
           }
           : {}),
