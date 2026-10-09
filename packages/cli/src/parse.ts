@@ -182,6 +182,12 @@ export interface ParsedSchedulesCommand {
 
 export interface ParsedGrantsCommand {
   command: 'grants';
+  /**
+   * The config a stopped daemon would start with, for the `approvals.commands`
+   * part of the listing. A serving daemon reports its own; this only matters
+   * when the files are read. Default: what `stratus serve` would find.
+   */
+  configPath?: string;
   action: 'list' | 'revoke';
   agentId: string;
   /** revoke: exactly one of the three names what goes. */
@@ -1136,6 +1142,11 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--token') {
         parsed.token = readOptionValue(tokens, index, '--token');
+        index += 1;
+        continue;
+      }
+      if (token === '--config') {
+        parsed.configPath = readOptionValue(tokens, index, '--config');
         index += 1;
         continue;
       }

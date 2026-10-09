@@ -1,4 +1,5 @@
 import type { ApprovalPolicy } from '@stratusagent/core';
+import { autonomyDirectory } from '../autonomy.ts';
 import type {
   ApprovalTransport,
   GatewayChannelAdapter,
@@ -22,6 +23,7 @@ import {
   loadChannelCredentials,
   readProcessEnv,
   logsDirPath,
+  agentWorkspacePath,
   resolveAgentApprovals,
   resolveAgentPrincipals,
   resolveAgentSlack,
@@ -36,6 +38,7 @@ import {
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
 import { describePrincipals, describeApprovers } from '../approvals.ts';
+import { createOperatorCommands } from '../operator-commands.ts';
 import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
 import { formatEvent, eventDetail } from '../events.ts';
@@ -61,6 +64,7 @@ import {
   loadServeApi,
   loadServePlugins,
   loadServeRuntimeSelection,
+  loadServeAgentMaxTurns,
   loadServeMaxTurns,
 } from '../trusted-config.ts';
 
@@ -251,6 +255,10 @@ const serveHeldHome = async (
   // config block, resolved once here: the daemon must not answer "who can
   // approve this" differently from "is anyone being asked at all".
   const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
+  // What the operator declared in approvals.commands, matched as scopes
+  // ahead of what was remembered, and reported by the control API so
+  // `stratus grants` shows this daemon's list rather than its own config's.
+  const operatorCommands = createOperatorCommands(approvalsConfig, warn);
   const approvalMode = command.approvals ?? approvalsConfig.mode ?? 'headless';
   const principalsConfig = await loadServePrincipals(env, command.configPath, warn);
   const slackConfig = await loadServeSlack(env, command.configPath, warn);
@@ -269,6 +277,7 @@ const serveHeldHome = async (
   // `stratus run` flag, so a served fleet was held to the kernel default
   // with no override.
   const maxTurns = await loadServeMaxTurns(env, command.configPath, warn);
+  const agentMaxTurns = await loadServeAgentMaxTurns(env, command.configPath, warn);
 
   // Every kind of grant an agent holds — command scopes, origins, standing
   // tool grants — in one file per agent beside its soul, through one store
@@ -326,6 +335,7 @@ const serveHeldHome = async (
         ...(command.configPath ? { configPath: command.configPath } : {}),
         ...(apiConfig.publicUrl !== undefined ? { publicUrl: apiConfig.publicUrl } : {}),
         grants: grantStore,
+        configCommands: (agentId: string) => operatorCommands.declaredFor(agentId),
         log,
         warn,
       });
@@ -486,8 +496,21 @@ const serveHeldHome = async (
   // installed. Wired unconditionally because it costs nothing without one:
   // a tool that carries no command string is judged by its risk exactly as
   // before. The whitelist lives beside the agent's soul, per agent.
+  // Only the read is widened: an "always allow" still lands in the
+  // whitelist file, and the file's own methods (list, revoke) still see
+  // only what is in it.
   const commands = {
-    whitelist: grantStore,
+    whitelist: {
+      scopesFor: async (agentId: string) => [...operatorCommands.scopesFor(agentId), ...await grantStore.scopesFor(agentId)],
+      remember: (agentId: string, scope: CommandScope) => grantStore.remember(agentId, scope),
+    },
+    // Workspace autonomy: the agent's own workspace, for the agents config
+    // turns it on for. Resolved per call so the answer always matches the
+    // config this daemon started with.
+    workspace: {
+      // The directory the shell resolves for the agent; see `autonomyDirectory`.
+      directoryFor: (agentId: string) => autonomyDirectory(approvalsConfig, pluginsConfig, env, agentId),
+    },
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
       // An approval that widens what runs unattended, for every future
       // session, is precisely the decision that must not be the one leaving
@@ -534,6 +557,25 @@ const serveHeldHome = async (
     );
   };
 
+  // Said the way the resolver decides it: a top-level default with its
+  // opt-outs named, or the agents that opted in.
+  const overrides = Object.entries(approvalsConfig.agents ?? {});
+  const autonomous = approvalsConfig.autonomy === 'workspace'
+    ? (() => {
+        const optedOut = overrides.filter(([, agent]) => agent.autonomy === 'off').map(([agentId]) => agentId);
+        return optedOut.length > 0 ? `every agent except ${optedOut.join(', ')}` : 'every agent';
+      })()
+    : overrides.filter(([, agent]) => agent.autonomy === 'workspace').map(([agentId]) => agentId).join(', ');
+  if (autonomous.length > 0) {
+    log(`approvals: autonomy workspace for ${autonomous} (reads inside their own workspace run without asking)`);
+  }
+  const declared = operatorCommands.describe();
+  if (declared) {
+    log(declared);
+  }
+  if (Object.keys(agentMaxTurns).length > 0) {
+    log(`maxTurns: ${Object.entries(agentMaxTurns).map(([agentId, turns]) => `${agentId} ${turns}`).join(', ')}; ${maxTurns ?? 'the default'} for the rest (agentMaxTurns)`);
+  }
   if (approvalMode === 'remote') {
     // Only agents whose channel actually came up can be asked: tokens on
     // disk with the Slack package missing means nothing renders the
@@ -607,6 +649,7 @@ const serveHeldHome = async (
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
+    ...(Object.keys(agentMaxTurns).length > 0 ? { maxTurnsFor: (agentId: string) => agentMaxTurns[agentId] } : {}),
     ...(channels.length > 0 ? { channels } : {}),
     // The Slack adapter is host-wired, so its (agent, kind) claims are
     // declared here; a plugin channel claiming one of them is refused at

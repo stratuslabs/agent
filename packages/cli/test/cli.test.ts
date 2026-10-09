@@ -9795,6 +9795,38 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   await rm(home, { recursive: true, force: true });
 });
 
+test('stratus grants lists config commands from the file it names, and says when that file could not be read', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-config-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const custom = path.join(home, 'custom.json');
+  await writeFile(custom, JSON.stringify({ approvals: { commands: ['agentboard'], agents: { ava: { commands: ['pnpm test'] } } } }));
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava', '--config', custom], streams: listing.streams, env }), 0);
+  assert.ok(listing.output.stdout.includes(`from approvals.commands in ${custom}`), listing.output.stdout);
+  assert.match(listing.output.stdout, / {4}agentboard\n {4}pnpm test/);
+  const asJson = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava', '--config', custom, '--format', 'json'], streams: asJson.streams, env }), 0);
+  const parsed = JSON.parse(asJson.output.stdout) as { configCommands: string[]; configSource: string };
+  assert.deepEqual(parsed.configCommands, ['agentboard', 'pnpm test']);
+  assert.equal(parsed.configSource, custom);
+
+  // A remembered scope config still covers: revoked, and told it still runs.
+  const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
+  await createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents'), stateHome: path.join(home, '.stratus') })
+    .remember('ava', { command: 'agentboard', args: ['task'] });
+  const revoke = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--scope', 'agentboard task', '--config', custom], streams: revoke.streams, env }), 0);
+  assert.match(revoke.output.stderr, /still runs without asking/);
+
+  // A config that won't parse is said, not shown as allowing nothing.
+  await writeFile(custom, '{ not json');
+  const broken = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava', '--config', custom], streams: broken.streams, env }), 0);
+  assert.match(broken.output.stderr, /Warning: ignoring the approvals config/);
+  await rm(home, { recursive: true, force: true });
+});
+
 test('stratus grants names the grant file it actually read while the move is pending', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-legacy-'));
   const env = { cwd: home, homeDir: home, processEnv: {} };
@@ -14188,7 +14220,7 @@ test('re-running setup keeps the output and turn bounds it has no menu for', asy
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
     path.join(home, '.stratus', 'config.json'),
-    `${JSON.stringify({ provider: 'demo', maxTokens: 4096, maxTurns: 24 })}\n`,
+    `${JSON.stringify({ provider: 'demo', maxTokens: 4096, maxTurns: 24, agentMaxTurns: { atlas: 300 } })}\n`,
   );
   const { streams } = createStreams();
   await runCli({
@@ -14206,6 +14238,7 @@ test('re-running setup keeps the output and turn bounds it has no menu for', asy
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) as Record<string, unknown>;
   assert.equal(config.maxTokens, 4096);
   assert.equal(config.maxTurns, 24);
+  assert.deepEqual(config.agentMaxTurns, { atlas: 300 });
 });
 
 test('a provider nobody registered is refused by name, with what is registered', async () => {

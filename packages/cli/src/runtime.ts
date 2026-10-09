@@ -49,6 +49,7 @@ import {
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   createAgentWorkspaces,
   createPluginStateDirectories,
+  createHostProtectedPaths,
   describeServingModel,
   type RuntimeSelection,
   type RuntimeConfig,
@@ -294,6 +295,7 @@ export const createAgentRuntime = async (
       credentials: createFileCredentialResolver(runEnv),
       workspaces: createAgentWorkspaces(runEnv),
       stateDirectories: createPluginStateDirectories(runEnv),
+      protectedPaths: createHostProtectedPaths(runEnv, options.configPath !== undefined ? { configPath: options.configPath } : {}),
     });
     loadedPlugins.push(...result.loaded);
     for (const failure of result.failures) {

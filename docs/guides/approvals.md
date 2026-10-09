@@ -37,13 +37,18 @@ built-in tools (`demo.echo`, `memory.remember`, `memory.recall`,
 turn — see [Schedules](./schedules.md). Anything you install is where this
 starts to bite, which is what [Tools](./tools.md) is about.
 
-Two tools are the exception to the whole paragraph, because their risk is
-in what a particular call does rather than in the tool's identity. Both are
+Three tools are the exception to the whole paragraph, because their risk is
+in what a particular call does rather than in the tool's identity. All are
 `gated`, and the permission engine then judges each call:
 
 - **A shell**, by the command it would run — see [Shell commands](./shell.md).
 - **`browser.act`**, by the site the conversation is on — see
   [Browser actions](./browser.md).
+- **`web.fetch`**, by the site of the URL it fetches. **Always allow** on
+  one grants that site (`https://docs.example.com`), never every URL. A
+  redirect to a different site is not followed: the result names where it
+  pointed (`redirectedTo`), and fetching that is a call of its own, judged
+  the same way. `http://` moving to `https://` on the same host is followed.
 
 Nothing built in is `dangerous` any more. The tier is still there, and an
 operator's `toolRisks` or a plugin's manifest can still put a tool in it —
@@ -173,7 +178,7 @@ warning naming the file.
   says which before you answer. A call judged by a *scope* persists that
   scope — a command scope for `shell.run` (see
   [Shell commands](./shell.md)), an origin for `browser.act` (see
-  [Browser actions](./browser.md)). Every other gated tool gets a
+  [Browser actions](./browser.md)) and for `web.fetch`. Every other gated tool gets a
   **standing grant** on the tool itself — see
   [Standing grants](#standing-grants). The one exception is a send outside
   a schedule (`message.send`): a grant there would be a yes to every
@@ -187,14 +192,119 @@ warning naming the file.
   answer: one yes to `git status` must not become a yes to every command,
   and one yes to a page must not become a yes to every page.
 
+## Commands you installed for your agents
+
+A tool you install on the host for your agents to use (`agentboard`, your
+test runner, `gh`) shouldn't need an approval each time. List it once in
+`~/.stratus/config.json`:
+
+```jsonc
+{
+  "approvals": {
+    "commands": ["agentboard", "gh pr"],                 // every agent
+    "agents": { "nova": { "commands": ["pnpm test"] } }  // adds to the list above for nova
+  }
+}
+```
+
+Each entry is a command and, optionally, the subcommands it's limited to.
+Whatever follows may vary: `agentboard` covers `agentboard task get 311`
+and `agentboard list --column todo`, and `pnpm test` covers
+`pnpm test --filter cli` but not `pnpm publish`. The same things stay
+refused as for an **Always allow** scope: destructive flags like
+`--force`, `-f`, and `--hard`, whatever the built-in list refuses for that
+command (`git -c`), and git refspec deletes. Each command in a pipeline
+still has to be covered on its own.
+
+An entry keeps every limit the built-in list draws for the same command:
+`git branch` still only lists branches, and `grep` still takes no file. A
+bare `git` is refused, because it would cover the mutating forms of the
+subcommands the built-in list limits. List the subcommands instead
+(`git push`, `git fetch`). An entry that extends a limited built-in scope,
+like `grep fix`, is refused too, since it would let a file follow the
+pattern. The built-in scope already runs those commands unattended within
+its limits.
+
+Unlike the other keys here, an agent's list adds to the top-level one
+rather than replacing it. An entry that isn't plain words (a flag, `|`, a
+glob, a path in any word) is ignored, with a warning at startup, and is left out of
+every listing of what's allowed. The daemon logs what
+config allows when it starts, and `stratus grants <agent>` lists these
+entries above the agent's grants. They aren't grants, so
+`stratus grants revoke` can't take one back. Remove it from config and
+restart. Revoking a remembered scope that config also lists removes the
+grant and says the command still runs because of config. Like grants, they stop counting for a conversation that has read
+external content when `externalContent` is `gate`.
+
+Only a config you chose can set this, the same rule as the rest of
+`approvals`. Listing a program means trusting what it runs: `pnpm test`
+executes whatever the repository's test script says.
+
+## Workspace autonomy
+
+An agent working on code spends most of its calls reading: listing files,
+searching them, opening one. Each of those is a shell command that asks,
+because the engine can't tell `cat notes.md` in the agent's own workspace
+from `cat ~/.stratus/credentials.json`. Turn on autonomy for an agent and
+it can:
+
+```jsonc
+{
+  "approvals": {
+    "agents": { "nova": { "autonomy": "workspace" } }   // or "autonomy" at the top for every agent
+  }
+}
+```
+
+With `autonomy: "workspace"`, a command that only reads, and only reads
+paths inside the agent's workspace (`~/.stratus/agents/<id>/workspace`, or
+`<workspaceRoot>/<id>` when `tool-shell` has its own `workspaceRoot`),
+runs without asking. That covers `cat`, `ls`, `head`, `tail`, `wc`, `grep`,
+`rg`, and `find`, and each stage of a pipeline is judged on its own, so
+`cat src/main.ts | wc -l` runs too. Each path is resolved through its
+symlinks, so a link that points out of the workspace is outside. The
+shell's working directory has to be inside the workspace as well, so an
+agent with a configured `cwd` elsewhere gets nothing from this.
+
+What still asks: a path outside the workspace, a glob or `~` or `$` (the
+shell expands those into paths the engine never saw), and any flag that
+would follow links out, run a program, or write a file (`grep -R`,
+`rg --follow`, `rg --pre`, `find -exec`, `find -delete`, `tail -f`). An
+unknown flag asks too. `rg` runs only with `--no-ignore` (or `-u`), because
+otherwise it reads ignore files outside the workspace: above it, in your
+home directory, and in a linked worktree's git directory.
+`grep -rn` needs nothing extra. The shell never passes `RIPGREP_CONFIG_PATH` or
+`GREP_OPTIONS` to a command, whatever its `env` or `passEnv` says, because
+they add options the command line doesn't show. Nor are shell startup variables passed (`BASH_ENV`, `ENV`, `ZDOTDIR`,
+exported `BASH_FUNC_*` functions), since they run code before the command,
+and zsh, tcsh, csh, and fish are started without their user startup
+files (`-f`, or `fish --no-config`) for the same reason.
+Nor does `PATH` keep an
+entry the agent can write to (its workspace or working directory, or a
+relative entry like `.`), because a program there named `cat` or `git`
+would run in place of the real one. Reads stay allowed after the conversation reads web
+content, even with `externalContent: "gate"`, because reading the agent's
+own files can't send anything anywhere.
+
+This is policy over command arguments, not a sandbox. It holds because
+these commands read only what they're told to. A program you list in
+`approvals.commands` can still read anything, which is why those are
+listed by you and never inferred.
+
 ## Standing grants
 
-Most installed tools are `gated` and name no scope — `web.fetch`,
-`fs.write`, a bridged MCP tool — so **Always allow** on one grants the
+Most installed tools are `gated` and name no scope — `fs.write`, a
+bridged MCP tool — so **Always allow** on one grants the
 **tool** to that agent: it runs without asking from then on, in every
 session and after every restart, until an operator revokes it. That is the
 only path such a tool has to running unattended at all: a `gated` call in
 `headless` mode is otherwise refused, whatever was approved in the past.
+
+`web.fetch` had a standing grant like this before it was judged by site.
+A `web.fetch` entry under `tools` in a whitelist file can still show up in
+`stratus grants`, but it no longer covers any call: the next fetch asks, and
+**Always allow** on it grants that site. Revoke the old entry to tidy the
+listing.
 
 **Grants are the daemon's, and only the daemon's.** `stratus run` and
 `stratus chat` do not consult them and cannot create one: at your own
@@ -215,9 +325,9 @@ decision came through the control API:
 {
   "version": 1,
   "scopes": [{ "command": "git", "args": ["push"], "denyRefspecForms": true }],
-  "origins": [{ "origin": "https://app.example.com" }],
+  "origins": [{ "origin": "https://app.example.com", "tool": "browser.act" }],
   "tools": [
-    { "tool": "web.fetch", "package": "@stratusagent/tool-web", "grantedAt": "2026-09-07T09:14:36.000Z", "grantedBy": "U01DYLAN" }
+    { "tool": "fs.write", "package": "@stratusagent/tool-fs", "grantedAt": "2026-09-07T09:14:36.000Z", "grantedBy": "U01DYLAN" }
   ]
 }
 ```
@@ -255,7 +365,7 @@ than scoping choices:
 
 ```bash
 stratus grants blair                                # everything blair may do unattended, all three kinds
-stratus grants revoke blair --tool web.fetch          # a standing grant
+stratus grants revoke blair --tool fs.write           # a standing grant
 stratus grants revoke blair --scope "git push"        # a command scope, by the line the listing shows
 stratus grants revoke blair --origin https://app.example.com
 ```
@@ -300,8 +410,8 @@ happened unattended can be told apart from one that ran because the tool
 was `safe`:
 
 ```text
-09:14:36  —  blair: web.fetch now runs without asking, until revoked (granted by U01DYLAN)
-03:00:02  —  blair: web.fetch ran under a standing grant (web.fetch (@stratusagent/tool-web), granted 2026-09-07T09:14:36.000Z by U01DYLAN) (session schedule:…)
+09:14:36  —  blair: fs.write now runs without asking, until revoked (granted by U01DYLAN)
+03:00:02  —  blair: fs.write ran under a standing grant (fs.write (@stratusagent/tool-fs), granted 2026-09-07T09:14:36.000Z by U01DYLAN) (session schedule:…)
 ```
 
 ## After an agent reads the web

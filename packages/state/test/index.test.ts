@@ -1732,3 +1732,44 @@ test('api.publicUrl loads as an http(s) address without a trailing slash, and an
   await assert.rejects(() => loadConfigFile(file), (error: Error) => !error.message.includes('hunter2'));
 });
 
+test('approvals.autonomy parses at the top and per agent, overrides per agent, and fails loudly when misspelled', async () => {
+  const configPath = await writeConfig('autonomy.json', {
+    approvals: { autonomy: 'workspace', agents: { blair: { autonomy: 'off' }, nova: {} } },
+  });
+  const config = await loadConfigFile(configPath);
+  assert.equal(resolveAgentApprovals(config.approvals, 'nova').autonomy, 'workspace');
+  assert.equal(resolveAgentApprovals(config.approvals, 'blair').autonomy, 'off');
+  assert.equal(resolveAgentApprovals({}, 'nova').autonomy, undefined);
+  const misspelled = await writeConfig('autonomy-bad.json', { approvals: { agents: { nova: { autonomy: 'workspaces' } } } });
+  await assert.rejects(loadConfigFile(misspelled), /Unsupported approvals\.agents\.nova\.autonomy/);
+});
+
+test('approvals.commands parses at the top and per agent, adds up per agent, and refuses a wrong shape', async () => {
+  const configPath = await writeConfig('commands.json', {
+    approvals: { commands: ['agentboard', '  ', ' gh pr '], agents: { nova: { commands: ['pnpm test', 'agentboard'] }, bea: {} } },
+  });
+  const config = await loadConfigFile(configPath);
+  assert.deepEqual(config.approvals?.commands, ['agentboard', 'gh pr']);
+  // Added together, not overridden: every agent uses agentboard, and Nova
+  // also runs the tests. Duplicates collapse.
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').commands, ['agentboard', 'gh pr', 'pnpm test']);
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'bea').commands, ['agentboard', 'gh pr']);
+  assert.equal(resolveAgentApprovals({}, 'nova').commands, undefined);
+
+  const notAList = await writeConfig('commands-string.json', { approvals: { commands: 'agentboard' } });
+  await assert.rejects(loadConfigFile(notAList), /Invalid approvals\.commands/);
+  const notStrings = await writeConfig('commands-numbers.json', { approvals: { agents: { nova: { commands: [1] } } } });
+  await assert.rejects(loadConfigFile(notStrings), /Invalid approvals\.agents\.nova\.commands/);
+});
+
+test('agentMaxTurns parses per agent and refuses a budget that is not one', async () => {
+  const configPath = await writeConfig('agent-max-turns.json', { maxTurns: 40, agentMaxTurns: { atlas: 300, nova: 120 } });
+  const config = await loadConfigFile(configPath);
+  assert.equal(config.maxTurns, 40);
+  assert.deepEqual(config.agentMaxTurns, { atlas: 300, nova: 120 });
+
+  for (const [name, value] of [['list', [300]], ['zero', { atlas: 0 }], ['fraction', { atlas: 1.5 }], ['text', { atlas: '300' }]] as const) {
+    const bad = await writeConfig(`agent-max-turns-${name}.json`, { agentMaxTurns: value });
+    await assert.rejects(loadConfigFile(bad), /Invalid agentMaxTurns/, name);
+  }
+});

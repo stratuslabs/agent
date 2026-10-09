@@ -257,6 +257,20 @@ test('only an external result is rendered for the model inside the untrusted env
   assert.equal(renderToolResultContent({ ok: false, output: null }), '{"error":"Tool failed"}');
 });
 
+test('a failed result keeps the output the tool returned with it', () => {
+  const failed = { ok: false, error: 'Command exited with code 1: /bin/sh', output: { stdout: '', stderr: 'test failed: expected 2', exitCode: 1 }, trust: 'unknown' as const };
+  assert.deepEqual(JSON.parse(renderToolResultContent(failed)), {
+    error: 'Command exited with code 1: /bin/sh',
+    output: { stdout: '', stderr: 'test failed: expected 2', exitCode: 1 },
+  });
+  // Still inside the envelope when it came from outside.
+  assert.deepEqual(JSON.parse(renderToolResultContent({ ...failed, trust: 'external' })), {
+    untrusted: true,
+    untrustedNote: UNTRUSTED_TOOL_RESULT_NOTE,
+    output: { error: 'Command exited with code 1: /bin/sh', output: { stdout: '', stderr: 'test failed: expected 2', exitCode: 1 } },
+  });
+});
+
 test('a session resumed from a pre-upgrade transcript reads unknown, not agent', async () => {
   const store = new InMemorySessionStore();
   // Written by an older build: no label on the session, no label on the

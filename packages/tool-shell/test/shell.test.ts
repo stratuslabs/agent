@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -306,4 +307,77 @@ test('a working directory the operator named is reported by name when it is miss
     () => runCommand(tools, 'pwd'),
     /configured working directory does not exist/,
   );
+});
+
+test('cwdFor names where a command would run without preparing anything', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-cwdfor-'));
+  let prepared = 0;
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => {
+      prepared += 1;
+      return path.join(home, 'agents', agentId, 'workspace');
+    },
+    all: async () => [],
+  };
+  const session = { id: 's1', agent: { id: 'ava', name: 'Ava' }, status: 'running', messages: [] } as unknown as Session;
+  const tool = createShellTool({}, { workspaces });
+  assert.equal(tool.cwdFor?.(session), path.join(home, 'agents', 'ava', 'workspace'));
+  assert.equal(prepared, 0);
+  // A configured cwd wins, as it does when the command runs.
+  const configured = createShellTool({ agents: { ava: { cwd: '~/work/ava' } } }, { workspaces, home });
+  assert.equal(configured.cwdFor?.(session), path.join(home, 'work', 'ava'));
+});
+
+test('variables that carry options for a judged command never reach it, however they are configured', async () => {
+  const tools = await registryFor(
+    { passEnv: ['PATH', 'GREP_OPTIONS'], env: { RIPGREP_CONFIG_PATH: '/tmp/rgrc', KEEP: 'kept' } },
+    { PATH: process.env.PATH, GREP_OPTIONS: '-R' },
+  );
+  const seen = String((await runCommand(tools, 'echo "[$RIPGREP_CONFIG_PATH][$GREP_OPTIONS][$KEEP]"')).stdout).trim();
+  assert.equal(seen, '[][][kept]');
+});
+
+test('PATH never includes a directory the agent can write to', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-path-'));
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    all: async () => [],
+  };
+  const inside = path.join(home, 'agents', 'ava', 'workspace', 'bin');
+  const tools = await registryFor(
+    { passEnv: [], env: { PATH: `.:${inside}::relative/bin:/usr/bin:/bin` } },
+    {},
+    workspaces,
+  );
+  assert.equal(String((await runCommand(tools, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin');
+  // Filtered to nothing is not an empty PATH, which sh reads as the cwd.
+  const emptied = await registryFor({ passEnv: [], env: { PATH: `.:${inside}` } }, {}, workspaces);
+  assert.equal(String((await runCommand(emptied, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin');
+});
+
+test('nothing a shell runs before the command is passed to it', async () => {
+  const tools = await registryFor(
+    { passEnv: ['PATH'], env: { BASH_ENV: '/tmp/x', ENV: '/tmp/y', ZDOTDIR: '/tmp/z', 'BASH_FUNC_cat%%': '() { echo pwned; }', KEEP: 'kept' } },
+    { PATH: process.env.PATH },
+  );
+  const seen = String((await runCommand(tools, 'echo "[$BASH_ENV][$ENV][$ZDOTDIR][$KEEP]"; env | grep -c BASH_FUNC_ || true')).stdout).trim();
+  assert.equal(seen, '[][][][kept]\n0');
+});
+
+test('zsh runs without the user startup files that could redefine a command', { skip: !existsSync('/bin/zsh') }, async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-zsh-'));
+  await writeFile(path.join(home, '.zshenv'), 'cat() { echo hijacked; }\n');
+  const tools = await registryFor({ shell: '/bin/zsh', passEnv: ['PATH'], env: { HOME: home } }, { PATH: process.env.PATH });
+  const result = await runCommand(tools, 'echo real | cat');
+  assert.equal(String(result.stdout).trim(), 'real');
+});
+
+test('tcsh runs without the startup files that could alias a command', { skip: !existsSync('/bin/tcsh') }, async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-tcsh-'));
+  await writeFile(path.join(home, '.tcshrc'), 'alias cat echo hijacked\n');
+  const tools = await registryFor({ shell: '/bin/tcsh', passEnv: ['PATH'], env: { HOME: home } }, { PATH: process.env.PATH });
+  const result = await runCommand(tools, 'echo real | cat');
+  assert.equal(String(result.stdout).trim(), 'real');
 });

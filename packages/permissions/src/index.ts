@@ -20,10 +20,14 @@ import { sessionTaintedBy, sessionTrustOf } from '@stratusagent/core';
  */
 export { atLeastAsRisky } from '@stratusagent/core';
 
+import { readsInsideWorkspace } from './workspace.ts';
+
+export { readsInsideWorkspace } from './workspace.ts';
 import {
   analyzeCommand,
   describeCommandScope,
   findCoveringScopes,
+  findMatchingScope,
   normalizeCommandScope,
   SAFE_COMMAND_SCOPES,
   type CommandAnalysis,
@@ -49,6 +53,7 @@ import {
 
 export {
   analyzeCommand,
+  commandScopeFromPrefix,
   describeCommandScope,
   findCoveringScopes,
   findMatchingScope,
@@ -346,6 +351,14 @@ export interface CommandScopeOptions {
   safeScopes?: readonly CommandScope[];
   /** Where "always allow" persists a scope, and where one is read back. */
   whitelist?: CommandWhitelistStore;
+  /**
+   * Workspace autonomy. Answers the directory an agent may read in without
+   * asking, or undefined when autonomy is off for it. With an answer, a
+   * command (or pipeline stage) that only reads, and only inside that
+   * directory, runs unattended; see `workspace.ts`. Needs the tool's
+   * `cwdFor`, since relative paths mean nothing without it.
+   */
+  workspace?: { directoryFor(agentId: string): string | undefined };
   /**
    * Called when a scope is persisted. The daemon logs it: an approval that
    * widens what runs unattended, for every future session, is exactly the
@@ -784,7 +797,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             ...(origins?.whitelist ? await origins.whitelist.originsFor(session.agent.id) : []),
           ]
         : [];
-      const reportedOrigin = scopedByOrigin ? context.tool.originFor?.(session) : undefined;
+      const reportedOrigin = scopedByOrigin ? context.tool.originFor?.(session, call.input) : undefined;
       // Read through the same normalizer a grant file is read through,
       // rather than taken as written. The hook's contract is an origin, but
       // this is what a grant is compared against — a plugin that hands back
@@ -833,6 +846,45 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               command,
             );
           }
+          // Workspace autonomy, for reads. Each stage is covered by a scope
+          // or only reads inside the workspace. Not a grant somebody made in
+          // another conversation, so it survives the external-content gate:
+          // reading its own files can't send anything anywhere, and every
+          // stage that could is still judged by scopes, which the gate
+          // already emptied.
+          const workspace = commands?.workspace?.directoryFor(session.agent.id);
+          const cwd = workspace === undefined ? undefined : context.tool.cwdFor?.(session);
+          if (workspace !== undefined && cwd !== undefined) {
+            const stages = analysis.pipeline ?? [analysis];
+            // Only the built-in safe scopes compose with an autonomous
+            // stage. A granted scope was judged as a command on its own:
+            // `curl https://example.com` approved once must not become the
+            // far end of `cat secret | curl … --data-binary @-`.
+            // The built-in list itself, not a host's extension of it, which
+            // can hold any command a config named.
+            const intrinsic = SAFE_COMMAND_SCOPES;
+            let read = false;
+            let covered = true;
+            for (const stage of stages) {
+              if (findMatchingScope(stage, intrinsic)) {
+                continue;
+              }
+              if (await readsInsideWorkspace(stage, cwd, workspace)) {
+                read = true;
+                continue;
+              }
+              covered = false;
+              break;
+            }
+            if (covered && read) {
+              return report(
+                context,
+                true,
+                `${call.toolName} only read inside ${session.agent.id}'s workspace (autonomy: workspace)`,
+                command,
+              );
+            }
+          }
         }
       } else if (risk === 'gated' && unscoped && !externalGate) {
         // The standing grant: this process's answers first, then the file.
@@ -863,7 +915,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       }
 
       if (origin !== undefined) {
-        const granted = findMatchingOriginScope(origin, grantedOrigins);
+        const granted = findMatchingOriginScope(origin, grantedOrigins, call.toolName);
         if (granted) {
           return report(
             context,
@@ -1043,7 +1095,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         if (!scopedByOrigin) {
           return report(context, true, reason, forCommand, undefined, origin);
         }
-        const settled = originScopeFor(context.tool.originFor?.(session) ?? '')?.origin;
+        const settled = originScopeFor(context.tool.originFor?.(session, call.input) ?? '')?.origin;
         if (settled === origin) {
           return report(context, true, reason, forCommand, undefined, origin);
         }
@@ -1074,7 +1126,10 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           );
         }
         if (scopedByOrigin) {
-          if (!originScope) {
+          // The tool goes in with the site: a grant for one origin-scoped
+          // tool is not a grant for another (see `OriginScope.tool`).
+          const grant: OriginScope | undefined = originScope ? { ...originScope, tool: call.toolName } : undefined;
+          if (!grant) {
             // No origin to remember — a page that never loaded, or one
             // whose URL has no origin this engine will name. The call runs;
             // nothing is widened. Falling back to the tool-wide grant here
@@ -1086,7 +1141,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           }
           if (origins?.whitelist) {
             try {
-              await origins.whitelist.rememberOrigin(session.agent.id, originScope);
+              await origins.whitelist.rememberOrigin(session.agent.id, grant);
             } catch (error) {
               if (!(error instanceof WhitelistUnreadableError)) {
                 throw error;
@@ -1094,17 +1149,17 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               // Same bargain the command half makes: the answer holds for
               // this process, and the file that would carry it past a
               // restart is not written over grants nobody can read.
-              rememberForProcess(sessionOrigins, session.agent.id, originScope);
+              rememberForProcess(sessionOrigins, session.agent.id, grant);
               return allowUnlessMoved(
-                `${call.toolName} was approved, and ${describeOriginScope(originScope)} is acted on without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
+                `${call.toolName} was approved, and ${describeOriginScope(grant)} is acted on without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
               );
             }
-            origins.onScopeRemembered?.({ agentId: session.agent.id, scope: originScope });
+            origins.onScopeRemembered?.({ agentId: session.agent.id, scope: grant });
           } else {
-            rememberForProcess(sessionOrigins, session.agent.id, originScope);
+            rememberForProcess(sessionOrigins, session.agent.id, grant);
           }
           return allowUnlessMoved(
-            `${call.toolName} was approved, and ${describeOriginScope(originScope)} is now acted on without asking`,
+            `${call.toolName} was approved, and ${describeOriginScope(grant)} is now acted on without asking`,
           );
         }
         const scope = commandScope;

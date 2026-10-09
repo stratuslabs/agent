@@ -148,7 +148,7 @@ entries alone.
 | [`@stratusagent/tool-fs`](../../packages/tool-fs) | `fs.read`, `fs.list`, `fs.search` | `safe` inside the agent's roots |
 | | `fs.write` | `gated` |
 | [`@stratusagent/tool-shell`](../../packages/tool-shell) | `shell.run` | `gated`, then [judged per command](./shell.md) |
-| [`@stratusagent/tool-web`](../../packages/tool-web) | `web.fetch` | `gated` |
+| [`@stratusagent/tool-web`](../../packages/tool-web) | `web.fetch` | `gated`, then [judged per site](./approvals.md) |
 | [`@stratusagent/tool-browser`](../../packages/tool-browser) | `browser.goto`, `.read`, `.screenshot` | `gated` |
 | | `browser.act` | `gated`, then [judged per site](./browser.md) |
 | [`@stratusagent/plugin-mcp`](../../packages/plugin-mcp) | `mcp.<server>.<tool>` — any MCP server's tools, [discovered at connect](./mcp.md) | `gated`, whatever the server says; per-tool `toolRisks` overrides |

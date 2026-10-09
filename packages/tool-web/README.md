@@ -32,7 +32,7 @@ tools: [web.fetch]
 
 | Tool | Risk | What approval mode does |
 | --- | --- | --- |
-| `web.fetch` | `gated` | `interactive` asks at the terminal, `remote` asks in Slack, `headless` refuses. It reaches a service outside Stratus at an address the agent chose, which is the line 03 draws. |
+| `web.fetch` | `gated` | `interactive` asks at the terminal, `remote` asks in Slack, `headless` refuses. It reaches a service outside Stratus at an address the agent chose, which is the line 03 draws. Judged per site: **Always allow** grants the URL's origin, not every URL, and a redirect to another site is returned as `redirectedTo` instead of followed. |
 
 Every result is labelled `external`: the body and the page-supplied title
 are a document somebody else wrote, and the session that read it — and

@@ -125,7 +125,8 @@ subscription sign-in to per-token billing.
   Slack instead.
 - **An agent stops to say it is out of steps** — the task used every tool
   turn one message allows (`maxTurns`, default 40). Reply "continue" to
-  carry on; raise `maxTurns` for agents that do long work. The error
+  carry on; give an agent that does long work its own budget with
+  `agentMaxTurns`. The error
   **"Session exceeded the maximum of N provider turns"** means the model
   called a tool on the wrap-up call it was told not to, and is fixed the
   same way.
