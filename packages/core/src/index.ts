@@ -4125,7 +4125,7 @@ export interface ChannelAdapterLike {
   start(gateway: unknown): Promise<void>;
   stop(): Promise<void>;
   required?: boolean;
-  resolveOutbound?(address: { agentId: string; to: string }): Promise<{
+  resolveOutbound?(address: { agentId: string; to: string; thread?: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
   /** See `@stratusagent/channels`' `ChannelAdapter.readConversation`. */

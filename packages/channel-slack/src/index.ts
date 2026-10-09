@@ -3445,12 +3445,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const channelId = conversation.id;
     const web = connection.web;
+    // A reply under a message rather than a post beside it. Every chunk of
+    // a long one goes to the same thread, so a split reply stays together.
+    const thread = address.thread?.trim() || undefined;
     return {
       async post(text: string): Promise<OutboundMessageRef> {
         const chunks = messageChunks(text.trim().length > 0 ? text : '(empty message)');
         let first: OutboundMessageRef | undefined;
         for (const chunk of chunks) {
-          const posted = await web.chat.postMessage({ channel: channelId, text: chunk });
+          const posted = await web.chat.postMessage({ channel: channelId, text: chunk, ...(thread ? { thread_ts: thread } : {}) });
           if (!first) {
             first = { channel: posted.channel ?? channelId, ts: posted.ts ?? '' };
           }
