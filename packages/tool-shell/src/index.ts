@@ -11,6 +11,7 @@ import {
 } from '@stratusagent/core';
 import {
   defineLocalCommandTool,
+  LOCAL_COMMAND_MAX_TIMEOUT_MS,
   type LocalCommandExecution,
   type LocalCommandInvocation,
   type LocalCommandTool,
@@ -256,7 +257,16 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       type: 'object',
       properties: {
         command: { type: 'string', description: 'The command line to run.' },
-        timeoutMs: { type: 'number' },
+        timeoutMs: {
+          type: 'number',
+          // The host's executor owns the ceiling and may set its own, so
+          // this states the stock one as a default, not as the rule; a call
+          // cut to whatever ceiling applies is told so in its result.
+          description: 'How long to wait before killing the command, in milliseconds. '
+            + `The host caps it, at ${LOCAL_COMMAND_MAX_TIMEOUT_MS} (${LOCAL_COMMAND_MAX_TIMEOUT_MS / 60_000} minutes) unless configured otherwise, and a command cut to the cap is told so. `
+            + 'For work that may run longer, start it in the background with its output redirected to a file '
+            + '(`long-job > job.log 2>&1 &`) and check the file in a later call.',
+        },
       },
       required: ['command'],
     },

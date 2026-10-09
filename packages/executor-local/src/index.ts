@@ -132,7 +132,14 @@ export interface LocalCommandExecutorOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_MAX_TIMEOUT_MS = 300_000;
+/**
+ * The longest a local command may run unless the host sets its own
+ * ceiling: five minutes. A request for longer is cut to it, and the
+ * timeout message says so, because a model that asked for an hour and was
+ * killed at five minutes otherwise has no way to tell why.
+ */
+export const LOCAL_COMMAND_MAX_TIMEOUT_MS = 300_000;
+const DEFAULT_MAX_TIMEOUT_MS = LOCAL_COMMAND_MAX_TIMEOUT_MS;
 // Per stream. Output is accumulated in the daemon's heap as it arrives, and
 // before this cap existed `head -c 300000000 /dev/zero | tr '\0' a` took a
 // daemon from 108 MB to 785 MB resident — and left it there — for a result
@@ -223,9 +230,21 @@ export class LocalCommandExecutor implements Executor {
       }
 
       if (execution.timedOut) {
+        // Cut to the ceiling rather than the timeout it asked for: say so,
+        // and what to do instead, or the next attempt asks for the same
+        // impossible hour and is killed at the same five minutes.
+        // What was asked for is the invocation's own timeout or, without a
+        // usable one, the executor's default — either can exceed the ceiling.
+        const requested = typeof invocation.timeoutMs === 'number' && Number.isFinite(invocation.timeoutMs) && invocation.timeoutMs > 0
+          ? invocation.timeoutMs
+          : this.defaultTimeoutMs;
+        const capped = requested > timeoutMs;
         return failureResult(
           call,
-          `Command timed out after ${timeoutMs}ms: ${execution.command}`,
+          capped
+            ? `Command timed out after ${timeoutMs}ms, the most a command may run here (it asked for ${requested}ms): ${execution.command}. `
+              + 'Start longer work in the background with its output redirected to a file, and check the file in a later call.'
+            : `Command timed out after ${timeoutMs}ms: ${execution.command}`,
           serializeExecution(execution),
           trust(),
         );
