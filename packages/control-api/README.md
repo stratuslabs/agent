@@ -538,7 +538,9 @@ endpoint whose job is to say what the daemon is doing right now. `POST
 
 `credential.request` falls back to a link where the agent's conversation
 cannot show a form, and gives one whenever the agent asks with
-`via: "link"`. This API issues it (the adapter's `requestCredentialLink`):
+`via: "link"`. The link needs the agent's soul to list `credential.request` under
+`tools:` (or have no `tools:` key); the daemon grants the form to every
+agent, but not the link. This API issues it (the adapter's `requestCredentialLink`):
 a 256-bit token, kept in memory, minted for one pending request, and built
 on `api.publicUrl`, or on the bound address when that is unset.
 
