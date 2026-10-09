@@ -3951,7 +3951,14 @@ export type StratusEvent =
    * otherwise invisible: the answers stay plausible while the agent
    * quietly stops being able to remember the start of the conversation.
    */
-  | { type: 'session.context-trimmed'; sessionId: string; droppedMessages: number; floor: number };
+  | { type: 'session.context-trimmed'; sessionId: string; droppedMessages: number; floor: number }
+  /**
+   * A message used its step budget and, with auto-continue on for its
+   * agent, was given another instead of wrapping up (`AgentRunnerOptions.autoContinue`).
+   * `continuation` counts from 1 within the message; `turns` is the
+   * allowance just granted.
+   */
+  | { type: 'session.continued'; sessionId: string; continuation: number; turns: number };
 
 export type EventHandler = (event: StratusEvent) => void | Promise<void>;
 
@@ -5979,6 +5986,18 @@ export interface AgentRunnerOptions {
   /** Maximum provider turns per run before the session fails. */
   maxTurns?: number;
   /**
+   * Keep working past `maxTurns` instead of wrapping up: when a message
+   * spends its budget, it gets another, `maxTurns` more, in the same turn.
+   * `true` means as many times as it takes; a number caps the extra
+   * allowances per message. Off when absent. A message still wraps up
+   * when it is stuck repeating a failure, when the cap is reached, and
+   * when `waitingInput` says somebody has written to the session since —
+   * they get the summary, and their message runs next.
+   */
+  autoContinue?: true | number;
+  /** Whether a dispatch is queued behind the session's running turn. See `autoContinue`. */
+  waitingInput?: (sessionId: string) => boolean;
+  /**
    * When true, the runner hands providers a delta sink and re-emits their
    * fragments as provider.delta events. Off by default: streaming is
    * additive, and consumers that render only final responses (one-shot CLI
@@ -6631,18 +6650,32 @@ export class AgentRunner {
           ? { toolName: results[0]!.toolName, times: failureRun }
           : undefined;
       };
+      // Where this message wraps up: `maxTurns`, raised by another
+      // `maxTurns` each time auto-continue grants one.
+      let ceiling = this.maxTurns;
+      let continued = 0;
       for (let turn = resumeFrom?.turn ?? 1; ; turn += 1) {
         throwIfAborted(signal);
+        // Out of budget and still working — the last response called a
+        // tool — so with auto-continue on it gets another allowance rather
+        // than a wrap-up. A loop, because a recovered turn can start
+        // several allowances in. Never for a turn stuck on a failure, past
+        // the cap, or with somebody's message waiting behind it.
+        while (turn > ceiling && stuck === undefined && this.mayContinue(session.id, continued)) {
+          ceiling += this.maxTurns;
+          continued += 1;
+          await this.bus.emit({ type: 'session.continued', sessionId: session.id, continuation: continued, turns: this.maxTurns });
+        }
         // One turn past the ceiling, and only one: the wrap-up, which may
-        // not call a tool, so a turn that reaches `maxTurns + 2` is a
+        // not call a tool, so a turn that reaches `ceiling + 2` is a
         // provider that ignored `toolChoice` and was already failed below.
         // A turn stopped for repeating itself wraps up the same way, early.
-        const wrappingUp = turn > this.maxTurns || stuck !== undefined;
+        const wrappingUp = turn > ceiling || stuck !== undefined;
         // A recovered call is a tool turn too, so one parked past the
         // ceiling — `maxTurns` lowered while it waited — is refused as it
         // was before wrap-up existed, not run on the one call reserved for
         // saying what happened.
-        if (turn > this.maxTurns + 1 || (wrappingUp && pendingEntry)) {
+        if (turn > ceiling + 1 || (wrappingUp && pendingEntry)) {
           throw new Error(turnLimitMessage(this.maxTurns));
         }
 
@@ -6924,6 +6957,15 @@ export class AgentRunner {
       await this.bus.emit({ type: 'session.failed', sessionId: session.id, error: lastError });
       throw error;
     }
+  }
+
+  /** Whether a message out of budget gets another; see `AgentRunnerOptions.autoContinue`. */
+  private mayContinue(sessionId: string, continued: number): boolean {
+    const autoContinue = this.options.autoContinue;
+    if (autoContinue === undefined || (autoContinue !== true && continued >= autoContinue)) {
+      return false;
+    }
+    return this.options.waitingInput?.(sessionId) !== true;
   }
 
   /** See `completeAnsweredTurn`; the loop's end and `continueTurn`'s. */

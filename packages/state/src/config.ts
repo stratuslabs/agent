@@ -338,6 +338,13 @@ export interface StratusConfigFile {
    * agent id: `{ "atlas": 300 }`. Trusted config only, like `maxTurns`.
    */
   agentMaxTurns?: Record<string, number>;
+  /**
+   * Agents that keep working past their budget instead of wrapping up,
+   * keyed by agent id: `true` with no cap, a number for that many extra
+   * allowances per message. Off for any agent not listed. Trusted config
+   * only, like `maxTurns`: it spends the operator's tokens.
+   */
+  autoContinue?: Record<string, true | number>;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */

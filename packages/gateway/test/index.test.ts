@@ -30,7 +30,7 @@ import {
   RECALL_TOOL_NAME,
   MEMORY_TOOL_NAME,
 } from '@stratusagent/agents';
-import { SKILL_READ_TOOL_NAME } from '@stratusagent/core';
+import { SKILL_READ_TOOL_NAME, latestTurnReply } from '@stratusagent/core';
 import { createHomeMemoryStore, fleetDbIn, legacyMemoryFilePath } from '@stratusagent/state';
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-'));
@@ -5921,6 +5921,90 @@ test('an agent with its own budget gets it, and the rest keep the shared one', a
     await gateway.dispatch({ sessionId: 'bea-short', agentId: 'bea', userMessage: 'keep going' });
     assert.equal(toolTurns.get('ava'), 5);
     assert.equal(toolTurns.get('bea'), 2);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('an agent with auto-continue keeps working past its budget, up to its cap, and the rest wrap up', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-a\n---\n\nYou are Bea.\n');
+  const toolTurns = new Map<string, number>();
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async (_url: unknown, init?: RequestInit) => {
+      const body = String(init?.body);
+      const who = body.includes('You are Ava.') ? 'ava' : 'bea';
+      if (body.includes('You have used every step this message allows')) {
+        return openAiText('wrapped up');
+      }
+      toolTurns.set(who, (toolTurns.get(who) ?? 0) + 1);
+      return openAiToolCall('demo.echo', { text: 'again' });
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    maxTurns: 2,
+    autoContinueFor: (agentId) => (agentId === 'ava' ? 2 : undefined),
+    approvals: () => ({ approve: async () => true }),
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'ava-auto', agentId: 'ava', userMessage: 'keep going' });
+    await gateway.dispatch({ sessionId: 'bea-plain', agentId: 'bea', userMessage: 'keep going' });
+    // Her two, and two more twice over; Bea wraps up at her two.
+    assert.equal(toolTurns.get('ava'), 6);
+    assert.equal(toolTurns.get('bea'), 2);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('an auto-continuing turn wraps up when another message is waiting for its session', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  let toolTurns = 0;
+  let wrapped = false;
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async (_url: unknown, init?: RequestInit) => {
+      const body = String(init?.body);
+      if (body.includes('You have used every step this message allows')) {
+        wrapped = true;
+        return openAiText('stopping for your message');
+      }
+      // Endless work until it has wrapped up once; the waiting message is answered.
+      if (wrapped) {
+        return openAiText('answered');
+      }
+      toolTurns += 1;
+      return openAiToolCall('demo.echo', { text: 'again' });
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    maxTurns: 2,
+    autoContinueFor: () => true,
+    approvals: () => ({ approve: async () => true }),
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    const first = gateway.dispatch({ sessionId: 'ava-yield', agentId: 'ava', userMessage: 'work through the queue' });
+    const second = gateway.dispatch({ sessionId: 'ava-yield', agentId: 'ava', userMessage: 'what is the status?' });
+    const [one, two] = await Promise.all([first, second]);
+    // Not renewed: somebody was waiting when the budget ran out.
+    assert.equal(toolTurns, 2);
+    assert.equal(latestTurnReply(one), 'stopping for your message');
+    assert.equal(latestTurnReply(two), 'answered');
   } finally {
     await gateway.stop();
   }

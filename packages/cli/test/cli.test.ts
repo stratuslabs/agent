@@ -14220,7 +14220,7 @@ test('re-running setup keeps the output and turn bounds it has no menu for', asy
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
     path.join(home, '.stratus', 'config.json'),
-    `${JSON.stringify({ provider: 'demo', maxTokens: 4096, maxTurns: 24, agentMaxTurns: { atlas: 300 } })}\n`,
+    `${JSON.stringify({ provider: 'demo', maxTokens: 4096, maxTurns: 24, agentMaxTurns: { atlas: 300 }, autoContinue: { nova: true } })}\n`,
   );
   const { streams } = createStreams();
   await runCli({
@@ -14239,6 +14239,7 @@ test('re-running setup keeps the output and turn bounds it has no menu for', asy
   assert.equal(config.maxTokens, 4096);
   assert.equal(config.maxTurns, 24);
   assert.deepEqual(config.agentMaxTurns, { atlas: 300 });
+  assert.deepEqual(config.autoContinue, { nova: true });
 });
 
 test('a provider nobody registered is refused by name, with what is registered', async () => {

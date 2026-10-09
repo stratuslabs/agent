@@ -64,6 +64,7 @@ import {
   loadServePlugins,
   loadServeRuntimeSelection,
   loadServeAgentMaxTurns,
+  loadServeAutoContinue,
   loadServeMaxTurns,
 } from '../trusted-config.ts';
 
@@ -275,6 +276,7 @@ const serveHeldHome = async (
   // with no override.
   const maxTurns = await loadServeMaxTurns(env, command.configPath, warn);
   const agentMaxTurns = await loadServeAgentMaxTurns(env, command.configPath, warn);
+  const autoContinue = await loadServeAutoContinue(env, command.configPath, warn);
 
   // Every kind of grant an agent holds — command scopes, origins, standing
   // tool grants — in one file per agent beside its soul, through one store
@@ -574,6 +576,9 @@ const serveHeldHome = async (
   if (Object.keys(agentMaxTurns).length > 0) {
     log(`maxTurns: ${Object.entries(agentMaxTurns).map(([agentId, turns]) => `${agentId} ${turns}`).join(', ')}; ${maxTurns ?? 'the default'} for the rest (agentMaxTurns)`);
   }
+  if (Object.keys(autoContinue).length > 0) {
+    log(`autoContinue: ${Object.entries(autoContinue).map(([agentId, setting]) => `${agentId} ${setting === true ? 'no cap' : `up to ${setting} more`}`).join(', ')} (kernel-loop runtimes; the claude-code and codex harnesses keep their own budget)`);
+  }
   if (approvalMode === 'remote') {
     // Only agents whose channel actually came up can be asked: tokens on
     // disk with the Slack package missing means nothing renders the
@@ -648,6 +653,7 @@ const serveHeldHome = async (
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(Object.keys(agentMaxTurns).length > 0 ? { maxTurnsFor: (agentId: string) => agentMaxTurns[agentId] } : {}),
+    ...(Object.keys(autoContinue).length > 0 ? { autoContinueFor: (agentId: string) => autoContinue[agentId] } : {}),
     ...(channels.length > 0 ? { channels } : {}),
     // The Slack adapter is host-wired, so its (agent, kind) claims are
     // declared here; a plugin channel claiming one of them is refused at

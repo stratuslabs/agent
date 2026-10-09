@@ -599,6 +599,13 @@ export interface GatewayOptions {
    */
   maxTurnsFor?: (agentId: string) => number | undefined;
   /**
+   * Whether an agent keeps working past its budget instead of wrapping up
+   * (`AgentRunnerOptions.autoContinue`): `true` without a cap, a number for
+   * that many extra allowances per message, undefined for off. `stratus
+   * serve` fills it from the trusted config's `autoContinue`.
+   */
+  autoContinueFor?: (agentId: string) => true | number | undefined;
+  /**
    * The activity watchdog: abort a turn when no event for its session has
    * arrived for this long. Progress-based, not wall-clock — any delta, tool
    * event, or response resets it. 0 disables. Default 120s.
@@ -2370,7 +2377,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // runtimes take it as their inner limit), so it is part of the key:
     // two agents on one model with different budgets get their own runners.
     const maxTurns = options.maxTurnsFor?.(agentId) ?? options.maxTurns;
-    const key = `${runnerKeyFor(config)}:${maxTurns ?? 'default'}`;
+    const autoContinue = options.autoContinueFor?.(agentId);
+    const key = `${runnerKeyFor(config)}:${maxTurns ?? 'default'}:${autoContinue ?? 'off'}`;
     const existing = runners.get(key);
     if (existing) {
       return existing;
@@ -2412,6 +2420,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       memory,
       streaming: true,
       ...(maxTurns !== undefined ? { maxTurns } : {}),
+      ...(autoContinue !== undefined
+        ? { autoContinue, waitingInput: (sessionId: string) => (waitingDispatches.get(sessionId) ?? 0) > 0 }
+        : {}),
     });
     hostedRunner = runner;
     runners.set(key, runner);
@@ -2696,6 +2707,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // behind the in-flight turn instead of interleaving with it. Sessions
   // are independent — different conversations run concurrently.
   const sessionChains = new Map<string, Promise<unknown>>();
+  /**
+   * Dispatches queued behind a session's running turn, per session: what
+   * tells an auto-continuing turn that somebody wrote meanwhile, so it
+   * wraps up and lets them in rather than keep the session to itself.
+   */
+  const waitingDispatches = new Map<string, number>();
   const inflight = new Set<Promise<unknown>>();
   let stopping = false;
   /**
@@ -3676,7 +3693,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       items.set(key, { turn, agentId: input.agentId, confirmed, addressed: input.addressed !== false });
       liveWorkItems.set(input.sessionId, items);
     };
+    waitingDispatches.set(input.sessionId, (waitingDispatches.get(input.sessionId) ?? 0) + 1);
     const turn: Promise<Session> = onSessionChain(input.sessionId, async () => {
+      // No longer waiting once it reaches the head of the chain.
+      const left = (waitingDispatches.get(input.sessionId) ?? 1) - 1;
+      if (left > 0) {
+        waitingDispatches.set(input.sessionId, left);
+      } else {
+        waitingDispatches.delete(input.sessionId);
+      }
       // Before `activeTurns` is touched: a repeat that runs nothing must
       // not claim the session's turn id, even for the instant it takes.
       const repeated = idempotencyKey !== undefined ? await settleRepeat(input.sessionId, idempotencyKey, input.agentId, turnId, input.onRepeat) : undefined;

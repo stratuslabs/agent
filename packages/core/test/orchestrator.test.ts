@@ -470,6 +470,121 @@ test('a message that uses every turn wraps up with where it got to instead of fa
   assert.equal(session.messages.some((message) => message.content === TURN_LIMIT_NOTE), false);
 });
 
+test('with auto-continue on, a message out of budget gets another and works until it is done', async () => {
+  const tools = new ToolRegistry();
+  const ran: number[] = [];
+  tools.register({
+    name: 'step',
+    async execute(input) {
+      ran.push((input as { n: number }).n);
+      return { done: true };
+    },
+  });
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    name: 'long-task',
+    async generate(request) {
+      requests.push(request);
+      // Seven steps of work, then the answer.
+      if (requests.length <= 7) {
+        return { parts: [{ type: 'tool-call', call: { id: `s${requests.length}`, toolName: 'step', input: { n: requests.length } } }] };
+      }
+      return { parts: [{ type: 'text', text: 'All seven steps are done.' }] };
+    },
+  };
+  const runner = new AgentRunner({ provider, tools, maxTurns: 3, autoContinue: true });
+  const continued: number[] = [];
+  runner.bus.subscribe((event) => {
+    if (event.type === 'session.continued') {
+      continued.push(event.continuation);
+    }
+  });
+  const session = await runner.run({ sessionId: 'auto', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Do the whole migration' });
+
+  assert.equal(session.status, 'completed');
+  assert.deepEqual(ran, [1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(session.messages.at(-1)?.content, 'All seven steps are done.');
+  // No wrap-up along the way: nothing was told it was out of steps.
+  assert.ok(requests.every((request) => request.toolChoice === undefined));
+  assert.deepEqual(continued, [1, 2]);
+});
+
+test('auto-continue stops at its cap, and wraps up there as it always did', async () => {
+  const tools = new ToolRegistry();
+  tools.register({ name: 'step', async execute() { return { done: true }; } });
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    name: 'endless',
+    async generate(request) {
+      requests.push(request);
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'Still going; reply "continue".' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `s${requests.length}`, toolName: 'step', input: { n: requests.length } } }] };
+    },
+  };
+  const runner = new AgentRunner({ provider, tools, maxTurns: 2, autoContinue: 2 });
+  const session = await runner.run({ sessionId: 'capped', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Go' });
+
+  // Two of its own, two more twice over, then the wrap-up.
+  assert.equal(requests.length, 7);
+  assert.equal(requests.at(-1)?.toolChoice, 'none');
+  assert.equal(session.status, 'completed');
+  assert.equal(session.messages.at(-1)?.content, 'Still going; reply "continue".');
+});
+
+test('auto-continue wraps up instead when somebody has written to the session meanwhile', async () => {
+  const tools = new ToolRegistry();
+  tools.register({ name: 'step', async execute() { return { done: true }; } });
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    name: 'endless',
+    async generate(request) {
+      requests.push(request);
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'Stopping here for your message.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `s${requests.length}`, toolName: 'step', input: {} } }] };
+    },
+  };
+  let waiting = false;
+  const runner = new AgentRunner({ provider, tools, maxTurns: 2, autoContinue: true, waitingInput: () => waiting });
+  runner.bus.subscribe((event) => {
+    // A person writes during the second allowance.
+    if (event.type === 'session.continued') {
+      waiting = true;
+    }
+  });
+  const session = await runner.run({ sessionId: 'yield', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Go' });
+
+  assert.equal(requests.length, 5);
+  assert.equal(requests.at(-1)?.toolChoice, 'none');
+  assert.equal(session.messages.at(-1)?.content, 'Stopping here for your message.');
+});
+
+test('auto-continue never extends a message stuck repeating a failure', async () => {
+  const tools = new ToolRegistry();
+  tools.register({ name: 'shell.run', async execute() { throw new Error('cwd /work/missing does not exist'); } });
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    name: 'stuck',
+    async generate(request) {
+      requests.push(request);
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'The directory is missing.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `c${requests.length}`, toolName: 'shell.run', input: { command: 'ls' } } }] };
+    },
+  };
+  // Renewed once at turn 3 (two failures so far), then stuck at the third.
+  const runner = new AgentRunner({ provider, tools, maxTurns: 2, autoContinue: true });
+  const session = await runner.run({ sessionId: 'stuck-auto', agent: { id: 'ava', name: 'Ava' }, userMessage: 'List' });
+
+  assert.equal(requests.length, 4);
+  assert.equal(requests.at(-1)?.toolChoice, 'none');
+  assert.equal(session.messages.at(-1)?.content, 'The directory is missing.');
+});
+
 test('a message that makes the same failing call three times running wraps up and says what is stuck', async () => {
   // The turn limit was the only thing that stopped this, so a missing cwd
   // or a gated tool refused in headless mode burned the whole allowance

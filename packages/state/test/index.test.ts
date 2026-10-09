@@ -1769,6 +1769,16 @@ test('approvals.commands parses at the top and per agent, adds up per agent, and
   await assert.rejects(loadConfigFile(notStrings), /Invalid approvals\.agents\.nova\.commands/);
 });
 
+test('autoContinue parses per agent as true or a cap, and refuses anything else', async () => {
+  const configPath = await writeConfig('auto-continue.json', { autoContinue: { nova: true, atlas: 10 } });
+  const config = await loadConfigFile(configPath);
+  assert.deepEqual(config.autoContinue, { nova: true, atlas: 10 });
+  for (const [name, value] of [['list', ['nova']], ['zero', { nova: 0 }], ['fraction', { nova: 1.5 }], ['text', { nova: 'yes' }], ['false', { nova: false }]] as const) {
+    const bad = await writeConfig(`auto-continue-${name}.json`, { autoContinue: value });
+    await assert.rejects(loadConfigFile(bad), /Invalid autoContinue/, name);
+  }
+});
+
 test('agentMaxTurns parses per agent and refuses a budget that is not one', async () => {
   const configPath = await writeConfig('agent-max-turns.json', { maxTurns: 40, agentMaxTurns: { atlas: 300, nova: 120 } });
   const config = await loadConfigFile(configPath);

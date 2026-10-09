@@ -62,6 +62,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `memoryStore` | Which store backs agent memory: `file` (the default) or the name a [plugin memory store](../guides/extending.md#memory-stores) registers — trusted configs only, see below |
 | `maxTurns` | How many tool turns one message may take before the agent stops and reports where it got to. Default `40` — trusted configs only, see below |
 | `agentMaxTurns` | Per-agent replacements for `maxTurns`, keyed by agent id. Trusted configs only |
+| `autoContinue` | Agents that keep working past their budget instead of stopping to ask, keyed by agent id: `true` (no cap) or a number of extra budgets per message. Off for agents not listed. Trusted configs only. See [how many turns one message may spend](#how-many-turns-one-message-may-spend) |
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
@@ -158,6 +159,32 @@ with what it did, what it found, and what is left. The session keeps every
 step, so replying "continue" carries on with a fresh allowance. The note
 is sent for that one call and never saved — it is the runtime speaking,
 not the person.
+
+An agent that should not stop to ask can keep going instead:
+
+```json
+{
+  "autoContinue": { "nova": true, "atlas": 10 }
+}
+```
+
+When one of these agents spends its budget while still working (its last
+step called a tool), it gets another `maxTurns` (or `agentMaxTurns`) in the
+same turn, with no wrap-up and nothing for anyone to type. `true` means no
+cap; a number caps the extra budgets per message. It still stops to sum up:
+
+- when it is stuck repeating the same failing call;
+- when its cap is reached;
+- when somebody has sent it another message in that conversation
+  meanwhile: they get the summary, and their message runs next.
+
+Approvals, grants and trust labels apply exactly as they did. Off for every
+agent not listed, because it spends tokens without a ceiling; the startup
+log names the agents it is on for. It applies to the built-in model loop
+(Anthropic and OpenAI-compatible providers); the `claude-code` and `codex`
+runtimes run their own loop and keep its budget. Nothing stops a running
+turn from Slack yet, so an uncapped runaway turn ends with a new message to
+the agent or a daemon restart.
 
 A provider that ignores the no-tools request and calls a tool anyway on
 that last call fails the turn with `Session exceeded the maximum of N
