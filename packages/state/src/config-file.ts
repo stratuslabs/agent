@@ -174,6 +174,25 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
     }
     resolved.maxTurns = config.maxTurns;
   }
+  if (config.agentMaxTurns !== undefined) {
+    // Refused, not dropped, for the reason `maxTurns` is: an operator who
+    // raised one agent's budget and silently got the default would find out
+    // as that agent stopping short with nothing in the config to explain it.
+    const budgets = config.agentMaxTurns as unknown;
+    if (typeof budgets !== 'object' || budgets === null || Array.isArray(budgets)) {
+      throw new Error(
+        `Invalid agentMaxTurns in config ${configPath}: expected agent ids mapped to step budgets, like { "atlas": 300 }.`,
+      );
+    }
+    for (const [agentId, turns] of Object.entries(budgets as Record<string, unknown>)) {
+      if (typeof turns !== 'number' || !Number.isInteger(turns) || turns < 1) {
+        throw new Error(
+          `Invalid agentMaxTurns.${agentId} in config ${configPath}: ${JSON.stringify(turns)}. Use a whole number of provider turns, 1 or more.`,
+        );
+      }
+    }
+    resolved.agentMaxTurns = { ...(budgets as Record<string, number>) };
+  }
   const approvals = parseApprovalsConfig(config.approvals, configPath);
   if (approvals) {
     resolved.approvals = approvals;

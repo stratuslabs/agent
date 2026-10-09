@@ -1711,3 +1711,15 @@ test('api.publicUrl loads as an http(s) address without a trailing slash, and an
   await writeFile(file, JSON.stringify({ api: { publicUrl: 'proxy-user:hunter2 not a url' } }));
   await assert.rejects(() => loadConfigFile(file), (error: Error) => !error.message.includes('hunter2'));
 });
+
+test('agentMaxTurns parses per agent and refuses a budget that is not one', async () => {
+  const configPath = await writeConfig('agent-max-turns.json', { maxTurns: 40, agentMaxTurns: { atlas: 300, nova: 120 } });
+  const config = await loadConfigFile(configPath);
+  assert.equal(config.maxTurns, 40);
+  assert.deepEqual(config.agentMaxTurns, { atlas: 300, nova: 120 });
+
+  for (const [name, value] of [['list', [300]], ['zero', { atlas: 0 }], ['fraction', { atlas: 1.5 }], ['text', { atlas: '300' }]] as const) {
+    const bad = await writeConfig(`agent-max-turns-${name}.json`, { agentMaxTurns: value });
+    await assert.rejects(loadConfigFile(bad), /Invalid agentMaxTurns/, name);
+  }
+});
