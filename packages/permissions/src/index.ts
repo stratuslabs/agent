@@ -20,9 +20,9 @@ import { sessionTaintedBy, sessionTrustOf } from '@stratusagent/core';
  */
 export { atLeastAsRisky } from '@stratusagent/core';
 
-import { readsInsideWorkspace } from './workspace.ts';
+import { gitInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
 
-export { readsInsideWorkspace } from './workspace.ts';
+export { gitInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
 import {
   analyzeCommand,
   describeCommandScope,
@@ -873,6 +873,12 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
                 read = true;
                 continue;
               }
+              // Local git changes things, so it's a grant like any other
+              // to a conversation the external-content gate has closed.
+              if (!externalGate && await gitInsideWorkspace(stage, cwd, workspace)) {
+                read = true;
+                continue;
+              }
               covered = false;
               break;
             }
@@ -880,7 +886,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               return report(
                 context,
                 true,
-                `${call.toolName} only read inside ${session.agent.id}'s workspace (autonomy: workspace)`,
+                `${call.toolName} worked inside ${session.agent.id}'s workspace (autonomy: workspace)`,
                 command,
               );
             }

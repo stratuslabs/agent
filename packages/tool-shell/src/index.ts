@@ -191,6 +191,12 @@ const settingsFor = (
       granted.PATH = '/usr/bin:/bin';
     }
   }
+  // No terminal, so an editor can only hang or, named in a repository's
+  // config, run a program nobody approved. `true` exits at once: git takes
+  // the message it already has (or aborts an empty one) instead. The
+  // environment variables win over `core.editor` and `sequence.editor`.
+  granted.GIT_EDITOR = 'true';
+  granted.GIT_SEQUENCE_EDITOR = 'true';
   return {
     ...(cwd ? { cwd } : {}),
     // Whether this agent's directory is ours to create. The workspace is —

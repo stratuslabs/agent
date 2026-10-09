@@ -4,9 +4,9 @@ import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { ApprovalContext, Session, Tool } from '@stratusagent/core';
+import { SESSION_TRUST_METADATA_KEY, type ApprovalContext, type Session, type Tool } from '@stratusagent/core';
 
-import { analyzeCommand, createPermissionPolicy, readsInsideWorkspace } from '../src/index.ts';
+import { analyzeCommand, createPermissionPolicy, gitInsideWorkspace, readsInsideWorkspace } from '../src/index.ts';
 
 const layout = async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-autonomy-'));
@@ -19,6 +19,9 @@ const layout = async () => {
   await symlink(outside, path.join(repo, 'leak.txt'));
   await symlink(root, path.join(repo, 'up'));
   await symlink(outside, path.join(repo, '--'));
+  await mkdir(path.join(repo, '.git'), { recursive: true });
+  await writeFile(path.join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  await writeFile(path.join(repo, '.git', 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n');
   await mkdir(path.join(root, 'elsewhere', 'child'), { recursive: true });
   await writeFile(path.join(root, 'elsewhere', 'secret'), 'token\n');
   await symlink(path.join(root, 'elsewhere', 'child'), path.join(repo, 'hop'));
@@ -164,4 +167,141 @@ test('autonomy lets reads run unattended for the agents it is on for, pipelines 
   // A tool that can't say where it runs is never judged by this rule.
   const blind = createPermissionPolicy({ mode: 'headless', commands: { workspace: { directoryFor: () => workspace } } });
   assert.equal(await blind.approve({ ...contextFor('nova', 'cat src/main.ts'), tool: shell }), false);
+});
+
+test('local git in a repository inside the workspace is judged inside, and publishing or leaving it is not', async () => {
+  const { root, workspace, repo } = await layout();
+  const inside = async (command: string, cwd = repo) => gitInsideWorkspace(analyzeCommand(command), cwd, workspace);
+
+  for (const command of [
+    'git status',
+    'git add -A',
+    'git commit -m "Fix the hang (Mac mini)"',
+    'git commit --amend --no-edit',
+    'git commit -am wip',
+    'git tag -a v2 -m "release"',
+    'git fetch',
+    'git fetch --all',
+    'git switch -c nova/fix',
+    'git checkout -b nova/fix',
+    'git branch --set-upstream-to=origin/main',
+    'git stash',
+    'git stash pop',
+    'git rebase origin/main',
+    'git fetch origin',
+    'git pull --rebase',
+    'git reset HEAD~1',
+    'git show HEAD~2:src/main.ts',
+    `git -C ${repo} log --oneline -4`,
+    'git -C . diff',
+    'git worktree add ../app-fix -b nova/fix',
+    'git worktree list',
+    'git log -S needle --oneline',
+    'git diff -U5 --stat',
+    'git status -sb',
+    'git stash push -m wip',
+    'git tag v1.2.3',
+    'git cherry-pick -x abc123',
+    'git rebase --continue',
+  ]) {
+    assert.equal(await inside(command), true, `should be inside: ${command}`);
+  }
+  assert.equal(await inside('git -C app status', workspace), true);
+  // A directory inside whose .git names a repository outside.
+  const decoy = path.join(workspace, 'decoy');
+  await mkdir(path.join(root, 'private', '.git'), { recursive: true });
+  await writeFile(path.join(root, 'private', '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  await mkdir(decoy, { recursive: true });
+  await writeFile(path.join(decoy, '.git'), `gitdir: ${path.join(root, 'private', '.git')}\n`);
+  assert.equal(await inside('git show HEAD:secret', decoy), false);
+  assert.equal(await inside('git reset --soft HEAD~1', decoy), false);
+  await symlink(path.join(root, 'private', '.git'), path.join(workspace, 'linked-git'));
+  const linked = path.join(workspace, 'linked');
+  await mkdir(linked, { recursive: true });
+  await symlink(path.join(root, 'private', '.git'), path.join(linked, '.git'));
+  assert.equal(await inside('git log', linked), false);
+
+  for (const command of [
+    // Publishing is judged elsewhere.
+    'git push origin nova/fix',
+    // Global options other than -C and --no-pager.
+    'git -c core.hooksPath=/tmp status',
+    'git --git-dir=/tmp/x status',
+    // Destructive or forced forms.
+    'git reset --hard',
+    'git branch -D old',
+    'git push --force',
+    'git checkout -f main',
+    'git stash drop',
+    'git stash clear',
+    'git fetch origin :refs/heads/main',
+    // A message from a file, possibly outside.
+    'git commit -F /etc/passwd',
+    // Repositories and worktrees outside the workspace.
+    `git -C ${root} status`,
+    'git -C up status',
+    'git worktree add /tmp/elsewhere',
+    'git worktree add ../../../../outside',
+    // Not on the list at all.
+    'git config user.email x',
+    'git clean -fdx',
+    'git filter-branch',
+    'git commit -m "$(cat ~/.ssh/id_rsa)"',
+    // Options that read a file or run a program, in every subcommand.
+    "git rebase -x 'cat /etc/passwd' HEAD~1",
+    'git rebase --exec ls HEAD~1',
+    'git rebase -i HEAD~3',
+    'git tag -F /etc/passwd leak',
+    'git merge -F /etc/passwd main',
+    'git add --pathspec-from-file=/etc/passwd',
+    'git reset --pathspec-from-file /etc/passwd',
+    'git commit -t /etc/passwd',
+    'git tag -s v1',
+    // A forced update with no flag, and interactive or forced forms.
+    'git fetch origin +main:refs/heads/victim',
+    'git pull origin +main',
+    'git fetch origin main:victim',
+    'git add -p',
+    'git worktree remove --force ../app-fix',
+    // Any flag nobody listed.
+    'git status --some-new-flag',
+    // An editor from config would run: the message has to be on the line.
+    'git commit',
+    'git commit -a',
+    'git tag -a v1',
+    // A repository named by path, not a configured remote.
+    'git fetch /home/user/private-repo',
+    'git pull ../../../../elsewhere main',
+    'git fetch upstream',
+  ]) {
+    assert.equal(await inside(command), false, `should not be inside: ${command}`);
+  }
+});
+
+test('local git runs under autonomy only while the external-content gate is open', async () => {
+  const { workspace, repo } = await layout();
+  const tool: Tool = { ...shell, cwdFor: () => repo };
+  const contextFor = (command: string, trust?: 'external'): ApprovalContext => ({
+    tool,
+    risk: 'gated',
+    call: { id: 'c1', toolName: 'shell.run', input: { command } },
+    session: {
+      id: 's-nova',
+      agent: { id: 'nova', name: 'Nova' },
+      status: 'running',
+      messages: [],
+      ...(trust ? { metadata: { [SESSION_TRUST_METADATA_KEY]: trust } } : {}),
+    } as unknown as Session,
+  } as ApprovalContext);
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: { workspace: { directoryFor: () => workspace } },
+    gateExternalContent: () => true,
+  });
+  assert.equal(await policy.approve(contextFor('git commit -m "x"')), true);
+  assert.equal(await policy.approve(contextFor('git add -A')), true);
+  assert.equal(await policy.approve(contextFor('git push origin nova/x')), false);
+  // After reading web content, reads still run and local git asks.
+  assert.equal(await policy.approve(contextFor('git commit -m "x"', 'external')), false);
+  assert.equal(await policy.approve(contextFor('cat src/main.ts', 'external')), true);
 });
