@@ -381,3 +381,13 @@ test('tcsh runs without the startup files that could alias a command', { skip: !
   const result = await runCommand(tools, 'echo real | cat');
   assert.equal(String(result.stdout).trim(), 'real');
 });
+
+test('git never opens an editor from a shell command', async () => {
+  const tools = await registryFor({ passEnv: ['PATH'], env: { GIT_EDITOR: 'vim' } }, { PATH: process.env.PATH });
+  assert.equal(String((await runCommand(tools, 'echo "$GIT_EDITOR $GIT_SEQUENCE_EDITOR"')).stdout).trim(), 'true true');
+});
+
+test('git is never pointed at another repository through the environment', async () => {
+  const tools = await registryFor({ passEnv: ['PATH'], env: { GIT_DIR: '/outside/.git', GIT_WORK_TREE: '/outside', GIT_CONFIG_GLOBAL: '/keep/gitconfig' } }, { PATH: process.env.PATH });
+  assert.equal(String((await runCommand(tools, 'echo "[$GIT_DIR][$GIT_WORK_TREE][$GIT_CONFIG_GLOBAL]"')).stdout).trim(), '[][][/keep/gitconfig]');
+});

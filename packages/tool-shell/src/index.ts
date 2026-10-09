@@ -101,6 +101,15 @@ const startupOff = (shell: string): string[] => {
   return [];
 };
 
+/**
+ * Variables that make git use a repository other than the one the command
+ * runs in, which the permission engine finds from the working directory.
+ * Identity and config (`GIT_CONFIG_GLOBAL`, author names) are untouched.
+ */
+const GIT_REPOSITORY_VARIABLES: readonly string[] = [
+  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
+];
+
 /** Variables that make a shell run code before the command. Never passed. */
 const SHELL_STARTUP_VARIABLES: readonly string[] = ['BASH_ENV', 'ENV', 'ZDOTDIR'];
 
@@ -166,7 +175,7 @@ const settingsFor = (
   // `ENV`, `ZDOTDIR`'s `.zshenv`) or an exported function (`BASH_FUNC_*`)
   // can define `cat` as anything. The command judged is the command run.
   for (const name of Object.keys(granted)) {
-    if (SHELL_STARTUP_VARIABLES.includes(name) || name.startsWith('BASH_FUNC_')) {
+    if (SHELL_STARTUP_VARIABLES.includes(name) || GIT_REPOSITORY_VARIABLES.includes(name) || name.startsWith('BASH_FUNC_')) {
       delete granted[name];
     }
   }
@@ -191,6 +200,12 @@ const settingsFor = (
       granted.PATH = '/usr/bin:/bin';
     }
   }
+  // No terminal, so an editor can only hang or, named in a repository's
+  // config, run a program nobody approved. `true` exits at once: git takes
+  // the message it already has (or aborts an empty one) instead. The
+  // environment variables win over `core.editor` and `sequence.editor`.
+  granted.GIT_EDITOR = 'true';
+  granted.GIT_SEQUENCE_EDITOR = 'true';
   return {
     ...(cwd ? { cwd } : {}),
     // Whether this agent's directory is ours to create. The workspace is —

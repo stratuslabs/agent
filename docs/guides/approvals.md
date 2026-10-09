@@ -286,6 +286,27 @@ would run in place of the real one. Reads stay allowed after the conversation re
 content, even with `externalContent: "gate"`, because reading the agent's
 own files can't send anything anywhere.
 
+Local git runs too, in a repository inside the workspace (the cwd, or
+`-C <path>`): `add`, `commit`, `switch`, `checkout`, `restore`, `branch`,
+`worktree add` (to a path inside the workspace) and `list`, `stash`,
+`merge`, `rebase`, `cherry-pick`, `reset`, `fetch`, `pull`, `tag`, `mv`,
+and `rm`, plus the read-only ones. Each subcommand has a list of the flags it may use, and anything else
+asks: `--force`, `--hard`, `-D`, `--no-verify`, `stash drop`/`clear`,
+options that read a file or run a program (`commit -F`, `tag -F`,
+`rebase -x`, `--pathspec-from-file`), interactive forms (`add -p`,
+`rebase -i`), and any flag nobody listed. So do any option before the
+subcommand except `-C` and `--no-pager`, a `+` or `:` refspec on fetch or
+pull, `push` (judged on its own), and any subcommand not on the list
+(`config`, `clean`, `filter-branch`). The repository git will actually use has to be inside too: a `.git` file
+or link naming one elsewhere asks. Fetch and pull take a configured remote,
+never a path. A commit or annotated tag needs its message on the command
+line, and the shell sets `GIT_EDITOR` and `GIT_SEQUENCE_EDITOR` to `true`
+for every command, since an editor can only hang without a terminal or run
+whatever a repository's config names. Unlike reads, local git stops
+running unattended once the conversation reads web content under
+`externalContent: "gate"`. Commit, merge, and rebase run the repository's
+hooks, which a repository only has if somebody put them there.
+
 This is policy over command arguments, not a sandbox. It holds because
 these commands read only what they're told to. A program you list in
 `approvals.commands` can still read anything, which is why those are

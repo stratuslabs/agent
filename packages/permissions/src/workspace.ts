@@ -1,4 +1,4 @@
-import { realpath } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { CommandAnalysis } from './commands.ts';
@@ -330,6 +330,358 @@ export const readsInsideWorkspace = async (
     if (resolved === undefined || !within(root, resolved)) {
       return false;
     }
+  }
+  return true;
+};
+
+/**
+ * Local git in a repository inside the workspace: the work of making a
+ * change (branch, stage, commit, rebase, fetch), never publishing it. Push
+ * is judged separately.
+ *
+ * Every subcommand has an allowlist of flags, and anything not on it asks.
+ * Git's option surface is large and several innocent-looking options read a
+ * file or run a program (`rebase -x`, `tag -F`, `--pathspec-from-file`), so
+ * a list of refusals would keep missing one; a list of what's known to be
+ * local and harmless fails closed instead.
+ *
+ * Unlike reads, these change things, so the policy applies them only to a
+ * conversation the external-content gate hasn't closed. Commit, merge, and
+ * rebase run the repository's hooks, which the agent's own repository only
+ * has if somebody put them there; that's the policy-not-sandbox limit, and
+ * the docs say so.
+ */
+interface GitSubcommand {
+  /** Flags with no value. Short ones may be bundled. */
+  flags?: string[];
+  /** Flags that take a value, separately (`-m msg`), attached (`-mmsg`, `--message=msg`). */
+  values?: string[];
+  /** `-4` as a count. */
+  numeric?: boolean;
+  /** When set, the first positional must be one of these (`stash pop`). */
+  actions?: string[];
+  /** Positionals must not be refspec-shaped (`+src:dst`, `:dst`). */
+  refspecs?: boolean;
+}
+
+const LOG_FLAGS = [
+  '--oneline', '--graph', '--decorate', '--no-decorate', '--all', '--stat', '--shortstat', '--numstat', '--name-only', '--name-status',
+  '-p', '--patch', '--no-patch', '-s', '--reverse', '--first-parent', '--no-merges', '--merges', '--abbrev-commit', '--follow', '--color',
+  '--no-color', '-w', '--ignore-all-space', '--date-order', '--topo-order', '--left-right', '--cherry-pick', '--boundary',
+];
+const LOG_VALUES = ['-n', '--max-count', '--format', '--pretty', '--since', '--after', '--until', '--before', '--author', '--committer', '--grep', '--date', '-S', '-G', '-U', '--unified', '--skip', '--abbrev'];
+const DIFF_FLAGS = [
+  '--stat', '--shortstat', '--numstat', '--name-only', '--name-status', '--cached', '--staged', '-p', '--patch', '--word-diff', '--color',
+  '--no-color', '--check', '-w', '--ignore-all-space', '-b', '--ignore-space-change', '--exit-code', '--quiet', '-R', '--merge-base', '--summary',
+];
+
+const GIT_SUBCOMMANDS: Record<string, GitSubcommand> = {
+  status: { flags: ['-s', '--short', '-b', '--branch', '--porcelain', '--long', '-u', '--untracked-files', '--ignored', '-z', '-v', '--verbose'] },
+  log: { flags: LOG_FLAGS, values: LOG_VALUES, numeric: true },
+  shortlog: { flags: ['-s', '--summary', '-n', '--numbered', '-e', '--email'], numeric: true },
+  diff: { flags: DIFF_FLAGS, values: ['-U', '--unified', '--diff-filter', '--stat-width'] },
+  show: { flags: [...LOG_FLAGS, ...DIFF_FLAGS], values: [...LOG_VALUES, '--diff-filter'], numeric: true },
+  blame: { flags: ['-w', '-s', '-e', '--porcelain', '-l', '--line-porcelain', '-M', '-C'], values: ['-L'] },
+  'rev-parse': { flags: ['--abbrev-ref', '--short', '--show-toplevel', '--git-dir', '--git-common-dir', '--verify', '--is-inside-work-tree', '--symbolic-full-name', '-q', '--quiet'] },
+  'ls-files': { flags: ['-m', '-o', '-d', '-s', '-c', '-u', '--others', '--modified', '--deleted', '--cached', '--stage', '--unmerged', '--exclude-standard', '-z', '--full-name'] },
+  describe: { flags: ['--tags', '--always', '--dirty', '--long', '--all'], values: ['--abbrev', '--match', '--exclude'] },
+  add: { flags: ['-A', '--all', '-u', '--update', '-N', '--intent-to-add', '-v', '--verbose', '-n', '--dry-run', '--renormalize'] },
+  commit: { flags: ['-a', '--all', '--amend', '--no-edit', '-s', '--signoff', '-q', '--quiet', '--allow-empty', '-v', '--verbose', '--no-verify-signatures'], values: ['-m', '--message', '--fixup', '--squash', '--author', '--date'] },
+  switch: { flags: ['--detach', '-d', '--track', '-t', '--no-track', '--guess', '--no-guess', '-q', '--quiet'], values: ['-c', '--create'] },
+  checkout: { flags: ['--detach', '--track', '-t', '--no-track', '-q', '--quiet'], values: ['-b'] },
+  restore: { flags: ['--staged', '-S', '--worktree', '-W', '-q', '--quiet'], values: ['--source', '-s'] },
+  branch: {
+    flags: [
+      '-a', '--all', '-r', '--remotes', '-l', '--list', '-v', '-vv', '--verbose', '--show-current', '--merged', '--no-merged',
+      '--unset-upstream', '--track', '-t', '--no-track', '-m', '--move', '--color', '--no-color', '--no-column',
+    ],
+    values: ['--set-upstream-to', '-u', '--sort', '--format', '--contains', '--no-contains', '--points-at'],
+  },
+  // Not `remove`: git matches its argument against registered worktrees by
+  // unique suffix, so `remove wt` can delete one outside the workspace.
+  worktree: { flags: ['--detach', '--track', '--no-track', '-q', '--quiet', '--porcelain', '-v', '--verbose', '--checkout', '--no-checkout'], values: ['-b'], actions: ['add', 'list'] },
+  stash: { flags: ['-u', '--include-untracked', '-k', '--keep-index', '--no-keep-index', '-q', '--quiet', '--index', '--staged'], values: ['-m', '--message'], actions: ['push', 'pop', 'apply', 'list', 'show', 'save'] },
+  merge: { flags: ['--no-ff', '--ff-only', '--ff', '--squash', '--no-squash', '--no-edit', '--abort', '--continue', '--quit', '-q', '--quiet', '--no-commit', '--commit', '--stat', '--no-stat', '--autostash'], values: ['-m', '--message'] },
+  rebase: { flags: ['--abort', '--continue', '--skip', '--quit', '--autosquash', '--no-autosquash', '--autostash', '--no-autostash', '-q', '--quiet', '--root', '--keep-empty', '--update-refs'], values: ['--onto'] },
+  'cherry-pick': { flags: ['--abort', '--continue', '--skip', '--quit', '-n', '--no-commit', '-x', '--ff', '--allow-empty'], values: ['-m', '--mainline'] },
+  reset: { flags: ['--soft', '--mixed', '--keep', '-q', '--quiet', '-N', '--intent-to-add'] },
+  fetch: { flags: ['--all', '--tags', '--no-tags', '-q', '--quiet', '-v', '--verbose', '--unshallow', '--dry-run', '--atomic', '--no-recurse-submodules'], values: ['--depth', '--deepen', '--shallow-since'], refspecs: true },
+  pull: { flags: ['--rebase', '--no-rebase', '--ff-only', '--ff', '--no-ff', '-q', '--quiet', '-v', '--verbose', '--autostash', '--no-autostash', '--no-edit'], refspecs: true },
+  tag: { flags: ['-l', '--list', '-a', '--annotate', '-n'], values: ['-m', '--message', '--sort', '--contains', '--points-at'] },
+  mv: { flags: ['-k', '-n', '--dry-run', '-v', '--verbose'] },
+  rm: { flags: ['--cached', '-r', '-q', '--quiet', '-n', '--dry-run'] },
+};
+
+/** The flags of one subcommand, or undefined when one isn't on its list. */
+const gitPositionals = (spec: GitSubcommand, rest: string[]): string[] | undefined => {
+  const flags = spec.flags ?? [];
+  const values = spec.values ?? [];
+  const positionals: string[] = [];
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index] as string;
+    if (token === '--') {
+      positionals.push(...rest.slice(index + 1));
+      break;
+    }
+    if (!token.startsWith('-') || token === '-') {
+      positionals.push(token);
+      continue;
+    }
+    if (spec.numeric && /^-\d+$/.test(token)) {
+      continue;
+    }
+    if (token.startsWith('--')) {
+      const [name] = token.split('=');
+      if (token.includes('=')) {
+        if (!values.includes(name ?? '') && !flags.includes(name ?? '')) {
+          return undefined;
+        }
+        continue;
+      }
+      if (values.includes(token)) {
+        if (rest[index + 1] === undefined) {
+          return undefined;
+        }
+        index += 1;
+        continue;
+      }
+      if (!flags.includes(token)) {
+        return undefined;
+      }
+      continue;
+    }
+    if (flags.includes(token)) {
+      continue;
+    }
+    if (values.includes(token)) {
+      if (rest[index + 1] === undefined) {
+        return undefined;
+      }
+      index += 1;
+      continue;
+    }
+    // An attached value (`-mmsg`, `-U3`), or a bundle of flags (`-sb`)
+    // whose last letter may take the next token as its value (`-am msg`).
+    if (values.includes(token.slice(0, 2))) {
+      continue;
+    }
+    const letters = [...token.slice(1)];
+    const last = `-${letters.at(-1)}`;
+    if (!letters.slice(0, -1).every((letter) => flags.includes(`-${letter}`))) {
+      return undefined;
+    }
+    if (values.includes(last)) {
+      if (rest[index + 1] === undefined) {
+        return undefined;
+      }
+      index += 1;
+      continue;
+    }
+    if (!flags.includes(last)) {
+      return undefined;
+    }
+  }
+  return positionals;
+};
+
+/**
+ * The repository's git directories, found the way git finds them: the
+ * nearest `.git` at or above `start` (but not above the workspace), which in
+ * a linked worktree is a file naming its own git directory, whose
+ * `commondir` names the one holding config and shared refs. Both resolved
+ * through symlinks, so a `.git` file or link pointing out of the workspace
+ * is seen for what it is.
+ */
+const gitDirsOf = async (start: string, root: string): Promise<{ gitDir: string; commonDir: string } | undefined> => {
+  for (let dir = start; within(root, dir); dir = path.dirname(dir)) {
+    const dotGit = path.join(dir, '.git');
+    const pointer = await readFile(dotGit, 'utf8').catch(() => undefined);
+    let gitDir: string | undefined;
+    if (pointer !== undefined) {
+      const match = /^gitdir: (.+)$/m.exec(pointer);
+      gitDir = match ? await resolveReal(path.resolve(dir, (match[1] as string).trim())) : undefined;
+      if (gitDir === undefined) {
+        return undefined;
+      }
+    } else if (await readFile(path.join(dotGit, 'HEAD'), 'utf8').then(() => true, () => false)) {
+      gitDir = await resolveReal(dotGit);
+    }
+    if (gitDir !== undefined) {
+      const common = await readFile(path.join(gitDir, 'commondir'), 'utf8').catch(() => undefined);
+      const commonDir = common === undefined ? gitDir : await resolveReal(path.resolve(gitDir, common.trim()));
+      return commonDir === undefined ? undefined : { gitDir, commonDir };
+    }
+    if (dir === root) {
+      return undefined;
+    }
+  }
+  return undefined;
+};
+
+/**
+ * The remotes a repository configures, or undefined when its config can't
+ * be trusted to say. `for: 'fetch'` needs a `url`; git ignores `pushurl`
+ * when fetching and reads the name as a path instead.
+ */
+const configuredRemotes = async (commonDir: string, use: 'fetch' | 'push' = 'push'): Promise<string[] | undefined> => {
+  const config = await readFile(path.join(commonDir, 'config'), 'utf8').catch(() => '');
+  // An include pulls config from a file this check never reads, and a
+  // backslash-continued line folds what looks like a header into a value:
+  // either way this line-based reading isn't git's, so nothing counts.
+  if (/^\s*\[include(?:If)?\b/im.test(config) || /\\\s*$/m.test(config)) {
+    return undefined;
+  }
+  // A remote only counts with a URL: without one git reads the name as a
+  // path (`[remote ".."]` would push to the parent directory). `.` and `..`
+  // are paths whatever the config says.
+  const sections = config.split(/^(?=\s*\[)/m);
+  return sections
+    // Section names are case-insensitive to git; subsection names aren't.
+    .map((section) => ({ name: /^\s*\[remote "([^"]+)"\]/i.exec(section)?.[1], section }))
+    .filter((entry): entry is { name: string; section: string } => entry.name !== undefined && entry.name !== '.' && entry.name !== '..'
+      && (use === 'fetch' ? /^\s*url\s*=\s*\S/im : /^\s*(?:push)?url\s*=\s*\S/im).test(entry.section))
+    .map((entry) => entry.name);
+};
+
+/**
+ * The remote a bare `git fetch`/`git pull` uses: the checked-out branch's
+ * `branch.<name>.remote`, or `origin`. Undefined when HEAD isn't a branch or
+ * the config includes a file this can't read.
+ */
+const upstreamRemote = async (dirs: { gitDir: string; commonDir: string }): Promise<string | undefined> => {
+  const head = await readFile(path.join(dirs.gitDir, 'HEAD'), 'utf8').catch(() => '');
+  const branch = /^ref: refs\/heads\/(.+)$/m.exec(head)?.[1]?.trim();
+  if (branch === undefined) {
+    return undefined;
+  }
+  const config = await readFile(path.join(dirs.commonDir, 'config'), 'utf8').catch(() => '');
+  if (/^\s*\[include(?:If)?\b/im.test(config)) {
+    return undefined;
+  }
+  for (const section of config.split(/^(?=\s*\[)/m)) {
+    const header = /^\s*\[branch "([^"]+)"\]/i.exec(section);
+    if (header?.[1] === branch) {
+      const remote = /^\s*remote\s*=\s*(.+?)\s*$/im.exec(section.slice(header[0].length))?.[1];
+      if (remote !== undefined) {
+        return remote;
+      }
+    }
+  }
+  return 'origin';
+};
+
+export const gitInsideWorkspace = async (
+  analysis: CommandAnalysis,
+  cwd: string,
+  workspace: string,
+): Promise<boolean> => {
+  if (analysis.disqualifiedBy || analysis.base !== 'git' || analysis.pipeline) {
+    return false;
+  }
+  // What the shell would expand, quoted or not, with one allowance: `~` only
+  // expands at the start of a word, so `HEAD~1` is the revision it says.
+  if (analysis.tokens.some((token) => token.startsWith('~') || /[*?[\]{}$`\\]/.test(token))) {
+    return false;
+  }
+  const args = analysis.tokens.slice(1);
+  // Global options: only where it runs, and whether it pages. Everything
+  // else before the subcommand (`-c`, `--git-dir`, `--exec-path`) asks.
+  // Each -C is relative to the one before it, as git applies them.
+  const directories: string[] = [];
+  let index = 0;
+  for (; index < args.length; index += 1) {
+    const token = args[index] as string;
+    if (token === '-C' && args[index + 1] !== undefined) {
+      directories.push(args[index + 1] as string);
+      index += 1;
+      continue;
+    }
+    if (token === '--no-pager') {
+      continue;
+    }
+    break;
+  }
+  const subcommand = args[index];
+  const spec = subcommand === undefined ? undefined : GIT_SUBCOMMANDS[subcommand];
+  if (subcommand === undefined || spec === undefined) {
+    return false;
+  }
+  const positionals = gitPositionals(spec, args.slice(index + 1));
+  if (positionals === undefined) {
+    return false;
+  }
+  if (spec.actions && positionals.length > 0 && !spec.actions.includes(positionals[0] as string)) {
+    return false;
+  }
+  if (spec.refspecs && positionals.some((token) => token.startsWith('+') || token.includes(':'))) {
+    // `+src:dst` is a forced update without a flag, and `:dst` a delete.
+    return false;
+  }
+  // An editor run from config is a program nobody approved, and with no
+  // terminal it can't be anything else: a commit or an annotated tag says
+  // its message on the command line.
+  const said = (names: string[]): boolean => args.slice(index + 1).some((token) => names.some((name) => token === name
+    || token.startsWith(`${name}=`)
+    // `-mmsg`, or a short bundle ending in it (`-am msg`).
+    || (name.length === 2 && !token.startsWith('--') && token.startsWith('-') && token.slice(1).includes(name.slice(1)))));
+  if (subcommand === 'commit' && !said(['-m', '--message', '--no-edit', '--fixup'])) {
+    return false;
+  }
+  if (subcommand === 'tag' && said(['-a', '--annotate']) && !said(['-m', '--message'])) {
+    return false;
+  }
+
+  const root = await resolveReal(workspace);
+  const here = await resolveReal(cwd);
+  if (root === undefined || here === undefined || !within(root, here)) {
+    return false;
+  }
+  let repoDir: string | undefined = here;
+  for (const directory of directories) {
+    repoDir = repoDir === undefined ? undefined : await walk(repoDir, directory);
+  }
+  if (repoDir === undefined || !within(root, repoDir)) {
+    return false;
+  }
+  // The repository git will actually use, not just the directory it runs
+  // in: a `.git` file or link can name one anywhere on the host.
+  const dirs = await gitDirsOf(repoDir, root);
+  if (dirs === undefined || !within(root, dirs.gitDir) || !within(root, dirs.commonDir)) {
+    return false;
+  }
+  // Fetch and pull name a repository first, and a path there reads one from
+  // anywhere on the host: only a remote the repository configures.
+  // With no repository named, the checked-out branch's `branch.<x>.remote`
+  // decides (`origin` when unset), and that must be a configured remote too.
+  if (subcommand === 'fetch' || subcommand === 'pull') {
+    const remotes = await configuredRemotes(dirs.commonDir, 'fetch');
+    const named = positionals.length > 0 ? positionals[0] as string : await upstreamRemote(dirs);
+    if (remotes === undefined || named === undefined || !remotes.includes(named)) {
+      return false;
+    }
+  }
+  // `git mv` writes its destination, and a symlinked directory on the way
+  // can put it outside: every path it names must land inside.
+  if (subcommand === 'mv') {
+    for (const target of positionals) {
+      const landed = await walk(repoDir, target);
+      if (landed === undefined || !within(root, landed)) {
+        return false;
+      }
+    }
+  }
+  // A worktree is a directory git creates or removes: it must land inside
+  // too. `git worktree add [-b <branch>] <path> [<commit>]`.
+  if (subcommand === 'worktree') {
+    const [action, target] = positionals;
+    if (action === 'list') {
+      return true;
+    }
+    if (target === undefined) {
+      return false;
+    }
+    const landed = await walk(repoDir, target);
+    return landed !== undefined && within(root, landed) && landed !== root;
   }
   return true;
 };
