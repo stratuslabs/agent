@@ -65,6 +65,8 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     'cat "`echo x`"',
     // An optional-argument flag must not swallow the pattern.
     'grep --color root /etc/passwd',
+    'grep - /etc/passwd',
+    'rg - /etc/passwd',
     // Globs and home are paths this parser never saw.
     'cat *.txt',
     'cat ~/x',

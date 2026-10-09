@@ -540,12 +540,17 @@ const serveHeldHome = async (
     );
   };
 
-  const autonomous = [
-    ...(approvalsConfig.autonomy === 'workspace' ? ['every agent'] : []),
-    ...Object.entries(approvalsConfig.agents ?? {}).filter(([, agent]) => agent.autonomy === 'workspace').map(([agentId]) => agentId),
-  ];
+  // Said the way the resolver decides it: a top-level default with its
+  // opt-outs named, or the agents that opted in.
+  const overrides = Object.entries(approvalsConfig.agents ?? {});
+  const autonomous = approvalsConfig.autonomy === 'workspace'
+    ? (() => {
+        const optedOut = overrides.filter(([, agent]) => agent.autonomy === 'off').map(([agentId]) => agentId);
+        return optedOut.length > 0 ? `every agent except ${optedOut.join(', ')}` : 'every agent';
+      })()
+    : overrides.filter(([, agent]) => agent.autonomy === 'workspace').map(([agentId]) => agentId).join(', ');
   if (autonomous.length > 0) {
-    log(`approvals: autonomy workspace for ${autonomous.join(', ')} (reads inside their own workspace run without asking)`);
+    log(`approvals: autonomy workspace for ${autonomous} (reads inside their own workspace run without asking)`);
   }
   if (approvalMode === 'remote') {
     // Only agents whose channel actually came up can be asked: tokens on

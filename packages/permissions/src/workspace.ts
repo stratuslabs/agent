@@ -194,10 +194,9 @@ const readPaths = (base: string, args: string[]): string[] | undefined => {
       }
       continue;
     }
-    if (token === '-') {
-      // stdin, which reads nothing from disk.
-      continue;
-    }
+    // A lone `-` is a positional like any other: stdin as a file, or, in
+    // the pattern position, the pattern. Dropping it would shift a real
+    // path into the pattern slot (`grep - /etc/passwd`).
     positionals.push(token);
   }
   const noPattern = (reader.noPatternFlags ?? []).some((flag) => seen.has(flag));
