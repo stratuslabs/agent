@@ -729,6 +729,18 @@ class ReplyRenderer {
    */
   readonly turnId: string = randomUUID();
   private buffer = '';
+  /**
+   * In `final` mode, what the model has said since its last tool call. A
+   * turn that writes "On it, checking the PRs" and then works for an hour
+   * should not leave the thread showing only a loading status: text the
+   * model wrote before calling a tool is posted when the call starts, as a
+   * message of its own, and the finished reply follows it.
+   */
+  private interim = '';
+  /** The last interim message posted, so a reply that repeats it is not posted twice. */
+  private lastInterim: string | undefined;
+  /** Whether any interim message landed — something said, whatever the reply's fate. */
+  private interimPosted = false;
   private turnBreakPending = false;
   private toolLine: string | undefined;
   private ref: OutboundMessageRef | undefined;
@@ -965,6 +977,7 @@ class ReplyRenderer {
       this.pendingEdit = undefined;
     }
     this.buffer = '';
+    this.interim = '';
     this.toolLine = undefined;
     this.runningTool = undefined;
     this.turnBreakPending = false;
@@ -1002,6 +1015,7 @@ class ReplyRenderer {
       }
       this.turnBreakPending = false;
       this.buffer += event.delta.text;
+      this.interim += event.delta.text;
       this.scheduleEdit();
       return;
     }
@@ -1010,6 +1024,7 @@ class ReplyRenderer {
       // mid-stream failure): discard everything streamed so far so two
       // attempts never fuse into one message.
       this.buffer = '';
+      this.interim = '';
       this.turnBreakPending = false;
       this.scheduleEdit();
       return;
@@ -1027,6 +1042,7 @@ class ReplyRenderer {
       this.turnBreakPending = true;
       this.toolLine = `⚙ ${event.call.toolName}…`;
       this.runningTool = event.call.toolName;
+      this.flushInterim(ofThisTurn);
       this.scheduleEdit();
       return;
     }
@@ -1124,6 +1140,42 @@ class ReplyRenderer {
         }
       })
       .catch((error) => this.warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  /**
+   * Post what the model said before the tool it is now calling, in `final`
+   * mode only: a streaming turn already shows it in its placeholder, and a
+   * turn nobody asked for must not speak before it decides to. Behind the
+   * turn ahead and any handover, on the upload chain, so interim text,
+   * files, and the reply land in the order they happened.
+   */
+  private flushInterim(ofThisTurn: boolean): void {
+    const text = this.interim.trim();
+    this.interim = '';
+    if (this.streaming || this.lazy || !this.turnStarted || !ofThisTurn || text.length === 0) {
+      return;
+    }
+    const handover = this.handover;
+    const after = this.after;
+    this.uploadChain = this.uploadChain
+      .then(() => handover)
+      .then(() => after)
+      .then(async () => {
+        for (const chunk of messageChunks(text)) {
+          const posted = await this.web.chat.postMessage({
+            channel: this.channel,
+            text: chunk,
+            ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+          });
+          this.placeText(posted.ts);
+        }
+        this.interimPosted = true;
+        this.lastInterim = text;
+        // A post of the app's in this thread takes the status down while
+        // the turn is still working; put it back.
+        this.refreshLoading();
+      })
+      .catch((error) => this.warn(`chat.postMessage failed for an interim message: ${error instanceof Error ? error.message : String(error)}`));
   }
 
   private currentText(): string {
@@ -1259,6 +1311,19 @@ class ReplyRenderer {
       await this.editChain;
       await this.uploadChain;
       return this.outcome(false, this.uploaded);
+    }
+    // Interim messages land before the reply is judged: one that already
+    // said what the reply says (the model's last words came before a
+    // tool call) is not posted again, and a turn that said things along
+    // the way is not followed by `(no reply)`.
+    await this.uploadChain;
+    if (!this.ref && this.interimPosted && (reply.trim().length === 0 || reply.trim() === this.lastInterim)) {
+      // Nothing posts after this to take the status down, so it is cleared.
+      if (hadStatus) {
+        this.setStatus('');
+        await this.statusChain;
+      }
+      return this.outcome(true, true);
     }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
     const chunks = messageChunks(text);

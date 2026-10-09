@@ -360,7 +360,7 @@ const recordStatuses = (web: FakeWeb, refuse = false): Array<{ channel_id: strin
   return statuses;
 };
 
-test('by default a reply posts once, finished, behind Slack\'s loading status', async () => {
+test('by default a turn posts what it says before each tool, then its finished reply, behind Slack\'s loading status', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const statuses = recordStatuses(web);
@@ -384,14 +384,15 @@ test('by default a reply posts once, finished, behind Slack\'s loading status', 
   await socket.deliver('app_mention', mention('<@B-AVA> is the build green?'));
   await adapter.stop();
 
-  // The reported annoyance: a `…` posted at once and edited as the agent
-  // worked, with the notification firing on the `…`. Nothing is posted
-  // while the turn runs, and the reply is one message, never edited.
-  assert.equal(postsWhileWorking, 0);
-  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['The build passes.', '100.1']]);
+  // No `…` placeholder to notify on, and nothing is ever edited. What the
+  // agent said before it went to work is posted as it starts that work,
+  // so a long turn answers at once, and the finished reply follows.
+  assert.ok(postsWhileWorking <= 1);
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Let me look', '100.1'], ['The build passes.', '100.1']]);
   assert.deepEqual(web.updates, []);
-  // What the agent is doing is in Slack's status line instead.
-  assert.deepEqual(statuses.map((status) => status.status), ['is thinking…', 'is running shell.run…', 'is thinking…']);
+  // What the agent is doing is in Slack's status line, put back after the
+  // interim post took it down.
+  assert.deepEqual(statuses.map((status) => status.status).filter((status, index, all) => status !== all[index - 1]).slice(0, 2), ['is thinking…', 'is running shell.run…']);
   assert.ok(statuses.every((status) => status.channel_id === 'C1' && status.thread_ts === '100.1'));
 });
 
@@ -9445,4 +9446,54 @@ test('a backfill follows Slack\'s cursor even when a short page says nothing of 
 
   assert.equal(reads.length, 2);
   assert.equal(gateway.dispatches[0]?.earlier?.at(-1)?.message, 'Dylan: newest reply');
+});
+
+test('a final reply the model already said before its last tool call is not posted twice', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Merged #288.' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'memory.remember', input: {} } });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'memory.remember', ok: true, output: null } });
+    // The final response had no text, so the reply read from the session
+    // is the text before the call.
+    return sessionWithReply(sessionId, 'Merged #288.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> status?'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['Merged #288.']);
+  // Nothing posted after it, so the status is cleared rather than left standing.
+  assert.equal(statuses.at(-1)?.status, '');
+});
+
+test('the stream reply mode posts no interim messages: its placeholder already shows them', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Let me look' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'The build passes.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'stream' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> is the build green?'));
+  await adapter.stop();
+
+  assert.equal(web.posts.length, 1);
+  assert.equal(web.posts[0]?.text, '…');
 });
