@@ -420,6 +420,12 @@ test('pushing the agent\'s own branch runs, and every other push asks', async ()
   assert.equal(await pushes(`git -C ${worktree} push origin nova/mic-hang`), false, 'a worktree\'s own config');
   await writeFile(path.join(git, 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n[push]\n\tfollowTags = true\n');
   assert.equal(await pushes('git push origin nova/x'), false, 'push.followTags would publish tags too');
+  await writeFile(path.join(git, 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n[push]\n\tfollowTags\n');
+  assert.equal(await pushes('git push origin nova/x'), false, 'a bare followTags is true');
+  await writeFile(path.join(git, 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n[push]\n\trecurseSubmodules = on-demand\n');
+  assert.equal(await pushes('git push origin nova/x'), false, 'push.recurseSubmodules');
+  await writeFile(path.join(git, 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n[submodule]\n\trecurse = true\n');
+  assert.equal(await pushes('git push origin nova/x'), false, 'submodule.recurse');
   // A remote with no URL is a path to git, and `..` always is.
   await writeFile(path.join(git, 'config'), '[remote ".."]\n\tfetch = +refs/heads/*:refs/remotes/up/*\n[remote "bare"]\n\tfetch = x\n');
   assert.equal(await pushes('git push .. nova/x'), false, 'remote ".." is the parent directory');

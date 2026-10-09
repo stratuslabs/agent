@@ -697,7 +697,10 @@ const anyPushMapping = async (gitDir: string, commonDir: string): Promise<boolea
   for (const file of [path.join(commonDir, 'config'), path.join(gitDir, 'config.worktree'), path.join(commonDir, 'config.worktree')]) {
     const config = await readFile(file, 'utf8').catch(() => '');
     // `push.followTags` publishes reachable annotated tags with the branch.
-    if (/^\s*push\s*=/im.test(config) || /^\s*followtags\s*=\s*(?:true|yes|on|1)\s*$/im.test(config) || /^\s*\[include(?:If)?\b/im.test(config)) {
+    // Any `followTags` key (a bare one is true) publishes tags with the
+    // branch, and submodule recursion pushes repositories nobody checked.
+    if (/^\s*push\s*=/im.test(config) || /^\s*followtags\b/im.test(config) || /^\s*recursesubmodules\b/im.test(config)
+      || /^\s*recurse\b/im.test(config) || /^\s*\[include(?:If)?\b/im.test(config)) {
       return true;
     }
   }
