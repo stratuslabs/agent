@@ -62,6 +62,11 @@ export interface AgentApprovalConfig {
    * the shape this is written in.
    */
   commands?: string[];
+  /**
+   * Under `autonomy: workspace`, the branch-name prefixes this agent may
+   * push without asking. Default `<agentId>/`. `[]` means every push asks.
+   */
+  branchPrefixes?: string[];
 }
 
 /**

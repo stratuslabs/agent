@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import { SESSION_TRUST_METADATA_KEY, type ApprovalContext, type Session, type Tool } from '@stratusagent/core';
 
-import { analyzeCommand, createPermissionPolicy, gitInsideWorkspace, readsInsideWorkspace } from '../src/index.ts';
+import { analyzeCommand, createPermissionPolicy, gitInsideWorkspace, gitPushInsideWorkspace, readsInsideWorkspace } from '../src/index.ts';
 
 const layout = async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-autonomy-'));
@@ -295,6 +295,10 @@ test('local git in a repository inside the workspace is judged inside, and publi
 
 test('local git runs under autonomy only while the external-content gate is open', async () => {
   const { workspace, repo } = await layout();
+  await mkdir(path.join(repo, '.git', 'refs', 'heads', 'nova'), { recursive: true });
+  await writeFile(path.join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  await writeFile(path.join(repo, '.git', 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n');
+  await writeFile(path.join(repo, '.git', 'refs', 'heads', 'nova', 'x'), '0'.repeat(40));
   const tool: Tool = { ...shell, cwdFor: () => repo };
   const contextFor = (command: string, trust?: 'external'): ApprovalContext => ({
     tool,
@@ -315,8 +319,106 @@ test('local git runs under autonomy only while the external-content gate is open
   });
   assert.equal(await policy.approve(contextFor('git commit -m "x"')), true);
   assert.equal(await policy.approve(contextFor('git add -A')), true);
-  assert.equal(await policy.approve(contextFor('git push origin nova/x')), false);
+  assert.equal(await policy.approve(contextFor('git push origin nova/x')), true);
+  assert.equal(await policy.approve(contextFor('git push origin main')), false);
+  assert.equal(await policy.approve(contextFor('git push origin nova/x', 'external')), false);
   // After reading web content, reads still run and local git asks.
   assert.equal(await policy.approve(contextFor('git commit -m "x"', 'external')), false);
   assert.equal(await policy.approve(contextFor('cat src/main.ts', 'external')), true);
+});
+
+test('pushing the agent\'s own branch runs, and every other push asks', async () => {
+  const { workspace, repo } = await layout();
+  const git = path.join(repo, '.git');
+  await mkdir(path.join(git, 'worktrees', 'fix'), { recursive: true });
+  await mkdir(path.join(git, 'refs', 'heads', 'nova'), { recursive: true });
+  await mkdir(path.join(git, 'refs', 'tags', 'nova'), { recursive: true });
+  await writeFile(path.join(git, 'HEAD'), 'ref: refs/heads/main\n');
+  await writeFile(path.join(git, 'config'), '[core]\n\tbare = false\n[remote "origin"]\n\turl = https://example.com/app.git\n');
+  for (const branch of ['main', 'nova/mic-hang', 'nova/x']) {
+    await writeFile(path.join(git, 'refs', 'heads', branch), '0'.repeat(40));
+  }
+  await writeFile(path.join(git, 'packed-refs'), `${'1'.repeat(40)} refs/heads/nova/packed\n`);
+  // A tag that shares a branch's spelling, and one that is only a tag.
+  await writeFile(path.join(git, 'refs', 'tags', 'nova', 'tag'), '0'.repeat(40));
+  await writeFile(path.join(git, 'refs', 'heads', 'nova', 'tag'), '0'.repeat(40));
+  const worktree = path.join(workspace, 'app-fix');
+  await mkdir(worktree, { recursive: true });
+  await writeFile(path.join(worktree, '.git'), `gitdir: ${path.join(git, 'worktrees', 'fix')}\n`);
+  await writeFile(path.join(git, 'worktrees', 'fix', 'HEAD'), 'ref: refs/heads/nova/mic-hang\n');
+  await writeFile(path.join(git, 'worktrees', 'fix', 'commondir'), '../..\n');
+  // A directory with a remote's spelling, which git would push to as a path.
+  await mkdir(path.join(repo, 'victim'), { recursive: true });
+  const prefixes = ['nova/'];
+  const pushes = async (command: string, cwd = repo) => gitPushInsideWorkspace(analyzeCommand(command), cwd, workspace, prefixes);
+
+  for (const command of [
+    'git push origin nova/mic-hang',
+    'git push -u origin nova/mic-hang',
+    'git push origin nova/packed',
+    'git push origin main:nova/main-copy',
+    'git push origin nova/x:refs/heads/nova/y',
+    'git push --dry-run origin nova/x',
+    `git -C ${worktree} push -u origin HEAD`,
+    `git -C ${worktree} push origin HEAD:nova/mic-hang`,
+  ]) {
+    assert.equal(await pushes(command), true, `should push: ${command}`);
+  }
+  assert.equal(await pushes('git push origin nova/x', path.join(repo, 'src')), true, 'from a subdirectory');
+  for (const command of [
+    // Destination decided by config, not the command.
+    'git push',
+    'git push origin',
+    `git -C ${worktree} push`,
+    // The checked-out branch here is main.
+    'git push origin HEAD',
+    'git push origin main',
+    'git push origin HEAD:main',
+    'git push origin nova/x:main',
+    'git push origin nova/',
+    'git push origin blair/fix',
+    // A name that is also a tag, a tag, and a source that is not a branch.
+    'git push origin nova/tag',
+    'git push origin refs/tags/nova/tag',
+    'git push origin abc123:nova/x',
+    'git push origin nova/x:refs/tags/nova/x',
+    'git push origin nova/missing',
+    // Force and delete, in every spelling.
+    'git push --force origin nova/x',
+    'git push -f origin nova/x',
+    'git push --force-with-lease origin nova/x',
+    'git push origin +nova/x',
+    'git push origin :nova/x',
+    'git push --delete origin nova/x',
+    'git push --all origin',
+    'git push --mirror origin',
+    'git push --tags origin',
+    'git push --no-verify origin nova/x',
+    // A remote that isn't configured.
+    'git push victim nova/x',
+    'git push upstream nova/x',
+    'git push https://example.com/x.git nova/x',
+    'git push /tmp/elsewhere nova/x',
+    // More than one refspec, and an outside repository.
+    'git push origin nova/x main',
+    'git -C /tmp push origin nova/x',
+  ]) {
+    assert.equal(await pushes(command), false, `should not push: ${command}`);
+  }
+  assert.equal(await gitPushInsideWorkspace(analyzeCommand('git push origin nova/x'), repo, workspace, []), false);
+
+  // A remote whose own push mapping decides the destination, and a config
+  // that includes a file this check never reads.
+  await writeFile(path.join(git, 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n\tpush = refs/heads/nova/x:refs/heads/main\n');
+  assert.equal(await pushes('git push origin nova/x'), false, 'remote.origin.push remaps it');
+  await writeFile(path.join(git, 'config'), '[include]\n\tpath = /tmp/other.config\n[remote "origin"]\n\turl = https://example.com/app.git\n');
+  assert.equal(await pushes('git push origin nova/x'), false, 'an include hides the rest of the config');
+  await writeFile(path.join(git, 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n[remote.origin]\n\tpush = refs/heads/nova/x:refs/heads/main\n');
+  assert.equal(await pushes('git push origin nova/x'), false, 'the older [remote.origin] form');
+  await writeFile(path.join(git, 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n');
+  await writeFile(path.join(git, 'worktrees', 'fix', 'config.worktree'), '[remote "origin"]\n\tpush = HEAD:refs/heads/main\n');
+  assert.equal(await pushes(`git -C ${worktree} push origin nova/mic-hang`), false, 'a worktree\'s own config');
+  // A .git pointing out of the workspace.
+  await writeFile(path.join(git, 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n');
+  assert.equal(await pushes('git push origin nova/x'), true, 'back to an ordinary config');
 });

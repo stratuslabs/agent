@@ -685,3 +685,162 @@ export const gitInsideWorkspace = async (
   }
   return true;
 };
+
+/**
+ * Whether any config git reads for this repository sets a push mapping, in
+ * any of its spellings (`[remote "origin"]` or the older `[remote.origin]`),
+ * including a worktree's own `config.worktree`. Any `push =` key at all
+ * counts: the only `push` key git has is `remote.<name>.push`, and reading
+ * every form exactly is a parser this check doesn't need to be.
+ */
+const anyPushMapping = async (gitDir: string, commonDir: string): Promise<boolean> => {
+  for (const file of [path.join(commonDir, 'config'), path.join(gitDir, 'config.worktree'), path.join(commonDir, 'config.worktree')]) {
+    const config = await readFile(file, 'utf8').catch(() => '');
+    if (/^\s*push\s*=/im.test(config) || /^\s*\[include(?:If)?\b/im.test(config)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+/** Whether a ref exists, loose or packed. */
+const refExists = async (commonDir: string, ref: string): Promise<boolean> => {
+  if (await readFile(path.join(commonDir, ref), 'utf8').then(() => true, () => false)) {
+    return true;
+  }
+  const packed = await readFile(path.join(commonDir, 'packed-refs'), 'utf8').catch(() => '');
+  return packed.split('\n').some((line) => line.endsWith(` ${ref}`));
+};
+
+/**
+ * Publishing the agent's own work: `git push <remote> <refspec>` of a
+ * branch whose name starts with one of the agent's prefixes (`nova/` by
+ * default), to a remote configured in the repository. Nothing lands from
+ * here without review, which is what makes this safe to run unattended.
+ *
+ * Judged by what git will actually update, so only forms whose destination
+ * is certain from the command and the repository: an explicit remote and
+ * one refspec. A bare `git push` or `git push origin` asks, because
+ * `remote.<name>.push` and `push.default` decide its destination. `HEAD` is
+ * the checked-out branch, pushed to the same name. An unqualified name is
+ * a branch only if it is a local branch and not also a tag.
+ *
+ * Refused: force in any spelling (`--force*`, `-f`, a `+` refspec), deletes
+ * (`--delete`, `:branch`), `--all`, `--mirror`, `--tags`, any other flag, a
+ * remote that isn't configured (a URL, a path, or a directory that happens
+ * to have a name's spelling), and any branch outside the prefixes.
+ */
+export const gitPushInsideWorkspace = async (
+  analysis: CommandAnalysis,
+  cwd: string,
+  workspace: string,
+  branchPrefixes: readonly string[],
+): Promise<boolean> => {
+  if (analysis.disqualifiedBy || analysis.base !== 'git' || analysis.pipeline || branchPrefixes.length === 0) {
+    return false;
+  }
+  if (analysis.tokens.some((token) => token.startsWith('~') || /[*?[\]{}$`\\]/.test(token))) {
+    return false;
+  }
+  const args = analysis.tokens.slice(1);
+  const directories: string[] = [];
+  let index = 0;
+  for (; index < args.length; index += 1) {
+    const token = args[index] as string;
+    if (token === '-C' && args[index + 1] !== undefined) {
+      directories.push(args[index + 1] as string);
+      index += 1;
+      continue;
+    }
+    if (token === '--no-pager') {
+      continue;
+    }
+    break;
+  }
+  if (args[index] !== 'push') {
+    return false;
+  }
+  const allowedFlags = new Set(['-u', '--set-upstream', '--dry-run', '-n', '-q', '--quiet', '-v', '--verbose', '--porcelain']);
+  const positionals: string[] = [];
+  for (const token of args.slice(index + 1)) {
+    if (token.startsWith('-')) {
+      if (!allowedFlags.has(token)) {
+        return false;
+      }
+      continue;
+    }
+    positionals.push(token);
+  }
+  if (positionals.length !== 2) {
+    return false;
+  }
+  const [remote, refspec] = positionals as [string, string];
+  if (!/^[A-Za-z0-9._-]+$/.test(remote) || refspec.startsWith('+') || refspec.startsWith(':')) {
+    return false;
+  }
+
+  const root = await resolveReal(workspace);
+  const here = await resolveReal(cwd);
+  if (root === undefined || here === undefined || !within(root, here)) {
+    return false;
+  }
+  let repoDir: string | undefined = here;
+  for (const directory of directories) {
+    repoDir = repoDir === undefined ? undefined : await walk(repoDir, directory);
+  }
+  if (repoDir === undefined || !within(root, repoDir)) {
+    return false;
+  }
+  const dirs = await gitDirsOf(repoDir, root);
+  if (dirs === undefined || !within(root, dirs.gitDir) || !within(root, dirs.commonDir)) {
+    return false;
+  }
+  // Configured, not merely name-shaped: git reads an unconfigured name as a
+  // path, and a directory by that name would receive the push.
+  const remotes = await configuredRemotes(dirs.commonDir);
+  if (remotes === undefined || !remotes.includes(remote)) {
+    return false;
+  }
+  // A remote with its own push mapping sends `nova/x` wherever that says,
+  // so the refspec on the line no longer names the destination.
+  if (await anyPushMapping(dirs.gitDir, dirs.commonDir)) {
+    return false;
+  }
+
+  const parts = refspec.split(':');
+  if (parts.length > 2) {
+    return false;
+  }
+  const [source, destination] = parts as [string, string | undefined];
+  let branch: string | undefined;
+  if (source === 'HEAD') {
+    const head = await readFile(path.join(dirs.gitDir, 'HEAD'), 'utf8').catch(() => '');
+    const current = /^ref: refs\/heads\/(.+)$/m.exec(head)?.[1]?.trim();
+    if (current === undefined) {
+      return false;
+    }
+    branch = current;
+  } else {
+    const name = source.replace(/^refs\/heads\//, '');
+    // A source git would read as something other than a local branch makes
+    // the destination something other than a branch, or unknowable.
+    if (source.startsWith('refs/') && !source.startsWith('refs/heads/')) {
+      return false;
+    }
+    if (!await refExists(dirs.commonDir, `refs/heads/${name}`) || await refExists(dirs.commonDir, `refs/tags/${name}`)) {
+      return false;
+    }
+    branch = name;
+  }
+  if (destination !== undefined) {
+    if (destination.startsWith('refs/')) {
+      if (!destination.startsWith('refs/heads/')) {
+        return false;
+      }
+      branch = destination.slice('refs/heads/'.length);
+    } else {
+      branch = destination;
+    }
+  }
+  return branch.length > 0 && branchPrefixes.some((prefix) => branch.startsWith(prefix) && branch.length > prefix.length);
+};

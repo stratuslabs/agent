@@ -1740,6 +1740,13 @@ test('approvals.autonomy parses at the top and per agent, overrides per agent, a
   assert.equal(resolveAgentApprovals(config.approvals, 'nova').autonomy, 'workspace');
   assert.equal(resolveAgentApprovals(config.approvals, 'blair').autonomy, 'off');
   assert.equal(resolveAgentApprovals({}, 'nova').autonomy, undefined);
+  const prefixed = await writeConfig('autonomy-prefixes.json', {
+    approvals: { branchPrefixes: ['bot/'], agents: { nova: { branchPrefixes: ['nova/', 'fix/'] } } },
+  });
+  const withPrefixes = await loadConfigFile(prefixed);
+  assert.deepEqual(resolveAgentApprovals(withPrefixes.approvals, 'nova').branchPrefixes, ['nova/', 'fix/']);
+  assert.deepEqual(resolveAgentApprovals(withPrefixes.approvals, 'blair').branchPrefixes, ['bot/']);
+  await assert.rejects(loadConfigFile(await writeConfig('prefixes-bad.json', { approvals: { branchPrefixes: [''] } })), /Invalid approvals\.branchPrefixes/);
   const misspelled = await writeConfig('autonomy-bad.json', { approvals: { agents: { nova: { autonomy: 'workspaces' } } } });
   await assert.rejects(loadConfigFile(misspelled), /Unsupported approvals\.agents\.nova\.autonomy/);
 });

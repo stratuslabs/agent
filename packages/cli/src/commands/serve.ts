@@ -510,6 +510,7 @@ const serveHeldHome = async (
     workspace: {
       // The directory the shell resolves for the agent; see `autonomyDirectory`.
       directoryFor: (agentId: string) => autonomyDirectory(approvalsConfig, pluginsConfig, env, agentId),
+      branchPrefixesFor: (agentId: string) => resolveAgentApprovals(approvalsConfig, agentId).branchPrefixes,
     },
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
       // An approval that widens what runs unattended, for every future

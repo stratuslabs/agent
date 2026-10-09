@@ -296,7 +296,7 @@ options that read a file or run a program (`commit -F`, `tag -F`,
 `rebase -x`, `--pathspec-from-file`), interactive forms (`add -p`,
 `rebase -i`), and any flag nobody listed. So do any option before the
 subcommand except `-C` and `--no-pager`, a `+` or `:` refspec on fetch or
-pull, `push` (judged on its own), and any subcommand not on the list
+pull, `push` except as below, and any subcommand not on the list
 (`config`, `clean`, `filter-branch`). The repository git will actually use has to be inside too: a `.git` file
 or link naming one elsewhere asks. Fetch and pull take a configured remote,
 never a path. A commit or annotated tag needs its message on the command
@@ -306,6 +306,41 @@ whatever a repository's config names. Unlike reads, local git stops
 running unattended once the conversation reads web content under
 `externalContent: "gate"`. Commit, merge, and rebase run the repository's
 hooks, which a repository only has if somebody put them there.
+
+`git push <remote> <refspec>` runs too, for the agent's own branches: the
+branch that lands on the remote (the refspec's destination, or the
+checked-out branch for `HEAD`) must start with one of the agent's prefixes,
+which are `<agentId>/` unless `branchPrefixes` says otherwise. A bare
+`git push` or `git push origin` asks, because the repository's config, not
+the command, decides where it goes. A name that is also a tag, or isn't a
+local branch, asks too, and so does a repository whose config sets any
+`push` mapping (in any spelling, including a worktree's `config.worktree`)
+or includes another file, since that decides the destination instead.
+
+
+
+```jsonc
+"approvals": { "agents": { "nova": { "autonomy": "workspace", "branchPrefixes": ["nova/", "fix/"] } } }
+```
+
+The remote has to be configured in the repository, never a URL, a path,
+or a directory that happens to share a remote's spelling. Force in any spelling, deletes, `--all`, `--mirror`, `--tags`, and
+`--no-verify` still ask, and so does any other flag. Nothing pushed this
+way lands without review, which is what makes it safe to run unattended.
+Like local git, it stops once the external-content gate closes.
+
+**What local git and push trust.** Turning these on trusts the agent's own
+repositories, not only its command lines. Git runs programs named in a
+repository's config and files: hooks, `diff.external` and textconv
+drivers, `core.sshCommand`, `core.fsmonitor`, merge drivers, and objects
+borrowed through `objects/info/alternates`. Git config in your home
+directory (`~/.gitconfig`) applies too, including `push.followTags` and
+`remote.*.push`. The checks above refuse the forms they can see on the
+command line and in the repository's own config, but an agent that can
+write its repository's `.git` (an `fs.write` grant covering the
+workspace, for instance) can make any approved git command run anything.
+Turn on autonomy for agents you trust with that. A sandboxed executor is
+the boundary for agents you don't.
 
 This is policy over command arguments, not a sandbox. It holds because
 these commands read only what they're told to. A program you list in

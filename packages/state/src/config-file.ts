@@ -403,6 +403,14 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     }
     route.commands = (source.commands as string[]).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
   }
+  if (source.branchPrefixes !== undefined) {
+    if (!Array.isArray(source.branchPrefixes) || source.branchPrefixes.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)) {
+      throw new Error(
+        `Invalid ${where}.branchPrefixes in config ${configPath}: expected a list of branch-name prefixes like ["nova/", "fix/"].`,
+      );
+    }
+    route.branchPrefixes = (source.branchPrefixes as string[]).map((entry) => entry.trim());
+  }
   return route;
 };
 
@@ -482,8 +490,10 @@ export const resolveAgentApprovals = (
   const autonomy = agent?.autonomy ?? approvals?.autonomy;
   // Added together rather than overridden: see `AgentApprovalConfig.commands`.
   const commands = [...new Set([...(approvals?.commands ?? []), ...(agent?.commands ?? [])])];
+  const branchPrefixes = agent?.branchPrefixes ?? approvals?.branchPrefixes;
   return {
     ...(autonomy !== undefined ? { autonomy } : {}),
+    ...(branchPrefixes !== undefined ? { branchPrefixes } : {}),
     ...(slackApprovers ? { slackApprovers } : {}),
     ...(slackChannel ? { slackChannel } : {}),
     ...(externalContent !== undefined ? { externalContent } : {}),
