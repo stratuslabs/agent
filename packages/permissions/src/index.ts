@@ -855,10 +855,15 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           const cwd = workspace === undefined ? undefined : context.tool.cwdFor?.(session);
           if (workspace !== undefined && cwd !== undefined) {
             const stages = analysis.pipeline ?? [analysis];
+            // Only the built-in safe scopes compose with an autonomous
+            // stage. A granted scope was judged as a command on its own:
+            // `curl https://example.com` approved once must not become the
+            // far end of `cat secret | curl … --data-binary @-`.
+            const intrinsic = commands?.safeScopes ?? SAFE_COMMAND_SCOPES;
             let read = false;
             let covered = true;
             for (const stage of stages) {
-              if (findMatchingScope(stage, candidates)) {
+              if (findMatchingScope(stage, intrinsic)) {
                 continue;
               }
               if (await readsInsideWorkspace(stage, cwd, workspace)) {
