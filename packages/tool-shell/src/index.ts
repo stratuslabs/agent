@@ -81,6 +81,23 @@ const maxOutputBytesFor = (config: JsonObject, session: Session): number =>
 // `operandsToo` in @stratusagent/permissions).
 export const COMMAND_OPTION_VARIABLES = ['RIPGREP_CONFIG_PATH', 'GREP_OPTIONS'] as const;
 
+/**
+ * Flags that stop a shell from running its user startup files before the
+ * command. Without them zsh sources `$HOME/.zshenv` and fish its config even
+ * non-interactively, and either can redefine `cat`. bash and `sh` read none
+ * when not interactive, once `BASH_ENV`/`ENV` are withheld.
+ */
+const startupOff = (shell: string): string[] => {
+  const name = path.basename(shell);
+  if (name === 'zsh') {
+    return ['-f'];
+  }
+  if (name === 'fish') {
+    return ['--no-config'];
+  }
+  return [];
+};
+
 /** Variables that make a shell run code before the command. Never passed. */
 const SHELL_STARTUP_VARIABLES: readonly string[] = ['BASH_ENV', 'ENV', 'ZDOTDIR'];
 
@@ -257,7 +274,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       }
       return {
         command: settings.shell,
-        args: ['-c', command],
+        args: [...startupOff(settings.shell), '-c', command],
         ...(settings.cwd ? { cwd: settings.cwd } : {}),
         env: settings.env,
         // Required, not preferred. The daemon's environment holds every key

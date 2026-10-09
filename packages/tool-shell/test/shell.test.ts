@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -363,4 +364,12 @@ test('nothing a shell runs before the command is passed to it', async () => {
   );
   const seen = String((await runCommand(tools, 'echo "[$BASH_ENV][$ENV][$ZDOTDIR][$KEEP]"; env | grep -c BASH_FUNC_ || true')).stdout).trim();
   assert.equal(seen, '[][][][kept]\n0');
+});
+
+test('zsh runs without the user startup files that could redefine a command', { skip: !existsSync('/bin/zsh') }, async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-zsh-'));
+  await writeFile(path.join(home, '.zshenv'), 'cat() { echo hijacked; }\n');
+  const tools = await registryFor({ shell: '/bin/zsh', passEnv: ['PATH'], env: { HOME: home } }, { PATH: process.env.PATH });
+  const result = await runCommand(tools, 'echo real | cat');
+  assert.equal(String(result.stdout).trim(), 'real');
 });
