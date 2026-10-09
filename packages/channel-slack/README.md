@@ -193,11 +193,9 @@ name is text anyone can set, and this lands in the system prompt), a group DM, a
 its member count, whether the message is in a thread, and whether the
 channel is shared with people outside the workspace (`is_ext_shared` /
 `is_org_shared` from the lookup, or the event's own `is_ext_shared_channel`,
-which is current on every turn). It also carries the channel's id, and its
-name as a `#label` only when the name is in Slack's own channel alphabet
-(lowercase letters, digits, `-`, `_`): whoever created or renamed the
-channel chose it, so nothing with spaces or punctuation reaches the prompt,
-though a hyphenated phrase still can. The agent writes for that audience: a public channel of a thousand
+which is current on every turn). It also carries the channel's id, never
+its name: whoever created or renamed the channel chose that text, and the
+prompt is no place for it. The agent writes for that audience: a public channel of a thousand
 people is not the DM it was in a minute ago, and what it was told in one does
 not belong in the other. The kind comes from the event; the count
 comes from `conversations.info` with `include_num_members`, the same call and
