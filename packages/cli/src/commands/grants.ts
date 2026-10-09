@@ -15,7 +15,7 @@ import {
   grantsLockPath,
   stratusHomePath,
 } from '@stratusagent/state';
-import { createOperatorCommands } from '../operator-commands.ts';
+import { configCovers, createOperatorCommands } from '../operator-commands.ts';
 import { loadServeApprovals } from '../trusted-config.ts';
 import { callRunningGateway, gatewayErrorMessage, readGatewayInfo } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
@@ -112,15 +112,7 @@ export const runGrants = async (
     return render(listing, await resolveWhitelistPath(stratusHomePath(env), agentsDirPath(env), agentId));
   };
 
-  // Whether a config entry still covers a scope: `agentboard` covers a
-  // remembered `agentboard task`, not only an entry spelled the same.
-  const coveredByConfig = (scope: string): boolean => {
-    const tokens = scope.trim().split(/\s+/);
-    return declared.some((entry) => {
-      const prefix = entry.trim().split(/\s+/);
-      return prefix.length <= tokens.length && prefix.every((token, index) => tokens[index] === token);
-    });
-  };
+  const coveredByConfig = (scope: string): boolean => configCovers(declared, scope);
 
   const reportRevocation = (revoked: boolean): number => {
     if (revoked && revocation?.scope !== undefined && coveredByConfig(revocation.scope)) {

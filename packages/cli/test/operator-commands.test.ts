@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import type { ApprovalContext, Session, Tool } from '@stratusagent/core';
 import { createPermissionPolicy } from '@stratusagent/permissions';
 
-import { createOperatorCommands } from '../src/operator-commands.ts';
+import { configCovers, createOperatorCommands } from '../src/operator-commands.ts';
 
 const shell: Tool = {
   name: 'shell.run',
@@ -50,4 +50,14 @@ test('a command declared in approvals.commands runs unattended for the agents it
   assert.equal(operator.describe(), 'approvals: run without asking, from config: agentboard for every agent; pnpm test for nova');
   assert.equal(createOperatorCommands({}, () => {}).describe(), undefined);
   assert.equal(createOperatorCommands({ commands: ['rm -rf'] }, () => {}).describe(), undefined);
+});
+
+test('whether config still covers a revoked scope is judged by the parsed entry, limits included', () => {
+  assert.equal(configCovers(['agentboard'], 'agentboard task'), true);
+  assert.equal(configCovers(['agentboard'], 'agentboard'), true);
+  assert.equal(configCovers(['head'], 'head --help'), false);
+  assert.equal(configCovers(['git push'], 'git push origin'), true);
+  assert.equal(configCovers(['git push'], 'git push --force'), false);
+  assert.equal(configCovers(['pnpm test'], 'pnpm'), false);
+  assert.equal(configCovers(['rm -rf'], 'rm -rf build'), false);
 });

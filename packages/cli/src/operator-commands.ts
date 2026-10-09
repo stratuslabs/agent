@@ -1,4 +1,4 @@
-import { commandScopeFromPrefix, type CommandScope } from '@stratusagent/permissions';
+import { analyzeCommand, commandScopeFromPrefix, matchesScope, type CommandScope } from '@stratusagent/permissions';
 import { resolveAgentApprovals, type ApprovalsConfig } from '@stratusagent/state';
 
 /**
@@ -70,4 +70,18 @@ export const createOperatorCommands = (
       return parts.length === 0 ? undefined : `approvals: run without asking, from config: ${parts.join('; ')}`;
     },
   };
+};
+
+/**
+ * Whether config entries still let a command run, judged the way the policy
+ * judges it: each entry's parsed scope, limits and all, matched against the
+ * command. `agentboard` covers `agentboard task`; `head` does not cover
+ * `head --help`, because the built-in limits on `head` come with the entry.
+ */
+export const configCovers = (entries: readonly string[], command: string): boolean => {
+  const analysis = analyzeCommand(command.trim());
+  return entries.some((entry) => {
+    const parsed = commandScopeFromPrefix(entry);
+    return 'scope' in parsed && matchesScope(analysis, parsed.scope);
+  });
 };
