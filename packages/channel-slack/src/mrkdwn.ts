@@ -1109,7 +1109,7 @@ const pad = (text: string, width: number, alignment: Alignment): string => {
 const tableLabel = (header: string): string =>
   header.length === 0 ? '' : /[*_~`]/.test(header) ? header : `**${header}**`;
 
-const renderTable = (header: string[], alignments: Alignment[], rows: string[][]): string => {
+const renderTable = (header: string[], alignments: Alignment[], rows: string[][], forceList = false): string => {
   const columns = header.length;
   const fit = (row: string[]): string[] => Array.from({ length: columns }, (_, index) => row[index] ?? '');
   // One column has nothing to line up, so it is a list under its header.
@@ -1133,7 +1133,7 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
   const linked = [header, ...rows].some((row) => row.some((cell) =>
     readEmphasis(scan(cell)).links.size > 0
     || /\b(?:https?:\/\/|mailto:)\S|<[a-z][a-z0-9+.-]*:[^>\s]+>|<[@#!][^>\s]+>/i.test(cell)));
-  if (width <= TABLE_MAX_WIDTH && !linked && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
+  if (!forceList && width <= TABLE_MAX_WIDTH && !linked && !grid.some((row) => row.some((cell) => cell.includes('```')))) {
     const line = (row: string[]): string =>
       row.map((cell, index) => pad(cell, widths[index] ?? 0, alignments[index] ?? 'left')).join(' │ ').trimEnd();
     const rule = widths.map((each) => '─'.repeat(each)).join('─┼─');
@@ -1154,6 +1154,35 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
       .join(' · '))
     .filter((line) => line.length > 0);
   return listed.length > 0 ? listed.join('\n') : headerOnly;
+};
+
+/**
+ * The block-quote depth and the content after the markers. GFM permits up
+ * to three spaces before each `>` and makes the space after it optional,
+ * so `  > > x` and `>> x` and `> >x` are all depth 2 with content `x`.
+ * Comparison is by depth, not by the raw spelling: two lines at the same
+ * depth share a logical prefix regardless of whether they wrote it the
+ * same way.
+ */
+const blockQuoteInfo = (line: string): { depth: number; contentStart: number } => {
+  let at = 0;
+  let depth = 0;
+  while (at < line.length) {
+    // Up to three leading spaces before each `>`.
+    const mark = at;
+    while (at < line.length && line[at] === ' ' && at - mark < 3) at += 1;
+    if (at >= line.length || line[at] !== '>') {
+      // The spaces were not part of a quote marker: roll back so they
+      // remain in the content and isIndentedCode can see them.
+      at = mark;
+      break;
+    }
+    at += 1;
+    depth += 1;
+    // Optional single space after `>`.
+    if (at < line.length && line[at] === ' ') at += 1;
+  }
+  return { depth, contentStart: at };
 };
 
 /** Four spaces or a tab: an indented code block, which no table row may be. */
@@ -1188,23 +1217,61 @@ const renderTables = (text: string): string => {
   let at = 0;
   while (at < lines.length) {
     const headerLine = lines[at] ?? '';
-    const alignments = inCode[at] || inCode[at + 1] ? undefined : tableAlignments(lines[at + 1] ?? '');
-    const header = tableCells(headerLine);
+
+    // A run of lines sharing a block-quote depth can hold a table whose
+    // `>` marker would otherwise become a spurious cell.
+    const bqHeader = blockQuoteInfo(headerLine);
+    const stripped = bqHeader.depth > 0 ? headerLine.slice(bqHeader.contentStart) : headerLine;
+    const nextRaw = lines[at + 1] ?? '';
+    const bqNext = blockQuoteInfo(nextRaw);
+    const nextStripped = bqHeader.depth > 0 && bqNext.depth === bqHeader.depth
+      ? nextRaw.slice(bqNext.contentStart)
+      : nextRaw;
+
+    const quoteDepth = bqHeader.depth > 0 && bqNext.depth === bqHeader.depth ? bqHeader.depth : 0;
+    const effectiveHeader = quoteDepth > 0 ? stripped : headerLine;
+    const effectiveNext = quoteDepth > 0 ? nextStripped : nextRaw;
+
+    const alignments = inCode[at] || inCode[at + 1] ? undefined : tableAlignments(effectiveNext);
+    const header = tableCells(effectiveHeader);
     // Four spaces or a tab of indentation is an indented code block, not a
     // table — GFM allows a table at most three.
-    const indented = isIndentedCode(headerLine) || isIndentedCode(lines[at + 1] ?? '');
-    if (alignments === undefined || indented || !isTableRow(headerLine) || header.length !== alignments.length) {
+    const indented = isIndentedCode(effectiveHeader) || isIndentedCode(effectiveNext);
+    if (alignments === undefined || indented || !isTableRow(effectiveHeader) || header.length !== alignments.length) {
       out.push(headerLine);
       at += 1;
       continue;
     }
     const rows: string[][] = [];
     let next = at + 2;
-    while (next < lines.length && !inCode[next] && !isIndentedCode(lines[next] ?? '') && isTableRow(lines[next] ?? '')) {
-      rows.push(tableCells(lines[next] ?? ''));
+    while (next < lines.length && !inCode[next]) {
+      const rowLine = lines[next] ?? '';
+      if (quoteDepth > 0) {
+        const bqRow = blockQuoteInfo(rowLine);
+        if (bqRow.depth !== quoteDepth) break;
+        const rowContent = rowLine.slice(bqRow.contentStart);
+        if (isIndentedCode(rowContent) || !isTableRow(rowContent)) break;
+        rows.push(tableCells(rowContent));
+      } else {
+        if (isIndentedCode(rowLine) || !isTableRow(rowLine)) break;
+        rows.push(tableCells(rowLine));
+      }
       next += 1;
     }
-    out.push(renderTable(header, alignments, rows));
+    // A table inside a block quote always takes the list form: Slack does
+    // not reliably render a code-block grid inside `>`, and the list form
+    // reads well quoted.
+    const rendered = renderTable(header, alignments, rows, quoteDepth > 0);
+    if (quoteDepth > 0) {
+      // Preserve the header line's outer indentation (from a list or
+      // another container) so the rendered table stays at the same nesting
+      // level, but normalize the > markers so the output is always `> `.
+      const leadingSpaces = headerLine.match(/^( *)/)![0];
+      const outputPrefix = leadingSpaces + '> '.repeat(quoteDepth);
+      out.push(rendered.split('\n').map((line) => outputPrefix + line).join('\n'));
+    } else {
+      out.push(rendered);
+    }
     at = next;
   }
   return out.join('\n');
