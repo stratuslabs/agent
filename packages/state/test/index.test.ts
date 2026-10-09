@@ -1711,3 +1711,21 @@ test('api.publicUrl loads as an http(s) address without a trailing slash, and an
   await writeFile(file, JSON.stringify({ api: { publicUrl: 'proxy-user:hunter2 not a url' } }));
   await assert.rejects(() => loadConfigFile(file), (error: Error) => !error.message.includes('hunter2'));
 });
+
+test('approvals.commands parses at the top and per agent, adds up per agent, and refuses a wrong shape', async () => {
+  const configPath = await writeConfig('commands.json', {
+    approvals: { commands: ['agentboard', '  ', ' gh pr '], agents: { nova: { commands: ['pnpm test', 'agentboard'] }, bea: {} } },
+  });
+  const config = await loadConfigFile(configPath);
+  assert.deepEqual(config.approvals?.commands, ['agentboard', 'gh pr']);
+  // Added together, not overridden: every agent uses agentboard, and Nova
+  // also runs the tests. Duplicates collapse.
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').commands, ['agentboard', 'gh pr', 'pnpm test']);
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'bea').commands, ['agentboard', 'gh pr']);
+  assert.equal(resolveAgentApprovals({}, 'nova').commands, undefined);
+
+  const notAList = await writeConfig('commands-string.json', { approvals: { commands: 'agentboard' } });
+  await assert.rejects(loadConfigFile(notAList), /Invalid approvals\.commands/);
+  const notStrings = await writeConfig('commands-numbers.json', { approvals: { agents: { nova: { commands: [1] } } } });
+  await assert.rejects(loadConfigFile(notStrings), /Invalid approvals\.agents\.nova\.commands/);
+});

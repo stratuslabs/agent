@@ -8,6 +8,7 @@ import type { ApprovalContext, Session, Tool } from '@stratusagent/core';
 
 import {
   analyzeCommand,
+  commandScopeFromPrefix,
   createFileCommandWhitelist,
   createPermissionPolicy,
   describeCommandScope,
@@ -656,4 +657,35 @@ test('the new scope fields survive a whitelist file and count in equality', () =
   assert.equal(parseCommandScope({ command: 'grep', maxPositionals: -1 })?.maxPositionals, undefined);
   assert.equal(sameScope({ command: 'grep' }, { command: 'grep', maxPositionals: 1 }), false);
   assert.equal(sameScope({ command: 'grep' }, { command: 'grep', literal: true }), false);
+});
+
+test('a command an operator declares is a prefix whose tail may vary, minus the destructive forms', () => {
+  const declared = (prefix: string): CommandScope => {
+    const result = commandScopeFromPrefix(prefix);
+    assert.ok('scope' in result, `${prefix} should be a scope`);
+    return result.scope;
+  };
+  const agentboard = declared('agentboard');
+  for (const command of ['agentboard task get 311', 'agentboard list --column todo', 'agentboard new "Fix it soon" --priority high']) {
+    assert.equal(matchesScope(analyzeCommand(command), agentboard), true, command);
+  }
+  assert.equal(matchesScope(analyzeCommand('agentboard task remove 311 --force'), agentboard), false);
+  assert.equal(matchesScope(analyzeCommand('agentboardx list'), agentboard), false);
+
+  const tests = declared('pnpm test');
+  assert.equal(matchesScope(analyzeCommand('pnpm test --filter @stratusagent/cli'), tests), true);
+  assert.equal(matchesScope(analyzeCommand('pnpm publish'), tests), false);
+  assert.equal(matchesScope(analyzeCommand('pnpm'), tests), false);
+
+  // git keeps the built-in list's refusals and its refspec rule.
+  const git = declared('git push');
+  assert.equal(matchesScope(analyzeCommand('git push origin nova/fix'), git), true);
+  assert.equal(matchesScope(analyzeCommand('git push origin :main'), git), false);
+  assert.equal(matchesScope(analyzeCommand('git push --force origin main'), git), false);
+  assert.equal(matchesScope(analyzeCommand('git -c core.sshCommand=sh push'), declared('git')), false);
+
+  // Only words: anything else would be a grant nobody wrote.
+  for (const prefix of ['agentboard --token x', 'git log | sh', 'rm -rf', 'tool*', '~/bin/tool', '/usr/bin/tool', 'a; b', '']) {
+    assert.ok('reason' in commandScopeFromPrefix(prefix), `should refuse: ${prefix}`);
+  }
 });

@@ -739,6 +739,46 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
   };
 };
 
+/**
+ * The scope an operator declares in config (`approvals.commands`): a
+ * command and, optionally, the subcommands it is limited to — `agentboard`,
+ * `pnpm test`, `gh pr`. Whatever follows the prefix may vary, the way a
+ * remembered scope's arguments do, and the same things stay refused: the
+ * destructive flags, whatever the built-in list refuses for that command,
+ * and git's refspec deletes.
+ *
+ * Only words. A flag, an operator, or a token the shell would expand has no
+ * meaning as a prefix, and guessing one would be a grant nobody wrote, so
+ * the entry is refused with the reason instead.
+ */
+export const commandScopeFromPrefix = (prefix: string): { scope: CommandScope } | { reason: string } => {
+  const analysis = analyzeCommand(prefix.trim());
+  if (analysis.pipeline) {
+    return { reason: 'it is a pipeline; list each command on its own' };
+  }
+  if (analysis.disqualifiedBy || analysis.base === undefined) {
+    return { reason: analysis.disqualifiedBy ?? 'it could not be read as a command' };
+  }
+  const args = analysis.tokens.slice(1);
+  if (args.some((token) => token.startsWith('-'))) {
+    return { reason: 'it names a flag; list the command and its subcommands only' };
+  }
+  if (analysis.expands?.some((expands) => expands) || analysis.tokens.some((token) => /[*?[\]{}~$\\#]/.test(token))) {
+    return { reason: 'it contains something the shell would expand' };
+  }
+  const forBase = SAFE_COMMAND_SCOPES.filter((scope) => scope.command === analysis.base);
+  const deniedArgs = forBase.flatMap((scope) => scope.deniedArgs ?? []);
+  return {
+    scope: {
+      command: analysis.base,
+      ...(args.length > 0 ? { args } : {}),
+      deniedFlags: [...new Set([...DESTRUCTIVE_FLAGS, ...forBase.flatMap((scope) => scope.deniedFlags ?? [])])],
+      ...(deniedArgs.length > 0 ? { deniedArgs: [...new Set(deniedArgs)] } : {}),
+      ...(analysis.base === 'git' ? { denyRefspecForms: true } : {}),
+    },
+  };
+};
+
 /** One line an operator can read in a log or a whitelist listing. */
 export const describeCommandScope = (scope: CommandScope): string =>
   [scope.command, ...(scope.args ?? [])].join(' ');

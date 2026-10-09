@@ -187,6 +187,43 @@ warning naming the file.
   answer: one yes to `git status` must not become a yes to every command,
   and one yes to a page must not become a yes to every page.
 
+## Commands you installed for your agents
+
+A tool you install on the host for your agents to use (`agentboard`, your
+test runner, `gh`) shouldn't need an approval each time. List it once in
+`~/.stratus/config.json`:
+
+```jsonc
+{
+  "approvals": {
+    "commands": ["agentboard", "gh pr"],                 // every agent
+    "agents": { "nova": { "commands": ["pnpm test"] } }  // adds to the list above for nova
+  }
+}
+```
+
+Each entry is a command and, optionally, the subcommands it's limited to.
+Whatever follows may vary: `agentboard` covers `agentboard task get 311`
+and `agentboard list --column todo`, and `pnpm test` covers
+`pnpm test --filter cli` but not `pnpm publish`. The same things stay
+refused as for an **Always allow** scope: destructive flags like
+`--force`, `-f`, and `--hard`, whatever the built-in list refuses for that
+command (`git -c`), and git refspec deletes. Each command in a pipeline
+still has to be covered on its own.
+
+Unlike the other keys here, an agent's list adds to the top-level one
+rather than replacing it. An entry that isn't plain words (a flag, `|`, a
+glob, a path) is ignored, with a warning at startup. The daemon logs what
+config allows when it starts, and `stratus grants <agent>` lists these
+entries above the agent's grants. They aren't grants, so
+`stratus grants revoke` can't take one back. Remove it from config and
+restart. Like grants, they stop counting for a conversation that has read
+external content when `externalContent` is `gate`.
+
+Only a config you chose can set this, the same rule as the rest of
+`approvals`. Listing a program means trusting what it runs: `pnpm test`
+executes whatever the repository's test script says.
+
 ## Standing grants
 
 Most installed tools are `gated` and name no scope — `web.fetch`,

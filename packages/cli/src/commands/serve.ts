@@ -36,6 +36,7 @@ import {
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
 import { describePrincipals, describeApprovers } from '../approvals.ts';
+import { createOperatorCommands, describeOperatorCommands } from '../operator-commands.ts';
 import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
 import { formatEvent, eventDetail } from '../events.ts';
@@ -483,8 +484,16 @@ const serveHeldHome = async (
   // installed. Wired unconditionally because it costs nothing without one:
   // a tool that carries no command string is judged by its risk exactly as
   // before. The whitelist lives beside the agent's soul, per agent.
+  // What the operator declared in approvals.commands, matched as scopes
+  // ahead of what was remembered. Only the read is widened: an "always
+  // allow" still lands in the whitelist file, and the file's own methods
+  // (list, revoke) still see only what is in it.
+  const operatorCommands = createOperatorCommands(approvalsConfig, warn);
   const commands = {
-    whitelist: grantStore,
+    whitelist: {
+      scopesFor: async (agentId: string) => [...operatorCommands.scopesFor(agentId), ...await grantStore.scopesFor(agentId)],
+      remember: (agentId: string, scope: CommandScope) => grantStore.remember(agentId, scope),
+    },
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
       // An approval that widens what runs unattended, for every future
       // session, is precisely the decision that must not be the one leaving
@@ -531,6 +540,10 @@ const serveHeldHome = async (
     );
   };
 
+  const declared = describeOperatorCommands(approvalsConfig);
+  if (declared) {
+    log(declared);
+  }
   if (approvalMode === 'remote') {
     // Only agents whose channel actually came up can be asked: tokens on
     // disk with the Slack package missing means nothing renders the

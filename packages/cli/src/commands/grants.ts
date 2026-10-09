@@ -15,6 +15,8 @@ import {
   grantsLockPath,
   stratusHomePath,
 } from '@stratusagent/state';
+import { createOperatorCommands } from '../operator-commands.ts';
+import { loadServeApprovals } from '../trusted-config.ts';
 import { callRunningGateway, gatewayErrorMessage, readGatewayInfo } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -109,6 +111,13 @@ export const runGrants = async (
   };
 
   const reportRevocation = (revoked: boolean): number => {
+    if (!revoked && revocation?.scope !== undefined && declared.includes(revocation.scope.trim())) {
+      writeLine(
+        streams.stderr,
+        `"${revocation.scope}" comes from approvals.commands in config, not from an approval. Remove it there and restart the daemon.`,
+      );
+      return 1;
+    }
     if (!revoked) {
       writeLine(streams.stderr, `${agentId} has no such grant. \`stratus grants ${agentId}\` lists what exists.`);
       return 1;
@@ -117,10 +126,25 @@ export const runGrants = async (
     return 0;
   };
 
+  // What config declares runs without asking. Not a grant, so not in the
+  // file or the daemon's listing, but the question this command answers is
+  // "what may this agent do unattended", and leaving it out would answer it
+  // wrong. Read from the global config, which is where the daemon reads it.
+  const declared = createOperatorCommands(
+    await loadServeApprovals(env, undefined, () => {}),
+    (line) => writeLine(streams.stderr, `Warning: ${line}`),
+  ).declaredFor(agentId);
+
   const render = (listing: GrantsListing, source: string): number => {
     if (command.format === 'json') {
-      writeLine(streams.stdout, JSON.stringify({ ...listing, source }, null, 2));
+      writeLine(streams.stdout, JSON.stringify({ ...listing, source, configCommands: declared }, null, 2));
       return 0;
+    }
+    if (declared.length > 0) {
+      writeLine(streams.stdout, `${agentId} runs these without asking, from approvals.commands in config:`);
+      for (const entry of declared) {
+        writeLine(streams.stdout, `    ${entry}`);
+      }
     }
     const total = listing.tools.length + listing.scopes.length + listing.origins.length;
     if (total === 0) {
