@@ -11,8 +11,10 @@ import {
   claimFileLock,
   FileLockHeldError,
   gatewayInfoPath,
+  globalConfigPath,
   GRANTS_LOCK_WAIT_MS,
   grantsLockPath,
+  resolveConfigLocation,
   stratusHomePath,
 } from '@stratusagent/state';
 import { configCovers, createOperatorCommands } from '../operator-commands.ts';
@@ -147,17 +149,22 @@ export const runGrants = async (
   // with no daemon is the global config read here, which is where the next
   // daemon to start would read it.
   let declared: string[] = [];
-  const localDeclared = async (): Promise<string[]> => createOperatorCommands(
-    // The file a daemon started the same way would read: --config when one
-    // was given, else STRATUS_CONFIG or the global file, as `stratus serve`
-    // resolves it.
-    await loadServeApprovals(env, command.configPath, () => {}),
-    (line) => writeLine(streams.stderr, `Warning: ${line}`),
-  ).declaredFor(agentId);
+  // Which file the list came from, named in the output: the daemon's own
+  // config, or the one a daemon started the same way would read.
+  let configSource = 'the daemon\'s config';
+  const localDeclared = async (): Promise<string[]> => {
+    // --config when one was given, else STRATUS_CONFIG or discovery, as
+    // `stratus serve` resolves it. Every warning reaches stderr: a file that
+    // could not be read must not look like a file that allows nothing.
+    const location = await resolveConfigLocation(command.configPath ? { configPath: command.configPath } : {}, env);
+    configSource = location?.path ?? globalConfigPath(env);
+    const warn = (line: string): void => writeLine(streams.stderr, `Warning: ${line}`);
+    return createOperatorCommands(await loadServeApprovals(env, command.configPath, warn), warn).declaredFor(agentId);
+  };
 
   const render = (listing: GrantsListing, source: string): number => {
     if (command.format === 'json') {
-      writeLine(streams.stdout, JSON.stringify({ ...listing, source, configCommands: declared }, null, 2));
+      writeLine(streams.stdout, JSON.stringify({ ...listing, source, configCommands: declared, configSource }, null, 2));
       return 0;
     }
     if (declared.length > 0) {
@@ -165,7 +172,7 @@ export const runGrants = async (
         streams.stdout,
         source.startsWith('from the daemon')
           ? `${agentId} runs these without asking, from approvals.commands in the daemon's config:`
-          : `${agentId} runs these without asking, from approvals.commands in ${command.configPath ?? 'the config `stratus serve` would read'} (a daemon started with another --config reads that file instead):`,
+          : `${agentId} runs these without asking, from approvals.commands in ${configSource} (a daemon started with another --config reads that file instead):`,
       );
       for (const entry of declared) {
         writeLine(streams.stdout, `    ${entry}`);
