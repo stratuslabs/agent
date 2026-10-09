@@ -82,6 +82,53 @@ const LINK_DESTINATION = /^(?:https?:\/\/|mailto:)[^\s()]+$/;
  * heading has any content is asked later, of the rendered line, where the
  * answer does not depend on which token the content landed in.
  */
+/**
+ * Where a bare address may begin: a scheme Slack links, with the character
+ * before it not one that would make it the middle of something else — a
+ * word, a path, or Slack's own `<…>` and `<…|…>` markup, which is already
+ * a link and is left exactly as written. Nor a `(`: that is where a
+ * Markdown link's destination starts, and one that turns out not to be a
+ * link stays as it was written, as it always has.
+ */
+const BARE_URL_START = /^https?:\/\/[^\s<>()[\]`"]/;
+const NOT_BEFORE_BARE_URL = /[\p{L}\p{N}<|(\/@=&.:+-]/u;
+
+/**
+ * Characters an address does not run through: whitespace, the brackets a
+ * link and Slack's markup are spelled with, and a backtick, so a snippet
+ * that follows an address is still a snippet.
+ */
+const BARE_URL_END = /[\s<>()[\]`"]/;
+
+/**
+ * Punctuation that ends a sentence or closes emphasis rather than ending
+ * the address, as GFM's autolinks read it: in `see **https://x/a**.` the
+ * address is `https://x/a`, and the `**.` is the sentence's.
+ */
+const BARE_URL_TRAILING = /[?!.,:;*_~'"]$/;
+
+/** How long the bare address starting at `at` is, or 0 when none starts there. */
+const bareUrlAt = (text: string, at: number): number => {
+  if (text[at] !== 'h' || !BARE_URL_START.test(text.slice(at, at + 9))) {
+    return 0;
+  }
+  const before = text[at - 1];
+  if (before !== undefined && NOT_BEFORE_BARE_URL.test(before)) {
+    return 0;
+  }
+  let end = at;
+  while (end < text.length && !BARE_URL_END.test(text[end] ?? '')) {
+    end += 1;
+  }
+  let url = text.slice(at, end);
+  while (BARE_URL_TRAILING.test(url)) {
+    url = url.slice(0, -1);
+  }
+  // Nothing after the scheme once trailing punctuation is gone is not an
+  // address anybody can follow.
+  return /^https?:\/\/./.test(url) ? url.length : 0;
+};
+
 const HEADING_OPENER = /^ {0,3}#{1,6}[ \t]+/;
 
 /**
@@ -97,6 +144,8 @@ type Token =
   | { readonly kind: 'code'; readonly text: string; readonly closed: boolean }
   | { readonly kind: 'run'; readonly char: string; readonly length: number; readonly opens: boolean; readonly closes: boolean }
   | { readonly kind: 'punct'; readonly text: string }
+  /** A bare web address, verbatim: what stands in it is part of the address, not markup. */
+  | { readonly kind: 'url'; readonly text: string }
   | { readonly kind: 'break' };
 
 /** The characters a token was written with, whatever it came to mean. */
@@ -212,6 +261,14 @@ const scan = (text: string): Token[] => {
         closes: tight && before !== undefined && !/\s/.test(before) && (char !== '_' || !inWord(after)),
       });
       at += length;
+      continue;
+    }
+
+    const url = bareUrlAt(text, at);
+    if (url > 0) {
+      flush();
+      tokens.push({ kind: 'url', text: text.slice(at, at + url) });
+      at += url;
       continue;
     }
 
@@ -640,6 +697,9 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
   const chunks: string[] = [];
   const stack: Frame[] = [{ kind: 'range', to, loose: new Set(), unclosed: false, wraps: false }];
   let at = from;
+  // How many link labels enclose the current token. An address inside a
+  // label is the label's text: `<https://x|<https://x>>` is not a link.
+  let labels = 0;
 
   /** Text that is prose: it contributes whatever delimiters stand in it. */
   const write = (frame: Frame, text: string): void => {
@@ -692,6 +752,7 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
           }
         }
       } else {
+        labels -= 1;
         chunks[frame.slot] = `<${frame.link.destination}|`;
         chunks.push('>');
         // The destination is an address rather than markup, so its
@@ -725,6 +786,7 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
         after: link.through + 1,
         link,
       });
+      labels += 1;
       at = link.label[0];
       continue;
     }
@@ -783,6 +845,16 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
       chunks.push(token.text);
       frame.unclosed = frame.unclosed || !token.closed;
       frame.wraps = frame.wraps || token.text.includes('\n');
+      at += 1;
+      continue;
+    }
+
+    if (token.kind === 'url' && labels === 0) {
+      // Spelled as Slack's own link so nothing around it decides where it
+      // ends: written bare, `*https://x/a*` left Slack to guess whether the
+      // closing asterisk was part of the address. Not through `write`,
+      // because nothing inside the brackets is markup to Slack.
+      chunks.push(`<${token.text}>`);
       at += 1;
       continue;
     }

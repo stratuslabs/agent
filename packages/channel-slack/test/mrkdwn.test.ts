@@ -757,4 +757,59 @@ test('a quoted table inside a list item preserves the outer indentation', () => 
   assert.ok(result.startsWith('- item\n'), 'list item stays');
   // The indentation and > prefix are preserved on the output
   assert.ok(result.includes('  > *A*: x'), result);
+
+test('a bare address is sent as Slack link markup, and nothing around it changes it', () => {
+  const cases: Array<[string, string]> = [
+    // Bold around an address: Slack no longer has to guess whether the
+    // closing marker is part of it.
+    ['Fixed in **https://github.com/o/r/pull/283**', 'Fixed in *<https://github.com/o/r/pull/283>*'],
+    ['*https://x.com/a*', '_<https://x.com/a>_'],
+    // Markers inside an address are the address: these were rewritten to
+    // `_star_` and paired with the bold after it.
+    ['see https://x.com/*star*/x', 'see <https://x.com/*star*/x>'],
+    ['https://x.com/a_b_c and _italic_', '<https://x.com/a_b_c> and _italic_'],
+    ['https://x.com/files/*.txt and **bold**', '<https://x.com/files/*.txt> and *bold*'],
+    // Trailing punctuation is the sentence's, as in GFM's autolinks.
+    ['(see https://x.com/a.)', '(see <https://x.com/a>.)'],
+    ['https://x.com/pull/1**, merged**', '<https://x.com/pull/1>*, merged*'],
+    // A snippet after an address is still a snippet.
+    ['https://x.com/`code`', '<https://x.com/>`code`'],
+    // Already a link, or not one anybody wrote: left as written.
+    ['<https://x.com|x> and <https://y.com>', '<https://x.com|x> and <https://y.com>'],
+    ['`https://code.com/*a*`', '`https://code.com/*a*`'],
+    ['xhttps://x.com', 'xhttps://x.com'],
+    ['http://', 'http://'],
+    // An address as a label is the label's text, not a second link inside it.
+    ['[https://x.com](https://x.com)', '<https://x.com|https://x.com>'],
+  ];
+  for (const [input, expected] of cases) {
+    assert.equal(toSlackMrkdwn(input), expected, JSON.stringify(input));
+  }
+});
+
+test('no reply, however written, alters a bare address in it', () => {
+  const addresses = ['https://h/a*b*c', 'https://h/a_b_c', 'https://h/~u/~t', 'https://h/x'];
+  const pieces = ['*', '**', '_', '__', '~~', 'a', ' ', '`c`', '. ', '[l](https://h/y)', '# ', ...addresses.map((url) => ` ${url}`)];
+  let checked = 0;
+  let seed = 20261009;
+  const next = (bound: number): number => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed % bound;
+  };
+  for (let round = 0; round < 5000; round += 1) {
+    let reply = '';
+    for (let piece = 1 + next(10); piece > 0; piece -= 1) {
+      reply += pieces[next(pieces.length)] ?? '';
+    }
+    const converted = toSlackMrkdwn(reply);
+    for (const url of addresses) {
+      // Each address the reply holds, ended where an address ends, reaches
+      // Slack whole and bracketed.
+      for (const match of reply.matchAll(new RegExp(` ${url.replace(/[*~]/g, '\\$&')}(?=[ \\[\`]|$)`, 'g'))) {
+        assert.ok(converted.includes(`<${match[0].slice(1)}>`), `address altered\n  in  ${JSON.stringify(reply)}\n  out ${JSON.stringify(converted)}`);
+        checked += 1;
+      }
+    }
+  }
+  assert.ok(checked > 1000, `only ${checked} addresses were checked`);
 });
