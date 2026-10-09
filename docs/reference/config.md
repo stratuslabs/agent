@@ -173,7 +173,7 @@ step called a tool), it gets another `maxTurns` (or `agentMaxTurns`) in the
 same turn, with no wrap-up and nothing for anyone to type. `true` means no
 cap; a number caps the extra budgets per message. It still stops to sum up:
 
-- when it is stuck repeating the same failing call;
+- when it is stuck repeating the same failing call (kernel loop only — Anthropic and OpenAI-compatible providers; the claude-code and codex runtimes run their own loops and do not have this check);
 - when its cap is reached;
 - when somebody has sent it another message in that conversation
   meanwhile: they get the summary, and their message runs next.
