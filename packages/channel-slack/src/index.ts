@@ -4499,12 +4499,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // lands at the top level from some other session, so nothing ties
       // the thread under it to the agent that wrote it. A reply there is
       // a reply to that agent. Read off the event, so every connection
-      // reaches the same answer, and after a restart too.
+      // reaches the same answer, and after a restart too. Looked up among
+      // authenticated identities, not live sockets: they are all learned
+      // before any socket starts, so an agent whose socket is still coming
+      // up is not judged absent and the memoized verdict cannot drop the
+      // reply when its own socket delivers it.
       if (parts.parentUser === undefined) {
         return undefined;
       }
-      return connections.find((candidate) =>
-        candidate.teamId === parts.team && candidate.botUserId === parts.parentUser)?.config.agentId;
+      for (const [agentId, identity] of botIdentities) {
+        if (identity.teamId === parts.team && identity.botUserId === parts.parentUser) {
+          return agentId;
+        }
+      }
+      return undefined;
     }
     if (engaged.length === 1) {
       return first.agentId;
