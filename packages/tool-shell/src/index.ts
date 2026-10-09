@@ -139,6 +139,22 @@ const settingsFor = (
   for (const name of COMMAND_OPTION_VARIABLES) {
     delete granted[name];
   }
+  // A PATH entry the agent can write to is a program the agent chose
+  // running under a command name the permission engine trusts: a workspace
+  // `cat` or `git` would be approved as the real one. Relative entries (`.`,
+  // empty) resolve to the working directory, which is the workspace. Kept
+  // out, whatever env or passEnv says; the system's own paths are unchanged.
+  if (typeof granted.PATH === 'string') {
+    const owned = [cwd, workspaceResolver(workspaces, workspaceRoot)?.(session.agent.id)]
+      .filter((dir): dir is string => typeof dir === 'string' && dir.length > 0);
+    granted.PATH = granted.PATH
+      .split(':')
+      .filter((entry) => entry.length > 0 && path.isAbsolute(entry) && !owned.some((dir) => {
+        const relative = path.relative(dir, path.resolve(entry));
+        return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+      }))
+      .join(':');
+  }
   return {
     ...(cwd ? { cwd } : {}),
     // Whether this agent's directory is ours to create. The workspace is —

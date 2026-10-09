@@ -336,3 +336,19 @@ test('variables that carry options for a judged command never reach it, however 
   const seen = String((await runCommand(tools, 'echo "[$RIPGREP_CONFIG_PATH][$GREP_OPTIONS][$KEEP]"')).stdout).trim();
   assert.equal(seen, '[][][kept]');
 });
+
+test('PATH never includes a directory the agent can write to', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-path-'));
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    all: async () => [],
+  };
+  const inside = path.join(home, 'agents', 'ava', 'workspace', 'bin');
+  const tools = await registryFor(
+    { passEnv: [], env: { PATH: `.:${inside}::relative/bin:/usr/bin:/bin` } },
+    {},
+    workspaces,
+  );
+  assert.equal(String((await runCommand(tools, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin');
+});

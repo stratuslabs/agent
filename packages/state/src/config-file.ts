@@ -174,6 +174,25 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
     }
     resolved.maxTurns = config.maxTurns;
   }
+  if (config.agentMaxTurns !== undefined) {
+    // Refused, not dropped, for the reason `maxTurns` is: an operator who
+    // raised one agent's budget and silently got the default would find out
+    // as that agent stopping short with nothing in the config to explain it.
+    const budgets = config.agentMaxTurns as unknown;
+    if (typeof budgets !== 'object' || budgets === null || Array.isArray(budgets)) {
+      throw new Error(
+        `Invalid agentMaxTurns in config ${configPath}: expected agent ids mapped to step budgets, like { "atlas": 300 }.`,
+      );
+    }
+    for (const [agentId, turns] of Object.entries(budgets as Record<string, unknown>)) {
+      if (typeof turns !== 'number' || !Number.isInteger(turns) || turns < 1) {
+        throw new Error(
+          `Invalid agentMaxTurns.${agentId} in config ${configPath}: ${JSON.stringify(turns)}. Use a whole number of provider turns, 1 or more.`,
+        );
+      }
+    }
+    resolved.agentMaxTurns = { ...(budgets as Record<string, number>) };
+  }
   const approvals = parseApprovalsConfig(config.approvals, configPath);
   if (approvals) {
     resolved.approvals = approvals;
@@ -373,6 +392,17 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     }
     route.autonomy = source.autonomy;
   }
+  if (source.commands !== undefined) {
+    // Refused when it is not a list of strings, rather than dropped: an
+    // operator who wrote it expects those commands to stop asking, and a
+    // silent drop reads as a daemon that ignores its config.
+    if (!Array.isArray(source.commands) || source.commands.some((entry) => typeof entry !== 'string')) {
+      throw new Error(
+        `Invalid ${where}.commands in config ${configPath}: expected a list of commands like ["agentboard", "pnpm test"].`,
+      );
+    }
+    route.commands = (source.commands as string[]).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  }
   return route;
 };
 
@@ -450,11 +480,14 @@ export const resolveAgentApprovals = (
   const slackChannel = agent?.slackChannel ?? approvals?.slackChannel;
   const externalContent = agent?.externalContent ?? approvals?.externalContent;
   const autonomy = agent?.autonomy ?? approvals?.autonomy;
+  // Added together rather than overridden: see `AgentApprovalConfig.commands`.
+  const commands = [...new Set([...(approvals?.commands ?? []), ...(agent?.commands ?? [])])];
   return {
     ...(autonomy !== undefined ? { autonomy } : {}),
     ...(slackApprovers ? { slackApprovers } : {}),
     ...(slackChannel ? { slackChannel } : {}),
     ...(externalContent !== undefined ? { externalContent } : {}),
+    ...(commands.length > 0 ? { commands } : {}),
   };
 };
 

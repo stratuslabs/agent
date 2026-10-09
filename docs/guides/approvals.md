@@ -187,6 +187,54 @@ warning naming the file.
   answer: one yes to `git status` must not become a yes to every command,
   and one yes to a page must not become a yes to every page.
 
+## Commands you installed for your agents
+
+A tool you install on the host for your agents to use (`agentboard`, your
+test runner, `gh`) shouldn't need an approval each time. List it once in
+`~/.stratus/config.json`:
+
+```jsonc
+{
+  "approvals": {
+    "commands": ["agentboard", "gh pr"],                 // every agent
+    "agents": { "nova": { "commands": ["pnpm test"] } }  // adds to the list above for nova
+  }
+}
+```
+
+Each entry is a command and, optionally, the subcommands it's limited to.
+Whatever follows may vary: `agentboard` covers `agentboard task get 311`
+and `agentboard list --column todo`, and `pnpm test` covers
+`pnpm test --filter cli` but not `pnpm publish`. The same things stay
+refused as for an **Always allow** scope: destructive flags like
+`--force`, `-f`, and `--hard`, whatever the built-in list refuses for that
+command (`git -c`), and git refspec deletes. Each command in a pipeline
+still has to be covered on its own.
+
+An entry keeps every limit the built-in list draws for the same command:
+`git branch` still only lists branches, and `grep` still takes no file. A
+bare `git` is refused, because it would cover the mutating forms of the
+subcommands the built-in list limits. List the subcommands instead
+(`git push`, `git fetch`). An entry that extends a limited built-in scope,
+like `grep fix`, is refused too, since it would let a file follow the
+pattern. The built-in scope already runs those commands unattended within
+its limits.
+
+Unlike the other keys here, an agent's list adds to the top-level one
+rather than replacing it. An entry that isn't plain words (a flag, `|`, a
+glob, a path in any word) is ignored, with a warning at startup, and is left out of
+every listing of what's allowed. The daemon logs what
+config allows when it starts, and `stratus grants <agent>` lists these
+entries above the agent's grants. They aren't grants, so
+`stratus grants revoke` can't take one back. Remove it from config and
+restart. Revoking a remembered scope that config also lists removes the
+grant and says the command still runs because of config. Like grants, they stop counting for a conversation that has read
+external content when `externalContent` is `gate`.
+
+Only a config you chose can set this, the same rule as the rest of
+`approvals`. Listing a program means trusting what it runs: `pnpm test`
+executes whatever the repository's test script says.
+
 ## Workspace autonomy
 
 An agent working on code spends most of its calls reading: listing files,
@@ -221,7 +269,10 @@ with both `--no-ignore-parent` and `--no-ignore-global`, because by default
 it reads ignore files above the workspace and in your home directory.
 `grep -rn` needs nothing extra. The shell never passes `RIPGREP_CONFIG_PATH` or
 `GREP_OPTIONS` to a command, whatever its `env` or `passEnv` says, because
-they add options the command line doesn't show. Reads stay allowed after the conversation reads web
+they add options the command line doesn't show. Nor does `PATH` keep an
+entry the agent can write to (its workspace or working directory, or a
+relative entry like `.`), because a program there named `cat` or `git`
+would run in place of the real one. Reads stay allowed after the conversation reads web
 content, even with `externalContent: "gate"`, because reading the agent's
 own files can't send anything anywhere.
 

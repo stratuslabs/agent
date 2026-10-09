@@ -61,6 +61,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `executor` | Which executor runs tool calls: `local` (the default) or the name a [plugin executor](../guides/extending.md#executors) registers — trusted configs only, see below |
 | `memoryStore` | Which store backs agent memory: `file` (the default) or the name a [plugin memory store](../guides/extending.md#memory-stores) registers — trusted configs only, see below |
 | `maxTurns` | How many tool turns one message may take before the agent stops and reports where it got to. Default `40` — trusted configs only, see below |
+| `agentMaxTurns` | Per-agent replacements for `maxTurns`, keyed by agent id. Trusted configs only |
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
@@ -133,6 +134,22 @@ reports.
   "maxTurns": 100
 }
 ```
+
+An agent that does long work can have its own budget, without raising
+everyone's:
+
+```json
+{
+  "maxTurns": 40,
+  "agentMaxTurns": { "atlas": 300 }
+}
+```
+
+`agentMaxTurns` replaces `maxTurns` for the agents it names, and the rest
+keep the shared ceiling. It follows the same trust rule as `maxTurns`, and
+not the soul, because a soul can come from someone else's template and a
+budget spends your tokens. A daemon restart picks it up, and the startup
+log names each agent's budget.
 
 The default is 40. A message that uses all of them is not failed: the
 agent gets one more call with its tools declared but not callable

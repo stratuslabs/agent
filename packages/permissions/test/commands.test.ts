@@ -8,6 +8,7 @@ import type { ApprovalContext, Session, Tool } from '@stratusagent/core';
 
 import {
   analyzeCommand,
+  commandScopeFromPrefix,
   createFileCommandWhitelist,
   createPermissionPolicy,
   describeCommandScope,
@@ -660,6 +661,59 @@ test('the new scope fields survive a whitelist file and count in equality', () =
   assert.equal(parseCommandScope({ command: 'grep', maxPositionals: -1 })?.maxPositionals, undefined);
   assert.equal(sameScope({ command: 'grep' }, { command: 'grep', maxPositionals: 1 }), false);
   assert.equal(sameScope({ command: 'grep' }, { command: 'grep', literal: true }), false);
+});
+
+test('a command an operator declares is a prefix whose tail may vary, minus the destructive forms', () => {
+  const declared = (prefix: string): CommandScope => {
+    const result = commandScopeFromPrefix(prefix);
+    assert.ok('scope' in result, `${prefix} should be a scope`);
+    return result.scope;
+  };
+  const agentboard = declared('agentboard');
+  for (const command of ['agentboard task get 311', 'agentboard list --column todo', 'agentboard new "Fix it soon" --priority high']) {
+    assert.equal(matchesScope(analyzeCommand(command), agentboard), true, command);
+  }
+  assert.equal(matchesScope(analyzeCommand('agentboard task remove 311 --force'), agentboard), false);
+  assert.equal(matchesScope(analyzeCommand('agentboardx list'), agentboard), false);
+
+  const tests = declared('pnpm test');
+  assert.equal(matchesScope(analyzeCommand('pnpm test --filter @stratusagent/cli'), tests), true);
+  assert.equal(matchesScope(analyzeCommand('pnpm publish'), tests), false);
+  assert.equal(matchesScope(analyzeCommand('pnpm'), tests), false);
+
+  // git keeps the built-in list's refusals and its refspec rule.
+  const git = declared('git push');
+  assert.equal(matchesScope(analyzeCommand('git push origin nova/fix'), git), true);
+  assert.equal(matchesScope(analyzeCommand('git push origin :main'), git), false);
+  assert.equal(matchesScope(analyzeCommand('git push --force origin main'), git), false);
+  assert.equal(matchesScope(analyzeCommand('git -c core.sshCommand=sh push'), git), false);
+
+  // Refusals from an unrelated subcommand don't come along: `git remote`
+  // refuses `add`, which must not refuse `git add` itself.
+  const add = declared('git add');
+  assert.equal(matchesScope(analyzeCommand('git add -A'), add), true);
+  assert.equal(matchesScope(analyzeCommand('git add src/main.ts'), add), true);
+
+  // A built-in scope's limits come along, not just its refusals.
+  const branch = declared('git branch');
+  assert.equal(matchesScope(analyzeCommand('git branch --list'), branch), true);
+  assert.equal(matchesScope(analyzeCommand('git branch release'), branch), false);
+  assert.equal(matchesScope(analyzeCommand('git branch --unset-upstream'), branch), false);
+  const grep = declared('grep');
+  assert.equal(matchesScope(analyzeCommand('grep fix'), grep), true);
+  assert.equal(matchesScope(analyzeCommand('grep fix credentials.json'), grep), false);
+  // And a prefix longer than a limited built-in scope, whose limits it
+  // would otherwise shed.
+  for (const prefix of ['grep fix', 'git branch release']) {
+    assert.match((commandScopeFromPrefix(prefix) as { reason: string }).reason, /already limits/, prefix);
+  }
+  // And a prefix shorter than a limited subcommand is refused outright.
+  assert.match((commandScopeFromPrefix('git') as { reason: string }).reason, /git branch/);
+
+  // Only words: anything else would be a grant nobody wrote.
+  for (const prefix of ['python scripts/tool.py', 'node ./x', 'agentboard "task"', "foo 'bar'", 'agentboard --token x', 'git log | sh', 'rm -rf', 'tool*', '~/bin/tool', '/usr/bin/tool', 'a; b', '']) {
+    assert.ok('reason' in commandScopeFromPrefix(prefix), `should refuse: ${prefix}`);
+  }
 });
 
 test('operators inside quotes are text, as the shell reads them', () => {

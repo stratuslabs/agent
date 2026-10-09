@@ -11,10 +11,14 @@ import {
   claimFileLock,
   FileLockHeldError,
   gatewayInfoPath,
+  globalConfigPath,
   GRANTS_LOCK_WAIT_MS,
   grantsLockPath,
+  resolveConfigLocation,
   stratusHomePath,
 } from '@stratusagent/state';
+import { configCovers, createOperatorCommands } from '../operator-commands.ts';
+import { loadServeApprovals } from '../trusted-config.ts';
 import { callRunningGateway, gatewayErrorMessage, readGatewayInfo } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -23,6 +27,7 @@ import type { ParsedGrantsCommand } from '../parse.ts';
 /** What `GET /agents/:id/grants` answers, and what the files answer when no daemon is serving. */
 interface GrantsListing extends AgentGrantsListing {
   agentId: string;
+  configCommands?: string[];
   tools: Array<ToolGrant & { stale?: string }>;
 }
 
@@ -62,6 +67,7 @@ export const runGrants = async (
   const named = revocation?.tool ?? revocation?.scope ?? revocation?.origin ?? '';
 
   const fromFiles = async (): Promise<number> => {
+    declared = await localDeclared();
     const store = createFileCommandWhitelist({
       directory: agentsDirPath(env),
       stateHome: stratusHomePath(env),
@@ -108,7 +114,27 @@ export const runGrants = async (
     return render(listing, await resolveWhitelistPath(stratusHomePath(env), agentsDirPath(env), agentId));
   };
 
+  const coveredByConfig = (scope: string): boolean => configCovers(declared, scope);
+
   const reportRevocation = (revoked: boolean): number => {
+    if (revoked && revocation?.scope !== undefined && coveredByConfig(revocation.scope)) {
+      // The stored grant is gone, but the command still runs: config says so
+      // too, and saying only "Revoked" would leave the operator believing it
+      // now asks.
+      writeLine(streams.stdout, `Revoked ${named} for ${agentId}.`);
+      writeLine(
+        streams.stderr,
+        `"${revocation.scope}" is also in approvals.commands in config, so it still runs without asking. Remove it there and restart the daemon.`,
+      );
+      return 0;
+    }
+    if (!revoked && revocation?.scope !== undefined && coveredByConfig(revocation.scope)) {
+      writeLine(
+        streams.stderr,
+        `"${revocation.scope}" comes from approvals.commands in config, not from an approval. Remove it there and restart the daemon.`,
+      );
+      return 1;
+    }
     if (!revoked) {
       writeLine(streams.stderr, `${agentId} has no such grant. \`stratus grants ${agentId}\` lists what exists.`);
       return 1;
@@ -117,10 +143,40 @@ export const runGrants = async (
     return 0;
   };
 
+  // What config declares runs without asking. Not a grant, but the question
+  // this command answers is "what may this agent do unattended", and leaving
+  // it out would answer it wrong. A serving daemon reports its own list; only
+  // with no daemon is the global config read here, which is where the next
+  // daemon to start would read it.
+  let declared: string[] = [];
+  // Which file the list came from, named in the output: the daemon's own
+  // config, or the one a daemon started the same way would read.
+  let configSource = 'the daemon\'s config';
+  const localDeclared = async (): Promise<string[]> => {
+    // --config when one was given, else STRATUS_CONFIG or discovery, as
+    // `stratus serve` resolves it. Every warning reaches stderr: a file that
+    // could not be read must not look like a file that allows nothing.
+    const location = await resolveConfigLocation(command.configPath ? { configPath: command.configPath } : {}, env);
+    configSource = location?.path ?? globalConfigPath(env);
+    const warn = (line: string): void => writeLine(streams.stderr, `Warning: ${line}`);
+    return createOperatorCommands(await loadServeApprovals(env, command.configPath, warn), warn).declaredFor(agentId);
+  };
+
   const render = (listing: GrantsListing, source: string): number => {
     if (command.format === 'json') {
-      writeLine(streams.stdout, JSON.stringify({ ...listing, source }, null, 2));
+      writeLine(streams.stdout, JSON.stringify({ ...listing, source, configCommands: declared, configSource }, null, 2));
       return 0;
+    }
+    if (declared.length > 0) {
+      writeLine(
+        streams.stdout,
+        source.startsWith('from the daemon')
+          ? `${agentId} runs these without asking, from approvals.commands in the daemon's config:`
+          : `${agentId} runs these without asking, from approvals.commands in ${configSource} (a daemon started with another --config reads that file instead):`,
+      );
+      for (const entry of declared) {
+        writeLine(streams.stdout, `    ${entry}`);
+      }
     }
     const total = listing.tools.length + listing.scopes.length + listing.origins.length;
     if (total === 0) {
@@ -157,6 +213,21 @@ export const runGrants = async (
     return fromFiles();
   }
 
+  // The daemon's own approvals.commands, or undefined when it couldn't be
+  // asked or its answer couldn't be read: not knowing is not "none".
+  const configCommandsFromDaemon = async (): Promise<string[] | undefined> => {
+    try {
+      const listing = await callRunningGateway(env, command, base as string, `/api/v1/agents/${encoded}/grants`, undefined, 'GET');
+      if (!listing.ok) {
+        return undefined;
+      }
+      const body = await listing.json() as GrantsListing;
+      return Array.isArray(body.configCommands) ? body.configCommands : [];
+    } catch {
+      return undefined;
+    }
+  };
+
   let response: Response;
   try {
     response = revocation
@@ -180,6 +251,18 @@ export const runGrants = async (
     return fromFiles();
   }
   if (response.status === 404 && revocation) {
+    // Whether the scope is a config entry is the daemon's config's answer;
+    // ask it rather than reading a config this client may not share.
+    const listed = await configCommandsFromDaemon();
+    if (listed === undefined && revocation.scope !== undefined) {
+      writeLine(streams.stderr, `${agentId} has no such grant. \`stratus grants ${agentId}\` lists what exists.`);
+      writeLine(
+        streams.stderr,
+        `Warning: could not ask the daemon whether approvals.commands in its config allows "${revocation.scope}".`,
+      );
+      return 1;
+    }
+    declared = listed ?? [];
     return reportRevocation(false);
   }
   if (!response.ok) {
@@ -187,7 +270,23 @@ export const runGrants = async (
     return 1;
   }
   if (revocation) {
+    if (revocation.scope !== undefined) {
+      const checked = await configCommandsFromDaemon();
+      if (checked === undefined) {
+        // Not knowing is not the same as "nothing in config covers it".
+        writeLine(streams.stdout, `Revoked ${named} for ${agentId}.`);
+        writeLine(
+          streams.stderr,
+          `Warning: could not ask the daemon whether approvals.commands in its config still allows "${revocation.scope}". `
+          + `\`stratus grants ${agentId}\` lists what config allows.`,
+        );
+        return 0;
+      }
+      declared = checked;
+    }
     return reportRevocation(true);
   }
-  return render(await response.json() as GrantsListing, `from the daemon at ${base}`);
+  const listing = await response.json() as GrantsListing;
+  declared = listing.configCommands ?? [];
+  return render(listing, `from the daemon at ${base}`);
 };

@@ -53,6 +53,15 @@ export interface AgentApprovalConfig {
    * agent like the keys above.
    */
   autonomy?: 'off' | 'workspace';
+  /**
+   * Commands the operator installed for the agent to use, which run without
+   * asking: `agentboard`, `pnpm test`, `gh pr`. Each is a command and
+   * optionally the subcommands it is limited to; what follows may vary.
+   * Additive, unlike the keys above: an agent's list adds to the top-level
+   * one, because "every agent uses agentboard, and Nova runs the tests" is
+   * the shape this is written in.
+   */
+  commands?: string[];
 }
 
 /**
@@ -311,6 +320,11 @@ export interface StratusConfigFile {
    * `executor` and `principals` do.
    */
   maxTurns?: number;
+  /**
+   * Per-agent budgets replacing `maxTurns` for one agent's messages, keyed by
+   * agent id: `{ "atlas": 300 }`. Trusted config only, like `maxTurns`.
+   */
+  agentMaxTurns?: Record<string, number>;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */

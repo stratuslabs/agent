@@ -233,6 +233,53 @@ export const loadServeMaxTurns = async (
 };
 
 /**
+ * Per-agent step budgets (`agentMaxTurns: { "<id>": n }`), each replacing
+ * `maxTurns` for that agent's messages. An agent that does long work gets a
+ * budget that fits it, and the rest of the fleet keeps the runaway guard.
+ *
+ * Trusted config only, and for the reason `maxTurns` is: a budget spends
+ * the operator's tokens. Not in the soul for the same reason, since a soul
+ * can arrive from a template somebody else wrote. An entry that isn't a
+ * whole number of at least 1 is ignored with a warning, so that agent keeps
+ * the shared budget rather than an install refusing to start over it.
+ */
+export const loadServeAgentMaxTurns = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<Record<string, number>> => {
+  let block = await readTrustedConfigBlock('agentMaxTurns', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring agentMaxTurns in ${block.path}: a project-local config cannot decide how many provider turns `
+      + 'this daemon spends on one message. Using ~/.stratus/config.json instead.',
+    );
+    block = await readGlobalConfigBlock('agentMaxTurns', env);
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring agentMaxTurns (${block.error instanceof Error ? block.error.message : String(block.error)})`);
+    return {};
+  }
+  if (block.status !== 'present') {
+    return {};
+  }
+  const value: unknown = block.value;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warn('ignoring agentMaxTurns: expected an object of agent ids to step budgets, like { "atlas": 300 }');
+    return {};
+  }
+  const budgets: Record<string, number> = {};
+  for (const [agentId, turns] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof turns === 'number' && Number.isInteger(turns) && turns >= 1) {
+      budgets[agentId] = turns;
+    } else {
+      warn(`ignoring agentMaxTurns.${agentId}: ${JSON.stringify(turns)} is not a whole number of provider turns, 1 or more`);
+    }
+  }
+  return budgets;
+};
+
+/**
  * The daemon's `executor` or `memoryStore` selection — a name a plugin
  * registered — under the trust rule `plugins` has, and for the same
  * reason one step on: the plugins block decides which code runs, and
