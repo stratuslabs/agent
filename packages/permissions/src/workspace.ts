@@ -1,4 +1,4 @@
-import { readFile, realpath } from 'node:fs/promises';
+import { access, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { CommandAnalysis } from './commands.ts';
@@ -933,6 +933,9 @@ export const gitPushInsideWorkspace = async (
  * `-F`, `-T`, `-X`), carries credentials or headers (`-u`, `-H`, `-b`,
  * `--netrc`), reads a config (`-K`), turns off TLS checks (`-k`), or lets
  * the server name the file (`-J`, `--content-disposition`) isn't on it.
+ * Neither is a user config file (`~/.curlrc`, `~/.wgetrc`): one that exists
+ * means it asks, unless the command turns config off (`curl -q`, `wget
+ * --no-config`).
  * Redirects (`-L`, wget's default) can still leave the site: the request
  * itself only ever goes to the trusted origin first, and a docs site with
  * an open redirect is the residual risk, the same one `web.fetch` names.
@@ -959,17 +962,42 @@ const DOWNLOADERS: Record<string, Downloader> = {
     dashIsStdout: true,
   },
   wget: {
-    flags: ['-q', '--quiet', '-nv', '--no-verbose', '-N', '--timestamping', '-nc', '--no-clobber', '-c', '--continue', '--https-only'],
+    flags: ['-q', '--quiet', '-nv', '--no-verbose', '-N', '--timestamping', '-nc', '--no-clobber', '-c', '--continue', '--https-only', '--no-config'],
     pathValues: ['-O', '--output-document', '-P', '--directory-prefix'],
     values: ['-T', '--timeout', '-t', '--tries', '-U', '--user-agent', '--max-redirect'],
     dashIsStdout: true,
   },
 };
 
+/**
+ * The user-level config files a downloader reads before its arguments, by
+ * the environment the shell hands it. A `.curlrc` can add a URL, an upload,
+ * credentials, or an output path, and `.wgetrc` the same, so the argv
+ * judged here would not be what runs. System-wide files (`/etc/wgetrc`)
+ * are the administrator's, and trusted like the rest of the host.
+ */
+const userConfigFiles = (base: string, env: NodeJS.ProcessEnv): string[] => {
+  const home = env.HOME;
+  if (base === 'curl') {
+    return [
+      env.CURL_HOME ? path.join(env.CURL_HOME, '.curlrc') : undefined,
+      env.XDG_CONFIG_HOME ? path.join(env.XDG_CONFIG_HOME, 'curlrc') : undefined,
+      home ? path.join(home, '.config', 'curlrc') : undefined,
+      home ? path.join(home, '.curlrc') : undefined,
+    ].filter((file): file is string => file !== undefined);
+  }
+  return [env.WGETRC, home ? path.join(home, '.wgetrc') : undefined].filter((file): file is string => file !== undefined);
+};
+
+const exists = async (file: string): Promise<boolean> => access(file).then(() => true, () => false);
+
 export const downloadInsideWorkspace = async (
   analysis: CommandAnalysis,
   cwd: string,
   workspace: string,
+  // The environment the shell runs the command with; the daemon's by default,
+  // which is what the shell tool grants from.
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<string | undefined> => {
   if (analysis.disqualifiedBy || analysis.base === undefined || analysis.pipeline) {
     return undefined;
@@ -985,7 +1013,22 @@ export const downloadInsideWorkspace = async (
   }
   const paths: string[] = [];
   const urls: string[] = [];
-  const args = analysis.tokens.slice(1);
+  let args = analysis.tokens.slice(1);
+  // `curl -q` / `curl --disable` first, or `wget --no-config`, reads no
+  // config; otherwise there must be none to read.
+  const noConfig = analysis.base === 'curl'
+    ? args[0] === '-q' || args[0] === '--disable'
+    : args.includes('--no-config');
+  if (analysis.base === 'curl' && noConfig) {
+    args = args.slice(1);
+  }
+  if (!noConfig) {
+    for (const file of userConfigFiles(analysis.base, env)) {
+      if (await exists(file)) {
+        return undefined;
+      }
+    }
+  }
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index] as string;
     if (!token.startsWith('-') || token === '-') {

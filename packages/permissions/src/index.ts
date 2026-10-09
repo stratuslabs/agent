@@ -919,7 +919,11 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               // A plain download from a site the agent may already read:
               // a trusted domain, or one approved for `web.fetch`. Granted
               // trust, so not to a conversation the gate has closed.
-              const site = externalGate ? undefined : await downloadInsideWorkspace(stage, cwd, workspace);
+              // And not for an agent the gate is on for at all: the shell
+              // marks its output `unknown`, not `external`, so a page read
+              // this way would never close the gate it exists to close.
+              const gated = gateExternalContent?.(session.agent.id) === true;
+              const site = gated ? undefined : await downloadInsideWorkspace(stage, cwd, workspace);
               if (site !== undefined && await readableSite(session.agent.id, site)) {
                 read = true;
                 continue;

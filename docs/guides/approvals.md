@@ -379,14 +379,21 @@ What runs without asking:
   approved for `web.fetch` with **Always allow**. Flags that send data
   (`-d`, `-F`, `-T`, `-X`), carry headers or credentials (`-H`, `-u`, `-b`),
   read a config (`-K`), skip TLS checks (`-k`), or let the server pick the
-  file name (`-J`) still ask. So does any flag not on the list.
+  file name (`-J`) still ask. So does any flag not on the list, and so does
+  any download while a user config file exists (`~/.curlrc`, `~/.wgetrc`,
+  `$CURL_HOME`, `$XDG_CONFIG_HOME/curlrc`, `$WGETRC`), since it can add
+  options the command doesn't show, unless the command turns config off
+  (`curl -q` as the first argument, `wget --no-config`).
 
 `curl -L` and `wget` follow redirects, and those can leave the site. The
 request itself goes to the trusted site first, so the risk left is a
 trusted site with an open redirect. List docs and vendor sites, never ones
 where anyone can publish a page (`github.io`, `githubusercontent.com`,
 `s3.amazonaws.com`). Trusted domains are withdrawn like every grant once
-the [external-content gate](#after-an-agent-reads-the-web) closes.
+the [external-content gate](#after-an-agent-reads-the-web) closes. For an
+agent with `externalContent: "gate"`, downloads always ask: the shell
+doesn't mark what it prints as web content, so a download could never
+close the gate the way `web.fetch` does.
 
 ## Standing grants
 
