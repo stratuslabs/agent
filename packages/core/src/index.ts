@@ -836,8 +836,12 @@ export const originOf = (rawUrl: string): string | undefined => {
  * as written, so every comparison of an origin in this codebase is of the
  * same thing.
  */
-const originForSession = (tool: Pick<Tool, 'originFor'>, session: Session): string | undefined => {
-  const reported = tool.originFor?.(session);
+const originForSession = (
+  tool: Pick<Tool, 'originFor'>,
+  session: Session,
+  input: JsonObject,
+): string | undefined => {
+  const reported = tool.originFor?.(session, input);
   return reported === undefined ? undefined : originOf(reported);
 };
 
@@ -3090,14 +3094,18 @@ export interface Tool {
    * effect lives in the page it is pointed at. In the form `originOf`
    * returns: `https://app.example.com`, scheme and host and port only.
    *
-   * **Deliberately not given the call's input**, which is the difference
-   * between this and its two siblings. A CSS selector describes nothing —
-   * `click("#submit")` is equally "load more results" and "confirm
-   * purchase" — so the only thing about a browser action that an operator
-   * can read and mean is *where* it happens, and that has to come from the
-   * page the conversation is already on. An input parameter would be the
-   * agent's claim about where it is, which is exactly the thing a scope
-   * must not take on trust.
+   * Two kinds of tool answer this, and they differ in what they may read.
+   * `browser.act` must answer from the *session*, never the input: a CSS
+   * selector describes nothing — `click("#submit")` is equally "load more
+   * results" and "confirm purchase" — so where it acts has to come from the
+   * page the conversation is already on, and an input parameter would be
+   * the agent's claim about where it is. `web.fetch` answers from the
+   * input, because its URL is not a claim about the action but the action
+   * itself. A tool may read `input` here **only** when its `execute` acts
+   * on exactly the origin it reported, and re-checks that before it leaves
+   * it (`web.fetch` stops at a redirect to another origin rather than
+   * following it), so a grant for one site never carries a call to
+   * another.
    *
    * Exposing this is a request to be judged by the origin, and it is also
    * a statement that the tool must never receive a tool-wide grant: the
@@ -3110,7 +3118,7 @@ export interface Tool {
    * grant answers only its own question, and how two of them compose on
    * one call is a decision nobody has made.
    */
-  originFor?(session: Session): string | undefined;
+  originFor?(session: Session, input: JsonObject): string | undefined;
   /**
    * The directory a call would run in, for a tool that carries a command
    * (`commandFor`). Not a scope hook, and it never narrows or widens
@@ -7242,7 +7250,7 @@ export class AgentRunner {
         ...(signal ? { signal } : {}),
         ...(options.parkedAt ? { parkedAt: options.parkedAt } : {}),
       });
-      originWhenJudged = originForSession(tool, session);
+      originWhenJudged = originForSession(tool, session, call.input);
     } finally {
       // Cleared before anything executes and on every exit — an abort that
       // throws out of the policy must not leave the session looking parked
@@ -7274,7 +7282,7 @@ export class AgentRunner {
     // `tool.completed` keeps the pairing every consumer reads — the
     // watchdog's phase, the channel's live line. The agent is told plainly,
     // because this is a page that moved rather than a permission it lacks.
-    const originNow = originForSession(tool, session);
+    const originNow = originForSession(tool, session, call.input);
     if (originNow !== originWhenJudged) {
       const result: ToolResult = {
         callId: call.id,

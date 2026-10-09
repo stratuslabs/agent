@@ -809,3 +809,46 @@ test('git -C <repo> persists a scope for that repository and that subcommand', (
   // host is reach the built-in list never promised.
   assert.equal(findMatchingScope(analyzeCommand(`git -C ${repo} status`), SAFE_COMMAND_SCOPES), undefined);
 });
+
+test('git switch -c is a subcommand flag, not git -c', () => {
+  const analysis = analyzeCommand('git switch -c nova/fix');
+  const scope = normalizeCommandScope(analysis);
+  assert.ok(scope);
+  assert.equal(matchesScope(analysis, scope), true, 'the approved command is covered');
+  assert.equal(matchesScope(analyzeCommand('git switch -c nova/other'), scope), true);
+  // Still refused before the subcommand, and in a flag-first exact scope.
+  assert.equal(matchesScope(analyzeCommand('git -c core.hooksPath=/tmp switch main'), scope), false);
+  assert.equal(normalizeCommandScope(analyzeCommand('git -c core.pager=sh log')), undefined);
+  // With git's own -C in front, too.
+  const inRepo = analyzeCommand('git -C /work/app switch -c nova/fix');
+  const repoScope = normalizeCommandScope(inRepo);
+  assert.ok(repoScope);
+  assert.equal(matchesScope(inRepo, repoScope), true);
+  // Not for clone, whose -c sets config like git -c.
+  const clone = analyzeCommand('git clone https://example.com/x.git');
+  const cloneScope = normalizeCommandScope(clone);
+  assert.ok(cloneScope);
+  assert.equal(matchesScope(analyzeCommand('git clone -c core.sshCommand=/tmp/evil ssh://host/repo'), cloneScope), false);
+  // An attached value is the branch, not more flags.
+  assert.equal(matchesScope(analyzeCommand('git switch -cfix'), scope), true);
+  assert.equal(matchesScope(analyzeCommand('git commit -cHEAD'), normalizeCommandScope(analyzeCommand('git commit -m x'))!), true);
+  // Behind other short flags in one bundle, too, and those flags still count.
+  assert.equal(matchesScope(analyzeCommand('git switch -qcfix'), scope), true);
+  assert.equal(matchesScope(analyzeCommand('git commit -qvcHEAD'), normalizeCommandScope(analyzeCommand('git commit -m x'))!), true);
+  assert.equal(matchesScope(analyzeCommand('git switch -fcx'), scope), false, 'f is still destructive');
+  // A scope that denies -c itself still does.
+  assert.equal(matchesScope(analyzeCommand('git switch -c x'), { command: 'git', args: ['switch'], deniedFlags: ['-c'] }), false);
+  assert.equal(matchesScope(analyzeCommand('git switch -cx'), { command: 'git', args: ['switch'], deniedFlags: ['-c'] }), false);
+  // After `--` it's a path, judged as one.
+  assert.equal(matchesScope(analyzeCommand('git commit -- -cfoo'), { command: 'git', args: ['commit'], maxPositionals: 0 }), false);
+  assert.equal(matchesScope(analyzeCommand('git commit -- -cHEAD'), { command: 'git', args: ['commit', '--'], maxPositionals: 0, deniedFlags: ['D'] }), false);
+  // In a scope's own prefix, and behind more than one -C.
+  assert.equal(matchesScope(analyzeCommand('git switch -c topic'), { command: 'git', args: ['switch', '-c'] }), true);
+  const twice = analyzeCommand('git -C /repo -C subdir switch -cfix');
+  assert.equal(matchesScope(twice, normalizeCommandScope(twice)!), true);
+  // Nor when the scope names its flags and -c isn't one.
+  assert.equal(matchesScope(analyzeCommand('git switch -cfoo'), { command: 'git', args: ['switch'], allowedFlags: [] }), false);
+  assert.equal(matchesScope(analyzeCommand('git switch -c foo'), { command: 'git', args: ['switch'], allowedFlags: [] }), false);
+  // And for anything that is not git.
+  assert.equal(matchesScope(analyzeCommand('sh -c id'), { command: 'sh' }), false);
+});

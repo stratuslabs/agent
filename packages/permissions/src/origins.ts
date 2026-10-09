@@ -42,6 +42,16 @@ export interface OriginScope {
    * is the only form this engine ever compares.
    */
   origin: string;
+  /**
+   * The tool the grant was made for. Present on every grant written since
+   * `web.fetch` became origin-scoped, because a site approved for a GET is
+   * not a site approved for clicks: without it, Always allow on a fetch of
+   * `https://app.example.com` let `browser.act` press buttons there with
+   * nobody asked. Absent on a grant from before then, when only the
+   * browser named an origin, and such a grant still covers every
+   * origin-scoped tool, as it always did.
+   */
+  tool?: string;
 }
 
 /**
@@ -57,22 +67,27 @@ export const originScopeFor = (rawUrl: string): OriginScope | undefined => {
   return origin === undefined ? undefined : { origin };
 };
 
-/** Whether an action on `origin` falls inside one scope. */
-export const matchesOriginScope = (origin: string, scope: OriginScope): boolean =>
-  scope.origin === origin;
+/**
+ * Whether an action on `origin` by `tool` falls inside one scope. A caller
+ * that names no tool is matched only by a scope that names none either.
+ */
+export const matchesOriginScope = (origin: string, scope: OriginScope, tool?: string): boolean =>
+  scope.origin === origin && (scope.tool === undefined || scope.tool === tool);
 
-/** The first scope covering this origin, if any covers it. */
+/** The first scope covering this origin for this tool, if any covers it. */
 export const findMatchingOriginScope = (
   origin: string,
   scopes: readonly OriginScope[],
-): OriginScope | undefined => scopes.find((scope) => matchesOriginScope(origin, scope));
+  tool?: string,
+): OriginScope | undefined => scopes.find((scope) => matchesOriginScope(origin, scope, tool));
 
 /** One line an operator can read in a log or a grant listing. */
-export const describeOriginScope = (scope: OriginScope): string => scope.origin;
+export const describeOriginScope = (scope: OriginScope): string =>
+  scope.tool === undefined ? scope.origin : `${scope.origin} (${scope.tool})`;
 
 /** Whether two scopes permit the same thing, so a whitelist does not grow duplicates. */
 export const sameOriginScope = (left: OriginScope, right: OriginScope): boolean =>
-  left.origin === right.origin;
+  left.origin === right.origin && left.tool === right.tool;
 
 /**
  * Read one scope out of a whitelist file, or refuse it.
@@ -89,6 +104,15 @@ export const parseOriginScope = (raw: unknown): OriginScope | undefined => {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
   }
-  const origin = (raw as Record<string, unknown>).origin;
-  return typeof origin === 'string' ? originScopeFor(origin) : undefined;
+  const source = raw as Record<string, unknown>;
+  if (typeof source.origin !== 'string') {
+    return undefined;
+  }
+  // A `tool` that is present but not a non-empty string is a hand edit gone
+  // wrong; dropping the whole grant beats widening it to every tool.
+  if (source.tool !== undefined && (typeof source.tool !== 'string' || source.tool.length === 0)) {
+    return undefined;
+  }
+  const scope = originScopeFor(source.origin);
+  return scope && typeof source.tool === 'string' ? { ...scope, tool: source.tool } : scope;
 };

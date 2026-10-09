@@ -14,8 +14,10 @@ import {
   runCli,
   serviceUnitPath,
   startService,
+  type CliEnvironment,
   type ServiceRunner,
 } from '../src/index.ts';
+import { defaultUpdateContinuation } from '../src/commands/update.ts';
 import {
   credentialsPath,
   readStateStamp,
@@ -55,6 +57,16 @@ const runningServiceRunner: ServiceRunner = async (command, args) => {
   }
   return { code: 0, stdout: '', stderr: '' };
 };
+
+// Stands in for the fresh process an upgrade hands the rest of the update
+// to: the same command, run again with the hand-off variable set. In-process,
+// so the suite spawns nothing — the fresh module cache is what the real one
+// adds, and no test can observe that from inside one process.
+const continueInProcess = (
+  streams: ReturnType<typeof createStreams>['streams'],
+  env: () => CliEnvironment,
+) => (resume: 'running' | 'stopped') =>
+  runCli({ argv: ['update'], streams, env: { ...env(), processEnv: { STRATUS_UPDATE_RESUME: resume } } });
 
 test('parseCommand understands update and update --check', () => {
   assert.deepEqual(parseCommand(['update']), { command: 'update', check: false });
@@ -149,6 +161,7 @@ test('update upgrades the companion packages that lag the CLI, in the same npm c
         installs.push(packages);
         return { ok: true, message: '' };
       },
+      updateContinuation: async () => 0,
     },
   });
   assert.equal(code, 0, `update failed:\n${output.stdout}\n${output.stderr}`);
@@ -191,6 +204,7 @@ test('update loads every module it will use before npm replaces them on disk', a
         events.push('install');
         return { ok: true, message: '' };
       },
+      updateContinuation: async () => 0,
     },
   });
   assert.equal(code, 0, `update failed:\n${output.stdout}\n${output.stderr}`);
@@ -291,26 +305,26 @@ test('update stops the service, upgrades, migrates, rewrites the unit with curre
 
   const installs: string[][] = [];
   const { streams, output } = createStreams();
-  const code = await runCli({
-    argv: ['update'],
-    streams,
-    env: {
-      homeDir: home,
-      cwd: home,
-      processEnv: {},
-      serviceRunner: runningServiceRunner,
-      packageVersionFetcher: async () => '99.0.0',
-      // Nothing of ours beside the CLI, so this stays a test about the CLI
-      // upgrade. Left to the real reader it would answer from the suite's
-      // own node_modules, where every workspace package is installed.
-      installedVersionReader: async () => undefined,
-      packageInstaller: async (packages) => {
-        installs.push(packages);
-        return { ok: true, message: '' };
-      },
+  const env = (): CliEnvironment => ({
+    homeDir: home,
+    cwd: home,
+    processEnv: {},
+    serviceRunner: runningServiceRunner,
+    packageVersionFetcher: async () => '99.0.0',
+    // Nothing of ours beside the CLI, so this stays a test about the CLI
+    // upgrade. Left to the real reader it would answer from the suite's
+    // own node_modules, where every workspace package is installed.
+    installedVersionReader: async () => undefined,
+    packageInstaller: async (packages) => {
+      installs.push(packages);
+      return { ok: true, message: '' };
     },
+    updateContinuation: continueInProcess(streams, env),
   });
+  const code = await runCli({ argv: ['update'], streams, env: env() });
   assert.equal(code, 0, `update failed:\n${output.stdout}\n${output.stderr}`);
+  // The second half neither stops the daemon again nor reinstalls.
+  assert.equal(output.stdout.split('Stopping stratusd').length - 1, 1, output.stdout);
 
   // The service stops before anything migrates or upgrades — the bracket
   // that keeps a live daemon from holding the session database mid-change.
@@ -1078,4 +1092,181 @@ test('update finishes the per-agent move when nothing else holds the home', asyn
   assert.equal(await hasBracketedLegacyState(env), false);
   const { claimHome } = await import('@stratusagent/gateway');
   claimHome(env).release();
+});
+
+test('an upgraded CLI hands the migrations to the new build instead of running them itself', async () => {
+  // The process that ran npm is the old build: a module it first imports
+  // afterwards is new code resolving against old modules in its cache,
+  // which failed 0.11.6 → 0.11.7 on FileLockHeldError and 0.11.7 → 0.11.8
+  // on createPluginStateDirectories. Nothing after the install may run here.
+  const home = await freshHome();
+  const handoffs: string[] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => '99.0.0',
+      installedVersionReader: async () => undefined,
+      packageInstaller: async () => ({ ok: true, message: '' }),
+      updateContinuation: async (resume) => {
+        handoffs.push(resume);
+        return 7;
+      },
+    },
+  });
+  assert.equal(code, 7, 'the new build\'s exit code is the update\'s');
+  assert.deepEqual(handoffs, ['stopped']);
+  assert.match(output.stdout, /Continuing the update on the new build/);
+  assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, 0, 'the old build must not migrate');
+  assert.doesNotMatch(output.stdout, /Rewriting the service unit/);
+});
+
+test('the hand-off tells the new build the daemon was running, so it restarts it', async () => {
+  const home = await freshHome();
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner },
+    {},
+  );
+  const handoffs: string[] = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => '99.0.0',
+      installedVersionReader: async () => undefined,
+      packageInstaller: async () => ({ ok: true, message: '' }),
+      updateContinuation: async (resume) => {
+        handoffs.push(resume);
+        return 0;
+      },
+    },
+  });
+  assert.deepEqual(handoffs, ['running']);
+});
+
+test('a new build that cannot be started leaves the update to finish here', async () => {
+  const home = await freshHome();
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => '99.0.0',
+      installedVersionReader: async () => undefined,
+      packageInstaller: async () => ({ ok: true, message: '' }),
+      updateContinuation: async () => undefined,
+    },
+  });
+  assert.equal(code, 0, `${output.stdout}\n${output.stderr}`);
+  assert.match(output.stderr, /continuing on this one/);
+  assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, STATE_SCHEMA_VERSION);
+});
+
+test('the second half of an update restarts a daemon it refuses to migrate under', async () => {
+  // The first half already stopped it. A refusal that would have come
+  // before the stop now comes after, and must not leave the fleet down.
+  const home = await freshHome();
+  const starts: string[][] = [];
+  const runner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && args.includes('is-active')) {
+      return { code: 3, stdout: 'inactive', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('is-enabled')) {
+      return { code: 0, stdout: 'enabled', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('restart')) {
+      starts.push([command, ...args]);
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    {},
+  );
+  await mkdir(path.dirname(stateFilePath({ homeDir: home })), { recursive: true });
+  await writeFile(stateFilePath({ homeDir: home }), JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [] }));
+  starts.length = 0;
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { STRATUS_UPDATE_RESUME: 'running' },
+      servicePlatform: 'linux',
+      serviceRunner: runner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  assert.equal(code, 1);
+  assert.match(output.stderr, /newer Stratus build/);
+  assert.match(output.stderr, /restarted on its previous unit/);
+  assert.ok(starts.length > 0, 'the daemon the first half stopped must be restarted');
+});
+
+test('a new build that dies before taking over does not answer for the update', async () => {
+  // `spawn` reports a child that started and then threw while loading as an
+  // exit, not an error. Taken as the update's answer, it left the daemon the
+  // first half had stopped down, since the child never reached the restart.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-continuation-'));
+  const crashes = path.join(dir, 'crashes.mjs');
+  await writeFile(crashes, "throw new Error('does not provide an export named x');\n");
+  const missing = path.join(dir, 'missing.mjs');
+  const takesOver = path.join(dir, 'takes-over.mjs');
+  await writeFile(takesOver, [
+    "if (process.env.STRATUS_UPDATE_RESUME !== 'running') process.exit(9);",
+    "process.send('stratus.update.resumed', undefined, {}, () => process.exit(3));",
+    '',
+  ].join('\n'));
+  const env = { cwd: dir, processEnv: {} };
+  assert.equal(await defaultUpdateContinuation(env, crashes)('running'), undefined);
+  assert.equal(await defaultUpdateContinuation(env, missing)('running'), undefined);
+  assert.equal(await defaultUpdateContinuation(env, takesOver)('running'), 3);
+});
+
+test('a resumed update that throws after taking over still restarts the daemon it inherited stopped', async () => {
+  // The first half stopped the daemon and handed over; the version lookup
+  // here throws before any step with its own recovery runs.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-resume-throw-'));
+  const starts: string[][] = [];
+  const runner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && (args.includes('start') || args.includes('restart'))) {
+      starts.push([command, ...args]);
+    }
+    return runningServiceRunner(command, args);
+  };
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { STRATUS_UPDATE_RESUME: 'running' },
+      servicePlatform: 'linux',
+      serviceRunner: runner,
+      packageVersionFetcher: async () => {
+        throw new Error('EIO reading the registry cache');
+      },
+    },
+  });
+  assert.equal(code, 1);
+  assert.match(output.stderr, /Update failed: EIO/);
+  assert.ok(starts.length > 0, 'the daemon the first half stopped must be started again');
 });

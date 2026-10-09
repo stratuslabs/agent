@@ -1,4 +1,7 @@
+import { spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   newerStateMessage,
   pendingStateMigrations,
@@ -19,7 +22,7 @@ import {
 } from '../service.ts';
 import { legacyDaemonServing, serviceEnvFor } from '../daemon.ts';
 import { installedUnitConfigError } from './service.ts';
-import type { CliStreams, CliEnvironment } from '../environment.ts';
+import type { CliStreams, CliEnvironment, UpdateResume } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
 import {
   defaultPackageVersionFetcher,
@@ -85,10 +88,117 @@ const claimExclusiveHome = async (
   return { held: true, reason: '', release: () => claim.release() };
 };
 
+/**
+ * Set on the process `stratus update` hands its second half to, saying
+ * whether the daemon was running before the first half stopped it. An
+ * environment variable rather than a flag: it is a hand-off between two
+ * builds of this command, not something an operator types.
+ */
+export const UPDATE_RESUME_ENV = 'STRATUS_UPDATE_RESUME';
+
+const readResume = (env: CliEnvironment): UpdateResume | undefined => {
+  const value = (env.processEnv ?? process.env)[UPDATE_RESUME_ENV];
+  return value === 'running' || value === 'stopped' ? value : undefined;
+};
+
+/** What the second half sends up once it is running, so a crash before it is not mistaken for its answer. */
+export const UPDATE_RESUMED_MESSAGE = 'stratus.update.resumed';
+
+/**
+ * Run `stratus update` again on the build npm just put on disk, and wait.
+ *
+ * The process that ran the install is the old build, and Node cannot swap
+ * it out: everything already imported stays the old code in the module
+ * cache, while anything imported for the first time is read from the new
+ * files and resolves its own imports against that cache. A new module
+ * asking an old one for an export it does not have fails the migration
+ * ("does not provide an export named …") — 0.11.7's `FileLockHeldError`,
+ * 0.11.8's `createPluginStateDirectories`. Preloading one module at a time
+ * only fixes the import someone already tripped over; a fresh process has
+ * nothing cached and runs the new build whole.
+ *
+ * Its exit code is the update's only once it has said it took over. A new
+ * build that dies before that, on a missing entrypoint or a module that
+ * throws as it loads, exits without ever reaching the recovery that
+ * restarts the daemon, so it resolves `undefined` and this process
+ * finishes the update itself instead.
+ */
+export const defaultUpdateContinuation = (
+  env: CliEnvironment,
+  entrypoint: string = (() => {
+    const modulePath = fileURLToPath(import.meta.url);
+    return path.join(path.dirname(modulePath), '..', `bin${path.extname(modulePath)}`);
+  })(),
+) => (resume: UpdateResume): Promise<number | undefined> =>
+  new Promise((resolve) => {
+    let resumed = false;
+    const child = spawn(process.execPath, [...process.execArgv, entrypoint, 'update'], {
+      stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+      cwd: env.cwd ?? process.cwd(),
+      env: { ...(env.processEnv ?? process.env), [UPDATE_RESUME_ENV]: resume },
+    });
+    child.on('message', (message) => {
+      if (message === UPDATE_RESUMED_MESSAGE) {
+        resumed = true;
+        // The channel would keep the child alive; it has said all it needs to.
+        child.disconnect();
+      }
+    });
+    child.once('error', () => resolve(undefined));
+    child.once('exit', (code) => resolve(resumed ? code ?? 1 : undefined));
+  });
+
+/** Tell the first half this process has taken over the update. */
+const announceResumed = (): Promise<void> =>
+  new Promise((resolve) => {
+    if (typeof process.send !== 'function' || !process.connected) {
+      resolve();
+      return;
+    }
+    process.send(UPDATE_RESUMED_MESSAGE, undefined, {}, () => resolve());
+  });
+
 export const runUpdate = async (
   command: ParsedUpdateCommand,
   streams: CliStreams,
   env: CliEnvironment,
+): Promise<number> => {
+  // Set when this process is the second half of an update an older build
+  // began: the daemon is already stopped and the packages already
+  // installed, so neither happens again.
+  const resume = command.check ? undefined : readResume(env);
+  if (resume === undefined) {
+    return runUpdateSteps(command, streams, env, undefined);
+  }
+  // Once this process says it took over, its exit is the update's answer,
+  // and the first half will not restart anything. So from here every way
+  // out has to leave a daemon that was running running again — including a
+  // throw from a version lookup, a status read, or a state file, none of
+  // which have a recovery of their own. Starting a service that the steps
+  // already restarted is harmless; leaving the fleet down is not.
+  await announceResumed();
+  try {
+    return await runUpdateSteps(command, streams, env, resume);
+  } catch (error) {
+    writeLine(streams.stderr, `Update failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (resume === 'running') {
+      const restarted = await startService(serviceEnvFor(env));
+      for (const message of restarted.messages) {
+        writeLine(restarted.ok ? streams.stdout : streams.stderr, message);
+      }
+      writeLine(streams.stderr, restarted.ok
+        ? 'stratusd was restarted. Fix the failure and run `stratus update` again.'
+        : 'stratusd could not be restarted either — bring it back with `stratus service start`.');
+    }
+    return 1;
+  }
+};
+
+const runUpdateSteps = async (
+  command: ParsedUpdateCommand,
+  streams: CliStreams,
+  env: CliEnvironment,
+  resume: UpdateResume | undefined,
 ): Promise<number> => {
   const serviceEnv = serviceEnvFor(env);
   const out = (line: string): void => writeLine(streams.stdout, line);
@@ -179,9 +289,27 @@ export const runUpdate = async (
     return actionable ? 1 : 0;
   }
 
-  if (stateNewer) {
-    writeLine(streams.stderr, newerStateMessage(stamp.schemaVersion));
+  // In the second half of an update, the first half already stopped the
+  // daemon: a refusal here must bring it back, or the fleet stays down
+  // over a check that changed nothing.
+  const refuse = async (lines: string[]): Promise<number> => {
+    for (const line of lines) {
+      writeLine(streams.stderr, line);
+    }
+    if (resume === 'running') {
+      const restarted = await startService(serviceEnv);
+      for (const message of restarted.messages) {
+        writeLine(restarted.ok ? streams.stdout : streams.stderr, message);
+      }
+      writeLine(streams.stderr, restarted.ok
+        ? 'stratusd was restarted on its previous unit.'
+        : 'stratusd could not be restarted either — bring it back with `stratus service start`.');
+    }
     return 1;
+  };
+
+  if (stateNewer) {
+    return refuse([newerStateMessage(stamp.schemaVersion)]);
   }
 
   if (status?.installed && (status.runAtLogin === undefined || status.running === undefined)) {
@@ -190,8 +318,7 @@ export const runUpdate = async (
     // Guessing would let a transient status failure convert a deliberate
     // --no-login install, or rewrite-and-stop a daemon that was actually
     // running — refuse instead, before anything has been stopped.
-    writeLine(streams.stderr, `Not updating: whether stratusd ${status.running === undefined ? 'is running' : 'starts at login'} could not be determined (the service manager did not answer), and the unit rewrite would have to guess. Check \`stratus service status\` and retry.`);
-    return 1;
+    return refuse([`Not updating: whether stratusd ${status.running === undefined ? 'is running' : 'starts at login'} could not be determined (the service manager did not answer), and the unit rewrite would have to guess. Check \`stratus service status\` and retry.`]);
   }
 
   // Before anything is stopped: the update restarts the service, and a
@@ -200,9 +327,12 @@ export const runUpdate = async (
   if (status?.installed) {
     const unitError = await installedUnitConfigError(env, serviceEnv);
     if (unitError) {
-      writeLine(streams.stderr, `Not updating: ${unitError.message}`);
-      writeLine(streams.stderr, 'The updated daemon would refuse to start on it, so nothing was stopped. Fix the file and run `stratus update` again.');
-      return 1;
+      return refuse([
+        `Not updating: ${unitError.message}`,
+        resume === undefined
+          ? 'The updated daemon would refuse to start on it, so nothing was stopped. Fix the file and run `stratus update` again.'
+          : 'The updated daemon would refuse to start on it. Fix the file and run `stratus update` again.',
+      ]);
     }
   }
 
@@ -217,10 +347,18 @@ export const runUpdate = async (
   // install says it is. And before the stop, not just before the install:
   // a load that fails then leaves the daemon serving, where one failing
   // after the stop sat outside the recovery that restarts it.
-  const gateway = await (env.gatewayLoader ?? (() => import('@stratusagent/gateway')))();
+  let gateway: typeof import('@stratusagent/gateway');
+  try {
+    gateway = await (env.gatewayLoader ?? (() => import('@stratusagent/gateway')))();
+  } catch (error) {
+    if (resume === undefined) {
+      throw error;
+    }
+    return refuse([`Could not load the gateway: ${error instanceof Error ? error.message : String(error)}`]);
+  }
 
-  const wasRunning = status?.running === true;
-  if (wasRunning) {
+  const wasRunning = resume === undefined ? status?.running === true : resume === 'running';
+  if (wasRunning && resume === undefined) {
     // No daemon may hold the session database while state migrates — this
     // bracket is the one place an update could otherwise lose data.
     out('Stopping stratusd for the update…');
@@ -244,7 +382,7 @@ export const runUpdate = async (
   // printing a line promising a version npm never confirmed. Staleness is
   // still *reported* offline — it is measured against this build, which
   // needs no network — so `--check` says what an online update would fix.
-  const upgrading = latest === undefined ? [] : [
+  const upgrading = latest === undefined || resume !== undefined ? [] : [
     ...(upgradeAvailable ? [`${CLI_PACKAGE_NAME}@latest`] : []),
     // `@latest` only where latest IS the target. Where this build is the
     // newer one, `@latest` would install the very version the target just
@@ -260,15 +398,27 @@ export const runUpdate = async (
       out(`Upgrading ${entry.name} ${entry.version} → ${target}…`);
     }
     const installed = await (env.packageInstaller ?? defaultPackageInstaller)(upgrading);
-    if (installed.ok) {
-      // This process is still the old build; migrations the new version
-      // adds run when it first starts — which the restart below is.
-      out('Upgraded. Migrations the new version adds run on its first start.');
+    if (installed.ok && upgradeAvailable) {
+      // This process is still the old build, so the rest of the update —
+      // the migrations above all — runs in a fresh one on the new build.
+      out('Upgraded. Continuing the update on the new build…');
+      const code = await (env.updateContinuation ?? defaultUpdateContinuation(env))(wasRunning ? 'running' : 'stopped');
+      if (code !== undefined) {
+        return code;
+      }
+      // It never took over: it could not be started, or died loading.
+      // Carry on here rather than leave a stopped daemon behind; this run
+      // restarts it if its own migration fails.
+      writeLine(streams.stderr, 'The new build did not take over the update — continuing on this one.');
+    } else if (installed.ok) {
+      // Only companions changed. This process's own modules are untouched,
+      // so the rest of the update is safe to run here.
+      out('Upgraded.');
     } else {
       upgradeFailed = true;
       writeLine(streams.stderr, `npm install failed: ${installed.message || 'unknown error'} — continuing with migrations and the unit rewrite.`);
     }
-  } else {
+  } else if (resume === undefined) {
     out(latest === undefined
       ? 'Skipping the package upgrade — npm did not answer.'
       : 'Package already up to date.');

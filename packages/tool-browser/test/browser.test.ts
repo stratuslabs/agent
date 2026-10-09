@@ -731,27 +731,27 @@ test('the origin browser.act is judged by comes from the page, never from the ca
   // and no scope can cover the call. Asking must not open one either: this
   // runs while the call is still being *judged*, and a lookup that launched
   // a browser would start one for a call about to be refused.
-  assert.equal(act.originFor?.(session), undefined);
+  assert.equal(act.originFor?.(session, {}), undefined);
   assert.equal(recorder.launches, 0);
 
   await tool('browser.goto').execute({ url: 'https://example.com/reports/17?token=abc' }, session);
   // The origin of where it is, not the URL: a grant an operator reads as
   // "may act on example.com" must not carry a path or a query with it.
-  assert.equal(act.originFor?.(session), 'https://example.com');
+  assert.equal(act.originFor?.(session, {}), 'https://example.com');
 
   // It follows the page. A conversation that navigates elsewhere is judged
   // against where it now is, so a grant for one site does not travel.
   await tool('browser.goto').execute({ url: 'https://other.example.com/' }, session);
-  assert.equal(act.originFor?.(session), 'https://other.example.com');
+  assert.equal(act.originFor?.(session, {}), 'https://other.example.com');
 
   // And it is that conversation's page. Contexts are per conversation, and
   // so is the question of where a click would land.
-  assert.equal(act.originFor?.(sessionFor('elsewhere')), undefined);
+  assert.equal(act.originFor?.(sessionFor('elsewhere'), {}), undefined);
 
   // A context the idle sweep has closed leaves no origin behind, rather
   // than the last one it happened to be on.
   await plugin.sweepIdle(Date.now() + 10 * 60_000);
-  assert.equal(act.originFor?.(session), undefined);
+  assert.equal(act.originFor?.(session, {}), undefined);
 });
 
 test('browser.act does not click a page that moved while its context was being opened', async (t) => {
@@ -768,7 +768,7 @@ test('browser.act does not click a page that moved while its context was being o
   await tool('browser.goto').execute({ url: 'https://example.com/reports' }, session);
   // What the kernel does immediately before dispatch: ask where the call
   // is being judged.
-  assert.equal(act.originFor?.(session), 'https://example.com');
+  assert.equal(act.originFor?.(session, {}), 'https://example.com');
   // ...and the page moves before the action opens it.
   await tool('browser.goto').execute({ url: 'https://other.example.com/' }, session);
 
@@ -802,15 +802,15 @@ test('the recorded origin is bounded: nothing kept for a page with none, and dro
   const session = sessionFor('bounded');
 
   // A conversation with no page records nothing at all.
-  assert.equal(act.originFor?.(session), undefined);
+  assert.equal(act.originFor?.(session, {}), undefined);
   await tool('browser.goto').execute({ url: 'https://example.com/' }, session);
-  assert.equal(act.originFor?.(session), 'https://example.com');
+  assert.equal(act.originFor?.(session, {}), 'https://example.com');
 
   // The sweep takes the context, so the next judgement is "no page" — and
   // the action executes against a fresh page that is also no page, which
   // agrees.
   await plugin.sweepIdle(Date.now() + 10 * 60_000);
-  assert.equal(act.originFor?.(session), undefined);
+  assert.equal(act.originFor?.(session, {}), undefined);
   const result = await act.execute({ action: 'click', selector: '#submit' }, session) as JsonObject;
   assert.equal(result.action, 'click');
 });
@@ -828,7 +828,7 @@ test('a call judged on no page at all is still refused if one appears before it 
 
   // What the kernel asks before dispatch, on a conversation that has never
   // navigated: no origin.
-  assert.equal(act.originFor?.(session), undefined);
+  assert.equal(act.originFor?.(session, {}), undefined);
   // ...and a page arrives before the action opens it.
   await tool('browser.goto').execute({ url: 'https://example.com/' }, session);
 

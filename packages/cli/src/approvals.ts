@@ -23,7 +23,7 @@ import type { CliApprovalMode } from './parse.ts';
  * `originOf` so this and the daemon's engine compare the same thing.
  */
 const approvalOrigin = (context: ApprovalContext): string | undefined => {
-  const reported = context.tool.originFor?.(context.session);
+  const reported = context.tool.originFor?.(context.session, context.call.input);
   return reported === undefined ? undefined : originOf(reported);
 };
 

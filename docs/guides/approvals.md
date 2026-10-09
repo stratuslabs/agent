@@ -37,13 +37,18 @@ built-in tools (`demo.echo`, `memory.remember`, `memory.recall`,
 turn — see [Schedules](./schedules.md). Anything you install is where this
 starts to bite, which is what [Tools](./tools.md) is about.
 
-Two tools are the exception to the whole paragraph, because their risk is
-in what a particular call does rather than in the tool's identity. Both are
+Three tools are the exception to the whole paragraph, because their risk is
+in what a particular call does rather than in the tool's identity. All are
 `gated`, and the permission engine then judges each call:
 
 - **A shell**, by the command it would run — see [Shell commands](./shell.md).
 - **`browser.act`**, by the site the conversation is on — see
   [Browser actions](./browser.md).
+- **`web.fetch`**, by the site of the URL it fetches. **Always allow** on
+  one grants that site (`https://docs.example.com`), never every URL. A
+  redirect to a different site is not followed: the result names where it
+  pointed (`redirectedTo`), and fetching that is a call of its own, judged
+  the same way. `http://` moving to `https://` on the same host is followed.
 
 Nothing built in is `dangerous` any more. The tier is still there, and an
 operator's `toolRisks` or a plugin's manifest can still put a tool in it —
@@ -173,7 +178,7 @@ warning naming the file.
   says which before you answer. A call judged by a *scope* persists that
   scope — a command scope for `shell.run` (see
   [Shell commands](./shell.md)), an origin for `browser.act` (see
-  [Browser actions](./browser.md)). Every other gated tool gets a
+  [Browser actions](./browser.md)) and for `web.fetch`. Every other gated tool gets a
   **standing grant** on the tool itself — see
   [Standing grants](#standing-grants). The one exception is a send outside
   a schedule (`message.send`): a grant there would be a yes to every
@@ -288,12 +293,18 @@ listed by you and never inferred.
 
 ## Standing grants
 
-Most installed tools are `gated` and name no scope — `web.fetch`,
-`fs.write`, a bridged MCP tool — so **Always allow** on one grants the
+Most installed tools are `gated` and name no scope — `fs.write`, a
+bridged MCP tool — so **Always allow** on one grants the
 **tool** to that agent: it runs without asking from then on, in every
 session and after every restart, until an operator revokes it. That is the
 only path such a tool has to running unattended at all: a `gated` call in
 `headless` mode is otherwise refused, whatever was approved in the past.
+
+`web.fetch` had a standing grant like this before it was judged by site.
+A `web.fetch` entry under `tools` in a whitelist file can still show up in
+`stratus grants`, but it no longer covers any call: the next fetch asks, and
+**Always allow** on it grants that site. Revoke the old entry to tidy the
+listing.
 
 **Grants are the daemon's, and only the daemon's.** `stratus run` and
 `stratus chat` do not consult them and cannot create one: at your own
@@ -314,9 +325,9 @@ decision came through the control API:
 {
   "version": 1,
   "scopes": [{ "command": "git", "args": ["push"], "denyRefspecForms": true }],
-  "origins": [{ "origin": "https://app.example.com" }],
+  "origins": [{ "origin": "https://app.example.com", "tool": "browser.act" }],
   "tools": [
-    { "tool": "web.fetch", "package": "@stratusagent/tool-web", "grantedAt": "2026-09-07T09:14:36.000Z", "grantedBy": "U01DYLAN" }
+    { "tool": "fs.write", "package": "@stratusagent/tool-fs", "grantedAt": "2026-09-07T09:14:36.000Z", "grantedBy": "U01DYLAN" }
   ]
 }
 ```
@@ -354,7 +365,7 @@ than scoping choices:
 
 ```bash
 stratus grants blair                                # everything blair may do unattended, all three kinds
-stratus grants revoke blair --tool web.fetch          # a standing grant
+stratus grants revoke blair --tool fs.write           # a standing grant
 stratus grants revoke blair --scope "git push"        # a command scope, by the line the listing shows
 stratus grants revoke blair --origin https://app.example.com
 ```
@@ -399,8 +410,8 @@ happened unattended can be told apart from one that ran because the tool
 was `safe`:
 
 ```text
-09:14:36  —  blair: web.fetch now runs without asking, until revoked (granted by U01DYLAN)
-03:00:02  —  blair: web.fetch ran under a standing grant (web.fetch (@stratusagent/tool-web), granted 2026-09-07T09:14:36.000Z by U01DYLAN) (session schedule:…)
+09:14:36  —  blair: fs.write now runs without asking, until revoked (granted by U01DYLAN)
+03:00:02  —  blair: fs.write ran under a standing grant (fs.write (@stratusagent/tool-fs), granted 2026-09-07T09:14:36.000Z by U01DYLAN) (session schedule:…)
 ```
 
 ## After an agent reads the web
