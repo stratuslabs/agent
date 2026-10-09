@@ -90,28 +90,31 @@ const LINK_DESTINATION = /^(?:https?:\/\/|mailto:)[^\s()]+$/;
  * Markdown link's destination starts, and one that turns out not to be a
  * link stays as it was written, as it always has.
  */
-const BARE_URL_START = /^https?:\/\/[^\s<>()[\]`"]/;
+const BARE_URL_START = /^https?:\/\/[^\s<>()[\]`"|]/i;
 const NOT_BEFORE_BARE_URL = /[\p{L}\p{N}<|(\/@=&.:+-]/u;
 
 /**
  * Characters an address does not run through: whitespace, the brackets a
- * link label and Slack's markup are spelled with, and a backtick, so a
- * snippet that follows an address is still a snippet. Parentheses are
- * not among them: `…/wiki/Function_(mathematics)` is one address, and only
- * a `)` the address never opened is cut from its end (see below).
+ * link label and Slack's markup are spelled with, a backtick, so a snippet
+ * that follows an address is still a snippet, and `|`, which inside
+ * `<…>` is Slack's label separator — `https://x/a|FAKE` sent whole would
+ * show a link labelled FAKE. Parentheses are not among them:
+ * `…/wiki/Function_(mathematics)` is one address, and only a `)` the
+ * address never opened is cut from its end (see below).
  */
-const BARE_URL_END = /[\s<>[\]`"]/;
+const BARE_URL_END = /[\s<>[\]`"|]/;
 
 /**
  * Punctuation that ends a sentence or closes emphasis rather than ending
  * the address, as GFM's autolinks read it: in `see **https://x/a**.` the
  * address is `https://x/a`, and the `**.` is the sentence's.
  */
-const BARE_URL_TRAILING = /[?!.,:;*_~'"]$/;
+const BARE_URL_TRAILING = /^[?!.,:;*_~'"]$/;
 
 /** How long the bare address starting at `at` is, or 0 when none starts there. */
 const bareUrlAt = (text: string, at: number): number => {
-  if (text[at] !== 'h' || !BARE_URL_START.test(text.slice(at, at + 9))) {
+  // Schemes are case-insensitive: `HTTPS://x/*a*` is as much an address.
+  if ((text[at] !== 'h' && text[at] !== 'H') || !BARE_URL_START.test(text.slice(at, at + 9))) {
     return 0;
   }
   const before = text[at - 1];
@@ -122,25 +125,37 @@ const bareUrlAt = (text: string, at: number): number => {
   while (end < text.length && !BARE_URL_END.test(text[end] ?? '')) {
     end += 1;
   }
-  let url = text.slice(at, end);
   // GFM's rule, both halves until neither applies: sentence punctuation
   // comes off the end, and so does a `)` with no `(` of its own in the
   // address — `(see https://x/a)` is a parenthesis around an address,
-  // `https://x/f_(m)` an address with one in it.
+  // `https://x/f_(m)` an address with one in it. The balance is counted
+  // once and kept as characters come off, so a reply ending in thousands
+  // of `)` is one pass, not one recount per parenthesis.
+  let opened = 0;
+  let closed = 0;
+  for (let index = at; index < end; index += 1) {
+    if (text[index] === '(') {
+      opened += 1;
+    } else if (text[index] === ')') {
+      closed += 1;
+    }
+  }
   for (;;) {
-    if (BARE_URL_TRAILING.test(url)) {
-      url = url.slice(0, -1);
+    const last = text[end - 1] ?? '';
+    if (end > at && BARE_URL_TRAILING.test(last)) {
+      end -= 1;
       continue;
     }
-    if (url.endsWith(')') && (url.match(/\)/g)?.length ?? 0) > (url.match(/\(/g)?.length ?? 0)) {
-      url = url.slice(0, -1);
+    if (last === ')' && closed > opened) {
+      end -= 1;
+      closed -= 1;
       continue;
     }
     break;
   }
   // Nothing after the scheme once trailing punctuation is gone is not an
   // address anybody can follow.
-  return /^https?:\/\/./.test(url) ? url.length : 0;
+  return /^https?:\/\/./i.test(text.slice(at, end)) ? end - at : 0;
 };
 
 const HEADING_OPENER = /^ {0,3}#{1,6}[ \t]+/;

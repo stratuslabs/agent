@@ -778,6 +778,11 @@ test('a bare address is sent as Slack link markup, and nothing around it changes
     ['(see https://en.wikipedia.org/wiki/F_(m))', '(see <https://en.wikipedia.org/wiki/F_(m)>)'],
     ['see https://x.com/a), then', 'see <https://x.com/a>), then'],
     ['**https://x.com/f_(m)**', '*<https://x.com/f_(m)>*'],
+    // Schemes are case-insensitive.
+    ['see HTTPS://x.com/*star*/x', 'see <HTTPS://x.com/*star*/x>'],
+    ['Http://x.com/a_b_c', '<Http://x.com/a_b_c>'],
+    // `|` is Slack's label separator inside `<…>`, so it ends an address.
+    ['https://example.com/a|FAKE', '<https://example.com/a>|FAKE'],
     ['https://x.com/pull/1**, merged**', '<https://x.com/pull/1>*, merged*'],
     // A snippet after an address is still a snippet.
     ['https://x.com/`code`', '<https://x.com/>`code`'],
@@ -792,6 +797,14 @@ test('a bare address is sent as Slack link markup, and nothing around it changes
   for (const [input, expected] of cases) {
     assert.equal(toSlackMrkdwn(input), expected, JSON.stringify(input));
   }
+});
+
+test('an address followed by a great many closing parentheses converts in linear time', () => {
+  const reply = `https://x.com/a${')'.repeat(200_000)}`;
+  const started = Date.now();
+  const converted = toSlackMrkdwn(reply);
+  assert.ok(Date.now() - started < 2_000, `took ${Date.now() - started}ms`);
+  assert.ok(converted.startsWith('<https://x.com/a>)'));
 });
 
 test('no reply, however written, alters a bare address in it', () => {
