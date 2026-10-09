@@ -8028,7 +8028,7 @@ test('with no principals configured, a DM names nobody: a display name never rea
   await adapter.stop();
 });
 
-test('each turn says what kind of room it is in now, its name and id, and how many are in it', async () => {
+test('each turn says what kind of room it is in now, how many are in it, and its id, never its name', async () => {
   // An agent in a DM told the person they were "talking on the terminal",
   // and would have answered a thousand-person channel the same way.
   const socket = createFakeSocket();
@@ -8070,19 +8070,19 @@ test('each turn says what kind of room it is in now, its name and id, and how ma
   // channel made private, or shared with another workspace, since the last
   // message is described as it is now.
   await socket.deliver('app_mention', mention('<@B-AVA> status?'));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', id: 'C1', name: 'general', members: 1042, thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 1042, thread: true, id: 'C1' });
   web.knownConversations.set('C1', { is_member: true, is_private: true, name: 'general', num_members: 12, is_org_shared: true });
   await socket.deliver('message', mention('and now?', { type: 'message', channel_type: 'group', ts: '100.2', thread_ts: '100.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', id: 'C1', name: 'general', members: 12, thread: true, shared: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 12, thread: true, shared: true, id: 'C1' });
   assert.equal(infoCalls, 2);
 
   await socket.deliver('app_mention', mention('<@B-AVA> review this', { channel: 'G1', ts: '200.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'private', id: 'G1', name: 'design-crit', members: 6, thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'private', members: 6, thread: true, id: 'G1' });
 
   // Shared beyond the workspace: said by the lookup, or by the event itself.
   web.knownConversations.set('C7', { is_member: true, num_members: 40, is_ext_shared: true });
   await socket.deliver('app_mention', mention('<@B-AVA> hi partners', { channel: 'C7', ts: '500.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', id: 'C7', members: 40, thread: true, shared: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', members: 40, thread: true, shared: true, id: 'C7' });
   await socket.deliver('message', {
     ...mention('<@B-AVA> hello', { type: 'message', channel: 'C1', channel_type: 'channel', ts: '600.1' }),
     body: { team_id: 'T1', event_id: 'evt-connect', is_ext_shared_channel: true },
@@ -9067,4 +9067,209 @@ test('a channel read that stops at its page bound says older history was not rea
     assert.equal(earlier.length, 1);
     assert.match(earlier[0]!.message, expectFirst);
   }
+});
+
+// ---- conversation reads (message.read) -------------------------------------
+
+test('readConversation reads a thread the app can see, paging and naming authors', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-FEEDBACK', { is_member: true });
+  const calls: Array<{ ts: string; cursor?: string; limit?: number }> = [];
+  web.conversations.replies = async (args) => {
+    calls.push({ ts: args.ts, ...(args.cursor ? { cursor: args.cursor } : {}), ...(args.limit !== undefined ? { limit: args.limit } : {}) });
+    return args.cursor
+      ? { messages: [{ ts: '1791333032.874939', thread_ts: '1791332967.606559', user: 'U-DYLAN', text: 'detail', files: [{ name: 'x.png' }] }] }
+      : {
+        messages: [{ ts: '1791332967.606559', thread_ts: '1791332967.606559', bot_id: 'B-BLAIR', bot_profile: { name: 'Blair' }, text: 'Summary', reply_count: 1 }],
+        response_metadata: { next_cursor: 'page-2' },
+      };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-FEEDBACK', thread: '1791332967.606559', limit: 50 });
+  assert.deepEqual(calls.map((call) => call.cursor), [undefined, 'page-2']);
+  assert.equal(calls[0]?.ts, '1791332967.606559');
+  assert.equal(result.more, false);
+  assert.deepEqual(result.messages[0], {
+    id: '1791332967.606559',
+    author: 'B-BLAIR',
+    authorName: 'Blair',
+    text: 'Summary',
+    at: new Date(1791332967606.559).toISOString(),
+    replies: 1,
+  });
+  assert.equal(result.messages[1]?.authorName, 'Dylan');
+  assert.equal(result.messages[1]?.thread, '1791332967.606559');
+  assert.deepEqual(result.messages[1]?.files, ['x.png']);
+  await adapter.stop();
+});
+
+test('readConversation reads top-level history within a window and stops at the limit', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true, is_private: true });
+  const seen: Array<{ oldest?: string; latest?: string; limit?: number; inclusive?: boolean }> = [];
+  web.conversations.history = async (args) => {
+    seen.push({ ...(args.oldest ? { oldest: args.oldest } : {}), ...(args.latest ? { latest: args.latest } : {}), ...(args.limit !== undefined ? { limit: args.limit } : {}), ...(args.inclusive !== undefined ? { inclusive: args.inclusive } : {}) });
+    return { messages: [{ ts: '200.000001', user: 'U-X', text: 'b' }, { ts: '199.000001', user: 'U-X', text: 'a' }], has_more: true, response_metadata: { next_cursor: 'next' } };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', after: '100.000000', before: '300.000000', limit: 2 });
+  assert.deepEqual(seen, [{ oldest: '100.000000', latest: '300.000000', limit: 2, inclusive: false }]);
+  assert.equal(result.messages.length, 2);
+  assert.equal(result.more, true);
+  await adapter.stop();
+});
+
+test('readConversation returns plain text, not Slack markup, and names only principals', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: [{
+      ts: '200.000001',
+      user: 'U-DYLAN',
+      text: '<@U-DYLAN> and <@U-STRANGER> see <#C-OPS|ops> and <https://example.com/a?b=1&amp;c=2|the doc>, '
+        + 'also <https://example.com>, <!here>, <!subteam^S1|@oncall>, <!date^1791332967^{date}|Oct 6>. 1 &lt; 2 &amp;&amp; 3 &gt; 2',
+    }],
+  });
+  const socket = createFakeSocket();
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused')));
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 5 });
+  assert.equal(
+    result.messages[0]?.text,
+    '@Dylan and @U-STRANGER see #ops and the doc (https://example.com/a?b=1&c=2), '
+      + 'also https://example.com, @here, @oncall, Oct 6. 1 < 2 && 3 > 2',
+  );
+  await adapter.stop();
+});
+
+test('readConversation looks up a bounded number of uncached authors, together, and leaves the rest as ids', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-BUSY', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: Array.from({ length: 30 }, (_, index) => ({ ts: `${300 - index}.000001`, user: `U-P${index}`, text: `m${index}` })),
+  });
+  let looked = 0;
+  let inFlight = 0;
+  let peak = 0;
+  web.users.info = async ({ user }: { user: string }) => {
+    looked += 1;
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight -= 1;
+    return { user: { profile: { display_name: `Name ${user}` } } };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-BUSY', limit: 50 });
+  assert.equal(looked, 10);
+  assert.ok(peak > 1, 'the lookups overlap rather than run one at a time');
+  assert.equal(result.messages[0]?.authorName, 'Name U-P0');
+  assert.equal(result.messages[29]?.authorName, undefined);
+  assert.equal(result.messages[29]?.author, 'U-P29');
+  await adapter.stop();
+});
+
+test('readConversation counts mentioned principals against the same lookup bound as authors', async () => {
+  const principals = Array.from({ length: 25 }, (_, index) => `U-M${index}`);
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-BUSY', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: [{ ts: '300.000001', user: 'U-AUTHOR', user_profile: { display_name: 'Author' }, text: principals.map((id) => `<@${id}>`).join(' ') }],
+  });
+  let looked = 0;
+  web.users.info = async ({ user }: { user: string }) => {
+    looked += 1;
+    return { user: { profile: { display_name: `Name ${user}` } } };
+  };
+  const socket = createFakeSocket();
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused')));
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-BUSY', limit: 5 });
+  assert.equal(looked, 10);
+  const text = result.messages[0]?.text ?? '';
+  assert.match(text, /^@Name U-M0 /);
+  assert.match(text, /@U-M24$/);
+  await adapter.stop();
+});
+
+test('readConversation refuses DMs and group DMs, even ones the app is in', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('D-DYLAN', { is_im: true, is_member: true });
+  web.knownConversations.set('G-GROUP', { is_mpim: true, is_member: true });
+  let read = false;
+  web.conversations.history = async () => {
+    read = true;
+    return { messages: [] };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'D-DYLAN', limit: 10 }), /direct message/);
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'G-GROUP', limit: 10 }), /direct message/);
+  assert.equal(read, false, 'nothing is read on a refusal');
+  await adapter.stop();
+});
+
+test('readConversation refuses a channel the app is not a member of, or cannot see', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-OTHER', { is_member: false });
+  web.conversations.history = async () => ({ messages: [] });
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'C-OTHER', limit: 10 }), /not a member of C-OTHER — invite it/);
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'C-NOWHERE', limit: 10 }), /cannot see C-NOWHERE/);
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'nobody', conversation: 'C-OTHER', limit: 10 }), /has no Slack app/);
+  await adapter.stop();
+});
+
+test('under admit: principals a peer whose socket failed to start keeps its place in the backfill', async () => {
+  const thread = [
+    { ts: '520.1', user: 'U-DYLAN', text: 'what is prod?' },
+    { ts: '520.2', bot_id: 'BB', user: 'B-BEA', text: 'prod is https://example.test', bot_profile: { name: 'Bea' } },
+  ];
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  socketBea.start = async () => {
+    throw new Error('socket refused');
+  };
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  (webAva.conversations as Record<string, unknown>).replies = async () => ({ messages: thread });
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'on it'));
+  gateway.sessionRouting = async () => undefined;
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', principals: ['U-DYLAN'], admit: 'principals' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    warn: () => {},
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  await socketAva.deliver('app_mention', mention('<@B-AVA> and staging?', { ts: '520.9', thread_ts: '520.1' }));
+  await adapter.stop();
+
+  const shown = gateway.dispatches[0]?.earlier?.map((entry) => entry.message) ?? [];
+  assert.equal(shown.length, 2);
+  assert.match(shown[1] ?? '', /Bea: prod is https:\/\/example\.test/);
 });

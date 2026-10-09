@@ -672,7 +672,16 @@ export const UNTRUSTED_TOOL_RESULT_NOTE =
  * transcripts, where a changed byte is a cache miss.
  */
 export const renderToolResultContent = (result: Pick<ToolResult, 'ok' | 'output' | 'error' | 'trust'>): string => {
-  const output: JsonValue = result.ok ? result.output : { error: result.error ?? 'Tool failed' };
+  // A failure keeps what the tool returned with it. A shell command that
+  // exits 1 carries its stdout, stderr, and exit code, and without them the
+  // model cannot tell a failing test from a typo from a missing program, so
+  // it guesses or asks. A failure with no output renders exactly as before,
+  // so most persisted transcripts replay byte-identical.
+  const output: JsonValue = result.ok
+    ? result.output
+    : result.output === null || result.output === undefined
+      ? { error: result.error ?? 'Tool failed' }
+      : { error: result.error ?? 'Tool failed', output: result.output };
   return JSON.stringify(
     result.trust === 'external'
       ? { untrusted: true, untrustedNote: UNTRUSTED_TOOL_RESULT_NOTE, output }
@@ -827,8 +836,12 @@ export const originOf = (rawUrl: string): string | undefined => {
  * as written, so every comparison of an origin in this codebase is of the
  * same thing.
  */
-const originForSession = (tool: Pick<Tool, 'originFor'>, session: Session): string | undefined => {
-  const reported = tool.originFor?.(session);
+const originForSession = (
+  tool: Pick<Tool, 'originFor'>,
+  session: Session,
+  input: JsonObject,
+): string | undefined => {
+  const reported = tool.originFor?.(session, input);
   return reported === undefined ? undefined : originOf(reported);
 };
 
@@ -2715,24 +2728,18 @@ export interface ConversationContext {
    */
   shared?: boolean;
   /**
-   * The platform's id for the conversation (a Slack channel id), so an
-   * agent can name it to a tool that reads the channel. Never set for a
-   * direct message.
+   * The channel's own id for the room, such as Slack's `C0123456789`: what
+   * `message.read` and `message.send` take, and what lets an agent say or
+   * remember which room this is. Never set for a direct message, where the
+   * id names nothing the agent can use elsewhere.
    */
   id?: string;
-  /**
-   * The channel's name, which is often the context itself — a channel per
-   * client, per project. Anyone who can create or rename a channel chooses
-   * it, and this reaches the system prompt, so only a name in Slack's own
-   * channel alphabet survives (lowercase letters, digits, `-`, `_`, at
-   * most 80): it cannot carry punctuation or a sentence, and is rendered
-   * as a `#label`, never as prose. Never set for a direct message.
-   */
-  name?: string;
+  // No channel name, deliberately: anyone who can create or rename a
+  // channel chooses it, and this reaches the system prompt, where a name
+  // like `ignore-all-previous-instructions` would outrank the soul. The
+  // kind, the count, and the id are what it needs, and none of them is text
+  // a person chose.
 }
-
-const CONVERSATION_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,79}$/;
-const CONVERSATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 /**
  * The metadata key a channel adapter records a turn's room under: a
@@ -2746,6 +2753,9 @@ const CONVERSATION_KINDS: readonly string[] = ['direct', 'group', 'private', 'pu
 // vouched for, but still typed, so anything that is not plainly a name is
 // dropped rather than quoted.
 const CONVERSATION_WITH_PATTERN = /^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} .'\u2019-]{0,63}$/u;
+// A platform-assigned id, never a word anyone typed: Slack's are capitals
+// and digits. Anything else is dropped rather than quoted.
+const CONVERSATION_ID_PATTERN = /^[A-Z0-9]{6,32}$/;
 
 /**
  * The room a turn's metadata describes, keeping only what is safe to put
@@ -2756,7 +2766,7 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
   }
-  const { kind, members, with: withWhom, thread, shared, id, name } = raw as Record<string, unknown>;
+  const { kind, members, with: withWhom, thread, shared, id } = raw as Record<string, unknown>;
   if (typeof kind !== 'string' || !CONVERSATION_KINDS.includes(kind)) {
     return undefined;
   }
@@ -2767,7 +2777,6 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
     ...(thread === true ? { thread: true } : {}),
     ...(kind !== 'direct' && shared === true ? { shared: true } : {}),
     ...(kind !== 'direct' && typeof id === 'string' && CONVERSATION_ID_PATTERN.test(id) ? { id } : {}),
-    ...(kind !== 'direct' && typeof name === 'string' && CONVERSATION_NAME_PATTERN.test(name) ? { name } : {}),
   };
 };
 
@@ -3085,14 +3094,18 @@ export interface Tool {
    * effect lives in the page it is pointed at. In the form `originOf`
    * returns: `https://app.example.com`, scheme and host and port only.
    *
-   * **Deliberately not given the call's input**, which is the difference
-   * between this and its two siblings. A CSS selector describes nothing —
-   * `click("#submit")` is equally "load more results" and "confirm
-   * purchase" — so the only thing about a browser action that an operator
-   * can read and mean is *where* it happens, and that has to come from the
-   * page the conversation is already on. An input parameter would be the
-   * agent's claim about where it is, which is exactly the thing a scope
-   * must not take on trust.
+   * Two kinds of tool answer this, and they differ in what they may read.
+   * `browser.act` must answer from the *session*, never the input: a CSS
+   * selector describes nothing — `click("#submit")` is equally "load more
+   * results" and "confirm purchase" — so where it acts has to come from the
+   * page the conversation is already on, and an input parameter would be
+   * the agent's claim about where it is. `web.fetch` answers from the
+   * input, because its URL is not a claim about the action but the action
+   * itself. A tool may read `input` here **only** when its `execute` acts
+   * on exactly the origin it reported, and re-checks that before it leaves
+   * it (`web.fetch` stops at a redirect to another origin rather than
+   * following it), so a grant for one site never carries a call to
+   * another.
    *
    * Exposing this is a request to be judged by the origin, and it is also
    * a statement that the tool must never receive a tool-wide grant: the
@@ -3105,7 +3118,7 @@ export interface Tool {
    * grant answers only its own question, and how two of them compose on
    * one call is a decision nobody has made.
    */
-  originFor?(session: Session): string | undefined;
+  originFor?(session: Session, input: JsonObject): string | undefined;
   execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;
 }
 
@@ -4096,6 +4109,27 @@ export interface ChannelAdapterLike {
   resolveOutbound?(address: { agentId: string; to: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
+  /** See `@stratusagent/channels`' `ChannelAdapter.readConversation`. */
+  readConversation?(request: {
+    agentId: string;
+    conversation: string;
+    thread?: string;
+    after?: string;
+    before?: string;
+    limit: number;
+  }): Promise<{
+    messages: Array<{
+      id: string;
+      author: string;
+      authorName?: string;
+      text: string;
+      at?: string;
+      thread?: string;
+      replies?: number;
+      files?: string[];
+    }>;
+    more: boolean;
+  }>;
 }
 
 /**
@@ -4396,6 +4430,34 @@ export interface PluginStateDirectory {
   prepare(): string;
 }
 
+/**
+ * Files and directories on this machine that no plugin may hand an agent,
+ * answered by the host.
+ *
+ * A seam for the reason {@link AgentWorkspaces} is one: which files hold
+ * the daemon's own secrets is the host's layout, not a plugin's. Before it,
+ * nothing kept them out of a tool whose roots happened to cover them: an
+ * operator who gave an agent `roots: ["~"]` gave it `fs.read` of
+ * `~/.stratus/credentials.json`, which `fs.read` answers ungated. Roots are
+ * the operator's choice of where an agent may work; this is the short list
+ * of places no choice of roots opens.
+ *
+ * Paths, not a promise that each exists: a caller canonicalizes and
+ * tolerates what is missing. Re-read rather than cached, so a file the host
+ * starts keeping under a running daemon is protected from the next call.
+ */
+export interface ProtectedPaths {
+  /** What is protected. A directory protects everything beneath it. */
+  all(): Promise<readonly string[]>;
+  /**
+   * Directories beneath a protected one that stay reachable. The daemon
+   * protects its whole home and exempts the agents' workspaces, which live
+   * inside it and are where agents are meant to work. Whether a given agent
+   * reaches a given workspace is still its roots' decision.
+   */
+  exempt(): Promise<readonly string[]>;
+}
+
 export interface MemoryRegistrationHandle {
   register(contribution: MemoryStoreContribution): void;
 }
@@ -4457,6 +4519,16 @@ export interface PluginContext {
    * once — and must never choose a directory of its own instead.
    */
   stateDirectory?: PluginStateDirectory;
+  /**
+   * What no plugin may hand an agent, whatever the agent's own roots say.
+   * See {@link ProtectedPaths}.
+   *
+   * A host that omits it protects nothing beyond what each plugin's own
+   * configuration excludes: a file-reading plugin with roots above the
+   * host's state reads the host's secrets there. The daemon and `stratus
+   * run` both supply it.
+   */
+  protectedPaths?: ProtectedPaths;
   /**
    * The host's log, for what a plugin has to say after `setup` returns —
    * a server that dropped, a reconnect that failed. The daemon's is the
@@ -5193,11 +5265,7 @@ export const renderChannelSection = (
  */
 const describeRoom = (room: ConversationContext, channel: string): string => {
   const count = room.members !== undefined ? room.members.toLocaleString('en-US') : undefined;
-  // `#name (ID)`, as a label: see `ConversationContext.name`.
-  const label = room.name !== undefined || room.id !== undefined
-    ? `, ${[room.name !== undefined ? `#${room.name}` : undefined, room.id !== undefined ? `(${room.id})` : undefined].filter(Boolean).join(' ')}`
-    : '';
-  const sep = label.length > 0 ? ',' : '';
+  const idNote = room.id !== undefined ? ` Its ${channel} id is ${room.id}.` : '';
   const inThread = room.thread === true ? ' You are replying in a thread there, which everyone who can read the channel can open.' : '';
   const outside = room.shared === true
     ? ' It is shared with people outside this workspace, through Slack Connect or another workspace of the organization, and they read it too.'
@@ -5209,14 +5277,14 @@ const describeRoom = (room: ConversationContext, channel: string): string => {
       return `this is a direct message in ${channel}${room.with !== undefined ? ` with ${room.with}` : ''}. `
         + 'Only the two of you can read it, so you are talking to one person.';
     case 'group':
-      return `this is a group direct message in ${channel}${label}${count !== undefined ? `${sep} with ${count} members, you included` : ''}. `
-        + `Only they can read it.${outside}${inThread} ${forEveryone}`;
+      return `this is a group direct message in ${channel}${count !== undefined ? ` with ${count} members, you included` : ''}. `
+        + `Only they can read it.${idNote}${outside}${inThread} ${forEveryone}`;
     case 'private':
-      return `this is a private ${channel} channel${label}${count !== undefined ? `${sep} with ${count} members, you included` : ''}. `
-        + `Only its members can read it.${outside}${inThread} ${forEveryone}`;
+      return `this is a private ${channel} channel${count !== undefined ? ` with ${count} members, you included` : ''}. `
+        + `Only its members can read it.${idNote}${outside}${inThread} ${forEveryone}`;
     case 'public':
-      return `this is a public ${channel} channel${label}${count !== undefined ? `${sep} with ${count} members` : ''}. `
-        + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${outside}${inThread} ${forEveryone}`;
+      return `this is a public ${channel} channel${count !== undefined ? ` with ${count} members` : ''}. `
+        + `Anyone in the workspace can find it and read it, now or later, not only the people talking.${idNote}${outside}${inThread} ${forEveryone}`;
   }
 };
 
@@ -5918,6 +5986,89 @@ export interface AgentRunnerOptions {
  * task checks in rather than where it dies, and 40 is enough for real
  * multi-step work while still bounding what a runaway loop can spend.
  */
+/**
+ * What is wrong with a call's input against the shape its tool declared,
+ * or undefined when nothing the check reads is wrong.
+ *
+ * Deliberately shallow: required keys, the declared JSON types, `enum`,
+ * and `additionalProperties: false`, applied to nested objects too. It
+ * exists so a call the tool would reject anyway is answered with the reason
+ * before anyone is asked to approve it, not to replace a tool's own checks,
+ * which still run. A schema keyword it doesn't read is not a failure.
+ */
+/** JSON equality, member order aside, the way JSON Schema compares `enum` values. */
+const sameJson = (left: JsonValue | undefined, right: JsonValue | undefined, depth = 0): boolean => {
+  if (left === right) {
+    return true;
+  }
+  // Past any depth a real enum has, too deep to compare safely: unknown is
+  // not wrong, so it counts as a match and the tool's own checks decide.
+  if (depth > 64) {
+    return true;
+  }
+  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') {
+    return false;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => sameJson(item, right[index], depth + 1));
+  }
+  const leftKeys = Object.keys(left).filter((key) => left[key] !== undefined);
+  const rightKeys = Object.keys(right).filter((key) => right[key] !== undefined);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => sameJson(left[key], right[key], depth + 1));
+};
+
+export const inputProblem = (schema: JsonObject | undefined, input: JsonValue, where = 'input', depth = 0): string | undefined => {
+  if (schema === undefined || depth > 4) {
+    return undefined;
+  }
+  const declared = schema.type;
+  const types = Array.isArray(declared) ? declared.filter((type): type is string => typeof type === 'string') : typeof declared === 'string' ? [declared] : [];
+  if (types.length > 0) {
+    const actual = input === null ? 'null'
+      : Array.isArray(input) ? 'array'
+        : typeof input === 'number' ? (Number.isInteger(input) ? 'integer' : 'number')
+          : typeof input;
+    const fits = types.some((type) => type === actual || (type === 'number' && actual === 'integer'));
+    if (!fits) {
+      return `${where} should be ${types.join(' or ')}, not ${actual}`;
+    }
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some((option) => sameJson(option, input))) {
+    return `${where} should be one of ${schema.enum.map((option) => JSON.stringify(option)).join(', ')}`;
+  }
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return undefined;
+  }
+  const properties = schema.properties !== null && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+    ? schema.properties as Record<string, JsonValue>
+    : {};
+  for (const key of Array.isArray(schema.required) ? schema.required : []) {
+    if (typeof key === 'string' && input[key] === undefined) {
+      return `${where} is missing "${key}"`;
+    }
+  }
+  // With `patternProperties` a key may be declared by a pattern, and running
+  // a pattern a schema supplied is a regex engine on untrusted input. Not
+  // this check's job: extra keys are only judged when no pattern exists.
+  const patterned = schema.patternProperties !== undefined && schema.patternProperties !== null;
+  if (schema.additionalProperties === false && !patterned) {
+    const unknown = Object.keys(input).find((key) => !(key in properties));
+    if (unknown !== undefined) {
+      return `${where} has "${unknown}", which this tool does not take (it takes ${Object.keys(properties).map((key) => `"${key}"`).join(', ') || 'nothing'})`;
+    }
+  }
+  for (const [key, value] of Object.entries(input)) {
+    const property = properties[key];
+    if (value !== undefined && property !== null && typeof property === 'object' && !Array.isArray(property)) {
+      const problem = inputProblem(property as JsonObject, value, `${where}.${key}`, depth + 1);
+      if (problem) {
+        return problem;
+      }
+    }
+  }
+  return undefined;
+};
+
 export const DEFAULT_MAX_TURNS = 40;
 
 export class AgentRunner {
@@ -7057,6 +7208,18 @@ export class AgentRunner {
       return rejected(`Tool not found: ${call.toolName}`);
     }
 
+    // A malformed call is answered before anyone is asked about it, for the
+    // reason an unknown tool is: approving a call the tool will reject is a
+    // question with no useful answer, and the model needs the reason, not a
+    // human's click, to fix it. Only for calls that would be asked about; a
+    // `safe` tool's own checks answer it as they always have.
+    if (resolveToolRisk(tool) !== 'safe') {
+      const problem = inputProblem(tool.parameters, call.input);
+      if (problem) {
+        return rejected(`Invalid input for ${call.toolName}: ${problem}. Fix the call and try again.`);
+      }
+    }
+
     // Only a call that can actually be held for a human is checkpointed:
     // a `safe` one is never asked about, and writing a record for it would
     // add a save to every unattended call to describe a wait that does not
@@ -7110,7 +7273,7 @@ export class AgentRunner {
         ...(signal ? { signal } : {}),
         ...(options.parkedAt ? { parkedAt: options.parkedAt } : {}),
       });
-      originWhenJudged = originForSession(tool, session);
+      originWhenJudged = originForSession(tool, session, call.input);
     } finally {
       // Cleared before anything executes and on every exit — an abort that
       // throws out of the policy must not leave the session looking parked
@@ -7142,7 +7305,7 @@ export class AgentRunner {
     // `tool.completed` keeps the pairing every consumer reads — the
     // watchdog's phase, the channel's live line. The agent is told plainly,
     // because this is a page that moved rather than a permission it lacks.
-    const originNow = originForSession(tool, session);
+    const originNow = originForSession(tool, session, call.input);
     if (originNow !== originWhenJudged) {
       const result: ToolResult = {
         callId: call.id,

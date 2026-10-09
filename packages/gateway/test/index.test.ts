@@ -5885,3 +5885,43 @@ test('holdsMessage counts a dispatch still queued behind another turn, and not a
     await gateway.stop();
   }
 });
+
+test('an agent with its own budget gets it, and the rest keep the shared one', async () => {
+  // Same model for both, so only the budget tells their runners apart: one
+  // runner shared across them would hand one the other's limit.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-a\n---\n\nYou are Bea.\n');
+  const toolTurns = new Map<string, number>();
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async (_url: unknown, init?: RequestInit) => {
+      const body = String(init?.body);
+      const who = body.includes('You are Ava.') ? 'ava' : 'bea';
+      if (body.includes('You have used every step this message allows')) {
+        return openAiText('wrapped up');
+      }
+      toolTurns.set(who, (toolTurns.get(who) ?? 0) + 1);
+      return openAiToolCall('demo.echo', { text: 'again' });
+    }) as typeof fetch,
+  };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    maxTurns: 2,
+    maxTurnsFor: (agentId) => (agentId === 'ava' ? 5 : undefined),
+    approvals: () => ({ approve: async () => true }),
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'ava-long', agentId: 'ava', userMessage: 'keep going' });
+    await gateway.dispatch({ sessionId: 'bea-short', agentId: 'bea', userMessage: 'keep going' });
+    assert.equal(toolTurns.get('ava'), 5);
+    assert.equal(toolTurns.get('bea'), 2);
+  } finally {
+    await gateway.stop();
+  }
+});

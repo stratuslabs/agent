@@ -336,6 +336,56 @@ export interface OutboundAddress {
 }
 
 /**
+ * A request to read a conversation's recent messages, outside any
+ * conversation the adapter is rendering — the read twin of
+ * `OutboundAddress`. Every id is channel-native (for Slack, a channel id
+ * and message `ts` values), for the same reason `OutboundAddress.to` is.
+ */
+export interface ConversationReadRequest {
+  /** Whose app does the reading: its membership is the boundary. */
+  agentId: string;
+  /** Channel-native conversation id, e.g. `C0123456`. */
+  conversation: string;
+  /**
+   * The root message id of one thread. Given, the read is that thread's
+   * root and replies, oldest first; absent, the conversation's top level,
+   * newest first.
+   */
+  thread?: string;
+  /** Only messages after this message id or time, exclusive. */
+  after?: string;
+  /** Only messages before this message id or time, exclusive. */
+  before?: string;
+  /** At most this many messages; the caller has already bounded it. */
+  limit: number;
+}
+
+/** One message as a read returns it: text and who wrote it, not markup. */
+export interface ConversationMessage {
+  /** Channel-native message id (Slack: its `ts`). */
+  id: string;
+  /** Channel-native author id; a bot's id when a bot wrote it. */
+  author: string;
+  /** A display name, when the platform supplies one cheaply. */
+  authorName?: string;
+  text: string;
+  /** ISO-8601 time the message was posted, when derivable. */
+  at?: string;
+  /** The root message id, for a reply inside a thread. */
+  thread?: string;
+  /** How many replies a thread root has. */
+  replies?: number;
+  /** Names of attached files; their contents are not read. */
+  files?: string[];
+}
+
+export interface ConversationReadResult {
+  messages: ConversationMessage[];
+  /** True when the platform had more messages past `limit`. */
+  more: boolean;
+}
+
+/**
  * A credential an agent asked for, handed to the channel its conversation
  * is in so a person there can be shown a form. Everything the answer needs
  * stays with the gateway under `requestId`; the channel only has to show
@@ -387,6 +437,19 @@ export interface ChannelAdapter {
    * tells its user the operator was asked.
    */
   requestCredential?(request: ChannelCredentialRequest): Promise<void>;
+  /**
+   * The read side of an addressable conversation — what `message.read`
+   * resolves. Optional, like `resolveOutbound`: a transport with no
+   * history (or none it will share) lacks the method, and the gateway
+   * says the channel cannot be read.
+   *
+   * MUST reject, with a sentence for the agent, anything its app could
+   * not or should not read: an agent with no app here, a conversation it
+   * is not a member of, and any kind of conversation the adapter keeps
+   * private to the people in it. The result is quoted to the model, so
+   * an implementation returns text, never platform markup or tokens.
+   */
+  readConversation?(request: ConversationReadRequest): Promise<ConversationReadResult>;
 }
 
 export interface ChannelSessionKeyParts {

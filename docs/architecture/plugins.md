@@ -205,6 +205,19 @@ directory at all. A plugin whose host gave it none says what it gives up —
 a channel that cannot store its read position cannot promise a message is
 handled once — and never picks a directory of its own.
 
+**What no plugin may hand an agent is asked too.** `setup` receives
+`context.protectedPaths`: `all()` answers with the daemon's whole home and
+the secret files in it, plus a trusted config chosen with `--config` or
+`STRATUS_CONFIG` wherever it is, and `exempt()` answers with the agents'
+workspaces. A plugin that reads or writes files for an agent checks every
+path with `protectedPathGuard` from `@stratusagent/plugins`, which matches
+both spellings of each path and a protected file by inode, so a hard link
+does not get around it. It is asked per call, like the workspaces. Roots
+are the operator's choice of where an agent works, and a broad one such as
+`~` should not also open the credential store, another agent's sessions,
+or the agent's own soul. A host that omits it protects nothing beyond each
+plugin's own configuration. `tool-fs` is the first consumer.
+
 **`ledgerRoot` is the host's key and is stripped**, the way `toolRisks` is,
 so a plugin's code never sees it. Two plugins write the filesystem
 provenance ledger (`tool-fs` and `plugin-mcp`), and an operator who
@@ -471,6 +484,10 @@ capability rather than an assumption:
 - `OutboundConnection.edit` and `upload` are optional. `post` is the whole
   of what the gateway's `message.send` and schedule delivery use; a channel
   without `edit` posts the finished reply instead of streaming it in place.
+- `ChannelAdapter.readConversation` is optional too: it is what
+  `message.read` reads through, and a channel without it cannot be read.
+  An adapter that has it decides which conversations are readable at all
+  and refuses the rest — Slack reads only channels its app is in, never DMs.
 - Who counts as the operator is one rule in `@stratusagent/channels`, not
   one per adapter: `isPrincipal`, `admitsSender` (the `admit` policy), and
   `senderTrustFor` (the `user`/`unknown` label a turn carries). Which

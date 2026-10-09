@@ -1,6 +1,6 @@
 import { CREDENTIAL_REQUEST_TOOL_NAME } from './credentials.ts';
 import { DELEGATE_TOOL_NAME } from './delegate.ts';
-import { MESSAGE_SEND_TOOL_NAME } from './message.ts';
+import { MESSAGE_READ_TOOL_NAME, MESSAGE_SEND_TOOL_NAME } from './message.ts';
 import {
   SCHEDULE_EVERY_TOOL_NAME,
   SCHEDULE_AT_TOOL_NAME,
@@ -31,6 +31,7 @@ export const GATEWAY_ONLY_TOOL_NAMES: readonly string[] = [
   SCHEDULE_LIST_TOOL_NAME,
   SCHEDULE_CANCEL_TOOL_NAME,
   MESSAGE_SEND_TOOL_NAME,
+  MESSAGE_READ_TOOL_NAME,
   DELEGATE_TOOL_NAME,
   CREDENTIAL_REQUEST_TOOL_NAME,
 ];

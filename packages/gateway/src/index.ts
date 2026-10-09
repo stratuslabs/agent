@@ -60,6 +60,8 @@ import {
   createForgetTool,
   createPinTool,
   createMessageSendTool,
+  createMessageReadTool,
+  type ConversationReader,
   createRecallTool,
   createRememberTool,
   createScheduleTools,
@@ -162,6 +164,7 @@ import {
   fleetDbIn,
   createAgentWorkspaces,
   createPluginStateDirectories,
+  createHostProtectedPaths,
   type FallbackRuntime,
   type OperatorSkillInfo,
   type RosterEntry,
@@ -234,6 +237,21 @@ export interface GatewayChannelAdapter {
   resolveOutbound?(address: { agentId: string; to: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
+  /**
+   * The read side of an addressable conversation, mirroring
+   * `@stratusagent/channels`' `ChannelAdapter.readConversation`. Optional:
+   * an adapter without it cannot be read through `message.read`.
+   * Implementations MUST reject a conversation their app may not read,
+   * with a sentence for the agent.
+   */
+  readConversation?(request: {
+    agentId: string;
+    conversation: string;
+    thread?: string;
+    after?: string;
+    before?: string;
+    limit: number;
+  }): ReturnType<ConversationReader>;
   /**
    * Shows a person a form for a credential an agent asked for, mirroring
    * `@stratusagent/channels`' `ChannelAdapter.requestCredential`. Optional:
@@ -574,6 +592,12 @@ export interface GatewayOptions {
    * `maxTurns`.
    */
   maxTurns?: number;
+  /**
+   * One agent's own budget, replacing `maxTurns` for its messages and the
+   * sub-sessions it delegates to that agent. Undefined means the shared one.
+   * `stratus serve` fills it from the trusted config's `agentMaxTurns`.
+   */
+  maxTurnsFor?: (agentId: string) => number | undefined;
   /**
    * The activity watchdog: abort a turn when no event for its session has
    * arrived for this long. Progress-based, not wall-clock — any delta, tool
@@ -2030,6 +2054,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const connection = await outboundFor(agentId, destination);
     await connection.post(text);
   }));
+  tools.register(createMessageReadTool(async ({ agentId, source, ...window }) => {
+    // The same carrying rule as outbound: a read goes through the app of
+    // the agent asking, never whichever adapter of that kind is running,
+    // because membership is the read boundary and it is per app.
+    const { adapter, carriesOthers } = channelCarrying(source.channel, agentId, (candidate) => candidate.readConversation !== undefined);
+    if (!adapter?.readConversation) {
+      throw new Error(carriesOthers
+        ? `No running '${source.channel}' channel carries agent ${agentId}, so it has no app to read ${source.to} with.`
+        : `No running channel can read '${source.channel}' conversations.`);
+    }
+    return adapter.readConversation({ agentId, conversation: source.to, ...window });
+  }));
   /**
    * Credential requests waiting on a person, by request id.
    *
@@ -2329,8 +2365,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return createHash('sha256').update(JSON.stringify(providerInputs)).digest('hex');
   };
 
-  const runnerFor = (config: RuntimeConfig): AgentRunner => {
-    const key = runnerKeyFor(config);
+  const runnerFor = (config: RuntimeConfig, agentId: string): AgentRunner => {
+    // The budget is a provider-construction input too (the harness
+    // runtimes take it as their inner limit), so it is part of the key:
+    // two agents on one model with different budgets get their own runners.
+    const maxTurns = options.maxTurnsFor?.(agentId) ?? options.maxTurns;
+    const key = `${runnerKeyFor(config)}:${maxTurns ?? 'default'}`;
     const existing = runners.get(key);
     if (existing) {
       return existing;
@@ -2349,7 +2389,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         }
         return hostedRunner.executeHostedToolCall(session, call, context);
       },
-      options.maxTurns,
+      maxTurns,
       // The sticky-fallback switch is durable the moment it happens, not
       // when the turn's next save lands — a daemon killed mid-fallback
       // must not retry the primary on restart.
@@ -2371,7 +2411,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       skills: skillCatalog,
       memory,
       streaming: true,
-      ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
+      ...(maxTurns !== undefined ? { maxTurns } : {}),
     });
     hostedRunner = runner;
     runners.set(key, runner);
@@ -2861,7 +2901,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
 
     const config = await runtimeForAgent(source);
-    const runner = runnerFor(config);
+    const runner = runnerFor(config, source.definition.id);
     // Which executor the turn's tool calls run through — the built-in
     // under the name `stratus run` has always recorded, a contributed one
     // under its registered name — so a transcript says where a command
@@ -3118,7 +3158,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       await store.save(session);
 
       const recoveredConfig = await runtimeForAgent(source);
-      const runner = runnerFor(recoveredConfig);
+      const runner = runnerFor(recoveredConfig, source.definition.id);
       // Tracked like a dispatched turn's controller: a recovered turn
       // that runs on past its approval is a turn like any other, and a
       // restart's window has to be able to cut it short with the same
@@ -3342,7 +3382,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     log(`${session.id}: continuing a keyed turn the last stratusd was still running`);
     session.agent = source.definition;
     await store.save(session);
-    const runner = runnerFor(config);
+    const runner = runnerFor(config, source.definition.id);
     return withWatchdog(session.id, undefined, effectiveStreams, fallbackStreams, async (signal) =>
       await runner.continueTurn(session.id, {
         runtime: runtimeContextFor(source, config, switchedToFallback, session.metadata),
@@ -3773,6 +3813,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       credentials: createFileCredentialResolver(env),
       workspaces: agentWorkspaces,
       stateDirectories: createPluginStateDirectories(env),
+      // The daemon's home, minus the agents' workspaces, whatever roots a
+      // plugin's config grants. See `createHostProtectedPaths`.
+      protectedPaths: createHostProtectedPaths(env, {
+        ...(options.selection?.configPath ? { configPath: options.selection.configPath } : {}),
+        // Where the stores were actually opened, when a host moved them.
+        ...(options.stateDir !== undefined ? { stateDir } : {}),
+      }),
       // The structured log, so a plugin's lifecycle lines — an MCP server
       // that dropped, a reconnect that failed — are in `stratus logs` and
       // not only on a stderr the service manager owns.

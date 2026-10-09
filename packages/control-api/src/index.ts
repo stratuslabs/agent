@@ -27,7 +27,7 @@ export type { DashboardSession } from './auth.ts';
 export type { EventEnvelope, EventFilter } from './events.ts';
 
 /** Kept in step with package.json, the way the CLI keeps its own version. */
-export const CONTROL_API_VERSION = '0.11.7';
+export const CONTROL_API_VERSION = '0.11.8';
 
 /** The default port `stratusd` serves its API on. Loopback only. */
 /** How long stop() lets an answer already being written finish before it closes the socket anyway. */
@@ -95,6 +95,12 @@ export interface ControlApiOptions {
    * and nothing a revoke could reach.
    */
   grants?: AgentGrantStore;
+  /**
+   * The commands this daemon's config lets an agent run without asking
+   * (`approvals.commands`), listed beside its grants. From the daemon,
+   * because a client reading its own config may be reading a different one.
+   */
+  configCommands?: (agentId: string) => string[];
   /**
    * The address people reach this daemon on from elsewhere (a Tailscale
    * name, a tunnel), from `api.publicUrl`. Credential links are built on
@@ -237,6 +243,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       env,
       configPath: options.configPath,
       grants: options.grants,
+      configCommands: options.configCommands,
       principal,
       params: resolved.params,
       url: requestUrl,

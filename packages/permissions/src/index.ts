@@ -23,9 +23,10 @@ export { atLeastAsRisky } from '@stratusagent/core';
 import {
   analyzeCommand,
   describeCommandScope,
-  findMatchingScope,
+  findCoveringScopes,
   normalizeCommandScope,
   SAFE_COMMAND_SCOPES,
+  type CommandAnalysis,
   type CommandScope,
 } from './commands.ts';
 import {
@@ -48,10 +49,13 @@ import {
 
 export {
   analyzeCommand,
+  commandScopeFromPrefix,
   describeCommandScope,
+  findCoveringScopes,
   findMatchingScope,
   matchesScope,
   normalizeCommandScope,
+  NUMERIC_FLAG,
   parseCommandScope,
   sameScope,
   SAFE_COMMAND_SCOPES,
@@ -605,6 +609,23 @@ const awaitRemote = async (
  * and it is the only path a scope-less gated tool has to running in
  * `headless`, which is the mode every installed service runs in.
  */
+/**
+ * What a log line may say an invocation runs: its base command, never its
+ * arguments, which is what keeps a refusal out of the transcript business.
+ */
+const commandNames = (analysis: CommandAnalysis | undefined): string | undefined => {
+  if (!analysis) {
+    return undefined;
+  }
+  if (analysis.pipeline) {
+    // Not the stage names: the first is the agent's own choice, but the
+    // rest of a pipeline is where a composed command puts the part a page
+    // talked it into, and the log is a trace rather than a transcript.
+    return 'a pipeline';
+  }
+  return analysis.base;
+};
+
 export const createPermissionPolicy = (options: PermissionPolicyOptions): ApprovalPolicy => {
   const { mode, ask, request, onDecision, commands, destinations, origins, grants, gateExternalContent } = options;
   if (mode === 'interactive' && !ask) {
@@ -764,7 +785,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             ...(origins?.whitelist ? await origins.whitelist.originsFor(session.agent.id) : []),
           ]
         : [];
-      const reportedOrigin = scopedByOrigin ? context.tool.originFor?.(session) : undefined;
+      const reportedOrigin = scopedByOrigin ? context.tool.originFor?.(session, call.input) : undefined;
       // Read through the same normalizer a grant file is read through,
       // rather than taken as written. The hook's contract is an origin, but
       // this is what a grant is compared against — a plugin that hands back
@@ -800,12 +821,16 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             ...granted,
             ...(commands?.safeScopes ?? SAFE_COMMAND_SCOPES),
           ];
-          const scope = findMatchingScope(analysis, candidates);
-          if (scope) {
+          // One scope per command of a pipeline, so `git log | grep fix`
+          // runs because both halves would on their own, and is named that way.
+          const covering = findCoveringScopes(analysis, candidates);
+          if (covering) {
             return report(
               context,
               true,
-              `${call.toolName} ran inside the approved scope "${describeCommandScope(scope)}"`,
+              covering.length === 1
+                ? `${call.toolName} ran inside the approved scope "${describeCommandScope(covering[0] as CommandScope)}"`
+                : `${call.toolName} ran a pipeline inside the approved scopes ${covering.map((scope) => `"${describeCommandScope(scope)}"`).join(' | ')}`,
               command,
             );
           }
@@ -839,7 +864,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       }
 
       if (origin !== undefined) {
-        const granted = findMatchingOriginScope(origin, grantedOrigins);
+        const granted = findMatchingOriginScope(origin, grantedOrigins, call.toolName);
         if (granted) {
           return report(
             context,
@@ -890,7 +915,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               + ' set to "gate" no grant covers it, and nobody is available to approve it'
             : command !== undefined
               ? `${call.toolName} was called outside every approved scope`
-                + `${analysis?.base ? ` (${analysis.base})` : ''} and nobody is available to approve it`
+                + `${commandNames(analysis) ? ` (${commandNames(analysis)})` : ''} and nobody is available to approve it`
               : origin !== undefined
                 // Named, because it is the actionable half: an operator
                 // reading this at 3am needs to know which site to grant, and
@@ -1019,7 +1044,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         if (!scopedByOrigin) {
           return report(context, true, reason, forCommand, undefined, origin);
         }
-        const settled = originScopeFor(context.tool.originFor?.(session) ?? '')?.origin;
+        const settled = originScopeFor(context.tool.originFor?.(session, call.input) ?? '')?.origin;
         if (settled === origin) {
           return report(context, true, reason, forCommand, undefined, origin);
         }
@@ -1050,7 +1075,10 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           );
         }
         if (scopedByOrigin) {
-          if (!originScope) {
+          // The tool goes in with the site: a grant for one origin-scoped
+          // tool is not a grant for another (see `OriginScope.tool`).
+          const grant: OriginScope | undefined = originScope ? { ...originScope, tool: call.toolName } : undefined;
+          if (!grant) {
             // No origin to remember — a page that never loaded, or one
             // whose URL has no origin this engine will name. The call runs;
             // nothing is widened. Falling back to the tool-wide grant here
@@ -1062,7 +1090,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           }
           if (origins?.whitelist) {
             try {
-              await origins.whitelist.rememberOrigin(session.agent.id, originScope);
+              await origins.whitelist.rememberOrigin(session.agent.id, grant);
             } catch (error) {
               if (!(error instanceof WhitelistUnreadableError)) {
                 throw error;
@@ -1070,17 +1098,17 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               // Same bargain the command half makes: the answer holds for
               // this process, and the file that would carry it past a
               // restart is not written over grants nobody can read.
-              rememberForProcess(sessionOrigins, session.agent.id, originScope);
+              rememberForProcess(sessionOrigins, session.agent.id, grant);
               return allowUnlessMoved(
-                `${call.toolName} was approved, and ${describeOriginScope(originScope)} is acted on without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
+                `${call.toolName} was approved, and ${describeOriginScope(grant)} is acted on without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
               );
             }
-            origins.onScopeRemembered?.({ agentId: session.agent.id, scope: originScope });
+            origins.onScopeRemembered?.({ agentId: session.agent.id, scope: grant });
           } else {
-            rememberForProcess(sessionOrigins, session.agent.id, originScope);
+            rememberForProcess(sessionOrigins, session.agent.id, grant);
           }
           return allowUnlessMoved(
-            `${call.toolName} was approved, and ${describeOriginScope(originScope)} is now acted on without asking`,
+            `${call.toolName} was approved, and ${describeOriginScope(grant)} is now acted on without asking`,
           );
         }
         const scope = commandScope;
