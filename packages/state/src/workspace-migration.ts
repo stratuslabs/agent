@@ -2361,11 +2361,26 @@ export const applyPerAgentWorkspaces = async (
             await saveLinkRecord(env, record);
           }
           await markMoving(agentId, { link: path.resolve(names) });
-          await symlink(path.relative(path.dirname(target), names), target);
+          const linkText = path.relative(path.dirname(target), names);
+          await symlink(linkText, target);
           if (recorded) {
             record.pending.delete(agentId);
             written.set(agentId, path.resolve(names));
-            await saveLinkRecord(env, record);
+            try {
+              await saveLinkRecord(env, record);
+            } catch (error) {
+              // The link stands only with its record. A retry would accept
+              // a link left here as a finished recreate (`ourRecreate`)
+              // without the entry that lets it be pointed back if its peer
+              // stays put, so take it back and leave the source to be
+              // moved again. Only if it is still the link just made.
+              written.delete(agentId);
+              const now = await readlink(target).catch(() => undefined);
+              if (now === linkText) {
+                await unlink(target);
+              }
+              throw error;
+            }
           }
           // Both exist for an instant. A run killed here finds the source
           // again next time and the destination resolving to the same
