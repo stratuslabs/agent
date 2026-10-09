@@ -525,8 +525,10 @@ const gitDirsOf = async (start: string, root: string): Promise<{ gitDir: string;
  */
 const configuredRemotes = async (commonDir: string, use: 'fetch' | 'push' = 'push'): Promise<string[] | undefined> => {
   const config = await readFile(path.join(commonDir, 'config'), 'utf8').catch(() => '');
-  // An include pulls config from a file this check never reads.
-  if (/^\s*\[include(?:If)?\b/im.test(config)) {
+  // An include pulls config from a file this check never reads, and a
+  // backslash-continued line folds what looks like a header into a value:
+  // either way this line-based reading isn't git's, so nothing counts.
+  if (/^\s*\[include(?:If)?\b/im.test(config) || /\\\s*$/m.test(config)) {
     return undefined;
   }
   // A remote only counts with a URL: without one git reads the name as a

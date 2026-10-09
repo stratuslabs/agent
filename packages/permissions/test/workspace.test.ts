@@ -212,6 +212,10 @@ test('local git in a repository inside the workspace is judged inside, and publi
   assert.equal(await inside('git fetch'), false, 'branch.main.remote is a path');
   assert.equal(await inside('git pull'), false);
   await writeFile(path.join(repo, '.git', 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n[remote "pushonly"]\n\tpushurl = https://example.com/app.git\n');
+  // A continued line hides what looks like a remote header inside a value.
+  await writeFile(path.join(repo, '.git', 'config'), '[foo]\n\tx = value \\\n[remote "../../private"]\n\turl = https://example.com/x\n');
+  assert.equal(await inside('git fetch ../../private'), false);
+  await writeFile(path.join(repo, '.git', 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n[remote "pushonly"]\n\tpushurl = https://example.com/app.git\n');
   // git mv's destination through a symlinked directory lands outside.
   assert.equal(await inside('git mv src/main.ts up/main.ts'), false);
   assert.equal(await inside('git mv src/main.ts src/renamed.ts'), true);
