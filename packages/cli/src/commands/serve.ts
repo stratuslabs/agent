@@ -1,4 +1,5 @@
 import type { ApprovalPolicy } from '@stratusagent/core';
+import { autonomyDirectory } from '../autonomy.ts';
 import type {
   ApprovalTransport,
   GatewayChannelAdapter,
@@ -504,9 +505,8 @@ const serveHeldHome = async (
     // turns it on for. Resolved per call so the answer always matches the
     // config this daemon started with.
     workspace: {
-      directoryFor: (agentId: string) => (resolveAgentApprovals(approvalsConfig, agentId).autonomy === 'workspace'
-        ? agentWorkspacePath(env, agentId)
-        : undefined),
+      // The directory the shell resolves for the agent; see `autonomyDirectory`.
+      directoryFor: (agentId: string) => autonomyDirectory(approvalsConfig, pluginsConfig, env, agentId),
     },
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
       // An approval that widens what runs unattended, for every future

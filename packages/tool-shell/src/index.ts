@@ -81,6 +81,9 @@ const maxOutputBytesFor = (config: JsonObject, session: Session): number =>
 // `operandsToo` in @stratusagent/permissions).
 export const COMMAND_OPTION_VARIABLES = ['RIPGREP_CONFIG_PATH', 'GREP_OPTIONS'] as const;
 
+/** Variables that make a shell run code before the command. Never passed. */
+const SHELL_STARTUP_VARIABLES: readonly string[] = ['BASH_ENV', 'ENV', 'ZDOTDIR'];
+
 const settingsFor = (
   config: JsonObject,
   session: Session,
@@ -138,6 +141,14 @@ const settingsFor = (
   // whatever the config says.
   for (const name of COMMAND_OPTION_VARIABLES) {
     delete granted[name];
+  }
+  // And what a shell runs before the command: a startup file (`BASH_ENV`,
+  // `ENV`, `ZDOTDIR`'s `.zshenv`) or an exported function (`BASH_FUNC_*`)
+  // can define `cat` as anything. The command judged is the command run.
+  for (const name of Object.keys(granted)) {
+    if (SHELL_STARTUP_VARIABLES.includes(name) || name.startsWith('BASH_FUNC_')) {
+      delete granted[name];
+    }
   }
   // A PATH entry the agent can write to is a program the agent chose
   // running under a command name the permission engine trusts: a workspace

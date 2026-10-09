@@ -355,3 +355,12 @@ test('PATH never includes a directory the agent can write to', async () => {
   const emptied = await registryFor({ passEnv: [], env: { PATH: `.:${inside}` } }, {}, workspaces);
   assert.equal(String((await runCommand(emptied, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin');
 });
+
+test('nothing a shell runs before the command is passed to it', async () => {
+  const tools = await registryFor(
+    { passEnv: ['PATH'], env: { BASH_ENV: '/tmp/x', ENV: '/tmp/y', ZDOTDIR: '/tmp/z', 'BASH_FUNC_cat%%': '() { echo pwned; }', KEEP: 'kept' } },
+    { PATH: process.env.PATH },
+  );
+  const seen = String((await runCommand(tools, 'echo "[$BASH_ENV][$ENV][$ZDOTDIR][$KEEP]"; env | grep -c BASH_FUNC_ || true')).stdout).trim();
+  assert.equal(seen, '[][][][kept]\n0');
+});

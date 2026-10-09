@@ -252,7 +252,8 @@ it can:
 ```
 
 With `autonomy: "workspace"`, a command that only reads, and only reads
-paths inside the agent's workspace (`~/.stratus/agents/<id>/workspace`),
+paths inside the agent's workspace (`~/.stratus/agents/<id>/workspace`, or
+`<workspaceRoot>/<id>` when `tool-shell` has its own `workspaceRoot`),
 runs without asking. That covers `cat`, `ls`, `head`, `tail`, `wc`, `grep`,
 `rg`, and `find`, and each stage of a pipeline is judged on its own, so
 `cat src/main.ts | wc -l` runs too. Each path is resolved through its
@@ -269,7 +270,9 @@ otherwise it reads ignore files outside the workspace: above it, in your
 home directory, and in a linked worktree's git directory.
 `grep -rn` needs nothing extra. The shell never passes `RIPGREP_CONFIG_PATH` or
 `GREP_OPTIONS` to a command, whatever its `env` or `passEnv` says, because
-they add options the command line doesn't show. Nor does `PATH` keep an
+they add options the command line doesn't show. Nor are shell startup variables passed (`BASH_ENV`, `ENV`, `ZDOTDIR`,
+exported `BASH_FUNC_*` functions), since they run code before the command.
+Nor does `PATH` keep an
 entry the agent can write to (its workspace or working directory, or a
 relative entry like `.`), because a program there named `cat` or `git`
 would run in place of the real one. Reads stay allowed after the conversation reads web
