@@ -745,3 +745,16 @@ test('a quoted table with varied whitespace around > is recognized', () => {
   const input = ['>| A | B |', '> | --- | --- |', '>| 1 | 2 |'].join('\n');
   assert.equal(toSlackMrkdwn(input), '> *A*: 1 · *B*: 2');
 });
+
+test('a quoted table inside a list item preserves the outer indentation', () => {
+  const input = [
+    '- item',
+    '  > | A | B |',
+    '  > | --- | --- |',
+    '  > | x | y |',
+  ].join('\n');
+  const result = toSlackMrkdwn(input);
+  assert.ok(result.startsWith('- item\n'), 'list item stays');
+  // The indentation and > prefix are preserved on the output
+  assert.ok(result.includes('  > *A*: x'), result);
+});

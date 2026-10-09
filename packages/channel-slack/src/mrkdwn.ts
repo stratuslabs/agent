@@ -1263,8 +1263,12 @@ const renderTables = (text: string): string => {
     // reads well quoted.
     const rendered = renderTable(header, alignments, rows, quoteDepth > 0);
     if (quoteDepth > 0) {
-      const canonical = '> '.repeat(quoteDepth);
-      out.push(rendered.split('\n').map((line) => canonical + line).join('\n'));
+      // Preserve the header line's outer indentation (from a list or
+      // another container) so the rendered table stays at the same nesting
+      // level, but normalize the > markers so the output is always `> `.
+      const leadingSpaces = headerLine.match(/^( *)/)![0];
+      const outputPrefix = leadingSpaces + '> '.repeat(quoteDepth);
+      out.push(rendered.split('\n').map((line) => outputPrefix + line).join('\n'));
     } else {
       out.push(rendered);
     }
