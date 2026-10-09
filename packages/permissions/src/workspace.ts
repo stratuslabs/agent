@@ -518,8 +518,12 @@ const gitDirsOf = async (start: string, root: string): Promise<{ gitDir: string;
   return undefined;
 };
 
-/** The remotes a repository configures, or undefined when its config can't be trusted to say. */
-const configuredRemotes = async (commonDir: string): Promise<string[] | undefined> => {
+/**
+ * The remotes a repository configures, or undefined when its config can't
+ * be trusted to say. `for: 'fetch'` needs a `url`; git ignores `pushurl`
+ * when fetching and reads the name as a path instead.
+ */
+const configuredRemotes = async (commonDir: string, use: 'fetch' | 'push' = 'push'): Promise<string[] | undefined> => {
   const config = await readFile(path.join(commonDir, 'config'), 'utf8').catch(() => '');
   // An include pulls config from a file this check never reads.
   if (/^\s*\[include(?:If)?\b/im.test(config)) {
@@ -532,7 +536,7 @@ const configuredRemotes = async (commonDir: string): Promise<string[] | undefine
   return sections
     .map((section) => ({ name: /^\s*\[remote "([^"]+)"\]/.exec(section)?.[1], section }))
     .filter((entry): entry is { name: string; section: string } => entry.name !== undefined && entry.name !== '.' && entry.name !== '..'
-      && /^\s*(?:push)?url\s*=\s*\S/im.test(entry.section))
+      && (use === 'fetch' ? /^\s*url\s*=\s*\S/im : /^\s*(?:push)?url\s*=\s*\S/im).test(entry.section))
     .map((entry) => entry.name);
 };
 
@@ -618,7 +622,7 @@ export const gitInsideWorkspace = async (
   // Fetch and pull name a repository first, and a path there reads one from
   // anywhere on the host: only a remote the repository configures.
   if ((subcommand === 'fetch' || subcommand === 'pull') && positionals.length > 0) {
-    const remotes = await configuredRemotes(dirs.commonDir);
+    const remotes = await configuredRemotes(dirs.commonDir, 'fetch');
     if (remotes === undefined || !remotes.includes(positionals[0] as string)) {
       return false;
     }

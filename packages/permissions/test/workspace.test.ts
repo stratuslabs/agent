@@ -21,7 +21,7 @@ const layout = async () => {
   await symlink(outside, path.join(repo, '--'));
   await mkdir(path.join(repo, '.git'), { recursive: true });
   await writeFile(path.join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
-  await writeFile(path.join(repo, '.git', 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n');
+  await writeFile(path.join(repo, '.git', 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n[remote "pushonly"]\n\tpushurl = https://example.com/app.git\n');
   await mkdir(path.join(root, 'elsewhere', 'child'), { recursive: true });
   await writeFile(path.join(root, 'elsewhere', 'secret'), 'token\n');
   await symlink(path.join(root, 'elsewhere', 'child'), path.join(repo, 'hop'));
@@ -273,6 +273,7 @@ test('local git in a repository inside the workspace is judged inside, and publi
     'git fetch /home/user/private-repo',
     'git pull ../../../../elsewhere main',
     'git fetch upstream',
+    'git fetch pushonly',
     // worktree remove matches by suffix, possibly outside.
     'git worktree remove ../app-fix',
   ]) {
