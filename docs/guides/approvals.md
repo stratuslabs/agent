@@ -352,6 +352,42 @@ these commands read only what they're told to. A program you list in
 `approvals.commands` can still read anything, which is why those are
 listed by you and never inferred.
 
+## Trusted domains
+
+Sites an agent reads all day, like vendor docs, can be trusted once in
+config instead of approved page by page:
+
+```jsonc
+"approvals": {
+  "trustedDomains": ["openai.com", "anthropic.com", "developer.apple.com"],
+  "agents": { "nova": { "trustedDomains": ["docs.github.com"] } }
+}
+```
+
+A domain covers itself and its subdomains (`openai.com` covers
+`developers.openai.com`, never `evilopenai.com`), over https on the default
+port. An agent's list adds to the top-level one, like `commands`. Write a
+domain with no scheme, path, or port; anything else is refused at startup.
+
+What runs without asking:
+
+- **`web.fetch`** of a page under a trusted domain. It still doesn't follow
+  a redirect to another site.
+- Under `autonomy: workspace`, **a plain download**: `curl` or `wget`
+  fetching one https URL with a GET, written to a file inside the workspace
+  or to stdout. The site has to be under a trusted domain, or one already
+  approved for `web.fetch` with **Always allow**. Flags that send data
+  (`-d`, `-F`, `-T`, `-X`), carry headers or credentials (`-H`, `-u`, `-b`),
+  read a config (`-K`), skip TLS checks (`-k`), or let the server pick the
+  file name (`-J`) still ask. So does any flag not on the list.
+
+`curl -L` and `wget` follow redirects, and those can leave the site. The
+request itself goes to the trusted site first, so the risk left is a
+trusted site with an open redirect. List docs and vendor sites, never ones
+where anyone can publish a page (`github.io`, `githubusercontent.com`,
+`s3.amazonaws.com`). Trusted domains are withdrawn like every grant once
+the [external-content gate](#after-an-agent-reads-the-web) closes.
+
 ## Standing grants
 
 Most installed tools are `gated` and name no scope — `fs.write`, a

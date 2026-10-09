@@ -916,3 +916,166 @@ export const gitPushInsideWorkspace = async (
   }
   return branch.length > 0 && branchPrefixes.some((prefix) => branch.startsWith(prefix) && branch.length > prefix.length);
 };
+
+/**
+ * A plain download, judged by the site it reads from: `curl` or `wget`
+ * fetching one https URL with a GET, written to a file inside the workspace
+ * or to stdout. Answers the URL's origin, for the policy to check against
+ * the sites the agent may read from (trusted domains, or a site approved
+ * for `web.fetch`); undefined means this isn't one, and it asks.
+ *
+ * "Always allow" on a command that starts with flags remembers the exact
+ * command, so before this every new docs page asked again. A download only
+ * reads a site the operator already trusts, and only writes inside the
+ * workspace; this lets that through and nothing else.
+ *
+ * An allowlist of flags, like git's. Everything that sends data (`-d`,
+ * `-F`, `-T`, `-X`), carries credentials or headers (`-u`, `-H`, `-b`,
+ * `--netrc`), reads a config (`-K`), turns off TLS checks (`-k`), or lets
+ * the server name the file (`-J`, `--content-disposition`) isn't on it.
+ * Redirects (`-L`, wget's default) can still leave the site: the request
+ * itself only ever goes to the trusted origin first, and a docs site with
+ * an open redirect is the residual risk, the same one `web.fetch` names.
+ */
+interface Downloader {
+  flags: string[];
+  /** Flags whose value is a path that must land inside the workspace. */
+  pathValues: string[];
+  /** Flags with a harmless value (a number, a user agent). */
+  values: string[];
+  /** A path value of `-` means stdout. */
+  dashIsStdout?: boolean;
+}
+
+const DOWNLOADERS: Record<string, Downloader> = {
+  curl: {
+    flags: [
+      '-s', '--silent', '-S', '--show-error', '-L', '--location', '-f', '--fail', '--fail-with-body', '--compressed',
+      '-#', '--progress-bar', '-R', '--remote-time', '-O', '--remote-name', '--create-dirs', '-I', '--head', '-v', '--verbose',
+      '-i', '--include', '--no-progress-meter',
+    ],
+    pathValues: ['-o', '--output', '--output-dir'],
+    values: ['-m', '--max-time', '--connect-timeout', '--retry', '--retry-delay', '--max-redirs', '-A', '--user-agent'],
+    dashIsStdout: true,
+  },
+  wget: {
+    flags: ['-q', '--quiet', '-nv', '--no-verbose', '-N', '--timestamping', '-nc', '--no-clobber', '-c', '--continue', '--https-only'],
+    pathValues: ['-O', '--output-document', '-P', '--directory-prefix'],
+    values: ['-T', '--timeout', '-t', '--tries', '-U', '--user-agent', '--max-redirect'],
+    dashIsStdout: true,
+  },
+};
+
+export const downloadInsideWorkspace = async (
+  analysis: CommandAnalysis,
+  cwd: string,
+  workspace: string,
+): Promise<string | undefined> => {
+  if (analysis.disqualifiedBy || analysis.base === undefined || analysis.pipeline) {
+    return undefined;
+  }
+  const downloader = DOWNLOADERS[analysis.base];
+  if (downloader === undefined) {
+    return undefined;
+  }
+  // The same rule as reads: anything the shell would expand, or a `$` or
+  // backtick however quoted, is text this parser never saw.
+  if (analysis.expands?.some((expands) => expands) || analysis.tokens.some((token) => /[$`]/.test(token))) {
+    return undefined;
+  }
+  const paths: string[] = [];
+  const urls: string[] = [];
+  const args = analysis.tokens.slice(1);
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index] as string;
+    if (!token.startsWith('-') || token === '-') {
+      urls.push(token);
+      continue;
+    }
+    if (token === '--') {
+      return undefined;
+    }
+    if (token.startsWith('--')) {
+      const equals = token.indexOf('=');
+      const name = equals === -1 ? token : token.slice(0, equals);
+      const attached = equals === -1 ? undefined : token.slice(equals + 1);
+      if (downloader.flags.includes(name) && attached === undefined) {
+        continue;
+      }
+      const isPath = downloader.pathValues.includes(name);
+      if (!isPath && !downloader.values.includes(name)) {
+        return undefined;
+      }
+      const value = attached ?? args[index + 1];
+      if (value === undefined) {
+        return undefined;
+      }
+      if (attached === undefined) {
+        index += 1;
+      }
+      if (isPath) {
+        paths.push(value);
+      }
+      continue;
+    }
+    // Short flags, possibly bundled (`-sSLo file`, `-qO-`): every letter but
+    // the last must be a plain flag, and a value flag takes the rest of the
+    // token or the next one.
+    for (let at = 1; at < token.length; at += 1) {
+      const flag = `-${token[at]}`;
+      // wget's two-letter short flags (`-nv`, `-nc`) only as the whole token.
+      if (at === 1 && downloader.flags.includes(token)) {
+        break;
+      }
+      if (downloader.flags.includes(flag)) {
+        continue;
+      }
+      const isPath = downloader.pathValues.includes(flag);
+      if (!isPath && !downloader.values.includes(flag)) {
+        return undefined;
+      }
+      const rest = token.slice(at + 1);
+      const value = rest.length > 0 ? rest : args[index + 1];
+      if (value === undefined) {
+        return undefined;
+      }
+      if (rest.length === 0) {
+        index += 1;
+      }
+      if (isPath) {
+        paths.push(value);
+      }
+      break;
+    }
+  }
+  if (urls.length !== 1) {
+    return undefined;
+  }
+  let url: URL;
+  try {
+    url = new URL(urls[0] as string);
+  } catch {
+    return undefined;
+  }
+  // https only, with no credentials in it: a plain read of a public page.
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') {
+    return undefined;
+  }
+  const root = await resolveReal(workspace);
+  const here = await resolveReal(cwd);
+  // With no path, curl -O and wget write into the working directory, so it
+  // must be inside too.
+  if (root === undefined || here === undefined || !within(root, here)) {
+    return undefined;
+  }
+  for (const target of paths) {
+    if (target === '-' && downloader.dashIsStdout) {
+      continue;
+    }
+    const resolved = await walk(here, target);
+    if (resolved === undefined || !within(root, resolved) || resolved === root) {
+      return undefined;
+    }
+  }
+  return url.origin;
+};

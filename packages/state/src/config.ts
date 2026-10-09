@@ -67,6 +67,17 @@ export interface AgentApprovalConfig {
    * push without asking. Default `<agentId>/`. `[]` means every push asks.
    */
   branchPrefixes?: string[];
+  /**
+   * Domains the agent may read from without asking, over https:
+   * `openai.com` covers it and its subdomains. `web.fetch` of a page there
+   * runs unattended, and under `autonomy: workspace` so does a plain
+   * `curl`/`wget` download of one into the workspace. Additive like
+   * `commands`: an agent's list adds to the top-level one. Withdrawn, like
+   * every grant, when `externalContent` is `gate` and the conversation has
+   * read external content. List docs and vendor sites, never ones where
+   * anyone can publish a page (`github.io`, `githubusercontent.com`).
+   */
+  trustedDomains?: string[];
 }
 
 /**

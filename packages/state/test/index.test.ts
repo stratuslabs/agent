@@ -1732,6 +1732,22 @@ test('api.publicUrl loads as an http(s) address without a trailing slash, and an
   await assert.rejects(() => loadConfigFile(file), (error: Error) => !error.message.includes('hunter2'));
 });
 
+test('approvals.trustedDomains adds up per agent, normalizes, and refuses anything that is not a domain', async () => {
+  const config = await loadConfigFile(await writeConfig('trusted.json', {
+    approvals: { trustedDomains: ['OpenAI.com', '*.apple.com'], agents: { nova: { trustedDomains: ['docs.github.com', 'openai.com'] } } },
+  }));
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').trustedDomains, ['openai.com', 'apple.com', 'docs.github.com']);
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'blair').trustedDomains, ['openai.com', 'apple.com']);
+  assert.equal(resolveAgentApprovals({}, 'nova').trustedDomains, undefined);
+  for (const bad of [['https://openai.com'], ['openai.com/docs'], ['openai.com:443'], [''], 'openai.com', [3]]) {
+    await assert.rejects(
+      loadConfigFile(await writeConfig('trusted-bad.json', { approvals: { agents: { nova: { trustedDomains: bad } } } })),
+      /Invalid approvals\.agents\.nova\.trustedDomains/,
+      JSON.stringify(bad),
+    );
+  }
+});
+
 test('approvals.autonomy parses at the top and per agent, overrides per agent, and fails loudly when misspelled', async () => {
   const configPath = await writeConfig('autonomy.json', {
     approvals: { autonomy: 'workspace', agents: { blair: { autonomy: 'off' }, nova: {} } },
