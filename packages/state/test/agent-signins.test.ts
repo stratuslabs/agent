@@ -14,6 +14,7 @@ import {
   removeAgentSignIn,
   resolveRuntimeConfig,
   saveAgentSignIn,
+  saveCredentials,
 } from '../src/index.ts';
 
 // Synthetic values only.
@@ -100,6 +101,10 @@ test('a stored agent sign-in is written 0600 beside, not over, the other namespa
   assert.equal((await loadAgentSignIns(env)).kai?.anthropic?.value, OWN);
   assert.equal((await loadCredentials(env)).anthropic?.value, SHARED);
   assert.equal((await stat(path.join(home, '.stratus', 'credentials.json'))).mode & 0o777, 0o600);
+
+  // `stratus setup` rewriting the shared sign-in keeps every agent's own.
+  await saveCredentials(env, { anthropic: { type: 'oauth_token', value: 'synthetic-new-shared' } });
+  assert.equal((await loadAgentSignIns(env)).kai?.anthropic?.value, OWN);
   await assert.rejects(saveAgentSignIn(env, '__proto__', 'anthropic', { type: 'oauth_token', value: OWN }), /cannot be an agent id/);
 });
 

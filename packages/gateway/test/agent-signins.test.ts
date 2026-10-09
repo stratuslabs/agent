@@ -113,11 +113,16 @@ test('two agents in one daemon, running at once, each reach the provider with th
     warn: () => {},
   });
   await gateway.start();
-  const [ava, bea] = await Promise.all([
-    gateway.dispatch({ sessionId: 'ava-1', agentId: 'ava', userMessage: 'hello' }),
-    gateway.dispatch({ sessionId: 'bea-1', agentId: 'bea', userMessage: 'hello' }),
-  ]);
-  await gateway.stop();
+  let ava: Session;
+  let bea: Session;
+  try {
+    [ava, bea] = await Promise.all([
+      gateway.dispatch({ sessionId: 'ava-1', agentId: 'ava', userMessage: 'hello' }),
+      gateway.dispatch({ sessionId: 'bea-1', agentId: 'bea', userMessage: 'hello' }),
+    ]);
+  } finally {
+    await gateway.stop();
+  }
 
   assert.equal(ava.status, 'completed', ava.lastError);
   assert.equal(bea.status, 'completed', bea.lastError);
@@ -145,36 +150,40 @@ test('rotating, then removing, an agent\'s own sign-in applies on its next turn 
     warn: (line) => warnings.push(line),
   });
   await gateway.start();
+  // In a finally, so an assertion failing mid-sequence still stops the
+  // daemon: left running, it keeps the test process alive and a regression
+  // reads as a hang rather than a failure.
+  try {
+    const turn = async (message: string): Promise<CapturedCall> => {
+      const before = calls.length;
+      const session = await gateway.dispatch({ sessionId: 'ava-rotate', agentId: 'ava', userMessage: message });
+      assert.equal(session.status, 'completed', session.lastError);
+      assert.equal(calls.length, before + 1, 'each turn should make exactly one SDK call');
+      return calls.at(-1)!;
+    };
 
-  const turn = async (message: string): Promise<CapturedCall> => {
-    const before = calls.length;
-    const session = await gateway.dispatch({ sessionId: 'ava-rotate', agentId: 'ava', userMessage: message });
-    assert.equal(session.status, 'completed', session.lastError);
-    assert.equal(calls.length, before + 1, 'each turn should make exactly one SDK call');
-    return calls.at(-1)!;
-  };
+    const first = await turn('one');
+    const second = await turn('two');
+    assert.equal(first.token, AVA_TOKEN);
+    // Same sign-in: the SDK session is resumed, as before this change.
+    assert.equal(second.resume, 'sdk-Ava-1');
 
-  const first = await turn('one');
-  const second = await turn('two');
-  assert.equal(first.token, AVA_TOKEN);
-  // Same sign-in: the SDK session is resumed, as before this change.
-  assert.equal(second.resume, 'sdk-Ava-1');
+    // Rotated while the daemon runs, through the same writer the CLI uses.
+    await saveAgentSignIn({ homeDir: home }, 'ava', 'anthropic', { type: 'oauth_token', value: AVA_ROTATED });
+    const rotated = await turn('three');
+    assert.equal(rotated.token, AVA_ROTATED);
+    assert.equal(rotated.resume, undefined, 'a session made under the old token must not be resumed under the new one');
+    const afterRotation = await turn('four');
+    assert.equal(afterRotation.resume, 'sdk-Ava-3', 'the session made under the new token resumes normally');
 
-  // Rotated while the daemon runs, through the same writer the CLI uses.
-  await saveAgentSignIn({ homeDir: home }, 'ava', 'anthropic', { type: 'oauth_token', value: AVA_ROTATED });
-  const rotated = await turn('three');
-  assert.equal(rotated.token, AVA_ROTATED);
-  assert.equal(rotated.resume, undefined, 'a session made under the old token must not be resumed under the new one');
-  const afterRotation = await turn('four');
-  assert.equal(afterRotation.resume, 'sdk-Ava-3', 'the session made under the new token resumes normally');
-
-  // Removed: back to the shared sign-in, again without resuming.
-  assert.equal(await removeAgentSignIn({ homeDir: home }, 'ava', 'anthropic'), true);
-  const shared = await turn('five');
-  assert.equal(shared.token, SHARED_TOKEN);
-  assert.equal(shared.resume, undefined);
-
-  await gateway.stop();
+    // Removed: back to the shared sign-in, again without resuming.
+    assert.equal(await removeAgentSignIn({ homeDir: home }, 'ava', 'anthropic'), true);
+    const shared = await turn('five');
+    assert.equal(shared.token, SHARED_TOKEN);
+    assert.equal(shared.resume, undefined);
+  } finally {
+    await gateway.stop();
+  }
 
   // Nothing the daemon said, and nothing it stored, carries a token.
   const stored = await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8');
@@ -192,8 +201,12 @@ test('the sessions a daemon persists carry no sign-in, only a fingerprint of whi
   const { queryFn } = createCapturingQuery();
   const gateway = createGateway({ env: { homeDir: home, cwd: home, processEnv: {}, queryFn }, warn: () => {} });
   await gateway.start();
-  const session = await gateway.dispatch({ sessionId: 'ava-leak', agentId: 'ava', userMessage: 'hello' });
-  await gateway.stop();
+  let session: Session;
+  try {
+    session = await gateway.dispatch({ sessionId: 'ava-leak', agentId: 'ava', userMessage: 'hello' });
+  } finally {
+    await gateway.stop();
+  }
 
   const serialized = JSON.stringify(session);
   assert.ok(!serialized.includes(AVA_TOKEN));
@@ -231,10 +244,15 @@ test('a rejected sign-in of the agent\'s own fails as itself, and never falls ba
     warn: () => {},
   });
   await gateway.start();
-  const outcome = await lastErrorOf(gateway.dispatch({ sessionId: 'ava-bad', agentId: 'ava', userMessage: 'hello' }));
-  // The control: the same fallback does serve an agent on the shared sign-in.
-  const beaOutcome = await lastErrorOf(gateway.dispatch({ sessionId: 'bea-ok', agentId: 'bea', userMessage: 'hello' }));
-  await gateway.stop();
+  let outcome: string;
+  let beaOutcome: string;
+  try {
+    outcome = await lastErrorOf(gateway.dispatch({ sessionId: 'ava-bad', agentId: 'ava', userMessage: 'hello' }));
+    // The control: the same fallback does serve an agent on the shared sign-in.
+    beaOutcome = await lastErrorOf(gateway.dispatch({ sessionId: 'bea-ok', agentId: 'bea', userMessage: 'hello' }));
+  } finally {
+    await gateway.stop();
+  }
 
   assert.match(outcome, /Claude refused ava's own sign-in/);
   assert.match(outcome, /stratus signin set anthropic --agent ava/);
@@ -249,9 +267,12 @@ test('an agent with no sign-in of its own resolves and resumes exactly as before
   const { calls, queryFn } = createCapturingQuery();
   const gateway = createGateway({ env: { homeDir: home, cwd: home, processEnv: {}, queryFn }, warn: () => {} });
   await gateway.start();
-  await gateway.dispatch({ sessionId: 'bea-plain', agentId: 'bea', userMessage: 'one' });
-  await gateway.dispatch({ sessionId: 'bea-plain', agentId: 'bea', userMessage: 'two' });
-  await gateway.stop();
+  try {
+    await gateway.dispatch({ sessionId: 'bea-plain', agentId: 'bea', userMessage: 'one' });
+    await gateway.dispatch({ sessionId: 'bea-plain', agentId: 'bea', userMessage: 'two' });
+  } finally {
+    await gateway.stop();
+  }
 
   assert.deepEqual(calls.map(({ token, resume }) => ({ token, resume })), [
     { token: SHARED_TOKEN, resume: undefined },
