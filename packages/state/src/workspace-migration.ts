@@ -2398,13 +2398,31 @@ export const applyPerAgentWorkspaces = async (
               written.delete(agentId);
               // Text first, identity after, so both describe the one entry
               // the unlink then removes; the unlink itself is the one step
-              // left unguarded, as at every rename here.
-              const text = await readlink(target).catch(() => undefined);
-              const now = await lstat(target).catch(() => undefined);
-              if (text === linkText && made !== undefined && now !== undefined && now.isSymbolicLink()
-                && inodeOf(now) === inodeOf(made)
-                && parentBeforeLink !== undefined && await steadyDirectory(targetParent) === parentBeforeLink) {
-                await unlink(target);
+              // left unguarded, as at every rename here. Asked again while
+              // the answer is inconclusive — the link just made is there by
+              // identity but its text could not be read — and, if it never
+              // settles, the start stops naming the link to remove rather
+              // than leaving it for a retry to accept.
+              let settledRollback = made === undefined;
+              for (let attempt = 0; attempt < 3 && !settledRollback; attempt += 1) {
+                const text = await readlink(target).catch(() => undefined);
+                const now = await lstat(target).catch(() => undefined);
+                const ours = now !== undefined && now.isSymbolicLink() && inodeOf(now) === inodeOf(made!)
+                  && parentBeforeLink !== undefined && await steadyDirectory(targetParent) === parentBeforeLink;
+                if (!ours) {
+                  // Gone, or something else stands there: not this run's.
+                  settledRollback = true;
+                } else if (text === linkText) {
+                  await unlink(target);
+                  settledRollback = true;
+                }
+              }
+              if (!settledRollback) {
+                throw new Error(
+                  `${target} was created by this start, but its record could not be saved and the link could not be `
+                  + `read back to remove it. Remove ${target} by hand and start again; ${from} is still in place, so `
+                  + `the move will be made again. (${error instanceof Error ? error.message : String(error)})`,
+                );
               }
               throw error;
             }
