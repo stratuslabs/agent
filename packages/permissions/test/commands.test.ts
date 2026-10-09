@@ -778,6 +778,10 @@ test('git switch -c is a subcommand flag, not git -c', () => {
   // An attached value is the branch, not more flags.
   assert.equal(matchesScope(analyzeCommand('git switch -cfix'), scope), true);
   assert.equal(matchesScope(analyzeCommand('git commit -cHEAD'), normalizeCommandScope(analyzeCommand('git commit -m x'))!), true);
+  // Behind other short flags in one bundle, too, and those flags still count.
+  assert.equal(matchesScope(analyzeCommand('git switch -qcfix'), scope), true);
+  assert.equal(matchesScope(analyzeCommand('git commit -qvcHEAD'), normalizeCommandScope(analyzeCommand('git commit -m x'))!), true);
+  assert.equal(matchesScope(analyzeCommand('git switch -fcx'), scope), false, 'f is still destructive');
   // A scope that denies -c itself still does.
   assert.equal(matchesScope(analyzeCommand('git switch -c x'), { command: 'git', args: ['switch'], deniedFlags: ['-c'] }), false);
   assert.equal(matchesScope(analyzeCommand('git switch -cx'), { command: 'git', args: ['switch'], deniedFlags: ['-c'] }), false);

@@ -644,12 +644,18 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
     if (token.startsWith('-')) {
       // `-cfix` is `-c fix`: the rest is the branch (or commit) it takes,
       // not more flags, unless the scope itself denies `-c`.
-      if (deniedInTail !== denied && token.startsWith('-c') && token.length > 2) {
-        // The same checks `-c` itself meets, minus reading its value as
-        // more flags: refused if the scope denies it, or names its flags
-        // and `-c` isn't one.
-        if (deniesFlag(scope.deniedFlags ?? [], '-c') || (scope.allowedFlags && !allowsFlag(scope.allowedFlags, '-c'))) {
-          return false;
+      // A short bundle with `c` in it (`-cfix`, `-qvcHEAD`): the letters
+      // before `c` are flags, and everything after it is `-c`'s value.
+      const at = !token.startsWith('--') ? token.indexOf('c', 1) : -1;
+      if (deniedInTail !== denied && at > 0 && token.length > at + 1) {
+        const before = [...token.slice(1, at)].map((letter) => `-${letter}`);
+        for (const flag of [...before, '-c']) {
+          // The same checks each flag meets on its own, minus reading the
+          // value as more flags; `-c` against the scope's own denials only.
+          const refusals = flag === '-c' ? scope.deniedFlags ?? [] : deniedInTail;
+          if (deniesFlag(refusals, flag) || (scope.allowedFlags && !allowsFlag(scope.allowedFlags, flag))) {
+            return false;
+          }
         }
         continue;
       }
