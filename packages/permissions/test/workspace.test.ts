@@ -47,6 +47,7 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     'ls missing-dir',
     'grep --color=always export src/main.ts',
     'ls src/../src',
+    'grep -n export src/main.ts -i',
   ]) {
     assert.equal(await inside(command), true, `should be inside: ${command}`);
   }
@@ -66,6 +67,9 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     // An optional-argument flag must not swallow the pattern.
     'grep --color root /etc/passwd',
     'grep - /etc/passwd',
+    // Options after an operand are files to BSD tools.
+    'head src/main.ts -n /etc/passwd',
+    'cat src/main.ts -n ../../../../secret.txt',
     // ripgrep reads ignore files above the workspace unless told not to.
     'rg export',
     'rg --no-ignore-parent export',

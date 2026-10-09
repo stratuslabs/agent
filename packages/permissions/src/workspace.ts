@@ -156,6 +156,11 @@ const readPaths = (base: string, args: string[]): string[] | undefined => {
     return undefined;
   }
   const positionals: string[] = [];
+  // Flags after the first operand mean two things: GNU tools read them as
+  // flags, BSD ones (and GNU under POSIXLY_CORRECT) as more files. So they
+  // must pass as flags and, as files, land inside: `head inside -n
+  // /etc/passwd` reads /etc/passwd on a Mac.
+  const operandsToo: string[] = [];
   const seen = new Set<string>();
   let patternGiven = false;
   let endOfFlags = false;
@@ -166,12 +171,18 @@ const readPaths = (base: string, args: string[]): string[] | undefined => {
       continue;
     }
     if (!endOfFlags && token.startsWith('-') && token !== '-') {
+      if (positionals.length > 0) {
+        operandsToo.push(token);
+      }
       if (reader.numeric && isNumericFlag(token)) {
         continue;
       }
       if ((reader.valueFlags ?? []).includes(token)) {
         if (args[index + 1] === undefined) {
           return undefined;
+        }
+        if (positionals.length > 0) {
+          operandsToo.push(args[index + 1] as string);
         }
         if ((reader.patternFlags ?? []).includes(token)) {
           patternGiven = true;
@@ -209,7 +220,7 @@ const readPaths = (base: string, args: string[]): string[] | undefined => {
     return undefined;
   }
   const noPattern = (reader.noPatternFlags ?? []).some((flag) => seen.has(flag));
-  const paths = reader.pattern && !patternGiven && !noPattern ? positionals.slice(1) : positionals;
+  const paths = [...(reader.pattern && !patternGiven && !noPattern ? positionals.slice(1) : positionals), ...operandsToo];
   if (reader.pattern && !patternGiven && !noPattern && positionals.length === 0) {
     return undefined;
   }

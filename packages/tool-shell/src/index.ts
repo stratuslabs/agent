@@ -76,6 +76,9 @@ const maxOutputBytesFor = (config: JsonObject, session: Session): number =>
  * Environment variables that carry options for a command the permission
  * engine judges by its arguments. Never passed to a child: see `settingsFor`.
  */
+// Not POSIXLY_CORRECT: macOS's /bin/sh exports it to every command it runs,
+// so the permission engine reads arguments both ways instead (see
+// `operandsToo` in @stratusagent/permissions).
 export const COMMAND_OPTION_VARIABLES = ['RIPGREP_CONFIG_PATH', 'GREP_OPTIONS'] as const;
 
 const settingsFor = (
