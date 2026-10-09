@@ -757,6 +757,7 @@ test('a quoted table inside a list item preserves the outer indentation', () => 
   assert.ok(result.startsWith('- item\n'), 'list item stays');
   // The indentation and > prefix are preserved on the output
   assert.ok(result.includes('  > *A*: x'), result);
+});
 
 test('a bare address is sent as Slack link markup, and nothing around it changes it', () => {
   const cases: Array<[string, string]> = [
@@ -792,6 +793,12 @@ test('a bare address is sent as Slack link markup, and nothing around it changes
     ["https://example.com/users/James'", "<https://example.com/users/James'>"],
     // A snippet after an address is still a snippet.
     ['https://x.com/`code`', '<https://x.com/>`code`'],
+    // A URL after = or : is still a URL.
+    ['url=https://x.com/path', 'url=<https://x.com/path>'],
+    ['see:https://x.com/a', 'see:<https://x.com/a>'],
+    // mailto: is a bare address too.
+    ['mailto:user@example.com', '<mailto:user@example.com>'],
+    ['send **mailto:a*b@c.com**', 'send *<mailto:a*b@c.com>*'],
     // Already a link, or not one anybody wrote: left as written.
     ['<https://x.com|x> and <https://y.com>', '<https://x.com|x> and <https://y.com>'],
     ['`https://code.com/*a*`', '`https://code.com/*a*`'],
@@ -838,4 +845,13 @@ test('no reply, however written, alters a bare address in it', () => {
     }
   }
   assert.ok(checked > 1000, `only ${checked} addresses were checked`);
+});
+
+test('a bare URL right at the Slack message limit is not wrapped in angle brackets', () => {
+  const url = `https://example.com/${'a'.repeat(3990)}`;
+  assert.ok(url.length > 3998, 'url should exceed the wrapping threshold');
+  const result = toSlackMrkdwn(url);
+  // No <...> wrapper since it would push past 4000 chars
+  assert.ok(!result.startsWith('<'), 'should not wrap in angle brackets');
+  assert.equal(result, url);
 });

@@ -90,8 +90,8 @@ const LINK_DESTINATION = /^(?:https?:\/\/|mailto:)[^\s()]+$/;
  * Markdown link's destination starts, and one that turns out not to be a
  * link stays as it was written, as it always has.
  */
-const BARE_URL_START = /^https?:\/\/[^\s<>()[\]`"|]/i;
-const NOT_BEFORE_BARE_URL = /[\p{L}\p{N}<|(\/@=&.:+-]/u;
+const BARE_URL_START = /^(?:https?:\/\/|mailto:)[^\s<>()[\]`"|]/i;
+const NOT_BEFORE_BARE_URL = /[\p{L}\p{N}<|(\/@&.+-]/u;
 
 /**
  * Characters an address does not run through: whitespace, the brackets a
@@ -116,7 +116,8 @@ const BARE_URL_TRAILING = /^[?!.,:*_~"]$/;
 /** How long the bare address starting at `at` is, or 0 when none starts there. */
 const bareUrlAt = (text: string, at: number): number => {
   // Schemes are case-insensitive: `HTTPS://x/*a*` is as much an address.
-  if ((text[at] !== 'h' && text[at] !== 'H') || !BARE_URL_START.test(text.slice(at, at + 9))) {
+  const ch = text[at] ?? '';
+  if ((ch !== 'h' && ch !== 'H' && ch !== 'm' && ch !== 'M') || !BARE_URL_START.test(text.slice(at, at + 9))) {
     return 0;
   }
   const before = text[at - 1];
@@ -170,7 +171,7 @@ const bareUrlAt = (text: string, at: number): number => {
   }
   // Nothing after the scheme once trailing punctuation is gone is not an
   // address anybody can follow.
-  return /^https?:\/\/./i.test(text.slice(at, end)) ? end - at : 0;
+  return /^(?:https?:\/\/|mailto:)./i.test(text.slice(at, end)) ? end - at : 0;
 };
 
 const HEADING_OPENER = /^ {0,3}#{1,6}[ \t]+/;
@@ -898,7 +899,15 @@ const renderRange = (context: Context, from: number, to: number): Rendered => {
       // ends: written bare, `*https://x/a*` left Slack to guess whether the
       // closing asterisk was part of the address. Not through `write`,
       // because nothing inside the brackets is markup to Slack.
-      chunks.push(`<${token.text}>`);
+      //
+      // Skip the wrapper when the URL alone fills a Slack message: adding
+      // `<` and `>` would push it past the 4,000-character limit, and the
+      // splitter has no way to keep a `<…>` that cannot fit in one message.
+      if (token.text.length <= 3998) {
+        chunks.push(`<${token.text}>`);
+      } else {
+        chunks.push(token.text);
+      }
       at += 1;
       continue;
     }
