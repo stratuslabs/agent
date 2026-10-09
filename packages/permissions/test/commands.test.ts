@@ -770,6 +770,11 @@ test('git switch -c is a subcommand flag, not git -c', () => {
   const repoScope = normalizeCommandScope(inRepo);
   assert.ok(repoScope);
   assert.equal(matchesScope(inRepo, repoScope), true);
+  // Not for clone, whose -c sets config like git -c.
+  const clone = analyzeCommand('git clone https://example.com/x.git');
+  const cloneScope = normalizeCommandScope(clone);
+  assert.ok(cloneScope);
+  assert.equal(matchesScope(analyzeCommand('git clone -c core.sshCommand=/tmp/evil ssh://host/repo'), cloneScope), false);
   // And for anything that is not git.
   assert.equal(matchesScope(analyzeCommand('sh -c id'), { command: 'sh' }), false);
 });

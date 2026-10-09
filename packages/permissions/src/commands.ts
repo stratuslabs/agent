@@ -564,6 +564,9 @@ const allowsFlag = (allowed: string[], token: string): boolean => {
   return letters.every((letter) => allowed.includes(letter));
 };
 
+/** Git subcommands whose own `-c` creates or reuses, never configures. */
+const GIT_SUBCOMMANDS_WITH_PLAIN_C = new Set(['switch', 'commit']);
+
 /** Whether an invocation falls inside one scope. */
 export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): boolean => {
   if (analysis.disqualifiedBy || analysis.base === undefined) {
@@ -588,10 +591,12 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   // `-c` is refused everywhere for `git -c`, which sets config before the
   // subcommand. After a subcommand it is that subcommand's own flag:
   // `git switch -c` creates a branch, `git commit -c` reuses a message.
-  // Only the tail past a scope that names a git subcommand is relieved; the
-  // subcommand itself is a literal required argument, so `-c` cannot be it.
+  // Only the tail past the subcommand is relieved; the subcommand itself is
+  // a literal required argument, so `-c` cannot be it.
+  // Only for subcommands whose `-c` is known not to set config: `clone -c`
+  // does exactly what `git -c` does (`core.sshCommand=…`).
   const subcommandAt = required[0] === '-C' ? 2 : 0;
-  const deniedInTail = scope.command === 'git' && required.length > subcommandAt && !(required[subcommandAt] ?? '').startsWith('-')
+  const deniedInTail = scope.command === 'git' && GIT_SUBCOMMANDS_WITH_PLAIN_C.has(required[subcommandAt] ?? '')
     ? denied.filter((flag) => flag !== '-c')
     : denied;
   // A required token can itself be a flag or a refspec — an exact scope
