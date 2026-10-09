@@ -388,7 +388,7 @@ export interface SlackHistoryPage {
 }
 
 export interface SlackWebLike {
-  auth: { test(): Promise<{ user_id?: string; team_id?: string }> };
+  auth: { test(): Promise<{ user_id?: string; team_id?: string; response_metadata?: { scopes?: string[] } }> };
   chat: {
     postMessage(args: { channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[] }): Promise<{ ts?: string; channel?: string }>;
     update(args: { channel: string; ts: string; text: string; blocks?: SlackBlock[] }): Promise<unknown>;
@@ -512,6 +512,45 @@ const requireModule = createRequire(import.meta.url);
 const defaultSocketClient = (appToken: string): SlackSocketLike => {
   const { SocketModeClient } = requireModule('@slack/socket-mode') as typeof import('@slack/socket-mode');
   return new SocketModeClient({ appToken }) as unknown as SlackSocketLike;
+};
+
+/**
+ * Scopes the manifest asks for. An app created before they shipped has
+ * fewer, and some features silently break — threads are answered without
+ * their context, images arrive as names. Checked once at connect, so the
+ * operator finds out at start, not at the first broken thread.
+ *
+ * Events (`message.channels`, `message.groups`, …) cannot be read from a
+ * bot token, so the warning says they are needed too.
+ */
+const REQUIRED_SCOPES: readonly string[] = [
+  'app_mentions:read',
+  'channels:history', 'channels:read',
+  'chat:write',
+  'files:read', 'files:write',
+  'groups:history', 'groups:read',
+  'im:history', 'im:read', 'im:write',
+  'mpim:history', 'mpim:read',
+  'users:read',
+];
+
+const checkBotScopes = (
+  agentId: string,
+  granted: readonly string[],
+  warn: (message: string) => void,
+): void => {
+  const have = new Set(granted);
+  const missing = REQUIRED_SCOPES.filter((scope) => !have.has(scope));
+  if (missing.length === 0) {
+    return;
+  }
+  warn(
+    `slack: ${agentId}'s app is missing bot scopes: ${missing.join(', ')}. `
+    + 'Add them under OAuth & Permissions, add the matching message.* events '
+    + 'under Event Subscriptions, and reinstall the app to the workspace. '
+    + 'Without them, some features (thread follow-through, image viewing, '
+    + 'channel history) will silently fail.',
+  );
 };
 
 const defaultWebClient = (botToken: string): SlackWebLike => {
@@ -5621,6 +5660,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           const auth = await web.auth.test();
           const botUserId = auth.user_id ?? '';
           const teamId = auth.team_id ?? '';
+          checkBotScopes(config.agentId, auth.response_metadata?.scopes ?? [], warn);
           // Recorded before the socket is even built: an app that never
           // comes up must still be recognizable when somebody names it.
           botIdentities.set(config.agentId, { botUserId, teamId });
