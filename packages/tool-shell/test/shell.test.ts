@@ -351,4 +351,7 @@ test('PATH never includes a directory the agent can write to', async () => {
     workspaces,
   );
   assert.equal(String((await runCommand(tools, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin');
+  // Filtered to nothing is not an empty PATH, which sh reads as the cwd.
+  const emptied = await registryFor({ passEnv: [], env: { PATH: `.:${inside}` } }, {}, workspaces);
+  assert.equal(String((await runCommand(emptied, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin');
 });

@@ -154,6 +154,11 @@ const settingsFor = (
         return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
       }))
       .join(':');
+    // An empty PATH is the current directory to `sh`, the one thing this
+    // filter exists to keep out.
+    if (granted.PATH.length === 0) {
+      granted.PATH = '/usr/bin:/bin';
+    }
   }
   return {
     ...(cwd ? { cwd } : {}),
