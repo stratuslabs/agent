@@ -5968,6 +5968,22 @@ export interface AgentRunnerOptions {
  * before anyone is asked to approve it, not to replace a tool's own checks,
  * which still run. A schema keyword it doesn't read is not a failure.
  */
+/** JSON equality, member order aside, the way JSON Schema compares `enum` values. */
+const sameJson = (left: JsonValue | undefined, right: JsonValue | undefined): boolean => {
+  if (left === right) {
+    return true;
+  }
+  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') {
+    return false;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => sameJson(item, right[index]));
+  }
+  const leftKeys = Object.keys(left).filter((key) => left[key] !== undefined);
+  const rightKeys = Object.keys(right).filter((key) => right[key] !== undefined);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => sameJson(left[key], right[key]));
+};
+
 export const inputProblem = (schema: JsonObject | undefined, input: JsonValue, where = 'input', depth = 0): string | undefined => {
   if (schema === undefined || depth > 4) {
     return undefined;
@@ -5984,7 +6000,7 @@ export const inputProblem = (schema: JsonObject | undefined, input: JsonValue, w
       return `${where} should be ${types.join(' or ')}, not ${actual}`;
     }
   }
-  if (Array.isArray(schema.enum) && !schema.enum.some((option) => JSON.stringify(option) === JSON.stringify(input))) {
+  if (Array.isArray(schema.enum) && !schema.enum.some((option) => sameJson(option, input))) {
     return `${where} should be one of ${schema.enum.map((option) => JSON.stringify(option)).join(', ')}`;
   }
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
@@ -5999,7 +6015,19 @@ export const inputProblem = (schema: JsonObject | undefined, input: JsonValue, w
     }
   }
   if (schema.additionalProperties === false) {
-    const unknown = Object.keys(input).find((key) => !(key in properties));
+    // A key a `patternProperties` pattern matches is declared too. A pattern
+    // this engine can't compile counts as matching: unknown is not wrong.
+    const patterns = schema.patternProperties !== null && typeof schema.patternProperties === 'object' && !Array.isArray(schema.patternProperties)
+      ? Object.keys(schema.patternProperties)
+      : [];
+    const matchesPattern = (key: string): boolean => patterns.some((pattern) => {
+      try {
+        return new RegExp(pattern, 'u').test(key);
+      } catch {
+        return true;
+      }
+    });
+    const unknown = Object.keys(input).find((key) => !(key in properties) && !matchesPattern(key));
     if (unknown !== undefined) {
       return `${where} has "${unknown}", which this tool does not take (it takes ${Object.keys(properties).map((key) => `"${key}"`).join(', ') || 'nothing'})`;
     }

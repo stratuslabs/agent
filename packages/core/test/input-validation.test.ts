@@ -34,6 +34,13 @@ test('inputProblem names the first thing wrong with a call, and nothing when the
   assert.equal(inputProblem(SEND_SCHEMA, { destination: { channel: 'slack', to: 'C1' }, text: 'hi', mode: 'soon' }), 'input.mode should be one of "now", "later"');
   assert.equal(inputProblem(SEND_SCHEMA, { destination: { channel: 'slack', to: 'C1' }, text: 'hi', count: 1.5 }), 'input.count should be integer, not number');
   assert.match(inputProblem({ ...SEND_SCHEMA, additionalProperties: false }, { destination: { channel: 'slack', to: 'C1' }, text: 'hi', extra: 1 }) ?? '', /has "extra"/);
+  // Enum values compare as JSON, member order aside.
+  assert.equal(inputProblem({ enum: [{ a: 1, b: [1, 2] }] }, { b: [1, 2], a: 1 }), undefined);
+  assert.match(inputProblem({ enum: [{ a: 1 }] }, { a: 2 }) ?? '', /should be one of/);
+  // A key patternProperties declares is not an extra one.
+  const patterned = { type: 'object', properties: { name: { type: 'string' } }, patternProperties: { '^x-': {} }, additionalProperties: false };
+  assert.equal(inputProblem(patterned, { name: 'a', 'x-trace': 'b' }), undefined);
+  assert.match(inputProblem(patterned, { name: 'a', other: 'b' }) ?? '', /has "other"/);
   // What it doesn't read is not a failure.
   assert.equal(inputProblem(undefined, { anything: true }), undefined);
   assert.equal(inputProblem({ type: 'object', properties: { x: { minLength: 3 } } }, { x: 'a' }), undefined);
