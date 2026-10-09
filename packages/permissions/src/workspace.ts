@@ -216,12 +216,11 @@ const readPaths = (base: string, args: string[]): string[] | undefined => {
     // path into the pattern slot (`grep - /etc/passwd`).
     positionals.push(token);
   }
-  // ripgrep reads ignore files above the directory it searches and the
-  // user's global ignore file by default: reads outside the workspace,
-  // however harmless. It runs here only told not to, by `--no-ignore` (or
-  // `-u`), or by both `--no-ignore-parent` and `--no-ignore-global`.
-  if (base === 'rg' && !seen.has('--no-ignore') && !seen.has('-u') && !seen.has('--unrestricted')
-    && !(seen.has('--no-ignore-parent') && seen.has('--no-ignore-global'))) {
+  // ripgrep reads ignore files it was never pointed at: above the directory
+  // it searches, the user's global ignore, and a linked worktree's
+  // `.git/info/exclude` in a git directory that can be anywhere. Only
+  // `--no-ignore` (or `-u`) turns all of them off at once.
+  if (base === 'rg' && !seen.has('--no-ignore') && !seen.has('-u') && !seen.has('--unrestricted')) {
     return undefined;
   }
   const noPattern = (reader.noPatternFlags ?? []).some((flag) => seen.has(flag));

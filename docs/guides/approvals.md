@@ -264,9 +264,9 @@ What still asks: a path outside the workspace, a glob or `~` or `$` (the
 shell expands those into paths the engine never saw), and any flag that
 would follow links out, run a program, or write a file (`grep -R`,
 `rg --follow`, `rg --pre`, `find -exec`, `find -delete`, `tail -f`). An
-unknown flag asks too. `rg` runs only with `--no-ignore` (or `-u`), or
-with both `--no-ignore-parent` and `--no-ignore-global`, because by default
-it reads ignore files above the workspace and in your home directory.
+unknown flag asks too. `rg` runs only with `--no-ignore` (or `-u`), because
+otherwise it reads ignore files outside the workspace: above it, in your
+home directory, and in a linked worktree's git directory.
 `grep -rn` needs nothing extra. The shell never passes `RIPGREP_CONFIG_PATH` or
 `GREP_OPTIONS` to a command, whatever its `env` or `passEnv` says, because
 they add options the command line doesn't show. Nor does `PATH` keep an

@@ -39,7 +39,7 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     'grep -rn export src',
     'grep -rn export',
     "grep -e 'a|b' src/main.ts",
-    'rg --no-ignore-parent --no-ignore-global export',
+    'rg --no-ignore export',
     'rg --no-ignore --files',
     'rg -u -n "x = 1" src',
     'find . -name main.ts -type f',
@@ -76,6 +76,7 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     // ripgrep reads ignore files above the workspace unless told not to.
     'rg export',
     'rg --no-ignore-parent export',
+    'rg --no-ignore-parent --no-ignore-global export',
     'rg - /etc/passwd',
     // Globs and home are paths this parser never saw.
     'cat *.txt',
