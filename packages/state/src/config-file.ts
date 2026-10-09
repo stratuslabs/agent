@@ -381,6 +381,17 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
   if (typeof source.slackChannel === 'string' && source.slackChannel.length > 0) {
     route.slackChannel = source.slackChannel;
   }
+  if (source.autonomy !== undefined) {
+    // Refused when misspelled: an operator who wrote `workspaces` and got
+    // `off` would see an agent asking for everything, with the config in
+    // front of them saying otherwise.
+    if (source.autonomy !== 'off' && source.autonomy !== 'workspace') {
+      throw new Error(
+        `Unsupported ${where}.autonomy in config ${configPath}: ${String(source.autonomy)}. Use off or workspace.`,
+      );
+    }
+    route.autonomy = source.autonomy;
+  }
   if (source.commands !== undefined) {
     // Refused when it is not a list of strings, rather than dropped: an
     // operator who wrote it expects those commands to stop asking, and a
@@ -468,9 +479,11 @@ export const resolveAgentApprovals = (
   const slackApprovers = agent?.slackApprovers ?? approvals?.slackApprovers;
   const slackChannel = agent?.slackChannel ?? approvals?.slackChannel;
   const externalContent = agent?.externalContent ?? approvals?.externalContent;
+  const autonomy = agent?.autonomy ?? approvals?.autonomy;
   // Added together rather than overridden: see `AgentApprovalConfig.commands`.
   const commands = [...new Set([...(approvals?.commands ?? []), ...(agent?.commands ?? [])])];
   return {
+    ...(autonomy !== undefined ? { autonomy } : {}),
     ...(slackApprovers ? { slackApprovers } : {}),
     ...(slackChannel ? { slackChannel } : {}),
     ...(externalContent !== undefined ? { externalContent } : {}),

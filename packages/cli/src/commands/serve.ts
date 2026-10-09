@@ -1,4 +1,5 @@
 import type { ApprovalPolicy } from '@stratusagent/core';
+import { autonomyDirectory } from '../autonomy.ts';
 import type {
   ApprovalTransport,
   GatewayChannelAdapter,
@@ -22,6 +23,7 @@ import {
   loadChannelCredentials,
   readProcessEnv,
   logsDirPath,
+  agentWorkspacePath,
   resolveAgentApprovals,
   resolveAgentPrincipals,
   resolveAgentSlack,
@@ -499,6 +501,13 @@ const serveHeldHome = async (
       scopesFor: async (agentId: string) => [...operatorCommands.scopesFor(agentId), ...await grantStore.scopesFor(agentId)],
       remember: (agentId: string, scope: CommandScope) => grantStore.remember(agentId, scope),
     },
+    // Workspace autonomy: the agent's own workspace, for the agents config
+    // turns it on for. Resolved per call so the answer always matches the
+    // config this daemon started with.
+    workspace: {
+      // The directory the shell resolves for the agent; see `autonomyDirectory`.
+      directoryFor: (agentId: string) => autonomyDirectory(approvalsConfig, pluginsConfig, env, agentId),
+    },
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
       // An approval that widens what runs unattended, for every future
       // session, is precisely the decision that must not be the one leaving
@@ -545,6 +554,18 @@ const serveHeldHome = async (
     );
   };
 
+  // Said the way the resolver decides it: a top-level default with its
+  // opt-outs named, or the agents that opted in.
+  const overrides = Object.entries(approvalsConfig.agents ?? {});
+  const autonomous = approvalsConfig.autonomy === 'workspace'
+    ? (() => {
+        const optedOut = overrides.filter(([, agent]) => agent.autonomy === 'off').map(([agentId]) => agentId);
+        return optedOut.length > 0 ? `every agent except ${optedOut.join(', ')}` : 'every agent';
+      })()
+    : overrides.filter(([, agent]) => agent.autonomy === 'workspace').map(([agentId]) => agentId).join(', ');
+  if (autonomous.length > 0) {
+    log(`approvals: autonomy workspace for ${autonomous} (reads inside their own workspace run without asking)`);
+  }
   const declared = operatorCommands.describe();
   if (declared) {
     log(declared);

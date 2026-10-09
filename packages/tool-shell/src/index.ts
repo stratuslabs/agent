@@ -15,7 +15,7 @@ import {
   type LocalCommandInvocation,
   type LocalCommandTool,
 } from '@stratusagent/executor-local';
-import { expandHome, resolvePluginAgentConfig, workspacePreparer } from '@stratusagent/plugins';
+import { expandHome, resolvePluginAgentConfig, workspacePreparer, workspaceResolver } from '@stratusagent/plugins';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 100_000;
@@ -72,6 +72,35 @@ const truncate = (value: string, maxBytes: number, dropped: boolean): { text: st
 const maxOutputBytesFor = (config: JsonObject, session: Session): number =>
   asNumber(resolvePluginAgentConfig(config, session.agent.id).maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
 
+/**
+ * Environment variables that carry options for a command the permission
+ * engine judges by its arguments. Never passed to a child: see `settingsFor`.
+ */
+// Not POSIXLY_CORRECT: macOS's /bin/sh exports it to every command it runs,
+// so the permission engine reads arguments both ways instead (see
+// `operandsToo` in @stratusagent/permissions).
+export const COMMAND_OPTION_VARIABLES = ['RIPGREP_CONFIG_PATH', 'GREP_OPTIONS'] as const;
+
+/**
+ * Flags that stop a shell from running its user startup files before the
+ * command. Without them zsh sources `$HOME/.zshenv` and fish its config even
+ * non-interactively, and either can redefine `cat`. bash and `sh` read none
+ * when not interactive, once `BASH_ENV`/`ENV` are withheld.
+ */
+const startupOff = (shell: string): string[] => {
+  const name = path.basename(shell);
+  if (name === 'zsh') {
+    return ['-f'];
+  }
+  if (name === 'fish') {
+    return ['--no-config'];
+  }
+  return [];
+};
+
+/** Variables that make a shell run code before the command. Never passed. */
+const SHELL_STARTUP_VARIABLES: readonly string[] = ['BASH_ENV', 'ENV', 'ZDOTDIR'];
+
 const settingsFor = (
   config: JsonObject,
   session: Session,
@@ -122,6 +151,43 @@ const settingsFor = (
     }
   }
 
+  // Variables that hand a judged command options the command line never
+  // shows: `rg pattern` with RIPGREP_CONFIG_PATH can be `rg --pre … --follow
+  // pattern`, and BSD grep reads GREP_OPTIONS. The permission engine judges
+  // the command as written, so what it judges has to be what runs. Withheld
+  // whatever the config says.
+  for (const name of COMMAND_OPTION_VARIABLES) {
+    delete granted[name];
+  }
+  // And what a shell runs before the command: a startup file (`BASH_ENV`,
+  // `ENV`, `ZDOTDIR`'s `.zshenv`) or an exported function (`BASH_FUNC_*`)
+  // can define `cat` as anything. The command judged is the command run.
+  for (const name of Object.keys(granted)) {
+    if (SHELL_STARTUP_VARIABLES.includes(name) || name.startsWith('BASH_FUNC_')) {
+      delete granted[name];
+    }
+  }
+  // A PATH entry the agent can write to is a program the agent chose
+  // running under a command name the permission engine trusts: a workspace
+  // `cat` or `git` would be approved as the real one. Relative entries (`.`,
+  // empty) resolve to the working directory, which is the workspace. Kept
+  // out, whatever env or passEnv says; the system's own paths are unchanged.
+  if (typeof granted.PATH === 'string') {
+    const owned = [cwd, workspaceResolver(workspaces, workspaceRoot)?.(session.agent.id)]
+      .filter((dir): dir is string => typeof dir === 'string' && dir.length > 0);
+    granted.PATH = granted.PATH
+      .split(':')
+      .filter((entry) => entry.length > 0 && path.isAbsolute(entry) && !owned.some((dir) => {
+        const relative = path.relative(dir, path.resolve(entry));
+        return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+      }))
+      .join(':');
+    // An empty PATH is the current directory to `sh`, the one thing this
+    // filter exists to keep out.
+    if (granted.PATH.length === 0) {
+      granted.PATH = '/usr/bin:/bin';
+    }
+  }
   return {
     ...(cwd ? { cwd } : {}),
     // Whether this agent's directory is ours to create. The workspace is —
@@ -208,7 +274,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       }
       return {
         command: settings.shell,
-        args: ['-c', command],
+        args: [...startupOff(settings.shell), '-c', command],
         ...(settings.cwd ? { cwd: settings.cwd } : {}),
         env: settings.env,
         // Required, not preferred. The daemon's environment holds every key
@@ -250,6 +316,17 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
      * with the first one the day either changed.
      */
     commandFor: (input: JsonObject) => (typeof input.command === 'string' ? input.command.trim() : undefined),
+    // Where the command would run, resolved the way `createCommand` resolves
+    // it but without creating anything: this is asked before the call is
+    // approved. A configured cwd wins, as it does there.
+    cwdFor: (session: Session) => {
+      const resolved = resolvePluginAgentConfig(config, session.agent.id, { mergeKeys: ['env'] });
+      if (typeof resolved.cwd === 'string' && resolved.cwd.length > 0) {
+        return expandHome(resolved.cwd, options.home);
+      }
+      const workspaceRoot = typeof resolved.workspaceRoot === 'string' ? resolved.workspaceRoot : undefined;
+      return workspaceResolver(options.workspaces, workspaceRoot)?.(session.agent.id);
+    },
   };
 };
 

@@ -46,6 +46,14 @@ export interface AgentApprovalConfig {
    */
   externalContent?: ExternalContentApprovals;
   /**
+   * How much an agent may do in its own workspace without asking.
+   * `workspace`: commands that only read, and only inside the agent's
+   * workspace directory, run unattended. `off` (the default): nothing
+   * beyond the built-in safe list and what was granted. Overrides per
+   * agent like the keys above.
+   */
+  autonomy?: 'off' | 'workspace';
+  /**
    * Commands the operator installed for the agent to use, which run without
    * asking: `agentboard`, `pnpm test`, `gh pr`. Each is a command and
    * optionally the subcommands it is limited to; what follows may vary.
