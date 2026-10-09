@@ -635,6 +635,14 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] as string;
     if (token.startsWith('-')) {
+      // `-cfix` is `-c fix`: the rest is the branch (or commit) it takes,
+      // not more flags, unless the scope itself denies `-c`.
+      if (deniedInTail !== denied && token.startsWith('-c') && token.length > 2) {
+        if (deniesFlag(scope.deniedFlags ?? [], '-c')) {
+          return false;
+        }
+        continue;
+      }
       if (deniesFlag(deniedInTail, token)) {
         return false;
       }

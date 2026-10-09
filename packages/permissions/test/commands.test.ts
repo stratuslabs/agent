@@ -775,8 +775,12 @@ test('git switch -c is a subcommand flag, not git -c', () => {
   const cloneScope = normalizeCommandScope(clone);
   assert.ok(cloneScope);
   assert.equal(matchesScope(analyzeCommand('git clone -c core.sshCommand=/tmp/evil ssh://host/repo'), cloneScope), false);
+  // An attached value is the branch, not more flags.
+  assert.equal(matchesScope(analyzeCommand('git switch -cfix'), scope), true);
+  assert.equal(matchesScope(analyzeCommand('git commit -cHEAD'), normalizeCommandScope(analyzeCommand('git commit -m x'))!), true);
   // A scope that denies -c itself still does.
   assert.equal(matchesScope(analyzeCommand('git switch -c x'), { command: 'git', args: ['switch'], deniedFlags: ['-c'] }), false);
+  assert.equal(matchesScope(analyzeCommand('git switch -cx'), { command: 'git', args: ['switch'], deniedFlags: ['-c'] }), false);
   // And for anything that is not git.
   assert.equal(matchesScope(analyzeCommand('sh -c id'), { command: 'sh' }), false);
 });
