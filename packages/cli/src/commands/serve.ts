@@ -577,7 +577,7 @@ const serveHeldHome = async (
     log(`maxTurns: ${Object.entries(agentMaxTurns).map(([agentId, turns]) => `${agentId} ${turns}`).join(', ')}; ${maxTurns ?? 'the default'} for the rest (agentMaxTurns)`);
   }
   if (Object.keys(autoContinue).length > 0) {
-    log(`autoContinue: ${Object.entries(autoContinue).map(([agentId, setting]) => `${agentId} ${setting === true ? 'no cap' : `up to ${setting} more`}`).join(', ')} (kernel-loop runtimes; the claude-code and codex harnesses keep their own budget)`);
+    log(`autoContinue: ${Object.entries(autoContinue).map(([agentId, setting]) => `${agentId} ${setting === true ? 'no cap' : `up to ${setting} more`}`).join(', ')} (the codex runtime is not covered and wraps up as before)`);
   }
   if (approvalMode === 'remote') {
     // Only agents whose channel actually came up can be asked: tokens on

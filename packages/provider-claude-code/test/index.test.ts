@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_TURNS, promptWasDelivered, TURN_LIMIT_NOTE, UNTRUSTED_TOOL_RESULT_NOTE } from '@stratusagent/core';
+import { DEFAULT_MAX_TURNS, promptWasDelivered, TURN_LIMIT_NOTE, CONTINUE_NOTE, UNTRUSTED_TOOL_RESULT_NOTE } from '@stratusagent/core';
 import { test } from 'node:test';
 import type {
   MemoryEntry,
@@ -1274,4 +1274,60 @@ test('a bridged result shows its images as MCP images, and one already let go of
   assert.deepEqual(shown.content[1], { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' });
   assert.equal(shown.content[2]?.type, 'text');
   assert.match(JSON.stringify(shown.content[2]), /old\.png/);
+});
+
+test('with auto-continue granted, a run out of turns carries on in the same SDK session until it answers', async () => {
+  const calls: Array<{ prompt: string; options?: Record<string, unknown> }> = [];
+  const runs: ClaudeCodeStreamMessage[][] = [
+    [{ type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-ac' }],
+    [{ type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-ac' }],
+    [{ type: 'result', subtype: 'success', is_error: false, result: 'All cards done.', session_id: 'sdk-ac' }],
+  ];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    calls.push(params as { prompt: string; options?: Record<string, unknown> });
+    const messages = runs[calls.length - 1] ?? [];
+    return (async function* () {
+      for (const message of messages) {
+        yield message;
+      }
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn, maxTurns: 3 });
+  let asked = 0;
+  const response = await provider.generate({ session: createSession(), mayContinue: () => { asked += 1; return true; } });
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'All cards done.' }]);
+  assert.equal(asked, 2);
+  assert.equal(calls.length, 3);
+  for (const call of calls.slice(1)) {
+    assert.equal(call.prompt, CONTINUE_NOTE);
+    assert.equal(call.options?.resume, 'sdk-ac');
+    // A full budget again, not the wrap-up's single turn.
+    assert.equal(call.options?.maxTurns, 3);
+  }
+});
+
+test('when auto-continue declines, a run out of turns wraps up as before', async () => {
+  const calls: Array<{ prompt: string; options?: Record<string, unknown> }> = [];
+  const runs: ClaudeCodeStreamMessage[][] = [
+    [{ type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-ac2' }],
+    [{ type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-ac2' }],
+    [{ type: 'result', subtype: 'success', is_error: false, result: 'Stopping here; reply "continue".', session_id: 'sdk-ac2' }],
+  ];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    calls.push(params as { prompt: string; options?: Record<string, unknown> });
+    const messages = runs[calls.length - 1] ?? [];
+    return (async function* () {
+      for (const message of messages) {
+        yield message;
+      }
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn, maxTurns: 3 });
+  let grants = 1;
+  const response = await provider.generate({ session: createSession(), mayContinue: () => grants-- > 0 });
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Stopping here; reply "continue".' }]);
+  assert.deepEqual(calls.map((call) => call.prompt).slice(1), [CONTINUE_NOTE, TURN_LIMIT_NOTE]);
+  assert.equal(calls[2]!.options?.maxTurns, 1);
 });

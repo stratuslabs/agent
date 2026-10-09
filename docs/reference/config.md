@@ -181,8 +181,9 @@ cap; a number caps the extra budgets per message. It still stops to sum up:
 Approvals, grants and trust labels apply exactly as they did. Off for every
 agent not listed, because it spends tokens without a ceiling; the startup
 log names the agents it is on for. It applies to the built-in model loop
-(Anthropic and OpenAI-compatible providers); the `claude-code` and `codex`
-runtimes run their own loop and keep its budget. Nothing stops a running
+(Anthropic and OpenAI-compatible providers) and to the `claude-code`
+runtime, which carries on in the same Claude Code session with a fresh
+budget. The `codex` runtime is not covered yet and wraps up as before. Nothing stops a running
 turn from Slack yet, so an uncapped runaway turn ends with a new message to
 the agent or a daemon restart.
 

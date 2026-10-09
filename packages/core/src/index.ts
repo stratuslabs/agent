@@ -2887,6 +2887,13 @@ export interface ProviderRequest {
    */
   onUsage?: (usage: ProviderCallUsage) => void;
   /**
+   * For a provider that runs its own tool loop (the harness runtimes): ask,
+   * when its inner budget runs out mid-work, whether to carry on with a
+   * fresh one instead of wrapping up. True grants it, and counts it against
+   * the agent's `autoContinue` cap. Absent when auto-continue is off.
+   */
+  mayContinue?: () => boolean;
+  /**
    * Abort signal for the turn. Adapters MUST cancel their underlying
    * operation (HTTP request, SDK query) when it fires — racing the promise
    * is not cancellation; the underlying work has to stop.
@@ -3561,6 +3568,13 @@ export const UNADDRESSED_TURN_NOTE =
  * the runtime speaking for one call, and a transcript that kept it would
  * read to every later turn as something the person said.
  */
+/**
+ * What a harness runtime is told when auto-continue grants it a fresh
+ * budget. The runtime speaking, never saved to the kernel's transcript.
+ */
+export const CONTINUE_NOTE =
+  'You ran out of steps for this stretch and have been given more. Carry on with the work from where you left off; do not start over or repeat what is done.';
+
 export const TURN_LIMIT_NOTE =
   'You have used every step this message allows, so you cannot call any more tools on it. Reply now, in words: say what you did, what you found, and what is left. If the work is unfinished, end by saying that replying "continue" picks it up from here.';
 
@@ -6802,6 +6816,20 @@ export class AgentRunner {
               ...(enabledSkills.length > 0 ? { skills: enabledSkills } : {}),
               ...(runtime !== undefined ? { runtime } : {}),
               ...(this.streaming ? { onDelta } : {}),
+              ...(this.options.autoContinue !== undefined
+                ? {
+                  // The same grant the loop below makes, for a provider
+                  // whose loop is its own.
+                  mayContinue: () => {
+                    if (!this.mayContinue(session.id, continued)) {
+                      return false;
+                    }
+                    continued += 1;
+                    void this.bus.emit({ type: 'session.continued', sessionId: session.id, continuation: continued, turns: this.maxTurns });
+                    return true;
+                  },
+                }
+                : {}),
               onUsage,
               ...(signal ? { signal } : {}),
             });
