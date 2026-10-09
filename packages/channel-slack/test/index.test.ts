@@ -88,7 +88,7 @@ const createFakeSocket = (): FakeSocket => {
 };
 
 interface FakeWeb extends SlackWebLike {
-  posts: Array<{ channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[] }>;
+  posts: Array<{ channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[]; unfurl_links?: boolean; unfurl_media?: boolean }>;
   updates: Array<{ channel: string; ts: string; text: string; blocks?: SlackBlock[] }>;
   deletes: Array<{ channel: string; ts: string }>;
   ephemerals: Array<{ channel: string; user: string; text: string }>;
@@ -6320,6 +6320,33 @@ test('resolveOutbound posts to a channel the app is a member of, splitting overs
   assert.equal(web.posts.length, 3);
   assert.ok((web.posts[1]?.text.length ?? 0) <= 4000);
   assert.match(web.posts[2]?.text ?? '', /b/);
+
+  await adapter.stop();
+});
+
+test('every post an agent makes asks Slack for no link or media previews', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  // Long enough to need a second message after the edited placeholder.
+  const reply = `see https://github.com/stratuslabs/agent/pull/1 ${'a'.repeat(5000)}`;
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> link me the PR'));
+  await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG' })).post('report: https://example.com');
+
+  assert.ok(web.posts.length >= 3, `expected a placeholder, a continuation and a report, got ${web.posts.length}`);
+  for (const post of web.posts) {
+    assert.equal(post.unfurl_links, false);
+    assert.equal(post.unfurl_media, false);
+  }
 
   await adapter.stop();
 });

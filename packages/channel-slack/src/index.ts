@@ -390,7 +390,7 @@ export interface SlackHistoryPage {
 export interface SlackWebLike {
   auth: { test(): Promise<{ user_id?: string; team_id?: string; response_metadata?: { scopes?: string[] } }> };
   chat: {
-    postMessage(args: { channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[] }): Promise<{ ts?: string; channel?: string }>;
+    postMessage(args: { channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[]; unfurl_links?: boolean; unfurl_media?: boolean }): Promise<{ ts?: string; channel?: string }>;
     update(args: { channel: string; ts: string; text: string; blocks?: SlackBlock[] }): Promise<unknown>;
     /**
      * Take a message back. The one caller is a turn nobody asked for that
@@ -551,6 +551,24 @@ const checkBotScopes = (
     + 'Without them, some features (thread follow-through, image viewing, '
     + 'channel history) will silently fail.',
   );
+};
+
+/**
+ * Every message an agent posts goes out without link or media previews.
+ * Slack unfurls links by default, and an agent's reports and replies are
+ * full of links (PRs, cards, docs) whose previews bury the text that
+ * matters. Applied once around the client, so no post site can forget it.
+ * `chat.update` takes no unfurl flags; an edited placeholder keeps the
+ * post's own setting.
+ */
+export const withoutLinkPreviews = (web: SlackWebLike): SlackWebLike => {
+  // Delegating objects, not copies: everything else on the client (and a
+  // method replaced on it later) is still reached through the original.
+  const chat = Object.create(web.chat) as SlackWebLike['chat'];
+  chat.postMessage = (args) => web.chat.postMessage({ ...args, unfurl_links: false, unfurl_media: false });
+  const wrapped = Object.create(web) as SlackWebLike;
+  wrapped.chat = chat;
+  return wrapped;
 };
 
 const defaultWebClient = (botToken: string): SlackWebLike => {
@@ -5683,7 +5701,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           continue;
         }
         try {
-          const web = createWeb(config.botToken);
+          const web = withoutLinkPreviews(createWeb(config.botToken));
           const auth = await web.auth.test();
           const botUserId = auth.user_id ?? '';
           const teamId = auth.team_id ?? '';
