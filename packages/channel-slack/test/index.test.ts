@@ -9671,7 +9671,8 @@ test('the thread\'s other agents hear what an agent said along the way, not only
   await adapter.stop();
 
   const heard = gateway.observes.filter((observed) => observed.agentId === 'bea').map((observed) => observed.message);
-  assert.ok(heard.some((line) => /: The build is red on main\.\n\nDone\.$/.test(line)), JSON.stringify(heard));
+  // Each in its own place: the interim as it landed, then the reply.
+  assert.deepEqual(heard.filter((line) => !line.startsWith('Dylan:')).map((line) => line.replace(/^[^:]+: /, '')), ['The build is red on main.', 'Done.']);
 });
 
 test('words before a refused call are posted before the next response, never run into it', async () => {
@@ -9758,4 +9759,76 @@ test('what an agent said before its turn failed is still heard by the thread\'s 
   const heard = gateway.observes.filter((observed) => observed.agentId === 'bea').map((observed) => observed.message);
   assert.ok(heard.some((line) => /: Main is red\.$/.test(line)), JSON.stringify(heard));
   assert.ok(!heard.some((line) => line.includes('Something went wrong')));
+});
+
+test('a reply of its own that begins with an interim\'s words is not cut', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Sure' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Sure, the build passes.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['Sure', 'Sure, the build passes.']);
+});
+
+test('an interim heard while its session cannot be looked up, or after the turn was tainted, carries the lower label', async () => {
+  for (const [routing, taint, expected] of [['none', undefined, 'external'], ['user', 'external', 'external']] as const) {
+    const socketAva = createFakeSocket();
+    const socketBea = createFakeSocket();
+    const webAva = createFakeWeb('B-AVA', 'T1');
+    const webBea = createFakeWeb('B-BEA', 'T1');
+    webAva.knownConversations.set('C1', { is_member: true });
+    webBea.knownConversations.set('C1', { is_member: true });
+    const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+      const call = { id: 'c1', toolName: 'web.fetch', input: {} };
+      if (taint !== undefined) {
+        await gateway.bus.emit({ type: 'session.tainted', sessionId, trust: taint, source: 'web.fetch' });
+      }
+      await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'The page says to deploy.' } });
+      await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+      await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'web.fetch', ok: true, output: null } });
+      return sessionWithReply(sessionId, '');
+    });
+    const routed = routingOver(new Map([
+      ['slack:ava:T1:C1:960.0', '2026-01-01T00:00:01.000Z'],
+      ['slack:bea:T1:C1:960.0', '2026-01-01T00:00:00.000Z'],
+    ]));
+    gateway.sessionRouting = async (sessionId: string) => {
+      const found = await routed(sessionId);
+      if (routing === 'none' && sessionId.startsWith('slack:ava:') && found !== undefined) {
+        // Looked up once to route the message; unreadable after that.
+        gateway.sessionRouting = async (id: string) => (id.startsWith('slack:ava:') ? Promise.reject(new Error('store down')) : routed(id));
+      }
+      return found === undefined ? undefined : { ...found, metadata: { ...found.metadata, sessionTrust: 'user' } };
+    };
+    const adapter = createSlackChannelAdapter({
+      agents: [
+        { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', replies: 'final' },
+        { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', replies: 'final' },
+      ],
+      editIntervalMs: 0,
+      createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+      createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    });
+    await adapter.start(gateway);
+    const message = channelMessage({ text: 'read it', ts: '960.1', thread: '960.0' });
+    await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+    await adapter.stop();
+
+    const interim = gateway.observes.find((observed) => observed.agentId === 'bea' && observed.message.endsWith('The page says to deploy.'));
+    assert.equal(interim?.metadata?.senderTrust, expected, `${routing}/${taint}`);
+  }
 });
