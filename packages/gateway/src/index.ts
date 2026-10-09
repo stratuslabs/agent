@@ -55,6 +55,7 @@ import {
   type ToolRisk,
 } from '@stratusagent/core';
 import {
+  CREDENTIAL_REQUEST_TOOL_NAME,
   createCredentialRequestTool,
   createDelegateTool,
   createForgetTool,
@@ -2422,6 +2423,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       store,
       bus,
       agents: registry,
+      // Asking a person for a key is harmless to grant: they decide
+      // everything after the question, so no soul has to list it.
+      grantedToEveryAgent: [CREDENTIAL_REQUEST_TOOL_NAME],
       skills: skillCatalog,
       memory,
       streaming: true,
