@@ -781,6 +781,9 @@ test('git switch -c is a subcommand flag, not git -c', () => {
   // A scope that denies -c itself still does.
   assert.equal(matchesScope(analyzeCommand('git switch -c x'), { command: 'git', args: ['switch'], deniedFlags: ['-c'] }), false);
   assert.equal(matchesScope(analyzeCommand('git switch -cx'), { command: 'git', args: ['switch'], deniedFlags: ['-c'] }), false);
+  // Nor when the scope names its flags and -c isn't one.
+  assert.equal(matchesScope(analyzeCommand('git switch -cfoo'), { command: 'git', args: ['switch'], allowedFlags: [] }), false);
+  assert.equal(matchesScope(analyzeCommand('git switch -c foo'), { command: 'git', args: ['switch'], allowedFlags: [] }), false);
   // And for anything that is not git.
   assert.equal(matchesScope(analyzeCommand('sh -c id'), { command: 'sh' }), false);
 });

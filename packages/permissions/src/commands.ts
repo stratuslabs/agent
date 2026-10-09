@@ -638,7 +638,10 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
       // `-cfix` is `-c fix`: the rest is the branch (or commit) it takes,
       // not more flags, unless the scope itself denies `-c`.
       if (deniedInTail !== denied && token.startsWith('-c') && token.length > 2) {
-        if (deniesFlag(scope.deniedFlags ?? [], '-c')) {
+        // The same checks `-c` itself meets, minus reading its value as
+        // more flags: refused if the scope denies it, or names its flags
+        // and `-c` isn't one.
+        if (deniesFlag(scope.deniedFlags ?? [], '-c') || (scope.allowedFlags && !allowsFlag(scope.allowedFlags, '-c'))) {
           return false;
         }
         continue;
