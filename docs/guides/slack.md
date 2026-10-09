@@ -234,8 +234,10 @@ without it, so one bad file cannot fail a thread from then on.
 
 An agent that needs a key it does not hold can ask for one in the
 conversation, with the `credential.request` tool. The daemon grants it to every agent,
-whatever its `tools:` says, because the agent only asks and a person
-decides everything after that:
+whatever its `tools:` says, because the form goes to an approver who
+decides everything after that. The one-time link it can fall back to is a
+bearer credential, so a link needs the soul to list `credential.request`
+(or have no `tools:` key):
 
 ```
 Kai is asking for a credential: github.token, for Kai only.
