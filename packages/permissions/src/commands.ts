@@ -752,6 +752,11 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
  * the entry is refused with the reason instead.
  */
 export const commandScopeFromPrefix = (prefix: string): { scope: CommandScope } | { reason: string } => {
+  // Plain words only, so the entry as written is the scope as matched, and
+  // every listing and revoke can compare it word for word.
+  if (/['"]/.test(prefix)) {
+    return { reason: 'it contains quotes; write the command as plain words' };
+  }
   const analysis = analyzeCommand(prefix.trim());
   if (analysis.pipeline) {
     return { reason: 'it is a pipeline; list each command on its own' };

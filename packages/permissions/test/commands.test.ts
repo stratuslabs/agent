@@ -707,7 +707,7 @@ test('a command an operator declares is a prefix whose tail may vary, minus the 
   assert.match((commandScopeFromPrefix('git') as { reason: string }).reason, /git branch/);
 
   // Only words: anything else would be a grant nobody wrote.
-  for (const prefix of ['agentboard --token x', 'git log | sh', 'rm -rf', 'tool*', '~/bin/tool', '/usr/bin/tool', 'a; b', '']) {
+  for (const prefix of ['agentboard "task"', "foo 'bar'", 'agentboard --token x', 'git log | sh', 'rm -rf', 'tool*', '~/bin/tool', '/usr/bin/tool', 'a; b', '']) {
     assert.ok('reason' in commandScopeFromPrefix(prefix), `should refuse: ${prefix}`);
   }
 });
