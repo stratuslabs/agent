@@ -111,7 +111,7 @@ const BARE_URL_END = /[\s<>[\]`"|]/;
  * `https://x/path;` keeps it, and only an entity-like `&hl;` at the end
  * comes off, whole (see `bareUrlAt`).
  */
-const BARE_URL_TRAILING = /^[?!.,:*_~'"]$/;
+const BARE_URL_TRAILING = /^[?!.,:*_~"]$/;
 
 /** How long the bare address starting at `at` is, or 0 when none starts there. */
 const bareUrlAt = (text: string, at: number): number => {

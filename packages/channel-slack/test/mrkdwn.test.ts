@@ -788,6 +788,8 @@ test('a bare address is sent as Slack link markup, and nothing around it changes
     ['https://example.com/search?q=commonmark&hl;', '<https://example.com/search?q=commonmark>&hl;'],
     ['https://example.com/a;b', '<https://example.com/a;b>'],
     ['https://x.com/pull/1**, merged**', '<https://x.com/pull/1>*, merged*'],
+    // An apostrophe is a valid URI sub-delimiter and stays in the address.
+    ["https://example.com/users/James'", "<https://example.com/users/James'>"],
     // A snippet after an address is still a snippet.
     ['https://x.com/`code`', '<https://x.com/>`code`'],
     // Already a link, or not one anybody wrote: left as written.
