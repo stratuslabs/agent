@@ -185,8 +185,9 @@ export interface SlackAgentConfig {
    * this agent's to answer without a mention: the channel people come to
    * when they want this agent. A message there that names another agent
    * is that agent's. Threads follow the soul's `listens` as anywhere else.
-   * One channel has one home agent: when two list it, the first in
-   * configuration order keeps it and the adapter warns at startup.
+   * One channel has one home agent: when two in the same workspace list
+   * it, neither owns it, both answer there only when mentioned, and the
+   * adapter warns at startup.
    */
   homeChannels?: string[];
 }

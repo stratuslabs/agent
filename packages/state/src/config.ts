@@ -135,7 +135,7 @@ export interface AgentSlackConfig {
  * Read only from a **trusted** config, like `principals`: how the daemon
  * posts into the operator's workspace is not a cloned repository's call.
  */
-export interface SlackConfig extends AgentSlackConfig {
+export interface SlackConfig extends Omit<AgentSlackConfig, 'homeChannels'> {
   /** Per-agent overrides, keyed by agent id. */
   agents?: Record<string, AgentSlackConfig>;
 }
