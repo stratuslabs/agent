@@ -273,6 +273,8 @@ test('local git in a repository inside the workspace is judged inside, and publi
     'git fetch /home/user/private-repo',
     'git pull ../../../../elsewhere main',
     'git fetch upstream',
+    // worktree remove matches by suffix, possibly outside.
+    'git worktree remove ../app-fix',
   ]) {
     assert.equal(await inside(command), false, `should not be inside: ${command}`);
   }

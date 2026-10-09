@@ -397,7 +397,9 @@ const GIT_SUBCOMMANDS: Record<string, GitSubcommand> = {
     ],
     values: ['--set-upstream-to', '-u', '--sort', '--format', '--contains', '--no-contains', '--points-at'],
   },
-  worktree: { flags: ['--detach', '--track', '--no-track', '-q', '--quiet', '--porcelain', '-v', '--verbose', '--checkout', '--no-checkout'], values: ['-b'], actions: ['add', 'list', 'remove'] },
+  // Not `remove`: git matches its argument against registered worktrees by
+  // unique suffix, so `remove wt` can delete one outside the workspace.
+  worktree: { flags: ['--detach', '--track', '--no-track', '-q', '--quiet', '--porcelain', '-v', '--verbose', '--checkout', '--no-checkout'], values: ['-b'], actions: ['add', 'list'] },
   stash: { flags: ['-u', '--include-untracked', '-k', '--keep-index', '--no-keep-index', '-q', '--quiet', '--index', '--staged'], values: ['-m', '--message'], actions: ['push', 'pop', 'apply', 'list', 'show', 'save'] },
   merge: { flags: ['--no-ff', '--ff-only', '--ff', '--squash', '--no-squash', '--no-edit', '--abort', '--continue', '--quit', '-q', '--quiet', '--no-commit', '--commit', '--stat', '--no-stat', '--autostash'], values: ['-m', '--message'] },
   rebase: { flags: ['--abort', '--continue', '--skip', '--quit', '--autosquash', '--no-autosquash', '--autostash', '--no-autostash', '-q', '--quiet', '--root', '--keep-empty', '--update-refs'], values: ['--onto'] },
@@ -523,7 +525,15 @@ const configuredRemotes = async (commonDir: string): Promise<string[] | undefine
   if (/^\s*\[include(?:If)?\b/im.test(config)) {
     return undefined;
   }
-  return [...config.matchAll(/^\s*\[remote "([^"]+)"\]/gm)].map((match) => match[1] as string);
+  // A remote only counts with a URL: without one git reads the name as a
+  // path (`[remote ".."]` would push to the parent directory). `.` and `..`
+  // are paths whatever the config says.
+  const sections = config.split(/^(?=\s*\[)/m);
+  return sections
+    .map((section) => ({ name: /^\s*\[remote "([^"]+)"\]/.exec(section)?.[1], section }))
+    .filter((entry): entry is { name: string; section: string } => entry.name !== undefined && entry.name !== '.' && entry.name !== '..'
+      && /^\s*(?:push)?url\s*=\s*\S/im.test(entry.section))
+    .map((entry) => entry.name);
 };
 
 export const gitInsideWorkspace = async (

@@ -288,7 +288,7 @@ own files can't send anything anywhere.
 
 Local git runs too, in a repository inside the workspace (the cwd, or
 `-C <path>`): `add`, `commit`, `switch`, `checkout`, `restore`, `branch`,
-`worktree add`/`list`/`remove` (to a path inside the workspace), `stash`,
+`worktree add` (to a path inside the workspace) and `list`, `stash`,
 `merge`, `rebase`, `cherry-pick`, `reset`, `fetch`, `pull`, `tag`, `mv`,
 and `rm`, plus the read-only ones. Each subcommand has a list of the flags it may use, and anything else
 asks: `--force`, `--hard`, `-D`, `--no-verify`, `stash drop`/`clear`,
