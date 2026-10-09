@@ -207,6 +207,14 @@ test('local git in a repository inside the workspace is judged inside, and publi
     assert.equal(await inside(command), true, `should be inside: ${command}`);
   }
   assert.equal(await inside('git -C app status', workspace), true);
+  // A bare fetch uses the branch's upstream remote, which must be configured.
+  await writeFile(path.join(repo, '.git', 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n[branch "main"]\n\tremote = /tmp/private\n');
+  assert.equal(await inside('git fetch'), false, 'branch.main.remote is a path');
+  assert.equal(await inside('git pull'), false);
+  await writeFile(path.join(repo, '.git', 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n[remote "pushonly"]\n\tpushurl = https://example.com/app.git\n');
+  // git mv's destination through a symlinked directory lands outside.
+  assert.equal(await inside('git mv src/main.ts up/main.ts'), false);
+  assert.equal(await inside('git mv src/main.ts src/renamed.ts'), true);
   // A directory inside whose .git names a repository outside.
   const decoy = path.join(workspace, 'decoy');
   await mkdir(path.join(root, 'private', '.git'), { recursive: true });

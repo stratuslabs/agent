@@ -541,6 +541,33 @@ const configuredRemotes = async (commonDir: string, use: 'fetch' | 'push' = 'pus
     .map((entry) => entry.name);
 };
 
+/**
+ * The remote a bare `git fetch`/`git pull` uses: the checked-out branch's
+ * `branch.<name>.remote`, or `origin`. Undefined when HEAD isn't a branch or
+ * the config includes a file this can't read.
+ */
+const upstreamRemote = async (dirs: { gitDir: string; commonDir: string }): Promise<string | undefined> => {
+  const head = await readFile(path.join(dirs.gitDir, 'HEAD'), 'utf8').catch(() => '');
+  const branch = /^ref: refs\/heads\/(.+)$/m.exec(head)?.[1]?.trim();
+  if (branch === undefined) {
+    return undefined;
+  }
+  const config = await readFile(path.join(dirs.commonDir, 'config'), 'utf8').catch(() => '');
+  if (/^\s*\[include(?:If)?\b/im.test(config)) {
+    return undefined;
+  }
+  for (const section of config.split(/^(?=\s*\[)/m)) {
+    const header = /^\s*\[branch "([^"]+)"\]/i.exec(section);
+    if (header?.[1] === branch) {
+      const remote = /^\s*remote\s*=\s*(.+?)\s*$/im.exec(section.slice(header[0].length))?.[1];
+      if (remote !== undefined) {
+        return remote;
+      }
+    }
+  }
+  return 'origin';
+};
+
 export const gitInsideWorkspace = async (
   analysis: CommandAnalysis,
   cwd: string,
@@ -622,10 +649,23 @@ export const gitInsideWorkspace = async (
   }
   // Fetch and pull name a repository first, and a path there reads one from
   // anywhere on the host: only a remote the repository configures.
-  if ((subcommand === 'fetch' || subcommand === 'pull') && positionals.length > 0) {
+  // With no repository named, the checked-out branch's `branch.<x>.remote`
+  // decides (`origin` when unset), and that must be a configured remote too.
+  if (subcommand === 'fetch' || subcommand === 'pull') {
     const remotes = await configuredRemotes(dirs.commonDir, 'fetch');
-    if (remotes === undefined || !remotes.includes(positionals[0] as string)) {
+    const named = positionals.length > 0 ? positionals[0] as string : await upstreamRemote(dirs);
+    if (remotes === undefined || named === undefined || !remotes.includes(named)) {
       return false;
+    }
+  }
+  // `git mv` writes its destination, and a symlinked directory on the way
+  // can put it outside: every path it names must land inside.
+  if (subcommand === 'mv') {
+    for (const target of positionals) {
+      const landed = await walk(repoDir, target);
+      if (landed === undefined || !within(root, landed)) {
+        return false;
+      }
     }
   }
   // A worktree is a directory git creates or removes: it must land inside
