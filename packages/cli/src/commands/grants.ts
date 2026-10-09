@@ -112,8 +112,18 @@ export const runGrants = async (
     return render(listing, await resolveWhitelistPath(stratusHomePath(env), agentsDirPath(env), agentId));
   };
 
+  // Whether a config entry still covers a scope: `agentboard` covers a
+  // remembered `agentboard task`, not only an entry spelled the same.
+  const coveredByConfig = (scope: string): boolean => {
+    const tokens = scope.trim().split(/\s+/);
+    return declared.some((entry) => {
+      const prefix = entry.trim().split(/\s+/);
+      return prefix.length <= tokens.length && prefix.every((token, index) => tokens[index] === token);
+    });
+  };
+
   const reportRevocation = (revoked: boolean): number => {
-    if (revoked && revocation?.scope !== undefined && declared.includes(revocation.scope.trim())) {
+    if (revoked && revocation?.scope !== undefined && coveredByConfig(revocation.scope)) {
       // The stored grant is gone, but the command still runs: config says so
       // too, and saying only "Revoked" would leave the operator believing it
       // now asks.
@@ -124,7 +134,7 @@ export const runGrants = async (
       );
       return 0;
     }
-    if (!revoked && revocation?.scope !== undefined && declared.includes(revocation.scope.trim())) {
+    if (!revoked && revocation?.scope !== undefined && coveredByConfig(revocation.scope)) {
       writeLine(
         streams.stderr,
         `"${revocation.scope}" comes from approvals.commands in config, not from an approval. Remove it there and restart the daemon.`,

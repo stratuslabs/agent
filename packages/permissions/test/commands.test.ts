@@ -684,6 +684,12 @@ test('a command an operator declares is a prefix whose tail may vary, minus the 
   assert.equal(matchesScope(analyzeCommand('git push --force origin main'), git), false);
   assert.equal(matchesScope(analyzeCommand('git -c core.sshCommand=sh push'), git), false);
 
+  // Refusals from an unrelated subcommand don't come along: `git remote`
+  // refuses `add`, which must not refuse `git add` itself.
+  const add = declared('git add');
+  assert.equal(matchesScope(analyzeCommand('git add -A'), add), true);
+  assert.equal(matchesScope(analyzeCommand('git add src/main.ts'), add), true);
+
   // A built-in scope's limits come along, not just its refusals.
   const branch = declared('git branch');
   assert.equal(matchesScope(analyzeCommand('git branch --list'), branch), true);

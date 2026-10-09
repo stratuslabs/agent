@@ -803,12 +803,21 @@ export const commandScopeFromPrefix = (prefix: string): { scope: CommandScope } 
     : undefined;
   const flagsWithValue = [...new Set(same.flatMap((scope) => scope.flagsWithValue ?? []))];
   const positionals = same.map((scope) => scope.maxPositionals).filter((count): count is number => count !== undefined);
-  const deniedArgs = forBase.flatMap((scope) => scope.deniedArgs ?? []);
+  // Refusals come only from built-in scopes on the same path as this one:
+  // `git remote` refuses `add` as its argument, which says nothing about
+  // `git add`, and copying it would refuse the entry's own subcommand.
+  const related = forBase.filter((scope) => {
+    const sub = scope.args ?? [];
+    const shorter = sub.length <= args.length ? sub : args;
+    const longer = sub.length <= args.length ? args : sub;
+    return shorter.every((token, index) => longer[index] === token);
+  });
+  const deniedArgs = related.flatMap((scope) => scope.deniedArgs ?? []);
   return {
     scope: {
       command: analysis.base,
       ...(args.length > 0 ? { args } : {}),
-      deniedFlags: [...new Set([...DESTRUCTIVE_FLAGS, ...forBase.flatMap((scope) => scope.deniedFlags ?? [])])],
+      deniedFlags: [...new Set([...DESTRUCTIVE_FLAGS, ...related.flatMap((scope) => scope.deniedFlags ?? [])])],
       ...(deniedArgs.length > 0 ? { deniedArgs: [...new Set(deniedArgs)] } : {}),
       ...(same.some((scope) => scope.listOnly) ? { listOnly: true } : {}),
       ...(allowedFlags ? { allowedFlags } : {}),
