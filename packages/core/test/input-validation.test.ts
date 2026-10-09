@@ -40,7 +40,25 @@ test('inputProblem names the first thing wrong with a call, and nothing when the
   // A key patternProperties declares is not an extra one.
   const patterned = { type: 'object', properties: { name: { type: 'string' } }, patternProperties: { '^x-': {} }, additionalProperties: false };
   assert.equal(inputProblem(patterned, { name: 'a', 'x-trace': 'b' }), undefined);
-  assert.match(inputProblem(patterned, { name: 'a', other: 'b' }) ?? '', /has "other"/);
+  // No pattern a schema supplies is ever run: with patternProperties, extra
+  // keys are not judged at all (a catastrophic pattern returns at once).
+  assert.equal(inputProblem(patterned, { name: 'a', other: 'b' }), undefined);
+  const evil = { type: 'object', patternProperties: { '^(a+)+$': {} }, additionalProperties: false };
+  const started = Date.now();
+  assert.equal(inputProblem(evil, { [`${'a'.repeat(40)}!`]: 1 }), undefined);
+  assert.ok(Date.now() - started < 100);
+  // A pathologically deep enum value doesn't overflow the stack.
+  const nested = (levels: number): Record<string, unknown> => {
+    const top: Record<string, unknown> = {};
+    let at = top;
+    for (let level = 0; level < levels; level += 1) {
+      const next: Record<string, unknown> = {};
+      at.n = next;
+      at = next;
+    }
+    return top;
+  };
+  assert.equal(inputProblem({ enum: [nested(5000)] } as never, nested(5000) as never), undefined);
   // What it doesn't read is not a failure.
   assert.equal(inputProblem(undefined, { anything: true }), undefined);
   assert.equal(inputProblem({ type: 'object', properties: { x: { minLength: 3 } } }, { x: 'a' }), undefined);

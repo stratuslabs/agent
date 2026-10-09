@@ -5969,19 +5969,24 @@ export interface AgentRunnerOptions {
  * which still run. A schema keyword it doesn't read is not a failure.
  */
 /** JSON equality, member order aside, the way JSON Schema compares `enum` values. */
-const sameJson = (left: JsonValue | undefined, right: JsonValue | undefined): boolean => {
+const sameJson = (left: JsonValue | undefined, right: JsonValue | undefined, depth = 0): boolean => {
   if (left === right) {
+    return true;
+  }
+  // Past any depth a real enum has, too deep to compare safely: unknown is
+  // not wrong, so it counts as a match and the tool's own checks decide.
+  if (depth > 64) {
     return true;
   }
   if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') {
     return false;
   }
   if (Array.isArray(left) || Array.isArray(right)) {
-    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => sameJson(item, right[index]));
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => sameJson(item, right[index], depth + 1));
   }
   const leftKeys = Object.keys(left).filter((key) => left[key] !== undefined);
   const rightKeys = Object.keys(right).filter((key) => right[key] !== undefined);
-  return leftKeys.length === rightKeys.length && leftKeys.every((key) => sameJson(left[key], right[key]));
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => sameJson(left[key], right[key], depth + 1));
 };
 
 export const inputProblem = (schema: JsonObject | undefined, input: JsonValue, where = 'input', depth = 0): string | undefined => {
@@ -6014,20 +6019,12 @@ export const inputProblem = (schema: JsonObject | undefined, input: JsonValue, w
       return `${where} is missing "${key}"`;
     }
   }
-  if (schema.additionalProperties === false) {
-    // A key a `patternProperties` pattern matches is declared too. A pattern
-    // this engine can't compile counts as matching: unknown is not wrong.
-    const patterns = schema.patternProperties !== null && typeof schema.patternProperties === 'object' && !Array.isArray(schema.patternProperties)
-      ? Object.keys(schema.patternProperties)
-      : [];
-    const matchesPattern = (key: string): boolean => patterns.some((pattern) => {
-      try {
-        return new RegExp(pattern, 'u').test(key);
-      } catch {
-        return true;
-      }
-    });
-    const unknown = Object.keys(input).find((key) => !(key in properties) && !matchesPattern(key));
+  // With `patternProperties` a key may be declared by a pattern, and running
+  // a pattern a schema supplied is a regex engine on untrusted input. Not
+  // this check's job: extra keys are only judged when no pattern exists.
+  const patterned = schema.patternProperties !== undefined && schema.patternProperties !== null;
+  if (schema.additionalProperties === false && !patterned) {
+    const unknown = Object.keys(input).find((key) => !(key in properties));
     if (unknown !== undefined) {
       return `${where} has "${unknown}", which this tool does not take (it takes ${Object.keys(properties).map((key) => `"${key}"`).join(', ') || 'nothing'})`;
     }
