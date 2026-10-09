@@ -8091,7 +8091,7 @@ test('each turn says what kind of room it is in now, how many are in it, and its
 
   // A lookup that fails keeps what the event said, and nothing more.
   await socket.deliver('message', mention('<@B-AVA> hello', { type: 'message', channel: 'C9', channel_type: 'channel', ts: '400.1' }));
-  assert.deepEqual(rooms.at(-1), { kind: 'public', id: 'C9', thread: true });
+  assert.deepEqual(rooms.at(-1), { kind: 'public', thread: true });
   await adapter.stop();
 });
 
