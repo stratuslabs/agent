@@ -527,7 +527,7 @@ const REQUIRED_SCOPES: readonly string[] = [
   'app_mentions:read',
   'channels:history', 'channels:read',
   'chat:write',
-  'files:read',
+  'files:read', 'files:write',
   'groups:history', 'groups:read',
   'im:history', 'im:read', 'im:write',
   'mpim:history', 'mpim:read',
