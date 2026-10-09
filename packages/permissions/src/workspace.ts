@@ -836,15 +836,14 @@ export const gitPushInsideWorkspace = async (
     }
     branch = name;
   }
+  // An explicit destination must say it's a branch: unqualified, git
+  // matches it against the remote's refs first, and `nova/x` could be
+  // `refs/nova/x` there.
   if (destination !== undefined) {
-    if (destination.startsWith('refs/')) {
-      if (!destination.startsWith('refs/heads/')) {
-        return false;
-      }
-      branch = destination.slice('refs/heads/'.length);
-    } else {
-      branch = destination;
+    if (!destination.startsWith('refs/heads/')) {
+      return false;
     }
+    branch = destination.slice('refs/heads/'.length);
   }
   return branch.length > 0 && branchPrefixes.some((prefix) => branch.startsWith(prefix) && branch.length > prefix.length);
 };

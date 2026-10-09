@@ -356,11 +356,11 @@ test('pushing the agent\'s own branch runs, and every other push asks', async ()
     'git push origin nova/mic-hang',
     'git push -u origin nova/mic-hang',
     'git push origin nova/packed',
-    'git push origin main:nova/main-copy',
+    'git push origin main:refs/heads/nova/main-copy',
     'git push origin nova/x:refs/heads/nova/y',
     'git push --dry-run origin nova/x',
     `git -C ${worktree} push -u origin HEAD`,
-    `git -C ${worktree} push origin HEAD:nova/mic-hang`,
+    `git -C ${worktree} push origin HEAD:refs/heads/nova/mic-hang`,
   ]) {
     assert.equal(await pushes(command), true, `should push: ${command}`);
   }
@@ -375,6 +375,7 @@ test('pushing the agent\'s own branch runs, and every other push asks', async ()
     'git push origin main',
     'git push origin HEAD:main',
     'git push origin nova/x:main',
+    'git push origin main:nova/x',
     'git push origin nova/',
     'git push origin blair/fix',
     // A name that is also a tag, a tag, and a source that is not a branch.

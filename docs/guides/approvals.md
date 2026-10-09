@@ -308,8 +308,8 @@ running unattended once the conversation reads web content under
 hooks, which a repository only has if somebody put them there.
 
 `git push <remote> <refspec>` runs too, for the agent's own branches: the
-branch that lands on the remote (the refspec's destination, or the
-checked-out branch for `HEAD`) must start with one of the agent's prefixes,
+branch that lands on the remote (the checked-out branch for `HEAD`, the
+same name for a branch, or an explicit `refs/heads/…` destination) must start with one of the agent's prefixes,
 which are `<agentId>/` unless `branchPrefixes` says otherwise. A bare
 `git push` or `git push origin` asks, because the repository's config, not
 the command, decides where it goes. A name that is also a tag, or isn't a
