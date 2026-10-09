@@ -564,6 +564,9 @@ const allowsFlag = (allowed: string[], token: string): boolean => {
   return letters.every((letter) => allowed.includes(letter));
 };
 
+/** Git subcommands whose own `-c` creates or reuses, never configures. */
+const GIT_SUBCOMMANDS_WITH_PLAIN_C = new Set(['switch', 'commit']);
+
 /** Whether an invocation falls inside one scope. */
 export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): boolean => {
   if (analysis.disqualifiedBy || analysis.base === undefined) {
@@ -585,6 +588,23 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   }
 
   const denied = [...ALWAYS_DENIED_FLAGS, ...(scope.deniedFlags ?? [])];
+  // `-c` is refused everywhere for `git -c`, which sets config before the
+  // subcommand. After a subcommand it is that subcommand's own flag:
+  // `git switch -c` creates a branch, `git commit -c` reuses a message.
+  // Only the tail past the subcommand is relieved; the subcommand itself is
+  // a literal required argument, so `-c` cannot be it.
+  // Only for subcommands whose `-c` is known not to set config: `clone -c`
+  // does exactly what `git -c` does (`core.sshCommand=…`).
+  // Past every leading `-C <repo>` pair: git applies each in turn.
+  let subcommandAt = 0;
+  while (scope.command === 'git' && required[subcommandAt] === '-C' && required[subcommandAt + 1] !== undefined) {
+    subcommandAt += 2;
+  }
+  // Only the `-c` the shared list contributes; a scope that names `-c` in
+  // its own `deniedFlags` still means it.
+  const deniedInTail = scope.command === 'git' && GIT_SUBCOMMANDS_WITH_PLAIN_C.has(required[subcommandAt] ?? '')
+    ? [...ALWAYS_DENIED_FLAGS.filter((flag) => flag !== '-c'), ...(scope.deniedFlags ?? [])]
+    : denied;
   // A required token can itself be a flag or a refspec — an exact scope
   // carries the whole approved command — and a whitelist file is
   // hand-editable, so the prefix is held to the same rules as the rest.
@@ -595,11 +615,12 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
     // Its operand is a path, not an argument of the subcommand's, so the
     // subcommand's denied arguments and git's refspec rule do not apply to
     // it either: `git -C add remote` is the `remote` subcommand in `add`.
-    if (scope.command === 'git' && required[0] === '-C' && required.length > 2 && index <= 1) {
+    if (scope.command === 'git' && subcommandAt > 0 && required.length > subcommandAt && index < subcommandAt) {
       continue;
     }
     if (token.startsWith('-')) {
-      if (deniesFlag(denied, token)) {
+      // Past the subcommand, the same relief the tail gets (`['switch', '-c']`).
+      if (deniesFlag(index > subcommandAt ? deniedInTail : denied, token)) {
         return false;
       }
       continue;
@@ -618,8 +639,32 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   let positionals = 0;
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] as string;
+    // After `--` a dash token is an operand to a program that honors it and
+    // a flag to one that doesn't, and the two can't both be checked as
+    // written: it asks.
+    // The required prefix counts: a scope may itself end in `--`.
+    if (token.startsWith('-') && args.slice(0, required.length + index).includes('--')) {
+      return false;
+    }
     if (token.startsWith('-')) {
-      if (deniesFlag(denied, token)) {
+      // `-cfix` is `-c fix`: the rest is the branch (or commit) it takes,
+      // not more flags, unless the scope itself denies `-c`.
+      // A short bundle with `c` in it (`-cfix`, `-qvcHEAD`): the letters
+      // before `c` are flags, and everything after it is `-c`'s value.
+      const at = !token.startsWith('--') ? token.indexOf('c', 1) : -1;
+      if (deniedInTail !== denied && at > 0 && token.length > at + 1) {
+        const before = [...token.slice(1, at)].map((letter) => `-${letter}`);
+        for (const flag of [...before, '-c']) {
+          // The same checks each flag meets on its own, minus reading the
+          // value as more flags; `-c` against the scope's own denials only.
+          const refusals = flag === '-c' ? scope.deniedFlags ?? [] : deniedInTail;
+          if (deniesFlag(refusals, flag) || (scope.allowedFlags && !allowsFlag(scope.allowedFlags, flag))) {
+            return false;
+          }
+        }
+        continue;
+      }
+      if (deniesFlag(deniedInTail, token)) {
         return false;
       }
       if (scope.allowedFlags && !allowsFlag(scope.allowedFlags, token)) {
