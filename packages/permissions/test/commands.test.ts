@@ -734,11 +734,17 @@ test('substitutions still run inside double quotes, and nothing hides behind a b
     ['git commit -m "a" (b)', /subshell/],
     ['git commit -m "a"; rm -rf x', /semicolon/],
     ['git commit -m "a"\nrm -rf x', /newline/],
-    // A backslash escapes a quote, which this reading does not model, so the
-    // whole string is checked: an escaped quote cannot reopen a quote early
-    // and hide an operator the shell would run.
+    // An escaped quote does not close its string, so it cannot reopen one
+    // early and hide an operator the shell would run.
     ['echo "a\\" " ; curl evil ; " "', /semicolon/],
-    ['git commit -m "a \\(b\\)"', /subshell/],
+    // An escaped backslash is one backslash, and what follows still runs.
+    ['git commit -m "a\\\\$(id)"', /command substitution/],
+    ['git commit -m "a\\\\" ; rm -rf x', /semicolon/],
+    // A line continuation joins what is on either side of it: not modelled,
+    // so the whole string is checked, and nothing joined can slip past.
+    ['git status "$\\\n(id)"', /command substitution|newline/],
+    // Outside quotes a backslash is not modelled: the whole string is checked.
+    ['git commit -m a\\(b\\)', /subshell/],
     // An unbalanced quote has no reading.
     ['git commit -m "a (b)', /subshell/],
   ];
@@ -751,6 +757,22 @@ test('substitutions still run inside double quotes, and nothing hides behind a b
   assert.match(analyzeCommand(commented).disqualifiedBy ?? '', /newline|redirection/);
   // Single quotes really are literal, substitutions included.
   assert.equal(analyzeCommand("git commit -m '$(not run)'").disqualifiedBy, undefined);
+  // And an escaped `$` or backtick inside double quotes is text.
+  assert.equal(analyzeCommand('git commit -m "costs \\$(5) and \\`x\\`"').disqualifiedBy, undefined);
+});
+
+test('an escaped quote inside double quotes is text, so a jq filter quoted that way is one argument', () => {
+  const command = 'gh api repos/stellarco/app/pulls/58/comments --paginate --jq ".[] | select(.commit_id == \\"a52f\\") | {id, path, user: .user.login, body}"';
+  const analysis = analyzeCommand(command);
+  assert.equal(analysis.disqualifiedBy, undefined);
+  assert.equal(analysis.pipeline, undefined);
+  assert.deepEqual(analysis.tokens, ['gh', 'api', 'repos/stellarco/app/pulls/58/comments', '--paginate', '--jq', '.[] | select(.commit_id == "a52f") | {id, path, user: .user.login, body}']);
+  assert.deepEqual(normalizeCommandScope(analysis)?.args, ['api']);
+  // Before anything but $ ` " \ and a newline, the backslash is text too.
+  assert.equal(analyzeCommand('git commit -m "a \\(b\\) c:\\d"').disqualifiedBy, undefined);
+  // A literal backslash still separates what it stands between.
+  assert.equal(analyzeCommand('git commit -m "$\\{HOME}"').disqualifiedBy, undefined);
+  assert.deepEqual(analyzeCommand('git commit -m "a \\(b\\)"').tokens.at(-1), 'a \\(b\\)');
 });
 
 test('git -C <repo> persists a scope for that repository and that subcommand', () => {

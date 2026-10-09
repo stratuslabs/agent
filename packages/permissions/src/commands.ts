@@ -309,6 +309,14 @@ export interface CommandAnalysis {
 
 const EXPANDING = /[*?[\]{}~$\\]/;
 
+/**
+ * The characters a backslash escapes inside double quotes, per POSIX:
+ * before anything else it is a literal backslash. Modelled so that a
+ * jq filter written `--jq ".[] | select(.a == \"b\")"` is read as the one
+ * quoted argument the shell reads, not closed early at its `\"`.
+ */
+const ESCAPABLE_IN_DOUBLE_QUOTES = new Set(['$', '`', '"', '\\', '\n']);
+
 const tokenize = (command: string): { tokens: string[]; expands: boolean[] } | undefined => {
   const tokens: string[] = [];
   const expands: boolean[] = [];
@@ -317,7 +325,16 @@ const tokenize = (command: string): { tokens: string[]; expands: boolean[] } | u
   let started = false;
   let expanding = false;
 
-  for (const char of command) {
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (quote === '"' && char === '\\' && ESCAPABLE_IN_DOUBLE_QUOTES.has(command[index + 1] ?? '')) {
+      index += 1;
+      // An escaped newline is a line continuation, and gone from the word.
+      if (command[index] !== '\n') {
+        current += command[index];
+      }
+      continue;
+    }
     if (quote) {
       if (char === quote) {
         quote = undefined;
@@ -368,7 +385,13 @@ const splitPipeline = (command: string): string[] | undefined => {
   const segments: string[] = [];
   let current = '';
   let quote: '"' | "'" | undefined;
-  for (const char of command) {
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (quote === '"' && char === '\\' && ESCAPABLE_IN_DOUBLE_QUOTES.has(command[index + 1] ?? '')) {
+      current += char + command[index + 1];
+      index += 1;
+      continue;
+    }
     if (quote) {
       if (char === quote) {
         quote = undefined;
@@ -437,15 +460,17 @@ const analyzePipeline = (command: string, segments: string[]): CommandAnalysis =
  * shell would not see.
  *
  * Undefined when this reading could disagree with `sh`: a backslash outside
- * single quotes escapes a quote, which this scanner does not model, and an
- * unbalanced quote has no reading at all. The caller then checks the whole
+ * any quotes, which this scanner does not model, and an unbalanced quote,
+ * which has no reading at all. Inside double quotes a backslash is modelled
+ * as POSIX has it (`ESCAPABLE_IN_DOUBLE_QUOTES`). The caller then checks the whole
  * string, quotes included, the way it always has.
  */
 const syntaxOf = (command: string): { active: string; bare: string } | undefined => {
   let active = '';
   let bare = '';
   let quote: '"' | "'" | undefined;
-  for (const char of command) {
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
     if (quote === "'") {
       if (char === "'") {
         quote = undefined;
@@ -454,7 +479,29 @@ const syntaxOf = (command: string): { active: string; bare: string } | undefined
       }
       continue;
     }
+    if (quote === '"' && char === '\\' && command[index + 1] === '\n') {
+      // A line continuation is deleted before the shell parses, joining
+      // what was on either side (`"$\<newline>(id)"` runs `id`). Not
+      // modelled; the whole string is checked instead.
+      return undefined;
+    }
+    if (quote === '"' && char === '\\') {
+      // Escaping one of the characters that mean something here makes it
+      // text, so it is kept out of `active`, where `$(` and backticks are
+      // looked for. Before anything else the backslash is itself text.
+      if (ESCAPABLE_IN_DOUBLE_QUOTES.has(command[index + 1] ?? '')) {
+        index += 1;
+        active += ' ';
+      } else {
+        // Kept, so it still stands between what it separates: `"$\{x}"`
+        // is no parameter expansion to the shell, and is none here.
+        active += char;
+      }
+      continue;
+    }
     if (char === '\\') {
+      // Outside quotes a backslash makes any character text, an operator
+      // included. Not modelled; the whole string is checked instead.
       return undefined;
     }
     if (quote === '"') {
