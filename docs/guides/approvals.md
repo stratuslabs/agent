@@ -187,6 +187,44 @@ warning naming the file.
   answer: one yes to `git status` must not become a yes to every command,
   and one yes to a page must not become a yes to every page.
 
+## Workspace autonomy
+
+An agent working on code spends most of its calls reading: listing files,
+searching them, opening one. Each of those is a shell command that asks,
+because the engine can't tell `cat notes.md` in the agent's own workspace
+from `cat ~/.stratus/credentials.json`. Turn on autonomy for an agent and
+it can:
+
+```jsonc
+{
+  "approvals": {
+    "agents": { "nova": { "autonomy": "workspace" } }   // or "autonomy" at the top for every agent
+  }
+}
+```
+
+With `autonomy: "workspace"`, a command that only reads, and only reads
+paths inside the agent's workspace (`~/.stratus/agents/<id>/workspace`),
+runs without asking. That covers `cat`, `ls`, `head`, `tail`, `wc`, `grep`,
+`rg`, and `find`, and each stage of a pipeline is judged on its own, so
+`cat src/main.ts | wc -l` runs too. Each path is resolved through its
+symlinks, so a link that points out of the workspace is outside. The
+shell's working directory has to be inside the workspace as well, so an
+agent with a configured `cwd` elsewhere gets nothing from this.
+
+What still asks: a path outside the workspace, a glob or `~` or `$` (the
+shell expands those into paths the engine never saw), and any flag that
+would follow links out, run a program, or write a file (`grep -R`,
+`rg --follow`, `rg --pre`, `find -exec`, `find -delete`, `tail -f`). An
+unknown flag asks too. Reads stay allowed after the conversation reads web
+content, even with `externalContent: "gate"`, because reading the agent's
+own files can't send anything anywhere.
+
+This is policy over command arguments, not a sandbox. It holds because
+these commands read only what they're told to. A program you list in
+`approvals.commands` can still read anything, which is why those are
+listed by you and never inferred.
+
 ## Standing grants
 
 Most installed tools are `gated` and name no scope — `web.fetch`,

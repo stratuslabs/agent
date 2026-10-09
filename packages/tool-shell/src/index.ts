@@ -15,7 +15,7 @@ import {
   type LocalCommandInvocation,
   type LocalCommandTool,
 } from '@stratusagent/executor-local';
-import { expandHome, resolvePluginAgentConfig, workspacePreparer } from '@stratusagent/plugins';
+import { expandHome, resolvePluginAgentConfig, workspacePreparer, workspaceResolver } from '@stratusagent/plugins';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 100_000;
@@ -250,6 +250,17 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
      * with the first one the day either changed.
      */
     commandFor: (input: JsonObject) => (typeof input.command === 'string' ? input.command.trim() : undefined),
+    // Where the command would run, resolved the way `createCommand` resolves
+    // it but without creating anything: this is asked before the call is
+    // approved. A configured cwd wins, as it does there.
+    cwdFor: (session: Session) => {
+      const resolved = resolvePluginAgentConfig(config, session.agent.id, { mergeKeys: ['env'] });
+      if (typeof resolved.cwd === 'string' && resolved.cwd.length > 0) {
+        return expandHome(resolved.cwd, options.home);
+      }
+      const workspaceRoot = typeof resolved.workspaceRoot === 'string' ? resolved.workspaceRoot : undefined;
+      return workspaceResolver(options.workspaces, workspaceRoot)?.(session.agent.id);
+    },
   };
 };
 

@@ -20,10 +20,14 @@ import { sessionTaintedBy, sessionTrustOf } from '@stratusagent/core';
  */
 export { atLeastAsRisky } from '@stratusagent/core';
 
+import { readsInsideWorkspace } from './workspace.ts';
+
+export { readsInsideWorkspace } from './workspace.ts';
 import {
   analyzeCommand,
   describeCommandScope,
   findCoveringScopes,
+  findMatchingScope,
   normalizeCommandScope,
   SAFE_COMMAND_SCOPES,
   type CommandAnalysis,
@@ -346,6 +350,14 @@ export interface CommandScopeOptions {
   safeScopes?: readonly CommandScope[];
   /** Where "always allow" persists a scope, and where one is read back. */
   whitelist?: CommandWhitelistStore;
+  /**
+   * Workspace autonomy. Answers the directory an agent may read in without
+   * asking, or undefined when autonomy is off for it. With an answer, a
+   * command (or pipeline stage) that only reads, and only inside that
+   * directory, runs unattended; see `workspace.ts`. Needs the tool's
+   * `cwdFor`, since relative paths mean nothing without it.
+   */
+  workspace?: { directoryFor(agentId: string): string | undefined };
   /**
    * Called when a scope is persisted. The daemon logs it: an approval that
    * widens what runs unattended, for every future session, is exactly the
@@ -832,6 +844,38 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
                 : `${call.toolName} ran a pipeline inside the approved scopes ${covering.map((scope) => `"${describeCommandScope(scope)}"`).join(' | ')}`,
               command,
             );
+          }
+          // Workspace autonomy, for reads. Each stage is covered by a scope
+          // or only reads inside the workspace. Not a grant somebody made in
+          // another conversation, so it survives the external-content gate:
+          // reading its own files can't send anything anywhere, and every
+          // stage that could is still judged by scopes, which the gate
+          // already emptied.
+          const workspace = commands?.workspace?.directoryFor(session.agent.id);
+          const cwd = workspace === undefined ? undefined : context.tool.cwdFor?.(session);
+          if (workspace !== undefined && cwd !== undefined) {
+            const stages = analysis.pipeline ?? [analysis];
+            let read = false;
+            let covered = true;
+            for (const stage of stages) {
+              if (findMatchingScope(stage, candidates)) {
+                continue;
+              }
+              if (await readsInsideWorkspace(stage, cwd, workspace)) {
+                read = true;
+                continue;
+              }
+              covered = false;
+              break;
+            }
+            if (covered && read) {
+              return report(
+                context,
+                true,
+                `${call.toolName} only read inside ${session.agent.id}'s workspace (autonomy: workspace)`,
+                command,
+              );
+            }
           }
         }
       } else if (risk === 'gated' && unscoped && !externalGate) {

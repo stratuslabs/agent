@@ -1711,3 +1711,15 @@ test('api.publicUrl loads as an http(s) address without a trailing slash, and an
   await writeFile(file, JSON.stringify({ api: { publicUrl: 'proxy-user:hunter2 not a url' } }));
   await assert.rejects(() => loadConfigFile(file), (error: Error) => !error.message.includes('hunter2'));
 });
+
+test('approvals.autonomy parses at the top and per agent, overrides per agent, and fails loudly when misspelled', async () => {
+  const configPath = await writeConfig('autonomy.json', {
+    approvals: { autonomy: 'workspace', agents: { blair: { autonomy: 'off' }, nova: {} } },
+  });
+  const config = await loadConfigFile(configPath);
+  assert.equal(resolveAgentApprovals(config.approvals, 'nova').autonomy, 'workspace');
+  assert.equal(resolveAgentApprovals(config.approvals, 'blair').autonomy, 'off');
+  assert.equal(resolveAgentApprovals({}, 'nova').autonomy, undefined);
+  const misspelled = await writeConfig('autonomy-bad.json', { approvals: { agents: { nova: { autonomy: 'workspaces' } } } });
+  await assert.rejects(loadConfigFile(misspelled), /Unsupported approvals\.agents\.nova\.autonomy/);
+});

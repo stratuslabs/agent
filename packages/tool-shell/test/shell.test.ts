@@ -307,3 +307,23 @@ test('a working directory the operator named is reported by name when it is miss
     /configured working directory does not exist/,
   );
 });
+
+test('cwdFor names where a command would run without preparing anything', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-cwdfor-'));
+  let prepared = 0;
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => {
+      prepared += 1;
+      return path.join(home, 'agents', agentId, 'workspace');
+    },
+    all: async () => [],
+  };
+  const session = { id: 's1', agent: { id: 'ava', name: 'Ava' }, status: 'running', messages: [] } as unknown as Session;
+  const tool = createShellTool({}, { workspaces });
+  assert.equal(tool.cwdFor?.(session), path.join(home, 'agents', 'ava', 'workspace'));
+  assert.equal(prepared, 0);
+  // A configured cwd wins, as it does when the command runs.
+  const configured = createShellTool({ agents: { ava: { cwd: '~/work/ava' } } }, { workspaces, home });
+  assert.equal(configured.cwdFor?.(session), path.join(home, 'work', 'ava'));
+});

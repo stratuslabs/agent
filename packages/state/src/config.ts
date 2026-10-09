@@ -45,6 +45,14 @@ export interface AgentApprovalConfig {
    * nothing by keeping its grants.
    */
   externalContent?: ExternalContentApprovals;
+  /**
+   * How much an agent may do in its own workspace without asking.
+   * `workspace`: commands that only read, and only inside the agent's
+   * workspace directory, run unattended. `off` (the default): nothing
+   * beyond the built-in safe list and what was granted. Overrides per
+   * agent like the keys above.
+   */
+  autonomy?: 'off' | 'workspace';
 }
 
 /**

@@ -22,6 +22,7 @@ import {
   loadChannelCredentials,
   readProcessEnv,
   logsDirPath,
+  agentWorkspacePath,
   resolveAgentApprovals,
   resolveAgentPrincipals,
   resolveAgentSlack,
@@ -485,6 +486,14 @@ const serveHeldHome = async (
   // before. The whitelist lives beside the agent's soul, per agent.
   const commands = {
     whitelist: grantStore,
+    // Workspace autonomy: the agent's own workspace, for the agents config
+    // turns it on for. Resolved per call so the answer always matches the
+    // config this daemon started with.
+    workspace: {
+      directoryFor: (agentId: string) => (resolveAgentApprovals(approvalsConfig, agentId).autonomy === 'workspace'
+        ? agentWorkspacePath(env, agentId)
+        : undefined),
+    },
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
       // An approval that widens what runs unattended, for every future
       // session, is precisely the decision that must not be the one leaving
@@ -531,6 +540,13 @@ const serveHeldHome = async (
     );
   };
 
+  const autonomous = [
+    ...(approvalsConfig.autonomy === 'workspace' ? ['every agent'] : []),
+    ...Object.entries(approvalsConfig.agents ?? {}).filter(([, agent]) => agent.autonomy === 'workspace').map(([agentId]) => agentId),
+  ];
+  if (autonomous.length > 0) {
+    log(`approvals: autonomy workspace for ${autonomous.join(', ')} (reads inside their own workspace run without asking)`);
+  }
   if (approvalMode === 'remote') {
     // Only agents whose channel actually came up can be asked: tokens on
     // disk with the Slack package missing means nothing renders the

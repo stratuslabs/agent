@@ -3111,6 +3111,18 @@ export interface Tool {
    * one call is a decision nobody has made.
    */
   originFor?(session: Session): string | undefined;
+  /**
+   * The directory a call would run in, for a tool that carries a command
+   * (`commandFor`). Not a scope hook, and it never narrows or widens
+   * anything by itself: it's the context a command's relative paths need,
+   * so a policy that judges where a command reads (workspace autonomy) can
+   * resolve them. A tool that doesn't answer is judged without it, which
+   * means any rule that needs it doesn't apply.
+   *
+   * Must name the directory `execute` would actually use for the same
+   * session, and must not create it: it's asked before anything runs.
+   */
+  cwdFor?(session: Session): string | undefined;
   execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;
 }
 
