@@ -18,6 +18,9 @@ const layout = async () => {
   await writeFile(outside, 'token\n');
   await symlink(outside, path.join(repo, 'leak.txt'));
   await symlink(root, path.join(repo, 'up'));
+  await mkdir(path.join(root, 'elsewhere', 'child'), { recursive: true });
+  await writeFile(path.join(root, 'elsewhere', 'secret'), 'token\n');
+  await symlink(path.join(root, 'elsewhere', 'child'), path.join(repo, 'hop'));
   return { root, workspace, repo, outside };
 };
 
@@ -42,6 +45,8 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     'find src -maxdepth 2',
     `cat ${path.join(repo, 'src', 'main.ts')}`,
     'ls missing-dir',
+    'grep --color=always export src/main.ts',
+    'ls src/../src',
   ]) {
     assert.equal(await inside(command), true, `should be inside: ${command}`);
   }
@@ -53,6 +58,13 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     'cat leak.txt',
     'ls up',
     'grep -r token up',
+    // `..` after a symlink is the parent of where the link points.
+    'cat hop/../secret',
+    // `$` and backticks expand inside double quotes.
+    'cat "$HOME/.ssh/id_rsa"',
+    'cat "`echo x`"',
+    // An optional-argument flag must not swallow the pattern.
+    'grep --color root /etc/passwd',
     // Globs and home are paths this parser never saw.
     'cat *.txt',
     'cat ~/x',

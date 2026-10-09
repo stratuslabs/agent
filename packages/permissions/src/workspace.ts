@@ -51,8 +51,12 @@ const READERS: Record<string, Reader> = {
   tail: { valueFlags: ['-n', '-c', '--lines', '--bytes'], flags: ['-q', '-v', '-r', '--quiet', '--silent', '--verbose'], numeric: true },
   wc: { flags: ['-l', '-w', '-c', '-m', '-L', '--lines', '--words', '--bytes', '--chars', '--max-line-length'] },
   grep: {
-    valueFlags: ['-e', '-m', '-A', '-B', '-C', '--regexp', '--max-count', '--after-context', '--before-context', '--context', '--include', '--exclude', '--exclude-dir', '--color', '--colour'],
+    // `--color` is not a value flag: its argument is optional and only
+    // ever attached (`--color=always`), so `grep --color root /etc/passwd`
+    // has `root` as its pattern.
+    valueFlags: ['-e', '-m', '-A', '-B', '-C', '--regexp', '--max-count', '--after-context', '--before-context', '--context', '--include', '--exclude', '--exclude-dir'],
     flags: [
+      '--color', '--colour',
       '-i', '-v', '-n', '-l', '-L', '-c', '-o', '-q', '-s', '-r', '-w', '-x', '-E', '-F', '-G', '-h', '-H', '-I', '-a', '-b', '-Z', '-z',
       '--ignore-case', '--invert-match', '--line-number', '--files-with-matches', '--files-without-match', '--count', '--only-matching',
       '--quiet', '--silent', '--no-messages', '--recursive', '--word-regexp', '--line-regexp', '--extended-regexp', '--fixed-strings',
@@ -238,6 +242,33 @@ const resolveReal = async (target: string): Promise<string | undefined> => {
 };
 
 /**
+ * Where `target` lands when the kernel walks it from `base`: each component
+ * in turn, symlinks followed as they are reached. Normalizing first, the
+ * way `path.resolve` does, would cancel `link/..` lexically, while the
+ * kernel follows `link` and then takes the parent of wherever it pointed.
+ */
+const walk = async (base: string, target: string): Promise<string | undefined> => {
+  let current = path.isAbsolute(target) ? await resolveReal(path.parse(target).root) : await resolveReal(base);
+  if (current === undefined) {
+    return undefined;
+  }
+  for (const segment of target.split(path.sep)) {
+    if (segment === '' || segment === '.') {
+      continue;
+    }
+    if (segment === '..') {
+      current = path.dirname(current);
+      continue;
+    }
+    const next: string = path.join(current, segment);
+    // Missing from here on: nothing below it exists to follow, so the rest
+    // is lexical, and a read of it reads nothing.
+    current = await realpath(next).catch(() => next);
+  }
+  return current;
+};
+
+/**
  * Whether one command (not a pipeline) only reads, and only inside the
  * workspace. `cwd` is where the shell will run it.
  */
@@ -255,6 +286,13 @@ export const readsInsideWorkspace = async (
   if (analysis.expands?.some((expands) => expands)) {
     return false;
   }
+  // Inside double quotes `$` and backticks still expand, and the tokenizer
+  // marks only what expands unquoted: `cat "$HOME/.ssh/id_rsa"` would read
+  // as a literal path under the workspace. Any `$`, backtick, or backslash,
+  // however quoted, means the shell may read something this parser didn't.
+  if (analysis.tokens.some((token) => /[$`\\]/.test(token))) {
+    return false;
+  }
   const paths = readPaths(analysis.base, analysis.tokens.slice(1));
   if (paths === undefined) {
     return false;
@@ -265,7 +303,7 @@ export const readsInsideWorkspace = async (
     return false;
   }
   for (const target of paths) {
-    const resolved = await resolveReal(path.resolve(here, target));
+    const resolved = await walk(here, target);
     if (resolved === undefined || !within(root, resolved)) {
       return false;
     }
