@@ -213,6 +213,21 @@ export const runGrants = async (
     return fromFiles();
   }
 
+  // The daemon's own approvals.commands, or undefined when it couldn't be
+  // asked or its answer couldn't be read: not knowing is not "none".
+  const configCommandsFromDaemon = async (): Promise<string[] | undefined> => {
+    try {
+      const listing = await callRunningGateway(env, command, base as string, `/api/v1/agents/${encoded}/grants`, undefined, 'GET');
+      if (!listing.ok) {
+        return undefined;
+      }
+      const body = await listing.json() as GrantsListing;
+      return Array.isArray(body.configCommands) ? body.configCommands : [];
+    } catch {
+      return undefined;
+    }
+  };
+
   let response: Response;
   try {
     response = revocation
@@ -238,8 +253,7 @@ export const runGrants = async (
   if (response.status === 404 && revocation) {
     // Whether the scope is a config entry is the daemon's config's answer;
     // ask it rather than reading a config this client may not share.
-    const listed = await callRunningGateway(env, command, base, `/api/v1/agents/${encoded}/grants`, undefined, 'GET')
-      .then(async (listing) => (listing.ok ? ((await listing.json()) as GrantsListing).configCommands ?? [] : undefined), () => undefined);
+    const listed = await configCommandsFromDaemon();
     if (listed === undefined && revocation.scope !== undefined) {
       writeLine(streams.stderr, `${agentId} has no such grant. \`stratus grants ${agentId}\` lists what exists.`);
       writeLine(
@@ -257,8 +271,7 @@ export const runGrants = async (
   }
   if (revocation) {
     if (revocation.scope !== undefined) {
-      const checked = await callRunningGateway(env, command, base, `/api/v1/agents/${encoded}/grants`, undefined, 'GET')
-        .then(async (listing) => (listing.ok ? ((await listing.json()) as GrantsListing).configCommands ?? [] : undefined), () => undefined);
+      const checked = await configCommandsFromDaemon();
       if (checked === undefined) {
         // Not knowing is not the same as "nothing in config covers it".
         writeLine(streams.stdout, `Revoked ${named} for ${agentId}.`);
