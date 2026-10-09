@@ -20,9 +20,9 @@ import { sessionTaintedBy, sessionTrustOf } from '@stratusagent/core';
  */
 export { atLeastAsRisky } from '@stratusagent/core';
 
-import { gitInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
+import { gitInsideWorkspace, gitPushInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
 
-export { gitInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
+export { gitInsideWorkspace, gitPushInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
 import {
   analyzeCommand,
   describeCommandScope,
@@ -358,7 +358,14 @@ export interface CommandScopeOptions {
    * directory, runs unattended; see `workspace.ts`. Needs the tool's
    * `cwdFor`, since relative paths mean nothing without it.
    */
-  workspace?: { directoryFor(agentId: string): string | undefined };
+  workspace?: {
+    directoryFor(agentId: string): string | undefined;
+    /**
+     * Branch-name prefixes the agent may push without asking. Defaults to
+     * `<agentId>/`. An empty list means pushing always asks.
+     */
+    branchPrefixesFor?(agentId: string): readonly string[] | undefined;
+  };
   /**
    * Called when a scope is persisted. The daemon logs it: an approval that
    * widens what runs unattended, for every future session, is exactly the
@@ -876,6 +883,11 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               // Local git changes things, so it's a grant like any other
               // to a conversation the external-content gate has closed.
               if (!externalGate && await gitInsideWorkspace(stage, cwd, workspace)) {
+                read = true;
+                continue;
+              }
+              const prefixes = commands?.workspace?.branchPrefixesFor?.(session.agent.id) ?? [`${session.agent.id}/`];
+              if (!externalGate && await gitPushInsideWorkspace(stage, cwd, workspace, prefixes)) {
                 read = true;
                 continue;
               }
