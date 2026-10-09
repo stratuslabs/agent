@@ -216,7 +216,9 @@ What still asks: a path outside the workspace, a glob or `~` or `$` (the
 shell expands those into paths the engine never saw), and any flag that
 would follow links out, run a program, or write a file (`grep -R`,
 `rg --follow`, `rg --pre`, `find -exec`, `find -delete`, `tail -f`). An
-unknown flag asks too. Reads stay allowed after the conversation reads web
+unknown flag asks too. The shell never passes `RIPGREP_CONFIG_PATH` or
+`GREP_OPTIONS` to a command, whatever its `env` or `passEnv` says, because
+they add options the command line doesn't show. Reads stay allowed after the conversation reads web
 content, even with `externalContent: "gate"`, because reading the agent's
 own files can't send anything anywhere.
 

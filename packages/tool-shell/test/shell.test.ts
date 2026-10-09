@@ -327,3 +327,12 @@ test('cwdFor names where a command would run without preparing anything', async 
   const configured = createShellTool({ agents: { ava: { cwd: '~/work/ava' } } }, { workspaces, home });
   assert.equal(configured.cwdFor?.(session), path.join(home, 'work', 'ava'));
 });
+
+test('variables that carry options for a judged command never reach it, however they are configured', async () => {
+  const tools = await registryFor(
+    { passEnv: ['PATH', 'GREP_OPTIONS'], env: { RIPGREP_CONFIG_PATH: '/tmp/rgrc', KEEP: 'kept' } },
+    { PATH: process.env.PATH, GREP_OPTIONS: '-R' },
+  );
+  const seen = String((await runCommand(tools, 'echo "[$RIPGREP_CONFIG_PATH][$GREP_OPTIONS][$KEEP]"')).stdout).trim();
+  assert.equal(seen, '[][][kept]');
+});

@@ -72,6 +72,12 @@ const truncate = (value: string, maxBytes: number, dropped: boolean): { text: st
 const maxOutputBytesFor = (config: JsonObject, session: Session): number =>
   asNumber(resolvePluginAgentConfig(config, session.agent.id).maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
 
+/**
+ * Environment variables that carry options for a command the permission
+ * engine judges by its arguments. Never passed to a child: see `settingsFor`.
+ */
+export const COMMAND_OPTION_VARIABLES = ['RIPGREP_CONFIG_PATH', 'GREP_OPTIONS'] as const;
+
 const settingsFor = (
   config: JsonObject,
   session: Session,
@@ -122,6 +128,14 @@ const settingsFor = (
     }
   }
 
+  // Variables that hand a judged command options the command line never
+  // shows: `rg pattern` with RIPGREP_CONFIG_PATH can be `rg --pre … --follow
+  // pattern`, and BSD grep reads GREP_OPTIONS. The permission engine judges
+  // the command as written, so what it judges has to be what runs. Withheld
+  // whatever the config says.
+  for (const name of COMMAND_OPTION_VARIABLES) {
+    delete granted[name];
+  }
   return {
     ...(cwd ? { cwd } : {}),
     // Whether this agent's directory is ours to create. The workspace is —
