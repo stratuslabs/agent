@@ -1157,17 +1157,32 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
 };
 
 /**
- * The leading block-quote markers of a line: zero or more `>` each followed
- * by at most one space. An empty prefix means the line is not quoted.
+ * The block-quote depth and the content after the markers. GFM permits up
+ * to three spaces before each `>` and makes the space after it optional,
+ * so `  > > x` and `>> x` and `> >x` are all depth 2 with content `x`.
+ * Comparison is by depth, not by the raw spelling: two lines at the same
+ * depth share a logical prefix regardless of whether they wrote it the
+ * same way.
  */
-const blockQuotePrefix = (line: string): string => {
+const blockQuoteInfo = (line: string): { depth: number; contentStart: number } => {
   let at = 0;
+  let depth = 0;
   while (at < line.length) {
-    if (line[at] !== '>') break;
+    // Up to three leading spaces before each `>`.
+    const mark = at;
+    while (at < line.length && line[at] === ' ' && at - mark < 3) at += 1;
+    if (at >= line.length || line[at] !== '>') {
+      // The spaces were not part of a quote marker: roll back so they
+      // remain in the content and isIndentedCode can see them.
+      at = mark;
+      break;
+    }
     at += 1;
+    depth += 1;
+    // Optional single space after `>`.
     if (at < line.length && line[at] === ' ') at += 1;
   }
-  return line.slice(0, at);
+  return { depth, contentStart: at };
 };
 
 /** Four spaces or a tab: an indented code block, which no table row may be. */
@@ -1203,19 +1218,19 @@ const renderTables = (text: string): string => {
   while (at < lines.length) {
     const headerLine = lines[at] ?? '';
 
-    // A run of lines sharing a block-quote prefix can hold a table whose
+    // A run of lines sharing a block-quote depth can hold a table whose
     // `>` marker would otherwise become a spurious cell.
-    const prefix = blockQuotePrefix(headerLine);
-    const stripped = prefix.length > 0 ? headerLine.slice(prefix.length) : headerLine;
+    const bqHeader = blockQuoteInfo(headerLine);
+    const stripped = bqHeader.depth > 0 ? headerLine.slice(bqHeader.contentStart) : headerLine;
     const nextRaw = lines[at + 1] ?? '';
-    const nextPrefix = blockQuotePrefix(nextRaw);
-    const nextStripped = prefix.length > 0 && nextPrefix === prefix
-      ? nextRaw.slice(prefix.length)
+    const bqNext = blockQuoteInfo(nextRaw);
+    const nextStripped = bqHeader.depth > 0 && bqNext.depth === bqHeader.depth
+      ? nextRaw.slice(bqNext.contentStart)
       : nextRaw;
 
-    const usedPrefix = prefix.length > 0 && nextPrefix === prefix ? prefix : '';
-    const effectiveHeader = usedPrefix.length > 0 ? stripped : headerLine;
-    const effectiveNext = usedPrefix.length > 0 ? nextStripped : nextRaw;
+    const quoteDepth = bqHeader.depth > 0 && bqNext.depth === bqHeader.depth ? bqHeader.depth : 0;
+    const effectiveHeader = quoteDepth > 0 ? stripped : headerLine;
+    const effectiveNext = quoteDepth > 0 ? nextStripped : nextRaw;
 
     const alignments = inCode[at] || inCode[at + 1] ? undefined : tableAlignments(effectiveNext);
     const header = tableCells(effectiveHeader);
@@ -1229,15 +1244,16 @@ const renderTables = (text: string): string => {
     }
     const rows: string[][] = [];
     let next = at + 2;
-    while (next < lines.length && !inCode[next] && !isIndentedCode(lines[next] ?? '')) {
+    while (next < lines.length && !inCode[next]) {
       const rowLine = lines[next] ?? '';
-      if (usedPrefix.length > 0) {
-        if (blockQuotePrefix(rowLine) !== usedPrefix) break;
-        const rowContent = rowLine.slice(usedPrefix.length);
-        if (!isTableRow(rowContent)) break;
+      if (quoteDepth > 0) {
+        const bqRow = blockQuoteInfo(rowLine);
+        if (bqRow.depth !== quoteDepth) break;
+        const rowContent = rowLine.slice(bqRow.contentStart);
+        if (isIndentedCode(rowContent) || !isTableRow(rowContent)) break;
         rows.push(tableCells(rowContent));
       } else {
-        if (!isTableRow(rowLine)) break;
+        if (isIndentedCode(rowLine) || !isTableRow(rowLine)) break;
         rows.push(tableCells(rowLine));
       }
       next += 1;
@@ -1245,9 +1261,10 @@ const renderTables = (text: string): string => {
     // A table inside a block quote always takes the list form: Slack does
     // not reliably render a code-block grid inside `>`, and the list form
     // reads well quoted.
-    const rendered = renderTable(header, alignments, rows, usedPrefix.length > 0);
-    if (usedPrefix.length > 0) {
-      out.push(rendered.split('\n').map((line) => usedPrefix + line).join('\n'));
+    const rendered = renderTable(header, alignments, rows, quoteDepth > 0);
+    if (quoteDepth > 0) {
+      const canonical = '> '.repeat(quoteDepth);
+      out.push(rendered.split('\n').map((line) => canonical + line).join('\n'));
     } else {
       out.push(rendered);
     }

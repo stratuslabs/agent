@@ -726,3 +726,22 @@ test('an unquoted table still works as before', () => {
   const table = ['| A | B |', '| --- | --- |', '| x | y |'].join('\n');
   assert.equal(toSlackMrkdwn(table), ['```', 'A │ B', '──┼──', 'x │ y', '```'].join('\n'));
 });
+
+test('a four-space-indented line after > is code, not a table row', () => {
+  const input = [
+    '> | A | B |',
+    '> | --- | --- |',
+    '> | 1 | 2 |',
+    '>     | code | block |',
+  ].join('\n');
+  const result = toSlackMrkdwn(input);
+  // Only the first row is a table; the indented line stays as written.
+  assert.ok(result.includes('> *A*: 1'), result);
+  assert.ok(result.includes('>     | code | block |'), result);
+});
+
+test('a quoted table with varied whitespace around > is recognized', () => {
+  // `>|` and `> |` are the same depth: no space after > is valid GFM.
+  const input = ['>| A | B |', '> | --- | --- |', '>| 1 | 2 |'].join('\n');
+  assert.equal(toSlackMrkdwn(input), '> *A*: 1 · *B*: 2');
+});
