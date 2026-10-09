@@ -1056,6 +1056,11 @@ export const downloadInsideWorkspace = async (
   if (analysis.disqualifiedBy || analysis.base === undefined || analysis.pipeline) {
     return undefined;
   }
+  // The shell tool runs /bin/sh, and curl's Windows config lookups
+  // (`_curlrc`, `%APPDATA%`) aren't modelled here: on Windows it asks.
+  if (process.platform === 'win32') {
+    return undefined;
+  }
   const downloader = DOWNLOADERS[analysis.base];
   if (downloader === undefined) {
     return undefined;
