@@ -1,4 +1,4 @@
-import type { JsonObject, Plugin, Session, Tool } from '@stratusagent/core';
+import { originOf, type JsonObject, type Plugin, type Session, type Tool } from '@stratusagent/core';
 import {
   assertRequestAllowed,
   egressPolicyFrom,
@@ -57,6 +57,24 @@ const settingsFor = (config: JsonObject, session: Session) => {
 
 const isRedirect = (status: number): boolean => status >= 300 && status < 400;
 
+/**
+ * Whether a hop stays on the site a call was judged on: the same origin, or
+ * the same host moved from `http:` to `https:` on default ports. The upgrade
+ * is allowed because it is what nearly every `http://` URL answers with, and
+ * it reaches the same host over a strictly safer channel. Nothing else is:
+ * `example.com` to `www.example.com` is another origin, and so is a
+ * downgrade, because a grant names an origin and means exactly that one.
+ */
+const staysOnSite = (judged: string, next: string): boolean => {
+  if (originOf(judged) === originOf(next)) {
+    return true;
+  }
+  const from = new URL(judged);
+  const to = new URL(next);
+  return from.protocol === 'http:' && to.protocol === 'https:'
+    && from.hostname === to.hostname && from.port === '' && to.port === '';
+};
+
 const contentTypeOf = (headers: Record<string, unknown>): string =>
   String(headers['content-type'] ?? '').toLowerCase();
 
@@ -79,8 +97,24 @@ export const fetchThroughPolicy = async (
     maxRedirects?: number;
     userAgent?: string;
     signal?: AbortSignal;
+    /**
+     * Stop at a redirect to another site instead of following it, and
+     * report where it pointed as `leftSite`. `web.fetch` sets this: it is
+     * judged by the origin of the URL it was given, so following a
+     * redirect elsewhere would carry a call approved for one site to
+     * another (an open redirect on a granted site would reach anywhere).
+     */
+    stayOnSite?: boolean;
   } = {},
-): Promise<{ url: string; status: number; contentType: string; body: string; truncated: boolean; hops: string[] }> => {
+): Promise<{
+  url: string;
+  status: number;
+  contentType: string;
+  body: string;
+  truncated: boolean;
+  hops: string[];
+  leftSite?: string;
+}> => {
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
   const hops: string[] = [];
   let current = assertRequestAllowed(rawUrl, options.policy ?? {}).href;
@@ -122,8 +156,21 @@ export const fetchThroughPolicy = async (
     if (isRedirect(response.status) && typeof location === 'string' && location.length > 0) {
       // Resolved against the current URL, then checked from scratch — a
       // relative redirect is still a new destination.
-      const next = new URL(location, current).href;
-      current = assertRequestAllowed(next, options.policy ?? {}).href;
+      // The address policy first: a hop it refuses is refused with its own
+      // reason, whether or not the hop also leaves the site.
+      const next = assertRequestAllowed(new URL(location, current).href, options.policy ?? {}).href;
+      if (options.stayOnSite === true && !staysOnSite(hops[0] ?? current, next)) {
+        return {
+          url: current,
+          status: response.status,
+          contentType: contentTypeOf(response.headers as Record<string, unknown>),
+          body: '',
+          truncated: false,
+          hops,
+          leftSite: next,
+        };
+      }
+      current = next;
       continue;
     }
 
@@ -159,6 +206,16 @@ const createFetchTool = (config: JsonObject): Tool => ({
     },
     required: ['url'],
   },
+  /**
+   * Judged by the site it is pointed at, so "always allow" can mean one
+   * site rather than every URL. Read from the input, which for this tool is
+   * the action itself rather than a claim about it: `execute` requests
+   * exactly this origin and stops at any redirect that leaves it
+   * (`stayOnSite`). See `Tool.originFor`.
+   */
+  originFor(_session, input) {
+    return typeof input.url === 'string' ? originOf(input.url) : undefined;
+  },
   async execute(input, session, context) {
     const url = typeof input.url === 'string' ? input.url : '';
     if (!url) {
@@ -171,8 +228,24 @@ const createFetchTool = (config: JsonObject): Tool => ({
       timeoutMs: settings.timeoutMs,
       maxRedirects: settings.maxRedirects,
       userAgent: settings.userAgent,
+      stayOnSite: true,
       ...(context?.signal ? { signal: context.signal } : {}),
     });
+
+    if (response.leftSite !== undefined) {
+      // Not an error: the request worked, and the agent decides whether
+      // the other site is worth a call of its own, which is judged (and
+      // asked about, when it needs to be) like any other.
+      return {
+        url: response.url,
+        status: response.status,
+        redirectedTo: response.leftSite,
+        ...(response.hops.length > 1 ? { redirects: response.hops } : {}),
+        text: `Redirected to ${response.leftSite}, a different site from the one this call was approved for, `
+          + 'so it was not followed. Call web.fetch on that URL to fetch it.',
+        truncated: false,
+      };
+    }
 
     const html = response.contentType.includes('html');
     const text = input.raw === true || !html ? response.body : htmlToText(response.body);

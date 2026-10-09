@@ -2430,13 +2430,13 @@ test('grants are listable and revocable over the API, through the daemon\'s own 
     const listed = await json<{
       agentId: string;
       scopes: Array<{ description: string; scope: { command: string } }>;
-      origins: Array<{ origin: string }>;
+      origins: Array<{ origin: string; tool?: string; description: string }>;
       tools: Array<{ tool: string; package?: string; grantedBy?: string; stale?: string }>;
     }>(await harness.call('/api/v1/agents/stratus/grants'));
     assert.equal(listed.agentId, 'stratus');
     assert.deepEqual(listed.scopes.map((row) => row.description), ['git push']);
     assert.equal(listed.scopes[0]?.scope.command, 'git');
-    assert.deepEqual(listed.origins, [{ origin: 'https://app.example.com' }]);
+    assert.deepEqual(listed.origins, [{ origin: 'https://app.example.com', description: 'https://app.example.com' }]);
     assert.deepEqual(listed.tools.map((row) => row.tool), ['notes.write', 'demo.echo', 'gone.tool']);
     assert.equal(listed.tools[0]?.grantedBy, 'U1');
     assert.equal(listed.tools[0]?.stale, undefined, 'contributed by the package it was granted from');

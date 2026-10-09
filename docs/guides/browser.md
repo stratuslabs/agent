@@ -85,10 +85,17 @@ hand. The file is per agent, `0600`, and read once at startup:
   "version": 1,
   "scopes": [],
   "origins": [
-    { "origin": "https://app.example.com" }
+    { "origin": "https://app.example.com", "tool": "browser.act" }
   ]
 }
 ```
+
+A site grant names the tool it was made for: one written by **Always allow**
+on `web.fetch` lets the agent fetch that site, not click there. Leave
+`tool` out and the grant covers every tool judged by site, which is also how
+a grant written before grants named a tool is read. `stratus grants revoke
+<id> --origin <origin>` takes back every grant for that site, whatever tool
+it names.
 
 Restart the daemon after editing it — grants are cached once read, which is
 the right way round for a file whose edits widen what runs unattended.

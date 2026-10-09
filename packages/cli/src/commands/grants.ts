@@ -202,7 +202,7 @@ export const runGrants = async (
     if (listing.origins.length > 0) {
       writeLine(streams.stdout, '  sites');
       for (const row of listing.origins) {
-        writeLine(streams.stdout, `    ${row.origin}`);
+        writeLine(streams.stdout, `    ${row.description}`);
       }
     }
     writeLine(streams.stdout, `Take one back: stratus grants revoke ${agentId} --tool <name> | --scope "<command>" | --origin <origin>`);
