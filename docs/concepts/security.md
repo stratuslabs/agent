@@ -36,6 +36,14 @@ linked own the full story.
   list a name cannot reach it. Channel tokens stay out of that path
   entirely; a namespace next door is not a way in.
   ([Tools](../guides/tools.md#searching-the-web))
+- **An agent's own provider sign-in is the daemon's, not the agent's.**
+  `agentSignIns.<agentId>.anthropic` decides which Claude subscription that
+  agent's model calls bill to. Only runtime resolution reads it: no soul
+  lists it, no tool resolves it, and no remote surface writes it. A session
+  records a one-way fingerprint of the sign-in its Claude Code session was
+  made under, never the token. An entry that is present and refused, or
+  unusable, fails the turn instead of moving it onto a shared account.
+  ([Setup](../start/setup.md#one-agent-on-its-own-claude-subscription))
 - **The credentials file is replaced, never rewritten in place.** A named
   credential is resolved per tool call so that a rotated key needs no
   restart, which means the file has a concurrent reader — and a truncate

@@ -49,6 +49,9 @@ printf %s "$KEY" | stratus credential set search.apiKey   # store a named creden
 stratus credential set search.apiKey --agent blair       # one agent's own key, over the shared one
 stratus credentials                    # stored names, never values (also: stratus credential list)
 stratus credential remove search.apiKey
+stratus signin set anthropic --agent remy   # remy's own Claude subscription (token asked without echo, or from stdin)
+stratus signins                        # which agents have their own sign-in, never the token (also: stratus signin list)
+stratus signin remove anthropic --agent remy  # back to the shared sign-in from its next turn
 stratus channel set imessage --agent blair apiKey apiSecret  # a channel plugin's secrets for one agent (asked without echo, or one per stdin line)
 stratus channel set slack --agent blair                      # Slack's appToken and botToken
 stratus channels                       # which agents have secrets for which channel, names only (also: stratus channel list)
@@ -86,6 +89,7 @@ stratus dashboard                      # local browser dashboard
 | `template add` | [Templates](../guides/templates.md) |
 | `skill add`, `skill validate`, `skills`, `skill reload` | [Skills](../guides/skills.md), [Skill format](./skill-format.md) |
 | `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
+| `signin set`, `signins`, `signin remove` | [Setup](../start/setup.md#one-agent-on-its-own-claude-subscription), [Security](../concepts/security.md) |
 | `channel set`, `channels`, `channel remove` | [Extending](../guides/extending.md#channels), [Slack](../guides/slack.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `health` | [Deployment](../guides/deployment.md#health-checks) |
@@ -136,7 +140,7 @@ stratus dashboard                      # local browser dashboard
 | `--no-login` | `stratus service install`: install without the start-at-login trigger |
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
 | `-n <count>` | `stratus logs`: how much backlog to print (default 50) |
-| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one. `channel set` / `channel remove`: the agent whose binding it is (required) |
+| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one. `signin set` / `signin remove`: the agent whose own sign-in it is (required). `channel set` / `channel remove`: the agent whose binding it is (required) |
 | `--session` | `stratus logs`: show only one session's records |
 | `--skill <id>` | `stratus skill add`: pick one skill from a multi-skill repo (repeatable) |
 | `--force` | `stratus skill add`: replace an already-installed skill id. `stratus template add`: replace an agent or skill already installed under the same name |
@@ -154,6 +158,12 @@ names and which agents have their own.
 It strips **one trailing newline and nothing else**, so `echo "$KEY" |` and
 `printf %s "$KEY" |` both store the same key, and a key whose own value
 begins or ends with a space is stored as it is rather than quietly altered.
+
+`stratus signin set anthropic --agent <id>` keeps the same rules: at a
+terminal it asks for the token without echoing it, otherwise it reads it
+from stdin, and nothing prints it back. It refuses an Anthropic API key
+(`sk-ant-api…`), which would be refused on every turn as a subscription
+token, and an agent id that is not on the roster.
 
 `stratus channel set <kind> --agent <id> <name>...` names the secrets on
 the command line and never their values. At a terminal it asks for each

@@ -120,6 +120,15 @@ export interface ParsedCredentialCommand {
   agentId?: string;
 }
 
+export interface ParsedSignInCommand {
+  command: 'signin';
+  action: 'set' | 'list' | 'remove';
+  /** The provider the sign-in is for. Only `anthropic` has per-agent sign-ins. */
+  provider?: 'anthropic';
+  /** The agent whose own sign-in this is; required for set and remove. */
+  agentId?: string;
+}
+
 export interface ParsedChannelCommand {
   command: 'channel';
   action: 'set' | 'list' | 'remove';
@@ -336,6 +345,7 @@ export type ParsedCommand =
   | ParsedSkillsCommand
   | ParsedSkillReloadCommand
   | ParsedCredentialCommand
+  | ParsedSignInCommand
   | ParsedChannelCommand
   | ParsedRestartCommand
   | ParsedHealthCommand
@@ -850,6 +860,56 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       ...(name !== undefined ? { name } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
     };
+  }
+
+  if (command === 'signin' || command === 'signins') {
+    const [subcommand, ...signInRest] = command === 'signins' ? ['list', ...rest] : rest;
+    if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+      return { command: 'help' };
+    }
+    if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove') {
+      throw new Error(`No signin subcommand named ${JSON.stringify(subcommand)}. It is set, list, or remove.`);
+    }
+    const positional: string[] = [];
+    let agentId: string | undefined;
+    for (let index = 0; index < signInRest.length; index += 1) {
+      const token = signInRest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--agent') {
+        agentId = readOptionValue(signInRest, index, '--agent');
+        index += 1;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      positional.push(token);
+    }
+    if (subcommand === 'list') {
+      if (positional.length > 0 || agentId !== undefined) {
+        throw new Error('signin list takes no arguments; it lists every agent with a sign-in of its own.');
+      }
+      return { command: 'signin', action: 'list' };
+    }
+    const [provider, ...extra] = positional;
+    if (provider !== 'anthropic' || extra.length > 0) {
+      throw new Error(
+        `signin ${subcommand} takes one provider, and anthropic (a Claude subscription) is the only one with per-agent sign-ins: `
+        + `stratus signin ${subcommand} anthropic --agent <id>. The shared sign-in is \`stratus setup\`'s.`,
+      );
+    }
+    if (agentId === undefined) {
+      throw new Error(`signin ${subcommand} needs --agent: this is one agent's own sign-in. The shared one is \`stratus setup\`'s.`);
+    }
+    if (!isValidAgentId(agentId)) {
+      throw new Error(`${JSON.stringify(agentId)} cannot be an agent id, so a sign-in stored under it could never be used.`);
+    }
+    return { command: 'signin', action: subcommand, provider, agentId };
   }
 
   if (command === 'channel' || command === 'channels') {

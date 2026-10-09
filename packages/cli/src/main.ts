@@ -11,6 +11,7 @@ import { runAgents } from './commands/agents.ts';
 import { runChat } from './commands/chat.ts';
 import { runCredential } from './commands/credential.ts';
 import { runChannel } from './commands/channel.ts';
+import { runSignIn } from './commands/signin.ts';
 import { runDashboard } from './commands/dashboard.ts';
 import { runDoctor } from './commands/doctor.ts';
 import { runGrants } from './commands/grants.ts';
@@ -100,6 +101,7 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
         || command.command === 'template-add'
         || command.command === 'dashboard'
         || (command.command === 'credential' && command.action !== 'list')
+        || (command.command === 'signin' && command.action !== 'list')
         || (command.command === 'channel' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
         || (command.command === 'memory' && memoryCommandWritesState(command.action))
@@ -193,6 +195,10 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
 
     if (command.command === 'credential') {
       return await runCredential(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'signin') {
+      return await runSignIn(command, streams, resolvedEnv);
     }
 
     if (command.command === 'channel') {

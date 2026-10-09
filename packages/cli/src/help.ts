@@ -39,6 +39,8 @@ Usage:
   stratus session rollover slack:blair:T01ABCDEF:D07GHIJKL
   printf %s "$BRAVE_KEY" | stratus credential set search.apiKey
   stratus credentials
+  stratus signin set anthropic --agent remy
+  stratus signins
   stratus channel set imessage --agent blair apiKey apiSecret
   stratus channels
   stratus doctor
@@ -150,6 +152,17 @@ Commands:
                    own — names only, never values (also: credential list)
   credential remove
                    Forget one (--agent <id> for that agent's own entry)
+  signin set       Give one agent its own Claude subscription: stratus signin
+                   set anthropic --agent <id> asks for a \`claude setup-token\`
+                   token without echoing it, or reads it from stdin; never
+                   from a flag. It outranks the shared sign-in (and any
+                   ANTHROPIC_API_KEY) for that agent only. Not a named
+                   credential: no soul lists it and no tool can read it.
+                   A running daemon uses it from that agent's next turn
+  signin list      Which agents have a sign-in of their own — names only,
+                   never tokens (also: signins)
+  signin remove    Forget one agent's own sign-in; its next turn runs on the
+                   shared one again
   channel set      Store a channel plugin's secrets for one agent: stratus
                    channel set <kind> --agent <id> <name>... asks for each
                    value without echoing it, or reads one per line from

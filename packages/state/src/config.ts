@@ -354,6 +354,8 @@ export interface FallbackRuntime {
   baseUrl?: string;
   apiKey?: string;
   authToken?: string;
+  /** See the anthropic runtime variant: whose own sign-in `authToken` is. */
+  agentSignIn?: string;
   /**
    * The Agent SDK transport for a *subscription* fallback, which a primary
    * cannot always supply. A fallback inherits `fetch` from its primary
@@ -443,6 +445,14 @@ type RuntimeConfigVariant =
       apiKey?: string;
       /** Claude subscription auth (Claude Code setup token). */
       authToken?: string;
+      /**
+       * Set when `authToken` is this agent's own sign-in
+       * (`agentSignIns.<id>.anthropic`) rather than the shared one: the
+       * agent id it belongs to. Reported by diagnostics and named in an
+       * authentication failure, so a rejected token points at the entry to
+       * replace instead of at `stratus setup`. Never a secret.
+       */
+      agentSignIn?: string;
       /** See StratusConfigFile.maxTokens. Absent means the adapter's default. */
       maxTokens?: number;
       systemPrompt?: string;

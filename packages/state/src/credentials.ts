@@ -141,6 +141,120 @@ export const saveCredentials = async (env: StateEnvironment, credentials: Creden
 };
 
 /**
+ * Provider sign-ins that belong to one agent rather than the whole fleet,
+ * under `agentSignIns.<agentId>.<provider>` in the credentials file.
+ *
+ * A sign-in decides which account a model call is billed to, so this is
+ * model-provider authentication, and it is kept apart from the two other
+ * per-agent namespaces on purpose. It is not a named credential: those are
+ * agent *capabilities*, resolvable by the agent through a tool, and a
+ * subscription token must never be one. Nor is it a channel token. Only
+ * `resolveRuntimeConfig` reads it, and it reads it per dispatch, so a token
+ * stored or removed while the daemon runs applies from the next turn.
+ *
+ * Anthropic setup tokens only, for now. That is the one sign-in two agents
+ * on one machine had reason to split (a second Claude subscription); an API
+ * key or a codex sign-in per agent is a widening to make deliberately, not
+ * one this shape should accept by accident.
+ */
+export type AgentSignInProviderName = 'anthropic';
+
+export type AgentSignIns = Record<string, Partial<Record<AgentSignInProviderName, StoredCredential>>>;
+
+const readAgentSignIn = (entry: unknown): StoredCredential | undefined =>
+  isPlainRecord(entry) && entry.type === 'oauth_token' && typeof entry.value === 'string' && entry.value.length > 0
+    ? { type: 'oauth_token', value: entry.value }
+    : undefined;
+
+/** Every agent's own provider sign-ins, by agent id. Prototype-free, like the named map. */
+export const loadAgentSignIns = async (env: StateEnvironment): Promise<AgentSignIns> => {
+  const raw = await loadRawCredentialsFile(env);
+  const signIns = Object.create(null) as AgentSignIns;
+  if (!isPlainRecord(raw.agentSignIns)) {
+    return signIns;
+  }
+  for (const [agentId, entry] of Object.entries(raw.agentSignIns)) {
+    const anthropic = isPlainRecord(entry) ? readAgentSignIn(entry.anthropic) : undefined;
+    if (anthropic !== undefined) {
+      signIns[agentId] = { anthropic };
+    }
+  }
+  return signIns;
+};
+
+/**
+ * Whether an agent has a sign-in of its own stored for a provider — present
+ * but unusable counts, because the resolver refuses to fall back to the
+ * shared one in that case and a caller explaining a failure needs to know.
+ */
+export const hasAgentSignInEntry = async (
+  env: StateEnvironment,
+  agentId: string,
+  provider: AgentSignInProviderName,
+): Promise<boolean> => {
+  const raw = await loadRawCredentialsFile(env);
+  return isPlainRecord(raw.agentSignIns)
+    && isPlainRecord(raw.agentSignIns[agentId])
+    && Object.hasOwn(raw.agentSignIns[agentId], provider);
+};
+
+/**
+ * Store, or replace, one agent's own sign-in for a provider. Replacing is
+ * allowed here because this is reached only from `stratus signin set` at the
+ * machine; no remote surface writes this namespace.
+ */
+export const saveAgentSignIn = async (
+  env: StateEnvironment,
+  agentId: string,
+  provider: AgentSignInProviderName,
+  credential: StoredCredential,
+): Promise<void> => {
+  if (!isValidAgentId(agentId)) {
+    throw new Error(`${JSON.stringify(agentId)} cannot be an agent id, so a sign-in stored under it could never be used.`);
+  }
+  if (credential.type !== 'oauth_token' || credential.value.trim().length === 0) {
+    throw new Error('An agent sign-in is a Claude setup token (`claude setup-token`), and it was empty.');
+  }
+  await withCredentialsFileLock(async () => {
+    const existing = await loadRawCredentialsFile(env);
+    const all = isPlainRecord(existing.agentSignIns) ? { ...existing.agentSignIns } : {};
+    const own = isPlainRecord(all[agentId]) ? { ...all[agentId] } : {};
+    own[provider] = { type: 'oauth_token', value: credential.value };
+    all[agentId] = own;
+    existing.agentSignIns = all;
+    await writeRawCredentialsFile(env, existing);
+  });
+};
+
+/** Forget one agent's own sign-in. Resolves whether there was one. */
+export const removeAgentSignIn = async (
+  env: StateEnvironment,
+  agentId: string,
+  provider: AgentSignInProviderName,
+): Promise<boolean> => withCredentialsFileLock(async () => {
+  const existing = await loadRawCredentialsFile(env);
+  if (!isPlainRecord(existing.agentSignIns) || !isPlainRecord(existing.agentSignIns[agentId])
+    || !Object.hasOwn(existing.agentSignIns[agentId], provider)) {
+    return false;
+  }
+  const all = { ...existing.agentSignIns };
+  const own = { ...(existing.agentSignIns[agentId] as Record<string, unknown>) };
+  delete own[provider];
+  if (Object.keys(own).length > 0) {
+    all[agentId] = own;
+  } else {
+    delete all[agentId];
+  }
+  if (Object.keys(all).length > 0) {
+    existing.agentSignIns = all;
+  } else {
+    delete existing.agentSignIns;
+  }
+  await writeRawCredentialsFile(env, existing);
+  return true;
+});
+
+/**
  * A Slack app/bot token pair for one agent. Channel tokens are gateway
  * infrastructure secrets, not agent capabilities: they live in their own
  * `channels` namespace of the credentials file and are NEVER resolved

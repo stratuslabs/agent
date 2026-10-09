@@ -419,7 +419,12 @@ test('every command migrates on first use of a newer build, and serve refuses ne
   // …while anything that writes under ~/.stratus refuses outright rather
   // than guessing at a format it was not written for — the daemon, and
   // equally a downgraded CLI's setup/chat/run.
-  for (const argv of [['serve'], ['run', 'hello'], ['chat'], ['setup']]) {
+  for (const argv of [
+    ['serve'], ['run', 'hello'], ['chat'], ['setup'],
+    // A sign-in lives in credentials.json, which the newer format owns too.
+    ['signin', 'set', 'anthropic', '--agent', 'remy'],
+    ['signin', 'remove', 'anthropic', '--agent', 'remy'],
+  ]) {
     const refused = createStreams();
     assert.equal(await runCli({
       argv,

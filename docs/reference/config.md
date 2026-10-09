@@ -84,6 +84,14 @@ entry first, then the fleet's shared one, then the environment. Add one with
 [`stratus credential set`](./cli.md); never write a key into a config file,
 which is a file people commit.
 
+And it holds **per-agent provider sign-ins**, under
+`agentSignIns.<agentId>.anthropic`: one agent's own Claude subscription,
+which outranks the shared Anthropic sign-in and the Anthropic environment
+keys for that agent only. It is model-provider authentication, not a named
+credential, so no soul lists it and no tool resolves it. Add one with
+[`stratus signin set anthropic --agent <id>`](./cli.md); see
+[Setup](../start/setup.md#one-agent-on-its-own-claude-subscription).
+
 ## How long an answer may be
 
 Anthropic requires a per-turn output cap, and `maxTokens` sets it. The
