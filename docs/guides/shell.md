@@ -50,10 +50,16 @@ unattended too. A pipeline is approved once and never stored as a scope:
 **Every other control operator disqualifies the whole command**, whatever
 it starts with: `||`, `|&`, `&`, `;`, a newline, backticks, `$( )`,
 subshells, redirection. `git log | grep x > out.txt` is refused, and so is
-a two-line command whose first line is innocent. A pipe inside quotes
-(`grep -E 'TODO|FIXME'`) and a backslash anywhere in a pipeline are
-refused too, which costs a prompt where the shell would have read them
-literally.
+a two-line command whose first line is innocent. Operators are looked for
+where the shell reads them: inside quotes, `(`, `;`, `&`, `|`, `<`, `>`,
+and a newline are text, so `git commit -m "Fix the hang (Mac mini)"` and
+`git diff | grep -E 'TODO|FIXME'` are judged as the commands they are.
+`$( )`, backticks, and `${ }` still count inside double quotes, where the
+shell still runs them. A backslash outside single quotes can escape a quote,
+which this parser does not model, and an unquoted `#` can start a comment
+in which the shell ignores quotes, so a command containing either is checked
+character by character, quotes and all, and a backslash anywhere in a
+pipeline is refused.
 
 The filters stay safe only while they cannot be handed a path. `grep`
 takes one positional, its pattern, and none of `-e`, `-f`, or `-r`; `head`,
@@ -78,8 +84,16 @@ git push origin :main       # a branch delete, with no flag involved
 git push origin +main       # a forced update, likewise
 ```
 
-A command whose first argument is preceded by a flag is stored exactly as
-approved: `mkdir -p build` stores `mkdir -p build`, which is what the log
+`git -C <repo>` straight after `git` is read as the directory it is: the
+repository is kept in the scope, literally, and the rest is judged as it
+would be without it. Approving `git -C /work/app switch -c fix` stores
+`git -C /work/app switch`, which covers other branches in that repository but not another repository, and
+not `--force`. `-C` does not make a command safe on its own: `git -C
+/elsewhere status` asks once, because another repository on the host is
+reach the built-in list never promised.
+
+Any other command whose first argument is preceded by a flag is stored
+exactly as approved: `mkdir -p build` stores `mkdir -p build`, which is what the log
 line names, and covers that command and nothing else — not `mkdir -p build
 other`, not `mkdir -p build -v`, and not `cp -r src elsewhere` after
 `cp -r src dist`. Nothing knows which flags take a value, so past such a

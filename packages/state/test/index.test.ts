@@ -1729,3 +1729,15 @@ test('approvals.commands parses at the top and per agent, adds up per agent, and
   const notStrings = await writeConfig('commands-numbers.json', { approvals: { agents: { nova: { commands: [1] } } } });
   await assert.rejects(loadConfigFile(notStrings), /Invalid approvals\.agents\.nova\.commands/);
 });
+
+test('agentMaxTurns parses per agent and refuses a budget that is not one', async () => {
+  const configPath = await writeConfig('agent-max-turns.json', { maxTurns: 40, agentMaxTurns: { atlas: 300, nova: 120 } });
+  const config = await loadConfigFile(configPath);
+  assert.equal(config.maxTurns, 40);
+  assert.deepEqual(config.agentMaxTurns, { atlas: 300, nova: 120 });
+
+  for (const [name, value] of [['list', [300]], ['zero', { atlas: 0 }], ['fraction', { atlas: 1.5 }], ['text', { atlas: '300' }]] as const) {
+    const bad = await writeConfig(`agent-max-turns-${name}.json`, { agentMaxTurns: value });
+    await assert.rejects(loadConfigFile(bad), /Invalid agentMaxTurns/, name);
+  }
+});

