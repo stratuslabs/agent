@@ -479,6 +479,12 @@ const syntaxOf = (command: string): { active: string; bare: string } | undefined
       }
       continue;
     }
+    if (quote === '"' && char === '\\' && command[index + 1] === '\n') {
+      // A line continuation is deleted before the shell parses, joining
+      // what was on either side (`"$\<newline>(id)"` runs `id`). Not
+      // modelled; the whole string is checked instead.
+      return undefined;
+    }
     if (quote === '"' && char === '\\') {
       // Escaping one of the characters that mean something here makes it
       // text, so it is kept out of `active`, where `$(` and backticks are

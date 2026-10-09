@@ -740,6 +740,9 @@ test('substitutions still run inside double quotes, and nothing hides behind a b
     // An escaped backslash is one backslash, and what follows still runs.
     ['git commit -m "a\\\\$(id)"', /command substitution/],
     ['git commit -m "a\\\\" ; rm -rf x', /semicolon/],
+    // A line continuation joins what is on either side of it: not modelled,
+    // so the whole string is checked, and nothing joined can slip past.
+    ['git status "$\\\n(id)"', /command substitution|newline/],
     // Outside quotes a backslash is not modelled: the whole string is checked.
     ['git commit -m a\\(b\\)', /subshell/],
     // An unbalanced quote has no reading.
