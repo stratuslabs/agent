@@ -771,6 +771,13 @@ test('a bare address is sent as Slack link markup, and nothing around it changes
     ['https://x.com/files/*.txt and **bold**', '<https://x.com/files/*.txt> and *bold*'],
     // Trailing punctuation is the sentence's, as in GFM's autolinks.
     ['(see https://x.com/a.)', '(see <https://x.com/a>.)'],
+    // Parentheses the address opened are the address's; one it did not is
+    // the sentence's.
+    ['https://en.wikipedia.org/wiki/Function_(mathematics)', '<https://en.wikipedia.org/wiki/Function_(mathematics)>'],
+    ['(https://en.wikipedia.org/wiki/F_(m))', '(https://en.wikipedia.org/wiki/F_(m))'],
+    ['(see https://en.wikipedia.org/wiki/F_(m))', '(see <https://en.wikipedia.org/wiki/F_(m)>)'],
+    ['see https://x.com/a), then', 'see <https://x.com/a>), then'],
+    ['**https://x.com/f_(m)**', '*<https://x.com/f_(m)>*'],
     ['https://x.com/pull/1**, merged**', '<https://x.com/pull/1>*, merged*'],
     // A snippet after an address is still a snippet.
     ['https://x.com/`code`', '<https://x.com/>`code`'],

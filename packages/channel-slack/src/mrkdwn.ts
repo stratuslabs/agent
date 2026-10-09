@@ -95,10 +95,12 @@ const NOT_BEFORE_BARE_URL = /[\p{L}\p{N}<|(\/@=&.:+-]/u;
 
 /**
  * Characters an address does not run through: whitespace, the brackets a
- * link and Slack's markup are spelled with, and a backtick, so a snippet
- * that follows an address is still a snippet.
+ * link label and Slack's markup are spelled with, and a backtick, so a
+ * snippet that follows an address is still a snippet. Parentheses are
+ * not among them: `…/wiki/Function_(mathematics)` is one address, and only
+ * a `)` the address never opened is cut from its end (see below).
  */
-const BARE_URL_END = /[\s<>()[\]`"]/;
+const BARE_URL_END = /[\s<>[\]`"]/;
 
 /**
  * Punctuation that ends a sentence or closes emphasis rather than ending
@@ -121,8 +123,20 @@ const bareUrlAt = (text: string, at: number): number => {
     end += 1;
   }
   let url = text.slice(at, end);
-  while (BARE_URL_TRAILING.test(url)) {
-    url = url.slice(0, -1);
+  // GFM's rule, both halves until neither applies: sentence punctuation
+  // comes off the end, and so does a `)` with no `(` of its own in the
+  // address — `(see https://x/a)` is a parenthesis around an address,
+  // `https://x/f_(m)` an address with one in it.
+  for (;;) {
+    if (BARE_URL_TRAILING.test(url)) {
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (url.endsWith(')') && (url.match(/\)/g)?.length ?? 0) > (url.match(/\(/g)?.length ?? 0)) {
+      url = url.slice(0, -1);
+      continue;
+    }
+    break;
   }
   // Nothing after the scheme once trailing punctuation is gone is not an
   // address anybody can follow.
