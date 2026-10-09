@@ -239,8 +239,16 @@ export const runGrants = async (
     // Whether the scope is a config entry is the daemon's config's answer;
     // ask it rather than reading a config this client may not share.
     const listed = await callRunningGateway(env, command, base, `/api/v1/agents/${encoded}/grants`, undefined, 'GET')
-      .then(async (listing) => (listing.ok ? ((await listing.json()) as GrantsListing).configCommands ?? [] : []), () => []);
-    declared = listed;
+      .then(async (listing) => (listing.ok ? ((await listing.json()) as GrantsListing).configCommands ?? [] : undefined), () => undefined);
+    if (listed === undefined && revocation.scope !== undefined) {
+      writeLine(streams.stderr, `${agentId} has no such grant. \`stratus grants ${agentId}\` lists what exists.`);
+      writeLine(
+        streams.stderr,
+        `Warning: could not ask the daemon whether approvals.commands in its config allows "${revocation.scope}".`,
+      );
+      return 1;
+    }
+    declared = listed ?? [];
     return reportRevocation(false);
   }
   if (!response.ok) {
