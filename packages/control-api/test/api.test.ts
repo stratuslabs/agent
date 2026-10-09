@@ -2560,3 +2560,20 @@ test('an approval decided through the API is recorded as the API, never as a cha
     await harness.stop();
   }
 });
+
+test('the grants listing carries the commands this daemon\'s config allows', async () => {
+  const home = await newHome();
+  const directory = path.join(home, '.stratus', 'agents');
+  const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
+  const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
+  const harness = await startApi({
+    home,
+    options: { grants: store, configCommands: (agentId: string) => (agentId === 'stratus' ? ['agentboard', 'pnpm test'] : ['agentboard']) },
+  });
+  try {
+    const listed = await json<{ configCommands: string[] }>(await harness.call('/api/v1/agents/stratus/grants'));
+    assert.deepEqual(listed.configCommands, ['agentboard', 'pnpm test']);
+  } finally {
+    await harness.stop();
+  }
+});

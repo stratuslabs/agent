@@ -767,6 +767,28 @@ export const commandScopeFromPrefix = (prefix: string): { scope: CommandScope } 
     return { reason: 'it contains something the shell would expand' };
   }
   const forBase = SAFE_COMMAND_SCOPES.filter((scope) => scope.command === analysis.base);
+  const declared = args.join(' ');
+  // A prefix shorter than a subcommand the built-in list limits would cover
+  // that subcommand's mutating forms: `git` would run `git branch release`,
+  // which the list's own `git branch` scope exists to refuse.
+  const narrower = forBase.find((scope) => {
+    const sub = scope.args ?? [];
+    return sub.length > args.length
+      && args.every((token, index) => sub[index] === token)
+      && (scope.listOnly || scope.allowedFlags || scope.maxPositionals !== undefined);
+  });
+  if (narrower) {
+    return { reason: `the built-in list limits \`${describeCommandScope(narrower)}\`; list the subcommands it may run instead` };
+  }
+  // And the same prefix as a built-in scope keeps every limit it draws —
+  // list-only, the named flags, the positional count — never just the
+  // refusals: `git branch` must still not create a branch.
+  const same = forBase.filter((scope) => (scope.args ?? []).join(' ') === declared);
+  const allowedFlags = same.length > 0 && same.every((scope) => scope.allowedFlags)
+    ? [...new Set(same.flatMap((scope) => scope.allowedFlags ?? []))]
+    : undefined;
+  const flagsWithValue = [...new Set(same.flatMap((scope) => scope.flagsWithValue ?? []))];
+  const positionals = same.map((scope) => scope.maxPositionals).filter((count): count is number => count !== undefined);
   const deniedArgs = forBase.flatMap((scope) => scope.deniedArgs ?? []);
   return {
     scope: {
@@ -774,6 +796,11 @@ export const commandScopeFromPrefix = (prefix: string): { scope: CommandScope } 
       ...(args.length > 0 ? { args } : {}),
       deniedFlags: [...new Set([...DESTRUCTIVE_FLAGS, ...forBase.flatMap((scope) => scope.deniedFlags ?? [])])],
       ...(deniedArgs.length > 0 ? { deniedArgs: [...new Set(deniedArgs)] } : {}),
+      ...(same.some((scope) => scope.listOnly) ? { listOnly: true } : {}),
+      ...(allowedFlags ? { allowedFlags } : {}),
+      ...(flagsWithValue.length > 0 ? { flagsWithValue } : {}),
+      ...(positionals.length > 0 ? { maxPositionals: Math.min(...positionals) } : {}),
+      ...(same.some((scope) => scope.literal) ? { literal: true } : {}),
       ...(analysis.base === 'git' ? { denyRefspecForms: true } : {}),
     },
   };

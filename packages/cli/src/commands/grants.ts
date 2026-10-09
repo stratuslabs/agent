@@ -25,6 +25,7 @@ import type { ParsedGrantsCommand } from '../parse.ts';
 /** What `GET /agents/:id/grants` answers, and what the files answer when no daemon is serving. */
 interface GrantsListing extends AgentGrantsListing {
   agentId: string;
+  configCommands?: string[];
   tools: Array<ToolGrant & { stale?: string }>;
 }
 
@@ -64,6 +65,7 @@ export const runGrants = async (
   const named = revocation?.tool ?? revocation?.scope ?? revocation?.origin ?? '';
 
   const fromFiles = async (): Promise<number> => {
+    declared = await localDeclared();
     const store = createFileCommandWhitelist({
       directory: agentsDirPath(env),
       stateHome: stratusHomePath(env),
@@ -126,11 +128,13 @@ export const runGrants = async (
     return 0;
   };
 
-  // What config declares runs without asking. Not a grant, so not in the
-  // file or the daemon's listing, but the question this command answers is
-  // "what may this agent do unattended", and leaving it out would answer it
-  // wrong. Read from the global config, which is where the daemon reads it.
-  const declared = createOperatorCommands(
+  // What config declares runs without asking. Not a grant, but the question
+  // this command answers is "what may this agent do unattended", and leaving
+  // it out would answer it wrong. A serving daemon reports its own list; only
+  // with no daemon is the global config read here, which is where the next
+  // daemon to start would read it.
+  let declared: string[] = [];
+  const localDeclared = async (): Promise<string[]> => createOperatorCommands(
     await loadServeApprovals(env, undefined, () => {}),
     (line) => writeLine(streams.stderr, `Warning: ${line}`),
   ).declaredFor(agentId);
@@ -204,6 +208,11 @@ export const runGrants = async (
     return fromFiles();
   }
   if (response.status === 404 && revocation) {
+    // Whether the scope is a config entry is the daemon's config's answer;
+    // ask it rather than reading a config this client may not share.
+    const listed = await callRunningGateway(env, command, base, `/api/v1/agents/${encoded}/grants`, undefined, 'GET')
+      .then(async (listing) => (listing.ok ? ((await listing.json()) as GrantsListing).configCommands ?? [] : []), () => []);
+    declared = listed;
     return reportRevocation(false);
   }
   if (!response.ok) {
@@ -213,5 +222,7 @@ export const runGrants = async (
   if (revocation) {
     return reportRevocation(true);
   }
-  return render(await response.json() as GrantsListing, `from the daemon at ${base}`);
+  const listing = await response.json() as GrantsListing;
+  declared = listing.configCommands ?? [];
+  return render(listing, `from the daemon at ${base}`);
 };

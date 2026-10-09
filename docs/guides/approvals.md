@@ -211,9 +211,16 @@ refused as for an **Always allow** scope: destructive flags like
 command (`git -c`), and git refspec deletes. Each command in a pipeline
 still has to be covered on its own.
 
+An entry keeps every limit the built-in list draws for the same command:
+`git branch` still only lists branches, and `grep` still takes no file. A
+bare `git` is refused, because it would cover the mutating forms of the
+subcommands the built-in list limits. List the subcommands instead
+(`git push`, `git fetch`).
+
 Unlike the other keys here, an agent's list adds to the top-level one
 rather than replacing it. An entry that isn't plain words (a flag, `|`, a
-glob, a path) is ignored, with a warning at startup. The daemon logs what
+glob, a path) is ignored, with a warning at startup, and is left out of
+every listing of what's allowed. The daemon logs what
 config allows when it starts, and `stratus grants <agent>` lists these
 entries above the agent's grants. They aren't grants, so
 `stratus grants revoke` can't take one back. Remove it from config and

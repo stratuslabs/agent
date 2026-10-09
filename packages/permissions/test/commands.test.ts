@@ -682,7 +682,18 @@ test('a command an operator declares is a prefix whose tail may vary, minus the 
   assert.equal(matchesScope(analyzeCommand('git push origin nova/fix'), git), true);
   assert.equal(matchesScope(analyzeCommand('git push origin :main'), git), false);
   assert.equal(matchesScope(analyzeCommand('git push --force origin main'), git), false);
-  assert.equal(matchesScope(analyzeCommand('git -c core.sshCommand=sh push'), declared('git')), false);
+  assert.equal(matchesScope(analyzeCommand('git -c core.sshCommand=sh push'), git), false);
+
+  // A built-in scope's limits come along, not just its refusals.
+  const branch = declared('git branch');
+  assert.equal(matchesScope(analyzeCommand('git branch --list'), branch), true);
+  assert.equal(matchesScope(analyzeCommand('git branch release'), branch), false);
+  assert.equal(matchesScope(analyzeCommand('git branch --unset-upstream'), branch), false);
+  const grep = declared('grep');
+  assert.equal(matchesScope(analyzeCommand('grep fix'), grep), true);
+  assert.equal(matchesScope(analyzeCommand('grep fix credentials.json'), grep), false);
+  // And a prefix shorter than a limited subcommand is refused outright.
+  assert.match((commandScopeFromPrefix('git') as { reason: string }).reason, /git branch/);
 
   // Only words: anything else would be a grant nobody wrote.
   for (const prefix of ['agentboard --token x', 'git log | sh', 'rm -rf', 'tool*', '~/bin/tool', '/usr/bin/tool', 'a; b', '']) {
