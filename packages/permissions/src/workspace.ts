@@ -972,7 +972,10 @@ const DOWNLOADERS: Record<string, Downloader> = {
  * can add a URL, an upload, credentials, or an output path, so the argv
  * judged here would not be what runs.
  */
-const userConfigFiles = (env: NodeJS.ProcessEnv, workspace: string): string[] => {
+const userConfigFiles = (env: NodeJS.ProcessEnv, workspace: string, cwd: string): string[] => {
+  // curl resolves a relative directory from where it runs, not the daemon.
+  const dir = (value: string | undefined): string | undefined =>
+    value === undefined || value.length === 0 ? undefined : path.resolve(cwd, value);
   // curl's last resort is the passwd entry's home (getpwuid), whatever HOME says.
   const passwdHome = (() => {
     try {
@@ -981,11 +984,11 @@ const userConfigFiles = (env: NodeJS.ProcessEnv, workspace: string): string[] =>
       return undefined;
     }
   })();
-  const homes = [...new Set([env.HOME, passwdHome, workspace])]
+  const homes = [...new Set([dir(env.HOME), passwdHome, workspace])]
     .filter((home): home is string => home !== undefined && home.length > 0);
   return [
-    env.CURL_HOME ? path.join(env.CURL_HOME, '.curlrc') : undefined,
-    env.XDG_CONFIG_HOME ? path.join(env.XDG_CONFIG_HOME, 'curlrc') : undefined,
+    dir(env.CURL_HOME) ? path.join(dir(env.CURL_HOME) as string, '.curlrc') : undefined,
+    dir(env.XDG_CONFIG_HOME) ? path.join(dir(env.XDG_CONFIG_HOME) as string, 'curlrc') : undefined,
     // The workspace as a home too: a shell configured to run with HOME (or
     // a config directory) there is the one place the agent itself could
     // write a config, and the policy can't see the shell's own environment.
@@ -1072,7 +1075,7 @@ export const downloadInsideWorkspace = async (
     args = args.slice(1);
   }
   if (!noConfig) {
-    for (const file of userConfigFiles(env, workspace)) {
+    for (const file of userConfigFiles(env, workspace, cwd)) {
       if (await exists(file)) {
         return undefined;
       }
@@ -1161,6 +1164,12 @@ export const downloadInsideWorkspace = async (
     }
     const resolved = await writeTarget(here, target);
     if (resolved === undefined || !within(root, resolved) || resolved === root) {
+      return undefined;
+    }
+    // An existing file with another name elsewhere (a hard link) is
+    // truncated wherever that name is, so it must have only this one.
+    const existing = await lstat(resolved).catch(() => undefined);
+    if (existing !== undefined && (!existing.isFile() || existing.nlink > 1)) {
       return undefined;
     }
   }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, link, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -32,6 +32,10 @@ const layout = async () => {
   // An existing file that is a link out: curl writes through it.
   await symlink(path.join(root, 'elsewhere', 'target.html'), path.join(workspace, 'refs', 'link.html'));
   await symlink(path.join(root, 'nowhere'), path.join(workspace, 'refs', 'gone'));
+  // A hard link to a file outside: writing the inside name truncates it.
+  await writeFile(path.join(root, 'elsewhere', 'daemon.json'), '{}');
+  await link(path.join(root, 'elsewhere', 'daemon.json'), path.join(workspace, 'refs', 'hard.json'));
+  await writeFile(path.join(workspace, 'refs', 'old.html'), 'previous');
   return { root, workspace };
 };
 
@@ -73,6 +77,7 @@ test('a plain download into the workspace is recognized, and its site is what it
     'curl -sL --create-dirs -o refs/new/page.html https://developers.openai.com/x',
     'curl -sL -m 30 --retry 2 -o refs/page.html https://developers.openai.com/x',
     'curl -sL -o - https://developers.openai.com/x',
+    'curl -sL -o refs/old.html https://developers.openai.com/x',
     'curl -q -sL -o refs/page.html https://developers.openai.com/x',
   ]) {
     assert.equal(await site(command), 'https://developers.openai.com', command);
@@ -111,6 +116,8 @@ test('anything that sends, authenticates, reconfigures, or writes outside is not
     'curl -s https://developers.openai.com:8443/x',
     'curl -o refs/link.html https://developers.openai.com/x',
     'curl -o refs/gone/x.html https://developers.openai.com/x',
+    'curl -o refs/hard.json https://developers.openai.com/x',
+    'curl -o refs https://developers.openai.com/x',
     'curl --create-dirs -o refs/gone/new/x.html https://developers.openai.com/x',
     `curl -o refs/a ${url} https://developers.openai.com/y`,
     'curl -o refs/a http://developers.openai.com/x',
@@ -237,6 +244,12 @@ test('a curl config file means a download is not plain, unless the command turns
   assert.equal(await site(`curl -sL ${url}`, { HOME: home }), undefined);
   assert.equal(await site(`curl -q -sL ${url}`, { HOME: home }), 'https://developers.openai.com');
   await rm(path.join(home, '.curlrc'));
+
+  // A relative config directory is curl's, from where it runs.
+  await mkdir(path.join(workspace, 'rel'), { recursive: true });
+  await writeFile(path.join(workspace, 'rel', '.curlrc'), 'upload-file = /etc/passwd\n');
+  assert.equal(await site(`curl -sL ${url}`, { HOME: home, CURL_HOME: 'rel' }), undefined);
+  await rm(path.join(workspace, 'rel', '.curlrc'));
 
   const curlHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-downloads-curlhome-'));
   await writeFile(path.join(curlHome, '.curlrc'), 'url = https://evil.example\n');
