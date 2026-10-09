@@ -381,6 +381,17 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
   if (typeof source.slackChannel === 'string' && source.slackChannel.length > 0) {
     route.slackChannel = source.slackChannel;
   }
+  if (source.commands !== undefined) {
+    // Refused when it is not a list of strings, rather than dropped: an
+    // operator who wrote it expects those commands to stop asking, and a
+    // silent drop reads as a daemon that ignores its config.
+    if (!Array.isArray(source.commands) || source.commands.some((entry) => typeof entry !== 'string')) {
+      throw new Error(
+        `Invalid ${where}.commands in config ${configPath}: expected a list of commands like ["agentboard", "pnpm test"].`,
+      );
+    }
+    route.commands = (source.commands as string[]).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  }
   return route;
 };
 
@@ -457,10 +468,13 @@ export const resolveAgentApprovals = (
   const slackApprovers = agent?.slackApprovers ?? approvals?.slackApprovers;
   const slackChannel = agent?.slackChannel ?? approvals?.slackChannel;
   const externalContent = agent?.externalContent ?? approvals?.externalContent;
+  // Added together rather than overridden: see `AgentApprovalConfig.commands`.
+  const commands = [...new Set([...(approvals?.commands ?? []), ...(agent?.commands ?? [])])];
   return {
     ...(slackApprovers ? { slackApprovers } : {}),
     ...(slackChannel ? { slackChannel } : {}),
     ...(externalContent !== undefined ? { externalContent } : {}),
+    ...(commands.length > 0 ? { commands } : {}),
   };
 };
 

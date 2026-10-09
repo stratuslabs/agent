@@ -839,6 +839,106 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
   };
 };
 
+/**
+ * The scope an operator declares in config (`approvals.commands`): a
+ * command and, optionally, the subcommands it is limited to — `agentboard`,
+ * `pnpm test`, `gh pr`. Whatever follows the prefix may vary, the way a
+ * remembered scope's arguments do, and the same things stay refused: the
+ * destructive flags, whatever the built-in list refuses for that command,
+ * and git's refspec deletes.
+ *
+ * Only words. A flag, an operator, or a token the shell would expand has no
+ * meaning as a prefix, and guessing one would be a grant nobody wrote, so
+ * the entry is refused with the reason instead.
+ */
+export const commandScopeFromPrefix = (prefix: string): { scope: CommandScope } | { reason: string } => {
+  // Plain words only, so the entry as written is the scope as matched, and
+  // every listing and revoke can compare it word for word.
+  if (/['"]/.test(prefix)) {
+    return { reason: 'it contains quotes; write the command as plain words' };
+  }
+  const analysis = analyzeCommand(prefix.trim());
+  if (analysis.pipeline) {
+    return { reason: 'it is a pipeline; list each command on its own' };
+  }
+  if (analysis.disqualifiedBy || analysis.base === undefined) {
+    return { reason: analysis.disqualifiedBy ?? 'it could not be read as a command' };
+  }
+  const args = analysis.tokens.slice(1);
+  if (args.some((token) => token.startsWith('-'))) {
+    return { reason: 'it names a flag; list the command and its subcommands only' };
+  }
+  // A path is a program or a file, not a subcommand: `python scripts/x.py`
+  // would let any tail follow a script nobody reviewed by name.
+  if (args.some((token) => token.includes('/') || token.startsWith('.'))) {
+    return { reason: 'it names a path; list the command and its subcommands only' };
+  }
+  if (analysis.expands?.some((expands) => expands) || analysis.tokens.some((token) => /[*?[\]{}~$\\#]/.test(token))) {
+    return { reason: 'it contains something the shell would expand' };
+  }
+  const forBase = SAFE_COMMAND_SCOPES.filter((scope) => scope.command === analysis.base);
+  const declared = args.join(' ');
+  // A prefix shorter than a subcommand the built-in list limits would cover
+  // that subcommand's mutating forms: `git` would run `git branch release`,
+  // which the list's own `git branch` scope exists to refuse.
+  const narrower = forBase.find((scope) => {
+    const sub = scope.args ?? [];
+    return sub.length > args.length
+      && args.every((token, index) => sub[index] === token)
+      && (scope.listOnly || scope.allowedFlags || scope.maxPositionals !== undefined);
+  });
+  if (narrower) {
+    return { reason: `the built-in list limits \`${describeCommandScope(narrower)}\`; list the subcommands it may run instead` };
+  }
+  // Nor longer than a limited built-in scope: `grep fix` names grep's
+  // pattern, and as a prefix it would let any file follow it, which the
+  // built-in `grep` exists to refuse. The limits are about the arguments a
+  // prefix fixes in place, so there is no adjusting them; the entry is
+  // refused and the built-in scope already covers what it was safe for.
+  const extended = forBase.find((scope) => {
+    const sub = scope.args ?? [];
+    return sub.length < args.length
+      && sub.every((token, index) => args[index] === token)
+      && (scope.listOnly || scope.allowedFlags || scope.maxPositionals !== undefined || scope.literal || (scope.flagsWithValue ?? []).length > 0);
+  });
+  if (extended) {
+    return { reason: `it extends \`${describeCommandScope(extended)}\`, which the built-in list already limits; it runs unattended within those limits without an entry` };
+  }
+  // And the same prefix as a built-in scope keeps every limit it draws —
+  // list-only, the named flags, the positional count — never just the
+  // refusals: `git branch` must still not create a branch.
+  const same = forBase.filter((scope) => (scope.args ?? []).join(' ') === declared);
+  const allowedFlags = same.length > 0 && same.every((scope) => scope.allowedFlags)
+    ? [...new Set(same.flatMap((scope) => scope.allowedFlags ?? []))]
+    : undefined;
+  const flagsWithValue = [...new Set(same.flatMap((scope) => scope.flagsWithValue ?? []))];
+  const positionals = same.map((scope) => scope.maxPositionals).filter((count): count is number => count !== undefined);
+  // Refusals come only from built-in scopes on the same path as this one:
+  // `git remote` refuses `add` as its argument, which says nothing about
+  // `git add`, and copying it would refuse the entry's own subcommand.
+  const related = forBase.filter((scope) => {
+    const sub = scope.args ?? [];
+    const shorter = sub.length <= args.length ? sub : args;
+    const longer = sub.length <= args.length ? args : sub;
+    return shorter.every((token, index) => longer[index] === token);
+  });
+  const deniedArgs = related.flatMap((scope) => scope.deniedArgs ?? []);
+  return {
+    scope: {
+      command: analysis.base,
+      ...(args.length > 0 ? { args } : {}),
+      deniedFlags: [...new Set([...DESTRUCTIVE_FLAGS, ...related.flatMap((scope) => scope.deniedFlags ?? [])])],
+      ...(deniedArgs.length > 0 ? { deniedArgs: [...new Set(deniedArgs)] } : {}),
+      ...(same.some((scope) => scope.listOnly) ? { listOnly: true } : {}),
+      ...(allowedFlags ? { allowedFlags } : {}),
+      ...(flagsWithValue.length > 0 ? { flagsWithValue } : {}),
+      ...(positionals.length > 0 ? { maxPositionals: Math.min(...positionals) } : {}),
+      ...(same.some((scope) => scope.literal) ? { literal: true } : {}),
+      ...(analysis.base === 'git' ? { denyRefspecForms: true } : {}),
+    },
+  };
+};
+
 /** One line an operator can read in a log or a whitelist listing. */
 export const describeCommandScope = (scope: CommandScope): string =>
   [scope.command, ...(scope.args ?? [])].join(' ');

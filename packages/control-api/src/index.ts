@@ -96,6 +96,12 @@ export interface ControlApiOptions {
    */
   grants?: AgentGrantStore;
   /**
+   * The commands this daemon's config lets an agent run without asking
+   * (`approvals.commands`), listed beside its grants. From the daemon,
+   * because a client reading its own config may be reading a different one.
+   */
+  configCommands?: (agentId: string) => string[];
+  /**
    * The address people reach this daemon on from elsewhere (a Tailscale
    * name, a tunnel), from `api.publicUrl`. Credential links are built on
    * it; without it they use the bound address, which works only on the
@@ -237,6 +243,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       env,
       configPath: options.configPath,
       grants: options.grants,
+      configCommands: options.configCommands,
       principal,
       params: resolved.params,
       url: requestUrl,

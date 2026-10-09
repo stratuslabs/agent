@@ -49,6 +49,7 @@ import {
 
 export {
   analyzeCommand,
+  commandScopeFromPrefix,
   describeCommandScope,
   findCoveringScopes,
   findMatchingScope,

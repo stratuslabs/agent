@@ -36,6 +36,7 @@ import {
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
 import { describePrincipals, describeApprovers } from '../approvals.ts';
+import { createOperatorCommands } from '../operator-commands.ts';
 import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
 import { formatEvent, eventDetail } from '../events.ts';
@@ -252,6 +253,10 @@ const serveHeldHome = async (
   // config block, resolved once here: the daemon must not answer "who can
   // approve this" differently from "is anyone being asked at all".
   const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
+  // What the operator declared in approvals.commands, matched as scopes
+  // ahead of what was remembered, and reported by the control API so
+  // `stratus grants` shows this daemon's list rather than its own config's.
+  const operatorCommands = createOperatorCommands(approvalsConfig, warn);
   const approvalMode = command.approvals ?? approvalsConfig.mode ?? 'headless';
   const principalsConfig = await loadServePrincipals(env, command.configPath, warn);
   const slackConfig = await loadServeSlack(env, command.configPath, warn);
@@ -328,6 +333,7 @@ const serveHeldHome = async (
         ...(command.configPath ? { configPath: command.configPath } : {}),
         ...(apiConfig.publicUrl !== undefined ? { publicUrl: apiConfig.publicUrl } : {}),
         grants: grantStore,
+        configCommands: (agentId: string) => operatorCommands.declaredFor(agentId),
         log,
         warn,
       });
@@ -485,8 +491,14 @@ const serveHeldHome = async (
   // installed. Wired unconditionally because it costs nothing without one:
   // a tool that carries no command string is judged by its risk exactly as
   // before. The whitelist lives beside the agent's soul, per agent.
+  // Only the read is widened: an "always allow" still lands in the
+  // whitelist file, and the file's own methods (list, revoke) still see
+  // only what is in it.
   const commands = {
-    whitelist: grantStore,
+    whitelist: {
+      scopesFor: async (agentId: string) => [...operatorCommands.scopesFor(agentId), ...await grantStore.scopesFor(agentId)],
+      remember: (agentId: string, scope: CommandScope) => grantStore.remember(agentId, scope),
+    },
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
       // An approval that widens what runs unattended, for every future
       // session, is precisely the decision that must not be the one leaving
@@ -533,6 +545,10 @@ const serveHeldHome = async (
     );
   };
 
+  const declared = operatorCommands.describe();
+  if (declared) {
+    log(declared);
+  }
   if (Object.keys(agentMaxTurns).length > 0) {
     log(`maxTurns: ${Object.entries(agentMaxTurns).map(([agentId, turns]) => `${agentId} ${turns}`).join(', ')}; ${maxTurns ?? 'the default'} for the rest (agentMaxTurns)`);
   }

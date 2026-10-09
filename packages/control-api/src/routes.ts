@@ -93,6 +93,8 @@ export interface RouteContext {
   configPath: string | undefined;
   /** The daemon's grant store, when it was started with one. See `ControlApiOptions.grants`. */
   grants: AgentGrantStore | undefined;
+  /** See `ControlApiOptions.configCommands`. */
+  configCommands: ((agentId: string) => string[]) | undefined;
   /**
    * How the caller authenticated, or undefined on the one route that
    * authenticates itself (see `selfAuthenticating` below).
@@ -1116,6 +1118,7 @@ export const routes: Route[] = [
       const contributors = new Map(context.gateway.tools().map((tool) => [tool.name, tool.package]));
       return {
         agentId,
+        configCommands: context.configCommands?.(agentId) ?? [],
         scopes: listing.scopes,
         origins: listing.origins,
         tools: listing.tools.map((grant) => {
