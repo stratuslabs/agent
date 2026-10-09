@@ -280,6 +280,49 @@ export const loadServeAgentMaxTurns = async (
 };
 
 /**
+ * Which agents keep working past their budget (`autoContinue: { "<id>":
+ * true | n }`), under `agentMaxTurns`'s trust rule and for its reason: it
+ * spends the operator's tokens, and a soul can come from someone else's
+ * template. An entry that is neither `true` nor a whole number of at least
+ * 1 is ignored with a warning, so that agent keeps wrapping up.
+ */
+export const loadServeAutoContinue = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<Record<string, true | number>> => {
+  let block = await readTrustedConfigBlock('autoContinue', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring autoContinue in ${block.path}: a project-local config cannot decide that an agent keeps spending `
+      + 'past its budget. Using ~/.stratus/config.json instead.',
+    );
+    block = await readGlobalConfigBlock('autoContinue', env);
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring autoContinue (${block.error instanceof Error ? block.error.message : String(block.error)})`);
+    return {};
+  }
+  if (block.status !== 'present') {
+    return {};
+  }
+  const value: unknown = block.value;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warn('ignoring autoContinue: expected an object of agent ids to true or a cap, like { "nova": true }');
+    return {};
+  }
+  const settings: Record<string, true | number> = {};
+  for (const [agentId, setting] of Object.entries(value as Record<string, unknown>)) {
+    if (setting === true || (typeof setting === 'number' && Number.isInteger(setting) && setting >= 1)) {
+      settings[agentId] = setting;
+    } else if (setting !== false) {
+      warn(`ignoring autoContinue.${agentId}: ${JSON.stringify(setting)} is neither true nor a whole number of extra allowances, 1 or more`);
+    }
+  }
+  return settings;
+};
+
+/**
  * The daemon's `executor` or `memoryStore` selection — a name a plugin
  * registered — under the trust rule `plugins` has, and for the same
  * reason one step on: the plugins block decides which code runs, and

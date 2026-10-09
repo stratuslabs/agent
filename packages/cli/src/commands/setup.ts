@@ -127,6 +127,7 @@ interface SetupState {
   maxTokens?: number;
   maxTurns?: number;
   agentMaxTurns?: Record<string, number>;
+  autoContinue?: Record<string, true | number>;
   /**
    * The four blocks an operator writes by hand, carried for the same reason
    * `vision` is — with more at stake, because each one is a decision about
@@ -270,6 +271,7 @@ export const runSetup = async (
     // Carried for the same reason: setup has no screen for it, and a save
     // that dropped it would put every agent back on the shared budget.
     ...(existing.agentMaxTurns !== undefined ? { agentMaxTurns: existing.agentMaxTurns } : {}),
+    ...(existing.autoContinue !== undefined ? { autoContinue: existing.autoContinue } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
@@ -2798,6 +2800,9 @@ export const runSetup = async (
     }
     if (state.agentMaxTurns !== undefined) {
       config.agentMaxTurns = state.agentMaxTurns;
+    }
+    if (state.autoContinue !== undefined) {
+      config.autoContinue = state.autoContinue;
     }
 
     await saveConfigFile(configPath, config);
