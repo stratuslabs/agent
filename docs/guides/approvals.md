@@ -352,6 +352,56 @@ these commands read only what they're told to. A program you list in
 `approvals.commands` can still read anything, which is why those are
 listed by you and never inferred.
 
+## Trusted domains
+
+Sites an agent reads all day, like vendor docs, can be trusted once in
+config instead of approved page by page:
+
+```jsonc
+"approvals": {
+  "trustedDomains": ["openai.com", "anthropic.com", "developer.apple.com"],
+  "agents": { "nova": { "trustedDomains": ["docs.github.com"] } }
+}
+```
+
+A domain covers itself and its subdomains (`openai.com` covers
+`developers.openai.com`, never `evilopenai.com`), over https on the default
+port. An agent's list adds to the top-level one, like `commands`. Write a
+domain with no scheme, path, or port; anything else is refused at startup.
+
+What runs without asking:
+
+- **`web.fetch`** of a page under a trusted domain. It still doesn't follow
+  a redirect to another site.
+- Under `autonomy: workspace`, **a plain download**: `curl` fetching one
+  plain https URL (a host, then a path, with no `@`, backslash, or curl
+  glob like `{a,b}` or `[1-9]`) with a GET, written with `-o` to a file
+  inside the workspace, or to stdout. `-O` and `--output-dir` ask, since
+  curl names that file itself. The site has to be under a trusted domain, or one already
+  approved for `web.fetch` with **Always allow**. Flags that send data
+  (`-d`, `-F`, `-T`, `-X`), carry headers or credentials (`-H`, `-u`, `-b`),
+  read a config (`-K`), skip TLS checks (`-k`), or let the server pick the
+  file name (`-J`) still ask. So does any flag not on the list, and so does
+  any download while a curl config file exists (`~/.curlrc`,
+  `~/.config/curlrc`, `$CURL_HOME/.curlrc`, `$XDG_CONFIG_HOME/curlrc`, the
+  same names in the account's passwd home directory, or the
+  same names at the top of the agent's workspace), since it can add options
+  the command doesn't show, unless the command starts with `curl -q`, which
+  reads no config. These are checked in the daemon's environment; a shell
+  `env` that points `CURL_HOME` or `XDG_CONFIG_HOME` somewhere else is
+  trusted as your config. `wget` always asks: it writes `~/.wget-hsts`
+  outside the workspace by default.
+
+`curl -L` follows redirects, and those can leave the site. The
+request itself goes to the trusted site first, so the risk left is a
+trusted site with an open redirect. List docs and vendor sites, never ones
+where anyone can publish a page (`github.io`, `githubusercontent.com`,
+`s3.amazonaws.com`). Trusted domains are withdrawn like every grant once
+the [external-content gate](#after-an-agent-reads-the-web) closes. For an
+agent with `externalContent: "gate"`, downloads always ask: the shell
+doesn't mark what it prints as web content, so a download could never
+close the gate the way `web.fetch` does.
+
 ## Standing grants
 
 Most installed tools are `gated` and name no scope — `fs.write`, a

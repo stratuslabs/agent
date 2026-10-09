@@ -20,9 +20,9 @@ import { sessionTaintedBy, sessionTrustOf } from '@stratusagent/core';
  */
 export { atLeastAsRisky } from '@stratusagent/core';
 
-import { gitInsideWorkspace, gitPushInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
+import { downloadInsideWorkspace, gitInsideWorkspace, gitPushInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
 
-export { gitInsideWorkspace, gitPushInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
+export { downloadInsideWorkspace, gitInsideWorkspace, gitPushInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
 import {
   analyzeCommand,
   describeCommandScope,
@@ -37,6 +37,7 @@ import {
   describeOriginScope,
   findMatchingOriginScope,
   originScopeFor,
+  trustedDomainOf,
   type OriginScope,
 } from './origins.ts';
 import {
@@ -73,6 +74,8 @@ export {
   originScopeFor,
   parseOriginScope,
   sameOriginScope,
+  normalizeTrustedDomain,
+  trustedDomainOf,
   type OriginScope,
 } from './origins.ts';
 export {
@@ -387,7 +390,22 @@ export interface OriginScopeOptions {
   whitelist?: OriginWhitelistStore;
   /** Called when an origin is persisted, for the same reason as above. */
   onScopeRemembered?: (event: { agentId: string; scope: OriginScope }) => void;
+  /**
+   * Domains the operator trusts this agent to read from without asking:
+   * `openai.com` covers it and its subdomains, over https. Applies to the
+   * read-only origin tools (`trustedDomainTools`) and, under workspace
+   * autonomy, to plain `curl` downloads into the workspace. Never
+   * to a tool that acts on a site (`browser.act`), and withdrawn, like
+   * every grant, from a conversation the external-content gate has closed.
+   * Read per call, so the answer is always the config's.
+   */
+  trustedDomainsFor?: (agentId: string) => readonly string[];
+  /** The origin tools that only read. Default `['web.fetch']`. */
+  trustedDomainTools?: readonly string[];
 }
+
+/** The tool whose origin grants also cover a plain download of that site. */
+const READ_ORIGIN_TOOL = 'web.fetch';
 
 const YES = new Set(['y', 'yes', 'always', 'a']);
 const ALWAYS = new Set(['always', 'a']);
@@ -675,6 +693,18 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     tier.set(agentId, [...(tier.get(agentId) ?? []), grant]);
   };
 
+  /** A site this agent may read without asking: trusted, or approved for `web.fetch`. */
+  const readableSite = async (agentId: string, site: string): Promise<boolean> => {
+    if (trustedDomainOf(site, origins?.trustedDomainsFor?.(agentId) ?? []) !== undefined) {
+      return true;
+    }
+    const granted = [
+      ...(sessionOrigins.get(agentId) ?? []),
+      ...(origins?.whitelist ? await origins.whitelist.originsFor(agentId) : []),
+    ];
+    return findMatchingOriginScope(site, granted, READ_ORIGIN_TOOL) !== undefined;
+  };
+
   const report = (
     context: ApprovalContext,
     allowed: boolean,
@@ -886,6 +916,18 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
                 read = true;
                 continue;
               }
+              // A plain download from a site the agent may already read:
+              // a trusted domain, or one approved for `web.fetch`. Granted
+              // trust, so not to a conversation the gate has closed.
+              // And not for an agent the gate is on for at all: the shell
+              // marks its output `unknown`, not `external`, so a page read
+              // this way would never close the gate it exists to close.
+              const gated = gateExternalContent?.(session.agent.id) === true;
+              const site = gated ? undefined : await downloadInsideWorkspace(stage, cwd, workspace);
+              if (site !== undefined && await readableSite(session.agent.id, site)) {
+                read = true;
+                continue;
+              }
               const prefixes = commands?.workspace?.branchPrefixesFor?.(session.agent.id) ?? [`${session.agent.id}/`];
               if (!externalGate && await gitPushInsideWorkspace(stage, cwd, workspace, prefixes)) {
                 read = true;
@@ -939,6 +981,19 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             context,
             true,
             `${call.toolName} acted on the approved site ${describeOriginScope(granted)}`,
+            undefined,
+            undefined,
+            origin,
+          );
+        }
+        const trusted = !externalGate && (origins?.trustedDomainTools ?? [READ_ORIGIN_TOOL]).includes(call.toolName)
+          ? trustedDomainOf(origin, origins?.trustedDomainsFor?.(session.agent.id) ?? [])
+          : undefined;
+        if (trusted !== undefined) {
+          return report(
+            context,
+            true,
+            `${call.toolName} read from ${origin}, under the trusted domain ${trusted}`,
             undefined,
             undefined,
             origin,

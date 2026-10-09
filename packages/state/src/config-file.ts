@@ -428,7 +428,26 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     }
     route.branchPrefixes = (source.branchPrefixes as string[]).map((entry) => entry.trim());
   }
+  if (source.trustedDomains !== undefined) {
+    // Refused rather than dropped, entry by entry: `https://openai.com/docs`
+    // or `openai.com:8443` is someone who meant a domain and would get a
+    // daemon quietly asking anyway.
+    const domains = Array.isArray(source.trustedDomains) ? source.trustedDomains : undefined;
+    const normalized = domains?.map((entry) => (typeof entry === 'string' ? normalizeTrustedDomainEntry(entry) : undefined));
+    if (normalized === undefined || normalized.some((entry) => entry === undefined)) {
+      throw new Error(
+        `Invalid ${where}.trustedDomains in config ${configPath}: expected a list of domains like ["openai.com", "developer.apple.com"], with no scheme, path, or port.`,
+      );
+    }
+    route.trustedDomains = [...new Set(normalized as string[])];
+  }
   return route;
+};
+
+/** The same normalization the permission engine applies: `*.x.com` and `.x.com` mean `x.com`. */
+const normalizeTrustedDomainEntry = (raw: string): string | undefined => {
+  const domain = raw.trim().toLowerCase().replace(/^\*\./, '').replace(/^\./, '');
+  return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/.test(domain) ? domain : undefined;
 };
 
 const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig | undefined => {
@@ -508,6 +527,7 @@ export const resolveAgentApprovals = (
   // Added together rather than overridden: see `AgentApprovalConfig.commands`.
   const commands = [...new Set([...(approvals?.commands ?? []), ...(agent?.commands ?? [])])];
   const branchPrefixes = agent?.branchPrefixes ?? approvals?.branchPrefixes;
+  const trustedDomains = [...new Set([...(approvals?.trustedDomains ?? []), ...(agent?.trustedDomains ?? [])])];
   return {
     ...(autonomy !== undefined ? { autonomy } : {}),
     ...(branchPrefixes !== undefined ? { branchPrefixes } : {}),
@@ -515,6 +535,7 @@ export const resolveAgentApprovals = (
     ...(slackChannel ? { slackChannel } : {}),
     ...(externalContent !== undefined ? { externalContent } : {}),
     ...(commands.length > 0 ? { commands } : {}),
+    ...(trustedDomains.length > 0 ? { trustedDomains } : {}),
   };
 };
 

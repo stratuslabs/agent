@@ -1,4 +1,5 @@
-import { readFile, realpath } from 'node:fs/promises';
+import { access, lstat, readFile, realpath } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import type { CommandAnalysis } from './commands.ts';
@@ -915,4 +916,267 @@ export const gitPushInsideWorkspace = async (
     branch = destination.slice('refs/heads/'.length);
   }
   return branch.length > 0 && branchPrefixes.some((prefix) => branch.startsWith(prefix) && branch.length > prefix.length);
+};
+
+/**
+ * A plain download, judged by the site it reads from: `curl` fetching one https URL with a GET, written to a file inside the workspace
+ * or to stdout. Answers the URL's origin, for the policy to check against
+ * the sites the agent may read from (trusted domains, or a site approved
+ * for `web.fetch`); undefined means this isn't one, and it asks.
+ *
+ * "Always allow" on a command that starts with flags remembers the exact
+ * command, so before this every new docs page asked again. A download only
+ * reads a site the operator already trusts, and only writes inside the
+ * workspace; this lets that through and nothing else.
+ *
+ * An allowlist of flags, like git's. Everything that sends data (`-d`,
+ * `-F`, `-T`, `-X`), carries credentials or headers (`-u`, `-H`, `-b`,
+ * `--netrc`), reads a config (`-K`), turns off TLS checks (`-k`), or lets
+ * the server name the file (`-J`, `--content-disposition`) isn't on it.
+ * Neither is a user config file (`~/.curlrc`): one that exists means it
+ * asks, unless the command turns config off (`curl -q` first). `wget` isn't
+ * judged here at all: it writes `~/.wget-hsts` by default, outside the
+ * workspace, and every agent seen so far reaches for curl.
+ * Redirects (`-L`) can still leave the site: the request
+ * itself only ever goes to the trusted origin first, and a docs site with
+ * an open redirect is the residual risk, the same one `web.fetch` names.
+ */
+interface Downloader {
+  flags: string[];
+  /** Flags whose value is a path that must land inside the workspace. */
+  pathValues: string[];
+  /** Flags with a harmless value (a number, a user agent). */
+  values: string[];
+  /** A path value of `-` means stdout. */
+  dashIsStdout?: boolean;
+}
+
+const DOWNLOADERS: Record<string, Downloader> = {
+  curl: {
+    flags: [
+      '-s', '--silent', '-S', '--show-error', '-L', '--location', '-f', '--fail', '--fail-with-body', '--compressed',
+      '-#', '--progress-bar', '-R', '--remote-time', '--create-dirs', '-I', '--head', '-v', '--verbose',
+      '-i', '--include', '--no-progress-meter',
+    ],
+    // `-O` and `--output-dir` aren't here: the file they write is named by
+    // the URL and joined in curl's own way, so the path checked would not
+    // be the path written.
+    pathValues: ['-o', '--output'],
+    values: ['-m', '--max-time', '--connect-timeout', '--retry', '--retry-delay', '--max-redirs', '-A', '--user-agent'],
+    dashIsStdout: true,
+  },
+};
+
+/**
+ * The user-level config files curl reads before its arguments. A `.curlrc`
+ * can add a URL, an upload, credentials, or an output path, so the argv
+ * judged here would not be what runs.
+ */
+const userConfigFiles = (env: NodeJS.ProcessEnv, workspace: string, cwd: string): string[] => {
+  // curl resolves a relative directory from where it runs, not the daemon.
+  const dir = (value: string | undefined): string | undefined =>
+    value === undefined || value.length === 0 ? undefined : path.resolve(cwd, value);
+  // curl's last resort is the passwd entry's home (getpwuid), whatever HOME says.
+  const passwdHome = (() => {
+    try {
+      return os.userInfo().homedir;
+    } catch {
+      return undefined;
+    }
+  })();
+  const homes = [...new Set([dir(env.HOME), passwdHome, workspace])]
+    .filter((home): home is string => home !== undefined && home.length > 0);
+  return [
+    dir(env.CURL_HOME) ? path.join(dir(env.CURL_HOME) as string, '.curlrc') : undefined,
+    dir(env.XDG_CONFIG_HOME) ? path.join(dir(env.XDG_CONFIG_HOME) as string, 'curlrc') : undefined,
+    // The workspace as a home too: a shell configured to run with HOME (or
+    // a config directory) there is the one place the agent itself could
+    // write a config, and the policy can't see the shell's own environment.
+    ...homes.flatMap((home) => [path.join(home, '.config', 'curlrc'), path.join(home, '.curlrc')]),
+  ].filter((file): file is string => file !== undefined);
+};
+
+const exists = async (file: string): Promise<boolean> => access(file).then(() => true, () => false);
+
+/**
+ * Where a write to `target` lands, or undefined when that can't be known.
+ * `walk` is for reads, where a link to nowhere reads nothing; a write
+ * follows it and creates its target, wherever that is. So any component
+ * that is a symlink which doesn't resolve refuses here.
+ */
+const writeTarget = async (base: string, target: string): Promise<string | undefined> => {
+  let current = path.isAbsolute(target) ? await resolveReal(path.parse(target).root) : await resolveReal(base);
+  if (current === undefined) {
+    return undefined;
+  }
+  for (const segment of target.split(path.sep)) {
+    if (segment === '' || segment === '.') {
+      continue;
+    }
+    if (segment === '..') {
+      current = path.dirname(current);
+      continue;
+    }
+    const next: string = path.join(current, segment);
+    const stat = await lstat(next).catch(() => undefined);
+    if (stat === undefined) {
+      current = next;
+      continue;
+    }
+    if (stat.isSymbolicLink()) {
+      const resolved = await realpath(next).catch(() => undefined);
+      if (resolved === undefined) {
+        return undefined;
+      }
+      current = resolved;
+      continue;
+    }
+    current = next;
+  }
+  return current;
+};
+
+/**
+ * The one URL shape judged here, read the same way by curl and by `URL`: a
+ * host of letters, digits, dots, and hyphens, an optional `:443`, then a
+ * path. No backslash (curl reads `https://a.com\\@b.com` as userinfo for
+ * `b.com`; `URL` as a path on `a.com`), no `@` anywhere, and none of curl's
+ * glob characters (`{}`, `[]`), which would turn one URL into several.
+ */
+const PLAIN_HTTPS_URL = /^https:\/\/[A-Za-z0-9.-]+(?::443)?(?:[/?#][^\s\\@{}[\]]*)?$/;
+
+export const downloadInsideWorkspace = async (
+  analysis: CommandAnalysis,
+  cwd: string,
+  workspace: string,
+  // The environment the shell runs the command with; the daemon's by default,
+  // which is what the shell tool grants from.
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string | undefined> => {
+  if (analysis.disqualifiedBy || analysis.base === undefined || analysis.pipeline) {
+    return undefined;
+  }
+  // The shell tool runs /bin/sh, and curl's Windows config lookups
+  // (`_curlrc`, `%APPDATA%`) aren't modelled here: on Windows it asks.
+  if (process.platform === 'win32') {
+    return undefined;
+  }
+  const downloader = DOWNLOADERS[analysis.base];
+  if (downloader === undefined) {
+    return undefined;
+  }
+  // The same rule as reads: anything the shell would expand, or a `$` or
+  // backtick however quoted, is text this parser never saw.
+  if (analysis.expands?.some((expands) => expands) || analysis.tokens.some((token) => /[$`]/.test(token))) {
+    return undefined;
+  }
+  const paths: string[] = [];
+  const urls: string[] = [];
+  let args = analysis.tokens.slice(1);
+  // `curl -q` / `curl --disable` first reads no config; otherwise there
+  // must be none to read.
+  const noConfig = args[0] === '-q' || args[0] === '--disable';
+  if (noConfig) {
+    args = args.slice(1);
+  }
+  if (!noConfig) {
+    for (const file of userConfigFiles(env, workspace, cwd)) {
+      if (await exists(file)) {
+        return undefined;
+      }
+    }
+  }
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index] as string;
+    if (!token.startsWith('-') || token === '-') {
+      urls.push(token);
+      continue;
+    }
+    if (token === '--') {
+      return undefined;
+    }
+    if (token.startsWith('--')) {
+      const equals = token.indexOf('=');
+      const name = equals === -1 ? token : token.slice(0, equals);
+      const attached = equals === -1 ? undefined : token.slice(equals + 1);
+      if (downloader.flags.includes(name) && attached === undefined) {
+        continue;
+      }
+      const isPath = downloader.pathValues.includes(name);
+      if (!isPath && !downloader.values.includes(name)) {
+        return undefined;
+      }
+      const value = attached ?? args[index + 1];
+      if (value === undefined) {
+        return undefined;
+      }
+      if (attached === undefined) {
+        index += 1;
+      }
+      if (isPath) {
+        paths.push(value);
+      }
+      continue;
+    }
+    // Short flags, possibly bundled (`-sSLo file`, `-qO-`): every letter but
+    // the last must be a plain flag, and a value flag takes the rest of the
+    // token or the next one.
+    for (let at = 1; at < token.length; at += 1) {
+      const flag = `-${token[at]}`;
+      if (downloader.flags.includes(flag)) {
+        continue;
+      }
+      const isPath = downloader.pathValues.includes(flag);
+      if (!isPath && !downloader.values.includes(flag)) {
+        return undefined;
+      }
+      const rest = token.slice(at + 1);
+      const value = rest.length > 0 ? rest : args[index + 1];
+      if (value === undefined) {
+        return undefined;
+      }
+      if (rest.length === 0) {
+        index += 1;
+      }
+      if (isPath) {
+        paths.push(value);
+      }
+      break;
+    }
+  }
+  if (urls.length !== 1 || !PLAIN_HTTPS_URL.test(urls[0] as string)) {
+    return undefined;
+  }
+  let url: URL;
+  try {
+    url = new URL(urls[0] as string);
+  } catch {
+    return undefined;
+  }
+  // https only, with no credentials in it: a plain read of a public page.
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') {
+    return undefined;
+  }
+  const root = await resolveReal(workspace);
+  const here = await resolveReal(cwd);
+  // The working directory must be inside, for relative output paths.
+  if (root === undefined || here === undefined || !within(root, here)) {
+    return undefined;
+  }
+  for (const target of paths) {
+    if (target === '-' && downloader.dashIsStdout) {
+      continue;
+    }
+    const resolved = await writeTarget(here, target);
+    if (resolved === undefined || !within(root, resolved) || resolved === root) {
+      return undefined;
+    }
+    // An existing file with another name elsewhere (a hard link) is
+    // truncated wherever that name is, so it must have only this one.
+    const existing = await lstat(resolved).catch(() => undefined);
+    if (existing !== undefined && (!existing.isFile() || existing.nlink > 1)) {
+      return undefined;
+    }
+  }
+  return url.origin;
 };

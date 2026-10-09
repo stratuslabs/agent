@@ -116,3 +116,37 @@ export const parseOriginScope = (raw: unknown): OriginScope | undefined => {
   const scope = originScopeFor(source.origin);
   return scope && typeof source.tool === 'string' ? { ...scope, tool: source.tool } : scope;
 };
+
+/**
+ * A trusted domain as an operator writes it: `openai.com`, which covers
+ * `openai.com` and every subdomain of it (`developers.openai.com`), and
+ * nothing that merely ends in the same letters (`evilopenai.com`). Leading
+ * `*.` or `.` is accepted and means the same. Anything with a scheme, a
+ * path, a port, or a character a hostname can't have is refused, so a typo
+ * never widens into something nobody wrote.
+ */
+export const normalizeTrustedDomain = (raw: string): string | undefined => {
+  const domain = raw.trim().toLowerCase().replace(/^\*\./, '').replace(/^\./, '');
+  return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/.test(domain) ? domain : undefined;
+};
+
+/**
+ * The trusted domain an origin is under, or undefined. https on its default
+ * port only: a trusted name reached over plain http, or on some other port,
+ * is not the site the operator meant.
+ */
+export const trustedDomainOf = (origin: string, domains: readonly string[]): string | undefined => {
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'https:' || url.port !== '') {
+    return undefined;
+  }
+  const host = url.hostname.toLowerCase();
+  return domains
+    .map(normalizeTrustedDomain)
+    .find((domain): domain is string => domain !== undefined && (host === domain || host.endsWith(`.${domain}`)));
+};

@@ -524,6 +524,8 @@ const serveHeldHome = async (
   // names no origin is judged by its risk exactly as before.
   const origins = {
     whitelist: grantStore,
+    // Read through the resolver per call, like the external-content gate.
+    trustedDomainsFor: (agentId: string) => resolveAgentApprovals(approvalsConfig, agentId).trustedDomains ?? [],
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: OriginScope }) => {
       log(`${agentId}: ${describeOriginScope(scope)} is now acted on without asking`);
     },
