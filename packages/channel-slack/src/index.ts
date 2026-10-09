@@ -25,6 +25,9 @@ import {
   type ApprovalAnswer,
   type ImageAttachment,
   type JsonObject,
+  leastTrusted,
+  sessionTrustOf,
+  SESSION_TRUST_METADATA_KEY,
   type ListensMode,
   type ProviderPart,
   type Session,
@@ -748,8 +751,16 @@ class ReplyRenderer {
   private lastInterim: string | undefined;
   /** Whether any interim message landed — something said, whatever the reply's fate. */
   private interimPosted = false;
-  /** Every interim message that landed, in order, for the thread's other agents to hear. */
+  /** Every interim message that landed whole, in order: what a hosted-loop reply is stripped of. */
   private readonly interimSaid: string[] = [];
+  /**
+   * Told of each interim message as it is queued — before the reply, and
+   * before anything typed while its tool runs — with what of it landed,
+   * once that is known, so the thread's other agents hear it in its place.
+   */
+  private readonly onInterim: ((heard: () => string, landed: Promise<boolean>) => void) | undefined;
+  /** The lowest trust this turn's session was lowered to while it ran (`session.tainted`). */
+  taintedTo: TrustLevel | undefined;
   private turnBreakPending = false;
   private toolLine: string | undefined;
   private ref: OutboundMessageRef | undefined;
@@ -874,6 +885,7 @@ class ReplyRenderer {
       statusWarned?: { value: boolean };
       after?: Promise<unknown>;
       dmWith?: string;
+      onInterim?: (heard: () => string, landed: Promise<boolean>) => void;
     } = {},
   ) {
     this.web = web;
@@ -888,6 +900,7 @@ class ReplyRenderer {
     this.statusWarned = options.statusWarned ?? { value: false };
     this.after = options.after ?? Promise.resolve();
     this.dmWith = options.dmWith;
+    this.onInterim = options.onInterim;
   }
 
   /**
@@ -1013,6 +1026,12 @@ class ReplyRenderer {
 
   onEvent(event: StratusEvent, ofThisTurn = true): void {
     if (this.finalized) {
+      return;
+    }
+    if (event.type === 'session.tainted') {
+      if (ofThisTurn && this.turnStarted) {
+        this.taintedTo = this.taintedTo === undefined ? event.trust : leastTrusted(this.taintedTo, event.trust);
+      }
       return;
     }
     if (event.type === 'provider.delta' && event.delta.type === 'text') {
@@ -1181,26 +1200,48 @@ class ReplyRenderer {
     }
     const handover = this.handover;
     const after = this.after;
+    let heard = '';
+    let settleLanded!: (landed: boolean) => void;
+    const landedNow = new Promise<boolean>((resolve) => {
+      settleLanded = resolve;
+    });
+    this.onInterim?.(() => heard, landedNow);
     this.uploadChain = this.uploadChain
       .then(() => handover)
       .then(() => after)
       .then(async () => {
-        for (const chunk of messageChunks(text)) {
-          const posted = await this.web.chat.postMessage({
-            channel: this.channel,
-            text: chunk,
-            ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-          });
-          this.placeText(posted.ts);
+        const landed: string[] = [];
+        try {
+          for (const chunk of messageChunks(text)) {
+            const posted = await this.web.chat.postMessage({
+              channel: this.channel,
+              text: chunk,
+              ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+            });
+            this.placeText(posted.ts);
+            landed.push(chunk);
+          }
+        } finally {
+          // Whatever landed was said, whole or not: it counts as speaking,
+          // and the others hear it. Only a message that landed whole is
+          // stripped from a hosted-loop reply; part of one is left in the
+          // reply, where repeating a few lines beats losing the rest.
+          if (landed.length > 0) {
+            this.interimPosted = true;
+            heard = landed.length === messageChunks(text).length ? text : landed.join('\n\n');
+          }
+          settleLanded(landed.length > 0);
         }
-        this.interimPosted = true;
         this.lastInterim = text;
         this.interimSaid.push(text);
         // A post of the app's in this thread takes the status down while
         // the turn is still working; put it back.
         this.refreshLoading();
       })
-      .catch((error) => this.warn(`chat.postMessage failed for an interim message: ${error instanceof Error ? error.message : String(error)}`));
+      .catch((error) => this.warn(`chat.postMessage failed for an interim message: ${error instanceof Error ? error.message : String(error)}`))
+      // Settled whatever happened above, or the other agents' intake would
+      // wait on it for good. A second settle is a no-op.
+      .finally(() => settleLanded(false));
   }
 
   /**
@@ -1209,8 +1250,7 @@ class ReplyRenderer {
    * repeats the last of them. Read once the turn's posts have landed.
    */
   spokenText(reply: string): string {
-    const rest = this.unsaid(reply);
-    return [...this.interimSaid, ...(rest.trim().length > 0 ? [rest] : [])].join('\n\n');
+    return this.unsaid(reply);
   }
 
   /**
@@ -1222,11 +1262,17 @@ class ReplyRenderer {
    */
   private unsaid(reply: string): string {
     let rest = reply.trim();
+    // Whole messages only, at the separator the codex provider joins them
+    // with: a reply of its own that merely begins with the same words
+    // ("Sure" then "Sure, the build passes.") is not cut.
     for (const said of this.interimSaid) {
-      if (!rest.startsWith(said)) {
+      if (rest === said) {
+        rest = '';
+      } else if (rest.startsWith(`${said}\n\n`)) {
+        rest = rest.slice(said.length + 2).trimStart();
+      } else {
         break;
       }
-      rest = rest.slice(said.length).trimStart();
     }
     return rest === this.lastInterim ? '' : rest;
   }
@@ -3291,7 +3337,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     channel: string,
     thread: string,
     reply: string | (() => string),
-    spoken: Pick<Session, 'metadata'>,
+    spoken: Pick<Session, 'metadata'> | (() => Promise<Pick<Session, 'metadata'>>),
     published: Promise<boolean>,
   ): Promise<void> => {
     const gateway = gatewayRef;
@@ -3305,7 +3351,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       slackChannel: channel,
       slackUser: speaker.botUserId,
       slackThread: thread,
-      [SENDER_TRUST_METADATA_KEY]: sessionWriteTrust(spoken),
     };
     // In the reply's own workspace only, because a session key carries a
     // team — the same reason `resolveFollowUpWinner` stays in-workspace.
@@ -3331,6 +3376,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           if (text.trim().length === 0) {
             return { observed: undefined };
           }
+          const trust = sessionWriteTrust(typeof spoken === 'function' ? await spoken() : spoken);
           let member: boolean | undefined;
           try {
             member = (await hearer.web.conversations.info({ channel })).channel?.is_member;
@@ -3344,7 +3390,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           // spoke, by display name. A bot user's is the app's own, set by
           // whoever installed it.
           const author = await displayNameFor(hearer, speaker.botUserId);
-          const observed = gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${text}`, metadata });
+          const observed = gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${text}`, metadata: { ...metadata, [SENDER_TRUST_METADATA_KEY]: trust } });
           return { observed: observed === undefined ? undefined : placeObserve(sessionId, observed) };
         });
         await observed;
@@ -5209,6 +5255,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         statusWarned: connection.statusWarned,
         ...(ahead ? { after: ahead } : {}),
         ...(isDm ? { dmWith: userId } : {}),
+        // Each interim message, as it lands, takes its place in the
+        // thread's other agents' sessions — ahead of a follow-up typed
+        // while the tool it preceded is still running. Under the session's
+        // label as stored, lowered by anything that tainted it during this
+        // turn, and the least trusted label where it cannot be read.
+        ...(thread !== undefined
+          ? {
+            onInterim: (heard: () => string, landed: Promise<boolean>) => {
+              // Tracked, so a shutdown drains it like any other reaction:
+              // the text is already in the thread, whatever the turn does.
+              track(overhearReply(connection, event.channel, thread, heard, async () => {
+                const routed = await gateway.sessionRouting?.(sessionId).catch(() => undefined);
+                const stored = routed ? sessionTrustOf(routed) : 'external';
+                const live = renderer.taintedTo === undefined ? stored : leastTrusted(stored, renderer.taintedTo);
+                return { metadata: { [SESSION_TRUST_METADATA_KEY]: live } };
+              }, landed));
+            },
+          }
+          : {}),
       });
       if (!streaming) {
         replyOrder.set(sessionId, renderer.posted);
@@ -5405,14 +5470,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       await heard;
     } else {
       const { spoke, spokeAt } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
-      // What the turn said before it broke is in the thread, so the
-      // others hear it; the error note is the failure's, and is not. Under
-      // the session's own label where it can be read, and the least
-      // trusted one where it cannot.
-      if (thread !== undefined && renderer.spokenText('').length > 0) {
-        const routed = await gateway.sessionRouting?.(sessionId).catch(() => undefined);
-        await overhearReply(connection, event.channel, thread, renderer.spokenText(''), routed ?? { metadata: {} }, Promise.resolve(true));
-      }
       if (spoke && threadKey !== undefined) {
         // A file it posted before breaking is still the last thing said.
         rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);
