@@ -2036,9 +2036,23 @@ export const applyPerAgentWorkspaces = async (
           written.delete(peer);
           await saveLinkRecord(env, record);
           settled = true;
-        } else if (await repointPeer(
-          agentId, peer, peerTarget, path.join(from, below), wrote, inodeOf(observed), inodeOf(parentBefore),
-        )) {
+        } else {
+          const repointed = await repointPeer(
+            agentId, peer, peerTarget, path.join(from, below), wrote, inodeOf(observed), inodeOf(parentBefore),
+          );
+          if (repointed === undefined) {
+            continue;
+          }
+          // The record goes only while the link just written still stands
+          // where it was written. One put back over it in between (a backup
+          // restoring the old link, or its directory) still names the
+          // stayed member's path, and the record is what repairs it: kept,
+          // and the next attempt sees the restored link and repoints it.
+          const landed = await lstat(peerTarget).catch(() => undefined);
+          if (landed === undefined || inodeOf(landed) !== repointed
+            || await steadyDirectory(peerParent) !== inodeOf(parentBefore)) {
+            continue;
+          }
           written.delete(peer);
           await saveLinkRecord(env, record);
           settled = true;
@@ -2061,7 +2075,7 @@ export const applyPerAgentWorkspaces = async (
     target: string,
     observed: string,
     parentObserved: string,
-  ): Promise<boolean> => {
+  ): Promise<string | undefined> => {
     // Made beside it and renamed over it, never unlinked first: a run that
     // dies between an unlink and its symlink leaves the peer with no link at
     // all, and the next pass then has nothing to recognise and repair. A
@@ -2075,13 +2089,15 @@ export const applyPerAgentWorkspaces = async (
     // it, for the reason given at the rename in `move`: Node has no
     // compare-and-swap rename to close it with.
     const replacement = `${peerTarget}.${randomUUID()}.tmp`;
+    let wroteLink: string;
     try {
       await symlink(path.relative(path.dirname(peerTarget), from), replacement);
+      wroteLink = inodeOf(await lstat(replacement));
       const now = await lstat(peerTarget).catch(() => undefined);
       if (now === undefined || inodeOf(now) !== observed
         || await steadyDirectory(path.dirname(peerTarget)) !== parentObserved) {
         await rm(replacement, { force: true });
-        return false;
+        return undefined;
       }
       await rename(replacement, peerTarget);
     } catch (error) {
@@ -2092,7 +2108,7 @@ export const applyPerAgentWorkspaces = async (
       `${peer} — named ${path.relative(stratusHomePath(env), target)}, below where ${JSON.stringify(agentId)} was due to `
       + `move and did not, so it names ${path.relative(stratusHomePath(env), from)} instead`,
     );
-    return true;
+    return wroteLink;
   };
 
   const move = async (entry: Dirent): Promise<void> => {
@@ -2362,7 +2378,10 @@ export const applyPerAgentWorkspaces = async (
           }
           await markMoving(agentId, { link: path.resolve(names) });
           const linkText = path.relative(path.dirname(target), names);
+          const targetParent = path.dirname(target);
+          const parentBeforeLink = await steadyDirectory(targetParent);
           await symlink(linkText, target);
+          const made = await lstat(target).catch(() => undefined);
           if (recorded) {
             record.pending.delete(agentId);
             written.set(agentId, path.resolve(names));
@@ -2373,10 +2392,14 @@ export const applyPerAgentWorkspaces = async (
               // a link left here as a finished recreate (`ourRecreate`)
               // without the entry that lets it be pointed back if its peer
               // stays put, so take it back and leave the source to be
-              // moved again. Only if it is still the link just made.
+              // moved again. Only if it is still the very link just made, in
+              // the directory it was made in: anything else there now is
+              // not this run's to delete.
               written.delete(agentId);
-              const now = await readlink(target).catch(() => undefined);
-              if (now === linkText) {
+              const now = await lstat(target).catch(() => undefined);
+              if (made !== undefined && now !== undefined && now.isSymbolicLink() && inodeOf(now) === inodeOf(made)
+                && parentBeforeLink !== undefined && await steadyDirectory(targetParent) === parentBeforeLink
+                && await readlink(target).catch(() => undefined) === linkText) {
                 await unlink(target);
               }
               throw error;
