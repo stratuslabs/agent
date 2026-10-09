@@ -383,7 +383,8 @@ What runs without asking:
   read a config (`-K`), skip TLS checks (`-k`), or let the server pick the
   file name (`-J`) still ask. So does any flag not on the list, and so does
   any download while a curl config file exists (`~/.curlrc`,
-  `~/.config/curlrc`, `$CURL_HOME/.curlrc`, `$XDG_CONFIG_HOME/curlrc`, or the
+  `~/.config/curlrc`, `$CURL_HOME/.curlrc`, `$XDG_CONFIG_HOME/curlrc`, the
+  same names in the account's passwd home directory, or the
   same names at the top of the agent's workspace), since it can add options
   the command doesn't show, unless the command starts with `curl -q`, which
   reads no config. These are checked in the daemon's environment; a shell

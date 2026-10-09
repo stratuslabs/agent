@@ -1,4 +1,5 @@
 import { access, lstat, readFile, realpath } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import type { CommandAnalysis } from './commands.ts';
@@ -972,7 +973,16 @@ const DOWNLOADERS: Record<string, Downloader> = {
  * judged here would not be what runs.
  */
 const userConfigFiles = (env: NodeJS.ProcessEnv, workspace: string): string[] => {
-  const homes = [env.HOME, workspace].filter((home): home is string => home !== undefined && home.length > 0);
+  // curl's last resort is the passwd entry's home (getpwuid), whatever HOME says.
+  const passwdHome = (() => {
+    try {
+      return os.userInfo().homedir;
+    } catch {
+      return undefined;
+    }
+  })();
+  const homes = [...new Set([env.HOME, passwdHome, workspace])]
+    .filter((home): home is string => home !== undefined && home.length > 0);
   return [
     env.CURL_HOME ? path.join(env.CURL_HOME, '.curlrc') : undefined,
     env.XDG_CONFIG_HOME ? path.join(env.XDG_CONFIG_HOME, 'curlrc') : undefined,

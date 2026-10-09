@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -229,6 +229,10 @@ test('a curl config file means a download is not plain, unless the command turns
   const site = (command: string, env: NodeJS.ProcessEnv) => downloadInsideWorkspace(analyzeCommand(command), workspace, workspace, env);
 
   assert.equal(await site(`curl -sL ${url}`, { HOME: home }), 'https://developers.openai.com');
+  // With no HOME at all, curl falls back to the passwd home, and so does this.
+  const passwdRc = path.join(os.userInfo().homedir, '.curlrc');
+  const passwdHasRc = await access(passwdRc).then(() => true, () => false);
+  assert.equal(await site(`curl -sL ${url}`, {}), passwdHasRc ? undefined : 'https://developers.openai.com');
   await writeFile(path.join(home, '.curlrc'), 'upload-file = /etc/passwd\n');
   assert.equal(await site(`curl -sL ${url}`, { HOME: home }), undefined);
   assert.equal(await site(`curl -q -sL ${url}`, { HOME: home }), 'https://developers.openai.com');
