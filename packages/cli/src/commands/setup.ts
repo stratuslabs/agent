@@ -126,6 +126,7 @@ interface SetupState {
    */
   maxTokens?: number;
   maxTurns?: number;
+  agentMaxTurns?: Record<string, number>;
   /**
    * The four blocks an operator writes by hand, carried for the same reason
    * `vision` is — with more at stake, because each one is a decision about
@@ -266,6 +267,9 @@ export const runSetup = async (
     ...(existing.memoryStore !== undefined ? { memoryStore: existing.memoryStore } : {}),
     ...(existing.maxTokens !== undefined ? { maxTokens: existing.maxTokens } : {}),
     ...(existing.maxTurns !== undefined ? { maxTurns: existing.maxTurns } : {}),
+    // Carried for the same reason: setup has no screen for it, and a save
+    // that dropped it would put every agent back on the shared budget.
+    ...(existing.agentMaxTurns !== undefined ? { agentMaxTurns: existing.agentMaxTurns } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
@@ -2791,6 +2795,9 @@ export const runSetup = async (
     }
     if (state.maxTurns !== undefined) {
       config.maxTurns = state.maxTurns;
+    }
+    if (state.agentMaxTurns !== undefined) {
+      config.agentMaxTurns = state.agentMaxTurns;
     }
 
     await saveConfigFile(configPath, config);
