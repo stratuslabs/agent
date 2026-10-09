@@ -107,9 +107,11 @@ const BARE_URL_END = /[\s<>[\]`"|]/;
 /**
  * Punctuation that ends a sentence or closes emphasis rather than ending
  * the address, as GFM's autolinks read it: in `see **https://x/a**.` the
- * address is `https://x/a`, and the `**.` is the sentence's.
+ * address is `https://x/a`, and the `**.` is the sentence's. Not `;`:
+ * `https://x/path;` keeps it, and only an entity-like `&hl;` at the end
+ * comes off, whole (see `bareUrlAt`).
  */
-const BARE_URL_TRAILING = /^[?!.,:;*_~'"]$/;
+const BARE_URL_TRAILING = /^[?!.,:*_~'"]$/;
 
 /** How long the bare address starting at `at` is, or 0 when none starts there. */
 const bareUrlAt = (text: string, at: number): number => {
@@ -150,6 +152,19 @@ const bareUrlAt = (text: string, at: number): number => {
       end -= 1;
       closed -= 1;
       continue;
+    }
+    // GFM again: a `;` ending something shaped like an entity reference,
+    // `&` and letters or digits, is not the address's, and goes as a unit.
+    // Any other `;` stays.
+    if (last === ';') {
+      let from = end - 2;
+      while (from > at && /[A-Za-z0-9]/.test(text[from] ?? '')) {
+        from -= 1;
+      }
+      if (from < end - 2 && text[from] === '&') {
+        end = from;
+        continue;
+      }
     }
     break;
   }

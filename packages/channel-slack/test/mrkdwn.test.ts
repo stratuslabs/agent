@@ -783,6 +783,10 @@ test('a bare address is sent as Slack link markup, and nothing around it changes
     ['Http://x.com/a_b_c', '<Http://x.com/a_b_c>'],
     // `|` is Slack's label separator inside `<…>`, so it ends an address.
     ['https://example.com/a|FAKE', '<https://example.com/a>|FAKE'],
+    // A `;` is the address's unless it ends an entity-like `&name;`.
+    ['https://example.com/path;', '<https://example.com/path;>'],
+    ['https://example.com/search?q=commonmark&hl;', '<https://example.com/search?q=commonmark>&hl;'],
+    ['https://example.com/a;b', '<https://example.com/a;b>'],
     ['https://x.com/pull/1**, merged**', '<https://x.com/pull/1>*, merged*'],
     // A snippet after an address is still a snippet.
     ['https://x.com/`code`', '<https://x.com/>`code`'],

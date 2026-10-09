@@ -1750,6 +1750,32 @@ const pastCodePoint = (text: string, index: number): number => {
   return code >= 0xd800 && code <= 0xdbff ? index + 1 : index;
 };
 
+/**
+ * `cut` moved in front of any Slack markup it would land inside — a link
+ * `<https://…>` or `<https://…|label>`, a mention `<@U…>` — when that still
+ * leaves half a message. Cut through, the first message ends on an
+ * unterminated `<https://…` and the next starts with the rest of the
+ * address and a stray `>`, and neither half is a link. Markup is one line,
+ * so only the cut's own line is looked at.
+ */
+const outsideSlackMarkup = (text: string, cut: number): number => {
+  const open = text.lastIndexOf('<', cut - 1);
+  if (open <= SLACK_MAX_MESSAGE_CHARS / 2) {
+    return cut;
+  }
+  const closedBefore = text.lastIndexOf('>', cut - 1);
+  const lineBreak = text.lastIndexOf('\n', cut - 1);
+  if (closedBefore > open || lineBreak > open) {
+    return cut;
+  }
+  const close = text.indexOf('>', cut);
+  const nextLine = text.indexOf('\n', cut);
+  if (close === -1 || (nextLine !== -1 && nextLine < close)) {
+    return cut;
+  }
+  return open;
+};
+
 const truncateForSlack = (text: string): string =>
   text.length <= SLACK_MAX_MESSAGE_CHARS
     ? text
@@ -1808,8 +1834,9 @@ const splitForSlack = (text: string): string[] => {
     // point, or the step that guarantees progress lands inside an emoji.
     const fence = run !== undefined && run.closer.startsWith('\n');
     if (run === undefined || !fence || reopen === undefined || reopen.length + run.closer.length > SLACK_MAX_MESSAGE_CHARS / 4 || floor + 2 > budget) {
-      chunks.push(rest.slice(0, cut));
-      rest = rest.slice(cut).replace(/^\n+/, '');
+      const at = run === undefined ? outsideSlackMarkup(rest, cut) : cut;
+      chunks.push(rest.slice(0, at));
+      rest = rest.slice(at).replace(/^\n+/, '');
       continue;
     }
     const inner = rest.lastIndexOf('\n', budget - 1);
