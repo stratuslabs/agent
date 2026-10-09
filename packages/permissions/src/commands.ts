@@ -488,11 +488,14 @@ const syntaxOf = (command: string): { active: string; bare: string } | undefined
     if (quote === '"' && char === '\\') {
       // Escaping one of the characters that mean something here makes it
       // text, so it is kept out of `active`, where `$(` and backticks are
-      // looked for. Before anything else the backslash is itself text,
-      // and the next character is read as it would be without it.
+      // looked for. Before anything else the backslash is itself text.
       if (ESCAPABLE_IN_DOUBLE_QUOTES.has(command[index + 1] ?? '')) {
         index += 1;
         active += ' ';
+      } else {
+        // Kept, so it still stands between what it separates: `"$\{x}"`
+        // is no parameter expansion to the shell, and is none here.
+        active += char;
       }
       continue;
     }

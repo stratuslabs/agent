@@ -770,6 +770,8 @@ test('an escaped quote inside double quotes is text, so a jq filter quoted that 
   assert.deepEqual(normalizeCommandScope(analysis)?.args, ['api']);
   // Before anything but $ ` " \ and a newline, the backslash is text too.
   assert.equal(analyzeCommand('git commit -m "a \\(b\\) c:\\d"').disqualifiedBy, undefined);
+  // A literal backslash still separates what it stands between.
+  assert.equal(analyzeCommand('git commit -m "$\\{HOME}"').disqualifiedBy, undefined);
   assert.deepEqual(analyzeCommand('git commit -m "a \\(b\\)"').tokens.at(-1), 'a \\(b\\)');
 });
 
