@@ -52,6 +52,8 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     'grep --color=always export src/main.ts',
     'ls src/../src',
     'grep -n export src/main.ts -i',
+    // A quoted backslash is text: grep's own alternation.
+    'grep -n "export\\|^type X\\|interface" src/main.ts',
   ]) {
     assert.equal(await inside(command), true, `should be inside: ${command}`);
   }
@@ -85,6 +87,10 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     'cat *.txt',
     'cat ~/x',
     'grep export $HOME',
+    // Unquoted, a backslash is not modelled, and the token is refused.
+    'cat src\\/main.ts',
+    // An escaped `$` is still a `$`, and still refused.
+    'cat "\\$HOME/x"',
     // Flags that follow links out, run programs, or write.
     'grep -R token .',
     'rg --follow token',

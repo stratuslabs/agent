@@ -311,9 +311,12 @@ export const readsInsideWorkspace = async (
   }
   // Inside double quotes `$` and backticks still expand, and the tokenizer
   // marks only what expands unquoted: `cat "$HOME/.ssh/id_rsa"` would read
-  // as a literal path under the workspace. Any `$`, backtick, or backslash,
-  // however quoted, means the shell may read something this parser didn't.
-  if (analysis.tokens.some((token) => /[$`\\]/.test(token))) {
+  // as a literal path under the workspace. Any `$` or backtick, however
+  // quoted, means the shell may read something this parser didn't. A
+  // backslash no longer does: unquoted it marks the token as expanding
+  // (refused above), and quoted it is read as the shell reads it, so one
+  // left in a token is text — the `\|` of a grep pattern.
+  if (analysis.tokens.some((token) => /[$`]/.test(token))) {
     return false;
   }
   const paths = readPaths(analysis.base, analysis.tokens.slice(1));
