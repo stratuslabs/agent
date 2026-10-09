@@ -581,7 +581,13 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   // A required token can itself be a flag or a refspec — an exact scope
   // carries the whole approved command — and a whitelist file is
   // hand-editable, so the prefix is held to the same rules as the rest.
-  for (const token of args.slice(0, required.length)) {
+  for (const [index, token] of args.slice(0, required.length).entries()) {
+    // A leading `-C <repo>` in a git scope is git's own directory flag, put
+    // there by `normalizeCommandScope`; the subcommand's refusal of `-C`
+    // (`git branch -C` copies) is about the tokens after the subcommand.
+    if (scope.command === 'git' && index === 0 && token === '-C' && required.length > 2) {
+      continue;
+    }
     if (token.startsWith('-')) {
       if (deniesFlag(denied, token)) {
         return false;

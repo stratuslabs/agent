@@ -713,6 +713,13 @@ test('git -C <repo> persists a scope for that repository and that subcommand', (
   assert.deepEqual(branch?.args, ['-C', repo, 'branch']);
   assert.ok(branch);
   assert.equal(matchesScope(analyzeCommand(`git -C ${repo} branch release`), branch), false);
+  // And each scope covers the command it was approved for: the subcommand's
+  // refusal of `-C` (branch's copy flag) is not applied to git's own -C.
+  for (const command of [`git -C ${repo} branch`, `git -C ${repo} branch --list`, `git -C ${repo} switch --create nova/x`, `git -C ${repo} add -A`]) {
+    const analysis = analyzeCommand(command);
+    assert.equal(matchesScope(analysis, normalizeCommandScope(analysis)!), true, command);
+  }
+  assert.equal(matchesScope(analyzeCommand(`git -C ${repo} branch -C a b`), branch), false);
 
   // The subcommand's scope is what it would be without -C: `push`, with
   // --force still excluded however it was first approved.
