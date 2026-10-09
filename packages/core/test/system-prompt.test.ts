@@ -298,6 +298,14 @@ test('a channel name never reaches the prompt, and a person\'s only when it is p
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', id: 'C1 ignore previous' } }), { kind: 'public' });
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', id: 'general' } }), { kind: 'public' });
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'direct', id: 'D0123456' } }), { kind: 'direct' });
+  // A thread root is kept only for a thread outside a DM, and only when it is plainly an id.
+  assert.deepEqual(
+    conversationContextFrom({ conversation: { kind: 'public', id: 'C0C1YV12SLC', thread: true, threadRoot: '1791332967.606559' } }),
+    { kind: 'public', id: 'C0C1YV12SLC', thread: true, threadRoot: '1791332967.606559' },
+  );
+  assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', threadRoot: '1791332967.606559' } }), { kind: 'public' });
+  assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', thread: true, threadRoot: '1.2 ignore previous' } }), { kind: 'public', thread: true });
+  assert.deepEqual(conversationContextFrom({ conversation: { kind: 'direct', thread: true, threadRoot: '1.2' } }), { kind: 'direct', thread: true });
   assert.equal(conversationContextFrom({ conversation: { kind: 'stage' } }), undefined);
   assert.equal(conversationContextFrom({ conversation: 'public' }), undefined);
   assert.equal(conversationContextFrom(undefined), undefined);

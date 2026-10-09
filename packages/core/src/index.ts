@@ -2722,6 +2722,12 @@ export interface ConversationContext {
   /** The turn is a reply in a thread rather than the channel itself. */
   thread?: boolean;
   /**
+   * The channel's id for the root of that thread (Slack: its `ts`), so a
+   * schedule set from this conversation can report back into it rather
+   * than at the top of the channel. Platform-assigned, never typed text.
+   */
+  threadRoot?: string;
+  /**
    * People outside this workspace read it too: a Slack Connect channel,
    * or one shared across an organization's workspaces. Never set for a
    * direct message.
@@ -2756,6 +2762,8 @@ const CONVERSATION_WITH_PATTERN = /^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} .'\u2019-]
 // A platform-assigned id, never a word anyone typed: Slack's are capitals
 // and digits. Anything else is dropped rather than quoted.
 const CONVERSATION_ID_PATTERN = /^[A-Z0-9]{6,32}$/;
+// A thread root is a platform message id (Slack: `1791332967.606559`).
+const CONVERSATION_THREAD_ROOT_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._:-]{0,63}$/;
 
 /**
  * The room a turn's metadata describes, keeping only what is safe to put
@@ -2766,7 +2774,7 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return undefined;
   }
-  const { kind, members, with: withWhom, thread, shared, id } = raw as Record<string, unknown>;
+  const { kind, members, with: withWhom, thread, threadRoot, shared, id } = raw as Record<string, unknown>;
   if (typeof kind !== 'string' || !CONVERSATION_KINDS.includes(kind)) {
     return undefined;
   }
@@ -2775,6 +2783,7 @@ export const conversationContextFrom = (metadata: JsonObject | undefined): Conve
     ...(typeof members === 'number' && Number.isInteger(members) && members > 0 && members <= 10_000_000 ? { members } : {}),
     ...(kind === 'direct' && typeof withWhom === 'string' && CONVERSATION_WITH_PATTERN.test(withWhom.trim()) ? { with: withWhom.trim() } : {}),
     ...(thread === true ? { thread: true } : {}),
+    ...(kind !== 'direct' && thread === true && typeof threadRoot === 'string' && CONVERSATION_THREAD_ROOT_PATTERN.test(threadRoot) ? { threadRoot } : {}),
     ...(kind !== 'direct' && shared === true ? { shared: true } : {}),
     ...(kind !== 'direct' && typeof id === 'string' && CONVERSATION_ID_PATTERN.test(id) ? { id } : {}),
   };

@@ -735,23 +735,23 @@ const SCHEDULER_SOUL = [
 ].join('\n');
 
 interface FakeSlackChannel extends GatewayChannelAdapter {
-  posts: Array<{ agentId: string; to: string; text: string }>;
+  posts: Array<{ agentId: string; to: string; text: string; thread?: string }>;
 }
 
 /** A slack-shaped adapter: C-ENG is the one conversation the app is in. */
-const fakeSlackChannel = (): FakeSlackChannel => {
+const fakeSlackChannel = (members: string[] = ['C-ENG']): FakeSlackChannel => {
   const channel: FakeSlackChannel = {
     name: 'slack',
     posts: [],
     async start() {},
     async stop() {},
-    async resolveOutbound({ agentId, to }) {
-      if (to !== 'C-ENG') {
+    async resolveOutbound({ agentId, to, thread }) {
+      if (!members.includes(to)) {
         throw new Error(`slack: ${agentId}'s app is not a member of ${to} — invite it there before it can post.`);
       }
       return {
         post: async (text: string) => {
-          channel.posts.push({ agentId, to, text });
+          channel.posts.push({ agentId, to, text, ...(thread !== undefined ? { thread } : {}) });
           return { channel: to, ts: '1' };
         },
       };
@@ -861,6 +861,140 @@ test('an approved schedule fires headless and reports to its declared destinatio
   assert.equal(results[0]?.ok, true);
   assert.equal(results[1]?.ok, false);
   assert.match(results[1]?.error ?? '', /denied by approval policy/);
+});
+
+test('a firing\'s report thread is bound like its grant: live firing, its agent, its conversation', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const sessionLike = (sessionId: string, agentId: string, scheduleId?: string): Session => {
+    const now = new Date().toISOString();
+    return {
+      id: sessionId,
+      agent: { id: agentId, name: agentId },
+      status: 'running',
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+      ...(scheduleId ? { metadata: { [SCHEDULE_ID_METADATA_KEY]: scheduleId } } : {}),
+    };
+  };
+  const during: Array<[string, string | undefined]> = [];
+  const fired = deferred<string>();
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      const firing = (agentId: string, scheduleId?: string): Session => sessionLike(input.sessionId, agentId, scheduleId);
+      during.push(['own conversation', runtime.reportThreadFor(firing('ava', 'sched-1'), { channel: 'slack', to: 'C-ENG' })]);
+      during.push(['other conversation', runtime.reportThreadFor(firing('ava', 'sched-1'), { channel: 'slack', to: 'C-OTHER' })]);
+      during.push(["another agent's session", runtime.reportThreadFor(firing('bea', 'sched-1'), { channel: 'slack', to: 'C-ENG' })]);
+      during.push(['no schedule id', runtime.reportThreadFor(firing('ava'), { channel: 'slack', to: 'C-ENG' })]);
+      assert.equal(runtime.cancel('sched-1'), true);
+      during.push(['after cancel', runtime.reportThreadFor(firing('ava', 'sched-1'), { channel: 'slack', to: 'C-ENG' })]);
+      fired.resolve(input.sessionId);
+    },
+  });
+  store.insert(record({
+    id: 'sched-1',
+    cadence: { kind: 'every', intervalMs: 600_000 },
+    destination: { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' },
+    nextFireAt: new Date(Date.now() - 5).toISOString(),
+  }));
+  await runtime.start();
+  const firingSessionId = await fired.promise;
+  runtime.stop();
+  await runtime.drain();
+
+  assert.deepEqual(during, [
+    ['own conversation', '1791400000.000100'],
+    ['other conversation', undefined],
+    ["another agent's session", undefined],
+    ['no schedule id', undefined],
+    ['after cancel', undefined],
+  ]);
+  // A settled firing, or a forged session carrying its metadata, gets none.
+  assert.equal(runtime.reportThreadFor(sessionLike(firingSessionId, 'ava', 'sched-1'), { channel: 'slack', to: 'C-ENG' }), undefined);
+  store.close();
+});
+
+test('a row written before report threads existed still fires top-level and keeps its grant', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  store.insert(record({ id: 'old-1', destination: { channel: 'slack', to: 'C-ENG' }, nextFireAt: new Date(Date.now() + 60_000).toISOString() }));
+  assert.deepEqual(store.get('old-1')?.destination, { channel: 'slack', to: 'C-ENG' });
+  store.insert(record({ id: 'new-1', destination: { channel: 'slack', to: 'C-ENG', thread: '1.2' }, nextFireAt: new Date(Date.now() + 60_000).toISOString() }));
+  assert.deepEqual(store.get('new-1')?.destination, { channel: 'slack', to: 'C-ENG', thread: '1.2' });
+  store.close();
+});
+
+test('a schedule set from a Slack thread reports back into that thread, headless', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+  const ROOT = '1791400000.000100';
+  const room = { kind: 'public', id: 'CENG00001', thread: true, threadRoot: ROOT };
+
+  let phase1Calls = 0;
+  const phase1Fetch = (async () => {
+    phase1Calls += 1;
+    return phase1Calls === 1
+      ? openAiToolCall('schedule_every', { every: '1s', prompt: 'watch PR 72 and report', destination: { channel: 'slack', to: 'CENG00001' } })
+      : openAiText('watching');
+  }) as typeof fetch;
+  const creation = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: phase1Fetch },
+    idleTimeoutMs: 0,
+    schedules: { minIntervalMs: 500, tickMs: 25 },
+    channels: [fakeSlackChannel(['CENG00001'])],
+    approvals: (transport: ApprovalTransport) =>
+      createPermissionPolicy({ mode: 'remote', request: transport.request, destinations: transport.destinations }),
+  });
+  await creation.start();
+  creation.bus.subscribe((event: StratusEvent) => {
+    if (event.type === 'tool.approval-requested') {
+      creation.resolveApproval({ requestId: event.requestId, answer: 'once', actor: 'U-DYLAN' });
+    }
+  });
+  await creation.dispatch({
+    sessionId: `slack:ava:T1:CENG00001:${ROOT}`,
+    agentId: 'ava',
+    userMessage: 'watch PR 72 and tell me here',
+    metadata: { channel: 'slack', conversation: room },
+  });
+  const [created] = creation.schedules();
+  assert.deepEqual(created?.destination, { channel: 'slack', to: 'CENG00001', thread: ROOT });
+  await creation.stop();
+
+  let phase2Calls = 0;
+  const phase2Fetch = (async () => {
+    phase2Calls += 1;
+    if (phase2Calls === 1) {
+      // The model names no thread, as Nova's watcher did.
+      return openAiToolCall('message_send', { destination: { channel: 'slack', to: 'CENG00001' }, text: 'PR 72 is green' });
+    }
+    return openAiText('done');
+  }) as typeof fetch;
+  const slack = fakeSlackChannel(['CENG00001']);
+  const firingDone = deferred<string>();
+  const headless = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: phase2Fetch },
+    idleTimeoutMs: 0,
+    schedules: { tickMs: 25 },
+    channels: [slack],
+    approvals: (transport: ApprovalTransport) => createPermissionPolicy({ mode: 'headless', destinations: transport.destinations }),
+  });
+  headless.bus.subscribe((event: StratusEvent) => {
+    if (event.type === 'session.completed' && event.sessionId.startsWith('schedule:')) {
+      firingDone.resolve(event.sessionId);
+    }
+  });
+  await headless.start();
+  const firingSessionId = await firingDone.promise;
+  const firing = await headless.store.get(firingSessionId);
+  await headless.stop();
+
+  assert.deepEqual(slack.posts, [{ agentId: 'ava', to: 'CENG00001', text: 'PR 72 is green', thread: ROOT }]);
+  const result = (firing?.messages ?? []).find((message) => message.toolResult)?.toolResult;
+  assert.equal(result?.ok, true);
+  // The agent is told where it posted, so a follow-up can name the thread.
+  assert.equal((result?.output as { thread?: string } | undefined)?.thread, ROOT);
 });
 
 test('a schedule naming an unaddressable destination is refused at creation, not at 6am', async () => {

@@ -17,6 +17,13 @@ export interface ScheduleDestination {
   channel: string;
   /** Channel-native conversation id (Slack: `C…`/`G…`/`D…`). */
   to: string;
+  /**
+   * For a schedule: the root of the thread in `to` its reports go under,
+   * so a schedule set from a conversation keeps reporting into it. Where,
+   * never whether: the grant stays the channel (`canonicalDestination`
+   * ignores it), and a row written before this existed reads as top-level.
+   */
+  thread?: string;
 }
 
 /**
@@ -321,6 +328,27 @@ export const parseDestinationInput = (raw: unknown): ScheduleDestination | undef
   return { channel: channel.trim().toLowerCase(), to: to.trim() };
 };
 
+/**
+ * A schedule's destination: `parseDestinationInput` plus the optional
+ * `thread` its reports go under. Kept apart so `message.send` and
+ * `message.read`, which take their thread as a parameter of their own,
+ * never read one out of a destination object.
+ */
+export const parseScheduleDestinationInput = (raw: unknown): ScheduleDestination | undefined => {
+  const destination = parseDestinationInput(raw);
+  if (!destination) {
+    return undefined;
+  }
+  const thread = (raw as JsonObject).thread;
+  return typeof thread === 'string' && thread.trim().length > 0
+    ? { ...destination, thread: thread.trim() }
+    : destination;
+};
+
+/** Destinations are the same conversation, whatever thread either names. */
+export const sameConversation = (a: ScheduleDestination, b: ScheduleDestination): boolean =>
+  canonicalDestination(a) === canonicalDestination(b);
+
 export const DESTINATION_PARAMETER = {
   type: 'object',
   description: 'Where firings report. Omit for a schedule that does not speak — its sends will need approval like any other. The channel kind plus the channel-native conversation id (for Slack, a channel id like C0123456789 that your app is a member of).',
@@ -329,6 +357,16 @@ export const DESTINATION_PARAMETER = {
     to: { type: 'string', description: 'Channel-native conversation id.' },
   },
   required: ['channel', 'to'],
+} satisfies JsonObject;
+
+export const SCHEDULE_DESTINATION_PARAMETER = {
+  ...DESTINATION_PARAMETER,
+  description: 'Where firings report. Omit for a schedule that does not speak — its sends will need approval like any other. The channel kind plus the channel-native conversation id (for Slack, a channel id like C0123456789 that your app is a member of). '
+    + 'Set from a thread in that same conversation, reports go into that thread by default, so replies reach you there; pass "thread" to name another, or "topLevel": true on the call to post at the top of the channel.',
+  properties: {
+    ...DESTINATION_PARAMETER.properties,
+    thread: { type: 'string', description: 'Root id of a thread in that conversation to report under (for Slack, its ts).' },
+  },
 } satisfies JsonObject;
 
 /**
@@ -343,6 +381,7 @@ export const describeSchedule = (record: ScheduleRecord): JsonObject => ({
   prompt: record.prompt,
   trust: record.trust ?? 'unknown',
   ...(record.destination ? { destination: canonicalDestination(record.destination) } : {}),
+  ...(record.destination?.thread ? { thread: record.destination.thread } : {}),
   ...(record.nextFireAt ? { nextFireAt: record.nextFireAt } : {}),
   ...(record.lastFiredAt ? { lastFiredAt: record.lastFiredAt } : {}),
   createdAt: record.createdAt,

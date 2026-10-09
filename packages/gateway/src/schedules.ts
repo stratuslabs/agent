@@ -256,6 +256,14 @@ export interface SchedulerRuntime {
    * schedule gates the very next send.
    */
   isPreauthorized(session: Session, destination: string): boolean;
+  /**
+   * The thread a live firing's send to its own schedule's destination goes
+   * under when the call names none: the thread the schedule was set to
+   * report into. Bound exactly as `isPreauthorized` is — a live firing, its
+   * agent's schedule, the same conversation — so metadata alone never
+   * steers a send.
+   */
+  reportThreadFor(session: Session, destination: ScheduleDestination): string | undefined;
   /** All agents' schedules, for the operator surfaces. */
   list(): ScheduleRecord[];
   /** Cancel any agent's schedule — the operator's stop button. */
@@ -597,6 +605,22 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         && record.agentId === session.agent.id
         && record.destination !== undefined
         && canonicalDestination(record.destination) === destination;
+    },
+    reportThreadFor(session, destination) {
+      if (!activeFirings.has(session.id)) {
+        return undefined;
+      }
+      const scheduleId = session.metadata?.[SCHEDULE_ID_METADATA_KEY];
+      if (typeof scheduleId !== 'string') {
+        return undefined;
+      }
+      const record = store.get(scheduleId);
+      if (record === undefined || record.agentId !== session.agent.id || record.destination === undefined) {
+        return undefined;
+      }
+      return canonicalDestination(record.destination) === canonicalDestination(destination)
+        ? record.destination.thread
+        : undefined;
     },
     list() {
       return store.list();

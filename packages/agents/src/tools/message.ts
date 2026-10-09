@@ -26,6 +26,14 @@ export type OutboundMessenger = (input: {
 }) => Promise<{ id?: string } | void>;
 
 /**
+ * The thread a send goes under when the call names none: a scheduled
+ * firing's own report thread, when it is sending to its schedule's
+ * destination. The host answers, because only it can tell a live firing
+ * from a session that merely carries a firing's metadata.
+ */
+export type DefaultThreadResolver = (session: Session, destination: ScheduleDestination) => string | undefined;
+
+/**
  * Post to a channel or DM outside the current conversation — what makes a
  * scheduled turn observable.
  *
@@ -36,7 +44,10 @@ export type OutboundMessenger = (input: {
  * this call would speak, and the policy allows it exactly when the firing's
  * schedule was approved with that destination.
  */
-export const createMessageSendTool = (send: OutboundMessenger): Tool => ({
+export const createMessageSendTool = (
+  send: OutboundMessenger,
+  options: { defaultThread?: DefaultThreadResolver } = {},
+): Tool => ({
   name: MESSAGE_SEND_TOOL_NAME,
   description: 'Send a message to a channel or DM you are not currently talking in, at the top level or as a reply in one of its threads. '
     + 'Returns the posted message\'s id, and the thread to name to reply under it: '
@@ -53,7 +64,11 @@ export const createMessageSendTool = (send: OutboundMessenger): Tool => ({
       text: { type: 'string', description: 'The message text.' },
       thread: {
         type: 'string',
-        description: 'The id of a message in that conversation to reply under (for Slack, its ts, e.g. 1791332967.606559). Omit to post at the top level.',
+        description: 'The id of a message in that conversation to reply under (for Slack, its ts, e.g. 1791332967.606559). Omit to post at the top level, or, in a scheduled run sending to its own destination, into the schedule\'s report thread.',
+      },
+      topLevel: {
+        type: 'boolean',
+        description: 'Post at the top level even in a scheduled run whose schedule reports into a thread.',
       },
     },
     required: ['destination', 'text'],
@@ -71,7 +86,14 @@ export const createMessageSendTool = (send: OutboundMessenger): Tool => ({
     if (!text) {
       throw new Error('message.send requires a non-empty "text".');
     }
-    const thread = optionalId(input, 'thread', MESSAGE_SEND_TOOL_NAME);
+    if (input.topLevel !== undefined && typeof input.topLevel !== 'boolean') {
+      throw new Error('message.send "topLevel" must be true or false.');
+    }
+    const explicit = optionalId(input, 'thread', MESSAGE_SEND_TOOL_NAME);
+    if (explicit !== undefined && input.topLevel === true) {
+      throw new Error('message.send takes either "thread" or "topLevel": true, not both.');
+    }
+    const thread = explicit ?? (input.topLevel === true ? undefined : options.defaultThread?.(session, destination));
     const posted = await send({
       agentId: session.agent.id,
       destination,

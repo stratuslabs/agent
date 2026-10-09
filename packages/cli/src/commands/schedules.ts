@@ -164,7 +164,9 @@ export const runSchedules = async (
     return 0;
   }
   for (const record of schedules) {
-    const destination = record.destination ? `  →  ${canonicalDestination(record.destination)}` : '';
+    const destination = record.destination
+      ? `  →  ${canonicalDestination(record.destination)}${record.destination.thread ? ` (thread ${record.destination.thread})` : ''}`
+      : '';
     writeLine(streams.stdout, `${record.id}  [${record.agentId}]  ${describeCadence(record.cadence)}${destination}`);
     writeLine(streams.stdout, `  next: ${record.nextFireAt ?? '(spent — awaiting cleanup)'}${record.lastFiredAt ? `   last: ${record.lastFiredAt}` : ''}`);
     writeLine(streams.stdout, `  prompt: ${record.prompt}`);

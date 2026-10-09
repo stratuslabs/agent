@@ -1,4 +1,5 @@
 import {
+  conversationContextFrom,
   isTaintedTrust,
   leastTrusted,
   sessionWriteTrust,
@@ -11,10 +12,32 @@ import {
   parseInterval,
   parseCronExpression,
   type SchedulerHandle,
-  parseDestinationInput,
-  DESTINATION_PARAMETER,
+  type ScheduleDestination,
+  parseScheduleDestinationInput,
+  SCHEDULE_DESTINATION_PARAMETER,
   describeSchedule,
+  sameConversation,
 } from '../schedules.ts';
+
+const TOP_LEVEL_PARAMETER = {
+  type: 'boolean',
+  description: 'Report at the top of the destination channel even when you set this from a thread in it. Default false: a schedule set from a thread reports into that thread.',
+} as const;
+
+/**
+ * The thread this session's turn is in, as the channel recorded it, when
+ * that conversation is `destination`. What lets "watch this and tell me"
+ * report back where it was asked, instead of starting a new top-level
+ * post whose replies reach a session that never saw the request.
+ */
+const originThreadFor = (session: Session, destination: ScheduleDestination): string | undefined => {
+  const channel = session.metadata?.channel;
+  const room = conversationContextFrom(session.metadata);
+  if (typeof channel !== 'string' || room?.id === undefined || room.threadRoot === undefined) {
+    return undefined;
+  }
+  return sameConversation({ channel, to: room.id }, destination) ? room.threadRoot : undefined;
+};
 
 export const SCHEDULE_EVERY_TOOL_NAME = 'schedule.every';
 
@@ -46,10 +69,21 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
     if (!prompt) {
       throw new Error('A schedule needs a non-empty "prompt" — the instruction each firing runs.');
     }
-    if (input.destination !== undefined && parseDestinationInput(input.destination) === undefined) {
+    if (input.destination !== undefined && parseScheduleDestinationInput(input.destination) === undefined) {
       throw new Error('"destination" must be { channel, to } with non-empty strings, or omitted.');
     }
-    const destination = parseDestinationInput(input.destination);
+    if (input.topLevel !== undefined && typeof input.topLevel !== 'boolean') {
+      throw new Error('"topLevel" must be true or false.');
+    }
+    const parsed = parseScheduleDestinationInput(input.destination);
+    if (parsed?.thread !== undefined && input.topLevel === true) {
+      throw new Error('Pass either a destination "thread" or "topLevel": true, not both.');
+    }
+    let destination = parsed;
+    if (parsed !== undefined && parsed.thread === undefined && input.topLevel !== true) {
+      const thread = originThreadFor(session, parsed);
+      destination = thread !== undefined ? { ...parsed, thread } : parsed;
+    }
     const record = await scheduler.create({
       agentId: session.agent.id,
       cadence,
@@ -72,7 +106,8 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
           every: { type: 'string', description: 'Interval like "90s", "30m", "2h", "1d". Exactly one of "every" or "cron".' },
           cron: { type: 'string', description: 'Five-field cron expression (minute hour day-of-month month day-of-week), local time. Exactly one of "every" or "cron".' },
           prompt: { type: 'string', description: 'The instruction each firing runs, phrased to stand alone.' },
-          destination: DESTINATION_PARAMETER,
+          destination: SCHEDULE_DESTINATION_PARAMETER,
+          topLevel: TOP_LEVEL_PARAMETER,
         },
         required: ['prompt'],
       },
@@ -102,7 +137,8 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
         properties: {
           at: { type: 'string', description: 'When to fire, ISO-8601 (e.g. 2026-09-01T07:00:00). Must be in the future.' },
           prompt: { type: 'string', description: 'The instruction the firing runs, phrased to stand alone.' },
-          destination: DESTINATION_PARAMETER,
+          destination: SCHEDULE_DESTINATION_PARAMETER,
+          topLevel: TOP_LEVEL_PARAMETER,
         },
         required: ['at', 'prompt'],
       },

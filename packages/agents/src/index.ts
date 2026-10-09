@@ -47,6 +47,7 @@ export {
 export {
   type ScheduleDestination,
   canonicalDestination,
+  sameConversation,
   type ScheduleCadence,
   type ScheduleRecord,
   parseInterval,
@@ -106,6 +107,7 @@ export {
   MESSAGE_SEND_TOOL_NAME,
   type OutboundMessenger,
   createMessageSendTool,
+  type DefaultThreadResolver,
   MESSAGE_READ_TOOL_NAME,
   MESSAGE_READ_MAX_LIMIT,
   MESSAGE_READ_TEXT_BUDGET,
