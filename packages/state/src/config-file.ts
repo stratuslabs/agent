@@ -193,6 +193,23 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
     }
     resolved.agentMaxTurns = { ...(budgets as Record<string, number>) };
   }
+  if (config.autoContinue !== undefined) {
+    // Refused, not dropped, for the reason `agentMaxTurns` is.
+    const entries = config.autoContinue as unknown;
+    if (typeof entries !== 'object' || entries === null || Array.isArray(entries)) {
+      throw new Error(
+        `Invalid autoContinue in config ${configPath}: expected agent ids mapped to true or a cap, like { "nova": true }.`,
+      );
+    }
+    for (const [agentId, setting] of Object.entries(entries as Record<string, unknown>)) {
+      if (setting !== true && (typeof setting !== 'number' || !Number.isInteger(setting) || setting < 1)) {
+        throw new Error(
+          `Invalid autoContinue.${agentId} in config ${configPath}: ${JSON.stringify(setting)}. Use true for no cap, or a whole number of extra allowances, 1 or more.`,
+        );
+      }
+    }
+    resolved.autoContinue = { ...(entries as Record<string, true | number>) };
+  }
   const approvals = parseApprovalsConfig(config.approvals, configPath);
   if (approvals) {
     resolved.approvals = approvals;
