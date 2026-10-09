@@ -783,6 +783,7 @@ test('git switch -c is a subcommand flag, not git -c', () => {
   assert.equal(matchesScope(analyzeCommand('git switch -cx'), { command: 'git', args: ['switch'], deniedFlags: ['-c'] }), false);
   // After `--` it's a path, judged as one.
   assert.equal(matchesScope(analyzeCommand('git commit -- -cfoo'), { command: 'git', args: ['commit'], maxPositionals: 0 }), false);
+  assert.equal(matchesScope(analyzeCommand('git commit -- -cHEAD'), { command: 'git', args: ['commit', '--'], maxPositionals: 0, deniedFlags: ['D'] }), false);
   // Nor when the scope names its flags and -c isn't one.
   assert.equal(matchesScope(analyzeCommand('git switch -cfoo'), { command: 'git', args: ['switch'], allowedFlags: [] }), false);
   assert.equal(matchesScope(analyzeCommand('git switch -c foo'), { command: 'git', args: ['switch'], allowedFlags: [] }), false);

@@ -637,7 +637,8 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
     // After `--` a dash token is an operand to a program that honors it and
     // a flag to one that doesn't, and the two can't both be checked as
     // written: it asks.
-    if (token.startsWith('-') && rest.slice(0, index).includes('--')) {
+    // The required prefix counts: a scope may itself end in `--`.
+    if (token.startsWith('-') && args.slice(0, required.length + index).includes('--')) {
       return false;
     }
     if (token.startsWith('-')) {
