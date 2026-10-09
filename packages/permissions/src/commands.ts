@@ -585,6 +585,15 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   }
 
   const denied = [...ALWAYS_DENIED_FLAGS, ...(scope.deniedFlags ?? [])];
+  // `-c` is refused everywhere for `git -c`, which sets config before the
+  // subcommand. After a subcommand it is that subcommand's own flag:
+  // `git switch -c` creates a branch, `git commit -c` reuses a message.
+  // Only the tail past a scope that names a git subcommand is relieved; the
+  // subcommand itself is a literal required argument, so `-c` cannot be it.
+  const subcommandAt = required[0] === '-C' ? 2 : 0;
+  const deniedInTail = scope.command === 'git' && required.length > subcommandAt && !(required[subcommandAt] ?? '').startsWith('-')
+    ? denied.filter((flag) => flag !== '-c')
+    : denied;
   // A required token can itself be a flag or a refspec — an exact scope
   // carries the whole approved command — and a whitelist file is
   // hand-editable, so the prefix is held to the same rules as the rest.
@@ -619,7 +628,7 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] as string;
     if (token.startsWith('-')) {
-      if (deniesFlag(denied, token)) {
+      if (deniesFlag(deniedInTail, token)) {
         return false;
       }
       if (scope.allowedFlags && !allowsFlag(scope.allowedFlags, token)) {

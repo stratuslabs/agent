@@ -755,3 +755,21 @@ test('git -C <repo> persists a scope for that repository and that subcommand', (
   // host is reach the built-in list never promised.
   assert.equal(findMatchingScope(analyzeCommand(`git -C ${repo} status`), SAFE_COMMAND_SCOPES), undefined);
 });
+
+test('git switch -c is a subcommand flag, not git -c', () => {
+  const analysis = analyzeCommand('git switch -c nova/fix');
+  const scope = normalizeCommandScope(analysis);
+  assert.ok(scope);
+  assert.equal(matchesScope(analysis, scope), true, 'the approved command is covered');
+  assert.equal(matchesScope(analyzeCommand('git switch -c nova/other'), scope), true);
+  // Still refused before the subcommand, and in a flag-first exact scope.
+  assert.equal(matchesScope(analyzeCommand('git -c core.hooksPath=/tmp switch main'), scope), false);
+  assert.equal(normalizeCommandScope(analyzeCommand('git -c core.pager=sh log')), undefined);
+  // With git's own -C in front, too.
+  const inRepo = analyzeCommand('git -C /work/app switch -c nova/fix');
+  const repoScope = normalizeCommandScope(inRepo);
+  assert.ok(repoScope);
+  assert.equal(matchesScope(inRepo, repoScope), true);
+  // And for anything that is not git.
+  assert.equal(matchesScope(analyzeCommand('sh -c id'), { command: 'sh' }), false);
+});
