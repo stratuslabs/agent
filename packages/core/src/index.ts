@@ -672,7 +672,16 @@ export const UNTRUSTED_TOOL_RESULT_NOTE =
  * transcripts, where a changed byte is a cache miss.
  */
 export const renderToolResultContent = (result: Pick<ToolResult, 'ok' | 'output' | 'error' | 'trust'>): string => {
-  const output: JsonValue = result.ok ? result.output : { error: result.error ?? 'Tool failed' };
+  // A failure keeps what the tool returned with it. A shell command that
+  // exits 1 carries its stdout, stderr, and exit code, and without them the
+  // model cannot tell a failing test from a typo from a missing program, so
+  // it guesses or asks. A failure with no output renders exactly as before,
+  // so most persisted transcripts replay byte-identical.
+  const output: JsonValue = result.ok
+    ? result.output
+    : result.output === null || result.output === undefined
+      ? { error: result.error ?? 'Tool failed' }
+      : { error: result.error ?? 'Tool failed', output: result.output };
   return JSON.stringify(
     result.trust === 'external'
       ? { untrusted: true, untrustedNote: UNTRUSTED_TOOL_RESULT_NOTE, output }
