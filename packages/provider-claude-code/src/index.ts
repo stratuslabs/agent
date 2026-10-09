@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   createSdkMcpServer,
@@ -286,6 +286,13 @@ export interface ClaudeCodeProviderConfig {
    * subscription. Omit to use the machine's existing Claude Code sign-in.
    */
   authToken?: string;
+  /**
+   * Who `authToken` belongs to when it is not the machine's shared
+   * sign-in: an agent id. Named in an authentication failure so the error
+   * points at that agent's entry rather than at `claude /login`, which
+   * would change nothing. Never a secret, and never used to pick a token.
+   */
+  authOwner?: string;
   /** Defaults to claude-opus-5-5. */
   model?: string;
   name?: string;
@@ -354,14 +361,58 @@ const linkedAbortController = (signal: AbortSignal): AbortController => {
  */
 export const SDK_SESSION_METADATA_KEY = 'claudeCodeSessionId';
 
-const readSdkSessionId = (session: ProviderRequest['session']): string | undefined => {
+/**
+ * Which sign-in the stored SDK session was made under, as a fingerprint.
+ *
+ * An SDK session is resumed only under the sign-in that made it. Two
+ * agents can run on two subscriptions in one daemon, and a token can be
+ * replaced or removed while a conversation is open; resuming across that
+ * change would carry one account's harness session into another's. A
+ * mismatch starts a fresh SDK session and replays the kernel's history
+ * into it, the same recovery a lost transcript gets.
+ *
+ * A one-way hash, truncated, with a fixed prefix, so the session store
+ * never holds anything a token could be recovered from. A session stored
+ * before this key existed has none. On the shared sign-in it resumes as it
+ * always did, because the upgrade itself must not cost every open
+ * conversation a replay. Under an agent's own sign-in it does not: nothing
+ * says which account made it, and that agent's sign-in is the one case
+ * where it matters.
+ */
+export const SDK_SESSION_AUTH_METADATA_KEY = 'claudeCodeAuth';
+
+const authFingerprintOf = (authToken: string | undefined): string => (authToken
+  ? `token:${createHash('sha256').update(`stratus-claude-code-auth\0${authToken}`).digest('hex').slice(0, 16)}`
+  : 'machine');
+
+const readSdkSessionId = (
+  session: ProviderRequest['session'],
+  fingerprint: string,
+  ownSignIn: boolean,
+): string | undefined => {
   const stored = session.metadata?.[SDK_SESSION_METADATA_KEY];
-  return typeof stored === 'string' && stored.length > 0 ? stored : undefined;
+  if (typeof stored !== 'string' || stored.length === 0) {
+    return undefined;
+  }
+  const madeUnder = session.metadata?.[SDK_SESSION_AUTH_METADATA_KEY];
+  return madeUnder === fingerprint || (madeUnder === undefined && !ownSignIn) ? stored : undefined;
 };
 
-const rememberSdkSessionId = (session: ProviderRequest['session'], id: string): void => {
-  (session.metadata ??= {})[SDK_SESSION_METADATA_KEY] = id;
+const rememberSdkSessionId = (session: ProviderRequest['session'], id: string, fingerprint: string): void => {
+  const metadata = (session.metadata ??= {});
+  metadata[SDK_SESSION_METADATA_KEY] = id;
+  metadata[SDK_SESSION_AUTH_METADATA_KEY] = fingerprint;
 };
+
+/**
+ * Whether a failed run is Claude refusing the sign-in. The Agent SDK passes
+ * the CLI's text through, which says so in a handful of ways: an HTTP 401,
+ * `authentication_error`, an invalid or expired OAuth token, or the CLI's
+ * own advice to run `/login`.
+ */
+const isAuthFailure = (error: unknown): boolean =>
+  /\b401\b|authentication_error|invalid api key|invalid bearer|oauth token|unauthori[sz]ed|\/login\b/i
+    .test(error instanceof Error ? error.message : String(error));
 
 // The transcript-per-prompt rendering is shared with every harness provider:
 // `renderTranscriptPrompt` for a fresh SDK session, `latestUserMessagePrompt`
@@ -463,6 +514,7 @@ const isMaxTurnsExit = (error: unknown): boolean =>
 
 export const createClaudeCodeProvider = ({
   authToken,
+  authOwner,
   model = DEFAULT_CLAUDE_CODE_MODEL,
   name = 'claude-code',
   systemPrompt,
@@ -662,7 +714,8 @@ export const createClaudeCodeProvider = ({
     // The alternative — replaying a flattened transcript every turn — re-
     // sends the whole history on each request and leaves the SDK no way to
     // carry state of its own between turns.
-    const resumeId = readSdkSessionId(request.session);
+    const fingerprint = authFingerprintOf(authToken);
+    const resumeId = readSdkSessionId(request.session, fingerprint, authOwner !== undefined);
     const attempt = async (resume: string | undefined): Promise<void> => {
       const attemptOptions: Options = { ...options, ...(resume ? { resume } : {}) };
       resetIdleTimer();
@@ -688,7 +741,7 @@ export const createClaudeCodeProvider = ({
           // succeeds or not — a session that fails mid-turn is still the
           // session the next turn should continue.
           if (message.session_id) {
-            rememberSdkSessionId(request.session, message.session_id);
+            rememberSdkSessionId(request.session, message.session_id, fingerprint);
           }
           if (message.type !== 'result') {
             // AWAIT the sink per fragment, the same backpressure the API
@@ -875,6 +928,14 @@ export const createClaudeCodeProvider = ({
         throw markIfDelivered(markIfSideEffects(
           new Error(`Claude Code produced no output for ${idleTimeoutMs}ms; the run was aborted as stalled.`),
         ));
+      }
+      if (authOwner !== undefined && !controller.signal.aborted && isAuthFailure(error)) {
+        throw markIfDelivered(markIfSideEffects(new Error(
+          `Claude refused ${authOwner}'s own sign-in (${error instanceof Error ? error.message : String(error)}). `
+          + `The run was not moved onto the shared sign-in. Store a fresh setup token with \`stratus signin set anthropic --agent ${authOwner}\`, `
+          + `or remove it with \`stratus signin remove anthropic --agent ${authOwner}\` to use the shared one.`,
+          { cause: error },
+        )));
       }
       throw markIfDelivered(markIfSideEffects(error));
     } finally {

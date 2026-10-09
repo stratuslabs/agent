@@ -22,6 +22,7 @@ import { createAnthropicProvider, RAW_TURNS_METADATA_KEY } from '@stratusagent/p
 import { ContextOverflowError } from '@stratusagent/core';
 import {
   createClaudeCodeProvider,
+  SDK_SESSION_AUTH_METADATA_KEY,
   SDK_SESSION_METADATA_KEY,
 } from '@stratusagent/provider-claude-code';
 import { createCodexProvider, CODEX_THREAD_METADATA_KEY } from '@stratusagent/provider-codex';
@@ -116,6 +117,7 @@ export const PROVIDER_STATE_METADATA_KEYS: readonly string[] = [
   FALLBACK_ACTIVE_METADATA_KEY,
   RAW_TURNS_METADATA_KEY,
   SDK_SESSION_METADATA_KEY,
+  SDK_SESSION_AUTH_METADATA_KEY,
   CODEX_THREAD_METADATA_KEY,
 ];
 
@@ -337,6 +339,7 @@ export const createRuntimeProvider = (
     if (runsOnHarness(config) && config.authToken) {
       return createClaudeCodeProvider({
         authToken: config.authToken,
+        ...(config.agentSignIn !== undefined ? { authOwner: config.agentSignIn } : {}),
         model: config.model,
         ...(config.queryFn ? { queryFn: config.queryFn } : {}),
         ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),

@@ -262,3 +262,51 @@ The `plugins` and `approvals` blocks now have menus, and those menus edit
 what was read rather than replacing it: settings you wrote by hand under a
 plugin setup did not ask about — `agents` overrides, `toolRisks`, a
 `timeoutMs` — are still there after enabling or disabling something.
+
+## One agent on its own Claude subscription
+
+Every agent on a Claude subscription uses the sign-in **Providers** stores,
+unless it has one of its own. Give one agent a different subscription, in
+the same daemon, at the machine:
+
+```bash
+claude setup-token                          # signed in to the second subscription; copy the token
+stratus signin set anthropic --agent remy   # paste it at the hidden prompt
+```
+
+Or pipe it, which never puts it in your shell history or in `ps`:
+
+```bash
+read -rs TOKEN && printf %s "$TOKEN" | stratus signin set anthropic --agent remy; unset TOKEN
+```
+
+`stratus signins` lists which agents have their own (never the token), and
+`stratus signin remove anthropic --agent remy` takes it back.
+
+What it changes, and what it does not:
+
+- **Only that agent.** Its own sign-in outranks the shared Anthropic
+  sign-in, and the `ANTHROPIC_API_KEY` / `STRATUS_API_KEY` environment
+  keys, for that agent and no other. Agents without one resolve exactly as
+  before.
+- **Only when Anthropic serves it.** An agent whose soul pins another
+  provider ignores the entry. An Anthropic fallback model uses the agent's
+  own sign-in too; a fallback on another provider is not used for that
+  agent, because it would bill a shared account.
+- **No restart.** The daemon reads the credentials file on every turn, so
+  `set`, a replacement, and `remove` all apply from the agent's next turn.
+  A turn already running finishes on the sign-in it started with.
+- **A change starts a fresh Claude Code session.** A conversation's Claude
+  Code session is resumed only under the sign-in that made it, so the first
+  turn after a change replays the conversation into a new one. That turn
+  costs more input; nothing is lost. A conversation last answered by a
+  build older than this one has no record of its sign-in, so an agent with
+  its own sign-in starts it fresh too; on the shared sign-in it resumes as
+  before.
+- **A refused token fails as itself.** If Claude rejects the agent's own
+  token (expired, revoked, or mistyped), the turn fails with an error that
+  names that agent's sign-in and these two commands. It is never retried on
+  the shared sign-in.
+- **It is not a named credential.** It does not go in a soul's
+  `credentials:`, an agent cannot request or read it, and the Slack form and
+  credential links cannot set it.

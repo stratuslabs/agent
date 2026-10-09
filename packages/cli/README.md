@@ -52,6 +52,7 @@ stratus plugins                        # installed → enabled → granted → w
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 stratus health                         # is the running daemon serving? exit 0/1, for container and probe health checks
 stratus credentials                    # stored credential names (never values)
+stratus signin set anthropic --agent remy  # one agent's own Claude subscription, token asked without echo (also `signins`, `signin remove`)
 stratus channel set imessage --agent blair apiKey  # a channel plugin's secrets for one agent, asked without echo (also `channels`, `channel remove`)
 stratus schedules                      # what the fleet has scheduled, and where it reports
 stratus grants blair                   # what blair may do unattended, and `grants revoke` to take one back
@@ -91,7 +92,7 @@ Full reference with every subcommand:
 | `--all-unknown` | `memory reassert`: every live fact with no recorded origin |
 | `--limit <n>` | `memory search`: maximum hits |
 | `--file <path>`, `--preserve-trust` | `memory export` / `memory import`: the JSONL, and keeping each recorded label instead of landing entries `external` |
-| `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one; `channel set`/`remove`: whose binding it is |
+| `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one; `signin set`/`remove`: whose own sign-in it is; `channel set`/`remove`: whose binding it is |
 | `--port`, `--host`, `--no-open` | `dashboard`: where a daemon it starts should bind; skip opening the browser |
 | `--no-login` | `service install`: install without the start-at-login trigger |
 | `--version`, `-v` | Print this build's version and exit |

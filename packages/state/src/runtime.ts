@@ -10,7 +10,8 @@ import type {
   RuntimeConfig,
   RuntimeSelection,
 } from './config.ts';
-import { loadCredentials } from './credentials.ts';
+import { hasAgentSignInEntry, loadAgentSignIns, loadCredentials, type StoredCredential } from './credentials.ts';
+import { credentialsPath } from './paths.ts';
 import { type StateEnvironment, readProcessEnv, readNonEmptyString } from './environment.ts';
 import {
   type StratusProviderName,
@@ -136,6 +137,27 @@ export const discoverIgnoredUntrustedConfig = async (
   return fileConfig === undefined ? undefined : ignoredUntrustedConfigKeys({}, fileConfig, location, env);
 };
 
+/**
+ * One agent's own Claude sign-in, or undefined when it has none and the
+ * shared sign-in applies. An entry that is there but unusable (hand-edited
+ * into something that is not a setup token) is refused, never skipped: the
+ * operator said this agent bills elsewhere, and quietly using the shared
+ * sign-in instead is the one outcome that must not happen.
+ */
+const resolveAgentSignIn = async (env: StateEnvironment, agentId: string): Promise<StoredCredential | undefined> => {
+  const own = (await loadAgentSignIns(env))[agentId]?.anthropic;
+  if (own !== undefined) {
+    return own;
+  }
+  if (await hasAgentSignInEntry(env, agentId, 'anthropic')) {
+    throw new Error(
+      `${agentId} has its own Claude sign-in in ${credentialsPath(env)}, and it is not a usable setup token, so the run was refused rather than moved onto the shared sign-in. `
+      + `Store it again with \`stratus signin set anthropic --agent ${agentId}\`, or remove it with \`stratus signin remove anthropic --agent ${agentId}\` to go back to the shared one.`,
+    );
+  }
+  return undefined;
+};
+
 export const resolveRuntimeConfig = async (
   selection: RuntimeSelection,
   env: StateEnvironment = {},
@@ -206,6 +228,18 @@ export const resolveRuntimeConfig = async (
 
   const credentials = await loadCredentials(env);
 
+  // The agent's own Claude sign-in, when it has one, replaces the shared
+  // Anthropic sign-in for this agent everywhere this resolver would have
+  // used it: the stored token, and the environment keys that outrank it.
+  // Whose run this is comes from the soul, the one identity every caller
+  // already resolves; a soul-less run is the shared default by definition.
+  // Read only when Anthropic could serve the run (as primary or fallback),
+  // so an agent on another provider never fails over an entry it ignores.
+  const agentId = soul?.agent.id;
+  const anthropicInPlay = provider === 'anthropic'
+    || (fileConfig.fallbackModel !== undefined && (fileConfig.fallbackProvider ?? (fileConfigApplies ? provider : undefined)) === 'anthropic');
+  const agentSignIn = anthropicInPlay && agentId !== undefined ? await resolveAgentSignIn(env, agentId) : undefined;
+
   /**
    * A configured fallback model kicks in when the default model errors
    * mid-run. It needs its own working sign-in; without one the fallback is
@@ -235,6 +269,14 @@ export const resolveRuntimeConfig = async (
     if (!fileConfig.fallbackModel || fallbackProvider === 'demo') {
       return undefined;
     }
+    // An agent on its own Claude sign-in falls back only onto that same
+    // sign-in. Any other fallback runs on a shared account — another
+    // provider's key, or a plugin's — and a rejected or exhausted token of
+    // the agent's own must fail as itself rather than move its turns onto
+    // the fleet's bill.
+    if (agentSignIn !== undefined && primary?.provider === 'anthropic' && fallbackProvider !== 'anthropic') {
+      return undefined;
+    }
     if (isRegisteredProviderName(fallbackProvider)) {
       // A contributed fallback needs no sign-in resolved here: its plugin
       // brings its own. Selected by name, and looked up when the provider
@@ -252,7 +294,10 @@ export const resolveRuntimeConfig = async (
       && configTrusted === false
       && fileConfig.fallbackBaseUrl !== undefined
       && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== DEFAULT_OPENAI_BASE_URL;
-    const fallbackEnvKey = readNonEmptyString(processEnv[defaultApiKeyEnvName(fallbackProvider)]);
+    const ownFallbackSignIn = fallbackProvider === 'anthropic' ? agentSignIn : undefined;
+    const fallbackEnvKey = ownFallbackSignIn !== undefined
+      ? undefined
+      : readNonEmptyString(processEnv[defaultApiKeyEnvName(fallbackProvider)]);
     // The primary's rule again, on the URL a fallback actually consumes.
     // Withholding only the stored key here left the same door open one
     // step further in: a project config that leaves `baseUrl` alone and
@@ -267,7 +312,8 @@ export const resolveRuntimeConfig = async (
         `The project config at ${configPathShown} sets a custom fallback base URL (${String(fileConfig.fallbackBaseUrl)}), and ${fallbackEnvKeyName} is not sent to an endpoint an auto-discovered config chose. Run with --config ${configPathShown} to trust that file, or move the fallback base URL into ~/.stratus/config.json.`,
       );
     }
-    const fallbackCandidate = fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider];
+    const fallbackCandidate = ownFallbackSignIn
+      ?? (fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider]);
     // A codex fallback consumes no endpoint URL, so a stored key bound to
     // one cannot be honored there — and must not silently follow the
     // harness to a different endpoint. The fallback is quietly skipped,
@@ -336,6 +382,7 @@ export const resolveRuntimeConfig = async (
         : (fallbackAnthropicBaseUrl ? { baseUrl: fallbackAnthropicBaseUrl } : {})),
       ...(fallbackApiKey ? { apiKey: String(fallbackApiKey) } : {}),
       ...(fallbackAuthToken ? { authToken: fallbackAuthToken } : {}),
+      ...(fallbackAuthToken && ownFallbackSignIn !== undefined && agentId !== undefined ? { agentSignIn: agentId } : {}),
       ...(fallbackCodexSubscription ? { codexSubscription: true as const } : {}),
       // Here rather than with the primary's transport above, because
       // the fallback does not exist yet at that point. A subscription
@@ -418,9 +465,17 @@ export const resolveRuntimeConfig = async (
     && fileConfig.baseUrl.replace(/\/+$/, '') !== defaultEndpointFor(String(provider));
 
   // Env vars outrank the stored sign-in from `stratus setup`.
-  const envApiKeyEntry = resolveEnvApiKey(apiKeyEnvName, env);
+  // Except the agent's own sign-in, which outranks both: it is the one
+  // input here that names this agent rather than the whole daemon.
+  const ownSignIn = provider === 'anthropic' ? agentSignIn : undefined;
+  if (ownSignIn !== undefined && untrustedCustomBaseUrl) {
+    throw new Error(
+      `The project config at ${configPathShown} sets a custom base URL (${String(fileConfig.baseUrl)}), so ${String(agentId)}'s own Claude sign-in is not sent to it, and the run was not moved onto the shared one. Run with --config ${configPathShown} to trust that file, or move the base URL into ~/.stratus/config.json.`,
+    );
+  }
+  const envApiKeyEntry = ownSignIn !== undefined ? undefined : resolveEnvApiKey(apiKeyEnvName, env);
   const envApiKey = envApiKeyEntry?.value;
-  const candidateCredential = credentials[provider as CredentialProviderName];
+  const candidateCredential = ownSignIn ?? credentials[provider as CredentialProviderName];
   // A bound credential ignores config URLs entirely, so an untrusted
   // project URL cannot redirect it — only unbound stored keys are blocked.
   const credentialIsBound = candidateCredential?.type === 'api_key' && candidateCredential.baseUrl !== undefined;
@@ -522,6 +577,7 @@ export const resolveRuntimeConfig = async (
         ...(baseUrl ? { baseUrl: String(baseUrl) } : {}),
         ...(apiKey ? { apiKey: String(apiKey) } : {}),
         ...(authToken ? { authToken } : {}),
+        ...(ownSignIn !== undefined && agentId !== undefined ? { agentSignIn: agentId } : {}),
         // Caching settings ride only on this variant: it is the one adapter
         // where Stratus builds the request. The harness providers assemble
         // their own prompts inside their SDKs, and the OpenAI-compatible

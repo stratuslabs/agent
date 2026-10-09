@@ -15,6 +15,7 @@ import {
   DEFAULT_CLAUDE_CODE_MODEL,
   hasHostedToolSideEffects,
   markHostedToolSideEffects,
+  SDK_SESSION_AUTH_METADATA_KEY,
   SDK_SESSION_METADATA_KEY,
   type ClaudeCodeQueryFn,
   type ClaudeCodeStreamMessage,
@@ -1274,4 +1275,66 @@ test('a bridged result shows its images as MCP images, and one already let go of
   assert.deepEqual(shown.content[1], { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' });
   assert.equal(shown.content[2]?.type, 'text');
   assert.match(JSON.stringify(shown.content[2]), /old\.png/);
+});
+
+test('an SDK session is resumed only under the sign-in that made it', async () => {
+  const { queryFn, calls } = createFakeQuery([
+    { type: 'system', subtype: 'init', session_id: 'sdk-made' },
+    { type: 'result', subtype: 'success', is_error: false, result: 'Hi.', session_id: 'sdk-made' },
+  ]);
+  const session = createSession();
+  await createClaudeCodeProvider({ authToken: 'synthetic-token-a', queryFn }).generate({ session, memory: [] });
+  const fingerprint = session.metadata?.[SDK_SESSION_AUTH_METADATA_KEY];
+  assert.match(String(fingerprint), /^token:[0-9a-f]{16}$/);
+  assert.ok(!JSON.stringify(session.metadata).includes('synthetic-token-a'));
+
+  session.messages.push(
+    { id: 'session-1:assistant:2', role: 'assistant', content: 'Hi.', createdAt: new Date().toISOString() },
+    { id: 'session-1:user:3', role: 'user', content: 'And now?', createdAt: new Date().toISOString() },
+  );
+  // Another token: a fresh SDK session, the whole history replayed into it.
+  await createClaudeCodeProvider({ authToken: 'synthetic-token-b', queryFn }).generate({ session, memory: [] });
+  assert.equal((calls[1]!.options as { resume?: string }).resume, undefined);
+  assert.match(calls[1]!.prompt, /Hello there/);
+  assert.notEqual(session.metadata?.[SDK_SESSION_AUTH_METADATA_KEY], fingerprint);
+
+  // The machine's own sign-in is a sign-in too, and differs from either.
+  await createClaudeCodeProvider({ queryFn }).generate({ session, memory: [] });
+  assert.equal((calls[2]!.options as { resume?: string }).resume, undefined);
+  assert.equal(session.metadata?.[SDK_SESSION_AUTH_METADATA_KEY], 'machine');
+});
+
+test('a session stored before sign-ins were recorded resumes on the shared sign-in, so an upgrade replays nothing', async () => {
+  const { queryFn, calls } = createFakeQuery([
+    { type: 'result', subtype: 'success', is_error: false, result: 'Hi.', session_id: 'sdk-legacy' },
+  ]);
+  const session = createSession({ metadata: { [SDK_SESSION_METADATA_KEY]: 'sdk-legacy' } });
+  await createClaudeCodeProvider({ authToken: 'synthetic-token-a', queryFn }).generate({ session, memory: [] });
+  assert.equal((calls[0]!.options as { resume?: string }).resume, 'sdk-legacy');
+
+  // Under an agent's own sign-in, a session of unknown origin is not resumed.
+  const own = createSession({ metadata: { [SDK_SESSION_METADATA_KEY]: 'sdk-legacy' } });
+  await createClaudeCodeProvider({ authToken: 'synthetic-own', authOwner: 'remy', queryFn }).generate({ session: own, memory: [] });
+  assert.equal((calls[1]!.options as { resume?: string }).resume, undefined);
+});
+
+test('an agent\'s own token being refused names that agent\'s entry, and the shared path is untouched', async () => {
+  const refusing: ClaudeCodeQueryFn = () => (async function* () {
+    yield { type: 'result', subtype: 'error_during_execution', is_error: true, result: 'Invalid API key · Please run /login' };
+  })();
+
+  await assert.rejects(
+    createClaudeCodeProvider({ authToken: 'synthetic-own', authOwner: 'remy', queryFn: refusing })
+      .generate({ session: createSession(), memory: [] }),
+    (error: unknown) => error instanceof Error
+      && /Claude refused remy's own sign-in/.test(error.message)
+      && /stratus signin remove anthropic --agent remy/.test(error.message)
+      && !error.message.includes('synthetic-own'),
+  );
+  // Without an owner the error is what it always was.
+  await assert.rejects(
+    createClaudeCodeProvider({ authToken: 'synthetic-shared', queryFn: refusing })
+      .generate({ session: createSession(), memory: [] }),
+    (error: unknown) => error instanceof Error && /^Claude Code run failed/.test(error.message),
+  );
 });
