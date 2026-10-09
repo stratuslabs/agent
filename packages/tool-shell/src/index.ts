@@ -83,13 +83,16 @@ export const COMMAND_OPTION_VARIABLES = ['RIPGREP_CONFIG_PATH', 'GREP_OPTIONS'] 
 
 /**
  * Flags that stop a shell from running its user startup files before the
- * command. Without them zsh sources `$HOME/.zshenv` and fish its config even
- * non-interactively, and either can redefine `cat`. bash and `sh` read none
- * when not interactive, once `BASH_ENV`/`ENV` are withheld.
+ * command. Without them zsh sources `$HOME/.zshenv`, tcsh and csh
+ * `~/.tcshrc`/`~/.cshrc`, and fish its config, even non-interactively, and any
+ * of them can redefine `cat`. bash, `sh`, dash, and ksh read none when not
+ * interactive, once `BASH_ENV`/`ENV` are withheld. Another shell named in
+ * config is the operator's choice, startup files and all.
  */
 const startupOff = (shell: string): string[] => {
   const name = path.basename(shell);
-  if (name === 'zsh') {
+  // zsh, tcsh, and csh all spell it `-f`.
+  if (name === 'zsh' || name === 'tcsh' || name === 'csh') {
     return ['-f'];
   }
   if (name === 'fish') {

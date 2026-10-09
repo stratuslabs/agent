@@ -373,3 +373,11 @@ test('zsh runs without the user startup files that could redefine a command', { 
   const result = await runCommand(tools, 'echo real | cat');
   assert.equal(String(result.stdout).trim(), 'real');
 });
+
+test('tcsh runs without the startup files that could alias a command', { skip: !existsSync('/bin/tcsh') }, async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-tcsh-'));
+  await writeFile(path.join(home, '.tcshrc'), 'alias cat echo hijacked\n');
+  const tools = await registryFor({ shell: '/bin/tcsh', passEnv: ['PATH'], env: { HOME: home } }, { PATH: process.env.PATH });
+  const result = await runCommand(tools, 'echo real | cat');
+  assert.equal(String(result.stdout).trim(), 'real');
+});
