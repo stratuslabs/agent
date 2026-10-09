@@ -8,6 +8,7 @@ import type { Session, Tool } from '@stratusagent/core';
 import {
   createLocalCommandExecutor,
   defineLocalCommandTool,
+  LOCAL_COMMAND_MAX_TIMEOUT_MS,
 } from '../src/index.ts';
 
 const session: Session = {
@@ -109,6 +110,32 @@ test('local command executor captures non-zero exits as failures', async () => {
   assert.equal(output.exitCode, 4);
   assert.equal(output.timedOut, false);
   assert.equal(typeof output.durationMs, 'number');
+});
+
+test('a timeout cut to the ceiling says so, and what to do instead', async () => {
+  const tool = defineLocalCommandTool({
+    name: 'slow',
+    createCommand() {
+      return {
+        command: process.execPath,
+        args: ['-e', 'setTimeout(() => console.log("late"), 200);'],
+        timeoutMs: 3_600_000,
+      };
+    },
+  });
+
+  // A ceiling small enough to test with; the default is five minutes.
+  const executor = createLocalCommandExecutor({ maxTimeoutMs: 25 });
+  const result = await executor.execute({ id: 'call-cap', toolName: 'slow', input: {} }, tool, session);
+
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /^Command timed out after 25ms, the most a command may run here \(it asked for 3600000ms\)/);
+  assert.match(result.error ?? '', /in the background with its output redirected to a file/);
+  assert.equal((result.output as Record<string, unknown>).timedOut, true);
+});
+
+test('the default ceiling is five minutes, and is exported for tools to describe', () => {
+  assert.equal(LOCAL_COMMAND_MAX_TIMEOUT_MS, 300_000);
 });
 
 test('local command executor times out long-running processes', async () => {
