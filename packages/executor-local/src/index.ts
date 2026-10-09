@@ -233,11 +233,16 @@ export class LocalCommandExecutor implements Executor {
         // Cut to the ceiling rather than the timeout it asked for: say so,
         // and what to do instead, or the next attempt asks for the same
         // impossible hour and is killed at the same five minutes.
-        const capped = typeof invocation.timeoutMs === 'number' && invocation.timeoutMs > timeoutMs && timeoutMs === this.maxTimeoutMs;
+        // What was asked for is the invocation's own timeout or, without a
+        // usable one, the executor's default — either can exceed the ceiling.
+        const requested = typeof invocation.timeoutMs === 'number' && Number.isFinite(invocation.timeoutMs) && invocation.timeoutMs > 0
+          ? invocation.timeoutMs
+          : this.defaultTimeoutMs;
+        const capped = requested > timeoutMs;
         return failureResult(
           call,
           capped
-            ? `Command timed out after ${timeoutMs}ms, the most a command may run here (it asked for ${invocation.timeoutMs}ms): ${execution.command}. `
+            ? `Command timed out after ${timeoutMs}ms, the most a command may run here (it asked for ${requested}ms): ${execution.command}. `
               + 'Start longer work in the background with its output redirected to a file, and check the file in a later call.'
             : `Command timed out after ${timeoutMs}ms: ${execution.command}`,
           serializeExecution(execution),
