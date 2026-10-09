@@ -303,6 +303,11 @@ export interface StratusConfigFile {
    * `executor` and `principals` do.
    */
   maxTurns?: number;
+  /**
+   * Per-agent budgets replacing `maxTurns` for one agent's messages, keyed by
+   * agent id: `{ "atlas": 300 }`. Trusted config only, like `maxTurns`.
+   */
+  agentMaxTurns?: Record<string, number>;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */
