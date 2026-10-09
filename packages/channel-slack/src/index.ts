@@ -245,6 +245,12 @@ export interface SlackInboundEvent {
   text?: string;
   ts: string;
   thread_ts?: string;
+  /**
+   * Who wrote the message that opened this thread, on a reply in one.
+   * Slack sets it on threaded `message` events; an app's own post carries
+   * its bot user id here.
+   */
+  parent_user_id?: string;
   channel: string;
   channel_type?: string;
   bot_id?: string;
@@ -4423,7 +4429,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * every thread, is answered without the question arising.
    */
   const resolveFollowUpWinner = async (
-    parts: { team: string; conversation: string; thread: string },
+    parts: { team: string; conversation: string; thread: string; parentUser?: string },
     ts: string,
   ): Promise<string | undefined> => {
     const gateway = gatewayRef;
@@ -4488,7 +4494,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const first = engaged[0];
     if (!first) {
-      return undefined;
+      // No agent has a session in this thread, but one may have STARTED
+      // it: a post made through message.send or a schedule's delivery
+      // lands at the top level from some other session, so nothing ties
+      // the thread under it to the agent that wrote it. A reply there is
+      // a reply to that agent. Read off the event, so every connection
+      // reaches the same answer, and after a restart too.
+      if (parts.parentUser === undefined) {
+        return undefined;
+      }
+      return connections.find((candidate) =>
+        candidate.teamId === parts.team && candidate.botUserId === parts.parentUser)?.config.agentId;
     }
     if (engaged.length === 1) {
       return first.agentId;
@@ -4714,7 +4730,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // place in that queue, and the line is an audit, not a turn; `track`
         // holds it so `stop()` drains it like any other background work.
         const thread = event.thread_ts;
-        track(followUpWinner({ team, conversation: event.channel, thread }, event.ts).then((winner) => {
+        track(followUpWinner({
+          team,
+          conversation: event.channel,
+          thread,
+          ...(event.parent_user_id !== undefined ? { parentUser: event.parent_user_id } : {}),
+        }, event.ts).then((winner) => {
           if (winner === connection.config.agentId) {
             log(refusal);
           }
@@ -4902,7 +4923,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // One verdict for this message, shared with whichever other agents
         // are asking about it — see `followUpWinner`.
         const winner = await followUpWinner(
-          { team, conversation: event.channel, thread: event.thread_ts ?? '' },
+          {
+            team,
+            conversation: event.channel,
+            thread: event.thread_ts ?? '',
+            ...(event.parent_user_id !== undefined ? { parentUser: event.parent_user_id } : {}),
+          },
           event.ts,
         );
         if (winner !== connection.config.agentId) {
