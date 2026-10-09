@@ -39,7 +39,8 @@ export type OutboundMessenger = (input: {
 export const createMessageSendTool = (send: OutboundMessenger): Tool => ({
   name: MESSAGE_SEND_TOOL_NAME,
   description: 'Send a message to a channel or DM you are not currently talking in, at the top level or as a reply in one of its threads. '
-    + 'Returns the posted message\'s id; pass it as thread to a later send to reply under that message. '
+    + 'Returns the posted message\'s id, and the thread to name to reply under it: '
+    + 'pass that returned thread (never a reply\'s id) to every later send in the same thread. '
     + 'Scheduled turns may post to their schedule\'s approved destination without asking; anywhere else needs approval.',
   risk: 'gated',
   parameters: {
@@ -78,11 +79,16 @@ export const createMessageSendTool = (send: OutboundMessenger): Tool => ({
       ...(thread !== undefined ? { thread } : {}),
     });
     const id = posted && typeof posted.id === 'string' && posted.id.length > 0 ? posted.id : undefined;
+    // The thread a reply to this post names: the root it went under, or,
+    // for a top-level post, the post itself. Always the root, because a
+    // reply's own id is not a thread to Slack — chaining sends through
+    // each reply's id would leave the thread after the second one.
+    const root = thread ?? id;
     return {
       sent: true,
       destination: canonicalDestination(destination),
       ...(id !== undefined ? { id } : {}),
-      ...(thread !== undefined ? { thread } : {}),
+      ...(root !== undefined ? { thread: root } : {}),
     };
   },
 });

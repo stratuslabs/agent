@@ -245,8 +245,9 @@ test('message.send is gated and names its destination for the policy', async () 
   ) as JsonObject;
   assert.deepEqual(sends, [{ agentId: 'ava', destination: { channel: 'slack', to: 'C9' }, text: 'all green' }]);
   assert.equal(result.destination, 'slack:C9');
-  // A messenger that reports no id leaves none in the result.
+  // A messenger that reports no id leaves none in the result, and no thread.
   assert.equal(result.id, undefined);
+  assert.equal(result.thread, undefined);
 });
 
 test('message.send replies in a thread when given one, and returns the posted id', async () => {
@@ -258,14 +259,17 @@ test('message.send replies in a thread when given one, and returns the posted id
 
   const top = await tool.execute({ destination: { channel: 'slack', to: 'C9' }, text: 'report' }, sessionFor('ava')) as JsonObject;
   assert.equal(top.id, '1791400000.000100');
-  assert.equal(top.thread, undefined);
+  // A top-level post is the root of its own thread.
+  assert.equal(top.thread, '1791400000.000100');
 
-  // The id a send returned is the thread a later send names.
+  // The thread a send returned is the thread a later send names.
   const reply = await tool.execute(
     { destination: { channel: 'slack', to: 'C9' }, text: 'details', thread: ' 1791400000.000100 ' },
     sessionFor('ava'),
   ) as JsonObject;
   assert.equal(sends[1]?.thread, '1791400000.000100');
+  // A reply hands back the root, not its own id, so a third send stays in
+  // the same thread.
   assert.equal(reply.thread, '1791400000.000100');
 
   // The thread does not change what is judged: the same conversation is
