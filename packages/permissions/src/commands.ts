@@ -428,9 +428,68 @@ const analyzePipeline = (command: string, segments: string[]): CommandAnalysis =
   return { command, tokens: [], pipeline };
 };
 
+/**
+ * The parts of a command the shell reads as syntax. `active` is everything
+ * outside single quotes, where `$(`, backticks and `${` still run; `bare` is
+ * everything outside any quotes, the only place `(`, `;`, `|` and the rest
+ * are operators. A quoted region is replaced by a space rather than dropped,
+ * so the text on either side of it can never join into an operator the
+ * shell would not see.
+ *
+ * Undefined when this reading could disagree with `sh`: a backslash outside
+ * single quotes escapes a quote, which this scanner does not model, and an
+ * unbalanced quote has no reading at all. The caller then checks the whole
+ * string, quotes included, the way it always has.
+ */
+const syntaxOf = (command: string): { active: string; bare: string } | undefined => {
+  let active = '';
+  let bare = '';
+  let quote: '"' | "'" | undefined;
+  for (const char of command) {
+    if (quote === "'") {
+      if (char === "'") {
+        quote = undefined;
+        active += ' ';
+        bare += ' ';
+      }
+      continue;
+    }
+    if (char === '\\') {
+      return undefined;
+    }
+    if (quote === '"') {
+      if (char === '"') {
+        quote = undefined;
+        bare += ' ';
+      } else {
+        active += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      active += ' ';
+      continue;
+    }
+    active += char;
+    bare += char;
+  }
+  return quote ? undefined : { active, bare };
+};
+
+/** Operators the shell still honors inside double quotes. */
+const EXPANDS_IN_DOUBLE_QUOTES = new Set(['command substitution ($( ))', 'command substitution (backticks)', 'a parameter expansion (${ })']);
+
 const analyzeSimple = (command: string): CommandAnalysis => {
+  // A `(` in a commit message is text, not a subshell: operators are looked
+  // for where the shell would read them, unless the quoting is too subtle
+  // to be sure of, in which case every character counts.
+  const syntax = syntaxOf(command);
   for (const operator of CONTROL_OPERATORS) {
-    if (operator.pattern.test(command)) {
+    const where = syntax === undefined
+      ? command
+      : EXPANDS_IN_DOUBLE_QUOTES.has(operator.name) ? syntax.active : syntax.bare;
+    if (operator.pattern.test(where)) {
       return { command, tokens: [], disqualifiedBy: `it contains ${operator.name}` };
     }
   }
@@ -640,6 +699,23 @@ export const findMatchingScope = (
 export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope | undefined => {
   if (analysis.disqualifiedBy || analysis.base === undefined) {
     return undefined;
+  }
+  // `git -C <repo> <subcommand> …` is `git <subcommand> …` run in <repo>,
+  // and an agent with worktrees spells nearly every git call this way. The
+  // repository is kept in the scope, literally, so a grant for one worktree
+  // says nothing about another; past it the subcommand is judged as it
+  // would be without -C. Only the leading position: anywhere else -C sits
+  // among flags of unknown arity, and the exact-command rule below applies.
+  if (analysis.base === 'git' && analysis.tokens[1] === '-C' && analysis.tokens.length > 3) {
+    const repo = analysis.tokens[2] as string;
+    if (repo.length > 0 && !repo.startsWith('-') && !analysis.expands?.[2] && !/[*?[\]{}~$\\#]/.test(repo)) {
+      const inner = normalizeCommandScope({
+        ...analysis,
+        tokens: ['git', ...analysis.tokens.slice(3)],
+        ...(analysis.expands ? { expands: [analysis.expands[0] ?? false, ...analysis.expands.slice(3)] } : {}),
+      });
+      return inner === undefined ? undefined : { ...inner, args: ['-C', repo, ...(inner.args ?? [])] };
+    }
   }
   const tokens = analysis.tokens.slice(1);
   const firstIndex = tokens.findIndex((token) => !token.startsWith('-'));
