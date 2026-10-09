@@ -313,7 +313,7 @@ checked-out branch for `HEAD`) must start with one of the agent's prefixes,
 which are `<agentId>/` unless `branchPrefixes` says otherwise. A bare
 `git push` or `git push origin` asks, because the repository's config, not
 the command, decides where it goes. A name that is also a tag, or isn't a
-local branch, asks too, and so does a repository whose config sets any
+local branch, asks too, and so does a repository whose config sets `push.followTags` or any
 `push` mapping (in any spelling, including a worktree's `config.worktree`)
 or includes another file, since that decides the destination instead.
 

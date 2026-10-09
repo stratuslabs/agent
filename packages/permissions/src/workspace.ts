@@ -696,7 +696,8 @@ export const gitInsideWorkspace = async (
 const anyPushMapping = async (gitDir: string, commonDir: string): Promise<boolean> => {
   for (const file of [path.join(commonDir, 'config'), path.join(gitDir, 'config.worktree'), path.join(commonDir, 'config.worktree')]) {
     const config = await readFile(file, 'utf8').catch(() => '');
-    if (/^\s*push\s*=/im.test(config) || /^\s*\[include(?:If)?\b/im.test(config)) {
+    // `push.followTags` publishes reachable annotated tags with the branch.
+    if (/^\s*push\s*=/im.test(config) || /^\s*followtags\s*=\s*(?:true|yes|on|1)\s*$/im.test(config) || /^\s*\[include(?:If)?\b/im.test(config)) {
       return true;
     }
   }
