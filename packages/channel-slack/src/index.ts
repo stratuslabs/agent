@@ -26,6 +26,7 @@ import {
   type ImageAttachment,
   type JsonObject,
   type ListensMode,
+  type ProviderPart,
   type Session,
   type StratusEvent,
   type ToolResult,
@@ -735,6 +736,20 @@ class ReplyRenderer {
    */
   readonly turnId: string = randomUUID();
   private buffer = '';
+  /**
+   * In `final` mode, what the model has said since its last tool call. A
+   * turn that writes "On it, checking the PRs" and then works for an hour
+   * should not leave the thread showing only a loading status: text the
+   * model wrote before calling a tool is posted when the call starts, as a
+   * message of its own, and the finished reply follows it.
+   */
+  private interim = '';
+  /** The last interim message posted, so a reply that repeats it is not posted twice. */
+  private lastInterim: string | undefined;
+  /** Whether any interim message landed — something said, whatever the reply's fate. */
+  private interimPosted = false;
+  /** Every interim message that landed, in order, for the thread's other agents to hear. */
+  private readonly interimSaid: string[] = [];
   private turnBreakPending = false;
   private toolLine: string | undefined;
   private ref: OutboundMessageRef | undefined;
@@ -971,6 +986,7 @@ class ReplyRenderer {
       this.pendingEdit = undefined;
     }
     this.buffer = '';
+    this.interim = '';
     this.toolLine = undefined;
     this.runningTool = undefined;
     this.turnBreakPending = false;
@@ -1008,6 +1024,7 @@ class ReplyRenderer {
       }
       this.turnBreakPending = false;
       this.buffer += event.delta.text;
+      this.interim += event.delta.text;
       this.scheduleEdit();
       return;
     }
@@ -1016,12 +1033,22 @@ class ReplyRenderer {
       // mid-stream failure): discard everything streamed so far so two
       // attempts never fuse into one message.
       this.buffer = '';
+      this.interim = '';
       this.turnBreakPending = false;
       this.scheduleEdit();
       return;
     }
     if (event.type === 'provider.response') {
       this.turnBreakPending = true;
+      // A provider that answers in one piece streams no deltas: the
+      // response is the only place its words before a tool call appear.
+      // One that streamed them has them already, and is not given them twice.
+      if (this.interim.trim().length === 0) {
+        this.interim = event.parts
+          .filter((part): part is Extract<ProviderPart, { type: 'text' }> => part.type === 'text')
+          .map((part) => part.text)
+          .join('');
+      }
       return;
     }
     if (event.type === 'tool.called') {
@@ -1033,6 +1060,7 @@ class ReplyRenderer {
       this.turnBreakPending = true;
       this.toolLine = `⚙ ${event.call.toolName}…`;
       this.runningTool = event.call.toolName;
+      this.flushInterim(ofThisTurn);
       this.scheduleEdit();
       return;
     }
@@ -1044,12 +1072,18 @@ class ReplyRenderer {
       this.toolLine = undefined;
       this.runningTool = undefined;
       this.turnBreakPending = true;
+      // Words written before a call that was refused were still said
+      // before a tool, and must not run into the next response's.
+      this.flushInterim(ofThisTurn);
       this.scheduleEdit();
       return;
     }
     if (event.type === 'tool.completed') {
       this.toolLine = undefined;
       this.runningTool = undefined;
+      // Settled here too for a call rejected before it ran, which never
+      // reached `tool.called`; after one that did, this is empty.
+      this.flushInterim(ofThisTurn);
       // Also a boundary, and not only for symmetry: a call rejected before
       // execution settles as tool.completed without ever having emitted
       // tool.called, so this is the only mark that attempt leaves.
@@ -1130,6 +1164,71 @@ class ReplyRenderer {
         }
       })
       .catch((error) => this.warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  /**
+   * Post what the model said before the tool it is now calling, in `final`
+   * mode only: a streaming turn already shows it in its placeholder, and a
+   * turn nobody asked for must not speak before it decides to. Behind the
+   * turn ahead and any handover, on the upload chain, so interim text,
+   * files, and the reply land in the order they happened.
+   */
+  private flushInterim(ofThisTurn: boolean): void {
+    const text = this.interim.trim();
+    this.interim = '';
+    if (this.streaming || this.lazy || !this.turnStarted || !ofThisTurn || text.length === 0) {
+      return;
+    }
+    const handover = this.handover;
+    const after = this.after;
+    this.uploadChain = this.uploadChain
+      .then(() => handover)
+      .then(() => after)
+      .then(async () => {
+        for (const chunk of messageChunks(text)) {
+          const posted = await this.web.chat.postMessage({
+            channel: this.channel,
+            text: chunk,
+            ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+          });
+          this.placeText(posted.ts);
+        }
+        this.interimPosted = true;
+        this.lastInterim = text;
+        this.interimSaid.push(text);
+        // A post of the app's in this thread takes the status down while
+        // the turn is still working; put it back.
+        this.refreshLoading();
+      })
+      .catch((error) => this.warn(`chat.postMessage failed for an interim message: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  /**
+   * Everything this turn said in the thread, for its other agents to hear:
+   * the interim messages that landed, then the reply unless it only
+   * repeats the last of them. Read once the turn's posts have landed.
+   */
+  spokenText(reply: string): string {
+    const rest = this.unsaid(reply);
+    return [...this.interimSaid, ...(rest.trim().length > 0 ? [rest] : [])].join('\n\n');
+  }
+
+  /**
+   * The part of a reply not already posted as interim messages. A provider
+   * that hosts its own loop (codex) returns every message of the turn
+   * joined into one reply, so the interim messages are stripped from its
+   * front in order; one whose last words came before its final tool call
+   * returns just those words, which were posted already.
+   */
+  private unsaid(reply: string): string {
+    let rest = reply.trim();
+    for (const said of this.interimSaid) {
+      if (!rest.startsWith(said)) {
+        break;
+      }
+      rest = rest.slice(said.length).trimStart();
+    }
+    return rest === this.lastInterim ? '' : rest;
   }
 
   private currentText(): string {
@@ -1265,6 +1364,22 @@ class ReplyRenderer {
       await this.editChain;
       await this.uploadChain;
       return this.outcome(false, this.uploaded);
+    }
+    // Interim messages land before the reply is judged: one that already
+    // said what the reply says (the model's last words came before a
+    // tool call) is not posted again, and a turn that said things along
+    // the way is not followed by `(no reply)`.
+    await this.uploadChain;
+    if (this.interimPosted && !this.ref) {
+      reply = this.unsaid(reply);
+    }
+    if (!this.ref && this.interimPosted && reply.trim().length === 0) {
+      // Nothing posts after this to take the status down, so it is cleared.
+      if (hadStatus) {
+        this.setStatus('');
+        await this.statusChain;
+      }
+      return this.outcome(true, true);
     }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
     const chunks = messageChunks(text);
@@ -3175,12 +3290,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     speaker: AgentConnection,
     channel: string,
     thread: string,
-    reply: string,
+    reply: string | (() => string),
     spoken: Pick<Session, 'metadata'>,
     published: Promise<boolean>,
   ): Promise<void> => {
     const gateway = gatewayRef;
-    if (!gateway?.observe || reply.trim().length === 0) {
+    if (!gateway?.observe || (typeof reply === 'string' && reply.trim().length === 0)) {
       return;
     }
     const team = speaker.teamId;
@@ -3210,6 +3325,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           if (!(await published)) {
             return { observed: undefined };
           }
+          // Read now that the posts have landed: what the turn said along
+          // the way is known only once they have.
+          const text = typeof reply === 'string' ? reply : reply();
+          if (text.trim().length === 0) {
+            return { observed: undefined };
+          }
           let member: boolean | undefined;
           try {
             member = (await hearer.web.conversations.info({ channel })).channel?.is_member;
@@ -3223,7 +3344,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           // spoke, by display name. A bot user's is the app's own, set by
           // whoever installed it.
           const author = await displayNameFor(hearer, speaker.botUserId);
-          const observed = gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${reply}`, metadata });
+          const observed = gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${text}`, metadata });
           return { observed: observed === undefined ? undefined : placeObserve(sessionId, observed) };
         });
         await observed;
@@ -5250,8 +5371,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // rule with the gateway's `sessionRouting`, which posts the same
       // message for a turn this adapter did not start.
       const finalized = renderer.finalize(renderer.lazy ? reply ?? '' : reply ?? NO_REPLY_TEXT);
-      const heard = thread !== undefined && reply !== undefined
-        ? overhearReply(connection, event.channel, thread, reply, session, finalized.then((outcome) => outcome.published))
+      // What the turn said along the way as well as its reply: interim
+      // messages are in the thread, so they are in what the others hear.
+      // Heard once the posts have settled, and the reply only if it landed:
+      // interim messages already in the thread are heard either way.
+      let replyLanded = false;
+      const settled = finalized.then((outcome) => {
+        replyLanded = outcome.published;
+        return true;
+      }, () => true);
+      const heard = thread !== undefined
+        ? overhearReply(connection, event.channel, thread, () => renderer.spokenText(replyLanded ? reply ?? '' : ''), session, settled)
         : undefined;
       const { spoke, spokeAt } = await finalized;
       if (spoke && threadKey !== undefined) {
@@ -5275,6 +5405,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       await heard;
     } else {
       const { spoke, spokeAt } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+      // What the turn said before it broke is in the thread, so the
+      // others hear it; the error note is the failure's, and is not. Under
+      // the session's own label where it can be read, and the least
+      // trusted one where it cannot.
+      if (thread !== undefined && renderer.spokenText('').length > 0) {
+        const routed = await gateway.sessionRouting?.(sessionId).catch(() => undefined);
+        await overhearReply(connection, event.channel, thread, renderer.spokenText(''), routed ?? { metadata: {} }, Promise.resolve(true));
+      }
       if (spoke && threadKey !== undefined) {
         // A file it posted before breaking is still the last thing said.
         rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);

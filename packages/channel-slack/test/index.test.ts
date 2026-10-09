@@ -360,7 +360,7 @@ const recordStatuses = (web: FakeWeb, refuse = false): Array<{ channel_id: strin
   return statuses;
 };
 
-test('by default a reply posts once, finished, behind Slack\'s loading status', async () => {
+test('by default a turn posts what it says before each tool, then its finished reply, behind Slack\'s loading status', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const statuses = recordStatuses(web);
@@ -384,14 +384,15 @@ test('by default a reply posts once, finished, behind Slack\'s loading status', 
   await socket.deliver('app_mention', mention('<@B-AVA> is the build green?'));
   await adapter.stop();
 
-  // The reported annoyance: a `…` posted at once and edited as the agent
-  // worked, with the notification firing on the `…`. Nothing is posted
-  // while the turn runs, and the reply is one message, never edited.
-  assert.equal(postsWhileWorking, 0);
-  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['The build passes.', '100.1']]);
+  // No `…` placeholder to notify on, and nothing is ever edited. What the
+  // agent said before it went to work is posted as it starts that work,
+  // so a long turn answers at once, and the finished reply follows.
+  assert.ok(postsWhileWorking <= 1);
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Let me look', '100.1'], ['The build passes.', '100.1']]);
   assert.deepEqual(web.updates, []);
-  // What the agent is doing is in Slack's status line instead.
-  assert.deepEqual(statuses.map((status) => status.status), ['is thinking…', 'is running shell.run…', 'is thinking…']);
+  // What the agent is doing is in Slack's status line, put back after the
+  // interim post took it down.
+  assert.deepEqual(statuses.map((status) => status.status).filter((status, index, all) => status !== all[index - 1]).slice(0, 2), ['is thinking…', 'is running shell.run…']);
   assert.ok(statuses.every((status) => status.channel_id === 'C1' && status.thread_ts === '100.1'));
 });
 
@@ -9447,6 +9448,56 @@ test('a backfill follows Slack\'s cursor even when a short page says nothing of 
   assert.equal(gateway.dispatches[0]?.earlier?.at(-1)?.message, 'Dylan: newest reply');
 });
 
+test('a final reply the model already said before its last tool call is not posted twice', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Merged #288.' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'memory.remember', input: {} } });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'memory.remember', ok: true, output: null } });
+    // The final response had no text, so the reply read from the session
+    // is the text before the call.
+    return sessionWithReply(sessionId, 'Merged #288.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> status?'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['Merged #288.']);
+  // Nothing posted after it, so the status is cleared rather than left standing.
+  assert.equal(statuses.at(-1)?.status, '');
+});
+
+test('the stream reply mode posts no interim messages: its placeholder already shows them', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Let me look' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'The build passes.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'stream' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> is the build green?'));
+  await adapter.stop();
+
+  assert.equal(web.posts.length, 1);
+  assert.equal(web.posts[0]?.text, '…');
+});
+
 test('an untagged reply under an agent\'s own top-level post is that agent\'s, with no session in the thread', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
@@ -9537,4 +9588,174 @@ test('a reply under an agent\'s own post still reaches it when another app hears
     gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.sessionId]),
     [['ava', 'slack:ava:T1:C1:950.0']],
   );
+});
+
+test('a provider that answers in one piece still gets its words before a tool posted', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    // No deltas: the text arrives only in the response.
+    await gateway.bus.emit({ type: 'provider.response', sessionId, parts: [{ type: 'text', text: 'On it.' }, { type: 'tool-call', call }] });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['On it.', 'Done.']);
+});
+
+test('a streaming provider\'s words before a tool are posted once, not again from its response', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'On it.' } });
+    await gateway.bus.emit({ type: 'provider.response', sessionId, parts: [{ type: 'text', text: 'On it.' }, { type: 'tool-call', call }] });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['On it.', 'Done.']);
+});
+
+test('the thread\'s other agents hear what an agent said along the way, not only its reply', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'The build is red on main.' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:930.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:930.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', replies: 'final' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', replies: 'final' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const message = channelMessage({ text: 'check main', ts: '930.1', thread: '930.0' });
+  await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  await adapter.stop();
+
+  const heard = gateway.observes.filter((observed) => observed.agentId === 'bea').map((observed) => observed.message);
+  assert.ok(heard.some((line) => /: The build is red on main\.\n\nDone\.$/.test(line)), JSON.stringify(heard));
+});
+
+test('words before a refused call are posted before the next response, never run into it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const refused = { id: 'c1', toolName: 'shell.run', input: {} };
+    const allowed = { id: 'c2', toolName: 'fs.read', input: {} };
+    await gateway.bus.emit({ type: 'provider.response', sessionId, parts: [{ type: 'text', text: 'Trying the shell.' }, { type: 'tool-call', call: refused }] });
+    await gateway.bus.emit({ type: 'tool.denied', sessionId, call: refused });
+    await gateway.bus.emit({ type: 'provider.response', sessionId, parts: [{ type: 'text', text: 'Reading the file instead.' }, { type: 'tool-call', call: allowed }] });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: allowed });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c2', toolName: 'fs.read', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['Trying the shell.', 'Reading the file instead.', 'Done.']);
+});
+
+test('a hosted-loop reply that joins the whole turn posts only what was not said along the way', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Let me check' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    // As the codex provider returns it: every message of the turn, joined.
+    return sessionWithReply(sessionId, 'Let me check\n\nDone');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['Let me check', 'Done']);
+});
+
+test('what an agent said before its turn failed is still heard by the thread\'s other agents, and the error note is not', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Main is red.' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    throw new Error('provider exploded');
+  });
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:940.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:940.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', replies: 'final' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', replies: 'final' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const message = channelMessage({ text: 'check main', ts: '940.1', thread: '940.0' });
+  await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  await adapter.stop();
+
+  const heard = gateway.observes.filter((observed) => observed.agentId === 'bea').map((observed) => observed.message);
+  assert.ok(heard.some((line) => /: Main is red\.$/.test(line)), JSON.stringify(heard));
+  assert.ok(!heard.some((line) => line.includes('Something went wrong')));
 });
