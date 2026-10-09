@@ -6340,6 +6340,22 @@ test('resolveOutbound with a thread posts every chunk as a reply under it', asyn
   await adapter.stop();
 });
 
+test('a message split at Slack\'s limit never cuts through a link', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  const adapter = await startedAdapterWith(web);
+
+  const url = `https://example.com/${'p'.repeat(60)}`;
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG' });
+  // No newline to break at, and the address straddles the 4,000th character.
+  await connection.post(`${'a'.repeat(3_980)} ${url} and after`);
+  assert.equal(web.posts.length, 2);
+  assert.ok(!(web.posts[0]?.text ?? '').includes('<'), web.posts[0]?.text.slice(-40));
+  assert.ok((web.posts[1]?.text ?? '').startsWith(`<${url}>`), web.posts[1]?.text.slice(0, 40));
+
+  await adapter.stop();
+});
+
 test('resolveOutbound refuses a channel the app is not a member of, naming the fix', async () => {
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('C-PRIVATE', { is_member: false });
