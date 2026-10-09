@@ -596,8 +596,10 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   // Only for subcommands whose `-c` is known not to set config: `clone -c`
   // does exactly what `git -c` does (`core.sshCommand=…`).
   const subcommandAt = required[0] === '-C' ? 2 : 0;
+  // Only the `-c` the shared list contributes; a scope that names `-c` in
+  // its own `deniedFlags` still means it.
   const deniedInTail = scope.command === 'git' && GIT_SUBCOMMANDS_WITH_PLAIN_C.has(required[subcommandAt] ?? '')
-    ? denied.filter((flag) => flag !== '-c')
+    ? [...ALWAYS_DENIED_FLAGS.filter((flag) => flag !== '-c'), ...(scope.deniedFlags ?? [])]
     : denied;
   // A required token can itself be a flag or a refspec — an exact scope
   // carries the whole approved command — and a whitelist file is
