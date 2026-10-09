@@ -768,6 +768,11 @@ export const commandScopeFromPrefix = (prefix: string): { scope: CommandScope } 
   if (args.some((token) => token.startsWith('-'))) {
     return { reason: 'it names a flag; list the command and its subcommands only' };
   }
+  // A path is a program or a file, not a subcommand: `python scripts/x.py`
+  // would let any tail follow a script nobody reviewed by name.
+  if (args.some((token) => token.includes('/') || token.startsWith('.'))) {
+    return { reason: 'it names a path; list the command and its subcommands only' };
+  }
   if (analysis.expands?.some((expands) => expands) || analysis.tokens.some((token) => /[*?[\]{}~$\\#]/.test(token))) {
     return { reason: 'it contains something the shell would expand' };
   }

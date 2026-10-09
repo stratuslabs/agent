@@ -249,8 +249,19 @@ export const runGrants = async (
   }
   if (revocation) {
     if (revocation.scope !== undefined) {
-      declared = await callRunningGateway(env, command, base, `/api/v1/agents/${encoded}/grants`, undefined, 'GET')
-        .then(async (listing) => (listing.ok ? ((await listing.json()) as GrantsListing).configCommands ?? [] : []), () => []);
+      const checked = await callRunningGateway(env, command, base, `/api/v1/agents/${encoded}/grants`, undefined, 'GET')
+        .then(async (listing) => (listing.ok ? ((await listing.json()) as GrantsListing).configCommands ?? [] : undefined), () => undefined);
+      if (checked === undefined) {
+        // Not knowing is not the same as "nothing in config covers it".
+        writeLine(streams.stdout, `Revoked ${named} for ${agentId}.`);
+        writeLine(
+          streams.stderr,
+          `Warning: could not ask the daemon whether approvals.commands in its config still allows "${revocation.scope}". `
+          + `\`stratus grants ${agentId}\` lists what config allows.`,
+        );
+        return 0;
+      }
+      declared = checked;
     }
     return reportRevocation(true);
   }

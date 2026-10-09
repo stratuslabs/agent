@@ -222,7 +222,7 @@ its limits.
 
 Unlike the other keys here, an agent's list adds to the top-level one
 rather than replacing it. An entry that isn't plain words (a flag, `|`, a
-glob, a path) is ignored, with a warning at startup, and is left out of
+glob, a path in any word) is ignored, with a warning at startup, and is left out of
 every listing of what's allowed. The daemon logs what
 config allows when it starts, and `stratus grants <agent>` lists these
 entries above the agent's grants. They aren't grants, so
