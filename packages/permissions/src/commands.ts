@@ -471,6 +471,13 @@ const syntaxOf = (command: string): { active: string; bare: string } | undefined
       active += ' ';
       continue;
     }
+    if (char === '#') {
+      // An unquoted `#` can start a comment, inside which `sh` ignores
+      // quotes up to the newline — so a quote there would put this scanner
+      // in quoted mode over text the shell runs. Not modelled; checked
+      // whole instead.
+      return undefined;
+    }
     active += char;
     bare += char;
   }
@@ -585,7 +592,10 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
     // A leading `-C <repo>` in a git scope is git's own directory flag, put
     // there by `normalizeCommandScope`; the subcommand's refusal of `-C`
     // (`git branch -C` copies) is about the tokens after the subcommand.
-    if (scope.command === 'git' && index === 0 && token === '-C' && required.length > 2) {
+    // Its operand is a path, not an argument of the subcommand's, so the
+    // subcommand's denied arguments and git's refspec rule do not apply to
+    // it either: `git -C add remote` is the `remote` subcommand in `add`.
+    if (scope.command === 'git' && required[0] === '-C' && required.length > 2 && index <= 1) {
       continue;
     }
     if (token.startsWith('-')) {

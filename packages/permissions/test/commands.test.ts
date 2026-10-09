@@ -691,6 +691,10 @@ test('substitutions still run inside double quotes, and nothing hides behind a b
   for (const [command, reason] of refused) {
     assert.match(analyzeCommand(command).disqualifiedBy ?? '', reason, command);
   }
+  // An unquoted `#` may start a comment, where sh ignores quotes: a quote
+  // there must not hide the next line from the check.
+  const commented = 'git status # "\nprintf owned > /tmp/pwn # "';
+  assert.match(analyzeCommand(commented).disqualifiedBy ?? '', /newline|redirection/);
   // Single quotes really are literal, substitutions included.
   assert.equal(analyzeCommand("git commit -m '$(not run)'").disqualifiedBy, undefined);
 });
@@ -720,6 +724,14 @@ test('git -C <repo> persists a scope for that repository and that subcommand', (
     assert.equal(matchesScope(analysis, normalizeCommandScope(analysis)!), true, command);
   }
   assert.equal(matchesScope(analyzeCommand(`git -C ${repo} branch -C a b`), branch), false);
+  // The repository operand is a path, whatever it is called.
+  for (const command of ['git -C add remote', 'git -C +repo status', 'git -C :repo log']) {
+    const analysis = analyzeCommand(command);
+    const scope = normalizeCommandScope(analysis);
+    assert.ok(scope, command);
+    assert.equal(matchesScope(analysis, scope), true, command);
+  }
+  assert.equal(matchesScope(analyzeCommand('git -C add remote add origin x'), normalizeCommandScope(analyzeCommand('git -C add remote'))!), false);
 
   // The subcommand's scope is what it would be without -C: `push`, with
   // --force still excluded however it was first approved.

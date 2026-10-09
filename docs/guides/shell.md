@@ -56,7 +56,8 @@ and a newline are text, so `git commit -m "Fix the hang (Mac mini)"` and
 `git diff | grep -E 'TODO|FIXME'` are judged as the commands they are.
 `$( )`, backticks, and `${ }` still count inside double quotes, where the
 shell still runs them. A backslash outside single quotes can escape a quote,
-which this parser does not model, so a command containing one is checked
+which this parser does not model, and an unquoted `#` can start a comment
+in which the shell ignores quotes, so a command containing either is checked
 character by character, quotes and all, and a backslash anywhere in a
 pipeline is refused.
 
