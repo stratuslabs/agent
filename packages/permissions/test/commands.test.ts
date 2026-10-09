@@ -692,6 +692,11 @@ test('a command an operator declares is a prefix whose tail may vary, minus the 
   const grep = declared('grep');
   assert.equal(matchesScope(analyzeCommand('grep fix'), grep), true);
   assert.equal(matchesScope(analyzeCommand('grep fix credentials.json'), grep), false);
+  // And a prefix longer than a limited built-in scope, whose limits it
+  // would otherwise shed.
+  for (const prefix of ['grep fix', 'git branch release']) {
+    assert.match((commandScopeFromPrefix(prefix) as { reason: string }).reason, /already limits/, prefix);
+  }
   // And a prefix shorter than a limited subcommand is refused outright.
   assert.match((commandScopeFromPrefix('git') as { reason: string }).reason, /git branch/);
 

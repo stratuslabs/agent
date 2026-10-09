@@ -215,7 +215,10 @@ An entry keeps every limit the built-in list draws for the same command:
 `git branch` still only lists branches, and `grep` still takes no file. A
 bare `git` is refused, because it would cover the mutating forms of the
 subcommands the built-in list limits. List the subcommands instead
-(`git push`, `git fetch`).
+(`git push`, `git fetch`). An entry that extends a limited built-in scope,
+like `grep fix`, is refused too, since it would let a file follow the
+pattern. The built-in scope already runs those commands unattended within
+its limits.
 
 Unlike the other keys here, an agent's list adds to the top-level one
 rather than replacing it. An entry that isn't plain words (a flag, `|`, a
@@ -224,7 +227,8 @@ every listing of what's allowed. The daemon logs what
 config allows when it starts, and `stratus grants <agent>` lists these
 entries above the agent's grants. They aren't grants, so
 `stratus grants revoke` can't take one back. Remove it from config and
-restart. Like grants, they stop counting for a conversation that has read
+restart. Revoking a remembered scope that config also lists removes the
+grant and says the command still runs because of config. Like grants, they stop counting for a conversation that has read
 external content when `externalContent` is `gate`.
 
 Only a config you chose can set this, the same rule as the rest of

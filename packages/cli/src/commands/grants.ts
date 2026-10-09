@@ -113,6 +113,17 @@ export const runGrants = async (
   };
 
   const reportRevocation = (revoked: boolean): number => {
+    if (revoked && revocation?.scope !== undefined && declared.includes(revocation.scope.trim())) {
+      // The stored grant is gone, but the command still runs: config says so
+      // too, and saying only "Revoked" would leave the operator believing it
+      // now asks.
+      writeLine(streams.stdout, `Revoked ${named} for ${agentId}.`);
+      writeLine(
+        streams.stderr,
+        `"${revocation.scope}" is also in approvals.commands in config, so it still runs without asking. Remove it there and restart the daemon.`,
+      );
+      return 0;
+    }
     if (!revoked && revocation?.scope !== undefined && declared.includes(revocation.scope.trim())) {
       writeLine(
         streams.stderr,
@@ -220,6 +231,10 @@ export const runGrants = async (
     return 1;
   }
   if (revocation) {
+    if (revocation.scope !== undefined) {
+      declared = await callRunningGateway(env, command, base, `/api/v1/agents/${encoded}/grants`, undefined, 'GET')
+        .then(async (listing) => (listing.ok ? ((await listing.json()) as GrantsListing).configCommands ?? [] : []), () => []);
+    }
     return reportRevocation(true);
   }
   const listing = await response.json() as GrantsListing;

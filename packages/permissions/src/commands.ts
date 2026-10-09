@@ -780,6 +780,20 @@ export const commandScopeFromPrefix = (prefix: string): { scope: CommandScope } 
   if (narrower) {
     return { reason: `the built-in list limits \`${describeCommandScope(narrower)}\`; list the subcommands it may run instead` };
   }
+  // Nor longer than a limited built-in scope: `grep fix` names grep's
+  // pattern, and as a prefix it would let any file follow it, which the
+  // built-in `grep` exists to refuse. The limits are about the arguments a
+  // prefix fixes in place, so there is no adjusting them; the entry is
+  // refused and the built-in scope already covers what it was safe for.
+  const extended = forBase.find((scope) => {
+    const sub = scope.args ?? [];
+    return sub.length < args.length
+      && sub.every((token, index) => args[index] === token)
+      && (scope.listOnly || scope.allowedFlags || scope.maxPositionals !== undefined || scope.literal || (scope.flagsWithValue ?? []).length > 0);
+  });
+  if (extended) {
+    return { reason: `it extends \`${describeCommandScope(extended)}\`, which the built-in list already limits; it runs unattended within those limits without an entry` };
+  }
   // And the same prefix as a built-in scope keeps every limit it draws —
   // list-only, the named flags, the positional count — never just the
   // refusals: `git branch` must still not create a branch.
