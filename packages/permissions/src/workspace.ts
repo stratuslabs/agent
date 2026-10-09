@@ -167,6 +167,11 @@ const readPaths = (base: string, args: string[]): string[] | undefined => {
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index] as string;
     if (!endOfFlags && token === '--') {
+      // After an operand, `--` may itself be a file to a tool that stopped
+      // reading options there (BSD, or POSIXLY_CORRECT).
+      if (positionals.length > 0) {
+        operandsToo.push(token);
+      }
       endOfFlags = true;
       continue;
     }

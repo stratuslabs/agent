@@ -18,6 +18,7 @@ const layout = async () => {
   await writeFile(outside, 'token\n');
   await symlink(outside, path.join(repo, 'leak.txt'));
   await symlink(root, path.join(repo, 'up'));
+  await symlink(outside, path.join(repo, '--'));
   await mkdir(path.join(root, 'elsewhere', 'child'), { recursive: true });
   await writeFile(path.join(root, 'elsewhere', 'secret'), 'token\n');
   await symlink(path.join(root, 'elsewhere', 'child'), path.join(repo, 'hop'));
@@ -70,6 +71,8 @@ test('a read inside the workspace is judged inside, and one that leaves it is no
     // Options after an operand are files to BSD tools.
     'head src/main.ts -n /etc/passwd',
     'cat src/main.ts -n ../../../../secret.txt',
+    // `--` after an operand may be a file, and here it's a link out.
+    'cat src/main.ts --',
     // ripgrep reads ignore files above the workspace unless told not to.
     'rg export',
     'rg --no-ignore-parent export',
