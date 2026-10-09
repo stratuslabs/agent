@@ -46,6 +46,14 @@ export interface AgentApprovalConfig {
    */
   externalContent?: ExternalContentApprovals;
   /**
+   * How much an agent may do in its own workspace without asking.
+   * `workspace`: commands that only read, and only inside the agent's
+   * workspace directory, run unattended. `off` (the default): nothing
+   * beyond the built-in safe list and what was granted. Overrides per
+   * agent like the keys above.
+   */
+  autonomy?: 'off' | 'workspace';
+  /**
    * Commands the operator installed for the agent to use, which run without
    * asking: `agentboard`, `pnpm test`, `gh pr`. Each is a command and
    * optionally the subcommands it is limited to; what follows may vary.
@@ -126,6 +134,14 @@ export type SlackReplyMode = 'final' | 'stream';
 /** One agent's Slack presentation settings. */
 export interface AgentSlackConfig {
   replies?: SlackReplyMode;
+  /**
+   * Channel ids where this agent answers every new top-level message from
+   * an admitted sender without being mentioned — a channel that is "the
+   * place you talk to this agent". Threads there follow the soul's
+   * `listens` like anywhere else. Per-agent only: the top-level `slack`
+   * block refuses it, since one channel cannot be every agent's home.
+   */
+  homeChannels?: string[];
 }
 
 /**
@@ -136,7 +152,7 @@ export interface AgentSlackConfig {
  * Read only from a **trusted** config, like `principals`: how the daemon
  * posts into the operator's workspace is not a cloned repository's call.
  */
-export interface SlackConfig extends AgentSlackConfig {
+export interface SlackConfig extends Omit<AgentSlackConfig, 'homeChannels'> {
   /** Per-agent overrides, keyed by agent id. */
   agents?: Record<string, AgentSlackConfig>;
 }
