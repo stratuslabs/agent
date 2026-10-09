@@ -618,26 +618,6 @@ export const resolveAgentSlack = (
   homeChannels: slack?.agents?.[agentId]?.homeChannels ?? [],
 });
 
-/**
- * Which agent owns each home channel: the first under `slack.agents` in
- * the config file's own order. Settled here, from the config, because the
- * order anything downstream sees agents in is not the operator's. The
- * daemon lists Slack apps in credential-store order, which follows the
- * order the apps were set up in, and "first wins" has to mean first in
- * the file the operator edits.
- */
-export const homeChannelOwners = (slack: SlackConfig | undefined): Map<string, string> => {
-  const owners = new Map<string, string>();
-  for (const [agentId, agent] of Object.entries(slack?.agents ?? {})) {
-    for (const channelId of agent?.homeChannels ?? []) {
-      if (!owners.has(channelId)) {
-        owners.set(channelId, agentId);
-      }
-    }
-  }
-  return owners;
-};
-
 // ---------------------------------------------------------------------------
 // Writing the config file
 // ---------------------------------------------------------------------------

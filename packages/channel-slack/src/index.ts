@@ -2749,24 +2749,42 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     options.agents.find((candidate) => candidate.agentId === agentId);
 
   /**
-   * Which agent each home channel belongs to, settled once from the
-   * configuration. First listed wins: two agents answering every message in
-   * one channel is the double reply the thread rules exist to prevent, and
-   * a startup warning is the place an operator will see the clash.
+   * Which agent each home channel belongs to, keyed `team:channel` because
+   * a channel id is unique only within its workspace. Settled at start,
+   * once every app has authenticated and its team is known. A channel two
+   * agents in one workspace both call home belongs to neither: two agents
+   * answering every message there is the double reply the thread rules
+   * exist to prevent, and picking one would hang on an order the config
+   * file does not reliably carry (JSON objects enumerate integer-like keys
+   * numerically). Both still answer there when mentioned, and a startup
+   * warning says so.
    */
   const homeOwners = new Map<string, string>();
-  for (const agent of options.agents) {
-    for (const channelId of agent.homeChannels ?? []) {
-      const owner = homeOwners.get(channelId);
-      if (owner === undefined) {
-        homeOwners.set(channelId, agent.agentId);
-      } else if (owner !== agent.agentId) {
-        (options.warn ?? options.log ?? (() => {}))(
-          `slack: ${channelId} is a home channel for both ${owner} and ${agent.agentId}; ${owner} keeps it, and ${agent.agentId} answers there only when mentioned.`,
-        );
+  const settleHomeOwners = (): void => {
+    homeOwners.clear();
+    const claims = new Map<string, string[]>();
+    for (const agent of options.agents) {
+      const teamId = botIdentities.get(agent.agentId)?.teamId;
+      if (teamId === undefined) {
+        continue;
+      }
+      for (const channelId of agent.homeChannels ?? []) {
+        const key = `${teamId}:${channelId}`;
+        claims.set(key, [...(claims.get(key) ?? []), agent.agentId]);
       }
     }
-  }
+    for (const [key, claimants] of claims) {
+      const agentIds = [...new Set(claimants)];
+      if (agentIds.length === 1) {
+        homeOwners.set(key, agentIds[0]!);
+        continue;
+      }
+      const channelId = key.slice(key.indexOf(':') + 1);
+      warn(
+        `slack: ${channelId} is a home channel for ${agentIds.join(' and ')}; a channel can be home to one agent, so none of them answers there unless mentioned.`,
+      );
+    }
+  };
 
   /**
    * How an agent listens, from its soul — read per message, so a roster
@@ -4399,7 +4417,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // inside a thread the soul's `listens` already says what an untagged
     // reply is, and the home channel does not overrule it.
     const homeOwner = !isDm && event.thread_ts === undefined && named === undefined
-      ? homeOwners.get(event.channel)
+      ? homeOwners.get(`${team}:${event.channel}`)
       : undefined;
     const addressed = mentioned || homeOwner === connection.config.agentId;
     // The key one Slack MESSAGE is known by, whichever delivery carried
@@ -5133,6 +5151,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         }
       }
 
+      settleHomeOwners();
+
       for (const connection of authenticated) {
         const { config, socket } = connection;
         try {
@@ -5197,6 +5217,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       coldVerdicts.clear();
       pendingObserves.clear();
       botIdentities.clear();
+      homeOwners.clear();
       rendering.clear();
       resolvedWhileRendering.clear();
       credentialsPosting.clear();

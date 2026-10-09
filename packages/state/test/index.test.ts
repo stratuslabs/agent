@@ -20,7 +20,6 @@ import {
   readTrustedConfigBlock,
   resolveAgentApprovals,
   resolveAgentSlack,
-  homeChannelOwners,
   validateConfigFile,
   resolveRuntimeConfig,
   saveConfigFile,
@@ -1733,13 +1732,3 @@ test('api.publicUrl loads as an http(s) address without a trailing slash, and an
   await assert.rejects(() => loadConfigFile(file), (error: Error) => !error.message.includes('hunter2'));
 });
 
-test('a home channel two agents list belongs to the first in the config file', () => {
-  const owners = homeChannelOwners({
-    agents: {
-      bea: { homeChannels: ['C1', 'C2'] },
-      ava: { homeChannels: ['C1', 'C3'] },
-    },
-  });
-  assert.deepEqual([...owners], [['C1', 'bea'], ['C2', 'bea'], ['C3', 'ava']]);
-  assert.deepEqual([...homeChannelOwners(undefined)], []);
-});

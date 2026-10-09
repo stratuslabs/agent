@@ -134,9 +134,9 @@ thread under the message.
 - A message there that names another agent is that agent's, not both.
 - Threads are unchanged: an untagged reply follows the soul's
   [`listens`](#how-an-agent-listens), as in any other channel.
-- One channel has one home agent. If two list it, the first in the
-  configuration keeps it and the daemon warns at startup; the other answers
-  there only when mentioned. It is per-agent only: the top-level `slack`
+- One channel has one home agent. If two agents in the same workspace list
+  it, neither gets it: the daemon warns at startup and both answer there
+  only when mentioned. It is per-agent only: the top-level `slack`
   block refuses `homeChannels`.
 - Mentions of people are not mentions of agents, so `@Kai can you look?`
   posted top-level in the channel still goes to the home agent.

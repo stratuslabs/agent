@@ -25,7 +25,6 @@ import {
   resolveAgentApprovals,
   resolveAgentPrincipals,
   resolveAgentSlack,
-  homeChannelOwners,
   applyPerAgentWorkspaces,
   workspaceRepairPending,
   runStateMigrations,
@@ -380,19 +379,6 @@ const serveHeldHome = async (
     // every other channel — with an actionable line instead of a
     // module-not-found stack.
     const adapter = await loadSlackAdapter();
-    // Settled from the config's order before the adapter sees the agents,
-    // which arrive in credential order; each agent gets only the home
-    // channels it won, so the adapter has no tie left to break.
-    const owners = homeChannelOwners(slackConfig);
-    const ownHomeChannels = (agentId: string, listed: readonly string[]): string[] =>
-      listed.filter((channelId) => {
-        const owner = owners.get(channelId);
-        if (owner !== undefined && owner !== agentId) {
-          warn(`slack: ${channelId} is a home channel for both ${owner} and ${agentId}; ${owner} keeps it, and ${agentId} answers there only when mentioned.`);
-          return false;
-        }
-        return true;
-      });
     if (adapter) {
       slackAdapterUp = true;
       channels.push(adapter({
@@ -400,7 +386,7 @@ const serveHeldHome = async (
           const route = resolveAgentApprovals(approvalsConfig, agentId);
           const principals = resolveAgentPrincipals(principalsConfig, agentId);
           const presentation = resolveAgentSlack(slackConfig, agentId);
-          const homeChannels = ownHomeChannels(agentId, presentation.homeChannels);
+          const { homeChannels } = presentation;
           return {
             agentId,
             appToken: tokens.appToken,

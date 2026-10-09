@@ -8845,11 +8845,42 @@ test('a home channel admits only who the agent admits', async () => {
   assert.equal(logged.filter((line) => /refused a message from U-STRANGER/.test(line)).length, 1);
 });
 
-test('a channel two agents call home stays with the first, with a warning, so nobody gets two answers', async () => {
+test('a channel two agents in one workspace call home belongs to neither, with a warning, so nobody gets two answers', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
   const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const warned: string[] = [];
+  const adapter = createSlackChannelAdapter({
+    // Numeric ids on purpose: a JSON object lists these in numeric order,
+    // not the order the operator wrote, so no order can decide the tie.
+    agents: [
+      { agentId: '10', appToken: 'xapp-a', botToken: 'xoxb-a', homeChannels: ['C1'] },
+      { agentId: '2', appToken: 'xapp-b', botToken: 'xoxb-b', homeChannels: ['C1'] },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    warn: (line) => warned.push(line),
+  });
+  gateway.agents = () => [{ id: '10', name: 'Ten' }, { id: '2', name: 'Two' }];
+  await adapter.start(gateway);
+  const untagged = channelMessage({ text: 'status?', ts: '720.1' });
+  await socketAva.deliver('message', untagged);
+  await socketBea.deliver('message', untagged);
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches, []);
+  assert.deepEqual(warned.filter((line) => line.includes('home channel')), [
+    'slack: C1 is a home channel for 10 and 2; a channel can be home to one agent, so none of them answers there unless mentioned.',
+  ]);
+});
+
+test('the same channel id in two workspaces is home to each workspace\'s own agent', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T2');
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
   const warned: string[] = [];
   const adapter = createSlackChannelAdapter({
@@ -8863,14 +8894,13 @@ test('a channel two agents call home stays with the first, with a warning, so no
     warn: (line) => warned.push(line),
   });
   await adapter.start(gateway);
-  const untagged = channelMessage({ text: 'status?', ts: '720.1' });
-  await socketAva.deliver('message', untagged);
-  await socketBea.deliver('message', untagged);
+  const inT1 = channelMessage({ text: 'status?', ts: '721.1' });
+  const inT2 = { ...channelMessage({ text: 'status?', ts: '721.2' }), body: { team_id: 'T2', event_id: 'evt-t2' } };
+  await socketAva.deliver('message', inT1);
+  await socketBea.deliver('message', inT2);
   await adapter.stop();
-  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId), ['ava']);
-  assert.deepEqual(warned.filter((line) => line.includes('home channel')), [
-    'slack: C1 is a home channel for both ava and bea; ava keeps it, and bea answers there only when mentioned.',
-  ]);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId).sort(), ['ava', 'bea']);
+  assert.deepEqual(warned.filter((line) => line.includes('home channel')), []);
 });
 
 test('a reply under a home-channel message reaches its owner even when another socket hears it first', async () => {
