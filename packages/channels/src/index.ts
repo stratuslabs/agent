@@ -171,6 +171,15 @@ export interface GatewayLike {
      * posts nothing for it.
      */
     addressed?: boolean;
+    /**
+     * What was said in the conversation before this message that the agent
+     * never heard — a thread it is mentioned into partway — oldest first,
+     * each entry with its own metadata for its speaker's trust. Used only
+     * when the dispatch creates the session; see `RunInput.earlier` in
+     * `@stratusagent/core`. A host without it ignores the field, and the
+     * agent sees only the message that named it.
+     */
+    earlier?: Array<{ message: string; metadata?: JsonObject }>;
     metadata?: JsonObject;
     signal?: AbortSignal;
     /**

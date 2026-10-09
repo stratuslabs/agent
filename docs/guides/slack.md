@@ -49,8 +49,10 @@ since. The agent that stood down keeps
 listening: what you say to its colleague in that thread, and what the
 colleague answers, go into its own session, marked as said to somebody
 else, so when you turn back to it, it answers as someone who followed
-along. And an agent hears a thread from the mention that brought it in, not
-before — say what it needs in that message. The full set of rules, and the
+along. An agent mentioned partway into a thread opens with the thread's
+parent and newest earlier messages, and one mentioned at the top of a channel
+opens with the channel's most recent messages, when its app has the history
+scopes. The full set of rules, and the
 two edges around them, is [Who a message is
 for](../../packages/channel-slack/README.md#who-a-message-is-for).
 
