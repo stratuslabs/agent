@@ -172,7 +172,10 @@ Commands:
                    else from ~/.stratus/agents/<id>/whitelist.json; --format
                    json. "stratus grants revoke <agent> --tool <name> |
                    --scope "<command>" | --origin <origin>" takes one back,
-                   and a running daemon stops honouring it at once
+                   and a running daemon stops honouring it at once. Also
+                   lists approvals.commands from config: the daemon's own
+                   when one is serving, else the file --config names (or
+                   the one stratus serve would find)
   memory list      Show an agent's live memory with the trust label each
                    entry carries — user, agent, unknown (no recorded origin,
                    or written in a conversation with someone not configured

@@ -148,7 +148,10 @@ export const runGrants = async (
   // daemon to start would read it.
   let declared: string[] = [];
   const localDeclared = async (): Promise<string[]> => createOperatorCommands(
-    await loadServeApprovals(env, undefined, () => {}),
+    // The file a daemon started the same way would read: --config when one
+    // was given, else STRATUS_CONFIG or the global file, as `stratus serve`
+    // resolves it.
+    await loadServeApprovals(env, command.configPath, () => {}),
     (line) => writeLine(streams.stderr, `Warning: ${line}`),
   ).declaredFor(agentId);
 
@@ -158,7 +161,12 @@ export const runGrants = async (
       return 0;
     }
     if (declared.length > 0) {
-      writeLine(streams.stdout, `${agentId} runs these without asking, from approvals.commands in config:`);
+      writeLine(
+        streams.stdout,
+        source.startsWith('from the daemon')
+          ? `${agentId} runs these without asking, from approvals.commands in the daemon's config:`
+          : `${agentId} runs these without asking, from approvals.commands in ${command.configPath ?? 'the config `stratus serve` would read'} (a daemon started with another --config reads that file instead):`,
+      );
       for (const entry of declared) {
         writeLine(streams.stdout, `    ${entry}`);
       }
