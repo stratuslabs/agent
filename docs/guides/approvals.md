@@ -373,19 +373,23 @@ What runs without asking:
 
 - **`web.fetch`** of a page under a trusted domain. It still doesn't follow
   a redirect to another site.
-- Under `autonomy: workspace`, **a plain download**: `curl` or `wget`
-  fetching one https URL with a GET, written to a file inside the workspace
-  or to stdout. The site has to be under a trusted domain, or one already
+- Under `autonomy: workspace`, **a plain download**: `curl` fetching one
+  https URL with a GET, written to a file inside the workspace or to
+  stdout. The site has to be under a trusted domain, or one already
   approved for `web.fetch` with **Always allow**. Flags that send data
   (`-d`, `-F`, `-T`, `-X`), carry headers or credentials (`-H`, `-u`, `-b`),
   read a config (`-K`), skip TLS checks (`-k`), or let the server pick the
   file name (`-J`) still ask. So does any flag not on the list, and so does
-  any download while a user config file exists (`~/.curlrc`, `~/.wgetrc`,
-  `$CURL_HOME`, `$XDG_CONFIG_HOME/curlrc`, `$WGETRC`), since it can add
-  options the command doesn't show, unless the command turns config off
-  (`curl -q` as the first argument, `wget --no-config`).
+  any download while a curl config file exists (`~/.curlrc`,
+  `~/.config/curlrc`, `$CURL_HOME/.curlrc`, `$XDG_CONFIG_HOME/curlrc`, or the
+  same names at the top of the agent's workspace), since it can add options
+  the command doesn't show, unless the command starts with `curl -q`, which
+  reads no config. These are checked in the daemon's environment; a shell
+  `env` that points `CURL_HOME` or `XDG_CONFIG_HOME` somewhere else is
+  trusted as your config. `wget` always asks: it writes `~/.wget-hsts`
+  outside the workspace by default.
 
-`curl -L` and `wget` follow redirects, and those can leave the site. The
+`curl -L` follows redirects, and those can leave the site. The
 request itself goes to the trusted site first, so the risk left is a
 trusted site with an open redirect. List docs and vendor sites, never ones
 where anyone can publish a page (`github.io`, `githubusercontent.com`,

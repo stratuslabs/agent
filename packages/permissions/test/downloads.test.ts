@@ -71,12 +71,7 @@ test('a plain download into the workspace is recognized, and its site is what it
     'curl -sL --create-dirs -o refs/new/page.html https://developers.openai.com/x',
     'curl -sL -m 30 --retry 2 -o refs/page.html https://developers.openai.com/x',
     'curl -sL -o - https://developers.openai.com/x',
-    'wget -q -O refs/page.html https://developers.openai.com/x',
-    'wget -qO- https://developers.openai.com/x',
-    'wget -nv -P refs https://developers.openai.com/x',
-    'wget https://developers.openai.com/x',
     'curl -q -sL -o refs/page.html https://developers.openai.com/x',
-    'wget --no-config -qO- https://developers.openai.com/x',
   ]) {
     assert.equal(await site(command), 'https://developers.openai.com', command);
   }
@@ -114,6 +109,8 @@ test('anything that sends, authenticates, reconfigures, or writes outside is not
     `curl -- ${url}`,
     `curl -sL -q ${url}`,
     `wget --post-data=x ${url}`,
+    `wget -q -O refs/page.html ${url}`,
+    `wget --no-config -qO- ${url}`,
     `wget -i list.txt`,
     `wget -O ${path.join(root, 'x')} ${url}`,
     `wget -r ${url}`,
@@ -122,9 +119,8 @@ test('anything that sends, authenticates, reconfigures, or writes outside is not
   ]) {
     assert.equal(await site(command), undefined, command);
   }
-  // curl -O and wget write into the working directory, so it must be inside.
+  // curl -O writes into the working directory, so it must be inside.
   assert.equal(await site(`curl -sLO ${url}`, root), undefined);
-  assert.equal(await site(`wget ${url}`, root), undefined);
 });
 
 const shell: Tool = {
@@ -213,7 +209,7 @@ test('a site approved for web.fetch with Always allow also covers a plain downlo
   assert.equal(await policy.approve(contextFor(tool, { command: 'curl -sL -o refs/a.html https://app.example.com/a' })), false);
 });
 
-test('a user config file means a download is not plain, unless the command turns config off', async () => {
+test('a curl config file means a download is not plain, unless the command turns config off', async () => {
   const { workspace } = await layout();
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-downloads-rc-'));
   const url = 'https://developers.openai.com/x';
@@ -232,11 +228,15 @@ test('a user config file means a download is not plain, unless the command turns
   await writeFile(path.join(xdg, 'curlrc'), 'url = https://evil.example\n');
   assert.equal(await site(`curl -sL ${url}`, { HOME: home, XDG_CONFIG_HOME: xdg }), undefined);
 
-  assert.equal(await site(`wget -q ${url}`, { HOME: home }), 'https://developers.openai.com');
-  await writeFile(path.join(home, '.wgetrc'), 'post_file = /etc/passwd\n');
-  assert.equal(await site(`wget -q ${url}`, { HOME: home }), undefined);
-  assert.equal(await site(`wget --no-config -q ${url}`, { HOME: home }), 'https://developers.openai.com');
-  assert.equal(await site(`wget -q ${url}`, { WGETRC: path.join(home, '.wgetrc') }), undefined);
+  // The workspace counts as a home too: a shell may run with HOME there,
+  // and it's the one place the agent could write a config itself.
+  await writeFile(path.join(workspace, '.curlrc'), 'upload-file = /etc/passwd\n');
+  assert.equal(await site(`curl -sL ${url}`, { HOME: home }), undefined);
+  assert.equal(await site(`curl -q -sL ${url}`, { HOME: home }), 'https://developers.openai.com');
+  await rm(path.join(workspace, '.curlrc'));
+  await mkdir(path.join(workspace, '.config'), { recursive: true });
+  await writeFile(path.join(workspace, '.config', 'curlrc'), 'upload-file = /etc/passwd\n');
+  assert.equal(await site(`curl -sL ${url}`, { HOME: home }), undefined);
 });
 
 test('for an agent the external-content gate is on for, downloads always ask', async () => {

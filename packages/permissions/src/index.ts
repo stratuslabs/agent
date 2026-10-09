@@ -394,7 +394,7 @@ export interface OriginScopeOptions {
    * Domains the operator trusts this agent to read from without asking:
    * `openai.com` covers it and its subdomains, over https. Applies to the
    * read-only origin tools (`trustedDomainTools`) and, under workspace
-   * autonomy, to plain `curl`/`wget` downloads into the workspace. Never
+   * autonomy, to plain `curl` downloads into the workspace. Never
    * to a tool that acts on a site (`browser.act`), and withdrawn, like
    * every grant, from a conversation the external-content gate has closed.
    * Read per call, so the answer is always the config's.

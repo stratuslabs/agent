@@ -918,8 +918,7 @@ export const gitPushInsideWorkspace = async (
 };
 
 /**
- * A plain download, judged by the site it reads from: `curl` or `wget`
- * fetching one https URL with a GET, written to a file inside the workspace
+ * A plain download, judged by the site it reads from: `curl` fetching one https URL with a GET, written to a file inside the workspace
  * or to stdout. Answers the URL's origin, for the policy to check against
  * the sites the agent may read from (trusted domains, or a site approved
  * for `web.fetch`); undefined means this isn't one, and it asks.
@@ -933,10 +932,11 @@ export const gitPushInsideWorkspace = async (
  * `-F`, `-T`, `-X`), carries credentials or headers (`-u`, `-H`, `-b`,
  * `--netrc`), reads a config (`-K`), turns off TLS checks (`-k`), or lets
  * the server name the file (`-J`, `--content-disposition`) isn't on it.
- * Neither is a user config file (`~/.curlrc`, `~/.wgetrc`): one that exists
- * means it asks, unless the command turns config off (`curl -q`, `wget
- * --no-config`).
- * Redirects (`-L`, wget's default) can still leave the site: the request
+ * Neither is a user config file (`~/.curlrc`): one that exists means it
+ * asks, unless the command turns config off (`curl -q` first). `wget` isn't
+ * judged here at all: it writes `~/.wget-hsts` by default, outside the
+ * workspace, and every agent seen so far reaches for curl.
+ * Redirects (`-L`) can still leave the site: the request
  * itself only ever goes to the trusted origin first, and a docs site with
  * an open redirect is the residual risk, the same one `web.fetch` names.
  */
@@ -961,32 +961,23 @@ const DOWNLOADERS: Record<string, Downloader> = {
     values: ['-m', '--max-time', '--connect-timeout', '--retry', '--retry-delay', '--max-redirs', '-A', '--user-agent'],
     dashIsStdout: true,
   },
-  wget: {
-    flags: ['-q', '--quiet', '-nv', '--no-verbose', '-N', '--timestamping', '-nc', '--no-clobber', '-c', '--continue', '--https-only', '--no-config'],
-    pathValues: ['-O', '--output-document', '-P', '--directory-prefix'],
-    values: ['-T', '--timeout', '-t', '--tries', '-U', '--user-agent', '--max-redirect'],
-    dashIsStdout: true,
-  },
 };
 
 /**
- * The user-level config files a downloader reads before its arguments, by
- * the environment the shell hands it. A `.curlrc` can add a URL, an upload,
- * credentials, or an output path, and `.wgetrc` the same, so the argv
- * judged here would not be what runs. System-wide files (`/etc/wgetrc`)
- * are the administrator's, and trusted like the rest of the host.
+ * The user-level config files curl reads before its arguments. A `.curlrc`
+ * can add a URL, an upload, credentials, or an output path, so the argv
+ * judged here would not be what runs.
  */
-const userConfigFiles = (base: string, env: NodeJS.ProcessEnv): string[] => {
-  const home = env.HOME;
-  if (base === 'curl') {
-    return [
-      env.CURL_HOME ? path.join(env.CURL_HOME, '.curlrc') : undefined,
-      env.XDG_CONFIG_HOME ? path.join(env.XDG_CONFIG_HOME, 'curlrc') : undefined,
-      home ? path.join(home, '.config', 'curlrc') : undefined,
-      home ? path.join(home, '.curlrc') : undefined,
-    ].filter((file): file is string => file !== undefined);
-  }
-  return [env.WGETRC, home ? path.join(home, '.wgetrc') : undefined].filter((file): file is string => file !== undefined);
+const userConfigFiles = (env: NodeJS.ProcessEnv, workspace: string): string[] => {
+  const homes = [env.HOME, workspace].filter((home): home is string => home !== undefined && home.length > 0);
+  return [
+    env.CURL_HOME ? path.join(env.CURL_HOME, '.curlrc') : undefined,
+    env.XDG_CONFIG_HOME ? path.join(env.XDG_CONFIG_HOME, 'curlrc') : undefined,
+    // The workspace as a home too: a shell configured to run with HOME (or
+    // a config directory) there is the one place the agent itself could
+    // write a config, and the policy can't see the shell's own environment.
+    ...homes.flatMap((home) => [path.join(home, '.config', 'curlrc'), path.join(home, '.curlrc')]),
+  ].filter((file): file is string => file !== undefined);
 };
 
 const exists = async (file: string): Promise<boolean> => access(file).then(() => true, () => false);
@@ -1014,16 +1005,14 @@ export const downloadInsideWorkspace = async (
   const paths: string[] = [];
   const urls: string[] = [];
   let args = analysis.tokens.slice(1);
-  // `curl -q` / `curl --disable` first, or `wget --no-config`, reads no
-  // config; otherwise there must be none to read.
-  const noConfig = analysis.base === 'curl'
-    ? args[0] === '-q' || args[0] === '--disable'
-    : args.includes('--no-config');
-  if (analysis.base === 'curl' && noConfig) {
+  // `curl -q` / `curl --disable` first reads no config; otherwise there
+  // must be none to read.
+  const noConfig = args[0] === '-q' || args[0] === '--disable';
+  if (noConfig) {
     args = args.slice(1);
   }
   if (!noConfig) {
-    for (const file of userConfigFiles(analysis.base, env)) {
+    for (const file of userConfigFiles(env, workspace)) {
       if (await exists(file)) {
         return undefined;
       }
@@ -1066,10 +1055,6 @@ export const downloadInsideWorkspace = async (
     // token or the next one.
     for (let at = 1; at < token.length; at += 1) {
       const flag = `-${token[at]}`;
-      // wget's two-letter short flags (`-nv`, `-nc`) only as the whole token.
-      if (at === 1 && downloader.flags.includes(token)) {
-        break;
-      }
       if (downloader.flags.includes(flag)) {
         continue;
       }
@@ -1106,7 +1091,7 @@ export const downloadInsideWorkspace = async (
   }
   const root = await resolveReal(workspace);
   const here = await resolveReal(cwd);
-  // With no path, curl -O and wget write into the working directory, so it
+  // With no path, curl -O writes into the working directory, so it
   // must be inside too.
   if (root === undefined || here === undefined || !within(root, here)) {
     return undefined;
