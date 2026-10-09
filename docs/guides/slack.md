@@ -189,11 +189,26 @@ warning in the daemon log, and replies still post — just without the status
 ahead of them. Slack drops a status after two minutes with no message, so
 the daemon sets it again while a long turn runs.
 
-Links in an agent's messages stay clickable but get no preview card. Every
-post goes out with Slack's link and media unfurling turned off, so a reply
-that names three PRs is three lines, not three cards. In `stream` mode the
-setting is made when the placeholder is posted; Slack's edit call takes no
-unfurl setting of its own.
+Slack shows a preview card under each link an agent posts. To turn that
+off, set `linkPreviews` to `false`, for every agent or one: links stay
+clickable, and a reply that names three PRs is three lines, not three
+cards.
+
+```jsonc
+// ~/.stratus/config.json — trusted configs only
+{
+  "slack": {
+    "linkPreviews": false,             // default true, Slack's own behavior
+    "agents": {
+      "blair": { "linkPreviews": true }  // per agent, over the default
+    }
+  }
+}
+```
+
+Restart the daemon to apply it. In `stream` mode the setting is made when
+the placeholder is posted; Slack's edit call takes no preview setting of its
+own.
 
 ## Sending an image
 

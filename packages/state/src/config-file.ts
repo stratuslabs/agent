@@ -628,6 +628,15 @@ const parseSlackEntry = (
     }
     entry.replies = source.replies;
   }
+  if (source.linkPreviews !== undefined) {
+    // Refused rather than coerced: "false" as a string would read as on.
+    if (typeof source.linkPreviews !== 'boolean') {
+      throw new Error(
+        `Invalid ${where}.linkPreviews in config ${configPath}: expected true or false, received ${JSON.stringify(source.linkPreviews)}.`,
+      );
+    }
+    entry.linkPreviews = source.linkPreviews;
+  }
   if (source.homeChannels !== undefined) {
     // A home channel shared by every agent would have each of them answer
     // every message there; the per-agent entry is the only place it means
@@ -680,7 +689,8 @@ const parseSlackConfig = (raw: unknown, configPath: string): SlackConfig | undef
 /**
  * One agent's Slack presentation: its own entry where it has one, the
  * top-level block otherwise — per key, the precedence `resolveAgentPrincipals`
- * uses. `replies` defaults to `final` here, the one place, so nothing
+ * uses. `replies` defaults to `final` and `linkPreviews` to `true` here,
+ * the one place, so nothing
  * downstream has to know what an absent key means.
  */
 export const resolveAgentSlack = (
@@ -688,6 +698,7 @@ export const resolveAgentSlack = (
   agentId: string,
 ): Required<AgentSlackConfig> => ({
   replies: slack?.agents?.[agentId]?.replies ?? slack?.replies ?? 'final',
+  linkPreviews: slack?.agents?.[agentId]?.linkPreviews ?? slack?.linkPreviews ?? true,
   homeChannels: slack?.agents?.[agentId]?.homeChannels ?? [],
 });
 

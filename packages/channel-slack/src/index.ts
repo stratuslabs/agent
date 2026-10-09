@@ -186,6 +186,12 @@ export interface SlackAgentConfig {
    */
   replies?: 'final' | 'stream';
   /**
+   * `false` posts this agent's messages without link and media previews
+   * (Slack's `unfurl_links`/`unfurl_media`). Absent or `true` leaves
+   * Slack's default, which previews them.
+   */
+  linkPreviews?: boolean;
+  /**
    * Channel ids where a new top-level message from an admitted sender is
    * this agent's to answer without a mention: the channel people come to
    * when they want this agent. A message there that names another agent
@@ -554,12 +560,10 @@ const checkBotScopes = (
 };
 
 /**
- * Every message an agent posts goes out without link or media previews.
- * Slack unfurls links by default, and an agent's reports and replies are
- * full of links (PRs, cards, docs) whose previews bury the text that
- * matters. Applied once around the client, so no post site can forget it.
- * `chat.update` takes no unfurl flags; an edited placeholder keeps the
- * post's own setting.
+ * A client whose every post goes out without link or media previews, for
+ * an agent configured with `linkPreviews: false`. Applied once around the
+ * client, so no post site can forget it. `chat.update` takes no unfurl
+ * flags; an edited placeholder keeps the post's own setting.
  */
 export const withoutLinkPreviews = (web: SlackWebLike): SlackWebLike => {
   // Delegating objects, not copies: everything else on the client (and a
@@ -5701,7 +5705,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           continue;
         }
         try {
-          const web = withoutLinkPreviews(createWeb(config.botToken));
+          const created = createWeb(config.botToken);
+          const web = config.linkPreviews === false ? withoutLinkPreviews(created) : created;
           const auth = await web.auth.test();
           const botUserId = auth.user_id ?? '';
           const teamId = auth.team_id ?? '';

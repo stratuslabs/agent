@@ -6324,31 +6324,41 @@ test('resolveOutbound posts to a channel the app is a member of, splitting overs
   await adapter.stop();
 });
 
-test('every post an agent makes asks Slack for no link or media previews', async () => {
+const postsWithLinks = async (linkPreviews?: boolean): Promise<FakeWeb['posts']> => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('C-ENG', { is_member: true });
-  // Long enough to need a second message after the edited placeholder.
+  // Long enough to need a second message after the first.
   const reply = `see https://github.com/stratuslabs/agent/pull/1 ${'a'.repeat(5000)}`;
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
   const adapter = createSlackChannelAdapter({
-    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', ...(linkPreviews === undefined ? {} : { linkPreviews }) }],
     editIntervalMs: 0,
     createSocketClient: () => socket,
     createWebClient: () => web,
   });
   await adapter.start(gateway);
-
   await socket.deliver('app_mention', mention('<@B-AVA> link me the PR'));
   await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG' })).post('report: https://example.com');
+  await adapter.stop();
+  assert.ok(web.posts.length >= 3, `expected a reply in two parts and a report, got ${web.posts.length}`);
+  return web.posts;
+};
 
-  assert.ok(web.posts.length >= 3, `expected a placeholder, a continuation and a report, got ${web.posts.length}`);
-  for (const post of web.posts) {
+test('an agent with linkPreviews off asks Slack for no link or media previews on every post', async () => {
+  for (const post of await postsWithLinks(false)) {
     assert.equal(post.unfurl_links, false);
     assert.equal(post.unfurl_media, false);
   }
+});
 
-  await adapter.stop();
+test('by default an agent\'s posts leave Slack\'s link previews alone', async () => {
+  for (const linkPreviews of [undefined, true]) {
+    for (const post of await postsWithLinks(linkPreviews)) {
+      assert.equal('unfurl_links' in post, false);
+      assert.equal('unfurl_media' in post, false);
+    }
+  }
 });
 
 test('resolveOutbound with a thread posts every chunk as a reply under it', async () => {

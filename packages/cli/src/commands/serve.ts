@@ -405,6 +405,7 @@ const serveHeldHome = async (
             ...(principals.slackUsers ? { principals: principals.slackUsers } : {}),
             ...(principals.admit ? { admit: principals.admit } : {}),
             replies: presentation.replies,
+            ...(presentation.linkPreviews ? {} : { linkPreviews: false }),
             ...(homeChannels.length > 0 ? { homeChannels } : {}),
           };
         }),
