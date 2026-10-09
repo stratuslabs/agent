@@ -859,7 +859,9 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             // stage. A granted scope was judged as a command on its own:
             // `curl https://example.com` approved once must not become the
             // far end of `cat secret | curl … --data-binary @-`.
-            const intrinsic = commands?.safeScopes ?? SAFE_COMMAND_SCOPES;
+            // The built-in list itself, not a host's extension of it, which
+            // can hold any command a config named.
+            const intrinsic = SAFE_COMMAND_SCOPES;
             let read = false;
             let covered = true;
             for (const stage of stages) {

@@ -79,6 +79,7 @@ const READERS: Record<string, Reader> = {
       '--files-with-matches', '--files-without-match', '--count', '--count-matches', '--only-matching', '--word-regexp', '--line-regexp',
       '--fixed-strings', '--hidden', '--no-ignore', '--unrestricted', '--multiline', '--pcre2', '--json', '--no-heading', '--heading',
       '--vimgrep', '--with-filename', '--no-filename', '--null', '--text', '--stats', '--trim', '--no-messages', '--no-config',
+      '--no-ignore-parent', '--no-ignore-global', '--no-ignore-dot', '--no-ignore-vcs', '--no-ignore-files', '--no-ignore-exclude',
     ],
     pattern: true,
     patternFlags: ['-e', '--regexp'],
@@ -198,6 +199,14 @@ const readPaths = (base: string, args: string[]): string[] | undefined => {
     // the pattern position, the pattern. Dropping it would shift a real
     // path into the pattern slot (`grep - /etc/passwd`).
     positionals.push(token);
+  }
+  // ripgrep reads ignore files above the directory it searches and the
+  // user's global ignore file by default: reads outside the workspace,
+  // however harmless. It runs here only told not to, by `--no-ignore` (or
+  // `-u`), or by both `--no-ignore-parent` and `--no-ignore-global`.
+  if (base === 'rg' && !seen.has('--no-ignore') && !seen.has('-u') && !seen.has('--unrestricted')
+    && !(seen.has('--no-ignore-parent') && seen.has('--no-ignore-global'))) {
+    return undefined;
   }
   const noPattern = (reader.noPatternFlags ?? []).some((flag) => seen.has(flag));
   const paths = reader.pattern && !patternGiven && !noPattern ? positionals.slice(1) : positionals;
