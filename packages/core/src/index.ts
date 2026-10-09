@@ -6962,7 +6962,8 @@ export class AgentRunner {
   /** Whether a message out of budget gets another; see `AgentRunnerOptions.autoContinue`. */
   private mayContinue(sessionId: string, continued: number): boolean {
     const autoContinue = this.options.autoContinue;
-    if (autoContinue === undefined || (autoContinue !== true && continued >= autoContinue)) {
+    // A budget of nothing renews to nothing, forever: never renewed.
+    if (autoContinue === undefined || this.maxTurns < 1 || (autoContinue !== true && continued >= autoContinue)) {
       return false;
     }
     return this.options.waitingInput?.(sessionId) !== true;

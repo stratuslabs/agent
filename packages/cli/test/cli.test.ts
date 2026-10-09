@@ -14678,3 +14678,9 @@ test('an announced restart under --log-format json keeps stdout JSON, and the ne
   }
   assert.match(watched.output.stdout, /"msg":"restarting stratusd \(test\)"/);
 });
+
+test('a continuation shows in --events and keeps its counts in the log', () => {
+  const event = { type: 'session.continued' as const, sessionId: 's1', continuation: 2, turns: 40 };
+  assert.equal(formatEvent(event), '• session.continued #2 (+40 turns)');
+  assert.deepEqual(eventDetail(event), { continuation: 2, turns: 40 });
+});

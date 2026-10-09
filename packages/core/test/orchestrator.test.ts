@@ -562,6 +562,22 @@ test('auto-continue wraps up instead when somebody has written to the session me
   assert.equal(session.messages.at(-1)?.content, 'Stopping here for your message.');
 });
 
+test('auto-continue never renews a budget of nothing', async () => {
+  const tools = new ToolRegistry();
+  tools.register({ name: 'step', async execute() { return { done: true }; } });
+  const provider: ModelProvider = {
+    name: 'zero',
+    async generate(request) {
+      return request.toolChoice === 'none'
+        ? { parts: [{ type: 'text', text: 'No steps to spend.' }] }
+        : { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: 'step', input: {} } }] };
+    },
+  };
+  const runner = new AgentRunner({ provider, tools, maxTurns: 0, autoContinue: true });
+  const session = await runner.run({ sessionId: 'zero', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Go' });
+  assert.equal(session.messages.at(-1)?.content, 'No steps to spend.');
+});
+
 test('auto-continue never extends a message stuck repeating a failure', async () => {
   const tools = new ToolRegistry();
   tools.register({ name: 'shell.run', async execute() { throw new Error('cwd /work/missing does not exist'); } });

@@ -34,6 +34,8 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• session.tainted ${event.trust} (${event.source})`;
     case 'session.context-trimmed':
       return `• session.context-trimmed dropped=${event.droppedMessages} floor=${event.floor}`;
+    case 'session.continued':
+      return `• session.continued #${event.continuation} (+${event.turns} turns)`;
     default:
       return null;
   }
@@ -121,6 +123,8 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
       // Counts, never the messages: the conversation that fell out of the
       // window is exactly the kind of thing the log does not carry.
       return { droppedMessages: event.droppedMessages, floor: event.floor };
+    case 'session.continued':
+      return { continuation: event.continuation, turns: event.turns };
     default:
       return undefined;
   }
