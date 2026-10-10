@@ -1,9 +1,15 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
 import path from 'node:path';
 
-import { gatewayTokenPath, stratusHomePath, type StateEnvironment } from '@stratusagent/state';
+import {
+  gatewayTokenPath,
+  readNonEmptyString,
+  readProcessEnv,
+  stratusHomePath,
+  type StateEnvironment,
+} from '@stratusagent/state';
 
 /** How long a browser session lasts before it has to be re-opened. */
 const SESSION_TTL_MS = 12 * 60 * 60_000;
@@ -31,8 +37,51 @@ export type Principal =
    */
   | { kind: 'cookie'; sessionId: string };
 
+/** The variable naming a file whose contents become the gateway's token. */
+export const GATEWAY_TOKEN_FILE_VARIABLE = 'STRATUS_GATEWAY_TOKEN_FILE';
+
 /**
- * Read the gateway's bearer token, generating one the first time.
+ * A seeded token's shape: one line of printable ASCII with no spaces, so it
+ * survives a header and a shell argument, and at least as long as the 32
+ * bytes a generated one carries once encoded.
+ */
+const SEEDED_TOKEN = /^[\x21-\x7e]{32,}$/;
+
+/**
+ * The token a deployment chose, read from the file
+ * `STRATUS_GATEWAY_TOKEN_FILE` names (a mounted secret, typically), or
+ * undefined when the variable is unset or empty.
+ *
+ * A file rather than the token itself in a variable: a variable is inherited
+ * by everything the daemon starts and shows up in `ps e` and crash dumps, and
+ * `STRATUS_GATEWAY_TOKEN` already means "the token of the gateway this
+ * *client* talks to", which a daemon must never pick up by accident.
+ * Refuses rather than falling back, because a deployment that seeded a token
+ * and got a generated one instead would lock its own control plane out.
+ */
+const readSeededToken = async (env: StateEnvironment): Promise<string | undefined> => {
+  const file = readNonEmptyString(readProcessEnv(env)[GATEWAY_TOKEN_FILE_VARIABLE]);
+  if (file === undefined) {
+    return undefined;
+  }
+  const raw = await readFile(file, 'utf8').catch((error: NodeJS.ErrnoException) => {
+    throw new Error(
+      `${GATEWAY_TOKEN_FILE_VARIABLE} names ${file}, which could not be read (${error.code ?? error.message}). Fix the path or unset the variable.`,
+    );
+  });
+  const token = raw.replace(/\r?\n$/, '');
+  if (!SEEDED_TOKEN.test(token)) {
+    throw new Error(
+      `${GATEWAY_TOKEN_FILE_VARIABLE} names ${file}, which does not hold a usable token: it must be one line of at least 32 printable characters with no spaces.`,
+    );
+  }
+  return token;
+};
+
+/**
+ * Read the gateway's bearer token: the seeded one when
+ * `STRATUS_GATEWAY_TOKEN_FILE` names a file, otherwise the home's own,
+ * generating one the first time.
  *
  * 0600 twice over: `writeFile`'s mode only applies when it creates the file,
  * so an upgrade over a token written under a looser umask would stay
@@ -51,12 +100,34 @@ export const ensureGatewayToken = async (env: StateEnvironment): Promise<string>
     return value;
   };
 
+  const seeded = await readSeededToken(env);
+
   const existing = await readFile(tokenPath, 'utf8').then((raw) => raw.trim()).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'ENOENT') {
       throw error;
     }
     return undefined;
   });
+  if (seeded !== undefined) {
+    if (existing === seeded) {
+      return settle(seeded);
+    }
+    // Copied into the home so every local client that reads the file —
+    // `stratus health`, `stratus restart`, the image's healthcheck — keeps
+    // authenticating. Replaced in one atomic step: written to a private
+    // staging file, then renamed over whatever was there, so no reader ever
+    // sees an empty or half-written token. Two daemons seeded with the same
+    // value race to write the same bytes, which is harmless.
+    const staging = `${tokenPath}.${randomBytes(8).toString('hex')}`;
+    try {
+      await writeFile(staging, `${seeded}\n`, { flag: 'wx', mode: 0o600 });
+      await rename(staging, tokenPath);
+    } finally {
+      await rm(staging, { force: true });
+    }
+    return settle(seeded);
+  }
+
   if (existing !== undefined) {
     if (existing.length === 0) {
       // A token file that holds nothing is corrupt, and this refuses it
