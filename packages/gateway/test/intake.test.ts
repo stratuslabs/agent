@@ -329,3 +329,44 @@ test('a stop that begins while a promotion is connecting a channel stops that ch
 
   assert.deepEqual(order, ['start slow', 'started slow', 'stop slow']);
 });
+
+test('a stop during a promotion starts no further channel, even one that would never finish starting', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const order: string[] = [];
+  let release: () => void = () => {};
+  const firstStart = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const first: GatewayChannelAdapter = {
+    name: 'first',
+    async start() {
+      order.push('start first');
+      await firstStart;
+    },
+    async stop() {
+      order.push('stop first');
+    },
+  };
+  const hangs: GatewayChannelAdapter = {
+    name: 'hangs',
+    async start() {
+      order.push('start hangs');
+      await new Promise(() => {});
+    },
+    async stop() {
+      order.push('stop hangs');
+    },
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, held: true, channels: [first, hangs] });
+  await gateway.start();
+
+  const promoted = gateway.promote();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const stopped = gateway.stop();
+  release();
+  await assert.rejects(promoted);
+  await stopped;
+
+  assert.deepEqual(order, ['start first', 'stop first']);
+});

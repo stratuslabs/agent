@@ -4270,6 +4270,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
   const startChannels = async (adapters: GatewayChannelAdapter[]): Promise<void> => {
     for (const adapter of adapters) {
+      // A stop that began while an earlier channel was starting stops what
+      // is up; starting more after it would leave one it never sees, or
+      // one whose start never returns holding the stop open.
+      if (stopping) {
+        return;
+      }
       try {
         await adapter.start(gateway);
         startedChannels.push(adapter);
