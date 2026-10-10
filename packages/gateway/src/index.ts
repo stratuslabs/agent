@@ -4328,6 +4328,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   let promoting: Promise<void> | undefined;
+  /**
+   * Why the work of a promotion could not begin, once it could not. Final:
+   * the scheduler stops for good when its readiness check fails (a newer
+   * build stamped the home), so a retry would report success with every
+   * schedule silently off. The daemon stays held and says why until it is
+   * restarted.
+   */
+  let promotionFailure: Error | undefined;
 
   const promote = async (): Promise<void> => {
     if (!heldState) {
@@ -4338,6 +4346,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     // One promotion at a time: a second call while the first is connecting
     // channels waits for it rather than starting them twice.
+    if (promotionFailure !== undefined) {
+      throw promotionFailure;
+    }
     promoting ??= (async () => {
       const pending = deferredStart;
       if (pending === undefined) {
@@ -4355,7 +4366,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Held until the work has actually begun: a scheduler that refuses to
       // start (a newer build stamped the home meanwhile) must leave the
       // daemon held, reporting so, and a retry able to try again.
-      await beginWork(pending.orphaned, pending.abandoned);
+      try {
+        await beginWork(pending.orphaned, pending.abandoned);
+      } catch (error) {
+        promotionFailure = new Error(
+          `This daemon could not begin its work and stays held until it is restarted: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        throw promotionFailure;
+      }
       deferredStart = undefined;
       heldState = false;
       log('stratusd promoted: channels connected, schedules running');

@@ -288,6 +288,11 @@ test('a promotion whose work cannot begin leaves the gateway held, and says so',
       (error: unknown) => error instanceof IntakePausedError,
     );
     await rm(stampFile, { force: true });
+
+    // Restoring the state is not enough: the scheduler stopped for good, so
+    // a retry must not report a promotion with every schedule silently off.
+    await assert.rejects(() => gateway.promote(), /stays held until it is restarted/);
+    assert.equal(gateway.held(), true);
   } finally {
     await gateway.stop();
   }
