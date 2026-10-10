@@ -3685,7 +3685,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
 
-    const connection = connectionFor(event.agentId);
+    // A delegated call is asked where the work was asked for: the
+    // delegating conversation, through the app and approvers of the agent
+    // at the root of the chain. The agent doing the work may have no
+    // connection here at all, and its sub-session has no conversation of
+    // its own — asked the old way, nobody saw it and the turn sat out the
+    // whole timeout. The gateway makes such a call one-shot, so routing it
+    // through another agent's approvers never grants anything standing.
+    const origin = event.delegatedFrom;
+    const viaOrigin = origin ? connectionFor(origin.agentId) : undefined;
+    const connection = viaOrigin ?? connectionFor(event.agentId);
     if (!connection) {
       // Two different situations, and only one of them is this adapter's
       // to answer.
@@ -3700,15 +3709,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // agent — denying here would let Slack refuse a question somebody
       // else was going to ask. `stratus serve` reports agents that no
       // channel can ask for, at startup, where the whole roster is visible.
-      if (configuredAgents.has(event.agentId)) {
-        warn(`slack: ${event.agentId} has no live connection; denying ${event.call.toolName}`);
+      if (configuredAgents.has(event.agentId) || (origin && configuredAgents.has(origin.agentId))) {
+        warn(`slack: ${origin?.agentId ?? event.agentId} has no live connection; denying ${event.call.toolName}`);
         gateway.resolveApproval({ requestId: event.requestId, answer: 'deny', reason: 'undeliverable' });
       }
       return;
     }
 
     const approvers = new Set((connection.config.approvers ?? []).filter((id) => id.length > 0));
-    const metadata = event.metadata ?? {};
+    const metadata = (viaOrigin ? origin?.metadata : event.metadata) ?? {};
     const sameChannel = metadata.channel === 'slack' && typeof metadata.slackChannel === 'string'
       ? metadata.slackChannel
       : undefined;
@@ -3724,15 +3733,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     };
 
     if (approvers.size === 0) {
-      decline(`no approvers configured for ${event.agentId}`);
+      decline(`no approvers configured for ${connection.config.agentId}`);
       return;
     }
     if (!channel) {
-      decline(`no conversation to ask in for ${event.agentId}`);
+      decline(`no conversation to ask in for ${connection.config.agentId}`);
       return;
     }
 
-    const agentName = gateway.agents().find((agent) => agent.id === event.agentId)?.name ?? event.agentId;
+    const nameOf = (agentId: string): string => gateway.agents().find((agent) => agent.id === agentId)?.name ?? agentId;
+    // "Quinn (for Nova)": the approver is being asked about Quinn's call,
+    // by Nova's app, in Nova's conversation, and should be told both.
+    const agentName = viaOrigin && origin && origin.agentId !== event.agentId
+      ? `${nameOf(event.agentId)} (for ${nameOf(origin.agentId)})`
+      : nameOf(event.agentId);
     // The notification preview is all some approvers see before deciding
     // whether to open the thread, so it carries the arguments too — just
     // the short form.

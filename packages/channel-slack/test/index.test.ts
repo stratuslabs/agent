@@ -9933,3 +9933,61 @@ test('a shutdown waits for a failed turn\'s interim to reach the thread\'s other
 
   assert.ok(gateway.observes.some((observed) => observed.agentId === 'bea' && observed.message.endsWith('Main is red.')));
 });
+
+test('a delegated call is asked in the delegating thread, through that agent\'s app and approvers', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'], approvalChannel: 'C-OPS' },
+  ]);
+  await adapter.start(gateway);
+
+  // Quinn has no Slack app here. Before, nobody was asked and the turn
+  // waited out the whole timeout.
+  gateway.pendingApprovals.add('req-d');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-d',
+    agentId: 'quinn',
+    sessionId: 'slack:ava:T1:C1:100.1:delegate:quinn:1:1-abcdefgh',
+    metadata: { delegatedBy: 'ava', rootSessionId: 'slack:ava:T1:C1:100.1', delegationDepth: 1 },
+    delegatedFrom: {
+      agentId: 'ava',
+      sessionId: 'slack:ava:T1:C1:100.1',
+      metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    },
+    oneShot: true,
+  }));
+
+  const post = web.posts.at(-1);
+  assert.equal(post?.channel, 'C1');
+  assert.equal(post?.thread_ts, '100.1');
+  assert.match(String(post?.text ?? ''), /quinn \(for Ava\) wants to run shell\.run/i);
+  assert.deepEqual(buttonIds(post?.blocks as SlackBlock[] | undefined), ['stratus_approve_once', 'stratus_deny']);
+  assert.equal(gateway.resolutions.length, 0);
+
+  // Ava's approvers decide it, on Ava's app.
+  await socket.deliver('interactive', click('stratus_approve_once', 'req-d', 'U-DYLAN'));
+  assert.deepEqual(gateway.resolutions.map((entry) => entry.answer), ['once']);
+
+  await adapter.stop();
+});
+
+test('a delegated call whose chain this adapter carries no agent of is left for another channel', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-x');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-x',
+    agentId: 'quinn',
+    sessionId: 'root:delegate:quinn:1:1-abcdefgh',
+    metadata: {},
+    delegatedFrom: { agentId: 'nova', sessionId: 'root' },
+    oneShot: true,
+  }));
+
+  assert.equal(web.posts.length, 0);
+  assert.deepEqual(gateway.resolutions, []);
+
+  await adapter.stop();
+});
