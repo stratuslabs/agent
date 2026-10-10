@@ -9,7 +9,8 @@
 set -euo pipefail
 
 IMAGE=stratusd:smoke
-NAME=stratusd-smoke
+NAME="stratusd-smoke-$$-$(date +%s)"
+STARTED=0
 PORT=${SMOKE_PORT:-4199}
 WORK=$(mktemp -d)
 TOKEN="smoke-$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -20,7 +21,11 @@ cleanup() {
     echo "--- container logs" >&2
     docker logs "$NAME" >&2 2>&1 || true
   fi
-  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  # Only the container this run started, with its anonymous home volume
+  # (the Dockerfile declares one, and `rm` without -v leaves it behind).
+  if [ "$STARTED" = 1 ]; then
+    docker rm -fv "$NAME" >/dev/null 2>&1 || true
+  fi
   rm -rf "$WORK"
 }
 trap 'cleanup $?' EXIT
@@ -55,6 +60,7 @@ docker run -d --name "$NAME" \
   -v "$WORK/gateway-token:/run/secrets/gateway-token:ro" \
   -p "127.0.0.1:${PORT}:4123" \
   "$IMAGE" stratus serve --api-host 0.0.0.0 --log-format json --held >/dev/null
+STARTED=1
 wait_healthy
 
 call GET /health | grep -q '"held":true' || fail "health does not report held"
