@@ -97,6 +97,41 @@ test('/intake needs the token like every other route', async () => {
   }
 });
 
+test('a held daemon answers health as held, refuses messages, and POST /promote releases it', async () => {
+  const order: string[] = [];
+  const harness = await startApi({
+    gateway: {
+      held: true,
+      channels: [{ name: 'chat', async start() { order.push('start chat'); }, async stop() {} }],
+    },
+  });
+  try {
+    const health = await (await harness.call('/api/v1/health')).json() as { ok: boolean; held: boolean };
+    assert.equal(health.ok, true);
+    assert.equal(health.held, true);
+    assert.deepEqual(order, [], 'a conversation channel waits for the promotion');
+
+    const refused = await harness.call('/api/v1/sessions/held-1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'stratus' }),
+    });
+    assert.equal(refused.status, 503);
+
+    const promoted = await harness.call('/api/v1/promote', { method: 'POST' });
+    assert.equal(promoted.status, 200);
+    assert.deepEqual(await promoted.json(), { held: false });
+    assert.deepEqual(order, ['start chat']);
+    assert.equal(((await (await harness.call('/api/v1/health')).json()) as { held: boolean }).held, false);
+
+    // Again: nothing to do, and nothing started twice.
+    assert.deepEqual(await (await harness.call('/api/v1/promote', { method: 'POST' })).json(), { held: false });
+    assert.deepEqual(order, ['start chat']);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('a pause that cannot be written down is a server error, not a bad request', async () => {
   const harness = await startApi();
   const original = harness.gateway.pauseIntake.bind(harness.gateway);

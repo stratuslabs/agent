@@ -618,6 +618,7 @@ const serveHeldHome = async (
   const gateway = createGateway({
     env,
     approvals,
+    ...(command.held === true ? { held: true } : {}),
     onRestart: (outcome) => {
       restart = outcome;
       requestShutdown();

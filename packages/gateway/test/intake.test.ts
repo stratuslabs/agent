@@ -4,8 +4,16 @@ import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { intakeStatePath } from '@stratusagent/state';
-import { createGateway, DEFAULT_PAUSED_MESSAGE, IntakePausedError } from '../src/index.ts';
+import { fleetDbPath, intakeStatePath } from '@stratusagent/state';
+import {
+  createGateway,
+  DEFAULT_PAUSED_MESSAGE,
+  HELD_MESSAGE,
+  IntakePausedError,
+  SqliteScheduleStore,
+  type Gateway,
+  type GatewayChannelAdapter,
+} from '../src/index.ts';
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-intake-'));
 
@@ -115,6 +123,105 @@ test('a pause message is bounded', async () => {
     await assert.rejects(() => gateway.pauseIntake({ message: 'x'.repeat(501) }), /500/);
     await assert.rejects(() => gateway.pauseIntake({ message: '   ' }), /empty/);
     assert.equal(gateway.intake().paused, false);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+// ---- a held start --------------------------------------------------------------
+
+
+const recordingAdapter = (name: string, order: string[], servesWhileHeld?: boolean): GatewayChannelAdapter => ({
+  name,
+  ...(servesWhileHeld !== undefined ? { servesWhileHeld } : {}),
+  async start(_gateway: Gateway) {
+    order.push(`start ${name}`);
+  },
+  async stop() {
+    order.push(`stop ${name}`);
+  },
+});
+
+test('a held gateway starts only what serves while held, refuses work, and promote brings up the rest', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const order: string[] = [];
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    held: true,
+    channels: [recordingAdapter('operator', order, true), recordingAdapter('chat', order)],
+  });
+  await gateway.start();
+  try {
+    assert.equal(gateway.held(), true);
+    assert.deepEqual(order, ['start operator']);
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'held-1', userMessage: 'hello' }),
+      (error: unknown) => error instanceof IntakePausedError && error.message === HELD_MESSAGE,
+    );
+
+    await gateway.promote();
+    assert.equal(gateway.held(), false);
+    assert.deepEqual(order, ['start operator', 'start chat']);
+    const session = await gateway.dispatch({ sessionId: 'held-1', userMessage: 'hello' });
+    assert.equal(session.status, 'completed');
+
+    // Promoting again changes nothing and starts nothing twice.
+    await gateway.promote();
+    assert.deepEqual(order, ['start operator', 'start chat']);
+  } finally {
+    await gateway.stop();
+  }
+  assert.deepEqual(order.slice(2).sort(), ['stop chat', 'stop operator']);
+});
+
+test('a gateway that is not held ignores promote and starts every channel', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const order: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 0, channels: [recordingAdapter('operator', order, true), recordingAdapter('chat', order)] });
+  await gateway.start();
+  try {
+    assert.equal(gateway.held(), false);
+    await gateway.promote();
+    assert.deepEqual(order, ['start operator', 'start chat']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a held gateway fires no schedule until promoted', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const probe = createGateway({ env, idleTimeoutMs: 0 });
+  await probe.start();
+  await probe.stop();
+
+  const store = new SqliteScheduleStore(fleetDbPath(env));
+  const slot = new Date(Date.now() - 5).toISOString();
+  store.insert({
+    id: 'held-sched',
+    agentId: 'stratus',
+    cadence: { kind: 'every', intervalMs: 600_000 },
+    prompt: 'say hello',
+    createdAt: new Date().toISOString(),
+    nextFireAt: slot,
+  });
+  store.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, held: true, schedules: { minIntervalMs: 1, tickMs: 10 } });
+  await gateway.start();
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(gateway.schedules().find((row) => row.id === 'held-sched')?.nextFireAt, slot, 'nothing fired while held');
+
+    await gateway.promote();
+    const deadline = Date.now() + 5_000;
+    while (gateway.schedules().find((row) => row.id === 'held-sched')?.nextFireAt === slot && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.notEqual(gateway.schedules().find((row) => row.id === 'held-sched')?.nextFireAt, slot, 'the slot fired once promoted');
   } finally {
     await gateway.stop();
   }

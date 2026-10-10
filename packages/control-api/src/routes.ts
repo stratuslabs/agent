@@ -21,6 +21,7 @@ import {
   reservedSessionMetadataKey,
   RestartUnsupportedError,
   DEFAULT_PAUSED_MESSAGE,
+  HELD_MESSAGE,
   PauseMessageError,
   ROLLED_OVER_TO_METADATA_KEY,
   SCHEDULE_SESSION_ID_PREFIX,
@@ -608,6 +609,7 @@ export const routes: Route[] = [
         sessions: { total: storedSessions, byStatus },
         approvals: { pending: context.gateway.pendingApprovals().length },
         intake: context.gateway.intake(),
+        held: context.gateway.held(),
         runtimes: [...runtimes.values()],
       };
     },
@@ -910,6 +912,18 @@ export const routes: Route[] = [
   },
   {
     method: 'POST',
+    pattern: `${API_PREFIX}/promote`,
+    async handler(context) {
+      try {
+        await context.gateway.promote();
+      } catch (error) {
+        throw new ApiError(409, 'not_promotable', error instanceof Error ? error.message : String(error));
+      }
+      return { held: context.gateway.held() };
+    },
+  },
+  {
+    method: 'POST',
     pattern: `${API_PREFIX}/restart`,
     async handler(context) {
       const body = await readJsonObject(context.request);
@@ -991,6 +1005,9 @@ export const routes: Route[] = [
       // not awaited, so its refusal would otherwise reach only the stream.
       if (context.gateway.intake().paused) {
         throw new ApiError(503, 'intake_paused', context.gateway.intake().message ?? DEFAULT_PAUSED_MESSAGE);
+      }
+      if (context.gateway.held()) {
+        throw new ApiError(503, 'held', HELD_MESSAGE);
       }
 
       if (isScheduleSessionId(sessionId)) {
