@@ -9945,6 +9945,14 @@ test('serveArgv round-trips every serve option, so the daemon a restart starts i
   assert.deepEqual(parseCommand(['serve', '--api']), { command: 'serve', events: true, api: true });
 });
 
+test('serve --held parses, and the daemon a restart brings up is never held', () => {
+  const held = parseCommand(['serve', '--held', '--no-events']);
+  assert.deepEqual(held, { command: 'serve', events: false, held: true });
+  // Holding is for a new version's first start. A restart replaces a daemon
+  // that was serving; held, it would sit offline until someone promoted it.
+  assert.deepEqual(serveArgv(held as Parameters<typeof serveArgv>[0]), ['serve', '--no-events']);
+});
+
 test('runCli skill add reloads the running daemon, and says so; --no-reload and no daemon stay quiet', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillreload-'));
   const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillreload-src-'));

@@ -231,6 +231,13 @@ export interface GatewayChannelAdapter {
    */
   required?: boolean;
   /**
+   * Whether this channel starts while the gateway is held (`held: true`).
+   * Only a surface for the operator should: the control API, so health can
+   * be asked and `promote` sent. A conversation channel must not, or the
+   * held daemon would take work. Absent means it waits for `promote()`.
+   */
+  servesWhileHeld?: boolean;
+  /**
    * The addressable outbound seam, mirroring
    * `@stratusagent/channels`' `ChannelAdapter.resolveOutbound` structurally
    * for the same reason the rest of this interface does. Optional: an
@@ -533,6 +540,9 @@ export interface IntakeState {
 /** What a paused daemon says when nobody gave it a sentence of its own. */
 export const DEFAULT_PAUSED_MESSAGE = "I'm paused right now and not taking new work. Please try again later.";
 
+/** What a held gateway answers a dispatch with, before it is promoted. */
+export const HELD_MESSAGE = "I'm starting up and not taking work yet. Please try again in a moment.";
+
 /** The longest pause message, so a reply to a refused message stays one. */
 export const MAX_PAUSED_MESSAGE_LENGTH = 500;
 
@@ -775,6 +785,15 @@ export interface GatewayOptions {
    * unchecked.
    */
   restartPreflight?: () => Promise<void>;
+  /**
+   * Start held: migrate, load the roster, and bring up only the channels
+   * that serve while held (the control API), so the daemon answers health
+   * and nothing else. No conversation channel connects, no schedule fires,
+   * no parked approval is re-asked and no abandoned turn is failed, and a
+   * dispatch is refused, until `promote()`. For an upgrade that has to prove
+   * the new version healthy before it touches any work.
+   */
+  held?: boolean;
   /** The drain window a `restart()` uses when the request names none. Default 30s. */
   restartDrainTimeoutMs?: number;
   log?: (line: string) => void;
@@ -1091,6 +1110,15 @@ export interface Gateway {
   pauseIntake(input?: { message?: string }): Promise<IntakeState>;
   /** Take new work again. Idempotent. */
   resumeIntake(): Promise<IntakeState>;
+  /** Whether the gateway started held and has not been promoted yet. */
+  held(): boolean;
+  /**
+   * End a held start: connect the remaining channels, start the scheduler,
+   * and run the recovery sweeps a normal start runs. Resolves once the
+   * channels are up. A no-op on a gateway that is not held. A required
+   * channel that fails to start rejects, and the gateway stays held.
+   */
+  promote(): Promise<void>;
   /**
    * Answers a `credential.requested` with the value an approver entered:
    * stores it add-only (`addNamedCredential`), under the agent or the fleet
@@ -2893,6 +2921,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // Open until `startServing` reads what the last process left, which it
   // does before any channel or the scheduler can deliver work.
   let intakeState: IntakeState = { paused: false };
+  let heldState = options.held === true;
+  /** What a held start left for `promote()`: the channels it did not start, and the sweeps it did not run. */
+  let deferredStart: { adapters: GatewayChannelAdapter[]; orphaned: ReadonlySet<string>; abandoned: string[] } | undefined;
   /**
    * The abort handle of every turn running right now. A restart's drain
    * window ends by aborting these — the same signal the watchdog fires —
@@ -3837,6 +3868,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (intakeState.paused) {
       throw new IntakePausedError(intakeState.message ?? DEFAULT_PAUSED_MESSAGE);
     }
+    if (heldState) {
+      throw new IntakePausedError(HELD_MESSAGE);
+    }
     // The live dispatch named no agent, so whose session it is is known
     // only once its turn resolves. Queueing instead would make this a
     // `finished` repeat of a turn the live caller is still rendering — two
@@ -4200,6 +4234,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ...(options.channels ?? []),
       ...channelContributions.list().map((contribution) => contribution.adapter),
     ];
+    if (heldState) {
+      // Held: only the operator's surface comes up, and everything that
+      // would touch work waits for promote(), in the same order.
+      await startChannels(adapters.filter((adapter) => adapter.servesWhileHeld === true));
+      deferredStart = { adapters: adapters.filter((adapter) => adapter.servesWhileHeld !== true), orphaned, abandoned };
+      log('stratusd is held: answering health only, until promoted');
+      return;
+    }
+    await startChannels(adapters);
+    await beginWork(orphaned, abandoned);
+  };
+
+  const startChannels = async (adapters: GatewayChannelAdapter[]): Promise<void> => {
     for (const adapter of adapters) {
       try {
         await adapter.start(gateway);
@@ -4230,7 +4277,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         }
       }
     }
+  };
 
+  const beginWork = async (
+    orphaned: ReadonlySet<string>,
+    abandoned: string[],
+  ): Promise<void> => {
     // After the channels, so a catch-up firing has somewhere to report and
     // the missed-window log lines land in a gateway whose surfaces are
     // listening. The sweep inside is quick (store reads); the firings it
@@ -4251,7 +4303,35 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     void failAbandonedTurns(abandoned).catch((error) => {
       warn(`failing abandoned turns failed: ${error instanceof Error ? error.message : String(error)}`);
     });
-    
+  };
+
+  let promoting: Promise<void> | undefined;
+
+  const promote = async (): Promise<void> => {
+    if (!heldState) {
+      return;
+    }
+    if (stopping) {
+      throw refusal();
+    }
+    // One promotion at a time: a second call while the first is connecting
+    // channels waits for it rather than starting them twice.
+    promoting ??= (async () => {
+      const pending = deferredStart;
+      if (pending === undefined) {
+        throw new Error('The gateway is held but has not finished starting; promote it once health answers.');
+      }
+      // Skipping any a failed earlier promotion already started, so a retry
+      // never starts one twice.
+      await startChannels(pending.adapters.filter((adapter) => !startedChannels.includes(adapter)));
+      deferredStart = undefined;
+      heldState = false;
+      log('stratusd promoted: channels connected, schedules running');
+      await beginWork(pending.orphaned, pending.abandoned);
+    })().finally(() => {
+      promoting = undefined;
+    });
+    return promoting;
   };
 
   /**
@@ -4866,6 +4946,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       log('intake paused: new work will be refused until it resumes');
       return { ...intakeState };
     },
+
+    held() {
+      return heldState;
+    },
+
+    promote,
 
     async resumeIntake() {
       await writeIntakeState(env, { paused: false });

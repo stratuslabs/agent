@@ -129,6 +129,9 @@ export const serveArgv = (command: ParsedServeCommand): string[] => [
   ...(command.api === false ? ['--no-api'] : command.api === true ? ['--api'] : []),
   ...(command.apiPort !== undefined ? ['--api-port', String(command.apiPort)] : []),
   ...(command.apiHost !== undefined ? ['--api-host', command.apiHost] : []),
+  // Never `--held`: holding is for the first start of a new version, until
+  // it is promoted. The daemon a restart brings up is one that was serving,
+  // and starting it held would take it offline until someone promoted it.
 ];
 
 /**

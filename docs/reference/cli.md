@@ -122,6 +122,7 @@ stratus dashboard                      # local browser dashboard
 | `--no-events` | Hide the event log |
 | `--no-log-file` | `stratus serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
 | `--log-format` | `stratus serve`: `text` (default) — human lines on stdout — or `json`: every record written to the log file, also written to stdout as one JSON line, and nothing else there. For `docker logs`, journald, and log shippers; see [Logs](../guides/logs.md#logs-on-stdout-for-a-container-or-journald) |
+| `--held` | `stratus serve`: start held. State migrations run, the roster loads, and the control API answers health (`"held": true`), but no conversation channel connects, no schedule fires, no parked approval is re-asked, and new messages are refused, until `POST /api/v1/promote`. For an upgrade that has to prove the new version healthy before it touches any work. A daemon an announced restart brings up is never held; one a service manager restarts with the same command is, and waits to be promoted again |
 | `--no-api` | `stratus serve`: do not serve the control API |
 | `--api` | `stratus serve`: serve it even where the config says `api.enabled: false` (what `stratus dashboard` asks of the daemon it starts) |
 | `--api-host` | `stratus serve`: control API interface (default `127.0.0.1`) |

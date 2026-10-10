@@ -300,6 +300,9 @@ Options:
   --api-port       serve: control API port (default: 4123, 0 for any free port)
   --log-format     serve: text (default) or json — every structured log record
                    as one JSON line on stdout, and no human lines
+  --held           serve: start held — the control API answers health, but no
+                   channel connects and no schedule fires until
+                   POST /api/v1/promote (for upgrades that must prove healthy)
   --help, -h       Show this help message
   --version, -v    Print this build's version and exit
 

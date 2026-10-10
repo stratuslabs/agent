@@ -315,6 +315,8 @@ export interface ParsedServeCommand {
    * and nothing else, since a stray human line is a parse error there.
    */
   logFormat?: 'text' | 'json';
+  /** Start held: health only until `POST /api/v1/promote` (see `GatewayOptions.held`). */
+  held?: boolean;
   /** Serve the control API. Defaults to true when the package is installed. */
   api?: boolean;
   /** Overrides `api.port` in the config file. */
@@ -481,6 +483,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--no-api') {
         parsed.api = false;
+        continue;
+      }
+      if (token === '--held') {
+        parsed.held = true;
         continue;
       }
       if (token === '--api') {
