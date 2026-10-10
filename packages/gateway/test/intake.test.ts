@@ -119,3 +119,46 @@ test('a pause message is bounded', async () => {
     await gateway.stop();
   }
 });
+
+test('an intake file that is JSON but not a pause record starts paused, and says why', async () => {
+  for (const contents of ['{}', '{ "paused": "true" }', '{ "paused": false }', 'null', '[]']) {
+    const home = await newHome();
+    const env = { homeDir: home, cwd: home, processEnv: {} };
+    const probe = createGateway({ env, idleTimeoutMs: 0 });
+    await probe.start();
+    await probe.stop();
+    await writeFile(intakeStatePath(env), contents, { mode: 0o600 });
+
+    const warnings: string[] = [];
+    const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line: string) => warnings.push(line) });
+    await gateway.start();
+    try {
+      assert.equal(gateway.intake().paused, true, `opened on ${contents}`);
+      assert.ok(warnings.some((line) => line.includes(intakeStatePath(env))), warnings.join('\n'));
+    } finally {
+      await gateway.stop();
+    }
+  }
+});
+
+test('overlapping pause and resume calls leave memory and disk agreeing', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  try {
+    for (let round = 0; round < 20; round += 1) {
+      await Promise.all([gateway.pauseIntake({ message: `round ${round}` }), gateway.resumeIntake()]);
+      // Called in that order, so the resume is the last word, on disk too.
+      assert.equal(gateway.intake().paused, false);
+      await assert.rejects(readFile(intakeStatePath(env), 'utf8'), { code: 'ENOENT' });
+
+      await Promise.all([gateway.resumeIntake(), gateway.pauseIntake({ message: `round ${round}` })]);
+      assert.equal(gateway.intake().paused, true);
+      assert.equal(JSON.parse(await readFile(intakeStatePath(env), 'utf8')).paused, true);
+    }
+    await gateway.resumeIntake();
+  } finally {
+    await gateway.stop();
+  }
+});

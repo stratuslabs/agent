@@ -21,6 +21,7 @@ import {
   reservedSessionMetadataKey,
   RestartUnsupportedError,
   DEFAULT_PAUSED_MESSAGE,
+  PauseMessageError,
   ROLLED_OVER_TO_METADATA_KEY,
   SCHEDULE_SESSION_ID_PREFIX,
   type Gateway,
@@ -897,7 +898,13 @@ export const routes: Route[] = [
       try {
         return await context.gateway.pauseIntake(message !== undefined ? { message } : {});
       } catch (error) {
-        throw new ApiError(400, 'invalid_body', error instanceof Error ? error.message : String(error));
+        // Only the message is the caller's fault. A pause that could not be
+        // written down (a full disk, a read-only home) is the daemon's, and
+        // stays a 500 so a caller can tell the two apart.
+        if (error instanceof PauseMessageError) {
+          throw new ApiError(400, 'invalid_body', error.message);
+        }
+        throw error;
       }
     },
   },

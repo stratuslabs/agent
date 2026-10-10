@@ -536,6 +536,14 @@ export const DEFAULT_PAUSED_MESSAGE = "I'm paused right now and not taking new w
 /** The longest pause message, so a reply to a refused message stays one. */
 export const MAX_PAUSED_MESSAGE_LENGTH = 500;
 
+/** A pause message the gateway will not take: empty, or too long. */
+export class PauseMessageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PauseMessageError';
+  }
+}
+
 /**
  * A dispatch refused because intake is paused. Its message is the sentence
  * to show whoever sent the work, as it is: a channel posts it as the reply,
@@ -569,9 +577,13 @@ const readIntakeState = async (env: StateEnvironment, warn: (line: string) => vo
     return { paused: true, since: new Date().toISOString() };
   }
   try {
-    const parsed = JSON.parse(raw) as Partial<IntakeState>;
-    if (parsed.paused !== true) {
-      return { paused: false };
+    const parsed = JSON.parse(raw) as Partial<IntakeState> | null;
+    // Only a pause is ever written here (resuming removes the file), so
+    // anything else in it is not a record this build wrote, and the same
+    // rule as an unreadable file applies.
+    if (typeof parsed !== 'object' || parsed === null || parsed.paused !== true) {
+      warn(`intake: ${file} does not hold a pause record; starting paused. Resume intake to clear it.`);
+      return { paused: true, since: new Date().toISOString() };
     }
     return {
       paused: true,
@@ -2893,6 +2905,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // Open until `startServing` reads what the last process left, which it
   // does before any channel or the scheduler can deliver work.
   let intakeState: IntakeState = { paused: false };
+  // Pause and resume run one at a time, each writing the file and then the
+  // state, so the two always agree: overlapping, a pause's write could land
+  // after a resume removed the file, leaving the daemon paused in memory
+  // and open on disk — open again after the next restart.
+  let intakeChain: Promise<unknown> = Promise.resolve();
+  const intakeTransition = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = intakeChain.then(work);
+    intakeChain = run.catch(() => undefined);
+    return run;
+  };
   /**
    * The abort handle of every turn running right now. A restart's drain
    * window ends by aborting these — the same signal the watchdog fires —
@@ -4847,33 +4869,37 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (input.message !== undefined) {
         const trimmed = input.message.trim();
         if (trimmed.length === 0) {
-          throw new Error('A pause message cannot be empty; leave it out to use the default.');
+          throw new PauseMessageError('A pause message cannot be empty; leave it out to use the default.');
         }
         if (trimmed.length > MAX_PAUSED_MESSAGE_LENGTH) {
-          throw new Error(`A pause message is at most ${MAX_PAUSED_MESSAGE_LENGTH} characters; this one is ${trimmed.length}.`);
+          throw new PauseMessageError(`A pause message is at most ${MAX_PAUSED_MESSAGE_LENGTH} characters; this one is ${trimmed.length}.`);
         }
         message = trimmed;
       }
-      const next: IntakeState = {
-        paused: true,
-        ...(message !== undefined ? { message } : {}),
-        since: intakeState.paused && intakeState.since ? intakeState.since : new Date().toISOString(),
-      };
-      // Durable first: a pause the process reports but would forget at the
-      // next crash is the gap the file exists to close.
-      await writeIntakeState(env, next);
-      intakeState = next;
-      log('intake paused: new work will be refused until it resumes');
-      return { ...intakeState };
+      return intakeTransition(async () => {
+        const next: IntakeState = {
+          paused: true,
+          ...(message !== undefined ? { message } : {}),
+          since: intakeState.paused && intakeState.since ? intakeState.since : new Date().toISOString(),
+        };
+        // Durable first: a pause the process reports but would forget at
+        // the next crash is the gap the file exists to close.
+        await writeIntakeState(env, next);
+        intakeState = next;
+        log('intake paused: new work will be refused until it resumes');
+        return { ...intakeState };
+      });
     },
 
     async resumeIntake() {
-      await writeIntakeState(env, { paused: false });
-      if (intakeState.paused) {
-        log('intake resumed');
-      }
-      intakeState = { paused: false };
-      return { ...intakeState };
+      return intakeTransition(async () => {
+        await writeIntakeState(env, { paused: false });
+        if (intakeState.paused) {
+          log('intake resumed');
+        }
+        intakeState = { paused: false };
+        return { ...intakeState };
+      });
     },
     provideCredential,
   };

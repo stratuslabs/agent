@@ -96,3 +96,18 @@ test('/intake needs the token like every other route', async () => {
     await harness.stop();
   }
 });
+
+test('a pause that cannot be written down is a server error, not a bad request', async () => {
+  const harness = await startApi();
+  const original = harness.gateway.pauseIntake.bind(harness.gateway);
+  harness.gateway.pauseIntake = async () => {
+    throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+  };
+  try {
+    const response = await harness.call('/api/v1/intake', put({ paused: true }));
+    assert.equal(response.status, 500);
+  } finally {
+    harness.gateway.pauseIntake = original;
+    await harness.stop();
+  }
+});
