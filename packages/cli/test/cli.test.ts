@@ -9434,6 +9434,22 @@ test('serve --no-api leaves the port closed', async () => {
   await assert.rejects(readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8'));
 });
 
+test('serve --held refuses to start without the control API, since nothing could promote it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-held-noapi-'));
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 2_000);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events', '--held', '--no-api'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.notEqual(code, 0);
+  assert.match(output.stderr + output.stdout, /--held needs the control API/);
+});
+
 test('a project-local config cannot decide which interface the daemon binds', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-api-untrusted-'));
   // Auto-discovered, and checkable into any repository. Which interface a
@@ -9943,6 +9959,14 @@ test('serveArgv round-trips every serve option, so the daemon a restart starts i
   // without the API, and the dashboard would lose the daemon it started.
   assert.deepEqual(serveArgv({ command: 'serve', events: false, api: true }), ['serve', '--no-events', '--api']);
   assert.deepEqual(parseCommand(['serve', '--api']), { command: 'serve', events: true, api: true });
+});
+
+test('serve --held parses, and the daemon a restart brings up is never held', () => {
+  const held = parseCommand(['serve', '--held', '--no-events']);
+  assert.deepEqual(held, { command: 'serve', events: false, held: true });
+  // Holding is for a new version's first start. A restart replaces a daemon
+  // that was serving; held, it would sit offline until someone promoted it.
+  assert.deepEqual(serveArgv(held as Parameters<typeof serveArgv>[0]), ['serve', '--no-events']);
 });
 
 test('runCli skill add reloads the running daemon, and says so; --no-reload and no daemon stay quiet', async () => {

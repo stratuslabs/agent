@@ -381,6 +381,9 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
     // bind failure and serve on without it — which is how a second
     // `stratus serve` on a home became a second daemon on its database.
     required: true,
+    // The operator's surface: up while the gateway is held, so health can
+    // be asked and the promotion sent.
+    servesWhileHeld: true,
 
     get url() {
       return url;

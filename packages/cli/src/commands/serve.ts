@@ -350,6 +350,15 @@ const serveHeldHome = async (
     }
   }
 
+  // Held, the control API is the only way out: without one nothing could
+  // ever promote this daemon, and it would sit there answering nobody.
+  if (command.held === true && boundApi === undefined) {
+    throw new Error(
+      '--held needs the control API, which is how a held daemon is promoted (POST /api/v1/promote), '
+      + 'and this daemon will not serve one (--no-api, api.enabled: false, or @stratusagent/control-api not installed).',
+    );
+  }
+
   // Listening before anything else is awaited: what the supervisor hands
   // this daemon is queued in the channel until then, and the API keeps it
   // until it is serving.
@@ -618,6 +627,7 @@ const serveHeldHome = async (
   const gateway = createGateway({
     env,
     approvals,
+    ...(command.held === true ? { held: true } : {}),
     onRestart: (outcome) => {
       restart = outcome;
       requestShutdown();
