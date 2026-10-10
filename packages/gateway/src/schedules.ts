@@ -241,6 +241,14 @@ export interface SchedulerRuntimeOptions {
    * "still starting".
    */
   ready?(): void | Promise<void>;
+  /**
+   * Whether the gateway's intake is paused. While it is, a due recurring
+   * firing is skipped to its next slot (a paused agent catching up on hours
+   * of missed firings the moment it resumes is the opposite of paused), and
+   * a due one-shot waits: it has no next slot, so skipping it would drop it.
+   * Consulted on every scan.
+   */
+  paused?(): boolean;
   log(line: string): void;
   warn(line: string): void;
 }
@@ -467,6 +475,22 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       deferralsWarned.delete(deferralKey);
       return;
     }
+
+    if (options.paused?.() === true) {
+      const pausedKey = `${record.id}:${slot}:paused`;
+      if (following) {
+        log(`schedule ${record.id}: intake is paused; skipping the firing at ${slot} to ${following.toISOString()}`);
+        store.claimSlot(withNextFire(record, following), slot);
+        deferralsWarned.delete(pausedKey);
+        return;
+      }
+      if (!deferralsWarned.has(pausedKey)) {
+        deferralsWarned.add(pausedKey);
+        log(`schedule ${record.id}: intake is paused; this one-time firing (slot ${slot}) waits until it resumes`);
+      }
+      return;
+    }
+    deferralsWarned.delete(`${record.id}:${slot}:paused`);
 
     const running = runningPerAgent.get(record.agentId) ?? 0;
     if (running >= maxConcurrentPerAgent) {

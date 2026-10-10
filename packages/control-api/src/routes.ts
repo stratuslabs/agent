@@ -20,6 +20,7 @@ import {
   RESERVED_SESSION_METADATA_KEYS,
   reservedSessionMetadataKey,
   RestartUnsupportedError,
+  DEFAULT_PAUSED_MESSAGE,
   ROLLED_OVER_TO_METADATA_KEY,
   SCHEDULE_SESSION_ID_PREFIX,
   type Gateway,
@@ -605,6 +606,7 @@ export const routes: Route[] = [
         }),
         sessions: { total: storedSessions, byStatus },
         approvals: { pending: context.gateway.pendingApprovals().length },
+        intake: context.gateway.intake(),
         runtimes: [...runtimes.values()],
       };
     },
@@ -869,6 +871,36 @@ export const routes: Route[] = [
       }
     },
   },
+  // ---- intake ---------------------------------------------------------------
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/intake`,
+    async handler(context) {
+      return context.gateway.intake();
+    },
+  },
+  {
+    method: 'PUT',
+    pattern: `${API_PREFIX}/intake`,
+    async handler(context) {
+      const body = await readJsonObject(context.request);
+      if (typeof body.paused !== 'boolean') {
+        throw new ApiError(400, 'invalid_body', '"paused" must be true or false.');
+      }
+      const message = optionalString(body, 'message');
+      if (!body.paused) {
+        if (message !== undefined) {
+          throw new ApiError(400, 'invalid_body', '"message" applies only when pausing.');
+        }
+        return context.gateway.resumeIntake();
+      }
+      try {
+        return await context.gateway.pauseIntake(message !== undefined ? { message } : {});
+      } catch (error) {
+        throw new ApiError(400, 'invalid_body', error instanceof Error ? error.message : String(error));
+      }
+    },
+  },
   {
     method: 'POST',
     pattern: `${API_PREFIX}/restart`,
@@ -948,6 +980,12 @@ export const routes: Route[] = [
       // never run. Preflighted here for the same reason the two checks
       // below are: a refusal the caller can see beats one only the event
       // stream carries.
+      // Paused intake is refused here for the same reason: the dispatch is
+      // not awaited, so its refusal would otherwise reach only the stream.
+      if (context.gateway.intake().paused) {
+        throw new ApiError(503, 'intake_paused', context.gateway.intake().message ?? DEFAULT_PAUSED_MESSAGE);
+      }
+
       if (isScheduleSessionId(sessionId)) {
         throw new ApiError(
           400,
