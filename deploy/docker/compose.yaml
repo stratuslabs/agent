@@ -29,6 +29,14 @@ services:
     # promise either — the failure is a corrupt database, not an error.
     volumes:
       - stratus-home:/home/node/.stratus
+    # To choose the control API's token instead of letting the daemon
+    # generate one: put it in ./gateway-token (one line, 32+ printable
+    # characters, no spaces, readable by uid 1000), uncomment these two lines
+    # and the top-level `secrets` block below, and set
+    # STRATUS_GATEWAY_TOKEN_FILE=/run/secrets/stratus-gateway-token in
+    # stratusd.env. A set variable with no file mounted refuses the start.
+    # secrets:
+    #   - stratus-gateway-token
     # The control API on the host's loopback only. Reach it from elsewhere
     # through a tunnel (Tailscale, SSH), never by widening this.
     ports:
@@ -71,3 +79,7 @@ services:
 
 volumes:
   stratus-home:
+
+# secrets:
+#   stratus-gateway-token:
+#     file: ./gateway-token

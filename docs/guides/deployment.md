@@ -92,6 +92,10 @@ TOKEN=$(docker compose exec -T stratusd cat /home/node/.stratus/gateway-token)
 curl -H "authorization: Bearer $TOKEN" http://127.0.0.1:4123/api/v1/agents
 ```
 
+Or choose the token yourself, so whatever manages the container knows it
+without reading it back: see the control API's token under
+[Credentials](#credentials).
+
 ## First run: a system unit
 
 Node `>=22.13 <23 || >=23.4` on the host, then:
@@ -128,6 +132,7 @@ cannot:
 | --- | --- | --- |
 | A provider API key | **Yes** | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `CODEX_API_KEY`. A key alone does not select a provider — with nothing naming one, agents run on the demo — so set `STRATUS_PROVIDER` too, or `provider` in the config, or `provider:` in a soul. `STRATUS_API_KEY` outranks every provider's own variable at once, so it belongs only on a single-provider fleet. See [Configuration](../reference/config.md). |
 | A named credential (`search.apiKey`) | **Yes**, in the image | By its exact name, read after any stored entry of that name — and only by an agent whose soul lists it under `credentials:`. The image starts the daemon with no shell in between because a POSIX shell drops a variable named `search.apiKey` on its way to exec; a system unit's `EnvironmentFile=` may refuse such a name too. Storing it works everywhere: `printf %s "$KEY" \| docker exec -i stratusd stratus credential set search.apiKey`. |
+| The control API's token | **Yes**, as a file | Set `STRATUS_GATEWAY_TOKEN_FILE` to a file holding the token (a mounted secret), and the daemon uses it instead of generating one, copying it into `~/.stratus/gateway-token` so `stratus health` and the other local commands keep working. One line, at least 32 printable characters, no spaces. Replace the file and restart to rotate it; a file that is missing or malformed stops the daemon from starting rather than falling back to a token nothing else knows. Unset, the daemon generates its own the first time, as before. |
 | Slack tokens | **No** | Read only from `credentials.json` in the home, because they are the daemon's own and an agent must never resolve them. Store them with `docker exec -it stratusd stratus setup` → **Channels**, or through the API (below), then `stratus restart`. |
 | A Claude subscription or a codex sign-in | **No** | Stored by `stratus setup`. The `claude-code` and `codex` runtimes also run their vendor's CLI, which keeps its own state under the home directory — outside the volume, and read-only in the image — so they need that directory made writable (a second volume at `/home/node/.claude` or `/home/node/.codex`) and are not covered by the backup below. An API key is the path this recipe is built around. |
 

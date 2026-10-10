@@ -509,3 +509,78 @@ test('a session minted under another gateway token is not adopted, so rotating t
   same.adoptSessions(handed);
   assert.equal(same.sessionCount(), 1);
 });
+
+// ---- a token seeded from a file (STRATUS_GATEWAY_TOKEN_FILE) ---------------
+
+const SEED = 'seeded-token-0123456789abcdefghijklmnopqrstuvwxyz';
+
+const seedFile = async (home: string, contents: string): Promise<string> => {
+  const file = path.join(home, 'secret-mount', 'gateway-token');
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, contents);
+  return file;
+};
+
+test('a seeded token file is the gateway token, and is copied into the home', async () => {
+  const home = await newHome();
+  const file = await seedFile(home, `${SEED}\n`);
+  const tokenPath = path.join(home, '.stratus', 'gateway-token');
+
+  const token = await ensureGatewayToken({ homeDir: home, processEnv: { STRATUS_GATEWAY_TOKEN_FILE: file } });
+
+  assert.equal(token, SEED);
+  // Copied so every local client that reads the home's file — `stratus
+  // health`, `stratus restart` — authenticates without being told anything.
+  assert.equal((await readFile(tokenPath, 'utf8')).trim(), SEED);
+  assert.equal((await stat(tokenPath)).mode & 0o777, 0o600);
+});
+
+test('a seeded token replaces a different token already in the home', async () => {
+  const home = await newHome();
+  const tokenPath = path.join(home, '.stratus', 'gateway-token');
+  const generated = await ensureGatewayToken({ homeDir: home });
+  assert.notEqual(generated, SEED);
+  const file = await seedFile(home, SEED);
+
+  // The seed is the source of truth: rotating it and restarting rotates the
+  // gateway's token, the way rotating any mounted secret does.
+  const token = await ensureGatewayToken({ homeDir: home, processEnv: { STRATUS_GATEWAY_TOKEN_FILE: file } });
+
+  assert.equal(token, SEED);
+  assert.equal((await readFile(tokenPath, 'utf8')).trim(), SEED);
+  assert.equal((await stat(tokenPath)).mode & 0o777, 0o600);
+  const strays = (await readdir(path.dirname(tokenPath))).filter((entry) => entry.startsWith('gateway-token.'));
+  assert.deepEqual(strays, [], `staging files were left behind: ${strays.join(', ')}`);
+});
+
+test('a seeded token file that is missing refuses to start, naming the variable and the path', async () => {
+  const home = await newHome();
+  const file = path.join(home, 'nowhere', 'gateway-token');
+
+  await assert.rejects(
+    ensureGatewayToken({ homeDir: home, processEnv: { STRATUS_GATEWAY_TOKEN_FILE: file } }),
+    (error: Error) => error.message.includes('STRATUS_GATEWAY_TOKEN_FILE') && error.message.includes(file),
+  );
+});
+
+test('a seeded token that is too short or not one line is refused, and the home is left alone', async () => {
+  const home = await newHome();
+  const tokenPath = path.join(home, '.stratus', 'gateway-token');
+  const generated = await ensureGatewayToken({ homeDir: home });
+
+  for (const contents of ['short', '', `${SEED} ${SEED}`, `${SEED}\n${SEED}\n`]) {
+    const file = await seedFile(home, contents);
+    await assert.rejects(
+      ensureGatewayToken({ homeDir: home, processEnv: { STRATUS_GATEWAY_TOKEN_FILE: file } }),
+      (error: Error) => error.message.includes('STRATUS_GATEWAY_TOKEN_FILE') && error.message.includes(file),
+      `accepted ${JSON.stringify(contents)}`,
+    );
+    assert.equal((await readFile(tokenPath, 'utf8')).trim(), generated);
+  }
+});
+
+test('an empty STRATUS_GATEWAY_TOKEN_FILE is the same as unset', async () => {
+  const home = await newHome();
+  const token = await ensureGatewayToken({ homeDir: home, processEnv: { STRATUS_GATEWAY_TOKEN_FILE: '' } });
+  assert.ok(token.length >= 32);
+});
