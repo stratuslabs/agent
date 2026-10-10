@@ -208,6 +208,21 @@ the old daemon removes `gateway.json` when it stops serving and the new one
 writes it when its API binds, and the check says "not serving" in between.
 That is what `retries` / `failureThreshold` are for.
 
+## Pausing new work
+
+`PUT /api/v1/intake` with `{"paused": true, "message": "…"}` stops new work
+without stopping the daemon: turns already running finish, new messages
+are answered with your sentence, and due schedules are skipped. It holds
+across restarts until `{"paused": false}`. Useful for a maintenance window
+or a spending limit. See the
+[control API](../../packages/control-api/README.md) for the details.
+
+```bash
+curl -fsS -X PUT http://127.0.0.1:4123/api/v1/intake \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"paused": true, "message": "Back after maintenance at 3pm."}'
+```
+
 ## Back up and restore
 
 The home is the backup. Copy it with the daemon **stopped**, so every

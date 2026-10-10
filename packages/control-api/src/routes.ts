@@ -20,6 +20,8 @@ import {
   RESERVED_SESSION_METADATA_KEYS,
   reservedSessionMetadataKey,
   RestartUnsupportedError,
+  DEFAULT_PAUSED_MESSAGE,
+  PauseMessageError,
   ROLLED_OVER_TO_METADATA_KEY,
   SCHEDULE_SESSION_ID_PREFIX,
   type Gateway,
@@ -605,6 +607,7 @@ export const routes: Route[] = [
         }),
         sessions: { total: storedSessions, byStatus },
         approvals: { pending: context.gateway.pendingApprovals().length },
+        intake: context.gateway.intake(),
         runtimes: [...runtimes.values()],
       };
     },
@@ -869,6 +872,42 @@ export const routes: Route[] = [
       }
     },
   },
+  // ---- intake ---------------------------------------------------------------
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/intake`,
+    async handler(context) {
+      return context.gateway.intake();
+    },
+  },
+  {
+    method: 'PUT',
+    pattern: `${API_PREFIX}/intake`,
+    async handler(context) {
+      const body = await readJsonObject(context.request);
+      if (typeof body.paused !== 'boolean') {
+        throw new ApiError(400, 'invalid_body', '"paused" must be true or false.');
+      }
+      const message = optionalString(body, 'message');
+      if (!body.paused) {
+        if (message !== undefined) {
+          throw new ApiError(400, 'invalid_body', '"message" applies only when pausing.');
+        }
+        return context.gateway.resumeIntake();
+      }
+      try {
+        return await context.gateway.pauseIntake(message !== undefined ? { message } : {});
+      } catch (error) {
+        // Only the message is the caller's fault. A pause that could not be
+        // written down (a full disk, a read-only home) is the daemon's, and
+        // stays a 500 so a caller can tell the two apart.
+        if (error instanceof PauseMessageError) {
+          throw new ApiError(400, 'invalid_body', error.message);
+        }
+        throw error;
+      }
+    },
+  },
   {
     method: 'POST',
     pattern: `${API_PREFIX}/restart`,
@@ -948,6 +987,12 @@ export const routes: Route[] = [
       // never run. Preflighted here for the same reason the two checks
       // below are: a refusal the caller can see beats one only the event
       // stream carries.
+      // Paused intake is refused here for the same reason: the dispatch is
+      // not awaited, so its refusal would otherwise reach only the stream.
+      if (context.gateway.intake().paused) {
+        throw new ApiError(503, 'intake_paused', context.gateway.intake().message ?? DEFAULT_PAUSED_MESSAGE);
+      }
+
       if (isScheduleSessionId(sessionId)) {
         throw new ApiError(
           400,
@@ -1028,6 +1073,13 @@ export const routes: Route[] = [
           `Session metadata key "${reserved}" is reserved for the daemon's own records and cannot be supplied by a caller. `
             + `Reserved keys: ${RESERVED_SESSION_METADATA_KEYS.join(', ')}.`,
         );
+      }
+
+      // Again, with nothing awaited between here and the dispatch: a pause
+      // that landed while this handler was reading the store would otherwise
+      // be refused by the gateway after the caller had been handed a 202.
+      if (context.gateway.intake().paused) {
+        throw new ApiError(503, 'intake_paused', context.gateway.intake().message ?? DEFAULT_PAUSED_MESSAGE);
       }
 
       const turnId = randomUUID();

@@ -10028,3 +10028,27 @@ test('a delegated call whose chain this adapter carries no agent of is left for 
 
   await adapter.stop();
 });
+
+test('a paused daemon answers a mention with its pause sentence, not as a failure', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(async () => {
+    // What the gateway's dispatch throws while intake is paused.
+    const error = new Error("I'm paused: this workspace's usage limit is reached.");
+    error.name = 'IntakePausedError';
+    throw error;
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+
+  const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+  assert.ok(said.includes("I'm paused: this workspace's usage limit is reached."), said.join('\n'));
+  assert.ok(!said.some((text) => /Something went wrong/.test(text ?? '')), said.join('\n'));
+});
