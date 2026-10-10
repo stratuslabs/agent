@@ -6009,3 +6009,106 @@ test('an auto-continuing turn wraps up when another message is waiting for its s
     await gateway.stop();
   }
 });
+
+/**
+ * A delegated call is asked where the work was asked for. The sub-session
+ * has no conversation, and its agent may have no channel at all, so the
+ * request carries the root of the chain, read from the store. Work done for
+ * another agent is one-shot: an `always` runs it once and grants nothing.
+ */
+const delegatedHarness = async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const stateDir = path.join(home, 'state');
+  const seed = new ShardedSessionStore({ stateDir });
+  await seed.create({
+    id: 'root',
+    agent: { id: 'nova', name: 'Nova' },
+    status: 'running',
+    messages: [],
+    metadata: { channel: 'slack', slackChannel: 'C9', slackThread: '1.2' },
+  });
+  seed.close();
+  let transport: ApprovalTransport | undefined;
+  const events: StratusEvent[] = [];
+  const gateway = createGateway({
+    env,
+    stateDir,
+    idleTimeoutMs: 0,
+    approvals: (given) => {
+      transport = given;
+      return { async approve() { return true; } };
+    },
+  });
+  gateway.bus.subscribe((event) => {
+    events.push(event);
+  });
+  assert.ok(transport);
+  return { gateway, transport, events };
+};
+
+const delegatedCall = (agent: { id: string; name: string }, metadata: Record<string, string | number>) => ({
+  session: {
+    id: `root:delegate:${agent.id}:1:1-abcdefgh`,
+    agent,
+    status: 'running' as const,
+    messages: [],
+    createdAt: '2026-10-10T00:00:00.000Z',
+    updatedAt: '2026-10-10T00:00:00.000Z',
+    metadata: { delegationDepth: 1, delegatedBy: 'nova', rootSessionId: 'root', ...metadata },
+  },
+  call: { id: 'call-1', toolName: 'shell.run', input: { command: 'ls' } },
+  risk: 'gated' as const,
+  always: 'scope' as const,
+});
+
+test('a delegated call is asked in the delegating conversation, once only', async () => {
+  const { gateway, transport, events } = await delegatedHarness();
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  const answer = transport.request(delegatedCall({ id: 'quinn', name: 'Quinn' }, {}));
+  const request = await settles(requested, 'the approval request');
+
+  assert.equal(request.agentId, 'quinn');
+  assert.deepEqual(request.delegatedFrom, {
+    agentId: 'nova',
+    sessionId: 'root',
+    metadata: { channel: 'slack', slackChannel: 'C9', slackThread: '1.2' },
+  });
+  assert.equal(request.oneShot, true);
+  assert.equal(request.always, undefined);
+  assert.deepEqual(gateway.pendingApprovals().map((pending) => pending.delegatedFrom?.agentId), ['nova']);
+
+  // The control API takes all three answers; this one still runs once.
+  assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'always', actor: 'U9' }), true);
+  assert.equal((await settles(answer, 'the parked call')).answer, 'once');
+  const resolved = events.find((event) => event.type === 'tool.approval-resolved');
+  assert.equal(resolved?.type === 'tool.approval-resolved' ? resolved.answer : undefined, 'once');
+
+  await gateway.stop();
+});
+
+test('an agent delegating to itself keeps Always allow, and metadata alone does not route', async () => {
+  const { gateway, transport } = await delegatedHarness();
+
+  const own = nextEvent(gateway.bus, 'tool.approval-requested');
+  const ownAnswer = transport.request(delegatedCall({ id: 'nova', name: 'Nova' }, {}));
+  const ownRequest = await settles(own, 'the self-delegated request');
+  assert.equal(ownRequest.delegatedFrom?.agentId, 'nova');
+  assert.equal(ownRequest.oneShot, undefined);
+  assert.equal(ownRequest.always, 'scope');
+  gateway.resolveApproval({ requestId: ownRequest.requestId, answer: 'always' });
+  assert.equal((await settles(ownAnswer, 'the self-delegated call')).answer, 'always');
+
+  // The markers without the minted id shape are not a delegation.
+  const forged = nextEvent(gateway.bus, 'tool.approval-requested');
+  const call = delegatedCall({ id: 'quinn', name: 'Quinn' }, {});
+  const forgedAnswer = transport.request({ ...call, session: { ...call.session, id: 'plain-session' } });
+  const forgedRequest = await settles(forged, 'the forged request');
+  assert.equal(forgedRequest.delegatedFrom, undefined);
+  assert.equal(forgedRequest.always, 'scope');
+  gateway.resolveApproval({ requestId: forgedRequest.requestId, answer: 'deny' });
+  await settles(forgedAnswer, 'the forged call');
+
+  await gateway.stop();
+});

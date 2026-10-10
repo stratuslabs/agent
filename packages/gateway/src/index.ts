@@ -39,6 +39,7 @@ import {
   type CredentialScope,
   type AgentMemoryStore,
   type AlwaysMeans,
+  type ApprovalDelegationOrigin,
   type ApprovalAnswer,
   type ApprovalOutcome,
   type ApprovalPolicy,
@@ -427,6 +428,8 @@ export interface PendingApproval {
   expiresAt?: string;
   /** The session's metadata: where the turn is happening. */
   metadata?: JsonObject;
+  /** Where a delegated call's work was asked from — see the event. */
+  delegatedFrom?: ApprovalDelegationOrigin;
 }
 
 export interface ResolveApprovalInput {
@@ -1357,7 +1360,43 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * so a click racing the timeout — or arriving after an abort — is refused
    * rather than executing a tool for a turn that has already moved on.
    */
-  const requestApproval: ApprovalRequester = (request) => new Promise<ApprovalOutcome>((resolve) => {
+  /**
+   * The conversation a delegated sub-session's work was asked from, read
+   * from the store rather than from anything the caller wrote: the root
+   * session `agent.delegate` recorded, which is where the person waiting
+   * on the answer is. Undefined for an ordinary session, or a root that no
+   * longer exists — the request is then asked the way it always was.
+   */
+  const delegationOriginOf = async (session: Session): Promise<ApprovalDelegationOrigin | undefined> => {
+    if (!isDelegatedSession(session)) {
+      return undefined;
+    }
+    const rootId = session.metadata?.[ROOT_SESSION_ID_METADATA_KEY];
+    if (typeof rootId !== 'string' || rootId === session.id) {
+      return undefined;
+    }
+    let root: Session | undefined;
+    try {
+      root = await store.get(rootId);
+    } catch (error) {
+      warn(`${session.id}: could not read the delegating session ${rootId} to route an approval (${error instanceof Error ? error.message : String(error)})`);
+      return undefined;
+    }
+    if (!root) {
+      return undefined;
+    }
+    return { agentId: root.agent.id, sessionId: root.id, ...(root.metadata ? { metadata: root.metadata } : {}) };
+  };
+
+  const requestApproval: ApprovalRequester = async (request) => {
+    const delegatedFrom = await delegationOriginOf(request.session);
+    return requestApprovalFrom(request, delegatedFrom);
+  };
+
+  const requestApprovalFrom = (
+    request: GatewayApprovalRequest,
+    delegatedFrom: ApprovalDelegationOrigin | undefined,
+  ): Promise<ApprovalOutcome> => new Promise<ApprovalOutcome>((resolve) => {
     // A shutdown denies what is parked once, at the top of stop(). Turns
     // already running keep going through the drain, though, and one of them
     // can reach a gated tool AFTER that snapshot — finishing a provider
@@ -1401,7 +1440,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
      */
     let announced: Promise<void> = Promise.resolve();
 
-    const settle: SettleApproval = (answer, reason, actor) => {
+    // Work one agent does for another is allowed one call at a time. The
+    // people asked are the delegating conversation's, and a standing grant
+    // would widen what the other agent may do on its own work for good —
+    // so nothing offers **Always allow** here, and an `always` that
+    // arrives anyway (the control API takes all three answers) runs the
+    // call once, recorded as exactly that.
+    const forAnotherAgent = delegatedFrom !== undefined && delegatedFrom.agentId !== request.session.agent.id;
+    const oneShot = request.oneShot === true || forAnotherAgent;
+    const always = forAnotherAgent ? undefined : request.always;
+
+    const settle: SettleApproval = (given, reason, actor) => {
+      const answer: ApprovalAnswer = forAnotherAgent && given === 'always' ? 'once' : given;
       // Identity, not presence: a request that already settled is gone from
       // the registry, and comparing against this exact function is what
       // makes every ending — click, timeout, abort, shutdown — idempotent.
@@ -1448,11 +1498,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         call: request.call,
         risk: request.risk,
         ...(request.origin !== undefined ? { origin: request.origin } : {}),
-        ...(request.oneShot ? { oneShot: true } : {}),
-        ...(request.always !== undefined ? { always: request.always } : {}),
+        ...(oneShot ? { oneShot: true } : {}),
+        ...(always !== undefined ? { always } : {}),
         parkedAt: request.parkedAt ?? new Date().toISOString(),
         ...(expiresAt ? { expiresAt } : {}),
         ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
+        ...(delegatedFrom ? { delegatedFrom } : {}),
       },
     });
 
@@ -1500,9 +1551,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       call: request.call,
       risk: request.risk,
       ...(request.origin !== undefined ? { origin: request.origin } : {}),
-      ...(request.oneShot ? { oneShot: true } : {}),
-      ...(request.always !== undefined ? { always: request.always } : {}),
+      ...(oneShot ? { oneShot: true } : {}),
+      ...(always !== undefined ? { always } : {}),
       ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
+      ...(delegatedFrom ? { delegatedFrom } : {}),
       ...(expiresAt ? { expiresAt } : {}),
     });
     // Drained at shutdown alongside the resolutions: a channel that has not

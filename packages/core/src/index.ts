@@ -3816,6 +3816,18 @@ export interface ApprovalOutcome {
  * by "somebody refused this", and folding an undelivered request into it
  * would put a denial nobody made on the same footing as one somebody did.
  */
+/**
+ * The conversation a delegated call's work was asked from — see
+ * `tool.approval-requested`'s `delegatedFrom`.
+ */
+export interface ApprovalDelegationOrigin {
+  /** The agent whose session is at the root of the delegation chain. */
+  agentId: string;
+  sessionId: string;
+  /** That session's metadata: where the person who asked is. */
+  metadata?: JsonObject;
+}
+
 export type ApprovalResolutionReason = 'decided' | 'timeout' | 'cancelled' | 'undeliverable';
 
 export type StratusEvent =
@@ -3875,6 +3887,15 @@ export type StratusEvent =
        */
       always?: AlwaysMeans;
       metadata?: JsonObject;
+      /**
+       * Where the work was asked for, when this call is in a delegated
+       * sub-session (`agent.delegate`): the agent and session at the root of
+       * the chain, and that session's metadata. A sub-session has no
+       * conversation of its own and its agent may have no channel at all,
+       * so a renderer that asks in the conversation it came from asks here.
+       * Set by the gateway from its own records, never from a caller.
+       */
+      delegatedFrom?: ApprovalDelegationOrigin;
       /**
        * When the request gives up and denies itself, ISO-8601. Absent when
        * it never will — a deadline of "now" would be a worse lie than

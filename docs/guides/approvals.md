@@ -167,6 +167,14 @@ warning naming the file.
   the delegation's: `agent.delegate` reports the sub-session's id, and a
   message sent to that id afterwards continues it as an ordinary
   conversation, whose parked turns are resumed like any other.
+- **A delegated call is asked where the work was asked for.** When Nova
+  delegates to Quinn and Quinn reaches a gated call, the request goes to
+  the conversation at the root of the delegation, through Nova's Slack app
+  and Nova's approvers, labelled "Quinn (for Nova)". Quinn needs no Slack
+  app of his own for this. Work done for another agent is allowed one call
+  at a time: there is no **Always allow**, and an `always` sent through the
+  control API runs the call once. A standing grant for Quinn comes from
+  Quinn's own work or from `stratus grants`, not from Nova's approvers.
 - **A button left behind by a dead daemon corrects itself when clicked.** A
   normal shutdown retracts its buttons; a crash cannot, and the new process
   has no record of what the old one posted. Clicking such a prompt tells
