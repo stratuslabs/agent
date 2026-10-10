@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { fleetDbPath, intakeStatePath } from '@stratusagent/state';
+import { fleetDbPath, intakeStatePath, stateFilePath } from '@stratusagent/state';
 import {
   createGateway,
   DEFAULT_PAUSED_MESSAGE,
@@ -268,4 +268,59 @@ test('overlapping pause and resume calls leave memory and disk agreeing', async 
   } finally {
     await gateway.stop();
   }
+});
+
+test('a promotion whose work cannot begin leaves the gateway held, and says so', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, held: true });
+  await gateway.start();
+  try {
+    // A newer build stamped the home while this one was held: the scheduler
+    // refuses to start on state it no longer understands.
+    const stampFile = stateFilePath(env);
+    await writeFile(stampFile, JSON.stringify({ schemaVersion: 999 }));
+
+    await assert.rejects(() => gateway.promote());
+    assert.equal(gateway.held(), true, 'still held: the work never began');
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'x', userMessage: 'hi' }),
+      (error: unknown) => error instanceof IntakePausedError,
+    );
+    await rm(stampFile, { force: true });
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a stop that begins while a promotion is connecting a channel stops that channel too', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const order: string[] = [];
+  let release: () => void = () => {};
+  const slowStart = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const slow: GatewayChannelAdapter = {
+    name: 'slow',
+    async start() {
+      order.push('start slow');
+      await slowStart;
+      order.push('started slow');
+    },
+    async stop() {
+      order.push('stop slow');
+    },
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, held: true, channels: [slow] });
+  await gateway.start();
+
+  const promoted = gateway.promote();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const stopped = gateway.stop();
+  release();
+  await assert.rejects(promoted, /stopping|restarting/);
+  await stopped;
+
+  assert.deepEqual(order, ['start slow', 'started slow', 'stop slow']);
 });

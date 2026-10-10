@@ -9434,6 +9434,22 @@ test('serve --no-api leaves the port closed', async () => {
   await assert.rejects(readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8'));
 });
 
+test('serve --held refuses to start without the control API, since nothing could promote it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-held-noapi-'));
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 2_000);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events', '--held', '--no-api'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.notEqual(code, 0);
+  assert.match(output.stderr + output.stdout, /--held needs the control API/);
+});
+
 test('a project-local config cannot decide which interface the daemon binds', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-api-untrusted-'));
   // Auto-discovered, and checkable into any repository. Which interface a

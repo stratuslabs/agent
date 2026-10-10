@@ -4346,10 +4346,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Skipping any a failed earlier promotion already started, so a retry
       // never starts one twice.
       await startChannels(pending.adapters.filter((adapter) => !startedChannels.includes(adapter)));
+      // A stop that began while the channels were connecting has waited
+      // for this (see shutdown), and now stops them all. Nothing past here
+      // may start once it has.
+      if (stopping) {
+        throw refusal();
+      }
+      // Held until the work has actually begun: a scheduler that refuses to
+      // start (a newer build stamped the home meanwhile) must leave the
+      // daemon held, reporting so, and a retry able to try again.
+      await beginWork(pending.orphaned, pending.abandoned);
       deferredStart = undefined;
       heldState = false;
       log('stratusd promoted: channels connected, schedules running');
-      await beginWork(pending.orphaned, pending.abandoned);
     })().finally(() => {
       promoting = undefined;
     });
@@ -4451,6 +4460,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // drained; a plain stop goes on closing either way.
     let channelsReleased = true;
     const drain = (async () => {
+      // A promotion still connecting channels finishes first, so every
+      // channel it started is in the list stopped below; seeing `stopping`,
+      // it starts nothing after that.
+      await promoting?.catch(() => undefined);
       await Promise.allSettled([...approvalEmissions]);
       const stopping = [...startedChannels];
       const stops = await Promise.allSettled(stopping.map((adapter) => adapter.stop()));

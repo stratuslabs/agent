@@ -1098,6 +1098,9 @@ export const routes: Route[] = [
       if (context.gateway.intake().paused) {
         throw new ApiError(503, 'intake_paused', context.gateway.intake().message ?? DEFAULT_PAUSED_MESSAGE);
       }
+      if (context.gateway.held()) {
+        throw new ApiError(503, 'held', HELD_MESSAGE);
+      }
 
       const turnId = randomUUID();
       // Armed before the dispatch, so a failure that arrives while the runner
