@@ -635,6 +635,14 @@ reason to send comes near either.
 }
 ```
 
+The bearer token is `~/.stratus/gateway-token` (0600), generated the first
+time the daemon starts. A deployment that wants to choose it sets
+`STRATUS_GATEWAY_TOKEN_FILE` to a file holding the token, and the daemon
+uses that instead, copying it into `~/.stratus/gateway-token` for local
+clients. A missing or malformed file refuses the start. (That variable is
+the daemon's; `STRATUS_GATEWAY_TOKEN` is a *client's* way to name the token
+of a gateway it talks to, and the daemon never reads it.)
+
 While it is serving, `~/.stratus/gateway.json` (0600) says where:
 
 ```json
