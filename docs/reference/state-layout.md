@@ -14,6 +14,7 @@ what moves when you rename an agent.
 | `credentials.json` | Stored sign-ins (the shared ones, and any agent's own under `agentSignIns`), channel tokens, and named credentials. `0600`. No endpoint ever returns a secret from it. |
 | `state.json` | The schema stamp: which format this home is in, and which migrations have run. See [Updating](../guides/updating.md). |
 | `fleet.db` | The schedules, and the session index that says which agent's store holds a given session id. Fleet infrastructure, deliberately not per agent — see below. |
+| `intake.json` | Present only while intake is paused (`PUT /api/v1/intake`): the pause, its message, and when it began. Read at start, so a pause survives a restart; a file that cannot be read starts the daemon paused. `0600`. |
 | `gateway-token`, `gateway.json` | The [control API](../../packages/control-api/README.md)'s bearer token and the address a running daemon bound. Both `0600`. |
 | `stratusd.lock` | Held by the daemon serving this home; how a second `stratus serve` is refused. |
 | `grants.lock` | Held for a moment while a grant file is read by the daemon or rewritten by `stratus grants revoke`, so a daemon never reads one halfway through a revoke. Empty; safe to delete when nothing is running. |

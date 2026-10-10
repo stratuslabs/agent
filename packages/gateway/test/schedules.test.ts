@@ -1234,3 +1234,64 @@ test('a stamp that advances during the spent one-shot lookup keeps the row and f
     store.close();
   }
 });
+
+// ---- paused intake -------------------------------------------------------------
+
+test('while intake is paused a recurring firing is skipped to its next slot, never dispatched', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  let dispatches = 0;
+  const logs: string[] = [];
+  const runtime = runtimeWith(store, {
+    dispatch: async () => {
+      dispatches += 1;
+    },
+    paused: () => true,
+    log: (line) => logs.push(line),
+  });
+
+  const slot = new Date(Date.now() - 5).toISOString();
+  store.insert(record({ id: 'recurring', cadence: { kind: 'every', intervalMs: 600_000 }, nextFireAt: slot }));
+  await runtime.start();
+  await waitFor(() => (store.get('recurring')?.nextFireAt ?? slot) !== slot, 'the paused slot to be skipped');
+  runtime.stop();
+  await runtime.drain();
+
+  assert.equal(dispatches, 0);
+  assert.ok(Date.parse(store.get('recurring')?.nextFireAt ?? '') > Date.parse(slot));
+  // Skipped, not fired: nothing records it as having run.
+  assert.equal(store.get('recurring')?.lastSessionId, undefined);
+  assert.ok(logs.some((line) => line.includes('recurring') && /paused/.test(line)), logs.join('\n'));
+  store.close();
+});
+
+test('while intake is paused a one-shot waits, and fires once intake resumes', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  let paused = true;
+  let dispatches = 0;
+  const fired = deferred<void>();
+  const runtime = runtimeWith(store, {
+    dispatch: async () => {
+      dispatches += 1;
+      fired.resolve();
+    },
+    paused: () => paused,
+  });
+
+  const at = new Date(Date.now() - 5).toISOString();
+  store.insert(record({ id: 'once', cadence: { kind: 'at', at }, nextFireAt: at }));
+  await runtime.start();
+  // Several ticks while paused: a one-shot has no next slot to skip to, so
+  // skipping it would drop it for good.
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(dispatches, 0);
+  assert.equal(store.get('once')?.nextFireAt, at);
+
+  paused = false;
+  await fired.promise;
+  runtime.stop();
+  await runtime.drain();
+  assert.equal(dispatches, 1);
+  store.close();
+});

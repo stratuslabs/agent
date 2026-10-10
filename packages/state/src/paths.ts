@@ -30,6 +30,7 @@ const LOGS_DIRNAME = 'logs';
 const PLUGINS_DIRNAME = 'plugins';
 
 const GATEWAY_TOKEN_FILENAME = 'gateway-token';
+const INTAKE_STATE_FILENAME = 'intake.json';
 
 const GATEWAY_INFO_FILENAME = 'gateway.json';
 
@@ -148,6 +149,14 @@ export const skillsDirPath = (env: StateEnvironment): string =>
  */
 export const gatewayTokenPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), GATEWAY_TOKEN_FILENAME);
+
+/**
+ * Whether the daemon is taking new work (0600). Present only while intake is
+ * paused, so a home that never paused has nothing here. Written by the
+ * gateway's `pauseIntake` and read at start, so a pause outlives a crash.
+ */
+export const intakeStatePath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), INTAKE_STATE_FILENAME);
 
 /**
  * Where a running daemon says it can be reached (0600). Written when the

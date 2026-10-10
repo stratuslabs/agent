@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
@@ -164,6 +165,7 @@ import {
   applySoulPins,
   assertStateCompatible,
   stratusHomePath,
+  intakeStatePath,
   fleetDbIn,
   createAgentWorkspaces,
   createPluginStateDirectories,
@@ -518,6 +520,102 @@ export interface RestartOutcome {
    */
   drained: boolean;
 }
+
+/** Whether the daemon is taking new work. */
+export interface IntakeState {
+  paused: boolean;
+  /** What a refused message is answered with. Present only while paused. */
+  message?: string;
+  /** When the pause began (ISO 8601). Present only while paused. */
+  since?: string;
+}
+
+/** What a paused daemon says when nobody gave it a sentence of its own. */
+export const DEFAULT_PAUSED_MESSAGE = "I'm paused right now and not taking new work. Please try again later.";
+
+/** The longest pause message, so a reply to a refused message stays one. */
+export const MAX_PAUSED_MESSAGE_LENGTH = 500;
+
+/** A pause message the gateway will not take: empty, or too long. */
+export class PauseMessageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PauseMessageError';
+  }
+}
+
+/**
+ * A dispatch refused because intake is paused. Its message is the sentence
+ * to show whoever sent the work, as it is: a channel posts it as the reply,
+ * not as a failure.
+ */
+export class IntakePausedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'IntakePausedError';
+  }
+}
+
+/**
+ * The intake state a previous process left, or open when there is none.
+ *
+ * Fails closed: a file that exists but cannot be read or parsed starts the
+ * daemon paused, with a warning naming it. A pause exists to stop work (a
+ * spending cap, a maintenance window), and a file nobody can read is no
+ * evidence that it was lifted.
+ */
+const readIntakeState = async (env: StateEnvironment, warn: (line: string) => void): Promise<IntakeState> => {
+  const file = intakeStatePath(env);
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { paused: false };
+    }
+    warn(`intake: ${file} could not be read (${(error as Error).message}); starting paused. Resume intake to clear it.`);
+    return { paused: true, since: new Date().toISOString() };
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<IntakeState> | null;
+    // Only a pause is ever written here (resuming removes the file), so
+    // anything else in it is not a record this build wrote, and the same
+    // rule as an unreadable file applies.
+    if (typeof parsed !== 'object' || parsed === null || parsed.paused !== true) {
+      warn(`intake: ${file} does not hold a pause record; starting paused. Resume intake to clear it.`);
+      return { paused: true, since: new Date().toISOString() };
+    }
+    return {
+      paused: true,
+      ...(typeof parsed.message === 'string' && parsed.message.trim().length > 0 ? { message: parsed.message } : {}),
+      since: typeof parsed.since === 'string' ? parsed.since : new Date().toISOString(),
+    };
+  } catch {
+    warn(`intake: ${file} is not valid JSON; starting paused. Resume intake to clear it.`);
+    return { paused: true, since: new Date().toISOString() };
+  }
+};
+
+/**
+ * Record a pause durably (0600, replaced in one atomic step), or remove the
+ * record when intake reopens: open is the default, so nothing on disk
+ * means open.
+ */
+const writeIntakeState = async (env: StateEnvironment, state: IntakeState): Promise<void> => {
+  const file = intakeStatePath(env);
+  if (!state.paused) {
+    await rm(file, { force: true });
+    return;
+  }
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  const staging = `${file}.${randomBytes(8).toString('hex')}`;
+  try {
+    await writeFile(staging, `${JSON.stringify(state)}\n`, { flag: 'wx', mode: 0o600 });
+    await rename(staging, file);
+  } finally {
+    await rm(staging, { force: true });
+  }
+};
 
 /**
  * `restart()` on a gateway whose host gave it no way back. Exported so the
@@ -992,6 +1090,19 @@ export interface Gateway {
    * it as "try again".
    */
   resolveApproval(input: ResolveApprovalInput): boolean;
+  /** Whether the daemon is taking new work. */
+  intake(): IntakeState;
+  /**
+   * Stop taking new work without stopping. Turns already running or queued
+   * finish; a new dispatch is refused with `IntakePausedError` carrying
+   * `message` (or `DEFAULT_PAUSED_MESSAGE`); due recurring schedules are
+   * skipped and one-shots wait. Channels stay connected, so they can say
+   * so. Durable: the pause outlives a restart until `resumeIntake`.
+   * Pausing again replaces the message and keeps the original `since`.
+   */
+  pauseIntake(input?: { message?: string }): Promise<IntakeState>;
+  /** Take new work again. Idempotent. */
+  resumeIntake(): Promise<IntakeState>;
   /**
    * Answers a `credential.requested` with the value an approver entered:
    * stores it add-only (`addNamedCredential`), under the agent or the fleet
@@ -1293,6 +1404,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // The same stamp check every turn runs, before a slot is claimed — see
     // `SchedulerRuntimeOptions.ready`.
     ready: () => assertStateCompatible(env),
+    paused: () => intakeState.paused,
     log,
     warn,
   });
@@ -2790,6 +2902,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const waitingDispatches = new Map<string, number>();
   const inflight = new Set<Promise<unknown>>();
   let stopping = false;
+  // Open until `startServing` reads what the last process left, which it
+  // does before any channel or the scheduler can deliver work.
+  let intakeState: IntakeState = { paused: false };
+  // Pause and resume run one at a time, each writing the file and then the
+  // state, so the two always agree: overlapping, a pause's write could land
+  // after a resume removed the file, leaving the daemon paused in memory
+  // and open on disk — open again after the next restart.
+  let intakeChain: Promise<unknown> = Promise.resolve();
+  const intakeTransition = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = intakeChain.then(work);
+    intakeChain = run.catch(() => undefined);
+    return run;
+  };
   /**
    * The abort handle of every turn running right now. A restart's drain
    * window ends by aborting these — the same signal the watchdog fires —
@@ -3726,6 +3851,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       input.onRepeat?.('live');
       return live.turn;
     }
+    // The one door every external dispatch comes through, so a pause holds
+    // for every channel at once. Work already accepted is not behind this
+    // check: a turn running, a redelivery of a message whose turn is live
+    // (answered above), a message queued behind it, a delegation or
+    // an approval resuming a parked turn all go on.
+    if (intakeState.paused) {
+      throw new IntakePausedError(intakeState.message ?? DEFAULT_PAUSED_MESSAGE);
+    }
     // The live dispatch named no agent, so whose session it is is known
     // only once its turn resolves. Queueing instead would make this a
     // `finished` repeat of a turn the live caller is still rendering — two
@@ -4062,6 +4195,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       );
     }
     await loadRoster();
+    intakeState = await readIntakeState(env, warn);
+    if (intakeState.paused) {
+      log(`intake is paused (since ${intakeState.since ?? 'unknown'}); new work will be refused until it resumes`);
+    }
     const named = registry.list().map((agent) => agent.name).join(', ');
     log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
 
@@ -4722,6 +4859,48 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     resolveApproval,
+
+    intake() {
+      return { ...intakeState };
+    },
+
+    async pauseIntake(input = {}) {
+      let message: string | undefined;
+      if (input.message !== undefined) {
+        const trimmed = input.message.trim();
+        if (trimmed.length === 0) {
+          throw new PauseMessageError('A pause message cannot be empty; leave it out to use the default.');
+        }
+        if (trimmed.length > MAX_PAUSED_MESSAGE_LENGTH) {
+          throw new PauseMessageError(`A pause message is at most ${MAX_PAUSED_MESSAGE_LENGTH} characters; this one is ${trimmed.length}.`);
+        }
+        message = trimmed;
+      }
+      return intakeTransition(async () => {
+        const next: IntakeState = {
+          paused: true,
+          ...(message !== undefined ? { message } : {}),
+          since: intakeState.paused && intakeState.since ? intakeState.since : new Date().toISOString(),
+        };
+        // Durable first: a pause the process reports but would forget at
+        // the next crash is the gap the file exists to close.
+        await writeIntakeState(env, next);
+        intakeState = next;
+        log('intake paused: new work will be refused until it resumes');
+        return { ...intakeState };
+      });
+    },
+
+    async resumeIntake() {
+      return intakeTransition(async () => {
+        await writeIntakeState(env, { paused: false });
+        if (intakeState.paused) {
+          log('intake resumed');
+        }
+        intakeState = { paused: false };
+        return { ...intakeState };
+      });
+    },
     provideCredential,
   };
 

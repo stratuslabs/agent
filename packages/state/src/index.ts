@@ -63,6 +63,7 @@ export {
   assertPathSafeAgentId,
   foldedAgentId,
   gatewayTokenPath,
+  intakeStatePath,
   gatewayInfoPath,
   grantsLockPath,
 } from './paths.ts';

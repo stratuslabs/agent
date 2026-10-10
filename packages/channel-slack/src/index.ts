@@ -5574,7 +5574,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       renderers.get(sessionId)?.[0]?.refreshLoading();
       await heard;
     } else {
-      const { spoke, spokeAt } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+      // A paused daemon's refusal is its answer, said as it is: the
+      // operator wrote that sentence for the person reading it, and it is
+      // not a failure of the agent. Matched by name, as this package does
+      // not import the gateway. A turn nobody asked for stays silent.
+      const pausedReply = failure instanceof Error && failure.name === 'IntakePausedError';
+      const { spoke, spokeAt } = pausedReply
+        ? await renderer.finalize(renderer.lazy ? '' : (failure as Error).message)
+        : await renderer.fail(failure instanceof Error ? failure.message : String(failure));
       if (spoke && threadKey !== undefined) {
         // A file it posted before breaking is still the last thing said.
         rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts);
