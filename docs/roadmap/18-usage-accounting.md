@@ -18,12 +18,12 @@ completion event cannot report usage, the dashboard cannot show it, and no
 budget cap can be enforced because nothing knows what has been spent.
 
 This is [`stratus-v2.md`](../architecture/stratus-v2.md)'s kernel change 7 and
-it is currently owned by [08](./08-deployment-profiles.md). It is pulled out
+it is currently owned by 08. It is pulled out
 here because it is not a deployment concern. An operator running one daemon on
 one machine has the same question — *which agent is spending my tokens* — and
 today the answer is the provider's own console with no per-agent breakdown.
 It also blocks two things ranked above 08: the session view in
-[17](./17-fleet-console.md), and the per-agent daily cap that
+17, and the per-agent daily cap that
 [13](./13-search.md) flags as needed "before the first unattended agent, not
 after the first bill."
 
@@ -104,7 +104,7 @@ harness-internal calls, resumed sessions, and fallback attempts:
   indistinguishable once two of them share a provider and model — and
   ordering does not recover the boundaries, because a harness turn
   contributes several records of its own. Per-turn accounting is promised
-  here and needed by [17](./17-fleet-console.md), so the turn id is part of
+  here and needed by 17, so the turn id is part of
   the record rather than something to reconstruct.
 
 **Out:**

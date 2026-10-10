@@ -282,7 +282,7 @@ docker compose exec stratusd stratus health
 ```
 
 Scheduled, off-machine backups with secret scanning and encrypted
-conversations are [roadmap step 33](../roadmap/33-backups.md), not yet
+conversations are planned, not yet
 shipped. Until then this is the procedure; run it from cron on the host
 if you want it nightly — the stop costs up to the 30-second drain.
 

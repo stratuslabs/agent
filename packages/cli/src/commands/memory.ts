@@ -21,8 +21,8 @@ import { loadServeRuntimeSelection } from '../trusted-config.ts';
 
 /**
  * `stratus memory` — the operator's half of an agent's long-term memory.
- * [17](../../../docs/roadmap/17-fleet-console.md) owns the console view and
- * still does; this is the terminal half.
+ * The fleet console is meant to own the console view; this is the
+ * terminal half.
  *
  * `list` shows what an agent's store holds with the label each entry
  * carries, because an operator cannot re-assert what they cannot see;

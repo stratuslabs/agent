@@ -28,9 +28,9 @@ tool with neither has **no path to running unattended at all**, no matter what
 the operator has approved in the past. That is not a policy decision anybody
 made; it is a gap between two mechanisms.
 
-Two steps already run into it. [24](./24-sub-agents.md) needs a sub-agent to
+Two steps already run into it. 24 needs a sub-agent to
 inherit its parent's standing permissions, and can only inherit command scopes
-today. [26](./26-fleet-introspection.md) had to argue its way around the gap
+today. 26 had to argue its way around the gap
 rather than through it.
 
 ## Scope
@@ -40,7 +40,7 @@ rather than through it.
 - **A durable per-agent tool grant**, stored beside the command scopes it
   already keeps, consulted in the same place, and surviving restarts.
 - **One vocabulary.** "Always allow" means the same thing in the CLI prompt, in
-  Slack, and in [17](./17-fleet-console.md): granted for this agent until
+  Slack, and in 17: granted for this agent until
   revoked. A one-turn answer is "allow once" and says so.
 - **Revocation, and somewhere to see what is granted.** A standing grant nobody
   can list is one nobody can audit, and a grant nobody can remove is a
@@ -120,7 +120,7 @@ rather than through it.
 
 ## Open questions
 
-- **Does this change [26](./26-fleet-introspection.md) back to `gated`?** It
+- **Does this change 26 back to `gated`?** It
   makes `gated` workable there, which it was not before. The argument for
   `safe` does not depend on that and should be re-read on its own terms: the
   risk model grades acting on the world, and a fleet read acts on nothing. The
@@ -128,7 +128,7 @@ rather than through it.
   intent than an allowlist entry. Worth settling deliberately rather than
   inheriting whichever answer was convenient.
 - **Should a grant expire?** A standing yes that is a year old was given
-  against a different fleet. [08](./08-deployment-profiles.md)'s lease model —
+  against a different fleet. 08's lease model —
   scope, expiry, use count, reason — is the shape if one is wanted, and it may
   be too much machinery for a single-operator install.
 - **Does the grant survive an agent being deleted and its id reused?** Ids are

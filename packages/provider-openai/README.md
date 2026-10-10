@@ -2,7 +2,7 @@
 
 The OpenAI-compatible chat-completions provider, as a **plugin**. It
 registers a provider named `openai-compatible` through the plugin seam
-([19](../../docs/roadmap/19-registration-seams.md)), and a soul selects it
+(19), and a soul selects it
 the way it selects a built-in:
 
 ```markdown

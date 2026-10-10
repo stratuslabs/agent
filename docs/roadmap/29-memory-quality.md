@@ -261,7 +261,7 @@ different review look like.
   one asked for serves `recency` and says so rather than erroring. Two
   implementations stay honest about ordering without memory being frozen at
   clock order forever, and an embeddings-backed store behind
-  [19](./19-registration-seams.md) becomes an additive capability rather than a
+  19 becomes an additive capability rather than a
   contract break.
 
 - **Usage telemetry in the index, and only in the index.** `lastRecalledAt` and
@@ -296,7 +296,7 @@ different review look like.
     tests the matching contract, the bounded-read rule, and parity between the
     two store implementations. It is not a measure of 29's selection policy and
     is not the headline number; it becomes one when a `relevance` strategy
-    lands behind [19](./19-registration-seams.md).
+    lands behind 19.
 
   **Better means: precision up and staleness down at no more tokens per
   relevant fact**, against the recency policy this step replaces, on the same
@@ -306,7 +306,7 @@ different review look like.
   implementations, with no live model in the default path.
 
 - **`stratus memory`** — `list`, `search`, `forget`, `audit`, `pin`, `export`,
-  `import`. [17](./17-fleet-console.md) owns the console view and still does;
+  `import`. 17 owns the console view and still does;
   this is the terminal half, and the export path is what the harness needs to
   run a corpus in the first place. **An imported entry lands `external`** per
   [30](./30-provenance.md) unless the operator explicitly says otherwise —
@@ -337,7 +337,7 @@ different review look like.
   agent's own tool call under its own policy — that invariant is most of why
   this memory is trustworthy, and end-of-turn extraction is the standard way it
   gets lost. A reflection step that *proposes* candidates is the supported
-  shape, reusing [24](./24-sub-agents.md)'s proposal mechanism, and it is a
+  shape, reusing 24's proposal mechanism, and it is a
   separate step from this one.
 - **Automatic retrieval at turn start.** Still the right idea and still
   unmeasurable today. Building the ruler before the tuning is the whole point

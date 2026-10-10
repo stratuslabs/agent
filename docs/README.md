@@ -41,7 +41,7 @@ tree is where the depth lives.
 | Understand what installing a plugin does (and does not do) | [Plugins](./concepts/plugins.md) |
 | See the security posture in one place | [Security](./concepts/security.md) |
 | Drive a daemon over HTTP/WebSocket | [Control API reference](../packages/control-api/README.md) |
-| Understand the design, or see what is coming | [Architecture](./architecture/stratus-v2.md) · [Roadmap](./roadmap/README.md) |
+| Understand the design and why it was built that way | [Architecture](./architecture/stratus-v2.md) · [Roadmap](./roadmap/README.md) |
 
 ## How this tree is organized
 
@@ -51,7 +51,7 @@ tree is where the depth lives.
 - **`concepts/`** — the ideas underneath: agents, memory, plugins, security.
 - **`architecture/`** — design documents; [`plugins.md`](./architecture/plugins.md)
   is the contract the ecosystem builds against.
-- **`roadmap/`** — ordered steps with a one-page spec each.
+- **`roadmap/`** — the spec of each shipped step, by number.
 
 Package READMEs stay canonical for their own surface:
 [`channel-slack`](../packages/channel-slack/README.md) for the Slack app

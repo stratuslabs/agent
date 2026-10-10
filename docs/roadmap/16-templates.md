@@ -66,7 +66,7 @@ directories, and reuses those helpers rather than growing new ones.
   the first attempt 18 review findings, for a failure mode an operator can
   see and fix.
 - **Editing an existing agent.** Templates add; changing an agent afterwards
-  is the soul file and [17](./17-fleet-console.md).
+  is the soul file and 17.
 
 ## Acceptance criteria
 
@@ -100,7 +100,7 @@ directories, and reuses those helpers rather than growing new ones.
 ## Deferred
 
 - **The library UI.** The desktop and web apps show the available templates
-  and install one on click, over this command. That is [17](./17-fleet-console.md).
+  and install one on click, over this command. That is 17.
 - **Trusting a source.** Today the review is the whole answer: a template can
   name any npm package, and installing one runs that package's install
   scripts. Signing, pinning, or a curated index is later work.

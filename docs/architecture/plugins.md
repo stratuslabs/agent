@@ -36,7 +36,7 @@ plugin can *register* one through the entrypoint, and today most cannot:
 | tools | `Tool` → `ToolRegistry` | **yes**, `context.tools` |
 | hooks | `EventBus.subscribe` | **yes**, `context.bus` |
 | skills | `Skill` → `SkillRegistry` | **n/a — the host loads them from the manifest** ([09](../roadmap/09-skills.md)) |
-| providers | `ModelProvider`, behind a `ProviderContribution` factory | **yes**, `context.providers` ([19](../roadmap/19-registration-seams.md)) |
+| providers | `ModelProvider`, behind a `ProviderContribution` factory | **yes**, `context.providers` (19) |
 | channels | `ChannelAdapter`, as a `ChannelContribution` | **yes**, `context.channels` |
 | memory | `AgentMemoryStore`, as a `MemoryStoreContribution` | **yes**, `context.memory` |
 | executors | `Executor`, as an `ExecutorContribution` | **yes**, `context.executors` |
@@ -73,7 +73,7 @@ first half of kernel change 9 to land, and it landed because
 express. A host that omits it leaves a plugin needing a key with no way to
 get one, and such a plugin must fail the call naming what is missing rather
 than falling back to the environment. And the second half, from
-[19](../roadmap/19-registration-seams.md): four registration handles —
+19: four registration handles —
 `providers`, `channels`, `memory`, `executors` — each a manifest-bound view
 following the shape `tools` established, and each optional for the same
 reason `credentials` is: `AgentRunner.initialize` still calls
@@ -117,7 +117,7 @@ to kernel code, which is what makes the ecosystem's tools first-class here.
 predate the seams are still host-wired — `@stratusagent/channel-slack` is
 constructed by the CLI and handed to `createGateway({ channels: [...] })`,
 and the three built-in providers are built inside `createRuntimeProvider` —
-and converting them is [19B](../roadmap/19-registration-seams.md)'s work,
+and converting them is 19B's work,
 not a gap in the contract: a plugin contributing any of the four registers
 it through its handle today, and the fixture plugins under `fixtures/` are
 the proof.
@@ -234,7 +234,7 @@ and a package without it is not loadable however well it is written.
 
 The registration handles for providers, channels, memory, and executors
 were enumerated as kernel-budget item 9 in [`stratus-v2.md`](./stratus-v2.md)
-and landed in [19A](../roadmap/19-registration-seams.md). Until then a
+and landed in 19A. Until then a
 plugin contributing one of those four kinds was configuration the host read,
 not code the plugin registered; that is no longer true, and the section
 below is the contract.
@@ -808,4 +808,3 @@ the ecosystem non-empty on the day it lands.
 - [09 — skills](../roadmap/09-skills.md)
 - [10 — proactive agents: schedules and outbound messages](../roadmap/10-proactive.md)
 - [11 — MCP bridge](../roadmap/11-mcp.md)
-- [20 — Discord channel: the second adapter](../roadmap/20-channel-discord.md)

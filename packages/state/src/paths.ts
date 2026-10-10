@@ -165,7 +165,7 @@ export const gatewayInfoPath = (env: StateEnvironment): string =>
 // The point is structural: a store is opened on an agent's path, so there is
 // no query another agent's rows could come back from — the handle does not
 // exist rather than a filter having remembered to exclude them. See
-// docs/roadmap/15-agent-isolation.md.
+// docs/reference/state-layout.md.
 //
 // Ids key these joins, which is why `isValidAgentId` refuses anything that
 // is not a single path segment. The callers below take an id the roster (or
