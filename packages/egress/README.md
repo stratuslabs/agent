@@ -79,5 +79,5 @@ protects what an agent has read from where it may send it — a URL's query
 string is a channel to any host it names.
 
 None of these is a substitute for network-level egress rules in a VM or hosted
-profile ([08](../../docs/roadmap/08-deployment-profiles.md)); this is the
+profile; this is the
 in-process half.

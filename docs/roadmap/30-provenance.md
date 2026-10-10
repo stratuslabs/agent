@@ -209,7 +209,7 @@ half stood.
     proportional to **everything that reaches the prompt**, not to the pins.
 
     That makes bulk re-assertion part of the operator surface rather than a
-    convenience: `stratus memory` and [17](./17-fleet-console.md) re-assert a
+    convenience: `stratus memory` and 17 re-assert a
     selection, not one entry at a time. It is still bounded work — an operator
     reviews what their agent actually surfaces, once — but it is honest about
     the size, and a claim that pinning covers it would send someone into an
@@ -235,7 +235,7 @@ half stood.
     replaced the binary, was the drafting error worth naming: a rule stated as
     a lattice has to be applied as one everywhere, and every place that still
     says "tainted" is a place it was not.
-  - **A sub-agent's reply, when [24](./24-sub-agents.md) lands.** 24 marks a
+  - **A sub-agent's reply, when 24 lands.** 24 marks a
     sub-agent's memory *proposals* untrusted and guarantees it writes no
     memory; its **reply text** is a separate channel into the parent and is
     not covered by either rule. Named here so 24 inherits the answer instead
@@ -267,7 +267,7 @@ half stood.
   session was tainted by, when there was one. Both optional; both absent on a
   legacy entry and on anything hand-added, which is exactly what `unknown`
   already says. It answers "where did this come from" for an operator reading
-  [17](./17-fleet-console.md)'s memory view, and it is **not** a security
+  17's memory view, and it is **not** a security
   control — `trust` is the control, and nothing decides anything from `origin`.
   It travels with the entry through export and import as ordinary data. Said
   here because [29](./29-memory-quality.md) carries the field on the strength
@@ -401,7 +401,7 @@ half stood.
   once it reads `external` content, per agent, and the default stays
   label-only ([Approvals](../guides/approvals.md#after-an-agent-reads-the-web)).
 - **Does the label reach the *user*, or only the model?** An operator reading
-  their agent's memory in [17](./17-fleet-console.md) probably wants to see
+  their agent's memory in 17 probably wants to see
   which facts came off the network, and that is a UI decision 17 owns.
 - **Is session scope too coarse to be useful in practice?** An agent that
   fetches one page early marks everything after it. Measurable once

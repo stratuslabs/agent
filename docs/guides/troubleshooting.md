@@ -173,7 +173,7 @@ What this costs is real and worth knowing:
   knows how many there were and nothing about them, so it will answer
   questions about the start of the conversation as though it had just
   joined. Summarizing what leaves is
-  [planned, not shipped](../roadmap/32-context-management.md).
+  planned, not shipped.
 - **Nothing is deleted.** The window bounds what is *sent*; the transcript
   on disk is whole, and `stratus logs` shows every trim as
   `session.context-trimmed`.

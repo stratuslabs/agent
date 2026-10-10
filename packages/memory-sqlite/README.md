@@ -2,7 +2,7 @@
 
 Agent memory on one SQLite file, as a **plugin**. It registers a memory
 store named `sqlite` through the plugin seam
-([19](../../docs/roadmap/19-registration-seams.md)); a trusted config
+(19); a trusted config
 selects it for the fleet, and every agent's `memory.remember`,
 `memory.recall`, `memory.forget`, and `memory.pin` — and the memory each
 turn's prompt is built from — go through it instead of the built-in file
