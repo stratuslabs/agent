@@ -1669,11 +1669,11 @@ test('the slack block sets each agent\'s reply mode, per agent over the default,
     slack: { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {} } },
   }, 'test-config');
   assert.deepEqual(config.slack, { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {} } });
-  assert.deepEqual(resolveAgentSlack(config.slack, 'ava'), { replies: 'stream', homeChannels: [] });
-  assert.deepEqual(resolveAgentSlack(config.slack, 'bea'), { replies: 'final', homeChannels: [] });
-  assert.deepEqual(resolveAgentSlack(config.slack, 'cy'), { replies: 'stream', homeChannels: [] });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'ava'), { replies: 'stream', linkPreviews: true, homeChannels: [] });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'bea'), { replies: 'final', linkPreviews: true, homeChannels: [] });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'cy'), { replies: 'stream', linkPreviews: true, homeChannels: [] });
   // No block at all: the default is the reply posted once, finished.
-  assert.deepEqual(resolveAgentSlack(undefined, 'ava'), { replies: 'final', homeChannels: [] });
+  assert.deepEqual(resolveAgentSlack(undefined, 'ava'), { replies: 'final', linkPreviews: true, homeChannels: [] });
   // A misspelling is refused rather than read as the default, which would
   // look like the setting silently did nothing.
   assert.throws(
@@ -1686,12 +1686,28 @@ test('the slack block sets each agent\'s reply mode, per agent over the default,
   );
 });
 
+test('slack linkPreviews is on unless turned off, per agent over the default, and only true or false', () => {
+  const config = validateConfigFile({
+    slack: { linkPreviews: false, agents: { bea: { linkPreviews: true }, cy: {} } },
+  }, 'test-config');
+  assert.equal(resolveAgentSlack(config.slack, 'ava').linkPreviews, false);
+  assert.equal(resolveAgentSlack(config.slack, 'bea').linkPreviews, true);
+  assert.equal(resolveAgentSlack(config.slack, 'cy').linkPreviews, false);
+  // Unset is Slack's own behavior: previews on.
+  assert.equal(resolveAgentSlack(undefined, 'ava').linkPreviews, true);
+  // "false" as a string would read as on if it were coerced.
+  assert.throws(
+    () => validateConfigFile({ slack: { agents: { ava: { linkPreviews: 'false' } } } }, 'test-config'),
+    /Invalid slack\.agents\.ava\.linkPreviews in config test-config: expected true or false, received "false"\./,
+  );
+});
+
 test('slack homeChannels is per-agent, deduplicated, and refuses anything but channel ids', () => {
   const config = validateConfigFile({
     slack: { agents: { atlas: { homeChannels: ['C0C1YV12SLC', 'C0C1YV12SLC', 'G0PRIVATE1'] } } },
   }, 'test-config');
-  assert.deepEqual(resolveAgentSlack(config.slack, 'atlas'), { replies: 'final', homeChannels: ['C0C1YV12SLC', 'G0PRIVATE1'] });
-  assert.deepEqual(resolveAgentSlack(config.slack, 'blair'), { replies: 'final', homeChannels: [] });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'atlas'), { replies: 'final', linkPreviews: true, homeChannels: ['C0C1YV12SLC', 'G0PRIVATE1'] });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'blair'), { replies: 'final', linkPreviews: true, homeChannels: [] });
   // A shared home channel would have every agent answer every message.
   assert.throws(
     () => validateConfigFile({ slack: { homeChannels: ['C0C1YV12SLC'] } }, 'test-config'),

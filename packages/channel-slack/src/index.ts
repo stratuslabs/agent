@@ -186,6 +186,12 @@ export interface SlackAgentConfig {
    */
   replies?: 'final' | 'stream';
   /**
+   * `false` posts this agent's messages without link and media previews
+   * (Slack's `unfurl_links`/`unfurl_media`). Absent or `true` leaves
+   * Slack's default, which previews them.
+   */
+  linkPreviews?: boolean;
+  /**
    * Channel ids where a new top-level message from an admitted sender is
    * this agent's to answer without a mention: the channel people come to
    * when they want this agent. A message there that names another agent
@@ -390,7 +396,7 @@ export interface SlackHistoryPage {
 export interface SlackWebLike {
   auth: { test(): Promise<{ user_id?: string; team_id?: string; response_metadata?: { scopes?: string[] } }> };
   chat: {
-    postMessage(args: { channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[] }): Promise<{ ts?: string; channel?: string }>;
+    postMessage(args: { channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[]; unfurl_links?: boolean; unfurl_media?: boolean }): Promise<{ ts?: string; channel?: string }>;
     update(args: { channel: string; ts: string; text: string; blocks?: SlackBlock[] }): Promise<unknown>;
     /**
      * Take a message back. The one caller is a turn nobody asked for that
@@ -551,6 +557,22 @@ const checkBotScopes = (
     + 'Without them, some features (thread follow-through, image viewing, '
     + 'channel history) will silently fail.',
   );
+};
+
+/**
+ * A client whose every post goes out without link or media previews, for
+ * an agent configured with `linkPreviews: false`. Applied once around the
+ * client, so no post site can forget it. `chat.update` takes no unfurl
+ * flags; an edited placeholder keeps the post's own setting.
+ */
+export const withoutLinkPreviews = (web: SlackWebLike): SlackWebLike => {
+  // Delegating objects, not copies: everything else on the client (and a
+  // method replaced on it later) is still reached through the original.
+  const chat = Object.create(web.chat) as SlackWebLike['chat'];
+  chat.postMessage = (args) => web.chat.postMessage({ ...args, unfurl_links: false, unfurl_media: false });
+  const wrapped = Object.create(web) as SlackWebLike;
+  wrapped.chat = chat;
+  return wrapped;
 };
 
 const defaultWebClient = (botToken: string): SlackWebLike => {
@@ -5697,7 +5719,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           continue;
         }
         try {
-          const web = createWeb(config.botToken);
+          const created = createWeb(config.botToken);
+          const web = config.linkPreviews === false ? withoutLinkPreviews(created) : created;
           const auth = await web.auth.test();
           const botUserId = auth.user_id ?? '';
           const teamId = auth.team_id ?? '';

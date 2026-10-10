@@ -151,6 +151,12 @@ export type SlackReplyMode = 'final' | 'stream';
 export interface AgentSlackConfig {
   replies?: SlackReplyMode;
   /**
+   * Whether Slack shows preview cards for links and media in this agent's
+   * posts. `true`, the default, is Slack's own behavior; `false` keeps
+   * links clickable but posts them without previews.
+   */
+  linkPreviews?: boolean;
+  /**
    * Channel ids where this agent answers every new top-level message from
    * an admitted sender without being mentioned — a channel that is "the
    * place you talk to this agent". Threads there follow the soul's
