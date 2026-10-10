@@ -1075,6 +1075,13 @@ export const routes: Route[] = [
         );
       }
 
+      // Again, with nothing awaited between here and the dispatch: a pause
+      // that landed while this handler was reading the store would otherwise
+      // be refused by the gateway after the caller had been handed a 202.
+      if (context.gateway.intake().paused) {
+        throw new ApiError(503, 'intake_paused', context.gateway.intake().message ?? DEFAULT_PAUSED_MESSAGE);
+      }
+
       const turnId = randomUUID();
       // Armed before the dispatch, so a failure that arrives while the runner
       // is still unwinding is seen rather than missed.

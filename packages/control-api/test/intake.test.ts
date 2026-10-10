@@ -111,3 +111,27 @@ test('a pause that cannot be written down is a server error, not a bad request',
     await harness.stop();
   }
 });
+
+test('a pause that lands while a message is being checked is still refused with 503, not 202', async () => {
+  const harness = await startApi();
+  const store = harness.gateway.store;
+  const originalGet = store.get.bind(store);
+  // The route reads the store before it dispatches; pause intake in that gap.
+  store.get = async (sessionId: string) => {
+    await harness.gateway.pauseIntake({ message: 'Paused mid-request.' });
+    return originalGet(sessionId);
+  };
+  try {
+    const response = await harness.call('/api/v1/sessions/race-1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'stratus' }),
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await json<{ error: { code: string } }>(response)).error.code, 'intake_paused');
+  } finally {
+    store.get = originalGet;
+    await harness.gateway.resumeIntake();
+    await harness.stop();
+  }
+});
