@@ -19,9 +19,11 @@ macOS app and a headless VM — want the API and not a web page.
 
 ## Authentication
 
-Two credentials, one check. Every endpoint requires one of them, except two
-that carry a single-use token of their own in their address: the one-time
-sign-in exchange below, and a [credential link](#credential-links).
+Two credentials, one check. Every endpoint requires one of them, except
+three: two that carry a single-use token of their own in their address (the
+one-time sign-in exchange below, and a [credential link](#credential-links)),
+and `GET /livez`, which needs nothing and answers only `{ "ok": true }`, for
+a platform's liveness check.
 
 **Bearer token** — generated into `~/.stratus/gateway-token` (0600) the first
 time the API binds. Programmatic clients read the file and send it:
