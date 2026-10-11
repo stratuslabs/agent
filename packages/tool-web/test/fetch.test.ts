@@ -928,3 +928,47 @@ test('a redirect to another site is reported, not followed', async (t) => {
   assert.match(String(away.text), /not followed/);
   assert.equal(otherReached, false);
 });
+
+test('web.fetch returns a long page in pages, and offset reads the rest', async (t) => {
+  const body = Array.from({ length: 2_000 }, (_, i) => `row ${String(i).padStart(4, '0')}`).join('\n');
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const url = `http://localhost:${port}/long.txt`;
+
+  const tool = await fetchTool({ allowedHosts: ['localhost'], maxChars: 4_000 });
+  let offset = 0;
+  let seen = '';
+  let pages = 0;
+  for (;;) {
+    const page = await tool.execute({ url, ...(offset > 0 ? { offset } : {}) }, session) as JsonObject;
+    pages += 1;
+    assert.ok(String(page.text).length <= 4_000);
+    assert.equal(page.totalChars, body.length);
+    assert.equal(page.truncated, false, 'the download was whole; paging is not truncation');
+    seen += String(page.text);
+    if (page.nextOffset === undefined) break;
+    offset = page.nextOffset as number;
+  }
+  assert.equal(seen, body);
+  assert.equal(pages, Math.ceil(body.length / 4_000));
+});
+
+test('a short page carries no paging fields', async (t) => {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('short');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const tool = await fetchTool({ allowedHosts: ['localhost'] });
+  const result = await tool.execute({ url: `http://localhost:${port}/` }, session) as JsonObject;
+  assert.equal(result.text, 'short');
+  assert.equal(result.nextOffset, undefined);
+  assert.equal(result.offset, undefined);
+});

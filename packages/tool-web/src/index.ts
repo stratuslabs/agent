@@ -12,6 +12,16 @@ import { extractTitle, htmlToText } from './readability.ts';
 export { decodeEntities, extractTitle, htmlToText } from './readability.ts';
 
 const DEFAULT_MAX_BYTES = 400_000;
+/**
+ * The most text one call returns. Separate from `maxBytes`, which bounds
+ * the download: a page is read whole up to that and handed back in slices
+ * of this, so a long document is read in full over several calls rather
+ * than cut off. Sized to stay inside what a model host will put in front
+ * of the model as one tool result: Claude Code's harness swaps a larger
+ * result for a file in its own directory, outside every root an agent can
+ * read, and the agent sees only that the text existed.
+ */
+const DEFAULT_MAX_CHARS = 40_000;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_REDIRECTS = 5;
 const DEFAULT_USER_AGENT = 'StratusAgent/0.5 (+https://github.com/stratuslabs/agent)';
@@ -24,6 +34,8 @@ export interface WebPluginConfig extends JsonObject {
   /** The only hosts reachable at all, when set. See the README. */
   onlyHosts?: string[];
   maxBytes?: number;
+  /** The most text one call returns; the rest is read with `offset`. */
+  maxChars?: number;
   timeoutMs?: number;
   maxRedirects?: number;
   userAgent?: string;
@@ -49,6 +61,7 @@ const settingsFor = (config: JsonObject, session: Session) => {
   return {
     policy,
     maxBytes: asNumber(resolved.maxBytes, DEFAULT_MAX_BYTES),
+    maxChars: asNumber(resolved.maxChars, DEFAULT_MAX_CHARS),
     timeoutMs: asNumber(resolved.timeoutMs, DEFAULT_TIMEOUT_MS),
     maxRedirects: asNumber(resolved.maxRedirects, DEFAULT_MAX_REDIRECTS),
     userAgent: typeof resolved.userAgent === 'string' ? resolved.userAgent : DEFAULT_USER_AGENT,
@@ -187,6 +200,36 @@ export const fetchThroughPolicy = async (
   throw new Error(`Too many redirects (${maxRedirects}) starting at ${rawUrl}`);
 };
 
+/**
+ * One call's slice of a page's text. Cut at a code-point boundary: a slice
+ * ending between the halves of a surrogate pair would put a lone half on
+ * each side, and the pages would no longer join back into the text.
+ */
+const pageOf = (whole: string, requested: unknown, maxChars: number): {
+  text: string;
+  offset: number;
+  nextOffset?: number;
+  paged: boolean;
+} => {
+  const offset = typeof requested === 'number' && Number.isFinite(requested) && requested > 0
+    ? Math.min(Math.floor(requested), whole.length)
+    : 0;
+  let end = Math.min(offset + maxChars, whole.length);
+  if (end < whole.length && end > offset + 1) {
+    const last = whole.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) {
+      end -= 1;
+    }
+  }
+  const nextOffset = end < whole.length ? end : undefined;
+  return {
+    text: whole.slice(offset, end),
+    offset,
+    ...(nextOffset === undefined ? {} : { nextOffset }),
+    paged: offset > 0 || nextOffset !== undefined,
+  };
+};
+
 const createFetchTool = (config: JsonObject): Tool => ({
   name: 'web.fetch',
   description: 'Retrieve a URL and return its readable text. No browser, no JavaScript.',
@@ -203,6 +246,7 @@ const createFetchTool = (config: JsonObject): Tool => ({
       url: { type: 'string' },
       maxBytes: { type: 'number' },
       raw: { type: 'boolean', description: 'Return the body as received, without text extraction.' },
+      offset: { type: 'number', description: 'Start this many characters into the text. A long page returns nextOffset; pass it here to read on.' },
     },
     required: ['url'],
   },
@@ -248,8 +292,9 @@ const createFetchTool = (config: JsonObject): Tool => ({
     }
 
     const html = response.contentType.includes('html');
-    const text = input.raw === true || !html ? response.body : htmlToText(response.body);
+    const whole = input.raw === true || !html ? response.body : htmlToText(response.body);
     const title = html ? extractTitle(response.body) : undefined;
+    const page = pageOf(whole, input.offset, settings.maxChars);
 
     return {
       url: response.url,
@@ -259,7 +304,13 @@ const createFetchTool = (config: JsonObject): Tool => ({
       // Named `redirects` rather than left implicit: an agent that followed
       // a link somewhere else should be able to say where it ended up.
       ...(response.hops.length > 1 ? { redirects: response.hops } : {}),
-      text,
+      text: page.text,
+      // Paging fields only when the text did not fit in one call, so a
+      // short page reads exactly as it always has. `truncated` stays the
+      // download's own: true means the body was cut at `maxBytes` and no
+      // offset will reach past that.
+      ...(page.paged ? { offset: page.offset, totalChars: whole.length } : {}),
+      ...(page.nextOffset === undefined ? {} : { nextOffset: page.nextOffset }),
       truncated: response.truncated,
     };
   },
