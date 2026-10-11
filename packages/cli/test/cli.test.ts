@@ -9450,6 +9450,32 @@ test('serve --held refuses to start without the control API, since nothing could
   assert.match(output.stderr + output.stdout, /--held needs the control API/);
 });
 
+test('serve --hold-new-version without the API serves a promoted version, and refuses an unpromoted one', async () => {
+  const { recordPromotedVersion } = await import('../src/promotion.ts');
+  const { CLI_VERSION } = await import('../src/npm.ts');
+  const run = async (home: string) => {
+    const { streams, output } = createStreams();
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 1_500);
+    const code = await runCli({
+      argv: ['serve', '--no-events', '--hold-new-version', '--no-api'],
+      streams,
+      env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+    });
+    return { code, text: output.stderr + output.stdout };
+  };
+
+  const unpromoted = await mkdtemp(path.join(os.tmpdir(), 'stratus-hnv-new-'));
+  const refused = await run(unpromoted);
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.text, /--hold-new-version needs the control API/);
+
+  const promoted = await mkdtemp(path.join(os.tmpdir(), 'stratus-hnv-old-'));
+  await recordPromotedVersion({ homeDir: promoted }, CLI_VERSION);
+  const served = await run(promoted);
+  assert.equal(served.code, 0, served.text);
+});
+
 test('a project-local config cannot decide which interface the daemon binds', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-api-untrusted-'));
   // Auto-discovered, and checkable into any repository. Which interface a

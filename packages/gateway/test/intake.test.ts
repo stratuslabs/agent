@@ -397,3 +397,26 @@ test('onPromoted runs once after a promotion succeeds, and its failure does not 
     await gateway.stop();
   }
 });
+
+test('an onPromoted that throws synchronously is warned about, and the promotion stands', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    held: true,
+    warn: (line: string) => warnings.push(line),
+    onPromoted: (() => {
+      throw new Error('thrown before any promise');
+    }) as unknown as () => Promise<void>,
+  });
+  await gateway.start();
+  try {
+    await gateway.promote();
+    assert.equal(gateway.held(), false);
+    assert.ok(warnings.some((line) => line.includes('thrown before any promise')), warnings.join('\n'));
+  } finally {
+    await gateway.stop();
+  }
+});

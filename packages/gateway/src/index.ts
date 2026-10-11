@@ -4391,9 +4391,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       heldState = false;
       log('stratusd promoted: channels connected, schedules running');
       if (options.onPromoted) {
-        await options.onPromoted().catch((error: unknown) => {
+        // Synchronous throws too: the promotion has happened either way.
+        try {
+          await options.onPromoted();
+        } catch (error) {
           warn(`recording the promotion failed: ${error instanceof Error ? error.message : String(error)}`);
-        });
+        }
       }
     })().finally(() => {
       promoting = undefined;

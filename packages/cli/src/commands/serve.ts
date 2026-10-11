@@ -359,7 +359,9 @@ const serveHeldHome = async (
 
   // Held, the control API is the only way out: without one nothing could
   // ever promote this daemon, and it would sit there answering nobody.
-  if ((command.held === true || command.holdNewVersion === true) && boundApi === undefined) {
+  // Only a start that is actually held: a version already promoted serves
+  // at once, API or not, and must not be refused on a crash restart.
+  if (held && boundApi === undefined) {
     throw new Error(
       `${command.held === true ? '--held' : '--hold-new-version'} needs the control API, which is how a held daemon is promoted (POST /api/v1/promote), `
       + 'and this daemon will not serve one (--no-api, api.enabled: false, or @stratusagent/control-api not installed).',
