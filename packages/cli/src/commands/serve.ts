@@ -45,6 +45,7 @@ import { writeLine } from '../io.ts';
 import { hostChannelClaimsFor, loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
 import { CLI_VERSION } from '../npm.ts';
+import { holdsForVersion, recordPromotedVersion } from '../promotion.ts';
 import type { ParsedServeCommand } from '../parse.ts';
 import { warnOnCredentialOverride, warnOnUntrustedConfig, warnOnIgnoredConfig } from '../runtime.ts';
 import {
@@ -350,11 +351,17 @@ const serveHeldHome = async (
     }
   }
 
+  // `--held` holds every start; `--hold-new-version` only a start of a
+  // version this home has not promoted yet, so an upgrade proves itself and
+  // a crash restart of the same version serves at once.
+  const held = command.held === true
+    || (command.holdNewVersion === true && await holdsForVersion(env, CLI_VERSION));
+
   // Held, the control API is the only way out: without one nothing could
   // ever promote this daemon, and it would sit there answering nobody.
-  if (command.held === true && boundApi === undefined) {
+  if ((command.held === true || command.holdNewVersion === true) && boundApi === undefined) {
     throw new Error(
-      '--held needs the control API, which is how a held daemon is promoted (POST /api/v1/promote), '
+      `${command.held === true ? '--held' : '--hold-new-version'} needs the control API, which is how a held daemon is promoted (POST /api/v1/promote), `
       + 'and this daemon will not serve one (--no-api, api.enabled: false, or @stratusagent/control-api not installed).',
     );
   }
@@ -627,7 +634,8 @@ const serveHeldHome = async (
   const gateway = createGateway({
     env,
     approvals,
-    ...(command.held === true ? { held: true } : {}),
+    ...(held ? { held: true } : {}),
+    ...(command.holdNewVersion === true ? { onPromoted: () => recordPromotedVersion(env, CLI_VERSION) } : {}),
     onRestart: (outcome) => {
       restart = outcome;
       requestShutdown();

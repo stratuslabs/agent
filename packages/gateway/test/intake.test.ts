@@ -370,3 +370,30 @@ test('a stop during a promotion starts no further channel, even one that would n
 
   assert.deepEqual(order, ['start first', 'stop first']);
 });
+
+test('onPromoted runs once after a promotion succeeds, and its failure does not undo it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  let calls = 0;
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    held: true,
+    warn: (line: string) => warnings.push(line),
+    onPromoted: async () => {
+      calls += 1;
+      throw new Error('disk full');
+    },
+  });
+  await gateway.start();
+  try {
+    await gateway.promote();
+    await gateway.promote();
+    assert.equal(calls, 1);
+    assert.equal(gateway.held(), false);
+    assert.ok(warnings.some((line) => line.includes('recording the promotion failed: disk full')), warnings.join('\n'));
+  } finally {
+    await gateway.stop();
+  }
+});

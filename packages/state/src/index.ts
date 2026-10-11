@@ -64,6 +64,7 @@ export {
   foldedAgentId,
   gatewayTokenPath,
   intakeStatePath,
+  promotedVersionPath,
   gatewayInfoPath,
   grantsLockPath,
 } from './paths.ts';
