@@ -3,7 +3,7 @@
 The judgement behind `listens: judge` is a prompt (`UNADDRESSED_TURN_NOTE`
 in `@stratusagent/core`), and a prompt cannot be specified into
 correctness: a model asked "should you answer this?" says yes far more
-often than a person would. This is the ruler [31](../../../../docs/roadmap/31-reading-the-room.md)
+often than a person would. This is the ruler the reading-the-room work
 asked for, so "it interrupts too much" is a number that moves rather than
 an argument had again every review.
 

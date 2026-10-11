@@ -8,8 +8,7 @@
  * result shape, so a soul or a skill written against search keeps working
  * when the operator changes vendor.
  *
- * The contract is specified in `docs/roadmap/13-search.md` and summarized
- * in this package's README; the code here is what enforces it.
+ * The contract is documented in this package's README; the code here is what enforces it.
  */
 
 export {

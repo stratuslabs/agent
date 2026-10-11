@@ -2,8 +2,7 @@ import type { MemoryEntryKind, TrustLevel } from '@stratusagent/core';
 
 /**
  * A synthetic agent lifetime, with per-turn relevance labels — the ground
- * truth [29](../../../docs/roadmap/29-memory-quality.md)'s numbers are
- * measured against.
+ * truth the memory-quality numbers are measured against.
  *
  * Fixtures rather than recordings, for two reasons the spec states: real
  * transcripts would carry conversation content into the repository and
