@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, realpath, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -7158,6 +7158,176 @@ test('a text file the token may not read, or too large, or not text, stays a not
   assert.equal(warnings.filter((line) => /plan\.md/.test(line) && /files:read/.test(line)).length, 1);
   assert.equal(warnings.filter((line) => /huge\.log/.test(line) && /Paste the part that matters/.test(line)).length, 1);
   assert.equal(warnings.filter((line) => /notes\.txt/.test(line) && /not UTF-8/.test(line)).length, 1);
+});
+
+/** A recording ledger and a workspaces seam over a temporary root, for the saved-attachment tests. */
+const attachmentStoreAt = (root: string, events: string[] = []) => {
+  const records: Array<{ agentId: string; path: string; trust: string; existed: boolean }> = [];
+  return {
+    records,
+    store: {
+      workspaces: {
+        forAgent: (agentId: string) => path.join(root, agentId),
+        prepare: (agentId: string) => {
+          events.push(`prepare:${agentId}`);
+          return path.join(root, agentId);
+        },
+        all: async () => [],
+      },
+      ledger: {
+        recordWrite: async (agentId: string, absolutePath: string, trust: string) => {
+          const existed = await stat(absolutePath).then(() => true, () => false);
+          records.push({ agentId, path: absolutePath, trust, existed });
+        },
+      },
+    },
+  };
+};
+
+test('a text file too large for the message is saved to the workspace, labelled, and its path given', async () => {
+  // A 251 KB Markdown spec reached an agent as a filename only, and it had
+  // no way to open it. Over the inline cap and under the save cap, the file
+  // is saved under the agent's workspace and the turn is told where. What a
+  // Slack member sent must not read back through fs.read as the agent's own
+  // notes, so the path is in the ledger at the sender's label first.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'reading it'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'slack-saved-'));
+  const { store, records } = attachmentStoreAt(root);
+  const big = `# Spec\n${'x'.repeat(250 * 1024)}\n`;
+  const fetchedLimits: number[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    attachmentStore: store,
+    fetchFile: async (url, _token, _signal, maxBytes) => {
+      fetchedLimits.push(maxBytes);
+      return { status: 200, contentType: 'text/plain', body: Buffer.from(url.includes('F1') ? big : 'small\n') };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('message', dmWithFiles('evt-big', '980.0', '', [
+    { id: 'F1', name: '../../eps x signal.md', mimetype: 'text/markdown', size: Buffer.byteLength(big), url_private_download: 'https://files.slack.com/F1/download' },
+    { id: 'F2', name: 'note.txt', mimetype: 'text/plain', size: 6, url_private_download: 'https://files.slack.com/F2/download' },
+  ]));
+  await adapter.stop();
+
+  const dir = path.join(await realpath(root), 'ava', 'attachments', 'slack');
+  const names = await readdir(dir);
+  assert.equal(names.length, 1);
+  assert.match(names[0]!, /^[0-9a-z]+-F1-eps_x_signal\.md$/);
+  const saved = path.join(dir, names[0]!);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    '\n[Attached: note.txt. Its contents follow.]\nsmall\n[End of note.txt]'
+      + `\n[Attached: ../../eps x signal.md, 251 KB, too large to include here. It is saved in full at ${saved}. Read it with your file tools, in parts if it is long.]`,
+  ]);
+  assert.equal(await readFile(saved, 'utf8'), big);
+  assert.equal((await stat(saved)).mode & 0o777, 0o600);
+  // A DM from a member not on the principals list is `unknown`; the record
+  // names the exact canonical path, and was made before the file existed.
+  assert.deepEqual(records, [{ agentId: 'ava', path: saved, trust: 'unknown', existed: false }]);
+  assert.equal(fetchedLimits[0], 10 * 1024 * 1024);
+});
+
+test('a saved attachment never writes through a link at its name, and a failed record saves nothing', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const warnings: string[] = [];
+  const root = await mkdtemp(path.join(os.tmpdir(), 'slack-saved-link-'));
+  const outside = path.join(root, 'outside.txt');
+  await writeFile(outside, 'untouched');
+  const dir = path.join(root, 'ava', 'attachments', 'slack');
+  await mkdir(dir, { recursive: true });
+  const { store } = attachmentStoreAt(root);
+  let refuseRecord = false;
+  const ledger = {
+    recordWrite: async (agentId: string, absolutePath: string, trust: string) => {
+      if (refuseRecord) {
+        throw new Error('ledger unwritable');
+      }
+      // Plant a link at the very name the save is about to create.
+      await symlink(outside, absolutePath);
+      void agentId;
+      void trust;
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    attachmentStore: { workspaces: store.workspaces, ledger },
+    fetchFile: async () => ({ status: 200, contentType: 'text/plain', body: Buffer.from('y'.repeat(150 * 1024)) }),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', dmWithFiles('evt-link', '981.0', 'log', [
+    { id: 'F1', name: 'big.log', mimetype: 'text/plain', url_private_download: 'https://files.slack.com/F1/download' },
+  ]));
+  refuseRecord = true;
+  await socket.deliver('message', dmWithFiles('evt-noledger', '982.0', 'again', [
+    { id: 'F2', name: 'big2.log', mimetype: 'text/plain', url_private_download: 'https://files.slack.com/F2/download' },
+  ]));
+  await adapter.stop();
+
+  assert.equal(await readFile(outside, 'utf8'), 'untouched');
+  // Only the planted link is there: the refused record left no file behind.
+  assert.deepEqual((await readdir(dir)).filter((name) => !name.endsWith('big.log')), []);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    'log\n[Attached, name only: big.log (too large to read here). You have only the names, so say so rather than guessing at what is in them.]',
+    'again\n[Attached, name only: big2.log (too large to read here). You have only the names, so say so rather than guessing at what is in them.]',
+  ]);
+  assert.equal(warnings.filter((line) => /could not save big\.log/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /could not save big2\.log/.test(line) && /ledger unwritable/.test(line)).length, 1);
+});
+
+test('with a store, a text file over the save cap, a page, or a failed save is still a note', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const fetched: string[] = [];
+  const root = await mkdtemp(path.join(os.tmpdir(), 'slack-saved-fail-'));
+  // A file where the agent directory should be: the save under it fails.
+  await writeFile(path.join(root, 'ava'), 'not a directory');
+  const { store } = attachmentStoreAt(root);
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    attachmentStore: store,
+    fetchFile: async (url) => {
+      fetched.push(url);
+      if (url.includes('F2')) {
+        return { status: 200, contentType: 'text/html', body: Buffer.from(`<!DOCTYPE html>${'z'.repeat(200 * 1024)}`) };
+      }
+      return { status: 200, contentType: 'text/plain', body: Buffer.from('q'.repeat(300 * 1024)) };
+    },
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', dmWithFiles('evt-fail', '983.0', 'three', [
+    { id: 'F1', name: 'huge.log', mimetype: 'text/plain', size: 11 * 1024 * 1024, url_private_download: 'https://files.slack.com/F1/download' },
+    { id: 'F2', name: 'page.md', mimetype: 'text/markdown', url_private_download: 'https://files.slack.com/F2/download' },
+    { id: 'F3', name: 'spec.md', mimetype: 'text/markdown', size: 300 * 1024, url_private_download: 'https://files.slack.com/F3/download' },
+  ]));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    'three\n[Attached, name only: huge.log, spec.md (too large to read here); page.md (could not be downloaded). You have only the names, so say so rather than guessing at what is in them.]',
+  ]);
+  assert.deepEqual(fetched, ['https://files.slack.com/F2/download', 'https://files.slack.com/F3/download']);
+  assert.equal(warnings.filter((line) => /huge\.log/.test(line) && /saved at/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /spec\.md/.test(line) && /could not save/.test(line)).length, 1);
 });
 
 test('an image dropped in with nothing said is still a question', async () => {

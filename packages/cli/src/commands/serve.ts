@@ -1,4 +1,5 @@
 import type { ApprovalPolicy } from '@stratusagent/core';
+import { createFileLedger } from '@stratusagent/plugins';
 import { autonomyDirectory } from '../autonomy.ts';
 import type {
   ApprovalTransport,
@@ -24,6 +25,7 @@ import {
   readProcessEnv,
   logsDirPath,
   agentWorkspacePath,
+  createAgentWorkspaces,
   resolveAgentApprovals,
   resolveAgentPrincipals,
   resolveAgentSlack,
@@ -427,6 +429,10 @@ const serveHeldHome = async (
             ...(homeChannels.length > 0 ? { homeChannels } : {}),
           };
         }),
+        attachmentStore: (() => {
+          const workspaces = createAgentWorkspaces(env);
+          return { workspaces, ledger: createFileLedger((id) => workspaces.forAgent(id), (id) => workspaces.prepare(id)) };
+        })(),
         log,
         warn,
       }));
