@@ -719,6 +719,78 @@ test('a top-level DM reply takes down the loading status it was answered under',
   ]);
 });
 
+test('a reply in a DM thread is answered in that thread, in a session of its own', async () => {
+  // The reported bug: replying to an agent inside a thread in a DM got the
+  // answer at the DM's top level, and in the DM's one session.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'answered'));
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', mention('top level', { type: 'message', ts: '300.1', channel: 'D1', channel_type: 'im' }));
+  await socket.deliver('message', mention('in the thread', { type: 'message', ts: '300.5', thread_ts: '300.2', channel: 'D1', channel_type: 'im' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.sessionId, dispatch.userMessage]), [
+    ['slack:ava:T1:D1', 'top level'],
+    ['slack:ava:T1:D1:300.2', 'in the thread'],
+  ]);
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [
+    ['answered', undefined],
+    ['answered', '300.2'],
+  ]);
+});
+
+test('a new DM thread opens its session with what the thread said before it', async () => {
+  // The thread's parent is usually the agent's own top-level DM, which is in
+  // the DM's session and not in the thread's.
+  const { socket, gateway, adapter, reads } = threadAdapter([
+    { ts: '600.1', bot_id: 'BA', user: 'B-AVA', text: 'PR is up for review' },
+    { ts: '600.2', user: 'U-DYLAN', text: 'which one?' },
+  ]);
+  await adapter.start(gateway);
+  await socket.deliver('message', mention('which one?', { type: 'message', ts: '600.2', thread_ts: '600.1', channel: 'D1', channel_type: 'im' }));
+  await adapter.stop();
+
+  assert.deepEqual(reads.map((read) => [read.channel, read.ts, read.latest]), [['D1', '600.1', '600.2']]);
+  assert.equal(gateway.dispatches[0]?.sessionId, 'slack:ava:T1:D1:600.1');
+  assert.equal(gateway.dispatches[0]?.earlier?.length, 1);
+  assert.match(gateway.dispatches[0]?.earlier?.[0]?.message ?? '', /PR is up for review/);
+});
+
+test('a DM thread reply is not heard by the other agents on the gateway', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  // Slack would refuse Bea this DM, and Bea has no session in it. The reply
+  // must not rest on either lookup, so both are made to say yes here.
+  webBea.knownConversations.set('D1', { is_member: true });
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'between us'));
+  gateway.sessionRouting = async () => ({ agentId: 'bea', metadata: {} });
+  const adapter = createAdapterAsShipped({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  await socketAva.deliver('message', mention('private follow-up', { type: 'message', ts: '700.2', thread_ts: '700.1', channel: 'D1', channel_type: 'im' }));
+  await adapter.stop();
+
+  assert.deepEqual(webAva.posts.map((post) => [post.text, post.thread_ts]), [['between us', '700.1']]);
+  assert.deepEqual(gateway.observes, []);
+});
+
 test('an agent on the stream reply mode still posts a placeholder and edits it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

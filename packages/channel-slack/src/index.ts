@@ -4905,9 +4905,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const isDm = event.channel_type === 'im';
     const team = args.body?.team_id ?? connection.teamId;
     // A top-level mention has no thread_ts; its own ts roots the reply
-    // thread that becomes the conversation. DMs are one conversation per
-    // peer, unkeyed by thread.
-    const thread = isDm ? undefined : event.thread_ts ?? event.ts;
+    // thread that becomes the conversation. A DM's top level is one
+    // conversation per peer, unkeyed by thread; a thread inside the DM is a
+    // conversation of its own, answered in that thread.
+    const thread = isDm ? event.thread_ts : event.thread_ts ?? event.ts;
     // Threads only: a DM has one agent by construction.
     const threadKey = thread !== undefined && !isDm
       ? threadKeyFor({ team, conversation: event.channel, thread })
@@ -5331,7 +5332,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // said before this. Inside the chain, before the placeholder, so the
       // read cannot reorder this message against the next one.
       let earlier: Array<{ message: string; metadata: JsonObject }> = [];
-      if (!isDm && thread !== undefined) {
+      if (thread !== undefined) {
         // A top-level mention roots its own session, so it is new but for
         // a redelivery, which the gateway answers without reading this.
         let exists = false;
@@ -5365,7 +5366,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // while the tool it preceded is still running. Under the session's
         // label as stored, lowered by anything that tainted it during this
         // turn, and the least trusted label where it cannot be read.
-        ...(thread !== undefined
+        // A DM thread has nobody else in it to hear.
+        ...(thread !== undefined && !isDm
           ? {
             onInterim: (heard: () => string, landed: Promise<boolean>) => {
               // Tracked, so a shutdown drains it like any other reaction:
@@ -5550,7 +5552,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         replyLanded = outcome.published;
         return true;
       }, () => true);
-      const heard = thread !== undefined
+      const heard = thread !== undefined && !isDm
         ? overhearReply(connection, event.channel, thread, () => renderer.spokenText(replyLanded ? reply ?? '' : ''), session, settled)
         : undefined;
       const { spoke, spokeAt } = await finalized;
