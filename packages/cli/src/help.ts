@@ -303,6 +303,10 @@ Options:
   --held           serve: start held — the control API answers health, but no
                    channel connects and no schedule fires until
                    POST /api/v1/promote (for upgrades that must prove healthy)
+  --hold-new-version
+                   serve: like --held, but only when this version has not
+                   been promoted on this home yet; a promotion records it, so
+                   restarts of the same version serve at once
   --help, -h       Show this help message
   --version, -v    Print this build's version and exit
 

@@ -317,6 +317,8 @@ export interface ParsedServeCommand {
   logFormat?: 'text' | 'json';
   /** Start held: health only until `POST /api/v1/promote` (see `GatewayOptions.held`). */
   held?: boolean;
+  /** Hold only a version this home has not promoted yet (see `promotion.ts`). */
+  holdNewVersion?: boolean;
   /** Serve the control API. Defaults to true when the package is installed. */
   api?: boolean;
   /** Overrides `api.port` in the config file. */
@@ -487,6 +489,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--held') {
         parsed.held = true;
+        continue;
+      }
+      if (token === '--hold-new-version') {
+        parsed.holdNewVersion = true;
         continue;
       }
       if (token === '--api') {

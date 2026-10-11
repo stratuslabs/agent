@@ -31,6 +31,7 @@ const PLUGINS_DIRNAME = 'plugins';
 
 const GATEWAY_TOKEN_FILENAME = 'gateway-token';
 const INTAKE_STATE_FILENAME = 'intake.json';
+const PROMOTED_FILENAME = 'promoted.json';
 
 const GATEWAY_INFO_FILENAME = 'gateway.json';
 
@@ -157,6 +158,14 @@ export const gatewayTokenPath = (env: StateEnvironment): string =>
  */
 export const intakeStatePath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), INTAKE_STATE_FILENAME);
+
+/**
+ * The last version promoted on this home (`stratus serve --hold-new-version`),
+ * as `{ "version": "…", "promotedAt": "…" }`. A start of a version that does
+ * not match is held until promoted.
+ */
+export const promotedVersionPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), PROMOTED_FILENAME);
 
 /**
  * Where a running daemon says it can be reached (0600). Written when the

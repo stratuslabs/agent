@@ -806,6 +806,13 @@ export interface GatewayOptions {
    * the new version healthy before it touches any work.
    */
   held?: boolean;
+  /**
+   * Called once after a held gateway is promoted and its work has begun.
+   * `stratus serve --hold-new-version` records the running version here,
+   * so the next start of the same version is not held. A rejection is
+   * warned about and does not undo the promotion: the daemon is serving.
+   */
+  onPromoted?: () => Promise<void>;
   /** The drain window a `restart()` uses when the request names none. Default 30s. */
   restartDrainTimeoutMs?: number;
   log?: (line: string) => void;
@@ -4383,6 +4390,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       deferredStart = undefined;
       heldState = false;
       log('stratusd promoted: channels connected, schedules running');
+      if (options.onPromoted) {
+        // Synchronous throws too: the promotion has happened either way.
+        try {
+          await options.onPromoted();
+        } catch (error) {
+          warn(`recording the promotion failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
     })().finally(() => {
       promoting = undefined;
     });
