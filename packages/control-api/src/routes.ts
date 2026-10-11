@@ -546,6 +546,19 @@ export const routes: Route[] = [
     },
   },
 
+  // ---- liveness -------------------------------------------------------------
+  // For a platform's own check (a Fly machine check, a Kubernetes probe),
+  // which cannot send the bearer token. Says only that the API answers:
+  // no version, roster, counts, or state, so it needs no token to be safe.
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/livez`,
+    selfAuthenticating: true,
+    async handler() {
+      return { ok: true };
+    },
+  },
+
   // ---- health --------------------------------------------------------------
   {
     method: 'GET',

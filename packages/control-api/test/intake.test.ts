@@ -170,3 +170,16 @@ test('a pause that lands while a message is being checked is still refused with 
     await harness.stop();
   }
 });
+
+test('GET /livez answers without a token and says nothing but that it is up', async () => {
+  const harness = await startApi();
+  try {
+    const response = await fetch(`${harness.url}/api/v1/livez`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    // Everything else still needs the token.
+    assert.equal((await fetch(`${harness.url}/api/v1/health`)).status, 401);
+  } finally {
+    await harness.stop();
+  }
+});

@@ -19,9 +19,11 @@ macOS app and a headless VM — want the API and not a web page.
 
 ## Authentication
 
-Two credentials, one check. Every endpoint requires one of them, except two
-that carry a single-use token of their own in their address: the one-time
-sign-in exchange below, and a [credential link](#credential-links).
+Two credentials, one check. Every endpoint requires one of them, except
+three: two that carry a single-use token of their own in their address (the
+one-time sign-in exchange below, and a [credential link](#credential-links)),
+and `GET /livez`, which needs nothing and answers only `{ "ok": true }`, for
+a platform's liveness check.
 
 **Bearer token** — generated into `~/.stratus/gateway-token` (0600) the first
 time the API binds. Programmatic clients read the file and send it:
@@ -99,6 +101,7 @@ log, and an address bar is one that gets noticed when it changes.
 
 | Method | Path | What |
 | --- | --- | --- |
+| GET | `/livez` | **No token.** `200 { ok: true }` while the API answers, and nothing else: for a platform's own check (a Fly machine check, a Kubernetes probe) that cannot send the bearer token. Reveals no version, roster, or state |
 | GET | `/health` | Uptime, roster, session counts, pending approvals, intake (`{ paused, message?, since? }`), resolved runtimes |
 | GET | `/agents` | The roster as data — soul metadata, avatar palette, resolved provider/model, memory counts, activity |
 | POST | `/agents` | Create an agent: writes a soul file and reloads the roster |
