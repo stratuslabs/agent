@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readdir, readFile, realpath, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -521,9 +521,10 @@ export interface SlackAdapterOptions {
     /** The host's tainted-write ledger, the one `tool-fs` reads. */
     ledger: { recordWrite(agentId: string, absolutePath: string, trust: TrustLevel): Promise<void> };
     /**
-     * The most one agent's saved attachments may weigh together. A new save
-     * removes the oldest until it fits, so anyone admitted to talk to the
-     * agent cannot fill the host's disk. Defaults to 256 MB.
+     * The most one agent's saved attachments may weigh together, so anyone
+     * admitted to talk to the agent cannot fill the host's disk. A save that
+     * would pass it is refused (the file is a name-only note and the log
+     * says where to make room); nothing is deleted. Defaults to 256 MB.
      */
     maxBytes?: number;
   };
@@ -2254,30 +2255,38 @@ const savedAttachmentName = (file: SlackInboundFile, now: number): string => {
 };
 
 /**
- * Removes the oldest saved attachments until `incoming` more bytes fit
- * under `maxBytes`. Names start with the save time in base 36, so name
- * order is age order. A path removed here keeps its ledger record, which
- * labels nothing, the same as a save that crashed before its write.
+ * Refuses a save that would take the directory's regular files past
+ * `maxBytes` together. Refused rather than making room: deleting on a
+ * Slack member's say is a worse failure than a full directory, and with
+ * nothing removed every ledger record still names a file that exists.
  */
-const makeRoom = async (dir: string, incoming: number, maxBytes: number): Promise<void> => {
-  if (incoming > maxBytes) {
-    throw new Error(`the file is larger than the ${maxBytes}-byte bound on saved attachments`);
-  }
-  const saved: Array<{ name: string; size: number }> = [];
-  for (const name of (await readdir(dir)).sort()) {
+const ensureRoom = async (dir: string, incoming: number, maxBytes: number): Promise<void> => {
+  let total = 0;
+  for (const name of await readdir(dir)) {
     const info = await lstat(path.join(dir, name)).catch(() => undefined);
-    if (info?.isFile()) {
-      saved.push({ name, size: info.size });
-    }
+    total += info?.isFile() ? info.size : 0;
   }
-  let total = saved.reduce((sum, entry) => sum + entry.size, 0);
-  for (const entry of saved) {
-    if (total + incoming <= maxBytes) {
-      break;
-    }
-    await unlink(path.join(dir, entry.name)).catch(() => undefined);
-    total -= entry.size;
+  if (total + incoming > maxBytes) {
+    throw new Error(`saved attachments in ${dir} would pass their ${maxBytes}-byte bound; remove files there to save more`);
   }
+};
+
+/**
+ * One save at a time per directory, across messages and sessions: two
+ * concurrent saves would each measure the same free space and both write.
+ */
+const saveChains = new Map<string, Promise<unknown>>();
+const serialized = <T>(key: string, run: () => Promise<T>): Promise<T> => {
+  const previous = saveChains.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(run);
+  const settled = next.catch(() => undefined);
+  saveChains.set(key, settled);
+  void settled.then(() => {
+    if (saveChains.get(key) === settled) {
+      saveChains.delete(key);
+    }
+  });
+  return next;
 };
 
 /**
@@ -2306,30 +2315,32 @@ const createAttachmentSaver = (
   if (dir !== path.join(await realpath(workspace), SAVED_ATTACHMENTS_DIR)) {
     throw new Error(`${lexical} is a link, not the workspace's own directory`);
   }
-  await makeRoom(dir, body.length, store.maxBytes ?? SAVED_ATTACHMENTS_MAX_BYTES);
-  const target = path.join(dir, savedAttachmentName(file, now()));
-  await store.ledger.recordWrite(agentId, target, trust);
-  // O_EXCL and O_NOFOLLOW guard only the last component. A directory on the
-  // way swapped for a link after the record would send the create somewhere
-  // else, so the open file is checked against the recorded name before a
-  // byte is written (the same check as the plugins package's
-  // `nameIdentifiesHandle`). A refused save leaves the empty file rather
-  // than unlinking through a name that just proved it can move.
-  const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
-  try {
-    const [canonical, atName, held] = await Promise.all([
-      realpath(target).catch(() => undefined),
-      lstat(target).catch(() => undefined),
-      handle.stat(),
-    ]);
-    if (canonical !== target || atName === undefined || atName.dev !== held.dev || atName.ino !== held.ino) {
-      throw new Error(`${target} moved between its provenance record and its write`);
+  return serialized(dir, async () => {
+    await ensureRoom(dir, body.length, store.maxBytes ?? SAVED_ATTACHMENTS_MAX_BYTES);
+    const target = path.join(dir, savedAttachmentName(file, now()));
+    await store.ledger.recordWrite(agentId, target, trust);
+    // O_EXCL and O_NOFOLLOW guard only the last component. A directory on the
+    // way swapped for a link after the record would send the create somewhere
+    // else, so the open file is checked against the recorded name before a
+    // byte is written (the same check as the plugins package's
+    // `nameIdentifiesHandle`). A refused save leaves the empty file rather
+    // than unlinking through a name that just proved it can move.
+    const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+    try {
+      const [canonical, atName, held] = await Promise.all([
+        realpath(target).catch(() => undefined),
+        lstat(target).catch(() => undefined),
+        handle.stat(),
+      ]);
+      if (canonical !== target || atName === undefined || atName.dev !== held.dev || atName.ino !== held.ino) {
+        throw new Error(`${target} moved between its provenance record and its write`);
+      }
+      await handle.writeFile(body);
+    } finally {
+      await handle.close();
     }
-    await handle.writeFile(body);
-  } finally {
-    await handle.close();
-  }
-  return target;
+    return target;
+  });
 };
 
 const TEXT_APPLICATION_TYPES = new Set([

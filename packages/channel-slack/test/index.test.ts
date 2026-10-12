@@ -7367,35 +7367,46 @@ test('a saved attachment is refused when its directory is already a link out of 
   assert.equal(warnings.filter((line) => /could not save big\.log/.test(line)).length, 1);
 });
 
-test('saved attachments are bounded per agent: the oldest go first to make room', async () => {
+test('saved attachments are bounded per agent: past the bound a save is refused, even when saves race', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const warnings: string[] = [];
   const root = await mkdtemp(path.join(os.tmpdir(), 'slack-saved-bound-'));
-  const { store } = attachmentStoreAt(root);
-  let clock = 1_000_000;
+  const { store, records } = attachmentStoreAt(root);
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
     editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
     createSocketClient: () => socket,
     createWebClient: () => web,
     attachmentStore: { ...store, maxBytes: 350 * 1024 },
-    now: () => (clock += 1_000),
     fetchFile: async (url) => ({ status: 200, contentType: 'text/plain', body: Buffer.from((url.match(/F(\d)/)?.[1] ?? '0').repeat(150 * 1024)) }),
   });
   await adapter.start(gateway);
-  for (const n of [1, 2, 3]) {
-    await socket.deliver('message', dmWithFiles(`evt-bound-${n}`, `98${n}.5`, `file ${n}`, [
+  // Three DMs from three people, so three sessions processed at once.
+  await Promise.all([1, 2, 3].map((n) => {
+    const delivery = dmWithFiles(`evt-bound-${n}`, `98${n}.5`, `file ${n}`, [
       { id: `F${n}`, name: `f${n}.log`, mimetype: 'text/plain', url_private_download: `https://files.slack.com/F${n}/download` },
-    ]));
-  }
+    ]);
+    return socket.deliver('message', { ...delivery, event: { ...delivery.event, channel: `D${n}`, user: `U-${n}` } });
+  }));
   await adapter.stop();
 
   const dir = path.join(await realpath(root), 'ava', 'attachments', 'slack');
-  const names = (await readdir(dir)).sort();
-  assert.deepEqual(names.map((name) => name.replace(/^[0-9a-z]+-/, '')), ['F2-f2.log', 'F3-f3.log']);
-  assert.equal(gateway.dispatches.length, 3);
-  assert.ok(gateway.dispatches.every((dispatch) => /It is saved in full at/.test(dispatch.userMessage ?? '')));
+  const names = await readdir(dir);
+  assert.equal(names.length, 2);
+  let total = 0;
+  for (const name of names) {
+    total += (await stat(path.join(dir, name))).size;
+  }
+  assert.ok(total <= 350 * 1024);
+  // Nothing was removed to make room, and only saved files were recorded.
+  assert.equal(records.length, 2);
+  const notes = gateway.dispatches.map((dispatch) => dispatch.userMessage ?? '');
+  assert.equal(notes.filter((note) => /It is saved in full at/.test(note)).length, 2);
+  assert.equal(notes.filter((note) => /Attached, name only: f\d\.log \(too large to read here\)/.test(note)).length, 1);
+  assert.equal(warnings.filter((line) => /would pass their 358400-byte bound/.test(line)).length, 1);
 });
 
 test('with a store, a text file over the save cap, a page, or a failed save is still a note', async () => {
