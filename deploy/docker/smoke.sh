@@ -4,12 +4,16 @@
 #
 #   deploy/docker/smoke.sh            # from the repository root
 #
-# Needs Docker and curl. Leaves nothing running; the image stays tagged
-# stratusd:smoke.
+# Needs Docker and curl. Leaves nothing running and no tag behind; the
+# build's layers stay in Docker's cache.
 set -euo pipefail
 
-IMAGE=stratusd:smoke
-NAME="stratusd-smoke-$$-$(date +%s)"
+RUN_ID="$$-$(date +%s)"
+# Unique to this run, the image as much as the container: two checkouts
+# smoke-testing on one Docker host must each run the image they built.
+IMAGE="stratusd:smoke-${RUN_ID}"
+NAME="stratusd-smoke-${RUN_ID}"
+BUILT=0
 CREATED=0
 PORT=${SMOKE_PORT:-4199}
 WORK=$(mktemp -d)
@@ -27,6 +31,9 @@ cleanup() {
   # container and then fail to start it, a bound port for example.
   if [ "$CREATED" = 1 ]; then
     docker rm -fv "$NAME" >/dev/null 2>&1 || true
+  fi
+  if [ "$BUILT" = 1 ]; then
+    docker rmi "$IMAGE" >/dev/null 2>&1 || true
   fi
   rm -rf "$WORK"
 }
@@ -54,6 +61,7 @@ wait_healthy() {
 }
 
 echo "--- build"
+BUILT=1
 docker build -f deploy/docker/Dockerfile --target slim -t "$IMAGE" .
 
 printf '%s\n' "$TOKEN" > "$WORK/gateway-token"
