@@ -1,3 +1,5 @@
+import { writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -4763,6 +4765,187 @@ test('doctor reports the resolved provider and where it came from', async () => 
   assert.match(output.stdout, /agent {5}Ava \(ava\)/);
   assert.match(output.stdout, /anthropic API key/);
   assert.match(output.stdout, /No problems found\./);
+});
+
+// A home doctor finds healthy on disk, with a daemon (or none) answering
+// /health through `env.fetch` — what the daemon says it met at start is the
+// part a reading of the files cannot see.
+const doctorAgainstDaemon = async (
+  daemon: 'none' | 'unreachable' | ((configPath: string, configSha: string) => Record<string, unknown>),
+  options: { gatewayInfo?: string; processEnv?: Record<string, string> } = {},
+) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const configText = JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5' });
+  await writeFile(configPath, configText, { mode: 0o600 });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+  const configSha = createHash('sha256').update(configText).digest('hex');
+  const calls: string[] = [];
+  if (daemon !== 'none') {
+    await writeFile(path.join(home, '.stratus', 'gateway-token'), 'doctor-token\n');
+    await writeFile(path.join(home, '.stratus', 'gateway.json'), options.gatewayInfo ?? JSON.stringify({ url: 'http://127.0.0.1:9', host: '127.0.0.1', port: 9 }));
+  }
+  const authorizations: string[] = [];
+  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+    calls.push(String(url));
+    authorizations.push(String((init?.headers as Record<string, string> | undefined)?.authorization));
+    if (daemon === 'unreachable' || daemon === 'none') {
+      throw new TypeError('fetch failed');
+    }
+    return new Response(JSON.stringify({ ok: true, version: '9.9.9', startedAt: '2026-10-12T08:00:00.000Z', ...daemon(configPath, configSha) }), { status: 200 });
+  }) as typeof fetch;
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: options.processEnv ?? {}, fetch: fetchImpl },
+  });
+  return { exitCode, output, calls, configPath, authorizations, home };
+};
+
+test('doctor reports what the running daemon warned about at start, not only the files', async () => {
+  const { exitCode, output } = await doctorAgainstDaemon((configPath, sha256) => ({
+    startup: {
+      warnings: ['refusing every Slack sender: no principals are configured', 'ava: soul could not be loaded'],
+      configs: [{ path: configPath, sha256 }],
+    },
+  }));
+  assert.equal(exitCode, 1, output.stdout);
+  assert.match(output.stdout, /refusing every Slack sender/);
+  assert.match(output.stdout, /ava: soul could not be loaded/);
+  assert.match(output.stdout, /stratus restart/);
+  assert.doesNotMatch(output.stdout, /No problems found/);
+});
+
+test('doctor says the config changed since the daemon started, and that a restart applies it', async () => {
+  const { exitCode, output, configPath } = await doctorAgainstDaemon((configPath) => ({
+    startup: { warnings: [], configs: [{ path: configPath, sha256: 'not-what-is-on-disk-now' }] },
+  }));
+  assert.equal(exitCode, 1, output.stdout);
+  assert.ok(output.stdout.includes(`${configPath} changed since the daemon started`), output.stdout);
+  assert.match(output.stdout, /stratus restart/);
+});
+
+test('doctor with a daemon that started clean on the config on disk finds no problems', async () => {
+  const { exitCode, output, calls } = await doctorAgainstDaemon((configPath, sha256) => ({
+    startup: { warnings: [], configs: [{ path: configPath, sha256 }] },
+  }));
+  assert.equal(exitCode, 0, output.stdout);
+  assert.deepEqual(calls, ['http://127.0.0.1:9/api/v1/health']);
+  assert.match(output.stdout, /daemon {4}running 9\.9\.9, started 2026-10-12T08:00:00\.000Z/);
+  assert.match(output.stdout, /No problems found\./);
+});
+
+test('doctor with no daemon found says so without claiming it is stopped, and does not call it a problem', async () => {
+  const { exitCode, output, calls } = await doctorAgainstDaemon('none');
+  assert.equal(exitCode, 0, output.stdout);
+  assert.deepEqual(calls, []);
+  assert.match(output.stdout, /daemon {4}none found \(no control API published\)/);
+  assert.match(output.stdout, /No problems found\./);
+});
+
+test('doctor flags a config file that appeared after the daemon started', async () => {
+  // The daemon started with no global config; one exists now.
+  const { exitCode, output, configPath } = await doctorAgainstDaemon((configPath) => ({
+    startup: { warnings: [], configs: [{ path: '/nowhere/stratus.config.json', sha256: null }, { path: configPath, sha256: null }] },
+  }));
+  assert.equal(exitCode, 1, output.stdout);
+  assert.ok(output.stdout.includes(`${configPath} appeared after the daemon started`), output.stdout);
+});
+
+test('doctor checks the global config behind a project one, not only the file that won', async () => {
+  const projectConfig = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-project-')), 'stratus.config.json');
+  const projectText = JSON.stringify({ model: 'claude-opus-5' });
+  await writeFile(projectConfig, projectText);
+  const projectSha = createHash('sha256').update(projectText).digest('hex');
+  const { exitCode, output, configPath } = await doctorAgainstDaemon((configPath) => ({
+    startup: { warnings: [], configs: [{ path: projectConfig, sha256: projectSha }, { path: configPath, sha256: 'older-global' }] },
+  }));
+  assert.equal(exitCode, 1, output.stdout);
+  assert.ok(output.stdout.includes(`${configPath} changed since the daemon started`), output.stdout);
+  // Behind a project file, the global one never reaches a turn.
+  const line = output.stdout.split('\n').find((text) => text.includes(`${configPath} changed`)) ?? '';
+  assert.doesNotMatch(line, /Runtime settings/);
+});
+
+test('doctor does not promise a config that fails to load reaches the next turn', async () => {
+  const { exitCode, output, configPath } = await doctorAgainstDaemon((configPath) => {
+    writeFileSync(configPath, '{"provider":');
+    return { startup: { warnings: [], configs: [{ path: configPath, sha256: 'older' }] } };
+  });
+  assert.equal(exitCode, 1, output.stdout);
+  const line = output.stdout.split('\n').find((text) => text.includes(`${configPath} changed`)) ?? '';
+  assert.match(line, /does not load, so turns keep the last config that did/);
+  assert.doesNotMatch(line, /follow it from the next turn/);
+});
+
+test('doctor calls a damaged gateway.json a problem, not a stopped daemon', async () => {
+  const { exitCode, output, calls } = await doctorAgainstDaemon(() => ({}), { gatewayInfo: '{"url":' });
+  assert.equal(exitCode, 1, output.stdout);
+  assert.deepEqual(calls, []);
+  assert.match(output.stdout, /gateway\.json is damaged/);
+});
+
+test('doctor probes the local daemon with its local token even when STRATUS_GATEWAY_TOKEN names a remote one', async () => {
+  const { exitCode, output, authorizations } = await doctorAgainstDaemon((configPath, sha256) => ({
+    startup: { warnings: [], configs: [{ path: configPath, sha256 }] },
+  }), { processEnv: { STRATUS_GATEWAY_TOKEN: 'remote-token' } });
+  assert.equal(exitCode, 0, output.stdout);
+  assert.deepEqual(authorizations, ['Bearer doctor-token']);
+});
+
+test('doctor does not take any 200 on the published port for the daemon', async () => {
+  const { exitCode, output } = await doctorAgainstDaemon(() => ({ ok: false }));
+  assert.equal(exitCode, 1, output.stdout);
+  assert.match(output.stdout, /did not answer/);
+  assert.match(output.stdout, /not a Stratus health response/);
+});
+
+test('doctor reports a daemon that published its address but does not answer', async () => {
+  const { exitCode, output } = await doctorAgainstDaemon('unreachable');
+  assert.equal(exitCode, 1, output.stdout);
+  assert.match(output.stdout, /did not answer/);
+});
+
+test('doctor against a real daemon: what it warned at start stays a problem after the file is fixed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-live-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  const configPath = path.join(home, '.stratus', 'config.json');
+  // A plugin that is not installed: the daemon starts, warns, and runs without it.
+  await writeFile(configPath, JSON.stringify({ plugins: { 'stratus-plugin-not-installed-anywhere': {} } }), { mode: 0o600 });
+  const controller = new AbortController();
+  const served = createStreams();
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: served.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+  try {
+    for (let tries = 0; ; tries += 1) {
+      try {
+        await readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8');
+        break;
+      } catch {
+        if (tries > 100) throw new Error(`daemon never published gateway.json: ${served.output.stdout}${served.output.stderr}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    // Fixed on disk while the daemon keeps running on what it read.
+    await writeFile(configPath, JSON.stringify({}), { mode: 0o600 });
+    const { streams, output } = createStreams();
+    const code = await runCli({ argv: ['doctor'], streams, env: { homeDir: home, cwd: home, processEnv: {} } });
+    assert.equal(code, 1, output.stdout);
+    assert.match(output.stdout, /daemon {4}running/);
+    assert.match(output.stdout, /The running daemon warned at start: plugin stratus-plugin-not-installed-anywhere did not load/);
+    assert.ok(output.stdout.includes(`${configPath} changed since the daemon started`), output.stdout);
+  } finally {
+    controller.abort();
+    await serving;
+  }
 });
 
 test('doctor flags a trusted config other users can read, and not a project-local one', async () => {

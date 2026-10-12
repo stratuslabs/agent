@@ -34,6 +34,10 @@ Channels
   slack     no agents connected
             @stratusagent/channel-slack installed
 
+Daemon
+  daemon    running 0.12.0, started 2026-10-12T08:00:00.000Z
+            loaded ~/.stratus/config.json
+
 1 problem found:
   ! A fallback model (gpt-4.1-mini) is configured but could not be resolved — usually
     no sign-in for its provider. A failing primary model has nothing to retry on.
@@ -45,6 +49,23 @@ it finds a problem, and it is the fastest answer to the two most common
 surprises: a run that turns out to be on the `demo` provider, and an
 `ANTHROPIC_API_KEY` in the environment quietly demoting a Claude
 subscription sign-in to per-token billing.
+
+The files are only half the answer when a daemon is running. It
+re-resolves runtime settings (provider, model, system prompt and the rest of
+the runtime config) on every turn, but daemon-level settings (plugins,
+executor, memory store, Slack, approvals, principals, turn limits and the
+control API) are read once, at start, and stay as they were until `stratus
+restart`. So doctor also asks the running daemon
+(through the control API, at the address in `~/.stratus/gateway.json`) what
+it met while starting. Each warning it logged then (a plugin that did not
+load, nobody able to approve, and so on) is a problem, and so is a config
+file that has changed, appeared or gone since the daemon started, including a
+global config behind a project one, since a restart is what applies the
+daemon-level settings in it. No daemon found is not a problem, since `stratus run`
+needs none; doctor says `none found (no control API published)` because a
+daemon started with its API off publishes no address either. A damaged
+`gateway.json`, or a daemon that published its address and does not answer, is
+a problem.
 
 ## The usual suspects
 
