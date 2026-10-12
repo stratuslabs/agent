@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, realpath, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rename, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -7286,6 +7286,50 @@ test('a saved attachment never writes through a link at its name, and a failed r
   ]);
   assert.equal(warnings.filter((line) => /could not save big\.log/.test(line)).length, 1);
   assert.equal(warnings.filter((line) => /could not save big2\.log/.test(line) && /ledger unwritable/.test(line)).length, 1);
+});
+
+test('a saved attachment is refused when its directory is swapped for a link after the record', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const warnings: string[] = [];
+  const root = await mkdtemp(path.join(os.tmpdir(), 'slack-saved-swap-'));
+  const outside = path.join(root, 'outside');
+  await mkdir(outside);
+  const dir = path.join(root, 'ava', 'attachments', 'slack');
+  await mkdir(dir, { recursive: true });
+  const { store } = attachmentStoreAt(root);
+  const ledger = {
+    recordWrite: async () => {
+      // The directory the record named is replaced by a link elsewhere.
+      await rename(dir, `${dir}-moved`);
+      await symlink(outside, dir);
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    attachmentStore: { workspaces: store.workspaces, ledger },
+    fetchFile: async () => ({ status: 200, contentType: 'text/plain', body: Buffer.from('s'.repeat(150 * 1024)) }),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', dmWithFiles('evt-swap', '984.0', 'swap', [
+    { id: 'F1', name: 'big.log', mimetype: 'text/plain', url_private_download: 'https://files.slack.com/F1/download' },
+  ]));
+  await adapter.stop();
+
+  // No bytes landed outside the recorded path.
+  for (const name of await readdir(outside)) {
+    assert.equal((await stat(path.join(outside, name))).size, 0, `${name} got the attachment's bytes`);
+  }
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    'swap\n[Attached, name only: big.log (too large to read here). You have only the names, so say so rather than guessing at what is in them.]',
+  ]);
+  assert.equal(warnings.filter((line) => /could not save big\.log/.test(line)).length, 1);
 });
 
 test('with a store, a text file over the save cap, a page, or a failed save is still a note', async () => {

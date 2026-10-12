@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, readFile, realpath, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, readFile, realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -2263,7 +2264,26 @@ const createAttachmentSaver = (
   await mkdir(lexical, { recursive: true, mode: 0o700 });
   const target = path.join(await realpath(lexical), savedAttachmentName(file, now()));
   await store.ledger.recordWrite(agentId, target, trust);
-  await writeFile(target, body, { flag: 'wx', mode: 0o600 });
+  // O_EXCL and O_NOFOLLOW guard only the last component. A directory on the
+  // way swapped for a link after the record would send the create somewhere
+  // else, so the open file is checked against the recorded name before a
+  // byte is written (the same check as the plugins package's
+  // `nameIdentifiesHandle`). A refused save leaves the empty file rather
+  // than unlinking through a name that just proved it can move.
+  const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+  try {
+    const [canonical, atName, held] = await Promise.all([
+      realpath(target).catch(() => undefined),
+      lstat(target).catch(() => undefined),
+      handle.stat(),
+    ]);
+    if (canonical !== target || atName === undefined || atName.dev !== held.dev || atName.ino !== held.ino) {
+      throw new Error(`${target} moved between its provenance record and its write`);
+    }
+    await handle.writeFile(body);
+  } finally {
+    await handle.close();
+  }
   return target;
 };
 
