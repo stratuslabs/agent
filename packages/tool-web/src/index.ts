@@ -211,9 +211,18 @@ const pageOf = (whole: string, requested: unknown, maxChars: number): {
   nextOffset?: number;
   paged: boolean;
 } => {
-  const offset = typeof requested === 'number' && Number.isFinite(requested) && requested > 0
+  let offset = typeof requested === 'number' && Number.isFinite(requested) && requested > 0
     ? Math.min(Math.floor(requested), whole.length)
     : 0;
+  // An offset the caller chose can land on a pair's second half; start at
+  // the whole character instead (the answer's offset says where).
+  if (offset > 0 && offset < whole.length) {
+    const first = whole.charCodeAt(offset);
+    const before = whole.charCodeAt(offset - 1);
+    if (first >= 0xdc00 && first <= 0xdfff && before >= 0xd800 && before <= 0xdbff) {
+      offset -= 1;
+    }
+  }
   let end = Math.min(offset + maxChars, whole.length);
   if (end < whole.length) {
     const last = whole.charCodeAt(end - 1);

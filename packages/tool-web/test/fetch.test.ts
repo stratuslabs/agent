@@ -1007,3 +1007,18 @@ test('a one-character page widens to keep an astral character whole', async (t) 
   }
   assert.deepEqual(pages, ['a', '😀', 'b', '😀']);
 });
+
+test('an offset inside an astral character starts the page at the whole character', async (t) => {
+  const body = 'a😀b';
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const tool = await fetchTool({ allowedHosts: ['localhost'] });
+  const page = await tool.execute({ url: `http://localhost:${port}/`, offset: 2 }, session) as JsonObject;
+  assert.equal(page.text, '😀b');
+  assert.equal(page.offset, 1);
+});
