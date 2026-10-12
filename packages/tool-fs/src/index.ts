@@ -1445,7 +1445,16 @@ const createMoveTool = (
 
     const trust = sessionTrustOf(session);
     const tainted = isTaintedTrust(trust);
+    // One ledger read for the whole tree: per-path records would read the
+    // ledger again for every labelled descendant.
     const record = async (labels: Map<string, TrustLevel>): Promise<void> => {
+      if (labels.size === 0) {
+        return;
+      }
+      if (ledger.recordWrites !== undefined) {
+        await ledger.recordWrites(session.agent.id, [...labels]);
+        return;
+      }
       for (const [named, label] of labels) {
         await ledger.recordWrite(session.agent.id, named, label);
       }
@@ -1476,7 +1485,7 @@ const createMoveTool = (
       const labels = owed(before);
       if (tainted) {
         for (const parent of missingParents) {
-          await ledger.recordWrite(session.agent.id, parent, trust);
+          labels.set(parent, labels.has(parent) ? leastTrusted(labels.get(parent)!, trust) : trust);
         }
       }
       await record(labels);
@@ -1491,10 +1500,43 @@ const createMoveTool = (
       }
       await refuseExisting();
 
+      const destinationParent = path.dirname(destination.path);
       if (missingParents.length > 0) {
-        await mkdir(path.dirname(destination.path), { recursive: true });
+        await mkdir(destinationParent, { recursive: true });
+      }
+      // rename(2) resolves both names afresh, and Node has no renameat to
+      // hold the checked parent open across it. So the parent is checked
+      // once more right before, and the result is checked right after:
+      // a parent swapped for a link in either window moves the entry
+      // somewhere other than the name decided about, which shows as a
+      // different real parent or a different inode at the destination.
+      // That is undone and refused rather than reported as a move.
+      const parentIsCheckedDirectory = async (): Promise<boolean> => {
+        try {
+          const info = await lstat(destinationParent);
+          return info.isDirectory() && (await realpath(destinationParent)) === destinationParent;
+        } catch {
+          return false;
+        }
+      };
+      if (!(await parentIsCheckedDirectory())) {
+        throw new Error(`${destinationParent} changed while the move was being prepared; try again.`);
       }
       await rename(source.path, destination.path);
+      let landed = false;
+      try {
+        const info = await lstat(destination.path);
+        landed = info.dev === source.identity?.dev && info.ino === source.identity?.ino && (await parentIsCheckedDirectory());
+      } catch {
+        landed = false;
+      }
+      if (!landed) {
+        // Best effort: the same names, reversed, reach the same entries.
+        await rename(destination.path, source.path).catch(() => undefined);
+        throw new Error(
+          `Refusing to move ${source.path}: a directory on the way changed during the move, so it may not have landed at ${destination.path}. It was moved back where that was possible.`,
+        );
+      }
 
       // Another process (a `stratus run`, or plugin-mcp) may have recorded a
       // tainted write under the old path after the first snapshot and before

@@ -203,3 +203,33 @@ test('a label recorded at the old path while the move runs is carried too', asyn
   await run(tools, 'fs.read', { path: 'moved/late.md' }, sessionAt('ava', 'user'), marks.context);
   assert.deepEqual(marks.marks, ['external']);
 });
+
+test('a directory with many labelled files is carried in one ledger append', async () => {
+  const { root, workspaceRoot } = await home();
+  const tools = await registryFor({ roots: [root], workspaceRoot });
+  const count = 200;
+  for (let index = 0; index < count; index += 1) {
+    await run(tools, 'fs.write', { path: `tree/f${index}.md`, content: 'fetched' }, sessionAt('ava', 'external'));
+  }
+  const ledgerFile = path.join(workspaceRoot, 'ava', LEDGER_FILENAME);
+  const linesBefore = (await readFile(ledgerFile, 'utf8')).trim().split('\n').length;
+
+  const moved = await run(tools, 'fs.move', { from: 'tree', to: 'archive/tree' }, sessionAt('ava', 'agent')) as JsonObject;
+  assert.equal(moved.labelsCarried, count + 1);
+  const lines = (await readFile(ledgerFile, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { path: string; at: string });
+  const added = lines.slice(linesBefore);
+  assert.equal(added.length, count + 1);
+  // One batch: every carried record shares the append's timestamp.
+  assert.equal(new Set(added.map((line) => line.at)).size, 1);
+  assert.deepEqual(await readMarks(tools, 'archive/tree/f199.md'), ['external']);
+});
+
+test('the file ledger batch records only tainted paths that change', async () => {
+  const { workspaceRoot } = await home();
+  const ledger = createFileLedger((agentId) => path.join(workspaceRoot, agentId));
+  await ledger.recordWrite('ava', '/x/a', 'unknown');
+  await ledger.recordWrites!('ava', [['/x/a', 'unknown'], ['/x/b', 'agent'], ['/x/c', 'unknown'], ['/x/a', 'external']]);
+  const lines = (await readFile(path.join(workspaceRoot, 'ava', LEDGER_FILENAME), 'utf8')).trim().split('\n');
+  assert.equal(lines.length, 3);
+  assert.deepEqual(await ledger.snapshot('ava'), { '/x/a': 'external', '/x/c': 'unknown' });
+});
