@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readdir, readFile, realpath, rename, stat } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, realpath, rename, rmdir, stat } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 import os from 'node:os';
 import path from 'node:path';
@@ -1447,10 +1447,11 @@ const createMoveTool = (
     // rename(2) cannot cross filesystems. Refused here, before any label is
     // recorded or directory made, rather than by EXDEV halfway through.
     const sourceDevice = source.identity?.dev ?? (await lstat(source.path)).dev;
+    const crossDevice = (): Error => new Error(
+      `${fromRequested} and ${toRequested} are on different filesystems, which fs.move does not cross; copy it with fs.read and fs.write instead.`,
+    );
     if ((await stat(existingParent)).dev !== sourceDevice) {
-      throw new Error(
-        `${fromRequested} and ${toRequested} are on different filesystems, which fs.move does not cross; copy it with fs.read and fs.write instead.`,
-      );
+      throw crossDevice();
     }
 
     const trust = sessionTrustOf(session);
@@ -1532,7 +1533,22 @@ const createMoveTool = (
       if (!(await parentIsCheckedDirectory())) {
         throw new Error(`${destinationParent} changed while the move was being prepared; try again.`);
       }
-      await rename(source.path, destination.path);
+      try {
+        await rename(source.path, destination.path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EXDEV') {
+          throw error;
+        }
+        // Two mounts of one filesystem share a device number, so the check
+        // above can pass and rename still refuse. Nothing moved: the
+        // directories this call made are taken back, deepest first and only
+        // while empty. The labels recorded stay, which over-marks a path
+        // with nothing there, the safe direction.
+        for (const parent of [...missingParents].reverse()) {
+          await rmdir(parent).catch(() => undefined);
+        }
+        throw crossDevice();
+      }
       let landed = false;
       try {
         const info = await lstat(destination.path);
