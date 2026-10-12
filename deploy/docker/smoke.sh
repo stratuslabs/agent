@@ -10,7 +10,7 @@ set -euo pipefail
 
 IMAGE=stratusd:smoke
 NAME="stratusd-smoke-$$-$(date +%s)"
-STARTED=0
+CREATED=0
 PORT=${SMOKE_PORT:-4199}
 WORK=$(mktemp -d)
 TOKEN="smoke-$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -21,9 +21,11 @@ cleanup() {
     echo "--- container logs" >&2
     docker logs "$NAME" >&2 2>&1 || true
   fi
-  # Only the container this run started, with its anonymous home volume
-  # (the Dockerfile declares one, and `rm` without -v leaves it behind).
-  if [ "$STARTED" = 1 ]; then
+  # Only a container this run created (the name is unique to it), with its
+  # anonymous home volume (the Dockerfile declares one, and `rm` without -v
+  # leaves it behind). Set before `docker run`, because run can create the
+  # container and then fail to start it, a bound port for example.
+  if [ "$CREATED" = 1 ]; then
     docker rm -fv "$NAME" >/dev/null 2>&1 || true
   fi
   rm -rf "$WORK"
@@ -55,12 +57,12 @@ printf '%s\n' "$TOKEN" > "$WORK/gateway-token"
 chmod 0644 "$WORK/gateway-token" # readable by the image's uid 1000
 
 echo "--- start held, with a seeded token"
+CREATED=1
 docker run -d --name "$NAME" \
   -e STRATUS_GATEWAY_TOKEN_FILE=/run/secrets/gateway-token \
   -v "$WORK/gateway-token:/run/secrets/gateway-token:ro" \
   -p "127.0.0.1:${PORT}:4123" \
   "$IMAGE" stratus serve --api-host 0.0.0.0 --log-format json --held >/dev/null
-STARTED=1
 wait_healthy
 
 call GET /health | grep -q '"held":true' || fail "health does not report held"
