@@ -215,10 +215,12 @@ const pageOf = (whole: string, requested: unknown, maxChars: number): {
     ? Math.min(Math.floor(requested), whole.length)
     : 0;
   let end = Math.min(offset + maxChars, whole.length);
-  if (end < whole.length && end > offset + 1) {
+  if (end < whole.length) {
     const last = whole.charCodeAt(end - 1);
     if (last >= 0xd800 && last <= 0xdbff) {
-      end -= 1;
+      // Back off to before the pair, unless that would leave the page
+      // empty (maxChars 1): then widen it to the whole pair instead.
+      end += end > offset + 1 ? -1 : 1;
     }
   }
   const nextOffset = end < whole.length ? end : undefined;

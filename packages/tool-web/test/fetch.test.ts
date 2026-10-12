@@ -984,3 +984,26 @@ test('every setting the tool reads is one its manifest declares, so the loader a
     assert.doesNotThrow(() => validatePluginConfig(manifest, block));
   }
 });
+test('a one-character page widens to keep an astral character whole', async (t) => {
+  const body = 'a😀b😀';
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const url = `http://localhost:${port}/emoji.txt`;
+
+  const tool = await fetchTool({ allowedHosts: ['localhost'], maxChars: 1 });
+  const pages: string[] = [];
+  let offset = 0;
+  for (;;) {
+    const page = await tool.execute({ url, ...(offset > 0 ? { offset } : {}) }, session) as JsonObject;
+    pages.push(String(page.text));
+    if (page.nextOffset === undefined) break;
+    assert.ok((page.nextOffset as number) > offset, 'every page advances');
+    offset = page.nextOffset as number;
+  }
+  assert.deepEqual(pages, ['a', '😀', 'b', '😀']);
+});
