@@ -30,6 +30,8 @@ const DEFAULT_MAX_CHARS = 40_000;
  * leaves an English page as it was and holds a CJK one to about 16,000.
  */
 const PAGE_MAX_BYTES = 48 * 1024;
+/** The most of a page's `<title>` returned; it is outside the page budget. */
+const TITLE_MAX_CHARS = 300;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_REDIRECTS = 5;
 const DEFAULT_USER_AGENT = 'StratusAgent/0.5 (+https://github.com/stratuslabs/agent)';
@@ -210,7 +212,9 @@ export const fetchThroughPolicy = async (
 
 /**
  * One call's slice of a page's text, at most `maxChars` UTF-16 units and
- * `PAGE_MAX_BYTES` of UTF-8, and always at least one whole character. Cut
+ * `PAGE_MAX_BYTES` of UTF-8 as it will be sent (inside a JSON string, so a
+ * quote or a control character weighs its escape), and always at least one
+ * whole character. Cut
  * at code-point boundaries on both ends: a lone half of a surrogate pair
  * on either side would mean the pages no longer join back into the text.
  */
@@ -238,7 +242,9 @@ const pageOf = (whole: string, requested: unknown, maxChars: number): {
   while (end < whole.length) {
     const point = whole.codePointAt(end)!;
     const units = point > 0xffff ? 2 : 1;
-    const weight = point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+    const weight = point === 0x22 || point === 0x5c || point === 0x0a || point === 0x0d || point === 0x09 || point === 0x08 || point === 0x0c
+      ? 2
+      : point < 0x20 ? 6 : point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
     if (end > offset && (end + units - offset > maxChars || bytes + weight > PAGE_MAX_BYTES)) {
       break;
     }
@@ -319,7 +325,12 @@ const createFetchTool = (config: JsonObject): Tool => ({
 
     const html = response.contentType.includes('html');
     const whole = input.raw === true || !html ? response.body : htmlToText(response.body);
-    const title = html ? extractTitle(response.body) : undefined;
+    const fullTitle = html ? extractTitle(response.body) : undefined;
+    // A title is page-supplied too, and not paged: cut a long one at a
+    // code-point boundary so it cannot carry the result past the budget.
+    const title = fullTitle !== undefined && fullTitle.length > TITLE_MAX_CHARS
+      ? `${Array.from(fullTitle).slice(0, TITLE_MAX_CHARS).join('')}…`
+      : fullTitle;
     const page = pageOf(whole, input.offset, settings.maxChars);
 
     return {

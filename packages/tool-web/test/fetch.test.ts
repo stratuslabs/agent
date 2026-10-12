@@ -1044,3 +1044,28 @@ test('dense text is paged by bytes as well as characters, and an offset moved ba
   assert.equal(back.offset, 0);
   assert.equal(back.totalChars, '😀 and the rest'.length);
 });
+
+test('a page is budgeted as it is sent: escapes count, and a long title is cut', async (t) => {
+  const quotes = '"'.repeat(60_000);
+  const server = http.createServer((request, response) => {
+    if (request.url === '/quotes') {
+      response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      response.end(quotes);
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<html><head><title>${'題'.repeat(100_000)}</title></head><body><p>short</p></body></html>`);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const tool = await fetchTool({ allowedHosts: ['localhost'], maxBytes: 2_000_000 });
+
+  const page = await tool.execute({ url: `http://localhost:${port}/quotes` }, session) as JsonObject;
+  assert.ok(Buffer.byteLength(JSON.stringify(page.text)) <= 48 * 1024 + 2);
+  assert.equal(page.nextOffset, String(page.text).length);
+
+  const titled = await tool.execute({ url: `http://localhost:${port}/titled` }, session) as JsonObject;
+  assert.ok(String(titled.title).length <= 301);
+  assert.ok(String(titled.title).endsWith('…'));
+});
