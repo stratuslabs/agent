@@ -83,6 +83,9 @@
         "maxBytes": {
           "type": "integer"
         },
+        "maxChars": {
+          "type": "integer"
+        },
         "timeoutMs": {
           "type": "integer"
         },

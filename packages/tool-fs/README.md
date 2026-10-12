@@ -57,7 +57,7 @@ tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 | Key | Default | What |
 | --- | --- | --- |
 | `roots` | none | Directories this agent may reach. **No roots means no filesystem** — nothing is readable, rather than everything. |
-| `maxBytes` | `64000` | Cap on one `fs.read`, before the `truncated` marker. A call's own `maxBytes` may ask for less, never more. |
+| `maxBytes` | `64000` | Cap on one `fs.read`, before the `truncated` marker. A call's own `maxBytes` may ask for less, never more. A clipped read also returns `nextOffset`; `fs.read` with `offset: nextOffset` reads the next page, cut on a UTF-8 character boundary. |
 | `maxMatches` | `100` | Cap on `fs.search` matches. A call's own `maxMatches` may ask for fewer, never more. |
 | `maxEntries` | `500` | Cap on `fs.list` entries. |
 | `workspaceRoot` | the host's answer | Only for a host wiring this plugin by hand with no workspace layout of its own. Under the daemon the host answers per agent (`~/.stratus/agents/<id>/workspace`) and this key is not consulted at all — the ledger follows the host, so relocating one writer cannot fork it. Set on a hand-wired host, it means the old shape: one directory per agent directly under the root. |

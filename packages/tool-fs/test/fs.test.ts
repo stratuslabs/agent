@@ -552,3 +552,81 @@ test('fs.read reads a text file that happens to start with GIF8 as text', async 
   assert.equal(read.content, 'GIF8 notes: compare with webp');
   assert.equal(read.image, undefined);
 });
+
+test('fs.read pages through a file longer than the cap with offset and nextOffset', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-page-'));
+  const body = Array.from({ length: 300 }, (_, i) => `line ${String(i).padStart(3, '0')}\n`).join('');
+  await writeFile(path.join(root, 'long.txt'), body);
+
+  const tools = await registryFor({ roots: [root], maxBytes: 1_000 });
+  const session = sessionFor('ava');
+
+  let offset = 0;
+  let pages = 0;
+  let seen = '';
+  for (;;) {
+    const page = await run(tools, 'fs.read', { path: 'long.txt', ...(offset > 0 ? { offset } : {}) }, session) as JsonObject;
+    seen += String(page.content);
+    pages += 1;
+    assert.equal(page.size, body.length);
+    if (page.nextOffset === undefined) {
+      assert.equal(page.truncated, false, 'the last page is not clipped');
+      break;
+    }
+    assert.equal(page.truncated, true);
+    assert.equal(page.offset ?? 0, offset);
+    offset = page.nextOffset as number;
+  }
+  assert.equal(seen, body, 'the pages joined are the whole file, nothing lost or repeated');
+  assert.equal(pages, Math.ceil(body.length / 1_000));
+
+  const past = await run(tools, 'fs.read', { path: 'long.txt', offset: body.length + 10 }, session) as JsonObject;
+  assert.equal(past.content, '');
+  assert.equal(past.nextOffset, undefined);
+});
+
+test('fs.read pages never split a multi-byte character', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-utf8-'));
+  const body = 'é'.repeat(500) + '漢'.repeat(300);
+  await writeFile(path.join(root, 'utf8.txt'), body);
+
+  const tools = await registryFor({ roots: [root], maxBytes: 101 });
+  const session = sessionFor('ava');
+
+  let offset = 0;
+  let seen = '';
+  for (;;) {
+    const page = await run(tools, 'fs.read', { path: 'utf8.txt', ...(offset > 0 ? { offset } : {}) }, session) as JsonObject;
+    assert.doesNotMatch(String(page.content), /�/);
+    seen += String(page.content);
+    if (page.nextOffset === undefined) break;
+    offset = page.nextOffset as number;
+  }
+  assert.equal(seen, body);
+
+  // An offset a model made up in the middle of a character starts at the next whole one.
+  const mid = await run(tools, 'fs.read', { path: 'utf8.txt', offset: 1 }, session) as JsonObject;
+  assert.doesNotMatch(String(mid.content), /�/);
+  assert.match(String(mid.content), /^é/);
+});
+
+test('a read cap narrower than one character still pages through it whole', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-narrow-'));
+  const body = 'é漢a😀';
+  await writeFile(path.join(root, 'narrow.txt'), body);
+
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  let offset = 0;
+  let seen = '';
+  for (let calls = 0; calls < 20; calls += 1) {
+    const page = await run(tools, 'fs.read', { path: 'narrow.txt', maxBytes: 1, ...(offset > 0 ? { offset } : {}) }, session) as JsonObject;
+    assert.doesNotMatch(String(page.content), /�/);
+    seen += String(page.content);
+    if (page.nextOffset === undefined) break;
+    assert.ok((page.nextOffset as number) > offset, 'every page moves forward');
+    offset = page.nextOffset as number;
+  }
+  assert.equal(seen, body);
+});

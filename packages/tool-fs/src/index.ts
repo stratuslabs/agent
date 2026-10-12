@@ -165,10 +165,40 @@ const imageMediaTypeOf = (bytes: Uint8Array): ImageAttachmentMediaType | undefin
   return undefined;
 };
 
+/** Whether a byte continues a UTF-8 sequence rather than starting one. */
+const isContinuation = (byte: number | undefined): boolean => byte !== undefined && (byte & 0xc0) === 0x80;
+
+/**
+ * How many of `bytes` end on a whole character: a page cut inside a
+ * multi-byte sequence would show half of it as U+FFFD, and the next page
+ * would open with the other half as another. Dropping the partial tail
+ * here is what lets the pages join back into the file exactly.
+ */
+const wholeCharacterLength = (bytes: Buffer): number => {
+  let start = bytes.length - 1;
+  while (start >= 0 && isContinuation(bytes[start])) {
+    start -= 1;
+  }
+  if (start < 0) {
+    return bytes.length;
+  }
+  // A lead byte with all its continuations present ends whole; one cut
+  // short is dropped, even when that leaves nothing. The caller widens an
+  // empty page to one whole character rather than returning half of one.
+  return start + utf8Width(bytes[start]) <= bytes.length ? bytes.length : start;
+};
+
+/** The bytes in the UTF-8 sequence this lead byte opens. */
+const utf8Width = (lead: number | undefined): number => {
+  const byte = lead ?? 0;
+  return byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+};
+
 const readContained = async (
   resolved: ResolvedPath,
   maxBytes: number,
-): Promise<{ content: string; truncated: boolean; bytes: number; size: number; binary: boolean; image?: { mediaType: ImageAttachmentMediaType; data: Buffer } }> => {
+  offset = 0,
+): Promise<{ content: string; truncated: boolean; bytes: number; size: number; offset: number; nextOffset?: number; binary: boolean; image?: { mediaType: ImageAttachmentMediaType; data: Buffer } }> => {
   if (resolved.kind === 'directory') {
     throw new Error(`${resolved.path} is a directory; use fs.list.`);
   }
@@ -198,22 +228,51 @@ const readContained = async (
       if (info.size <= IMAGE_ATTACHMENT_MAX_BYTES) {
         const whole = Buffer.alloc(info.size);
         const { bytesRead: wholeRead } = await handle.read(whole, 0, info.size, 0);
-        return { content: '', truncated: false, bytes: wholeRead, size: info.size, binary: true, image: { mediaType, data: whole.subarray(0, wholeRead) } };
+        return { content: '', truncated: false, bytes: wholeRead, size: info.size, offset: 0, binary: true, image: { mediaType, data: whole.subarray(0, wholeRead) } };
       }
-      return { content: '', truncated: false, bytes: 0, size: info.size, binary: true, image: { mediaType, data: Buffer.alloc(0) } };
+      return { content: '', truncated: false, bytes: 0, size: info.size, offset: 0, binary: true, image: { mediaType, data: Buffer.alloc(0) } };
     }
-    const length = Math.min(info.size, maxBytes);
-    const buffer = Buffer.alloc(length);
-    const { bytesRead } = await handle.read(buffer, 0, length, 0);
-    const slice = buffer.subarray(0, bytesRead);
-    if (looksBinary(slice)) {
-      return { content: '', truncated: false, bytes: bytesRead, size: info.size, binary: true };
+    // An offset that lands inside a character (one a model computed rather
+    // than took from `nextOffset`) moves forward to the next whole one,
+    // three bytes at most, rather than opening the page with mojibake.
+    let start = Math.min(offset, info.size);
+    if (start > 0 && start < info.size) {
+      const peek = Buffer.alloc(3);
+      const { bytesRead: peeked } = await handle.read(peek, 0, Math.min(3, info.size - start), start);
+      let skip = 0;
+      while (skip < peeked && isContinuation(peek[skip])) {
+        skip += 1;
+      }
+      start += skip;
     }
+    let length = Math.max(0, Math.min(info.size - start, maxBytes));
+    let buffer = Buffer.alloc(length);
+    let { bytesRead } = await handle.read(buffer, 0, length, start);
+    // A cap narrower than the character at `start` would otherwise return
+    // half of it and point `nextOffset` into its middle, where the next
+    // read skips the rest: the character lost. The page grows to that one
+    // character instead, four bytes at most.
+    if (bytesRead > 0 && start + bytesRead < info.size && wholeCharacterLength(buffer.subarray(0, bytesRead)) === 0) {
+      length = Math.min(info.size - start, utf8Width(buffer[0]));
+      buffer = Buffer.alloc(length);
+      ({ bytesRead } = await handle.read(buffer, 0, length, start));
+    }
+    const read = buffer.subarray(0, bytesRead);
+    if (looksBinary(read)) {
+      return { content: '', truncated: false, bytes: bytesRead, size: info.size, offset: start, binary: true };
+    }
+    const end = start + bytesRead;
+    // Only a page that stops short of the end is trimmed to a character
+    // boundary; the file's own last byte is where it ends, whole or not.
+    const kept = end < info.size ? wholeCharacterLength(read) : bytesRead;
+    const nextOffset = start + kept < info.size ? start + kept : undefined;
     return {
-      content: slice.toString('utf8'),
-      truncated: info.size > bytesRead,
-      bytes: bytesRead,
+      content: read.subarray(0, kept).toString('utf8'),
+      truncated: nextOffset !== undefined,
+      bytes: kept,
       size: info.size,
+      offset: start,
+      ...(nextOffset === undefined ? {} : { nextOffset }),
       binary: false,
     };
   } finally {
@@ -263,6 +322,7 @@ const createReadTool = (
     properties: {
       path: { type: 'string', description: 'Absolute, or relative to the agent’s first root.' },
       maxBytes: { type: 'number', description: 'Stop after this many bytes.' },
+      offset: { type: 'number', description: 'Start this many bytes in. A clipped read returns nextOffset; pass it here to read on.' },
     },
     required: ['path'],
   },
@@ -272,6 +332,9 @@ const createReadTool = (
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
     await refuseProtected(isProtected, resolved, requested);
     const maxBytes = narrowed(input.maxBytes, settings.maxBytes);
+    const offset = typeof input.offset === 'number' && Number.isFinite(input.offset) && input.offset > 0
+      ? Math.floor(input.offset)
+      : 0;
     // Per call, not per tool: most files an agent reads are its operator's,
     // and only the ones a tainted session wrote carry a label — see the
     // ledger. Bytes and label are read as one step under the path's own
@@ -284,7 +347,7 @@ const createReadTool = (
     // succeeded, since a refused read put nothing in front of the model.
     const { result, recorded } = await serialized(resolved.path, async () => {
       const snapshot = await ledger.snapshot(session.agent.id);
-      const contents = await readContained(resolved, maxBytes);
+      const contents = await readContained(resolved, maxBytes, offset);
       return {
         result: contents,
         // The result names the file's path, directories included — see
@@ -293,7 +356,9 @@ const createReadTool = (
           await recordedTrustAmong(ledger, session.agent.id, [resolved.path], resolved.root, snapshot),
           await ledgerContentTrustAmong(isLedger, [[resolved.path, {
             identity: resolved.identity,
-            ...(contents.binary ? {} : { raw: contents.content, truncated: contents.truncated }),
+            // A page from past the start is as partial as a clipped one: the
+            // records before it are not in front of the label either.
+            ...(contents.binary ? {} : { raw: contents.content, truncated: contents.truncated || contents.offset > 0 }),
           }]]),
         ),
       };
@@ -314,6 +379,10 @@ const createReadTool = (
             // silently clipped file reads as a complete one, and a summary
             // written from half a document is confidently wrong.
             truncated: result.truncated,
+            // Named only when they say something: an ordinary whole-file
+            // read looks exactly as it did before paging existed.
+            ...(result.offset > 0 ? { offset: result.offset } : {}),
+            ...(result.nextOffset === undefined ? {} : { nextOffset: result.nextOffset }),
           }),
     };
   },

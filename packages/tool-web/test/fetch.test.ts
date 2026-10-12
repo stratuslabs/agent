@@ -928,3 +928,148 @@ test('a redirect to another site is reported, not followed', async (t) => {
   assert.match(String(away.text), /not followed/);
   assert.equal(otherReached, false);
 });
+
+test('web.fetch returns a long page in pages, and offset reads the rest', async (t) => {
+  const body = Array.from({ length: 2_000 }, (_, i) => `row ${String(i).padStart(4, '0')}`).join('\n');
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const url = `http://localhost:${port}/long.txt`;
+
+  const tool = await fetchTool({ allowedHosts: ['localhost'], maxChars: 4_000 });
+  let offset = 0;
+  let seen = '';
+  let pages = 0;
+  for (;;) {
+    const page = await tool.execute({ url, ...(offset > 0 ? { offset } : {}) }, session) as JsonObject;
+    pages += 1;
+    assert.ok(String(page.text).length <= 4_000);
+    assert.equal(page.totalChars, body.length);
+    assert.equal(page.truncated, false, 'the download was whole; paging is not truncation');
+    seen += String(page.text);
+    if (page.nextOffset === undefined) break;
+    offset = page.nextOffset as number;
+  }
+  assert.equal(seen, body);
+  assert.equal(pages, Math.ceil(body.length / 4_000));
+});
+
+test('a short page carries no paging fields', async (t) => {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('short');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const tool = await fetchTool({ allowedHosts: ['localhost'] });
+  const result = await tool.execute({ url: `http://localhost:${port}/` }, session) as JsonObject;
+  assert.equal(result.text, 'short');
+  assert.equal(result.nextOffset, undefined);
+  assert.equal(result.offset, undefined);
+});
+
+test('every setting the tool reads is one its manifest declares, so the loader accepts it', async () => {
+  const { validatePluginConfig } = await import('@stratusagent/plugins');
+  const pkg = (await import('../package.json', { with: { type: 'json' } })).default as {
+    name: string;
+    stratus: { config: JsonObject };
+  };
+  const manifest = { packageName: pkg.name, config: pkg.stratus.config } as never;
+  for (const block of [{ maxChars: 20_000 }, { agents: { ava: { maxChars: 10_000 } } }] as JsonObject[]) {
+    assert.doesNotThrow(() => validatePluginConfig(manifest, block));
+  }
+});
+test('a one-character page widens to keep an astral character whole', async (t) => {
+  const body = 'a😀b😀';
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const url = `http://localhost:${port}/emoji.txt`;
+
+  const tool = await fetchTool({ allowedHosts: ['localhost'], maxChars: 1 });
+  const pages: string[] = [];
+  let offset = 0;
+  for (;;) {
+    const page = await tool.execute({ url, ...(offset > 0 ? { offset } : {}) }, session) as JsonObject;
+    pages.push(String(page.text));
+    if (page.nextOffset === undefined) break;
+    assert.ok((page.nextOffset as number) > offset, 'every page advances');
+    offset = page.nextOffset as number;
+  }
+  assert.deepEqual(pages, ['a', '😀', 'b', '😀']);
+});
+
+test('an offset inside an astral character starts the page at the whole character', async (t) => {
+  const body = 'a😀b';
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const tool = await fetchTool({ allowedHosts: ['localhost'] });
+  const page = await tool.execute({ url: `http://localhost:${port}/`, offset: 2 }, session) as JsonObject;
+  assert.equal(page.text, '😀b');
+  assert.equal(page.offset, 1);
+});
+
+test('dense text is paged by bytes as well as characters, and an offset moved back to 0 still says so', async (t) => {
+  const cjk = '漢'.repeat(40_000);
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end(request.url === '/cjk' ? cjk : '😀 and the rest');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const tool = await fetchTool({ allowedHosts: ['localhost'], maxBytes: 1_000_000 });
+
+  const first = await tool.execute({ url: `http://localhost:${port}/cjk` }, session) as JsonObject;
+  assert.ok(Buffer.byteLength(String(first.text)) <= 48 * 1024);
+  assert.equal(first.nextOffset, String(first.text).length);
+  assert.equal(first.totalChars, cjk.length);
+
+  const back = await tool.execute({ url: `http://localhost:${port}/emoji`, offset: 1 }, session) as JsonObject;
+  assert.equal(back.text, '😀 and the rest');
+  assert.equal(back.offset, 0);
+  assert.equal(back.totalChars, '😀 and the rest'.length);
+});
+
+test('a page is budgeted as it is sent: escapes count, and a long title is cut', async (t) => {
+  const quotes = '"'.repeat(60_000);
+  const server = http.createServer((request, response) => {
+    if (request.url === '/quotes') {
+      response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      response.end(quotes);
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    const title = request.url === '/emoji-title' ? '😀'.repeat(200) : '題'.repeat(100_000);
+    response.end(`<html><head><title>${title}</title></head><body><p>short</p></body></html>`);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const tool = await fetchTool({ allowedHosts: ['localhost'], maxBytes: 2_000_000 });
+
+  const page = await tool.execute({ url: `http://localhost:${port}/quotes` }, session) as JsonObject;
+  assert.ok(Buffer.byteLength(JSON.stringify(page.text)) <= 48 * 1024 + 2);
+  assert.equal(page.nextOffset, String(page.text).length);
+
+  const titled = await tool.execute({ url: `http://localhost:${port}/titled` }, session) as JsonObject;
+  assert.ok(String(titled.title).length <= 301);
+  assert.ok(String(titled.title).endsWith('…'));
+  // 200 emoji are 400 UTF-16 units but 200 characters: under the cut.
+  const emoji = await tool.execute({ url: `http://localhost:${port}/emoji-title` }, session) as JsonObject;
+  assert.equal(emoji.title, '😀'.repeat(200));
+});

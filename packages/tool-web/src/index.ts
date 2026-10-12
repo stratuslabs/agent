@@ -12,6 +12,26 @@ import { extractTitle, htmlToText } from './readability.ts';
 export { decodeEntities, extractTitle, htmlToText } from './readability.ts';
 
 const DEFAULT_MAX_BYTES = 400_000;
+/**
+ * The most text one call returns. Separate from `maxBytes`, which bounds
+ * the download: a page is read whole up to that and handed back in slices
+ * of this, so a long document is read in full over several calls rather
+ * than cut off. Sized to stay inside what a model host will put in front
+ * of the model as one tool result: Claude Code's harness swaps a larger
+ * result for a file in its own directory, outside every root an agent can
+ * read, and the agent sees only that the text existed.
+ */
+const DEFAULT_MAX_CHARS = 40_000;
+/**
+ * The most UTF-8 one page may weigh, whatever `maxChars` says. Characters
+ * are a poor measure of tokens for dense text: 40,000 CJK characters are
+ * well past Claude Code's ~25,000-token cap, while 40,000 characters of
+ * English are about 10,000 tokens. Bytes track dense text better, so this
+ * leaves an English page as it was and holds a CJK one to about 16,000.
+ */
+const PAGE_MAX_BYTES = 48 * 1024;
+/** The most of a page's `<title>` returned; it is outside the page budget. */
+const TITLE_MAX_CHARS = 300;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_REDIRECTS = 5;
 const DEFAULT_USER_AGENT = 'StratusAgent/0.5 (+https://github.com/stratuslabs/agent)';
@@ -24,6 +44,8 @@ export interface WebPluginConfig extends JsonObject {
   /** The only hosts reachable at all, when set. See the README. */
   onlyHosts?: string[];
   maxBytes?: number;
+  /** The most text one call returns; the rest is read with `offset`. */
+  maxChars?: number;
   timeoutMs?: number;
   maxRedirects?: number;
   userAgent?: string;
@@ -49,6 +71,7 @@ const settingsFor = (config: JsonObject, session: Session) => {
   return {
     policy,
     maxBytes: asNumber(resolved.maxBytes, DEFAULT_MAX_BYTES),
+    maxChars: asNumber(resolved.maxChars, DEFAULT_MAX_CHARS),
     timeoutMs: asNumber(resolved.timeoutMs, DEFAULT_TIMEOUT_MS),
     maxRedirects: asNumber(resolved.maxRedirects, DEFAULT_MAX_REDIRECTS),
     userAgent: typeof resolved.userAgent === 'string' ? resolved.userAgent : DEFAULT_USER_AGENT,
@@ -187,6 +210,58 @@ export const fetchThroughPolicy = async (
   throw new Error(`Too many redirects (${maxRedirects}) starting at ${rawUrl}`);
 };
 
+/**
+ * One call's slice of a page's text, at most `maxChars` UTF-16 units and
+ * `PAGE_MAX_BYTES` of UTF-8 as it will be sent (inside a JSON string, so a
+ * quote or a control character weighs its escape), and always at least one
+ * whole character. Cut
+ * at code-point boundaries on both ends: a lone half of a surrogate pair
+ * on either side would mean the pages no longer join back into the text.
+ */
+const pageOf = (whole: string, requested: unknown, maxChars: number): {
+  text: string;
+  offset: number;
+  nextOffset?: number;
+  paged: boolean;
+} => {
+  const asked = typeof requested === 'number' && Number.isFinite(requested) && requested > 0
+    ? Math.min(Math.floor(requested), whole.length)
+    : 0;
+  let offset = asked;
+  // An offset the caller chose can land on a pair's second half; start at
+  // the whole character instead (the answer's offset says where).
+  if (offset > 0 && offset < whole.length) {
+    const first = whole.charCodeAt(offset);
+    const before = whole.charCodeAt(offset - 1);
+    if (first >= 0xdc00 && first <= 0xdfff && before >= 0xd800 && before <= 0xdbff) {
+      offset -= 1;
+    }
+  }
+  let end = offset;
+  let bytes = 0;
+  while (end < whole.length) {
+    const point = whole.codePointAt(end)!;
+    const units = point > 0xffff ? 2 : 1;
+    const weight = point === 0x22 || point === 0x5c || point === 0x0a || point === 0x0d || point === 0x09 || point === 0x08 || point === 0x0c
+      ? 2
+      : point < 0x20 ? 6 : point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+    if (end > offset && (end + units - offset > maxChars || bytes + weight > PAGE_MAX_BYTES)) {
+      break;
+    }
+    end += units;
+    bytes += weight;
+  }
+  const nextOffset = end < whole.length ? end : undefined;
+  return {
+    text: whole.slice(offset, end),
+    offset,
+    ...(nextOffset === undefined ? {} : { nextOffset }),
+    // A caller who asked for an offset is told where the page started,
+    // even when that turned out to be the beginning.
+    paged: asked > 0 || nextOffset !== undefined,
+  };
+};
+
 const createFetchTool = (config: JsonObject): Tool => ({
   name: 'web.fetch',
   description: 'Retrieve a URL and return its readable text. No browser, no JavaScript.',
@@ -203,6 +278,7 @@ const createFetchTool = (config: JsonObject): Tool => ({
       url: { type: 'string' },
       maxBytes: { type: 'number' },
       raw: { type: 'boolean', description: 'Return the body as received, without text extraction.' },
+      offset: { type: 'number', description: 'Start this many characters into the text. A long page returns nextOffset; pass it here to read on.' },
     },
     required: ['url'],
   },
@@ -248,8 +324,15 @@ const createFetchTool = (config: JsonObject): Tool => ({
     }
 
     const html = response.contentType.includes('html');
-    const text = input.raw === true || !html ? response.body : htmlToText(response.body);
-    const title = html ? extractTitle(response.body) : undefined;
+    const whole = input.raw === true || !html ? response.body : htmlToText(response.body);
+    const fullTitle = html ? extractTitle(response.body) : undefined;
+    // A title is page-supplied too, and not paged: cut a long one at a
+    // code-point boundary so it cannot carry the result past the budget.
+    const titlePoints = fullTitle === undefined ? [] : Array.from(fullTitle);
+    const title = titlePoints.length > TITLE_MAX_CHARS
+      ? `${titlePoints.slice(0, TITLE_MAX_CHARS).join('')}…`
+      : fullTitle;
+    const page = pageOf(whole, input.offset, settings.maxChars);
 
     return {
       url: response.url,
@@ -259,7 +342,13 @@ const createFetchTool = (config: JsonObject): Tool => ({
       // Named `redirects` rather than left implicit: an agent that followed
       // a link somewhere else should be able to say where it ended up.
       ...(response.hops.length > 1 ? { redirects: response.hops } : {}),
-      text,
+      text: page.text,
+      // Paging fields only when the text did not fit in one call, so a
+      // short page reads exactly as it always has. `truncated` stays the
+      // download's own: true means the body was cut at `maxBytes` and no
+      // offset will reach past that.
+      ...(page.paged ? { offset: page.offset, totalChars: whole.length } : {}),
+      ...(page.nextOffset === undefined ? {} : { nextOffset: page.nextOffset }),
       truncated: response.truncated,
     };
   },
