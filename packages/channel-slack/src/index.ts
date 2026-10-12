@@ -2316,7 +2316,23 @@ const createAttachmentSaver = (
 ): AttachmentSaver => async (file, body) => {
   const workspace = store.workspaces.prepare(agentId);
   const lexical = path.join(workspace, SAVED_ATTACHMENTS_DIR);
-  await mkdir(lexical, { recursive: true, mode: 0o700 });
+  // One component at a time, never through a link: a recursive mkdir would
+  // follow a link planted at `attachments` and create `slack` wherever it
+  // points before the check below could refuse it.
+  await mkdir(workspace, { recursive: true, mode: 0o700 });
+  let at = workspace;
+  for (const part of SAVED_ATTACHMENTS_DIR.split(path.sep)) {
+    at = path.join(at, part);
+    await mkdir(at, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EEXIST') {
+        throw error;
+      }
+    });
+    const info = await lstat(at);
+    if (!info.isDirectory()) {
+      throw new Error(`${at} is not a directory of the workspace's own`);
+    }
+  }
   // The directory must be exactly where the workspace says, through no link
   // of its own: one already planted at `attachments` or `attachments/slack`
   // would put the file outside the workspace, where the agent's file tools

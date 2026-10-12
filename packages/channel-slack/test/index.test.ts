@@ -7439,6 +7439,37 @@ test('saved attachments are bounded in number too, however small', async () => {
   assert.equal(warnings.filter((line) => /already holds 1000 saved attachments/.test(line)).length, 1);
 });
 
+test('a link planted at attachments creates nothing where it points', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const warnings: string[] = [];
+  const root = await mkdtemp(path.join(os.tmpdir(), 'slack-saved-parent-'));
+  const outside = path.join(root, 'outside');
+  await mkdir(outside);
+  await mkdir(path.join(root, 'ava'));
+  await symlink(outside, path.join(root, 'ava', 'attachments'));
+  const { store, records } = attachmentStoreAt(root);
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    attachmentStore: store,
+    fetchFile: async () => ({ status: 200, contentType: 'text/plain', body: Buffer.from('p'.repeat(150 * 1024)) }),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', dmWithFiles('evt-parent', '987.0', 'parent', [
+    { id: 'F1', name: 'big.log', mimetype: 'text/plain', url_private_download: 'https://files.slack.com/F1/download' },
+  ]));
+  await adapter.stop();
+
+  assert.deepEqual(await readdir(outside), []);
+  assert.deepEqual(records, []);
+  assert.equal(warnings.filter((line) => /could not save big\.log/.test(line)).length, 1);
+});
+
 test('with a store, a text file over the save cap, a page, or a failed save is still a note', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
