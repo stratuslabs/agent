@@ -96,6 +96,10 @@ Or choose the token yourself, so whatever manages the container knows it
 without reading it back: see the control API's token under
 [Credentials](#credentials).
 
+`deploy/docker/smoke.sh` builds the image and checks it end to end (a
+seeded token, a held start and its promotion, a pause that survives a
+restart). Run it from the repository root on any host with Docker.
+
 ## First run: a system unit
 
 Node `>=22.13 <23 || >=23.4` on the host, then:
