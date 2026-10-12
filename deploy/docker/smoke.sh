@@ -8,9 +8,10 @@
 # build's layers stay in Docker's cache.
 set -euo pipefail
 
-RUN_ID="$$-$(date +%s)"
 # Unique to this run, the image as much as the container: two checkouts
-# smoke-testing on one Docker host must each run the image they built.
+# smoke-testing on one Docker host must each run the image they built. Random
+# rather than a PID and a time, which two hosts sharing a daemon can repeat.
+RUN_ID="$(date +%s)-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 IMAGE="stratusd:smoke-${RUN_ID}"
 NAME="stratusd-smoke-${RUN_ID}"
 BUILT=0
