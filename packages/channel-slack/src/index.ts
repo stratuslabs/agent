@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, open, readFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, readdir, readFile, realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -28,6 +29,7 @@ import {
   leastTrusted,
   sessionTrustOf,
   SESSION_TRUST_METADATA_KEY,
+  type AgentWorkspaces,
   type ListensMode,
   type ProviderPart,
   type Session,
@@ -503,6 +505,29 @@ export interface SlackAdapterOptions {
    * Defaults to `DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS`.
    */
   fileDownloadTimeoutMs?: number;
+  /**
+   * Where a text attachment too large to read into the message is saved
+   * instead, so the turn can be told a path rather than only a name.
+   *
+   * Both halves or neither: the file holds what a Slack member sent, and
+   * read back through `fs.read` without a ledger record it would arrive as
+   * the agent's own notes — the laundering the ledger exists to stop. So the
+   * path is recorded at the sender's label before the bytes land, as
+   * `plugin-mcp` does for a server's files. Without this option such a file
+   * reaches the turn as a name only, as before.
+   */
+  attachmentStore?: {
+    workspaces: AgentWorkspaces;
+    /** The host's tainted-write ledger, the one `tool-fs` reads. */
+    ledger: { recordWrite(agentId: string, absolutePath: string, trust: TrustLevel): Promise<void> };
+    /**
+     * The most one agent's saved attachments may weigh together, so anyone
+     * admitted to talk to the agent cannot fill the host's disk. A save that
+     * would pass it is refused (the file is a name-only note and the log
+     * says where to make room); nothing is deleted. Defaults to 256 MB.
+     */
+    maxBytes?: number;
+  };
   /**
    * Test injection: the clock, in milliseconds, that an upload's place in
    * the thread is read from (`ReplyOutcome.spokeAt`) when the upload's
@@ -2202,6 +2227,147 @@ const TEXT_ATTACHMENT_MAX_BYTES = 100 * 1024;
  * is a cost decision as much as a context one.
  */
 const TEXT_ATTACHMENTS_MAX_TOTAL_BYTES = 200 * 1024;
+/**
+ * The most a text attachment may weigh to be saved to the agent's
+ * workspace when it is too large to read into the message. A 251 KB
+ * Markdown spec reached an agent as a filename and it had no way to open
+ * it; saved, the agent reads it with its file tools, in parts.
+ */
+const TEXT_ATTACHMENT_SAVE_MAX_BYTES = 10 * 1024 * 1024;
+/** The default bound on one agent's saved attachments, all together. */
+const SAVED_ATTACHMENTS_MAX_BYTES = 256 * 1024 * 1024;
+/**
+ * The most saved attachments one agent keeps, whatever they weigh. A file
+ * crowded out of a full message is saved however small it is, and each save
+ * is a ledger record, so the count is bounded as well as the bytes.
+ */
+const SAVED_ATTACHMENTS_MAX_FILES = 1_000;
+/** Under the agent's workspace, where saved attachments go. */
+const SAVED_ATTACHMENTS_DIR = path.join('attachments', 'slack');
+
+/** Saves a downloaded attachment's bytes and answers the path it is at. */
+type AttachmentSaver = (file: SlackInboundFile, body: Buffer) => Promise<string>;
+
+/**
+ * A file name safe to join under a directory: Slack's name is whatever the
+ * uploader's client sent, so separators, `..`, and control characters are
+ * replaced rather than trusted. Stamped, so the same file shared twice is
+ * two saves rather than a name already taken.
+ */
+const savedAttachmentName = (file: SlackInboundFile, now: number): string => {
+  const base = ((file.name ?? file.title ?? '').split(/[\\/]/).pop() ?? '').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[._]+/, '').slice(0, 120);
+  const id = (file.id ?? '').replace(/[^A-Za-z0-9]+/g, '').slice(0, 32);
+  return [now.toString(36), ...(id.length > 0 ? [id] : []), base.length > 0 ? base : 'attachment'].join('-');
+};
+
+/**
+ * Refuses a save that would take the directory's regular files past
+ * `maxBytes` together, or its entries past `SAVED_ATTACHMENTS_MAX_FILES`. Refused rather than making room: deleting on a
+ * Slack member's say is a worse failure than a full directory, and with
+ * nothing removed every ledger record still names a file that exists.
+ */
+const ensureRoom = async (dir: string, incoming: number, maxBytes: number): Promise<void> => {
+  let total = 0;
+  const names = await readdir(dir);
+  for (const name of names) {
+    const info = await lstat(path.join(dir, name)).catch(() => undefined);
+    total += info?.isFile() ? info.size : 0;
+  }
+  if (names.length >= SAVED_ATTACHMENTS_MAX_FILES) {
+    throw new Error(`${dir} already holds ${SAVED_ATTACHMENTS_MAX_FILES} saved attachments; remove files there to save more`);
+  }
+  if (total + incoming > maxBytes) {
+    throw new Error(`saved attachments in ${dir} would pass their ${maxBytes}-byte bound; remove files there to save more`);
+  }
+};
+
+/**
+ * One save at a time per directory, across messages and sessions: two
+ * concurrent saves would each measure the same free space and both write.
+ */
+const saveChains = new Map<string, Promise<unknown>>();
+const serialized = <T>(key: string, run: () => Promise<T>): Promise<T> => {
+  const previous = saveChains.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(run);
+  const settled = next.catch(() => undefined);
+  saveChains.set(key, settled);
+  void settled.then(() => {
+    if (saveChains.get(key) === settled) {
+      saveChains.delete(key);
+    }
+  });
+  return next;
+};
+
+/**
+ * The saver for one agent and one sender. The directory is canonical
+ * because the ledger is keyed the way `fs.read` looks a path up, through
+ * `realpath`. The path is recorded before the bytes land, so a crash
+ * between the two leaves a labelled path with no file, never a file with
+ * no label; and the file is created exclusively, so a link planted at the
+ * name fails the save rather than carrying the bytes somewhere the ledger
+ * never saw.
+ */
+const createAttachmentSaver = (
+  store: NonNullable<SlackAdapterOptions['attachmentStore']>,
+  agentId: string,
+  trust: TrustLevel,
+  now: () => number,
+): AttachmentSaver => async (file, body) => {
+  const workspace = store.workspaces.prepare(agentId);
+  const lexical = path.join(workspace, SAVED_ATTACHMENTS_DIR);
+  // One component at a time, never through a link: a recursive mkdir would
+  // follow a link planted at `attachments` and create `slack` wherever it
+  // points before the check below could refuse it.
+  await mkdir(workspace, { recursive: true, mode: 0o700 });
+  let at = workspace;
+  for (const part of SAVED_ATTACHMENTS_DIR.split(path.sep)) {
+    at = path.join(at, part);
+    await mkdir(at, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EEXIST') {
+        throw error;
+      }
+    });
+    const info = await lstat(at);
+    if (!info.isDirectory()) {
+      throw new Error(`${at} is not a directory of the workspace's own`);
+    }
+  }
+  // The directory must be exactly where the workspace says, through no link
+  // of its own: one already planted at `attachments` or `attachments/slack`
+  // would put the file outside the workspace, where the agent's file tools
+  // cannot read it and nothing should be written on a Slack member's say.
+  const dir = await realpath(lexical);
+  if (dir !== path.join(await realpath(workspace), SAVED_ATTACHMENTS_DIR)) {
+    throw new Error(`${lexical} is a link, not the workspace's own directory`);
+  }
+  return serialized(dir, async () => {
+    await ensureRoom(dir, body.length, store.maxBytes ?? SAVED_ATTACHMENTS_MAX_BYTES);
+    const target = path.join(dir, savedAttachmentName(file, now()));
+    await store.ledger.recordWrite(agentId, target, trust);
+    // O_EXCL and O_NOFOLLOW guard only the last component. A directory on the
+    // way swapped for a link after the record would send the create somewhere
+    // else, so the open file is checked against the recorded name before a
+    // byte is written (the same check as the plugins package's
+    // `nameIdentifiesHandle`). A refused save leaves the empty file rather
+    // than unlinking through a name that just proved it can move.
+    const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+    try {
+      const [canonical, atName, held] = await Promise.all([
+        realpath(target).catch(() => undefined),
+        lstat(target).catch(() => undefined),
+        handle.stat(),
+      ]);
+      if (canonical !== target || atName === undefined || atName.dev !== held.dev || atName.ino !== held.ino) {
+        throw new Error(`${target} moved between its provenance record and its write`);
+      }
+      await handle.writeFile(body);
+    } finally {
+      await handle.close();
+    }
+    return target;
+  });
+};
 
 const TEXT_APPLICATION_TYPES = new Set([
   'application/json',
@@ -2250,8 +2416,10 @@ const readTextAttachments = async (
   deadline: AbortSignal,
   warn: (line: string) => void,
   reasons: UnreadReasons,
-): Promise<{ texts: Array<{ name: string; text: string }>; unread: SlackInboundFile[] }> => {
+  save?: AttachmentSaver,
+): Promise<{ texts: Array<{ name: string; text: string }>; saved: SavedAttachment[]; unread: SlackInboundFile[] }> => {
   const texts: Array<{ name: string; text: string }> = [];
+  const saved: SavedAttachment[] = [];
   const unread: SlackInboundFile[] = [];
   const skip = (file: SlackInboundFile, reason: UnreadReason): void => {
     unread.push(file);
@@ -2273,8 +2441,13 @@ const readTextAttachments = async (
       continue;
     }
     const maxBytes = Math.min(TEXT_ATTACHMENT_MAX_BYTES, TEXT_ATTACHMENTS_MAX_TOTAL_BYTES - total);
-    if (file.size !== undefined && file.size > maxBytes) {
-      warn(`slack: ${fileLabel(file)} is ${file.size} bytes, over the ${maxBytes} bytes of text this message could still take; the turn is told it cannot be read. Paste the part that matters, or split the file.`);
+    // Over the inline cap, a file is still downloaded when it can be saved
+    // to the workspace instead; only over that cap too is it a name.
+    const limit = save === undefined ? maxBytes : Math.max(maxBytes, TEXT_ATTACHMENT_SAVE_MAX_BYTES);
+    if (file.size !== undefined && file.size > limit) {
+      warn(save === undefined
+        ? `slack: ${fileLabel(file)} is ${file.size} bytes, over the ${maxBytes} bytes of text this message could still take; the turn is told it cannot be read. Paste the part that matters, or split the file.`
+        : `slack: ${fileLabel(file)} is ${file.size} bytes, over the ${limit} bytes a text attachment may be saved at; the turn is told it cannot be read. Paste the part that matters, or split the file.`);
       skip(file, 'too-large');
       continue;
     }
@@ -2285,7 +2458,7 @@ const readTextAttachments = async (
     }
     let download: SlackFileDownload;
     try {
-      download = await fetchFile(url, botToken, deadline, maxBytes);
+      download = await fetchFile(url, botToken, deadline, limit);
     } catch (error) {
       const reason = error instanceof Error && error.name === 'TimeoutError'
         ? `this message's downloads took longer than ${timeoutMs}ms`
@@ -2303,8 +2476,8 @@ const readTextAttachments = async (
       skip(file, 'failed');
       continue;
     }
-    if (download.truncated === true || download.body.length > maxBytes) {
-      warn(`slack: ${fileLabel(file)} is larger than the ${maxBytes} bytes of text this message could still take; the download was abandoned and the turn is told it cannot be read.`);
+    if (download.truncated === true || download.body.length > limit) {
+      warn(`slack: ${fileLabel(file)} is larger than the ${limit} bytes ${save === undefined ? 'of text this message could still take' : 'a text attachment may be saved at'}; the download was abandoned and the turn is told it cannot be read.`);
       skip(file, 'too-large');
       continue;
     }
@@ -2316,11 +2489,32 @@ const readTextAttachments = async (
       skip(file, 'unreadable');
       continue;
     }
+    if (download.body.length > maxBytes) {
+      // Only reachable with a saver: `limit` is `maxBytes` without one.
+      try {
+        saved.push({ name: fileLabel(file), path: await save!(file, download.body), bytes: download.body.length });
+      } catch (error) {
+        warn(`slack: could not save ${fileLabel(file)} to the agent's workspace: ${error instanceof Error ? error.message : String(error)}. The turn is told it cannot be read.`);
+        skip(file, 'too-large');
+      }
+      continue;
+    }
     total += download.body.length;
     texts.push({ name: fileLabel(file), text });
   }
-  return { texts, unread };
+  return { texts, saved, unread };
 };
+
+/** A text attachment too large for the message, saved for the agent's file tools. */
+interface SavedAttachment {
+  name: string;
+  path: string;
+  bytes: number;
+}
+
+/** Saved attachments, named with where each is, after what was said. */
+const savedAttachmentBlocks = (saved: readonly SavedAttachment[]): string =>
+  saved.map(({ name, path: at, bytes }) => `\n[Attached: ${name}, ${Math.ceil(bytes / 1024)} KB, too large to include here. It is saved in full at ${at}. Read it with your file tools, in parts if it is long.]`).join('');
 
 /** Read text attachments, set into the message after what was said. */
 const textAttachmentBlocks = (texts: ReadonlyArray<{ name: string; text: string }>): string =>
@@ -5263,20 +5457,31 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           reasons,
           deadline,
         );
-      const { texts, unread } = overhear || judged
-        ? { texts: [], unread: notImages }
-        : await readTextAttachments(notImages, connection.config.botToken, fetchFile, fileDownloadTimeoutMs, deadline, warn, reasons);
+      const { texts, saved, unread } = overhear || judged
+        ? { texts: [], saved: [] as SavedAttachment[], unread: notImages }
+        : await readTextAttachments(
+          notImages,
+          connection.config.botToken,
+          fetchFile,
+          fileDownloadTimeoutMs,
+          deadline,
+          warn,
+          reasons,
+          options.attachmentStore
+            ? createAttachmentSaver(options.attachmentStore, connection.config.agentId, senderTrustFor(connection.config, userId), options.now ?? Date.now)
+            : undefined,
+        );
       // An image or a document with nothing said is still a question
       // ("what's this?"); a file the turn could not open with nothing said
       // is not one, and gets no reply.
-      if (cleaned.length === 0 && images.length === 0 && texts.length === 0) {
+      if (cleaned.length === 0 && images.length === 0 && texts.length === 0 && saved.length === 0) {
         return undefined;
       }
       const author = await authorFor(connection, userId);
       // In shared channels the model should know who is speaking; a DM is
       // unambiguous. A bare image in a channel still says who sent it.
       const spoken = isDm ? cleaned : (cleaned.length > 0 ? `${author}: ${cleaned}` : `${author}:`);
-      const userMessage = `${spoken}${textAttachmentBlocks(texts)}${attachmentNote(unread, reasons)}`;
+      const userMessage = `${spoken}${textAttachmentBlocks(texts)}${savedAttachmentBlocks(saved)}${attachmentNote(unread, reasons)}`;
       // Who sent this, judged against the operator's list — per message,
       // never remembered from the first one in the thread. A DM proves
       // nothing about who is typing, so a DM from an unlisted member is

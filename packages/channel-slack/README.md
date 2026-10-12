@@ -146,8 +146,17 @@ message after what was said, between `[Attached: plan.md. Its contents
 follow.]` and `[End of plan.md]`. A text file dropped in alone is a
 question, like a screenshot. One file may be 100 KB and one message's text
 files 200 KB together, since read text joins the conversation and is sent
-again every turn; a larger one is never downloaded, and `stratus serve`
-warns with the file's name. A file that is not UTF-8, or that comes back as
+again every turn. A larger one, up to 10 MB, is saved under the agent's
+workspace (`attachments/slack/<stamp>-<file id>-<name>`, `0600`) when the
+host passes `attachmentStore`, and the message says `[Attached: spec.md,
+251 KB, too large to include here. It is saved in full at <path>. …]`. The
+path is recorded in the tainted-write ledger at the sender's label before
+the bytes are written, so `fs.read` of it carries that label. One agent's
+saved attachments are bounded together (`attachmentStore.maxBytes`, 256 MB
+by default, and 1,000 files): past it a save is refused, the file reaches the turn as a
+name, and the warning names the directory to clear. Nothing is deleted. `stratus
+serve` passes it; a host that does not, or a file over 10 MB, gets the name
+only, and `stratus serve` warns with the file's name. A file that is not UTF-8, or that comes back as
 Slack's sign-in page because the scope is missing, is treated as unreadable
 and the warning names the scope. Text files share the message's 30-second
 download deadline with its images.

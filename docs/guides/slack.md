@@ -221,9 +221,15 @@ whenever an image arrives.
 
 Text files are read too. Attach a Markdown plan, a CSV, a JSON file, or a
 log, and its contents reach the agent with your message, up to 100 KB a
-file and 200 KB a message. Anything else — a PDF, a Word file, an image
-over 5 MB or 8000 pixels a side, one that would take a single message's
-images past 20 MB together, or a text file over those caps — reaches the
+file and 200 KB a message. A larger text file, up to 10 MB, is saved under
+the agent's workspace in `attachments/slack/`, and the agent is told the
+path so it can read it with its file tools. The saved file keeps the
+sender's trust label, so reading it back counts as reading what that person
+sent. An agent keeps up to 256 MB, and 1,000 files, of saved attachments; past that, a new one
+reaches the agent by name only and the daemon log says which directory to
+clear. Nothing is deleted for you. Anything else — a PDF, a Word file, an image over 5 MB or 8000 pixels
+a side, one that would take a single message's images past 20 MB together,
+or a text file over 10 MB — reaches the
 agent by name, with the reason it was not read: not a kind of file read
 here, too large, not downloaded (in time, or at all), or not readable as
 text or an image. It answers honestly from that note rather than as if it
