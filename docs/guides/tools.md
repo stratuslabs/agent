@@ -146,7 +146,7 @@ entries alone.
 | Package | Tools | Risk |
 | --- | --- | --- |
 | [`@stratusagent/tool-fs`](../../packages/tool-fs) | `fs.read`, `fs.list`, `fs.search` | `safe` inside the agent's roots |
-| | `fs.write` | `gated` |
+| | `fs.write`, `fs.move` | `gated` |
 | [`@stratusagent/tool-shell`](../../packages/tool-shell) | `shell.run` | `gated`, then [judged per command](./shell.md) |
 | [`@stratusagent/tool-web`](../../packages/tool-web) | `web.fetch` | `gated`, then [judged per site](./approvals.md) |
 | [`@stratusagent/tool-browser`](../../packages/tool-browser) | `browser.goto`, `.read`, `.screenshot` | `gated` |
@@ -194,7 +194,9 @@ risk levels. Four things are worth knowing here:
   MCP tool declare their output `external`; `shell.run` declares `unknown`,
   since `git status` and `curl` come back through the same stdout; `fs.read`
   labels a file the agent wrote while its session was tainted, from a
-  per-agent ledger at `~/.stratus/agents/<agent>/workspace/fs-provenance.jsonl`. The session that read any of it only
+  per-agent ledger at `~/.stratus/agents/<agent>/workspace/fs-provenance.jsonl`
+  (`fs.move` carries those labels to the new path; `shell.run mv` cannot).
+  The session that read any of it only
   ever gets less trusted, and every fact it remembers carries the label.
   The model reads an `external` result inside an envelope marked
   `untrusted`, with a note that it is data, not instructions — a nudge, not

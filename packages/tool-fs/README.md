@@ -51,6 +51,7 @@ tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 | `fs.list` | `safe` | Runs unattended. Symlinks are listed as symlinks and never followed. |
 | `fs.search` | `safe` | Runs unattended. Matches **literal text** (optionally `wholeWord`), never a regular expression — see below. Given a directory it walks it without following symlinks, skipping `.git`, `node_modules`, and files over 1 MB — each skipped file is named in the result's `skipped` list (the first fifty; `skippedTotal` counts them all), never silently passed over; given a file it searches that file and no others, streamed a line at a time, whatever its size — a single line longer than a million characters (Unicode code points, whatever their encoding) is searched in its first million only, and a file that reports no size (a `/proc` file) is searched in its first 1 MB only; the result says so either way. |
 | `fs.write` | `gated` | `interactive` asks at the terminal, `remote` asks in Slack, `headless` refuses. Writing where other people read is the thing worth a person's attention. |
+| `fs.move` | `gated` | Same as `fs.write`. Moves or renames a file or directory inside the roots (both ends checked), never overwrites, never moves a symlink, and carries provenance labels to the new path — see below. |
 
 ## Settings
 
@@ -94,6 +95,18 @@ The ledger is the daemon's record, and `fs.write` refuses to edit it even
 inside a root that covers it; a read or search that shows what it holds is
 labelled at the lowest label in it, because its contents are the paths
 tainted sessions chose.
+
+Labels are keyed by path, so a file moved with `shell.run mv` arrives at its
+new path unlabelled. `fs.move` is the supported way for an agent to move its
+own files: before the rename it appends a record at the destination for the
+moved entry, at the lowest label a read of it carried (its own record or a
+directory above it), and one for every recorded path beneath a moved
+directory. A tainted session's move also labels the new name at the
+session's level, since that name was its choice. Nothing is ever raised or
+created for a path with no label, the old paths' records stay (append-only,
+as above), and the ledger is read again after the rename so a record another
+process appended under the old path meanwhile is carried too. It refuses to
+move the ledger, a directory holding one, or anything the host protects.
 
 What this does not cover, said plainly: a copy under another name, a file a
 different process or a different agent wrote, content pasted through a path

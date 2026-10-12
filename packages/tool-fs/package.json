@@ -68,6 +68,10 @@
         {
           "name": "fs.write",
           "risk": "gated"
+        },
+        {
+          "name": "fs.move",
+          "risk": "gated"
         }
       ]
     },

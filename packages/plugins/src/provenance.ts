@@ -54,7 +54,18 @@ export interface TaintedWriteLedger {
    * session's write records nothing.
    */
   recordWrite(agentId: string, absolutePath: string, trust: TrustLevel): Promise<void>;
+  /**
+   * Record many writes at once, reading the ledger once rather than once
+   * per path, for a caller that labels a whole tree (`fs.move` of a
+   * directory). Same rules as `recordWrite`. Optional so a host-supplied
+   * ledger written before it existed still satisfies the interface; callers
+   * fall back to `recordWrite` per path.
+   */
+  recordWrites?(agentId: string, entries: ReadonlyArray<readonly [string, TrustLevel]>): Promise<void>;
 }
+
+/** The most one ledger write carries: far below the 512 KiB at which Node splits a write. */
+const LEDGER_APPEND_CHUNK_BYTES = 64 * 1024;
 
 /** The ledger's filename inside an agent's workspace. Exported so `fs.write` can refuse to write it. */
 export const LEDGER_FILENAME = 'fs-provenance.jsonl';
@@ -102,6 +113,13 @@ export const createProcessLocalLedger = (): TaintedWriteLedger => {
     },
     async recordWrite(agentId, absolutePath, trust) {
       byAgent.set(agentId, nextPaths(byAgent.get(agentId) ?? {}, absolutePath, trust));
+    },
+    async recordWrites(agentId, entries) {
+      let paths = byAgent.get(agentId) ?? {};
+      for (const [absolutePath, trust] of entries) {
+        paths = nextPaths(paths, absolutePath, trust);
+      }
+      byAgent.set(agentId, paths);
     },
   };
 };
@@ -253,47 +271,84 @@ export const createFileLedger = (
   // read-modify-write with no lock would let the second drop the first.
   let chain: Promise<void> = Promise.resolve();
 
+  const recordAll = (agentId: string, entries: ReadonlyArray<readonly [string, TrustLevel]>): Promise<void> => {
+    const work = chain.then(async () => {
+      // A clean write records nothing — see `TaintedWriteLedger`.
+      const owed = entries.filter(([, trust]) => tainted(trust));
+      if (owed.length === 0) {
+        return;
+      }
+      const filePath = ledgerPathForWrite(agentId);
+      await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+      // Read and appended through ONE descriptor. A ledger reached through
+      // a link (a relocated workspace, a relocated file — both supported)
+      // is resolved once, at this open; a second open for the append
+      // would resolve the name afresh, and a link repointed in between
+      // would put the record in some other file while the bytes it
+      // describes land where the resolver already decided. O_APPEND keeps
+      // the write itself atomic against a peer's.
+      const handle = await open(filePath, constants.O_RDWR | constants.O_CREAT | constants.O_APPEND, 0o600);
+      try {
+        // Tightened before the append, like the memory file: the mode on
+        // open applies only when it creates the file.
+        await handle.chmod(0o600);
+        const before = parseLedger((await handle.readFile()).toString('utf8'), filePath);
+        let paths = before;
+        const changed = new Set<string>();
+        for (const [absolutePath, trust] of owed) {
+          const next = nextPaths(paths, absolutePath, trust);
+          // A path already at this label or lower needs no second line.
+          if (next !== paths) {
+            changed.add(absolutePath);
+            paths = next;
+          }
+        }
+        if (changed.size === 0) {
+          return;
+        }
+        const at = new Date().toISOString();
+        const lines = [...changed].map((absolutePath) => {
+          const record: LedgerRecord = { path: absolutePath, trust: paths[absolutePath]!, at };
+          return `${JSON.stringify(record)}\n`;
+        });
+        // Whole records per write, each write well under the size Node
+        // would split into several: O_APPEND makes one write atomic, not one
+        // call, so a peer's line may land between two of these chunks but
+        // never inside a record.
+        let chunk = '';
+        const flush = async (): Promise<void> => {
+          if (chunk.length > 0) {
+            const bytes = Buffer.from(chunk, 'utf8');
+            const { bytesWritten } = await handle.write(bytes, 0, bytes.length);
+            if (bytesWritten !== bytes.length) {
+              throw new Error(`Short write to the filesystem provenance ledger at ${filePath}.`);
+            }
+            chunk = '';
+          }
+        };
+        for (const line of lines) {
+          if (chunk.length > 0 && Buffer.byteLength(chunk) + Buffer.byteLength(line) > LEDGER_APPEND_CHUNK_BYTES) {
+            await flush();
+          }
+          chunk += line;
+        }
+        await flush();
+      } finally {
+        await handle.close();
+      }
+    });
+    chain = work.then(() => undefined, () => undefined);
+    return work;
+  };
+
   return {
     lookup: (agentId, absolutePath) => read(agentId).then((paths) => paths[absolutePath]),
     snapshot: (agentId) => read(agentId),
     recordWrite(agentId, absolutePath, trust) {
-      const work = chain.then(async () => {
-        if (!tainted(trust)) {
-          // A clean write records nothing — see `TaintedWriteLedger`.
-          return;
-        }
-        const filePath = ledgerPathForWrite(agentId);
-        await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-        // Read and appended through ONE descriptor. A ledger reached through
-        // a link (a relocated workspace, a relocated file — both supported)
-        // is resolved once, at this open; a second open for the append
-        // would resolve the name afresh, and a link repointed in between
-        // would put the record in some other file while the bytes it
-        // describes land where the resolver already decided. O_APPEND keeps
-        // the write itself atomic against a peer's.
-        const handle = await open(filePath, constants.O_RDWR | constants.O_CREAT | constants.O_APPEND, 0o600);
-        try {
-          // Tightened before the append, like the memory file: the mode on
-          // open applies only when it creates the file.
-          await handle.chmod(0o600);
-          const before = parseLedger((await handle.readFile()).toString('utf8'), filePath);
-          const paths = nextPaths(before, absolutePath, trust);
-          // A path already at this label or lower needs no second line.
-          if (paths === before) {
-            return;
-          }
-          const record: LedgerRecord = {
-            path: absolutePath,
-            trust: paths[absolutePath]!,
-            at: new Date().toISOString(),
-          };
-          await handle.appendFile(`${JSON.stringify(record)}\n`);
-        } finally {
-          await handle.close();
-        }
-      });
-      chain = work.then(() => undefined, () => undefined);
-      return work;
+      return recordAll(agentId, [[absolutePath, trust]]);
+    },
+    recordWrites(agentId, entries) {
+      return recordAll(agentId, entries);
     },
   };
 };
