@@ -19,12 +19,13 @@ import {
 import { createCredentialLinkStore } from './credential-links.ts';
 import { createEventStream, type EventFilter } from './events.ts';
 import { API_PREFIX, ApiError, MAX_BODY_BYTES, isStateChanging, sendError, sendJson } from './http.ts';
-import { allowedMethodsFor, resolveRoute, type RouteContext } from './routes.ts';
+import { allowedMethodsFor, resolveRoute, type DaemonStartup, type RouteContext } from './routes.ts';
 
 export { API_PREFIX } from './http.ts';
 export { tokenFingerprint } from './auth.ts';
 export type { DashboardSession } from './auth.ts';
 export type { EventEnvelope, EventFilter } from './events.ts';
+export type { DaemonStartup } from './routes.ts';
 
 /** Kept in step with package.json, the way the CLI keeps its own version. */
 export const CONTROL_API_VERSION = '0.12.0';
@@ -79,6 +80,12 @@ export interface ControlApiOptions {
   port?: number;
   /** The config file the daemon was pinned to, if any. */
   configPath?: string;
+  /**
+   * What the host met while starting, reported by `GET /health` as
+   * `startup`. A function, because the API is created partway through the
+   * start and later warnings still belong to it.
+   */
+  startup?: () => DaemonStartup;
   /**
    * The web UI. Left unset, the package is auto-loaded when installed —
    * installing it is the whole opt-in. Pass `false` to serve the API alone on
@@ -250,6 +257,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       request,
       response,
       startedAt,
+      startup: options.startup,
       mintOneTimeToken: () => {
         if (!auth) {
           throw new ApiError(503, 'not_ready', 'The control API is not serving yet.');

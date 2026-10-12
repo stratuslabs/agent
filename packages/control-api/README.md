@@ -102,7 +102,7 @@ log, and an address bar is one that gets noticed when it changes.
 | Method | Path | What |
 | --- | --- | --- |
 | GET | `/livez` | **No token.** `200 { ok: true }` while the API answers, and nothing else: for a platform's own check (a Fly machine check, a Kubernetes probe) that cannot send the bearer token. Reveals no version, roster, or state |
-| GET | `/health` | Uptime, roster, session counts, pending approvals, intake (`{ paused, message?, since? }`), resolved runtimes |
+| GET | `/health` | Uptime, roster, session counts, pending approvals, intake (`{ paused, message?, since? }`), resolved runtimes, and `startup` (`{ warnings, config?: { path, sha256 } }`) when the host reports it |
 | GET | `/agents` | The roster as data — soul metadata, avatar palette, resolved provider/model, memory counts, activity |
 | POST | `/agents` | Create an agent: writes a soul file and reloads the roster |
 | GET | `/agents/:id` | One agent in full: complete instructions, the raw soul markdown, its pins, and its `language` when the soul sets one |
@@ -522,6 +522,14 @@ approvals, and the distinct runtimes the daemon would serve with how each got
 its credentials. It makes **no** network call — a monitoring view polls this,
 and a live call per poll would spend the operator's rate limit to say
 something resolution can answer for free.
+
+`startup` is what the daemon met while starting: each warning it logged before
+it began serving, and the config file it read with a SHA-256 of its bytes then.
+`stratus doctor` compares that digest with the file now, because a daemon runs
+on the config it started with and a file fixed afterwards changes nothing
+until a restart. The warnings are the daemon's own startup log lines, the same
+ones `stratus logs` shows, and never conversation content. Warnings from a
+held start's later `POST /promote` are not included.
 
 Both the roster and the runtimes come from the roster the gateway is
 **serving**, with each soul re-read the way `refreshAgent` re-reads it before

@@ -34,6 +34,10 @@ Channels
   slack     no agents connected
             @stratusagent/channel-slack installed
 
+Daemon
+  daemon    running 0.12.0, started 2026-10-12T08:00:00.000Z
+            loaded ~/.stratus/config.json
+
 1 problem found:
   ! A fallback model (gpt-4.1-mini) is configured but could not be resolved — usually
     no sign-in for its provider. A failing primary model has nothing to retry on.
@@ -45,6 +49,16 @@ it finds a problem, and it is the fastest answer to the two most common
 surprises: a run that turns out to be on the `demo` provider, and an
 `ANTHROPIC_API_KEY` in the environment quietly demoting a Claude
 subscription sign-in to per-token billing.
+
+The files are only half the answer when a daemon is running: it read its
+config once, at start, and runs on that until `stratus restart`. So doctor
+also asks the running daemon (through the control API, at the address in
+`~/.stratus/gateway.json`) what it met while starting. Each warning it logged
+then (a plugin that did not load, nobody able to approve, and so on) is a
+problem, and so is a config file that has changed since the daemon read it:
+`run stratus restart to apply it`. No daemon running is not a problem, since
+`stratus run` needs none. A daemon that published its address and does not
+answer is.
 
 ## The usual suspects
 

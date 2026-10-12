@@ -90,6 +90,19 @@ const apiActorFor = (principal: Principal | undefined, label: string | undefined
   return label ? `${source}:${label}` : source;
 };
 
+/**
+ * What the daemon met while starting, for `stratus doctor`: a config read at
+ * start is the one the daemon runs on until it restarts, so the file as it is
+ * now can be healthy while the process is not. The warnings are the daemon's
+ * own startup log lines, never conversation content.
+ */
+export interface DaemonStartup {
+  /** Each `warn` line from the start, in order. */
+  warnings: string[];
+  /** The config file the start read, and a digest of it then, so a later edit can be told apart. */
+  config?: { path: string; sha256: string };
+}
+
 export interface RouteContext {
   gateway: Gateway;
   env: StateEnvironment;
@@ -109,6 +122,8 @@ export interface RouteContext {
   response: ServerResponse;
   /** When the daemon's API bound, for uptime. */
   startedAt: number;
+  /** What the host met while starting. See `ControlApiOptions.startup`. */
+  startup: (() => DaemonStartup) | undefined;
   /** Mint a one-time browser token. Bearer callers only. */
   mintOneTimeToken: () => string;
   /** Spend one, yielding a session id. */
@@ -624,6 +639,7 @@ export const routes: Route[] = [
         intake: context.gateway.intake(),
         held: context.gateway.held(),
         runtimes: [...runtimes.values()],
+        ...(context.startup !== undefined ? { startup: context.startup() } : {}),
       };
     },
   },

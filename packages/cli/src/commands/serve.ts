@@ -36,6 +36,7 @@ import {
   trustedConfigError,
   grantReadSerializer,
   grantWriteSerializer,
+  resolveConfigLocation,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
 import { describePrincipals, describeApprovers } from '../approvals.ts';
@@ -47,6 +48,7 @@ import { writeLine } from '../io.ts';
 import { hostChannelClaimsFor, loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
 import { CLI_VERSION } from '../npm.ts';
+import { configDigest } from '../config-digest.ts';
 import { holdsForVersion, recordPromotedVersion } from '../promotion.ts';
 import type { ParsedServeCommand } from '../parse.ts';
 import { warnOnCredentialOverride, warnOnUntrustedConfig, warnOnIgnoredConfig } from '../runtime.ts';
@@ -207,7 +209,15 @@ const serveHeldHome = async (
     }
     void record({ ts: new Date().toISOString(), level: 'info', msg: line });
   };
+  // What this start met, for `GET /health` and so for `stratus doctor`: a
+  // daemon that started on a broken config keeps running on it after the
+  // file is fixed, and doctor reading the file alone said "No problems".
+  const startupWarnings: string[] = [];
+  let starting = true;
   const warn = (line: string): void => {
+    if (starting) {
+      startupWarnings.push(line);
+    }
     if (!jsonOut) {
       writeLine(streams.stderr, `Warning: ${line}`);
     }
@@ -255,6 +265,19 @@ const serveHeldHome = async (
   // The approval policy and the Slack approver sets come from the same
   // config block, resolved once here: the daemon must not answer "who can
   // approve this" differently from "is anyone being asked at all".
+  // Digested just before the blocks below read it, so it names the bytes
+  // this daemon runs on. Unreadable here means every load below failed too,
+  // and they say so through `warn`.
+  let startupConfig: { path: string; sha256: string } | undefined;
+  try {
+    const location = await resolveConfigLocation(command.configPath ? { configPath: command.configPath } : {}, env);
+    const sha256 = location !== undefined ? await configDigest(location.path) : undefined;
+    if (location !== undefined && sha256 !== undefined) {
+      startupConfig = { path: location.path, sha256 };
+    }
+  } catch {
+    // ConfigFileError: reported by the loads that follow.
+  }
   const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
   // What the operator declared in approvals.commands, matched as scopes
   // ahead of what was remembered, and reported by the control API so
@@ -338,6 +361,10 @@ const serveHeldHome = async (
         ...(apiConfig.publicUrl !== undefined ? { publicUrl: apiConfig.publicUrl } : {}),
         grants: grantStore,
         configCommands: (agentId: string) => operatorCommands.declaredFor(agentId),
+        startup: () => ({
+          warnings: [...startupWarnings],
+          ...(startupConfig !== undefined ? { config: startupConfig } : {}),
+        }),
         log,
         warn,
       });
@@ -785,6 +812,7 @@ const serveHeldHome = async (
       }
     }
 
+    starting = false;
     if (!jsonOut) {
       writeLine(streams.stdout, 'Press Ctrl+C to stop.');
     }

@@ -512,6 +512,44 @@ test('health reports the roster and its runtimes without probing a provider', as
   }
 });
 
+test('health reports what the daemon met while starting, asked fresh on every call', async () => {
+  const home = await newHome();
+  const warnings = ['plugins: @stratusagent/tool-shell is not installed; starting without it'];
+  const harness = await startApi({
+    home,
+    options: {
+      startup: () => ({
+        warnings: [...warnings],
+        config: { path: '/home/op/.stratus/config.json', sha256: 'abc123' },
+      }),
+    },
+  });
+  try {
+    type Startup = { startup?: { warnings: string[]; config?: { path: string; sha256: string } } };
+    const first = await json<Startup>(await harness.call('/api/v1/health'));
+    assert.deepEqual(first.startup, {
+      warnings: ['plugins: @stratusagent/tool-shell is not installed; starting without it'],
+      config: { path: '/home/op/.stratus/config.json', sha256: 'abc123' },
+    });
+    warnings.push('no channel can ask for ava');
+    const second = await json<Startup>(await harness.call('/api/v1/health'));
+    assert.equal(second.startup?.warnings.length, 2);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('health omits startup when the host reports none', async () => {
+  const home = await newHome();
+  const harness = await startApi({ home });
+  try {
+    const health = await json<{ startup?: unknown }>(await harness.call('/api/v1/health'));
+    assert.equal('startup' in health, false);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('credentials are writable but never readable, and channel tokens keep their own door', async () => {
   const home = await newHome();
   // A real roster agent, because a Slack binding must name one the daemon

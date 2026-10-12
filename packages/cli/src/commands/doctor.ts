@@ -16,6 +16,7 @@ import {
   readWorkingDirectory,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
+  gatewayInfoPath,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   CREDENTIAL_PROVIDER_NAMES,
   type CredentialProviderName,
@@ -29,7 +30,8 @@ import {
   quoteShellArg,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
-import { serviceEnvFor } from '../daemon.ts';
+import { callRunningGateway, gatewayErrorMessage, readGatewayInfo, serviceEnvFor } from '../daemon.ts';
+import { configDigest } from '../config-digest.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
 import { ignoredConfigRemedy } from '../runtime.ts';
@@ -58,8 +60,81 @@ export interface DoctorReport {
   slackAgents: string[];
   slackPackageInstalled: boolean;
   rosterCount: number;
+  /** The running daemon, as it reports itself. */
+  daemon: DoctorDaemon;
   problems: string[];
 }
+
+/**
+ * The daemon is asked rather than inferred: it read its config once, at
+ * start, and runs on that until it restarts, so the file being healthy now
+ * says nothing about the process. A real install had doctor report "No
+ * problems found" while the daemon ran with no plugins and no soul.
+ */
+export type DoctorDaemon =
+  | { state: 'not-running' }
+  | { state: 'unreachable'; url: string }
+  | { state: 'running'; url: string; version?: string; startedAt?: string; configPath?: string };
+
+/** Long enough for a busy daemon on loopback, short enough that doctor never hangs on a wedged one. */
+const DAEMON_TIMEOUT_MS = 3_000;
+
+interface DaemonHealth {
+  ok?: boolean;
+  version?: string;
+  startedAt?: string;
+  startup?: { warnings?: unknown; config?: { path?: unknown; sha256?: unknown } };
+}
+
+const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<DoctorDaemon> => {
+  const info = await readGatewayInfo(env);
+  if (info === undefined) {
+    // Information, not a problem: `stratus run` needs no daemon.
+    return { state: 'not-running' };
+  }
+  const url = info.url.replace(/\/+$/, '');
+  let health: DaemonHealth;
+  try {
+    const response = await callRunningGateway(env, {}, url, '/api/v1/health', undefined, 'GET', AbortSignal.timeout(DAEMON_TIMEOUT_MS));
+    if (!response.ok) {
+      throw new Error(await gatewayErrorMessage(response));
+    }
+    health = await response.json() as DaemonHealth;
+  } catch (error) {
+    problems.push(
+      `A daemon published ${url} in ${gatewayInfoPath(env)} but did not answer /health `
+      + `(${error instanceof Error ? error.message : String(error)}). If one is running, check \`stratus logs\`; `
+      + 'if none is, the file is left over from one that did not stop cleanly.',
+    );
+    return { state: 'unreachable', url };
+  }
+
+  // A daemon from before `startup` existed reports none; nothing to compare.
+  const startup = health.startup;
+  const warnings = Array.isArray(startup?.warnings)
+    ? startup.warnings.filter((line): line is string => typeof line === 'string')
+    : [];
+  for (const line of warnings) {
+    problems.push(`The running daemon warned at start: ${line}. It runs on what it loaded until \`stratus restart\`.`);
+  }
+  const configPath = typeof startup?.config?.path === 'string' ? startup.config.path : undefined;
+  const startedSha = typeof startup?.config?.sha256 === 'string' ? startup.config.sha256 : undefined;
+  if (configPath !== undefined && startedSha !== undefined) {
+    const now = await configDigest(configPath);
+    if (now === undefined) {
+      problems.push(`${configPath}, which the running daemon loaded at start, can no longer be read. It keeps running on the copy it loaded; fix the file, then \`stratus restart\`.`);
+    } else if (now !== startedSha) {
+      problems.push(`${configPath} changed since the daemon started; run \`stratus restart\` to apply it.`);
+    }
+  }
+  return {
+    state: 'running',
+    url,
+    ...(typeof health.version === 'string' ? { version: health.version } : {}),
+    ...(typeof health.startedAt === 'string' ? { startedAt: health.startedAt } : {}),
+    ...(configPath !== undefined ? { configPath } : {}),
+  };
+};
 
 /**
  * `stratus doctor` — what a run would resolve to right now, and which file
@@ -481,6 +556,8 @@ export const collectDoctorReport = async (
     );
   }
 
+  const daemon = await inspectDaemon(env, problems);
+
   return {
     ...(winner ? { configInUse: winner.path } : {}),
     configShadowed: shadowed.map((entry) => entry.path),
@@ -493,6 +570,7 @@ export const collectDoctorReport = async (
     slackAgents,
     slackPackageInstalled,
     rosterCount,
+    daemon,
     problems,
   };
 };
@@ -559,6 +637,24 @@ export const runDoctor = async (
     ? 'no agents connected'
     : `${report.slackAgents.length} connected (${report.slackAgents.join(', ')})`}`);
   writeLine(streams.stdout, `            @stratusagent/channel-slack ${report.slackPackageInstalled ? 'installed' : 'not installed'}`);
+
+  writeLine(streams.stdout);
+  writeLine(streams.stdout, 'Daemon');
+  const daemon = report.daemon;
+  if (daemon.state === 'not-running') {
+    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}not running`);
+  } else if (daemon.state === 'unreachable') {
+    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}did not answer at ${daemon.url}`);
+  } else {
+    const facts = [
+      ...(daemon.version !== undefined ? [daemon.version] : []),
+      ...(daemon.startedAt !== undefined ? [`started ${daemon.startedAt}`] : []),
+    ];
+    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}running${facts.length > 0 ? ` ${facts.join(', ')}` : ''}`);
+    if (daemon.configPath !== undefined) {
+      writeLine(streams.stdout, `  ${''.padEnd(10)}loaded ${daemon.configPath}`);
+    }
+  }
 
   writeLine(streams.stdout);
   if (report.problems.length === 0) {

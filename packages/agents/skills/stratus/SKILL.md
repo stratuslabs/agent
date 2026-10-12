@@ -58,7 +58,7 @@ A project-local `stratus.config.json` ships inside repositories, so it is **untr
 
 When a setting "isn't taking", these say why:
 
-- `stratus doctor` shows what `stratus run` and `stratus chat` would use, and which file or variable decided each value.
+- `stratus doctor` shows what `stratus run` and `stratus chat` would use, and which file or variable decided each value. When a daemon is running it also asks it what it warned about at start, and says when the config has changed since then (a restart applies it).
 - `stratus agents` shows what each agent on the roster runs on.
 - `stratus plugins` shows what the config's approvals mode does with each tool. `stratus serve --approvals` overrides that mode. A daemon in `remote` logs an `approvals: remote` line at startup, so a `stratus logs` with no such line since the last start means `headless`.
 
