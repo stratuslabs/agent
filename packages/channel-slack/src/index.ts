@@ -4088,7 +4088,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // "Said nothing" as the session can tell it: no reply saved for the
       // turn. A line the old process had streamed into a placeholder and
       // never saved is invisible here — the session records what was
-      // said, not what Slack took (roadmap 31's open item) — so such a
+      // said, not what Slack took (the open delivery-record item at the
+      // gateway's lastSpokeAt) — so such a
       // turn is failed without a note under that line. Taken over the
       // alternative on purpose: a note for every judged turn a restart
       // caught turns a silent turn, the common case, into the
