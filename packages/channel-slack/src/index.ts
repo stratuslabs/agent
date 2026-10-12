@@ -4167,9 +4167,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return { said: routing.unaddressed === true, landed };
     }
     // A reply the thread's other agents hear like any other, taking their
-    // place for it before the post, as `handleInbound` does.
+    // place for it before the post, as `handleInbound` does. A DM thread
+    // has nobody else in it to hear, as on the live path.
     const published = postAheadOf(behind, connection, channel, thread, posting, uploads);
-    const heard = routing.reply !== undefined && thread !== undefined
+    const conversation = metadata[CONVERSATION_METADATA_KEY];
+    const isDm = typeof conversation === 'object' && conversation !== null && !Array.isArray(conversation)
+      && (conversation as JsonObject).kind === 'direct';
+    const heard = routing.reply !== undefined && thread !== undefined && !isDm
       ? overhearReply(connection, channel, thread, routing.reply, routing, published)
       : undefined;
     const delivered = await published;

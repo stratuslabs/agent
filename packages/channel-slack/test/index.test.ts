@@ -1861,6 +1861,45 @@ test('the reply of a turn finished after a restart is heard by the thread\'s oth
   assert.equal(webBea.posts.length, 0);
 });
 
+test('the reply of a DM thread turn finished after a restart is posted in the thread and heard by nobody', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  // Slack would refuse Bea this DM. The recovered reply must not rest on
+  // that lookup, so it is made to say yes here.
+  webBea.knownConversations.set('D1', { is_member: true });
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  const lookedUp: string[] = [];
+  gateway.sessionRouting = async (sessionId) => {
+    lookedUp.push(sessionId);
+    if (sessionId === 'slack:ava:T1:D1:700.1') {
+      return {
+        agentId: 'ava',
+        metadata: { channel: 'slack', team: 'T1', slackChannel: 'D1', slackThread: '700.1', conversation: { kind: 'direct' }, sessionTrust: 'user' },
+        reply: 'the recovered DM reply',
+      };
+    }
+    return { agentId: 'bea', metadata: {} };
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:D1:700.1' });
+  await adapter.stop();
+
+  assert.deepEqual(webAva.posts.map((post) => [post.text, post.thread_ts]), [['the recovered DM reply', '700.1']]);
+  assert.deepEqual(gateway.observes, []);
+  assert.deepEqual(lookedUp, ['slack:ava:T1:D1:700.1'], 'no other agent is asked about a DM');
+});
+
 test('an agent taken out of the channel stops hearing its colleague there, and so does one Slack cannot vouch for', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
