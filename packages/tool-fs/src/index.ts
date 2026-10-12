@@ -1434,13 +1434,23 @@ const createMoveTool = (
     // The directories the move creates, deepest last — named by this
     // session, so recorded at its label like fs.write's.
     const missingParents: string[] = [];
+    let existingParent = destination.root;
     for (let parent = path.dirname(destination.path); parent !== destination.root && parent !== path.dirname(parent); parent = path.dirname(parent)) {
       try {
         await stat(parent);
+        existingParent = parent;
         break;
       } catch {
         missingParents.unshift(parent);
       }
+    }
+    // rename(2) cannot cross filesystems. Refused here, before any label is
+    // recorded or directory made, rather than by EXDEV halfway through.
+    const sourceDevice = source.identity?.dev ?? (await lstat(source.path)).dev;
+    if ((await stat(existingParent)).dev !== sourceDevice) {
+      throw new Error(
+        `${fromRequested} and ${toRequested} are on different filesystems, which fs.move does not cross; copy it with fs.read and fs.write instead.`,
+      );
     }
 
     const trust = sessionTrustOf(session);

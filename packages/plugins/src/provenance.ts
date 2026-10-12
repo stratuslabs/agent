@@ -64,6 +64,9 @@ export interface TaintedWriteLedger {
   recordWrites?(agentId: string, entries: ReadonlyArray<readonly [string, TrustLevel]>): Promise<void>;
 }
 
+/** The most one ledger write carries: far below the 512 KiB at which Node splits a write. */
+const LEDGER_APPEND_CHUNK_BYTES = 64 * 1024;
+
 /** The ledger's filename inside an agent's workspace. Exported so `fs.write` can refuse to write it. */
 export const LEDGER_FILENAME = 'fs-provenance.jsonl';
 
@@ -308,8 +311,28 @@ export const createFileLedger = (
           const record: LedgerRecord = { path: absolutePath, trust: paths[absolutePath]!, at };
           return `${JSON.stringify(record)}\n`;
         });
-        // One append, so a peer's record lands before or after the batch.
-        await handle.appendFile(lines.join(''));
+        // Whole records per write, each write well under the size Node
+        // would split into several: O_APPEND makes one write atomic, not one
+        // call, so a peer's line may land between two of these chunks but
+        // never inside a record.
+        let chunk = '';
+        const flush = async (): Promise<void> => {
+          if (chunk.length > 0) {
+            const bytes = Buffer.from(chunk, 'utf8');
+            const { bytesWritten } = await handle.write(bytes, 0, bytes.length);
+            if (bytesWritten !== bytes.length) {
+              throw new Error(`Short write to the filesystem provenance ledger at ${filePath}.`);
+            }
+            chunk = '';
+          }
+        };
+        for (const line of lines) {
+          if (chunk.length > 0 && Buffer.byteLength(chunk) + Buffer.byteLength(line) > LEDGER_APPEND_CHUNK_BYTES) {
+            await flush();
+          }
+          chunk += line;
+        }
+        await flush();
       } finally {
         await handle.close();
       }

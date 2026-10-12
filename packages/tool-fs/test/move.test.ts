@@ -233,3 +233,14 @@ test('the file ledger batch records only tainted paths that change', async () =>
   assert.equal(lines.length, 3);
   assert.deepEqual(await ledger.snapshot('ava'), { '/x/a': 'external', '/x/c': 'unknown' });
 });
+
+test('a batch larger than one ledger write lands as whole records', async () => {
+  const { workspaceRoot } = await home();
+  const ledger = createFileLedger((agentId) => path.join(workspaceRoot, agentId));
+  const entries = Array.from({ length: 1500 }, (_, index) => [`/x/${'d'.repeat(100)}/${index}`, 'external'] as const);
+  await ledger.recordWrites!('ava', entries);
+  const lines = (await readFile(path.join(workspaceRoot, 'ava', LEDGER_FILENAME), 'utf8')).trim().split('\n');
+  assert.ok(lines.join('\n').length > 128 * 1024);
+  assert.equal(lines.length, 1500);
+  assert.equal(Object.keys(await ledger.snapshot('ava')).length, 1500);
+});
