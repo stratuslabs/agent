@@ -9605,7 +9605,7 @@ test('a real plugin loads through the real loader, with the risks its manifest d
   assert.ok(!output.stderr.includes('did not load'), output.stderr);
 });
 
-// ---- stratus schedules (step 10) --------------------------------------------
+// ---- stratus schedules -------------------------------------------------------
 
 test('parseCommand reads the schedules command and its cancel form', () => {
   assert.deepEqual(parseCommand(['schedules']), { command: 'schedules', action: 'list', format: 'text' });
@@ -9721,7 +9721,7 @@ const fakeGateway = (answer: (call: CapturedCall) => Response | Promise<Response
   return { calls, fetchImpl };
 };
 
-// ---- stratus grants (step 28) -----------------------------------------------
+// ---- stratus grants ----------------------------------------------------------
 
 test('parseCommand reads the grants command and its revoke form', () => {
   assert.deepEqual(parseCommand(['grants', 'ava']), { command: 'grants', action: 'list', agentId: 'ava', format: 'text' });
@@ -14195,7 +14195,7 @@ test('stratus reports its own version, without asking npm or touching state', as
   await assert.rejects(() => stat(stateFilePath({ homeDir: home })));
 });
 
-// ---- registration seams (step 19A) ------------------------------------------
+// ---- plugin registration seams ---------------------------------------------
 //
 // One installed fixture plugin per contribution kind, under `fixtures/`, each
 // resolved through `import.meta.resolve` and loaded by the real loader — the

@@ -60,7 +60,7 @@ provider and model pins — through a validated round-trip.
 the default model listed from what those sign-ins can actually reach, and
 Slack channel tokens.
 
-**Plugins** — an honest placeholder. Tool packs are roadmap step 06.
+**Plugins** — the plugins the daemon was configured to load, including any that failed to resolve. An installed package that is not in the config is not listed.
 
 ## Two things the page will not do
 

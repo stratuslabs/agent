@@ -1,8 +1,7 @@
 # Plugins: the capability ecosystem
 
 How capability reaches an agent, what a package that supplies it is called, and
-what a developer outside this repository has to write. This is the contract
-[step 06](../roadmap/06-tool-packs.md) and everything after it implement
+what a developer outside this repository has to write. This is the contract the plugin packages implement
 against; [`stratus-v2.md`](./stratus-v2.md) is the architecture it sits inside.
 
 ## Three words
@@ -35,7 +34,7 @@ plugin can *register* one through the entrypoint, and today most cannot:
 | --- | --- | --- |
 | tools | `Tool` → `ToolRegistry` | **yes**, `context.tools` |
 | hooks | `EventBus.subscribe` | **yes**, `context.bus` |
-| skills | `Skill` → `SkillRegistry` | **n/a — the host loads them from the manifest** ([09](../roadmap/09-skills.md)) |
+| skills | `Skill` → `SkillRegistry` | **n/a — the host loads them from the manifest** |
 | providers | `ModelProvider`, behind a `ProviderContribution` factory | **yes**, `context.providers` (19) |
 | channels | `ChannelAdapter`, as a `ChannelContribution` | **yes**, `context.channels` |
 | memory | `AgentMemoryStore`, as a `MemoryStoreContribution` | **yes**, `context.memory` |
@@ -50,7 +49,7 @@ qualified `<package>:<skill>` id, plus the bare id while no other package (and
 no operator-installed skill) claims it.
 
 The entrypoint is the `Plugin` interface the kernel has had since v1, plus the
-teardown hook [06](../roadmap/06-tool-packs.md) added for plugins that hold
+teardown hook the tool packs added for plugins that hold
 something:
 
 ```ts
@@ -68,7 +67,7 @@ stderr. A `credentials` resolver, scoped per call to the agent whose
 call the plugin is serving, so a plugin declares what it needs by name in its
 manifest instead of reaching into ambient environment. That resolver is the
 first half of kernel change 9 to land, and it landed because
-[13](../roadmap/13-search.md) needed it: a search backend must reach the
+web search needed it: a search backend must reach the
 *calling* agent's key, which a `search(query, options)` seam could not
 express. A host that omits it leaves a plugin needing a key with no way to
 get one, and such a plugin must fail the call naming what is missing rather
@@ -98,7 +97,7 @@ contract rather than a courtesy: a result written by a party the operator
 has not authorized — a web page, a search snippet, an MCP server's response,
 a fetched document — is `external`, and the kernel carries that label from
 the result into the session that read it, across restarts and delegations,
-and into every fact the session remembers ([30](../roadmap/30-provenance.md)).
+and into every fact the session remembers.
 Two channels, mirroring `risk` and `commandFor`: `outputTrust: 'external'`
 on the `Tool` declares it for every call (`web.fetch`, `browser.read`), and
 `context.markTrust(level)` on the `ExecutionContext` a tool's `execute`
@@ -234,7 +233,7 @@ and a package without it is not loadable however well it is written.
 
 The registration handles for providers, channels, memory, and executors
 were enumerated as kernel-budget item 9 in [`stratus-v2.md`](./stratus-v2.md)
-and landed in 19A. Until then a
+and have since landed. Until then a
 plugin contributing one of those four kinds was configuration the host read,
 not code the plugin registered; that is no longer true, and the section
 below is the contract.
@@ -322,7 +321,7 @@ model.
 
 ### Declaring a namespace instead of names
 
-Some plugins cannot list their tools. The [MCP bridge](../roadmap/11-mcp.md)
+Some plugins cannot list their tools. The MCP bridge
 learns its tool names by asking a server at connect time, and the set changes
 when the server changes — so a static list of names is not merely inconvenient
 for it, it is impossible. For those, a manifest declares a **namespace it owns**
@@ -614,7 +613,7 @@ disabling a channel whose stored tokens say it should be running is the failure
 that split buys off.
 
 **Extracted before the plugin loader was written**, in
-[06](../roadmap/06-tool-packs.md). [05](../roadmap/05-control-api.md) had taken
+the tool packs. The control API had taken
 the count from one caller to three — the Slack adapter, the control API, and
 the dashboard resolved from inside the control API — each carrying its own copy
 of the same twelve lines, and the loader would have been the fourth. It is now
@@ -795,16 +794,8 @@ needs a vendor key and a commercial relationship, so core ships `web.fetch` and
 the ecosystem ships `web.search`. **The contract for it is first-party even
 though the backends are not** — `@stratusagent/search` publishes the tool
 name, the option meanings, and the result envelope, so two backends written
-by different authors are interchangeable behind one soul allowlist
-([13](../roadmap/13-search.md)). A capability that stays outside still needs
+by different authors are interchangeable behind one soul allowlist. A capability that stays outside still needs
 its shape decided in here, or the ecosystem half is worth nothing. The
-[MCP bridge](../roadmap/11-mcp.md) is the highest-leverage single entry in this
+MCP bridge is the highest-leverage single entry in this
 table — one plugin that mounts any MCP server's tools under kernel policy makes
 the ecosystem non-empty on the day it lands.
-
-## Related steps
-
-- [06 — tools: fs, shell, browser, web](../roadmap/06-tool-packs.md)
-- [09 — skills](../roadmap/09-skills.md)
-- [10 — proactive agents: schedules and outbound messages](../roadmap/10-proactive.md)
-- [11 — MCP bridge](../roadmap/11-mcp.md)

@@ -5,7 +5,7 @@
  * differs by tool: a standing grant to the agent outlives every session and
  * every restart, while a send outside a schedule lasts only this
  * conversation. An operator cannot tell those apart from a button reading
- * "Always allow" — which is the whole defect step 28 exists to close, so
+ * "Always allow" — which is the whole defect standing grants exist to close, so
  * leaving this surface silent would reintroduce it here.
  *
  * `always` rides in on the request (`GET /approvals` and

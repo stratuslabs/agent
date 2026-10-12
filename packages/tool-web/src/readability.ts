@@ -993,8 +993,7 @@ const scanTags = (html: string): ScannedTag[] => {
  * stylesheet or a class is kept, because without a browser there is no
  * cascade to evaluate, and neither are opacity, a zero font size, or
  * off-screen positioning chased: a filter that mostly works is worse than
- * the `external` label that always does, because it invites trust
- * (docs/roadmap/30-provenance.md). `raw: true` exists for a page this gets
+ * the `external` label that always does, because it invites trust. `raw: true` exists for a page this gets
  * wrong, including the one case where it drops text a browser shows: a
  * descendant of a `visibility: hidden` element that sets `visible` again.
  *

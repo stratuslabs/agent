@@ -730,7 +730,7 @@ export interface GatewayOptions {
    * index) live. Default `~/.stratus`.
    *
    * A directory rather than the single database path it replaced: after
-   * step 15's layer A there is no one file to point at, which is the
+   * per-agent state there is no one file to point at, which is the
    * point — a store is opened on one agent's path, so no query can return
    * another agent's rows.
    */
@@ -4669,8 +4669,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // said, for text and file alike, not what the channel delivered: a
       // post Slack refused or an upload that failed reads as spoken here.
       // The channel's own record has the delivery, and this is the
-      // reconstruction for a process that lost it; a delivery record
-      // written back into the session is the open item in roadmap 31.
+      // reconstruction for a process that lost it. Still open: a delivery
+      // record the channel writes back into the session would make this
+      // exact (a refused post, a failed upload, a line streamed into a
+      // placeholder by a process that died before saving its reply). It is
+      // a new gateway seam, and it has to be ordered against the overhears
+      // queued on the same session chain, so it is not built yet.
       const spoken = (message: Message): boolean =>
         (message.role === 'assistant' && message.content.trim().length > 0)
         || (message.role === 'tool' && message.toolResult !== undefined && filePathsOf(message.toolResult).length > 0);

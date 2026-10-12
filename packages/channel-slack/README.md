@@ -187,7 +187,7 @@ untagged reply in it, including the ones meant for somebody else. Give the
 side conversation its own thread. It can now *hear* a thread it is not
 answering; teaching it to choose — to answer only when it has something to
 add, and to let "thanks, we've got it" be a sentence it read — is the rest
-of [roadmap step 31](../../docs/roadmap/31-reading-the-room.md).
+of the reading-the-room work.
 
 ### What the agent is told about the room
 

@@ -2763,6 +2763,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const botIdentities = new Map<string, { botUserId: string; teamId: string }>();
   // Rendered approval requests, keyed by the gateway's request id — the
   // same id the buttons carry back.
+  //
+  // In memory only, and that is an open gap: a prompt posted by a process
+  // that died is never retracted unless someone clicks it (a click on a
+  // prompt this process never posted rewrites it from the click's own
+  // coordinates). Retracting the ones nobody clicks needs a durable index
+  // of these posts that survives the process that made them.
   const approvalPosts = new Map<string, PendingApprovalPost>();
   // Credential requests whose post is in flight: Slack can show the message,
   // and take a click on it, before postMessage resolves here. The same
@@ -4088,7 +4094,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // "Said nothing" as the session can tell it: no reply saved for the
       // turn. A line the old process had streamed into a placeholder and
       // never saved is invisible here — the session records what was
-      // said, not what Slack took (roadmap 31's open item) — so such a
+      // said, not what Slack took (the open delivery-record item at the
+      // gateway's lastSpokeAt) — so such a
       // turn is failed without a note under that line. Taken over the
       // alternative on purpose: a note for every judged turn a restart
       // caught turns a silent turn, the common case, into the

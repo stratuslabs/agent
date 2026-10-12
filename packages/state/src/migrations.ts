@@ -337,7 +337,7 @@ const PROVENANCE_LABELS_MIGRATION: StateMigration = {
 };
 
 /**
- * Step 15's layer A: the sessions shard into `agents/<id>/sessions.db`, the
+ * Per-agent state: the sessions shard into `agents/<id>/sessions.db`, the
  * schedule rows that shared their database move to `fleet.db`, and each
  * agent's grant file moves into its own directory.
  *
@@ -379,7 +379,7 @@ const PER_AGENT_LAYOUT_MIGRATION: StateMigration = {
 };
 
 /**
- * Step 15's layer A, finished: each agent's workspace moves from
+ * Per-agent state, finished: each agent's workspace moves from
  * `workspaces/<id>` into `agents/<id>/workspace`, so that `agents/<id>/` is
  * the one path everything an agent owns lives under. The move, and the two
  * things it does about the provenance ledger that are the whole reason it
