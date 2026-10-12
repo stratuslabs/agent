@@ -157,17 +157,24 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     problems.push(`The running daemon warned at start: ${line}. It runs on what it loaded until \`stratus restart\`.`);
   }
   const configs = startedConfigs(startup?.configs);
-  for (const file of configs) {
-    const now = (await configDigest(file.path)) ?? null;
+  const current = await Promise.all(configs.map(async (file) => (await configDigest(file.path)) ?? null));
+  // The file each turn resolves its runtime from now: the first one there.
+  // A file behind it (a global config behind a project one) feeds only the
+  // daemon-level blocks, so a change to it never reaches a turn.
+  const activeIndex = current.findIndex((digest) => digest !== null);
+  configs.forEach((file, index) => {
+    const now = current[index];
     if (now === file.sha256) {
-      continue;
+      return;
     }
-    // Provider and model are re-resolved on every dispatch, discovery
-    // included; the rest (plugins, Slack, approvals, principals, turn
-    // limits) only at start. Which of those a change touched is not
-    // knowable from a digest, so each message says which part a restart is
-    // for rather than guessing.
-    const split = 'Provider and model follow it from the next turn; plugins, Slack, approvals, principals and turn limits stay as they were until `stratus restart`.';
+    // Runtime settings are re-resolved on every turn, discovery included;
+    // daemon-level ones only at start. Which of those a change touched is
+    // not knowable from a digest, so the message says which part a restart
+    // is for rather than guessing.
+    const restart = 'Daemon-level settings (plugins, executor, memory store, Slack, approvals, principals, turn limits, control API) stay as they were until `stratus restart`.';
+    const split = index === activeIndex
+      ? `Runtime settings (provider, model, system prompt and the rest of the runtime config) follow it from the next turn. ${restart}`
+      : restart;
     if (file.sha256 === null) {
       problems.push(`${file.path} appeared after the daemon started. ${split}`);
     } else if (now === null) {
@@ -175,7 +182,7 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     } else {
       problems.push(`${file.path} changed since the daemon started. ${split}`);
     }
-  }
+  });
   const configPath = configs.find((file) => file.sha256 !== null)?.path;
   return {
     state: 'running',

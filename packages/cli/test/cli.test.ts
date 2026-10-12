@@ -4857,11 +4857,18 @@ test('doctor flags a config file that appeared after the daemon started', async 
 });
 
 test('doctor checks the global config behind a project one, not only the file that won', async () => {
+  const projectConfig = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-project-')), 'stratus.config.json');
+  const projectText = JSON.stringify({ model: 'claude-opus-5' });
+  await writeFile(projectConfig, projectText);
+  const projectSha = createHash('sha256').update(projectText).digest('hex');
   const { exitCode, output, configPath } = await doctorAgainstDaemon((configPath) => ({
-    startup: { warnings: [], configs: [{ path: '/nowhere/project/stratus.config.json', sha256: 'project-sha' }, { path: configPath, sha256: 'older-global' }] },
+    startup: { warnings: [], configs: [{ path: projectConfig, sha256: projectSha }, { path: configPath, sha256: 'older-global' }] },
   }));
   assert.equal(exitCode, 1, output.stdout);
   assert.ok(output.stdout.includes(`${configPath} changed since the daemon started`), output.stdout);
+  // Behind a project file, the global one never reaches a turn.
+  const line = output.stdout.split('\n').find((text) => text.includes(`${configPath} changed`)) ?? '';
+  assert.doesNotMatch(line, /Runtime settings/);
 });
 
 test('doctor calls a damaged gateway.json a problem, not a stopped daemon', async () => {
