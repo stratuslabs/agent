@@ -5338,7 +5338,7 @@ const describeRoom = (room: ConversationContext, channel: string): string => {
   switch (room.kind) {
     case 'direct':
       return `this is a direct message in ${channel}${room.with !== undefined ? ` with ${room.with}` : ''}. `
-        + 'Only the two of you can read it, so you are talking to one person.';
+        + `Only the two of you can read it, so you are talking to one person.${room.thread === true ? ' You are replying in a thread in that direct message.' : ''}`;
     case 'group':
       return `this is a group direct message in ${channel}${count !== undefined ? ` with ${count} members, you included` : ''}. `
         + `Only they can read it.${idNote}${outside}${inThread} ${forEveryone}`;

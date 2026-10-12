@@ -235,8 +235,8 @@ rewritten — and a running daemon reads it on its next turn. No tool can do thi
 agent re-labelling its own memory as trusted would be the attack writing its
 own permission slip.
 
-Some sessions never end — a Slack DM is one resumable conversation for the
-life of the install — and a session from before labels existed reads
+Some sessions never end — a Slack DM's top level is one resumable
+conversation for the life of the install — and a session from before labels existed reads
 `unknown` for as long as it lasts, whatever you re-assert. The remedy is a
 session boundary, not a raised label: `stratus session rollover <id>`
 archives the transcript so far and starts the same id over. The fresh

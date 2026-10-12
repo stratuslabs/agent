@@ -5288,7 +5288,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         : {
           ...room,
           ...(room.kind === 'direct' && senderTrust === 'user' ? { with: author } : {}),
-          ...(thread !== undefined && room.kind !== 'direct' ? { thread: true, threadRoot: thread } : {}),
+          // A DM thread is a thread too, with its own session; core takes
+          // no root for a direct room, since nothing posts to one by id.
+          ...(thread !== undefined ? { thread: true, ...(room.kind !== 'direct' ? { threadRoot: thread } : {}) } : {}),
           // People outside this workspace read a Slack Connect channel, and
           // the event says so itself, even when the lookup failed.
           ...(room.kind !== 'direct' && args.body?.is_ext_shared_channel === true ? { shared: true } : {}),

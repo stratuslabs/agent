@@ -468,8 +468,9 @@ export interface ChannelSessionKeyParts {
   team: string;
   conversation: string;
   /**
-   * Thread id for threaded containers. Omit for DMs: a DM is deliberately
-   * one ongoing conversation per peer, keyed by the conversation alone.
+   * Thread id for threaded containers. Omit for a DM's top level, which is
+   * one ongoing conversation per peer keyed by the conversation alone; a
+   * thread inside a DM passes its root and is a session of its own.
    */
   thread?: string;
 }
@@ -479,7 +480,8 @@ export interface ChannelSessionKeyParts {
  * Stable means resumable — any later message with the same parts lands in
  * the same session, across daemon restarts included. Callers pass
  * `thread_ts ?? ts` as the thread for channel messages (a top-level mention
- * roots its own reply-thread conversation) and no thread for DMs.
+ * roots its own reply-thread conversation), no thread for a DM's top level,
+ * and the thread's root for a reply in a DM thread.
  */
 export const channelSessionKey = (parts: ChannelSessionKeyParts): string => {
   const segments = [parts.channel, parts.agentId, parts.team, parts.conversation];
