@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -4869,6 +4870,17 @@ test('doctor checks the global config behind a project one, not only the file th
   // Behind a project file, the global one never reaches a turn.
   const line = output.stdout.split('\n').find((text) => text.includes(`${configPath} changed`)) ?? '';
   assert.doesNotMatch(line, /Runtime settings/);
+});
+
+test('doctor does not promise a config that fails to load reaches the next turn', async () => {
+  const { exitCode, output, configPath } = await doctorAgainstDaemon((configPath) => {
+    writeFileSync(configPath, '{"provider":');
+    return { startup: { warnings: [], configs: [{ path: configPath, sha256: 'older' }] } };
+  });
+  assert.equal(exitCode, 1, output.stdout);
+  const line = output.stdout.split('\n').find((text) => text.includes(`${configPath} changed`)) ?? '';
+  assert.match(line, /does not load, so turns keep the last config that did/);
+  assert.doesNotMatch(line, /follow it from the next turn/);
 });
 
 test('doctor calls a damaged gateway.json a problem, not a stopped daemon', async () => {

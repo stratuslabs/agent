@@ -162,6 +162,10 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   // A file behind it (a global config behind a project one) feeds only the
   // daemon-level blocks, so a change to it never reaches a turn.
   const activeIndex = current.findIndex((digest) => digest !== null);
+  // A turn that cannot load it keeps the daemon's last known-good config.
+  const activeLoads = activeIndex >= 0
+    ? await loadConfigFile(configs[activeIndex]!.path).then(() => true, () => false)
+    : false;
   configs.forEach((file, index) => {
     const now = current[index];
     if (now === file.sha256) {
@@ -172,9 +176,11 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     // not knowable from a digest, so the message says which part a restart
     // is for rather than guessing.
     const restart = 'Daemon-level settings (plugins, executor, memory store, Slack, approvals, principals, turn limits, control API) stay as they were until `stratus restart`.';
-    const split = index === activeIndex
-      ? `Runtime settings (provider, model, system prompt and the rest of the runtime config) follow it from the next turn. ${restart}`
-      : restart;
+    const split = index !== activeIndex
+      ? restart
+      : activeLoads
+        ? `Runtime settings (provider, model, system prompt and the rest of the runtime config) follow it from the next turn. ${restart}`
+        : `It does not load, so turns keep the last config that did; fix it first. ${restart}`;
     if (file.sha256 === null) {
       problems.push(`${file.path} appeared after the daemon started. ${split}`);
     } else if (now === null) {
