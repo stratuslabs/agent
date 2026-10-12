@@ -81,7 +81,7 @@ anyone else.
 | `allowPrivateAddresses` | `false` | Reach any non-global address. The trusted-workstation posture — it turns the SSRF protection off rather than adjusting it. |
 | `onlyHosts` | unset (every public host) | The only hosts `web.fetch` may reach, by name or literal address, or `*.example.com` for every subdomain (the apex is its own entry). Every redirect hop is checked against it, and a refused name is never looked up. `allowedHosts` entries stay reachable. Under `agents`, `["*"]` lifts a list the agent would otherwise inherit. |
 | `maxBytes` | `400000` | Stop reading here; the result says `truncated`. A call's own `maxBytes` may ask for less, never more. |
-| `maxChars` | `40000` | The most text one call returns. A longer page comes back with `offset`, `totalChars` and `nextOffset`; calling again with `offset: nextOffset` reads on. `truncated` still means only that the download hit `maxBytes`. |
+| `maxChars` | `40000` | The most text one call returns, and never more than 48 KB of UTF-8, so dense text such as CJK comes back in shorter pages. A longer page comes back with `offset`, `totalChars` and `nextOffset`; calling again with `offset: nextOffset` reads on. `truncated` still means only that the download hit `maxBytes`. |
 | `timeoutMs` | `20000` | Give up on the whole exchange — every redirect hop draws on the one budget. |
 | `maxRedirects` | `5` | Hops to follow before refusing. |
 | `userAgent` | `StratusAgent/0.5 …` | What to send. |

@@ -1022,3 +1022,25 @@ test('an offset inside an astral character starts the page at the whole characte
   assert.equal(page.text, '😀b');
   assert.equal(page.offset, 1);
 });
+
+test('dense text is paged by bytes as well as characters, and an offset moved back to 0 still says so', async (t) => {
+  const cjk = '漢'.repeat(40_000);
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end(request.url === '/cjk' ? cjk : '😀 and the rest');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+  const tool = await fetchTool({ allowedHosts: ['localhost'], maxBytes: 1_000_000 });
+
+  const first = await tool.execute({ url: `http://localhost:${port}/cjk` }, session) as JsonObject;
+  assert.ok(Buffer.byteLength(String(first.text)) <= 48 * 1024);
+  assert.equal(first.nextOffset, String(first.text).length);
+  assert.equal(first.totalChars, cjk.length);
+
+  const back = await tool.execute({ url: `http://localhost:${port}/emoji`, offset: 1 }, session) as JsonObject;
+  assert.equal(back.text, '😀 and the rest');
+  assert.equal(back.offset, 0);
+  assert.equal(back.totalChars, '😀 and the rest'.length);
+});

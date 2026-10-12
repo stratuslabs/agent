@@ -22,6 +22,14 @@ const DEFAULT_MAX_BYTES = 400_000;
  * read, and the agent sees only that the text existed.
  */
 const DEFAULT_MAX_CHARS = 40_000;
+/**
+ * The most UTF-8 one page may weigh, whatever `maxChars` says. Characters
+ * are a poor measure of tokens for dense text: 40,000 CJK characters are
+ * well past Claude Code's ~25,000-token cap, while 40,000 characters of
+ * English are about 10,000 tokens. Bytes track dense text better, so this
+ * leaves an English page as it was and holds a CJK one to about 16,000.
+ */
+const PAGE_MAX_BYTES = 48 * 1024;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_REDIRECTS = 5;
 const DEFAULT_USER_AGENT = 'StratusAgent/0.5 (+https://github.com/stratuslabs/agent)';
@@ -201,9 +209,10 @@ export const fetchThroughPolicy = async (
 };
 
 /**
- * One call's slice of a page's text. Cut at a code-point boundary: a slice
- * ending between the halves of a surrogate pair would put a lone half on
- * each side, and the pages would no longer join back into the text.
+ * One call's slice of a page's text, at most `maxChars` UTF-16 units and
+ * `PAGE_MAX_BYTES` of UTF-8, and always at least one whole character. Cut
+ * at code-point boundaries on both ends: a lone half of a surrogate pair
+ * on either side would mean the pages no longer join back into the text.
  */
 const pageOf = (whole: string, requested: unknown, maxChars: number): {
   text: string;
@@ -211,9 +220,10 @@ const pageOf = (whole: string, requested: unknown, maxChars: number): {
   nextOffset?: number;
   paged: boolean;
 } => {
-  let offset = typeof requested === 'number' && Number.isFinite(requested) && requested > 0
+  const asked = typeof requested === 'number' && Number.isFinite(requested) && requested > 0
     ? Math.min(Math.floor(requested), whole.length)
     : 0;
+  let offset = asked;
   // An offset the caller chose can land on a pair's second half; start at
   // the whole character instead (the answer's offset says where).
   if (offset > 0 && offset < whole.length) {
@@ -223,21 +233,26 @@ const pageOf = (whole: string, requested: unknown, maxChars: number): {
       offset -= 1;
     }
   }
-  let end = Math.min(offset + maxChars, whole.length);
-  if (end < whole.length) {
-    const last = whole.charCodeAt(end - 1);
-    if (last >= 0xd800 && last <= 0xdbff) {
-      // Back off to before the pair, unless that would leave the page
-      // empty (maxChars 1): then widen it to the whole pair instead.
-      end += end > offset + 1 ? -1 : 1;
+  let end = offset;
+  let bytes = 0;
+  while (end < whole.length) {
+    const point = whole.codePointAt(end)!;
+    const units = point > 0xffff ? 2 : 1;
+    const weight = point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+    if (end > offset && (end + units - offset > maxChars || bytes + weight > PAGE_MAX_BYTES)) {
+      break;
     }
+    end += units;
+    bytes += weight;
   }
   const nextOffset = end < whole.length ? end : undefined;
   return {
     text: whole.slice(offset, end),
     offset,
     ...(nextOffset === undefined ? {} : { nextOffset }),
-    paged: offset > 0 || nextOffset !== undefined,
+    // A caller who asked for an offset is told where the page started,
+    // even when that turned out to be the beginning.
+    paged: asked > 0 || nextOffset !== undefined,
   };
 };
 
