@@ -99,8 +99,8 @@ const apiActorFor = (principal: Principal | undefined, label: string | undefined
 export interface DaemonStartup {
   /** Each `warn` line from the start, in order. */
   warnings: string[];
-  /** The config file the start read, and a digest of it then, so a later edit can be told apart. */
-  config?: { path: string; sha256: string };
+  /** Every config file the start consulted, in precedence order, and a digest of each then (null: absent), so a later edit, a new file or a removed one can be told apart. */
+  configs?: Array<{ path: string; sha256: string | null }>;
 }
 
 export interface RouteContext {

@@ -36,7 +36,6 @@ import {
   trustedConfigError,
   grantReadSerializer,
   grantWriteSerializer,
-  resolveConfigLocation,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
 import { describePrincipals, describeApprovers } from '../approvals.ts';
@@ -48,7 +47,7 @@ import { writeLine } from '../io.ts';
 import { hostChannelClaimsFor, loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
 import { CLI_VERSION } from '../npm.ts';
-import { configDigest } from '../config-digest.ts';
+import { startupConfigFiles } from '../config-digest.ts';
 import { holdsForVersion, recordPromotedVersion } from '../promotion.ts';
 import type { ParsedServeCommand } from '../parse.ts';
 import { warnOnCredentialOverride, warnOnUntrustedConfig, warnOnIgnoredConfig } from '../runtime.ts';
@@ -265,19 +264,10 @@ const serveHeldHome = async (
   // The approval policy and the Slack approver sets come from the same
   // config block, resolved once here: the daemon must not answer "who can
   // approve this" differently from "is anyone being asked at all".
-  // Digested just before the blocks below read it, so it names the bytes
-  // this daemon runs on. Unreadable here means every load below failed too,
-  // and they say so through `warn`.
-  let startupConfig: { path: string; sha256: string } | undefined;
-  try {
-    const location = await resolveConfigLocation(command.configPath ? { configPath: command.configPath } : {}, env);
-    const sha256 = location !== undefined ? await configDigest(location.path) : undefined;
-    if (location !== undefined && sha256 !== undefined) {
-      startupConfig = { path: location.path, sha256 };
-    }
-  } catch {
-    // ConfigFileError: reported by the loads that follow.
-  }
+  // Digested just before the blocks below read them, so they name the bytes
+  // this daemon runs on: every file a start consults, present or not, so
+  // doctor can tell an edit, a new file, or a removed one apart from none.
+  const startupConfigs = await startupConfigFiles(command.configPath, env);
   const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
   // What the operator declared in approvals.commands, matched as scopes
   // ahead of what was remembered, and reported by the control API so
@@ -363,7 +353,7 @@ const serveHeldHome = async (
         configCommands: (agentId: string) => operatorCommands.declaredFor(agentId),
         startup: () => ({
           warnings: [...startupWarnings],
-          ...(startupConfig !== undefined ? { config: startupConfig } : {}),
+          configs: startupConfigs.map((file) => ({ ...file })),
         }),
         log,
         warn,

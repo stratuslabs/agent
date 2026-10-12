@@ -520,16 +520,16 @@ test('health reports what the daemon met while starting, asked fresh on every ca
     options: {
       startup: () => ({
         warnings: [...warnings],
-        config: { path: '/home/op/.stratus/config.json', sha256: 'abc123' },
+        configs: [{ path: '/work/stratus.config.json', sha256: null }, { path: '/home/op/.stratus/config.json', sha256: 'abc123' }],
       }),
     },
   });
   try {
-    type Startup = { startup?: { warnings: string[]; config?: { path: string; sha256: string } } };
+    type Startup = { startup?: { warnings: string[]; configs?: Array<{ path: string; sha256: string | null }> } };
     const first = await json<Startup>(await harness.call('/api/v1/health'));
     assert.deepEqual(first.startup, {
       warnings: ['plugins: @stratusagent/tool-shell is not installed; starting without it'],
-      config: { path: '/home/op/.stratus/config.json', sha256: 'abc123' },
+      configs: [{ path: '/work/stratus.config.json', sha256: null }, { path: '/home/op/.stratus/config.json', sha256: 'abc123' }],
     });
     warnings.push('no channel can ask for ava');
     const second = await json<Startup>(await harness.call('/api/v1/health'));

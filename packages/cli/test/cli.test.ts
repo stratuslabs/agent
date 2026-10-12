@@ -4771,6 +4771,7 @@ test('doctor reports the resolved provider and where it came from', async () => 
 // part a reading of the files cannot see.
 const doctorAgainstDaemon = async (
   daemon: 'none' | 'unreachable' | ((configPath: string, configSha: string) => Record<string, unknown>),
+  options: { gatewayInfo?: string; processEnv?: Record<string, string> } = {},
 ) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
@@ -4785,10 +4786,12 @@ const doctorAgainstDaemon = async (
   const calls: string[] = [];
   if (daemon !== 'none') {
     await writeFile(path.join(home, '.stratus', 'gateway-token'), 'doctor-token\n');
-    await writeFile(path.join(home, '.stratus', 'gateway.json'), JSON.stringify({ url: 'http://127.0.0.1:9', host: '127.0.0.1', port: 9 }));
+    await writeFile(path.join(home, '.stratus', 'gateway.json'), options.gatewayInfo ?? JSON.stringify({ url: 'http://127.0.0.1:9', host: '127.0.0.1', port: 9 }));
   }
-  const fetchImpl = (async (url: string | URL) => {
+  const authorizations: string[] = [];
+  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
     calls.push(String(url));
+    authorizations.push(String((init?.headers as Record<string, string> | undefined)?.authorization));
     if (daemon === 'unreachable' || daemon === 'none') {
       throw new TypeError('fetch failed');
     }
@@ -4798,16 +4801,16 @@ const doctorAgainstDaemon = async (
   const exitCode = await runCli({
     argv: ['doctor'],
     streams,
-    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {}, fetch: fetchImpl },
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: options.processEnv ?? {}, fetch: fetchImpl },
   });
-  return { exitCode, output, calls, configPath };
+  return { exitCode, output, calls, configPath, authorizations, home };
 };
 
 test('doctor reports what the running daemon warned about at start, not only the files', async () => {
   const { exitCode, output } = await doctorAgainstDaemon((configPath, sha256) => ({
     startup: {
       warnings: ['refusing every Slack sender: no principals are configured', 'ava: soul could not be loaded'],
-      config: { path: configPath, sha256 },
+      configs: [{ path: configPath, sha256 }],
     },
   }));
   assert.equal(exitCode, 1, output.stdout);
@@ -4819,7 +4822,7 @@ test('doctor reports what the running daemon warned about at start, not only the
 
 test('doctor says the config changed since the daemon started, and that a restart applies it', async () => {
   const { exitCode, output, configPath } = await doctorAgainstDaemon((configPath) => ({
-    startup: { warnings: [], config: { path: configPath, sha256: 'not-what-is-on-disk-now' } },
+    startup: { warnings: [], configs: [{ path: configPath, sha256: 'not-what-is-on-disk-now' }] },
   }));
   assert.equal(exitCode, 1, output.stdout);
   assert.ok(output.stdout.includes(`${configPath} changed since the daemon started`), output.stdout);
@@ -4828,7 +4831,7 @@ test('doctor says the config changed since the daemon started, and that a restar
 
 test('doctor with a daemon that started clean on the config on disk finds no problems', async () => {
   const { exitCode, output, calls } = await doctorAgainstDaemon((configPath, sha256) => ({
-    startup: { warnings: [], config: { path: configPath, sha256 } },
+    startup: { warnings: [], configs: [{ path: configPath, sha256 }] },
   }));
   assert.equal(exitCode, 0, output.stdout);
   assert.deepEqual(calls, ['http://127.0.0.1:9/api/v1/health']);
@@ -4836,12 +4839,44 @@ test('doctor with a daemon that started clean on the config on disk finds no pro
   assert.match(output.stdout, /No problems found\./);
 });
 
-test('doctor with no daemon running says so, and does not call it a problem', async () => {
+test('doctor with no daemon found says so without claiming it is stopped, and does not call it a problem', async () => {
   const { exitCode, output, calls } = await doctorAgainstDaemon('none');
   assert.equal(exitCode, 0, output.stdout);
   assert.deepEqual(calls, []);
-  assert.match(output.stdout, /daemon {4}not running/);
+  assert.match(output.stdout, /daemon {4}none found \(no control API published\)/);
   assert.match(output.stdout, /No problems found\./);
+});
+
+test('doctor flags a config file that appeared after the daemon started', async () => {
+  // The daemon started with no global config; one exists now.
+  const { exitCode, output, configPath } = await doctorAgainstDaemon((configPath) => ({
+    startup: { warnings: [], configs: [{ path: '/nowhere/stratus.config.json', sha256: null }, { path: configPath, sha256: null }] },
+  }));
+  assert.equal(exitCode, 1, output.stdout);
+  assert.ok(output.stdout.includes(`${configPath} appeared after the daemon started`), output.stdout);
+});
+
+test('doctor checks the global config behind a project one, not only the file that won', async () => {
+  const { exitCode, output, configPath } = await doctorAgainstDaemon((configPath) => ({
+    startup: { warnings: [], configs: [{ path: '/nowhere/project/stratus.config.json', sha256: 'project-sha' }, { path: configPath, sha256: 'older-global' }] },
+  }));
+  assert.equal(exitCode, 1, output.stdout);
+  assert.ok(output.stdout.includes(`${configPath} changed since the daemon started`), output.stdout);
+});
+
+test('doctor calls a damaged gateway.json a problem, not a stopped daemon', async () => {
+  const { exitCode, output, calls } = await doctorAgainstDaemon(() => ({}), { gatewayInfo: '{"url":' });
+  assert.equal(exitCode, 1, output.stdout);
+  assert.deepEqual(calls, []);
+  assert.match(output.stdout, /gateway\.json is damaged/);
+});
+
+test('doctor probes the local daemon with its local token even when STRATUS_GATEWAY_TOKEN names a remote one', async () => {
+  const { exitCode, output, authorizations } = await doctorAgainstDaemon((configPath, sha256) => ({
+    startup: { warnings: [], configs: [{ path: configPath, sha256 }] },
+  }), { processEnv: { STRATUS_GATEWAY_TOKEN: 'remote-token' } });
+  assert.equal(exitCode, 0, output.stdout);
+  assert.deepEqual(authorizations, ['Bearer doctor-token']);
 });
 
 test('doctor reports a daemon that published its address but does not answer', async () => {

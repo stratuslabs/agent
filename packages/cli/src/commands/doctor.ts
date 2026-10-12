@@ -17,6 +17,7 @@ import {
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
   gatewayInfoPath,
+  gatewayTokenPath,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   CREDENTIAL_PROVIDER_NAMES,
   type CredentialProviderName,
@@ -30,7 +31,7 @@ import {
   quoteShellArg,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
-import { callRunningGateway, gatewayErrorMessage, readGatewayInfo, serviceEnvFor } from '../daemon.ts';
+import { callRunningGateway, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
 import { configDigest } from '../config-digest.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
@@ -72,7 +73,7 @@ export interface DoctorReport {
  * problems found" while the daemon ran with no plugins and no soul.
  */
 export type DoctorDaemon =
-  | { state: 'not-running' }
+  | { state: 'no-api' }
   | { state: 'unreachable'; url: string }
   | { state: 'running'; url: string; version?: string; startedAt?: string; configPath?: string };
 
@@ -83,26 +84,60 @@ interface DaemonHealth {
   ok?: boolean;
   version?: string;
   startedAt?: string;
-  startup?: { warnings?: unknown; config?: { path?: unknown; sha256?: unknown } };
+  startup?: { warnings?: unknown; configs?: unknown };
 }
 
+/** What a daemon's /health said about each config file at start, keeping only well-formed entries. */
+const startedConfigs = (raw: unknown): Array<{ path: string; sha256: string | null }> =>
+  Array.isArray(raw)
+    ? raw.flatMap((entry) => {
+        const { path: file, sha256 } = (entry ?? {}) as { path?: unknown; sha256?: unknown };
+        return typeof file === 'string' && (typeof sha256 === 'string' || sha256 === null) ? [{ path: file, sha256 }] : [];
+      })
+    : [];
+
 const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<DoctorDaemon> => {
-  const info = await readGatewayInfo(env);
-  if (info === undefined) {
-    // Information, not a problem: `stratus run` needs no daemon.
-    return { state: 'not-running' };
+  // Read here rather than through readGatewayInfo, which folds a damaged
+  // file into "none": only a missing file is the benign case.
+  const infoPath = gatewayInfoPath(env);
+  let raw: string;
+  try {
+    raw = await readFile(infoPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // Information, not a problem: `stratus run` needs no daemon, and a
+      // daemon started with its control API off publishes no file either.
+      return { state: 'no-api' };
+    }
+    problems.push(`${infoPath} cannot be read (${(error as Error).message}), so doctor cannot find the running daemon. Check its permissions, or remove it and \`stratus restart\`.`);
+    return { state: 'no-api' };
   }
-  const url = info.url.replace(/\/+$/, '');
+  let url: string | undefined;
+  try {
+    const parsed = JSON.parse(raw) as { url?: unknown };
+    url = typeof parsed.url === 'string' ? parsed.url : undefined;
+  } catch {
+    url = undefined;
+  }
+  if (url === undefined) {
+    problems.push(`${infoPath} is damaged (no daemon address in it), so no command can find the running daemon. Run \`stratus restart\` to have it written again.`);
+    return { state: 'no-api' };
+  }
+  url = url.replace(/\/+$/, '');
+
   let health: DaemonHealth;
   try {
-    const response = await callRunningGateway(env, {}, url, '/api/v1/health', undefined, 'GET', AbortSignal.timeout(DAEMON_TIMEOUT_MS));
+    // The token this machine's daemon wrote, never STRATUS_GATEWAY_TOKEN:
+    // that names a remote gateway, and the address here is the local one.
+    const token = (await readFile(gatewayTokenPath(env), 'utf8')).trim();
+    const response = await callRunningGateway(env, { token }, url, '/api/v1/health', undefined, 'GET', AbortSignal.timeout(DAEMON_TIMEOUT_MS));
     if (!response.ok) {
       throw new Error(await gatewayErrorMessage(response));
     }
     health = await response.json() as DaemonHealth;
   } catch (error) {
     problems.push(
-      `A daemon published ${url} in ${gatewayInfoPath(env)} but did not answer /health `
+      `A daemon published ${url} in ${infoPath} but did not answer /health `
       + `(${error instanceof Error ? error.message : String(error)}). If one is running, check \`stratus logs\`; `
       + 'if none is, the file is left over from one that did not stop cleanly.',
     );
@@ -117,16 +152,21 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   for (const line of warnings) {
     problems.push(`The running daemon warned at start: ${line}. It runs on what it loaded until \`stratus restart\`.`);
   }
-  const configPath = typeof startup?.config?.path === 'string' ? startup.config.path : undefined;
-  const startedSha = typeof startup?.config?.sha256 === 'string' ? startup.config.sha256 : undefined;
-  if (configPath !== undefined && startedSha !== undefined) {
-    const now = await configDigest(configPath);
-    if (now === undefined) {
-      problems.push(`${configPath}, which the running daemon loaded at start, can no longer be read. It keeps running on the copy it loaded; fix the file, then \`stratus restart\`.`);
-    } else if (now !== startedSha) {
-      problems.push(`${configPath} changed since the daemon started; run \`stratus restart\` to apply it.`);
+  const configs = startedConfigs(startup?.configs);
+  for (const file of configs) {
+    const now = (await configDigest(file.path)) ?? null;
+    if (now === file.sha256) {
+      continue;
+    }
+    if (file.sha256 === null) {
+      problems.push(`${file.path} appeared after the daemon started, so it is not in effect; run \`stratus restart\` to apply it.`);
+    } else if (now === null) {
+      problems.push(`${file.path}, which the running daemon loaded at start, is gone or unreadable. It keeps running on the copy it loaded; fix the file, then \`stratus restart\`.`);
+    } else {
+      problems.push(`${file.path} changed since the daemon started; run \`stratus restart\` to apply it.`);
     }
   }
+  const configPath = configs.find((file) => file.sha256 !== null)?.path;
   return {
     state: 'running',
     url,
@@ -641,8 +681,10 @@ export const runDoctor = async (
   writeLine(streams.stdout);
   writeLine(streams.stdout, 'Daemon');
   const daemon = report.daemon;
-  if (daemon.state === 'not-running') {
-    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}not running`);
+  if (daemon.state === 'no-api') {
+    // No published control API: none running, or one started with the API
+    // off. Doctor cannot tell those apart from here, so it does not guess.
+    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}none found (no control API published)`);
   } else if (daemon.state === 'unreachable') {
     writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}did not answer at ${daemon.url}`);
   } else {

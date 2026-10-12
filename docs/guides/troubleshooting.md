@@ -55,10 +55,13 @@ config once, at start, and runs on that until `stratus restart`. So doctor
 also asks the running daemon (through the control API, at the address in
 `~/.stratus/gateway.json`) what it met while starting. Each warning it logged
 then (a plugin that did not load, nobody able to approve, and so on) is a
-problem, and so is a config file that has changed since the daemon read it:
-`run stratus restart to apply it`. No daemon running is not a problem, since
-`stratus run` needs none. A daemon that published its address and does not
-answer is.
+problem, and so is a config file that has changed, appeared or gone since the
+daemon started, including a global config behind a project one: `run stratus
+restart to apply it`. No daemon found is not a problem, since `stratus run`
+needs none; doctor says `none found (no control API published)` because a
+daemon started with its API off publishes no address either. A damaged
+`gateway.json`, or a daemon that published its address and does not answer, is
+a problem.
 
 ## The usual suspects
 
