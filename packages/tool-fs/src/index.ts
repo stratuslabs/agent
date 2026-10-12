@@ -1512,8 +1512,13 @@ const createMoveTool = (
       await refuseExisting();
 
       const destinationParent = path.dirname(destination.path);
+      // What this call made, from mkdir's own answer (the first directory it
+      // created): a peer can make one of `missingParents` in the meantime,
+      // and that one is not this call's to take back.
+      let created: string[] = [];
       if (missingParents.length > 0) {
-        await mkdir(destinationParent, { recursive: true });
+        const first = await mkdir(destinationParent, { recursive: true });
+        created = first === undefined ? [] : missingParents.filter((parent) => isAtOrUnder(first, parent));
       }
       // rename(2) resolves both names afresh, and Node has no renameat to
       // hold the checked parent open across it. So the parent is checked
@@ -1544,7 +1549,7 @@ const createMoveTool = (
         // directories this call made are taken back, deepest first and only
         // while empty. The labels recorded stay, which over-marks a path
         // with nothing there, the safe direction.
-        for (const parent of [...missingParents].reverse()) {
+        for (const parent of [...created].reverse()) {
           await rmdir(parent).catch(() => undefined);
         }
         throw crossDevice();
