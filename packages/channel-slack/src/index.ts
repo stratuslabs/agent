@@ -2260,9 +2260,18 @@ const createAttachmentSaver = (
   trust: TrustLevel,
   now: () => number,
 ): AttachmentSaver => async (file, body) => {
-  const lexical = path.join(store.workspaces.prepare(agentId), SAVED_ATTACHMENTS_DIR);
+  const workspace = store.workspaces.prepare(agentId);
+  const lexical = path.join(workspace, SAVED_ATTACHMENTS_DIR);
   await mkdir(lexical, { recursive: true, mode: 0o700 });
-  const target = path.join(await realpath(lexical), savedAttachmentName(file, now()));
+  // The directory must be exactly where the workspace says, through no link
+  // of its own: one already planted at `attachments` or `attachments/slack`
+  // would put the file outside the workspace, where the agent's file tools
+  // cannot read it and nothing should be written on a Slack member's say.
+  const dir = await realpath(lexical);
+  if (dir !== path.join(await realpath(workspace), SAVED_ATTACHMENTS_DIR)) {
+    throw new Error(`${lexical} is a link, not the workspace's own directory`);
+  }
+  const target = path.join(dir, savedAttachmentName(file, now()));
   await store.ledger.recordWrite(agentId, target, trust);
   // O_EXCL and O_NOFOLLOW guard only the last component. A directory on the
   // way swapped for a link after the record would send the create somewhere
