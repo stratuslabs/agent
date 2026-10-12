@@ -17,7 +17,7 @@ import {
  * Sessions live one database per agent — `agents/<id>/sessions.db` — with
  * one fleet-wide index saying which agent's store holds a given session id.
  *
- * The sharding is the point (step 15's layer A): a store is opened on one
+ * The sharding is the point (per-agent state): a store is opened on one
  * agent's path, so there is no query that could return another agent's
  * conversations. The index is what the sharding costs. Session ids are
  * caller-chosen and the control API resolves them *without* an agent —

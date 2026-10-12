@@ -142,7 +142,7 @@ type Grants = AgentGrants;
  * `<id>.whitelist.json` file it used to be in the shared one.
  *
  * Per-agent *directory* rather than a per-agent file in a shared one is
- * what step 15's layer A is: a store is opened on one agent's path, so
+ * what per-agent state is: a store is opened on one agent's path, so
  * there is no read that could return another agent's grants. The soul
  * stays a file in the parent directory — it is the operator's input, not
  * the agent's state.

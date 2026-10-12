@@ -730,7 +730,7 @@ export interface GatewayOptions {
    * index) live. Default `~/.stratus`.
    *
    * A directory rather than the single database path it replaced: after
-   * step 15's layer A there is no one file to point at, which is the
+   * per-agent state there is no one file to point at, which is the
    * point — a store is opened on one agent's path, so no query can return
    * another agent's rows.
    */

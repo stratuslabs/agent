@@ -49,7 +49,7 @@ qualified `<package>:<skill>` id, plus the bare id while no other package (and
 no operator-installed skill) claims it.
 
 The entrypoint is the `Plugin` interface the kernel has had since v1, plus the
-teardown hook step 06 added for plugins that hold
+teardown hook the tool packs added for plugins that hold
 something:
 
 ```ts
@@ -67,7 +67,7 @@ stderr. A `credentials` resolver, scoped per call to the agent whose
 call the plugin is serving, so a plugin declares what it needs by name in its
 manifest instead of reaching into ambient environment. That resolver is the
 first half of kernel change 9 to land, and it landed because
-step 13 needed it: a search backend must reach the
+web search needed it: a search backend must reach the
 *calling* agent's key, which a `search(query, options)` seam could not
 express. A host that omits it leaves a plugin needing a key with no way to
 get one, and such a plugin must fail the call naming what is missing rather
@@ -233,7 +233,7 @@ and a package without it is not loadable however well it is written.
 
 The registration handles for providers, channels, memory, and executors
 were enumerated as kernel-budget item 9 in [`stratus-v2.md`](./stratus-v2.md)
-and landed in 19A. Until then a
+and have since landed. Until then a
 plugin contributing one of those four kinds was configuration the host read,
 not code the plugin registered; that is no longer true, and the section
 below is the contract.
@@ -613,7 +613,7 @@ disabling a channel whose stored tokens say it should be running is the failure
 that split buys off.
 
 **Extracted before the plugin loader was written**, in
-step 06. Step 05 had taken
+the tool packs. The control API had taken
 the count from one caller to three — the Slack adapter, the control API, and
 the dashboard resolved from inside the control API — each carrying its own copy
 of the same twelve lines, and the loader would have been the fourth. It is now

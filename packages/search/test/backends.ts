@@ -4,7 +4,7 @@
  *
  * They stand in for the Brave/Tavily/Exa side of the boundary that
  * `plugins.md` keeps outside this repository, and they exist because the
- * criterion step 13 is for — "two backends from different authors are
+ * criterion the search contract is for — "two backends from different authors are
  * interchangeable" — cannot be proved by one. Everything about them differs
  * on purpose: one needs a key and one does not, their vendors' JSON uses
  * different field names, one filters natively and the other leaves the

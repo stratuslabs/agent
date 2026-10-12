@@ -40,7 +40,7 @@ import {
   stratusHomePath,
 } from './paths.ts';
 
-// Step 15's fourth per-agent resource: the workspace, from
+// The fourth per-agent resource: the workspace, from
 // `workspaces/<id>` to `agents/<id>/workspace`.
 //
 // The other three moved because their old homes were fleet-wide files two

@@ -1,6 +1,6 @@
 import type { JsonObject, TrustLevel } from '@stratusagent/core';
 
-// The pure half of step 10: what a schedule *is* — its cadence, its prompt,
+// The pure half of schedules: what a schedule *is* — its cadence, its prompt,
 // its optional destination — and the arithmetic of when it fires next. The
 // scheduler that arms timers, the store that makes rows durable, and the
 // channel that delivers a send all live in the gateway; this stays free of

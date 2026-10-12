@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { alwaysOffer } from '../ui/lib/grants.js';
 
 test('the approval card says what Always allow would grant, so no two lifetimes share one button', () => {
-  // The defect step 28 exists to close: the same button meant "this session"
+  // The defect standing grants exist to close: the same button meant "this session"
   // for one tool and "this agent, until revoked" for another, and an
   // operator could not tell which they had clicked. Slack says which; this
   // is the same sentence for the surface an operator uses when Slack is not

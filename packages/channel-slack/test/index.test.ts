@@ -6262,7 +6262,7 @@ test('an update Slack applied but never confirmed does not lose its outcome', as
   assert.match(web.updates.at(-1)?.text ?? '', /Allowed and remembered — .*? by <@U-DYLAN>/);
 });
 
-// ---- addressable outbound (step 10) -----------------------------------------
+// ---- addressable outbound (schedules) -------------------------------------
 
 const startedAdapterWith = async (web: FakeWeb, overrides?: { warn?: (msg: string) => void }): Promise<import('@stratusagent/channels').ChannelAdapter> => {
   const socket = createFakeSocket();
