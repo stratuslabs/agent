@@ -328,8 +328,9 @@ const createFetchTool = (config: JsonObject): Tool => ({
     const fullTitle = html ? extractTitle(response.body) : undefined;
     // A title is page-supplied too, and not paged: cut a long one at a
     // code-point boundary so it cannot carry the result past the budget.
-    const title = fullTitle !== undefined && fullTitle.length > TITLE_MAX_CHARS
-      ? `${Array.from(fullTitle).slice(0, TITLE_MAX_CHARS).join('')}…`
+    const titlePoints = fullTitle === undefined ? [] : Array.from(fullTitle);
+    const title = titlePoints.length > TITLE_MAX_CHARS
+      ? `${titlePoints.slice(0, TITLE_MAX_CHARS).join('')}…`
       : fullTitle;
     const page = pageOf(whole, input.offset, settings.maxChars);
 

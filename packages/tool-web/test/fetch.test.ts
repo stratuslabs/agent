@@ -1054,7 +1054,8 @@ test('a page is budgeted as it is sent: escapes count, and a long title is cut',
       return;
     }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(`<html><head><title>${'題'.repeat(100_000)}</title></head><body><p>short</p></body></html>`);
+    const title = request.url === '/emoji-title' ? '😀'.repeat(200) : '題'.repeat(100_000);
+    response.end(`<html><head><title>${title}</title></head><body><p>short</p></body></html>`);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
@@ -1068,4 +1069,7 @@ test('a page is budgeted as it is sent: escapes count, and a long title is cut',
   const titled = await tool.execute({ url: `http://localhost:${port}/titled` }, session) as JsonObject;
   assert.ok(String(titled.title).length <= 301);
   assert.ok(String(titled.title).endsWith('…'));
+  // 200 emoji are 400 UTF-16 units but 200 characters: under the cut.
+  const emoji = await tool.execute({ url: `http://localhost:${port}/emoji-title` }, session) as JsonObject;
+  assert.equal(emoji.title, '😀'.repeat(200));
 });
