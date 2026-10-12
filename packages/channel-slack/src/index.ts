@@ -2763,6 +2763,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const botIdentities = new Map<string, { botUserId: string; teamId: string }>();
   // Rendered approval requests, keyed by the gateway's request id — the
   // same id the buttons carry back.
+  //
+  // In memory only, and that is an open gap: a prompt posted by a process
+  // that died is never retracted unless someone clicks it (a click on a
+  // prompt this process never posted rewrites it from the click's own
+  // coordinates). Retracting the ones nobody clicks needs a durable index
+  // of these posts that survives the process that made them.
   const approvalPosts = new Map<string, PendingApprovalPost>();
   // Credential requests whose post is in flight: Slack can show the message,
   // and take a click on it, before postMessage resolves here. The same
