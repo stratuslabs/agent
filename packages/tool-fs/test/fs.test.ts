@@ -609,3 +609,24 @@ test('fs.read pages never split a multi-byte character', async () => {
   assert.doesNotMatch(String(mid.content), /�/);
   assert.match(String(mid.content), /^é/);
 });
+
+test('a read cap narrower than one character still pages through it whole', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-narrow-'));
+  const body = 'é漢a😀';
+  await writeFile(path.join(root, 'narrow.txt'), body);
+
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  let offset = 0;
+  let seen = '';
+  for (let calls = 0; calls < 20; calls += 1) {
+    const page = await run(tools, 'fs.read', { path: 'narrow.txt', maxBytes: 1, ...(offset > 0 ? { offset } : {}) }, session) as JsonObject;
+    assert.doesNotMatch(String(page.content), /�/);
+    seen += String(page.content);
+    if (page.nextOffset === undefined) break;
+    assert.ok((page.nextOffset as number) > offset, 'every page moves forward');
+    offset = page.nextOffset as number;
+  }
+  assert.equal(seen, body);
+});

@@ -972,3 +972,15 @@ test('a short page carries no paging fields', async (t) => {
   assert.equal(result.nextOffset, undefined);
   assert.equal(result.offset, undefined);
 });
+
+test('every setting the tool reads is one its manifest declares, so the loader accepts it', async () => {
+  const { validatePluginConfig } = await import('@stratusagent/plugins');
+  const pkg = (await import('../package.json', { with: { type: 'json' } })).default as {
+    name: string;
+    stratus: { config: JsonObject };
+  };
+  const manifest = { packageName: pkg.name, config: pkg.stratus.config } as never;
+  for (const block of [{ maxChars: 20_000 }, { agents: { ava: { maxChars: 10_000 } } }] as JsonObject[]) {
+    assert.doesNotThrow(() => validatePluginConfig(manifest, block));
+  }
+});

@@ -182,12 +182,16 @@ const wholeCharacterLength = (bytes: Buffer): number => {
   if (start < 0) {
     return bytes.length;
   }
-  const lead = bytes[start] ?? 0;
-  const width = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
   // A lead byte with all its continuations present ends whole; one cut
-  // short is dropped. Never drops the page to nothing: a cap smaller than
-  // one character still returns that character's bytes.
-  return start + width <= bytes.length || start === 0 ? bytes.length : start;
+  // short is dropped, even when that leaves nothing. The caller widens an
+  // empty page to one whole character rather than returning half of one.
+  return start + utf8Width(bytes[start]) <= bytes.length ? bytes.length : start;
+};
+
+/** The bytes in the UTF-8 sequence this lead byte opens. */
+const utf8Width = (lead: number | undefined): number => {
+  const byte = lead ?? 0;
+  return byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
 };
 
 const readContained = async (
@@ -241,9 +245,18 @@ const readContained = async (
       }
       start += skip;
     }
-    const length = Math.max(0, Math.min(info.size - start, maxBytes));
-    const buffer = Buffer.alloc(length);
-    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    let length = Math.max(0, Math.min(info.size - start, maxBytes));
+    let buffer = Buffer.alloc(length);
+    let { bytesRead } = await handle.read(buffer, 0, length, start);
+    // A cap narrower than the character at `start` would otherwise return
+    // half of it and point `nextOffset` into its middle, where the next
+    // read skips the rest: the character lost. The page grows to that one
+    // character instead, four bytes at most.
+    if (bytesRead > 0 && start + bytesRead < info.size && wholeCharacterLength(buffer.subarray(0, bytesRead)) === 0) {
+      length = Math.min(info.size - start, utf8Width(buffer[0]));
+      buffer = Buffer.alloc(length);
+      ({ bytesRead } = await handle.read(buffer, 0, length, start));
+    }
     const read = buffer.subarray(0, bytesRead);
     if (looksBinary(read)) {
       return { content: '', truncated: false, bytes: bytesRead, size: info.size, offset: start, binary: true };
