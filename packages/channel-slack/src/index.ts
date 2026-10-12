@@ -2236,6 +2236,12 @@ const TEXT_ATTACHMENTS_MAX_TOTAL_BYTES = 200 * 1024;
 const TEXT_ATTACHMENT_SAVE_MAX_BYTES = 10 * 1024 * 1024;
 /** The default bound on one agent's saved attachments, all together. */
 const SAVED_ATTACHMENTS_MAX_BYTES = 256 * 1024 * 1024;
+/**
+ * The most saved attachments one agent keeps, whatever they weigh. A file
+ * crowded out of a full message is saved however small it is, and each save
+ * is a ledger record, so the count is bounded as well as the bytes.
+ */
+const SAVED_ATTACHMENTS_MAX_FILES = 1_000;
 /** Under the agent's workspace, where saved attachments go. */
 const SAVED_ATTACHMENTS_DIR = path.join('attachments', 'slack');
 
@@ -2256,15 +2262,19 @@ const savedAttachmentName = (file: SlackInboundFile, now: number): string => {
 
 /**
  * Refuses a save that would take the directory's regular files past
- * `maxBytes` together. Refused rather than making room: deleting on a
+ * `maxBytes` together, or its entries past `SAVED_ATTACHMENTS_MAX_FILES`. Refused rather than making room: deleting on a
  * Slack member's say is a worse failure than a full directory, and with
  * nothing removed every ledger record still names a file that exists.
  */
 const ensureRoom = async (dir: string, incoming: number, maxBytes: number): Promise<void> => {
   let total = 0;
-  for (const name of await readdir(dir)) {
+  const names = await readdir(dir);
+  for (const name of names) {
     const info = await lstat(path.join(dir, name)).catch(() => undefined);
     total += info?.isFile() ? info.size : 0;
+  }
+  if (names.length >= SAVED_ATTACHMENTS_MAX_FILES) {
+    throw new Error(`${dir} already holds ${SAVED_ATTACHMENTS_MAX_FILES} saved attachments; remove files there to save more`);
   }
   if (total + incoming > maxBytes) {
     throw new Error(`saved attachments in ${dir} would pass their ${maxBytes}-byte bound; remove files there to save more`);

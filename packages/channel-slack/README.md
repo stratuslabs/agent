@@ -153,7 +153,7 @@ host passes `attachmentStore`, and the message says `[Attached: spec.md,
 path is recorded in the tainted-write ledger at the sender's label before
 the bytes are written, so `fs.read` of it carries that label. One agent's
 saved attachments are bounded together (`attachmentStore.maxBytes`, 256 MB
-by default): past it a save is refused, the file reaches the turn as a
+by default, and 1,000 files): past it a save is refused, the file reaches the turn as a
 name, and the warning names the directory to clear. Nothing is deleted. `stratus
 serve` passes it; a host that does not, or a file over 10 MB, gets the name
 only, and `stratus serve` warns with the file's name. A file that is not UTF-8, or that comes back as

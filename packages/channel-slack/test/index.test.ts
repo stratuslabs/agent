@@ -7409,6 +7409,36 @@ test('saved attachments are bounded per agent: past the bound a save is refused,
   assert.equal(warnings.filter((line) => /would pass their 358400-byte bound/.test(line)).length, 1);
 });
 
+test('saved attachments are bounded in number too, however small', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const warnings: string[] = [];
+  const root = await mkdtemp(path.join(os.tmpdir(), 'slack-saved-count-'));
+  const dir = path.join(root, 'ava', 'attachments', 'slack');
+  await mkdir(dir, { recursive: true });
+  await Promise.all(Array.from({ length: 1_000 }, (_, i) => writeFile(path.join(dir, `old-${i}`), '')));
+  const { store, records } = attachmentStoreAt(root);
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    attachmentStore: store,
+    fetchFile: async () => ({ status: 200, contentType: 'text/plain', body: Buffer.from('c'.repeat(150 * 1024)) }),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', dmWithFiles('evt-count', '986.0', 'count', [
+    { id: 'F1', name: 'big.log', mimetype: 'text/plain', url_private_download: 'https://files.slack.com/F1/download' },
+  ]));
+  await adapter.stop();
+
+  assert.equal((await readdir(dir)).length, 1_000);
+  assert.deepEqual(records, []);
+  assert.equal(warnings.filter((line) => /already holds 1000 saved attachments/.test(line)).length, 1);
+});
+
 test('with a store, a text file over the save cap, a page, or a failed save is still a note', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
