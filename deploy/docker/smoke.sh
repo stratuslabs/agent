@@ -43,7 +43,10 @@ call() { # method path [json]
 }
 
 wait_healthy() {
-  for _ in $(seq 1 60); do
+  # A deadline on the clock, not a count of tries: one probe can itself take
+  # the CLI's 5-second health timeout, so 60 tries could be six minutes.
+  local deadline=$((SECONDS + 60))
+  while [ "$SECONDS" -lt "$deadline" ]; do
     if docker exec "$NAME" stratus health >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
@@ -55,12 +58,14 @@ docker build -f deploy/docker/Dockerfile --target slim -t "$IMAGE" .
 
 printf '%s\n' "$TOKEN" > "$WORK/gateway-token"
 chmod 0644 "$WORK/gateway-token" # readable by the image's uid 1000
+# `Z` relabels the per-run file for an SELinux host, which would otherwise
+# refuse the container a mount it can see; elsewhere it does nothing.
 
 echo "--- start held, with a seeded token"
 CREATED=1
 docker run -d --name "$NAME" \
   -e STRATUS_GATEWAY_TOKEN_FILE=/run/secrets/gateway-token \
-  -v "$WORK/gateway-token:/run/secrets/gateway-token:ro" \
+  -v "$WORK/gateway-token:/run/secrets/gateway-token:ro,Z" \
   -p "127.0.0.1:${PORT}:4123" \
   "$IMAGE" stratus serve --api-host 0.0.0.0 --log-format json --held >/dev/null
 wait_healthy
