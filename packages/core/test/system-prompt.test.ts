@@ -240,6 +240,10 @@ test('the agent is told what kind of room it is in, and who can read what it pos
   assert.match(dm, /this is a direct message in Slack with Blair\. Only the two of you can read it, so you are talking to one person\./);
   assert.match(dm, /not in a terminal or a local chat/);
   assert.doesNotMatch(dm, /Everyone here reads what you post/);
+  assert.doesNotMatch(dm, /thread/);
+  const dmThread = roomOf({ kind: 'direct', with: 'Blair', thread: true });
+  assert.match(dmThread, /Only the two of you can read it, so you are talking to one person\. You are replying in a thread in that direct message\./);
+  assert.doesNotMatch(dmThread, /everyone who can read the channel/);
 
   const group = roomOf({ kind: 'group', members: 4 });
   assert.match(group, /a group direct message in Slack with 4 members, you included\. Only they can read it\./);

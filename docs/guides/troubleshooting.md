@@ -157,8 +157,9 @@ subscription sign-in to per-token billing.
 
 ## A conversation that outgrows the model
 
-A session is durable and a Slack DM is one session for the life of the
-install, so a busy thread's transcript grows without limit. Every turn
+A session is durable and a Slack DM's top level is one session for the
+life of the install (a thread inside the DM is its own session), so a busy
+conversation's transcript grows without limit. Every turn
 replays the whole thing to the model, and eventually it no longer fits.
 
 When that happens the conversation **narrows rather than stopping**. The
