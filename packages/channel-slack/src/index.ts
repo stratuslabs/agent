@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readFile, realpath } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, realpath, unlink } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -520,6 +520,12 @@ export interface SlackAdapterOptions {
     workspaces: AgentWorkspaces;
     /** The host's tainted-write ledger, the one `tool-fs` reads. */
     ledger: { recordWrite(agentId: string, absolutePath: string, trust: TrustLevel): Promise<void> };
+    /**
+     * The most one agent's saved attachments may weigh together. A new save
+     * removes the oldest until it fits, so anyone admitted to talk to the
+     * agent cannot fill the host's disk. Defaults to 256 MB.
+     */
+    maxBytes?: number;
   };
   /**
    * Test injection: the clock, in milliseconds, that an upload's place in
@@ -2227,6 +2233,8 @@ const TEXT_ATTACHMENTS_MAX_TOTAL_BYTES = 200 * 1024;
  * it; saved, the agent reads it with its file tools, in parts.
  */
 const TEXT_ATTACHMENT_SAVE_MAX_BYTES = 10 * 1024 * 1024;
+/** The default bound on one agent's saved attachments, all together. */
+const SAVED_ATTACHMENTS_MAX_BYTES = 256 * 1024 * 1024;
 /** Under the agent's workspace, where saved attachments go. */
 const SAVED_ATTACHMENTS_DIR = path.join('attachments', 'slack');
 
@@ -2243,6 +2251,33 @@ const savedAttachmentName = (file: SlackInboundFile, now: number): string => {
   const base = ((file.name ?? file.title ?? '').split(/[\\/]/).pop() ?? '').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[._]+/, '').slice(0, 120);
   const id = (file.id ?? '').replace(/[^A-Za-z0-9]+/g, '').slice(0, 32);
   return [now.toString(36), ...(id.length > 0 ? [id] : []), base.length > 0 ? base : 'attachment'].join('-');
+};
+
+/**
+ * Removes the oldest saved attachments until `incoming` more bytes fit
+ * under `maxBytes`. Names start with the save time in base 36, so name
+ * order is age order. A path removed here keeps its ledger record, which
+ * labels nothing, the same as a save that crashed before its write.
+ */
+const makeRoom = async (dir: string, incoming: number, maxBytes: number): Promise<void> => {
+  if (incoming > maxBytes) {
+    throw new Error(`the file is larger than the ${maxBytes}-byte bound on saved attachments`);
+  }
+  const saved: Array<{ name: string; size: number }> = [];
+  for (const name of (await readdir(dir)).sort()) {
+    const info = await lstat(path.join(dir, name)).catch(() => undefined);
+    if (info?.isFile()) {
+      saved.push({ name, size: info.size });
+    }
+  }
+  let total = saved.reduce((sum, entry) => sum + entry.size, 0);
+  for (const entry of saved) {
+    if (total + incoming <= maxBytes) {
+      break;
+    }
+    await unlink(path.join(dir, entry.name)).catch(() => undefined);
+    total -= entry.size;
+  }
 };
 
 /**
@@ -2271,6 +2306,7 @@ const createAttachmentSaver = (
   if (dir !== path.join(await realpath(workspace), SAVED_ATTACHMENTS_DIR)) {
     throw new Error(`${lexical} is a link, not the workspace's own directory`);
   }
+  await makeRoom(dir, body.length, store.maxBytes ?? SAVED_ATTACHMENTS_MAX_BYTES);
   const target = path.join(dir, savedAttachmentName(file, now()));
   await store.ledger.recordWrite(agentId, target, trust);
   // O_EXCL and O_NOFOLLOW guard only the last component. A directory on the
@@ -5383,7 +5419,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           warn,
           reasons,
           options.attachmentStore
-            ? createAttachmentSaver(options.attachmentStore, connection.config.agentId, senderTrustFor(connection.config, userId), Date.now)
+            ? createAttachmentSaver(options.attachmentStore, connection.config.agentId, senderTrustFor(connection.config, userId), options.now ?? Date.now)
             : undefined,
         );
       // An image or a document with nothing said is still a question

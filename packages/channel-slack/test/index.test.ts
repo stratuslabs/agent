@@ -7367,6 +7367,37 @@ test('a saved attachment is refused when its directory is already a link out of 
   assert.equal(warnings.filter((line) => /could not save big\.log/.test(line)).length, 1);
 });
 
+test('saved attachments are bounded per agent: the oldest go first to make room', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'slack-saved-bound-'));
+  const { store } = attachmentStoreAt(root);
+  let clock = 1_000_000;
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    attachmentStore: { ...store, maxBytes: 350 * 1024 },
+    now: () => (clock += 1_000),
+    fetchFile: async (url) => ({ status: 200, contentType: 'text/plain', body: Buffer.from((url.match(/F(\d)/)?.[1] ?? '0').repeat(150 * 1024)) }),
+  });
+  await adapter.start(gateway);
+  for (const n of [1, 2, 3]) {
+    await socket.deliver('message', dmWithFiles(`evt-bound-${n}`, `98${n}.5`, `file ${n}`, [
+      { id: `F${n}`, name: `f${n}.log`, mimetype: 'text/plain', url_private_download: `https://files.slack.com/F${n}/download` },
+    ]));
+  }
+  await adapter.stop();
+
+  const dir = path.join(await realpath(root), 'ava', 'attachments', 'slack');
+  const names = (await readdir(dir)).sort();
+  assert.deepEqual(names.map((name) => name.replace(/^[0-9a-z]+-/, '')), ['F2-f2.log', 'F3-f3.log']);
+  assert.equal(gateway.dispatches.length, 3);
+  assert.ok(gateway.dispatches.every((dispatch) => /It is saved in full at/.test(dispatch.userMessage ?? '')));
+});
+
 test('with a store, a text file over the save cap, a page, or a failed save is still a note', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
