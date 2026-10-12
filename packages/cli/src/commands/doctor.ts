@@ -163,7 +163,11 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     } else if (now === null) {
       problems.push(`${file.path}, which the running daemon loaded at start, is gone or unreadable. It keeps running on the copy it loaded; fix the file, then \`stratus restart\`.`);
     } else {
-      problems.push(`${file.path} changed since the daemon started; run \`stratus restart\` to apply it.`);
+      // Provider and model are re-read on every dispatch; the rest (plugins,
+      // Slack, approvals, principals, turn limits) only at start. Which of
+      // those an edit touched is not knowable from a digest, so this says
+      // which part a restart is for rather than guessing.
+      problems.push(`${file.path} changed since the daemon started. Provider and model changes apply from the next turn; plugins, Slack, approvals, principals and turn limits need \`stratus restart\`.`);
     }
   }
   const configPath = configs.find((file) => file.sha256 !== null)?.path;
