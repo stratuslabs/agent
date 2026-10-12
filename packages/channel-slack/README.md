@@ -151,7 +151,9 @@ workspace (`attachments/slack/<stamp>-<file id>-<name>`, `0600`) when the
 host passes `attachmentStore`, and the message says `[Attached: spec.md,
 251 KB, too large to include here. It is saved in full at <path>. …]`. The
 path is recorded in the tainted-write ledger at the sender's label before
-the bytes are written, so `fs.read` of it carries that label. `stratus
+the bytes are written, so `fs.read` of it carries that label. One agent's
+saved attachments are bounded together (`attachmentStore.maxBytes`, 256 MB
+by default): a new save removes the oldest until it fits. `stratus
 serve` passes it; a host that does not, or a file over 10 MB, gets the name
 only, and `stratus serve` warns with the file's name. A file that is not UTF-8, or that comes back as
 Slack's sign-in page because the scope is missing, is treated as unreadable

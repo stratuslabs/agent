@@ -225,7 +225,8 @@ file and 200 KB a message. A larger text file, up to 10 MB, is saved under
 the agent's workspace in `attachments/slack/`, and the agent is told the
 path so it can read it with its file tools. The saved file keeps the
 sender's trust label, so reading it back counts as reading what that person
-sent. Anything else — a PDF, a Word file, an image over 5 MB or 8000 pixels
+sent. An agent keeps up to 256 MB of saved attachments; past that, the oldest
+are removed to make room for a new one. Anything else — a PDF, a Word file, an image over 5 MB or 8000 pixels
 a side, one that would take a single message's images past 20 MB together,
 or a text file over 10 MB — reaches the
 agent by name, with the reason it was not read: not a kind of file read
