@@ -1284,7 +1284,7 @@ export const runSetup = async (
   }> = {
     '@stratusagent/tool-fs': {
       label: 'Files',
-      grants: 'fs.read, fs.list, fs.search, fs.write',
+      grants: 'fs.read, fs.list, fs.search, fs.write, fs.move',
       needs: {
         key: 'roots',
         question: 'Which directories may agents read and write? (comma-separated, e.g. ~/notes): ',

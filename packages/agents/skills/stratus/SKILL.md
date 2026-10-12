@@ -114,7 +114,7 @@ When a stored key "isn't found", check in this order:
 - `stratus setup` → Plugins installs, enables, and asks for settings like roots in one step.
 - Enabled is not granted: your soul's `tools:` must also cover a plugin's tools. `stratus plugins` walks the whole chain for each tool (installed, enabled, granted to which agents, and what approvals do with a call), so it answers "why can't you use X" in one command.
 - **Risk.** Every tool is `safe`, `gated`, or `dangerous`. The daemon runs `safe` tools unattended, among them `memory.*`, `skill.read`, `credential.request`, `agent.delegate`, `schedule.list`, `schedule.cancel`, and `fs.read`, `fs.list`, and `fs.search`. Gated tools include:
-  - `web.fetch`, `fs.write`, `shell.run`, `browser.*`, and `mcp.*`;
+  - `web.fetch`, `fs.write`, `fs.move`, `shell.run`, `browser.*`, and `mcp.*`;
   - `schedule.every`, `schedule.at`, `message.send`, and `message.read` (which reads a channel your Slack app is in, never a DM, and labels what it returns `external`);
   - every third-party tool, `web.search` included.
   - What happens to a gated call depends on the approvals mode. Under `headless` (the default) it is refused. Under `remote` the people in `approvals.slackApprovers` are asked in Slack (or through the control API's `/approvals`) with **Allow once**, **Always allow**, and **Deny**. Under `remote` with nobody to ask, it is refused too.
