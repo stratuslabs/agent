@@ -15,10 +15,11 @@ IMAGE="stratusd:smoke-${RUN_ID}"
 NAME="stratusd-smoke-${RUN_ID}"
 BUILT=0
 CREATED=0
-PORT=${SMOKE_PORT:-4199}
+# Empty: Docker picks a free host port for this run, read back below.
+PORT=${SMOKE_PORT:-}
 WORK=$(mktemp -d)
 TOKEN="smoke-$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-API="http://127.0.0.1:${PORT}/api/v1"
+API=
 
 cleanup() {
   if [ "${1:-0}" != 0 ]; then
@@ -49,6 +50,14 @@ call() { # method path [json]
   fi
 }
 
+# Where the API is published, read back from Docker after every start: a
+# port Docker chose can change when the container restarts.
+find_api() {
+  local published
+  published=$(docker port "$NAME" 4123/tcp | head -n 1) || fail "the API port is not published"
+  API="http://127.0.0.1:${published##*:}/api/v1"
+}
+
 wait_healthy() {
   # A deadline on the clock, not a count of tries: one probe can itself take
   # the CLI's 5-second health timeout, so 60 tries could be six minutes.
@@ -77,6 +86,7 @@ docker run -d --name "$NAME" \
   -p "127.0.0.1:${PORT}:4123" \
   "$IMAGE" stratus serve --api-host 0.0.0.0 --log-format json --held >/dev/null
 wait_healthy
+find_api
 
 call GET /health | grep -q '"held":true' || fail "health does not report held"
 status=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer wrong-token" "${API}/health")
@@ -90,6 +100,7 @@ echo "--- pause, restart, still paused"
 call PUT /intake '{"paused":true,"message":"Smoke test pause."}' | grep -q '"paused":true' || fail "pause was refused"
 docker restart "$NAME" >/dev/null
 wait_healthy
+find_api
 call GET /intake | grep -q '"paused":true' || fail "the pause did not survive a restart"
 # Started by the same command, so held again until promoted: a service
 # manager's restart is not an announced one.
