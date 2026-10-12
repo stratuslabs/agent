@@ -45,9 +45,9 @@ fail() { echo "smoke: $*" >&2; exit 1; }
 
 call() { # method path [json]
   if [ $# -ge 3 ]; then
-    curl -fsS -X "$1" -H "authorization: Bearer ${TOKEN}" -H 'content-type: application/json' -d "$3" "${API}$2"
+    curl -fsS --max-time 30 -X "$1" -H "authorization: Bearer ${TOKEN}" -H 'content-type: application/json' -d "$3" "${API}$2"
   else
-    curl -fsS -X "$1" -H "authorization: Bearer ${TOKEN}" "${API}$2"
+    curl -fsS --max-time 30 -X "$1" -H "authorization: Bearer ${TOKEN}" "${API}$2"
   fi
 }
 
@@ -90,7 +90,7 @@ wait_healthy
 find_api
 
 call GET /health | grep -q '"held":true' || fail "health does not report held"
-status=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer wrong-token" "${API}/health")
+status=$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' -H "authorization: Bearer wrong-token" "${API}/health")
 [ "$status" = 401 ] || fail "a wrong token got $status, not 401"
 
 echo "--- promote"
