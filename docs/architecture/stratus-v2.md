@@ -2,11 +2,16 @@
 
 This is the spec for where Stratus Agent goes after v1. The [v1 architecture](./stratus-v1.md) defined the kernel boundary and deliberately left transports, durable storage, remote execution, and product surfaces out of scope. This document specifies exactly those things.
 
-## Current state
+## Starting point
+
+This section records where things stood when the document was written, as
+the reason for what follows. Every gap listed below has since shipped: the
+Slack channel and gateway, durable sessions, the control API and dashboard,
+wired delegation, and tools on the subscription provider.
 
 The v1 kernel worked out. `@stratusagent/core` is ~600 lines with zero runtime dependencies, and its seams — `ModelProvider`, `Tool`, `Executor`, `ApprovalPolicy`, `SessionStore`, `AgentMemoryStore`, `CredentialResolver`, `Plugin`, the event bus — are the right ones. Agents-as-people (souls, deterministic avatars, per-agent tool and credential allowlists, delegation, routing) is implemented and tested. The CLI can run one-shot sessions and hold a persistent conversation (`stratus chat`).
 
-What does not exist yet:
+What did not exist yet:
 
 - **No channel layer.** There is no inbound message contract, no outbound reply interface, no long-running process to host either.
 - **No durable sessions.** `InMemorySessionStore` is the only session store; `stratus chat` resumes sessions within a process, but everything dies with it.
