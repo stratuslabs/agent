@@ -50,14 +50,16 @@ surprises: a run that turns out to be on the `demo` provider, and an
 `ANTHROPIC_API_KEY` in the environment quietly demoting a Claude
 subscription sign-in to per-token billing.
 
-The files are only half the answer when a daemon is running: it read its
-config once, at start, and runs on that until `stratus restart`. So doctor
-also asks the running daemon (through the control API, at the address in
-`~/.stratus/gateway.json`) what it met while starting. Each warning it logged
-then (a plugin that did not load, nobody able to approve, and so on) is a
-problem, and so is a config file that has changed, appeared or gone since the
-daemon started, including a global config behind a project one: `run stratus
-restart to apply it`. No daemon found is not a problem, since `stratus run`
+The files are only half the answer when a daemon is running. It re-reads
+the config for provider and model on every turn, but plugins, Slack,
+approvals, principals and turn limits are read once, at start, and stay as
+they were until `stratus restart`. So doctor also asks the running daemon
+(through the control API, at the address in `~/.stratus/gateway.json`) what
+it met while starting. Each warning it logged then (a plugin that did not
+load, nobody able to approve, and so on) is a problem, and so is a config
+file that has changed, appeared or gone since the daemon started, including a
+global config behind a project one, since a restart is what applies the
+start-time settings in it. No daemon found is not a problem, since `stratus run`
 needs none; doctor says `none found (no control API published)` because a
 daemon started with its API off publishes no address either. A damaged
 `gateway.json`, or a daemon that published its address and does not answer, is

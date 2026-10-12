@@ -4879,6 +4879,13 @@ test('doctor probes the local daemon with its local token even when STRATUS_GATE
   assert.deepEqual(authorizations, ['Bearer doctor-token']);
 });
 
+test('doctor does not take any 200 on the published port for the daemon', async () => {
+  const { exitCode, output } = await doctorAgainstDaemon(() => ({ ok: false }));
+  assert.equal(exitCode, 1, output.stdout);
+  assert.match(output.stdout, /did not answer/);
+  assert.match(output.stdout, /not a Stratus health response/);
+});
+
 test('doctor reports a daemon that published its address but does not answer', async () => {
   const { exitCode, output } = await doctorAgainstDaemon('unreachable');
   assert.equal(exitCode, 1, output.stdout);

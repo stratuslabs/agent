@@ -135,6 +135,10 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
       throw new Error(await gatewayErrorMessage(response));
     }
     health = await response.json() as DaemonHealth;
+    // Anything else answering 200 on a reused port is not this daemon.
+    if (health?.ok !== true) {
+      throw new Error('the answer was not a Stratus health response');
+    }
   } catch (error) {
     problems.push(
       `A daemon published ${url} in ${infoPath} but did not answer /health `
@@ -158,16 +162,18 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     if (now === file.sha256) {
       continue;
     }
+    // Provider and model are re-resolved on every dispatch, discovery
+    // included; the rest (plugins, Slack, approvals, principals, turn
+    // limits) only at start. Which of those a change touched is not
+    // knowable from a digest, so each message says which part a restart is
+    // for rather than guessing.
+    const split = 'Provider and model follow it from the next turn; plugins, Slack, approvals, principals and turn limits stay as they were until `stratus restart`.';
     if (file.sha256 === null) {
-      problems.push(`${file.path} appeared after the daemon started, so it is not in effect; run \`stratus restart\` to apply it.`);
+      problems.push(`${file.path} appeared after the daemon started. ${split}`);
     } else if (now === null) {
-      problems.push(`${file.path}, which the running daemon loaded at start, is gone or unreadable. It keeps running on the copy it loaded; fix the file, then \`stratus restart\`.`);
+      problems.push(`${file.path}, which the running daemon read at start, is gone or unreadable. ${split}`);
     } else {
-      // Provider and model are re-read on every dispatch; the rest (plugins,
-      // Slack, approvals, principals, turn limits) only at start. Which of
-      // those an edit touched is not knowable from a digest, so this says
-      // which part a restart is for rather than guessing.
-      problems.push(`${file.path} changed since the daemon started. Provider and model changes apply from the next turn; plugins, Slack, approvals, principals and turn limits need \`stratus restart\`.`);
+      problems.push(`${file.path} changed since the daemon started. ${split}`);
     }
   }
   const configPath = configs.find((file) => file.sha256 !== null)?.path;
