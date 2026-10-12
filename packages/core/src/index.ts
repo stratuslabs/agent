@@ -7022,6 +7022,14 @@ export class AgentRunner {
         // turn: an addressed one that failed is retried by its sender
         // with a new message, which is then the newest and the only one
         // sent, as it always was.
+        //
+        // Known open case: overheard messages batched ahead of an
+        // addressed message, in a turn the harness took and then failed.
+        // No boundary goes in for it, so on the sender's retry
+        // `latestUserMessagePrompt` still sees those overheard messages as
+        // unheard and sends them again. The delivery mark is there for a
+        // fix; what the boundary should be for an addressed turn is not
+        // decided.
         session.messages.push({
           id: `${session.id}:assistant:${session.messages.length + 1}`,
           role: 'assistant',
