@@ -236,7 +236,9 @@ Commands:
                    (override with --token or STRATUS_GATEWAY_TOKEN)
   doctor           Show what a run would use right now — provider, model, soul —
                    and which file or environment variable decided each, then
-                   flag anything that would surprise you (--format json)
+                   flag anything that would surprise you (--format json).
+                   --live also asks each provider your runs use whether it
+                   accepts the key
   update           The whole upgrade dance, in the order that cannot lose
                    data: stop stratusd, upgrade the package from npm —
                    together with every optional first-party package this
