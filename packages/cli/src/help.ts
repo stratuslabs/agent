@@ -73,7 +73,7 @@ Commands:
                    delegation, and a watchdog — one per home (it refuses to
                    start over a daemon already serving ~/.stratus, and exits
                    78 on a trusted config that will not load), and
-                   Ctrl+C / SIGTERM drains cleanly
+                   Ctrl+C / SIGTERM drains (30s, then aborts)
                    (--idle-timeout <seconds>, --approvals <headless|remote>,
                    --no-events, --no-log-file, --config <path>); everything it
                    says is also written to ~/.stratus/logs, which

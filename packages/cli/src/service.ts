@@ -91,6 +91,19 @@ export interface ServiceInstallOptions {
   configPath?: string;
 }
 
+/**
+ * How long either service manager waits after SIGTERM before SIGKILL, in
+ * seconds. Longer than both of a stop's windows: the 30-second drain
+ * (`DEFAULT_STOP_DRAIN_TIMEOUT_MS`), after which a turn still running is
+ * aborted by the daemon (its shell commands killed), and the same window
+ * again, which the aborted turns' record, the scheduler's drain and the
+ * plugins' dispose all share (the gateway holds them to one deadline),
+ * plus room for closing the stores and exiting. Without it launchd uses its own
+ * default, about five seconds on macOS 15, and its kill of the job does
+ * not reach a command's own process group, which runs on as an orphan.
+ */
+const SERVICE_STOP_TIMEOUT_SECONDS = 75;
+
 export const launchdPlist = (definition: ServiceDefinition): string => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -121,6 +134,8 @@ ${definition.path !== undefined ? `  <key>EnvironmentVariables</key>
   <string>${xml(path.join(definition.logDir, 'stratusd.err.log'))}</string>
   <key>ProcessType</key>
   <string>Background</string>
+  <key>ExitTimeOut</key>
+  <integer>${SERVICE_STOP_TIMEOUT_SECONDS}</integer>
 </dict>
 </plist>
 `;
@@ -153,7 +168,7 @@ ${definition.path !== undefined ? `Environment=${systemdValue(JSON.stringify(`PA
 RestartPreventExitStatus=${CONFIG_INVALID_EXIT_CODE}
 RestartSec=5
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=${SERVICE_STOP_TIMEOUT_SECONDS}
 
 [Install]
 WantedBy=default.target

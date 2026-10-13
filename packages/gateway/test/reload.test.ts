@@ -10,6 +10,7 @@ import type { OptionalModuleHost } from '@stratusagent/plugins';
 
 import {
   RESTARTING_TURN_ERROR,
+  STOPPING_TURN_ERROR,
   RestartUnsupportedError,
   ShardedSessionStore,
   createGateway,
@@ -374,6 +375,121 @@ test('an announced restart refuses new turns, lets a running one finish, and han
   } finally {
     await next.stop();
   }
+});
+
+test('a stop drains for a bounded window, then aborts what is still running and records why', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  // Never answers; only the abort ends it. Under a service manager that is
+  // what a stop used to wait on until the manager's SIGKILL, which left the
+  // turn's own process groups (a shell command's) running after the daemon.
+  let firstCall!: () => void;
+  const started = new Promise<void>((resolve) => { firstCall = resolve; });
+  const fetchImpl = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      firstCall();
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    })) as typeof fetch;
+
+  const warnings: string[] = [];
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    stopDrainTimeoutMs: 50,
+    log: () => {},
+    warn: (line) => warnings.push(line),
+  });
+  const failed = nextEvent(gateway.bus, 'session.failed');
+  await gateway.start();
+
+  const stuck = gateway.dispatch({ sessionId: 'stuck', agentId: 'ava', userMessage: 'hang' });
+  await started;
+  await gateway.stop();
+
+  await assert.rejects(
+    stuck,
+    (error: Error) => error instanceof RunAbortedError && error.message === STOPPING_TURN_ERROR,
+  );
+  assert.equal((await failed).error, STOPPING_TURN_ERROR);
+  assert.ok(warnings.some((line) => /stop: 1 turn\(s\) still running after 50ms; aborting them/.test(line)), warnings.join('\n'));
+
+  const next = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
+  await next.start();
+  try {
+    const stored = await next.store.get('stuck');
+    assert.equal(stored?.status, 'failed');
+    assert.equal(stored?.lastError, STOPPING_TURN_ERROR);
+  } finally {
+    await next.stop();
+  }
+});
+
+test('a stop that has to shut down around a stuck firing and a stuck plugin still ends within two windows', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-stop-deadline-'));
+  const directory = path.join(root, 'stratus-plugin-stuck');
+  await mkdir(path.join(directory, 'dist'), { recursive: true });
+  await mkdir(path.join(directory, 'skills'), { recursive: true });
+  await writeFile(path.join(directory, 'package.json'), JSON.stringify({
+    name: 'stratus-plugin-stuck',
+    stratus: { pluginVersion: 1, contributes: { skills: [{ id: 'triage', path: './skills/triage.md' }] } },
+  }));
+  await writeFile(path.join(directory, 'skills', 'triage.md'), '---\ndescription: Use when sorting.\n---\n\n# triage\n');
+  const host: OptionalModuleHost = {
+    resolve: () => pathToFileURL(path.join(directory, 'dist', 'index.js')).href,
+    async import() {
+      return { createPlugin: () => ({ name: 'stuck', setup() {}, dispose: () => new Promise<void>(() => {}) }) };
+    },
+  };
+
+  // A firing whose provider never answers and ignores its abort: every
+  // bounded phase after the drain (the post-abort wait, the scheduler's
+  // drain, the plugins' dispose) runs out. A service manager's stop timeout
+  // is sized for a drain window plus one more, so all of that has to fit in
+  // the second window, not one window each.
+  let firing!: () => void;
+  const firingStarted = new Promise<void>((resolve) => { firing = resolve; });
+  const fetchImpl = (() => new Promise<Response>(() => { firing(); })) as typeof fetch;
+
+  const window = 200;
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+    idleTimeoutMs: 0,
+    stopDrainTimeoutMs: window,
+    schedules: { minIntervalMs: 500, tickMs: 25 },
+    plugins: { 'stratus-plugin-stuck': { enabled: true } },
+    pluginHost: host,
+    log: () => {},
+    warn: (line) => warnings.push(line),
+  });
+  await gateway.start();
+
+  const { SqliteScheduleStore } = await import('../src/index.ts');
+  const { fleetDbPath } = await import('@stratusagent/state');
+  const scheduleStore = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+  scheduleStore.insert({
+    id: 'sched-stuck',
+    agentId: 'ava',
+    cadence: { kind: 'every', intervalMs: 600_000 },
+    prompt: 'do the scheduled thing',
+    createdAt: new Date().toISOString(),
+    nextFireAt: new Date(Date.now() - 5).toISOString(),
+  });
+  scheduleStore.close();
+  await firingStarted;
+
+  const began = Date.now();
+  await gateway.stop();
+  const elapsed = Date.now() - began;
+
+  assert.ok(warnings.some((line) => /did not stop after being aborted/.test(line)), warnings.join('\n'));
+  assert.ok(warnings.some((line) => /a plugin did not release what it holds/.test(line)), warnings.join('\n'));
+  // Two windows plus scheduling slack; one window per phase would be four.
+  assert.ok(elapsed < 3 * window, `stop took ${elapsed}ms with a ${window}ms window`);
 });
 
 test('a turn that outlives the drain window is aborted as restarting, and the restart still happens', async () => {
