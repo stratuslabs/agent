@@ -224,10 +224,13 @@ waiting on is cancelled and its card says so.
 
 Only the agent's approvers (`approvals.slackApprovers`) can stop it. From
 anyone else, or when nothing is running, `stop` is an ordinary message. An
-untagged `stop` goes to the agent that holds the thread; the others only
-hear it. Under `admit: "principals"`, an approver who is not a listed
+untagged `stop` goes to the agent that holds the thread, including one that
+only answers mentions or judges; the others only hear it. Under `admit: "principals"`, an approver who is not a listed
 principal can still stop the agent by naming it (`@agent stop`), and
 nothing else they send is admitted.
+
+A turn the daemon picked back up after a restart can't be stopped from Slack
+yet.
 
 ## Sending an image
 

@@ -2852,6 +2852,14 @@ interface Admission {
    * intake decides it.
    */
   judge: boolean;
+  /**
+   * An approver's untagged stop in a thread this agent holds, reaching an
+   * agent that listens to mentions or judges (card 337). Still heard if
+   * nothing is running to stop, but if something is, it stops it: the
+   * holder rule is what makes an untagged stop this agent's, whatever
+   * `listens` says about ordinary replies.
+   */
+  holderStop?: boolean;
 }
 
 interface AgentConnection {
@@ -5592,11 +5600,19 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // "whose is an untagged reply", and for these two agents the soul has
     // already answered.
     const listens = listensOf(connection.config.agentId);
-    if (listens === 'mentions') {
-      return { ...admission, overhear: true };
-    }
-    if (listens === 'judge') {
-      return { ...admission, overhear: true, judge: true };
+    if (listens === 'mentions' || listens === 'judge') {
+      // Except a stop (card 337): the holder rule decides whose it is, as
+      // for any agent, and it only acts if there is something to stop.
+      const holderStop = threadKey !== undefined &&
+        holderAt(threadKey, event.ts) === connection.config.agentId &&
+        (connection.config.approvers ?? []).includes(sender) &&
+        isStopRequest(text, connection.botUserId);
+      return {
+        ...admission,
+        overhear: true,
+        ...(listens === 'judge' ? { judge: true } : {}),
+        ...(holderStop ? { holderStop: true } : {}),
+      };
     }
 
     // The record is what this process has actually seen, in the order it
@@ -5656,10 +5672,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const { event, isDm, team, userId, thread, sessionId, threadKey, eventKey } = admitted;
 
     // Stop (card 337), see `stopTurns`. Only a message addressed to this
-    // agent: an untagged reply this agent merely overhears is the holder's,
-    // and one only the sessions can place is not this agent's to act on yet.
+    // agent: an untagged reply this agent merely overhears is the holder's
+    // (unless this agent is the holder and only `listens` made it an
+    // overhear, see `holderStop`), and one only the sessions can place is
+    // not this agent's to act on yet.
     if (
-      !admitted.overhear &&
+      (!admitted.overhear || admitted.holderStop === true) &&
       admitted.settled &&
       (connection.config.approvers ?? []).includes(userId) &&
       isStopRequest(event.text ?? '', connection.botUserId) &&

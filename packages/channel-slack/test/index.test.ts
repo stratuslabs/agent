@@ -11075,3 +11075,81 @@ test('an approver who is not a listed principal can still stop a turn, and nothi
   assert.ok(web.updates.some((update) => update.text === 'Stopped by <@U-BOSS>.'));
   await adapter.stop();
 });
+
+for (const listens of ['mentions', 'judge'] as const) {
+  test(`an untagged stop from an approver cancels the turn of a ${listens}-listening agent that holds the thread`, async () => {
+    const { gateway, signals, finishers } = stoppableGateway();
+    gateway.agents = () => [{ id: 'ava', name: 'Ava', listens }];
+    const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+    await adapter.start(gateway);
+
+    void socket.deliver('app_mention', mention('<@B-AVA> long job'));
+    await until(() => signals.length === 1);
+    void socket.deliver('message', channelMessage({ text: 'stop', ts: '100.2', thread: '100.1' }));
+    try {
+      await until(() => signals[0]?.aborted === true);
+    } finally {
+      for (const finish of finishers.splice(0)) finish();
+      await socket.settled();
+    }
+
+    assert.equal(signals.length, 1, 'the stop itself is not a turn');
+    assert.equal(signals[0]?.aborted, true);
+    assert.ok(web.updates.some((update) => update.text === 'Stopped by <@U-DYLAN>.'));
+    await adapter.stop();
+  });
+
+  test(`with nothing running, an untagged stop is only heard by a ${listens}-listening agent, as before`, async () => {
+    const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'done'));
+    gateway.agents = () => [{ id: 'ava', name: 'Ava', listens }];
+    const { socket, adapter } = stopAdapter(['U-DYLAN']);
+    await adapter.start(gateway);
+
+    await socket.deliver('app_mention', mention('<@B-AVA> quick one'));
+    await socket.settled();
+    await socket.deliver('message', channelMessage({ text: 'stop', ts: '100.2', thread: '100.1' }));
+    await socket.settled();
+    await adapter.stop();
+
+    assert.equal(gateway.dispatches.length, 1, 'no turn is taken on the stop');
+    assert.ok(gateway.observes.some((observed) => observed.message.endsWith('stop')));
+  });
+}
+
+test('an untagged stop does not reach a mentions-listening agent when another agent holds the thread', async () => {
+  const { gateway, signals, finishers } = stoppableGateway();
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'mentions' }, { id: 'bea', name: 'Bea' }];
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', approvers: ['U-DYLAN'], replies: 'stream' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', approvers: ['U-DYLAN'], replies: 'stream' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Ava is working; then the thread is handed to Bea.
+  const toAva = mention('<@B-AVA> long job');
+  void socketAva.deliver('app_mention', toAva);
+  void socketBea.deliver('message', { ...toAva, event: { ...toAva.event, type: 'message' } });
+  await until(() => signals.length === 1);
+  const toBea = channelMessage({ text: '<@B-BEA> your view?', ts: '100.2', thread: '100.1' });
+  void socketAva.deliver('message', toBea);
+  void socketBea.deliver('message', toBea);
+  await until(() => signals.length === 2);
+
+  const stop = channelMessage({ text: 'stop', ts: '100.3', thread: '100.1' });
+  await Promise.all([socketAva.deliver('message', stop), socketBea.deliver('message', stop)]);
+  await until(() => signals[1]?.aborted === true);
+  assert.equal(signals[0]?.aborted, false, "Ava's turn is not the holder's, so it keeps running");
+  finishers.shift()?.();
+  await socketAva.settled();
+  await socketBea.settled();
+  await adapter.stop();
+});
