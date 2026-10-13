@@ -259,3 +259,26 @@ test('a queued message whose images would overflow the batch replay budget is no
   assert.deepEqual(sent, [0, 11, 11]);
   await gateway.stop();
 });
+
+test('a queued message whose text would push the batch past the merged-text budget is not merged, so no turn is larger than one message could be', async () => {
+  const provider = gatedProvider();
+  const gateway = await startGateway(provider.fetchImpl);
+  // 25,000 characters each: either fits the 40,000-character budget alone, the two together do not.
+  const long = (tag: string) => `Dylan: ${tag} ${'x'.repeat(25_000)}`;
+
+  const first = gateway.dispatch({ sessionId: 'm-text', agentId: 'ava', userMessage: 'Dylan: first', idempotencyKey: 't1', onAbsorbed: () => {} });
+  await provider.running;
+  const absorbed: string[] = [];
+  const second = gateway.dispatch({ sessionId: 'm-text', agentId: 'ava', userMessage: long('second'), idempotencyKey: 't2', turnId: 'tt2', onAbsorbed: () => absorbed.push('t2') });
+  const third = gateway.dispatch({ sessionId: 'm-text', agentId: 'ava', userMessage: long('third'), idempotencyKey: 't3', turnId: 'tt3', onAbsorbed: () => absorbed.push('t3') });
+  const fourth = gateway.dispatch({ sessionId: 'm-text', agentId: 'ava', userMessage: 'Dylan: fourth', idempotencyKey: 't4', turnId: 'tt4', onAbsorbed: () => absorbed.push('t4') });
+  provider.release();
+  await Promise.all([first, second, third, fourth]);
+
+  // The second runs alone; the third leads a new batch that the short fourth still joins.
+  assert.deepEqual(absorbed, ['t4']);
+  assert.equal(provider.prompts.length, 3);
+  assert.equal(provider.prompts[1], long('second'));
+  assert.equal(provider.prompts[2], `${long('third')}\n\nDylan: fourth`);
+  await gateway.stop();
+});

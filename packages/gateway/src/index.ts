@@ -940,7 +940,22 @@ interface MergeBatch {
   absorbed: MergeJoiner[];
   /** Every image in the batch so far, leader's first. */
   images: ImageAttachment[];
+  /** Characters of the merged user message so far, separators included. */
+  chars: number;
 }
+
+/**
+ * The most text one merged user message may hold (card 423). The runner's
+ * overflow recovery can drop earlier transcript but never part of the
+ * newest message, so a batch must not grow that message past what one
+ * message could be on its own: this is Slack's own message-length limit.
+ * A single message longer than this still runs, alone, as it would have
+ * without merging.
+ */
+const MERGED_TEXT_BUDGET_CHARS = 40_000;
+
+/** Separator between merged messages; counted against the text budget. */
+const MERGED_SEPARATOR = '\n\n';
 
 /**
  * Whether `images` all fit the replay budget together. A merged turn's
@@ -4014,9 +4029,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       mergeable &&
       open !== undefined &&
       open.agentId === input.agentId &&
-      fitsReplayBudget([...open.images, ...(input.images ?? [])])
+      fitsReplayBudget([...open.images, ...(input.images ?? [])]) &&
+      open.chars + MERGED_SEPARATOR.length + input.userMessage.length <= MERGED_TEXT_BUDGET_CHARS
     ) {
       open.images.push(...(input.images ?? []));
+      open.chars += MERGED_SEPARATOR.length + input.userMessage.length;
       waitingDispatches.set(input.sessionId, (waitingDispatches.get(input.sessionId) ?? 0) + 1);
       const joined = new Promise<Session>((resolve, reject) => {
         open.absorbed.push({ input, resolve, reject });
@@ -4041,8 +4058,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       return joined;
     }
-    // It cannot join (or its images would overflow the batch's), so the
-    // open batch takes no more: a message arriving
+    // It cannot join (or its images or text would overflow the batch's
+    // budget), so the open batch takes no more: a message arriving
     // after this one must not be answered ahead of it.
     if (open !== undefined) {
       openBatches.delete(input.sessionId);
@@ -4050,7 +4067,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Otherwise it leads a new batch, if it is waiting behind a turn at all:
     // a message to an idle session runs at once, alone.
     const batch: MergeBatch | undefined = mergeable && sessionChains.has(input.sessionId)
-      ? { agentId: input.agentId, absorbed: [], images: [...(input.images ?? [])] }
+      ? { agentId: input.agentId, absorbed: [], images: [...(input.images ?? [])], chars: input.userMessage.length }
       : undefined;
     if (batch !== undefined) {
       openBatches.set(input.sessionId, batch);
@@ -4140,7 +4157,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       const merged: DispatchInput = {
         sessionId: input.sessionId,
         ...(head.input.agentId !== undefined ? { agentId: head.input.agentId } : {}),
-        userMessage: runnable.map((part) => part.input.userMessage).join('\n\n'),
+        userMessage: runnable.map((part) => part.input.userMessage).join(MERGED_SEPARATOR),
         ...(images.length > 0 ? { images } : {}),
         ...(head.input.earlier !== undefined ? { earlier: head.input.earlier } : {}),
         ...(metadata !== undefined ? { metadata } : {}),
