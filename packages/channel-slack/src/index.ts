@@ -5146,10 +5146,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * queued behind the turn it stops nor merged into the next one. The
    * caller has checked that the sender is an approver: a stop throws away
    * work someone else asked for.
+   *
+   * `fromIntake` is a stop that could only be placed on the intake chain,
+   * once the sessions named this agent (the cold case). Everything ahead of
+   * it on the chain has already been dispatched, and everything still in
+   * intake arrived after it, so it cancels the dispatched turns only.
    */
-  const stopTurns = (connection: AgentConnection, sessionId: string, userId: string, channel: string): boolean => {
+  const stopTurns = (connection: AgentConnection, sessionId: string, userId: string, channel: string, fromIntake = false): boolean => {
     const running = renderers.get(sessionId) ?? [];
-    const inIntake = intakeInFlight.get(sessionId) ?? 0;
+    const inIntake = fromIntake ? 0 : intakeInFlight.get(sessionId) ?? 0;
     if (running.length === 0 && inIntake === 0) {
       return false;
     }
@@ -5548,10 +5553,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           // Not this agent's to answer — and, if it is in the thread,
           // this agent's to hear, same as the two warm stand-downs.
           overhear = true;
-        } else if (threadKey) {
-          // Answered from the store rather than from memory: hold it, so
-          // the rest of the thread is ordered by receipt like any other.
-          rememberAddressee(threadKey, connection.config.agentId, event.ts);
+        } else {
+          if (threadKey) {
+            // Answered from the store rather than from memory: hold it, so
+            // the rest of the thread is ordered by receipt like any other.
+            rememberAddressee(threadKey, connection.config.agentId, event.ts);
+          }
+          // Stop (card 337) for a message only the sessions could place:
+          // now that they say it is this agent's, it is a stop like the
+          // warm one above, not a message to queue behind the turn it stops.
+          if (
+            (connection.config.approvers ?? []).includes(userId) &&
+            isStopRequest(event.text ?? '', connection.botUserId) &&
+            stopTurns(connection, sessionId, userId, event.channel, true)
+          ) {
+            return undefined;
+          }
         }
       }
       const cleaned = await humanizeMentions(connection, event.text ?? '');
