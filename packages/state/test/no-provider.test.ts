@@ -32,6 +32,16 @@ test('a provider key in the environment alone does not pick a provider, and the 
   );
 });
 
+test('a codex key in the environment gets the same hint as the other providers', async () => {
+  const dir = await home();
+  await assert.rejects(
+    resolveRuntimeConfig({}, { homeDir: dir, cwd: dir, processEnv: { CODEX_API_KEY: 'synthetic-env-key' } }),
+    (error: unknown) => error instanceof NoProviderConfiguredError
+      && /CODEX_API_KEY is set/.test(error.message)
+      && /STRATUS_PROVIDER=codex/.test(error.message),
+  );
+});
+
 test('the demo model still runs when it is picked explicitly', async () => {
   const dir = await home();
   const env = { homeDir: dir, cwd: dir, processEnv: {} };

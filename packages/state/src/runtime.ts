@@ -225,7 +225,7 @@ export const resolveRuntimeConfig = async (
     const signedIn = await signedInProviders(env);
     if (signedIn.length !== 1) {
       const envKeys = CREDENTIAL_PROVIDER_NAMES.filter(
-        (name) => name !== 'codex' && readNonEmptyString(processEnv[defaultApiKeyEnvName(name)]) !== undefined,
+        (name) => readNonEmptyString(processEnv[defaultApiKeyEnvName(name)]) !== undefined,
       );
       throw new NoProviderConfiguredError(noProviderMessage(signedIn, envKeys));
     }
