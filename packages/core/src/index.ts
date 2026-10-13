@@ -320,6 +320,15 @@ export interface Message {
    */
   idempotencyKey?: string;
   /**
+   * The keys of dispatches folded into this message's turn: messages that
+   * queued behind a running turn and are answered together with this one,
+   * in one user message (card 423). Every key reader matches these as it
+   * matches `idempotencyKey` (`carriesKey`), so a repeat of an absorbed
+   * dispatch is the merged turn, never a second one. Present only when
+   * something was absorbed.
+   */
+  absorbedKeys?: string[];
+  /**
    * Why the turn this user message started failed, written by
    * `recordTurnFailure` in the save that fails it. The session's
    * `lastError` is the latest turn's and the next turn replaces it; this
@@ -3341,6 +3350,16 @@ export const completeAnsweredTurn = async (finished: Session, store: SessionStor
 export const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
 
 /**
+ * Whether a user message brought the dispatch an idempotency key names:
+ * its own key, or one absorbed into its turn (`Message.absorbedKeys`).
+ * The one test every key reader uses, so none of them can miss an
+ * absorbed dispatch and run or answer it a second time.
+ */
+export const carriesKey = (message: Message, idempotencyKey: string): boolean =>
+  message.role === 'user'
+  && (message.idempotencyKey === idempotencyKey || message.absorbedKeys?.includes(idempotencyKey) === true);
+
+/**
  * The reply of the turn a keyed message started (`Message.idempotencyKey`),
  * where `latestTurnReply` is the newest turn's. A repeated dispatch resolves
  * with the session as it stands, which may have moved on since: an adapter
@@ -3349,7 +3368,7 @@ export const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
  * carries the key, or its turn produced no text.
  */
 export const turnReplyFor = (session: Pick<Session, 'messages'>, idempotencyKey: string): string | undefined => {
-  const start = session.messages.findLastIndex((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  const start = session.messages.findLastIndex((message) => carriesKey(message, idempotencyKey));
   if (start < 0) {
     return undefined;
   }
@@ -3372,7 +3391,7 @@ export const turnFilesFor = (
   session: Pick<Session, 'messages'>,
   idempotencyKey: string,
 ): Array<{ path: string; producedAt: string }> => {
-  const start = session.messages.findLastIndex((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  const start = session.messages.findLastIndex((message) => carriesKey(message, idempotencyKey));
   if (start < 0) {
     return [];
   }
@@ -3408,7 +3427,9 @@ export const recordTurnFailure = (session: Session, error: string): void => {
  * or not, started one.
  */
 export const isLatestTurn = (session: Pick<Session, 'messages'>, idempotencyKey: string): boolean =>
-  session.messages.findLast((message) => message.role === 'user' && message.observed !== true)?.idempotencyKey === idempotencyKey;
+  ((latest) => latest !== undefined && carriesKey(latest, idempotencyKey))(
+    session.messages.findLast((message) => message.role === 'user' && message.observed !== true),
+  );
 
 /**
  * Why the turn a keyed message started failed, or undefined if it did not.
@@ -3418,7 +3439,7 @@ export const isLatestTurn = (session: Pick<Session, 'messages'>, idempotencyKey:
  * while it is the latest (`isLatestTurn`).
  */
 export const turnFailureFor = (session: Pick<Session, 'messages' | 'status' | 'lastError'>, idempotencyKey: string): string | undefined => {
-  const keyed = session.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  const keyed = session.messages.findLast((message) => carriesKey(message, idempotencyKey));
   if (keyed === undefined) {
     return undefined;
   }
@@ -3505,7 +3526,7 @@ export const workItemState = (
   session: Pick<Session, 'messages' | 'status'>,
   idempotencyKey: string,
 ): 'unfinished' | 'finished' | undefined => {
-  const keyed = session.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+  const keyed = session.messages.findLast((message) => carriesKey(message, idempotencyKey));
   if (keyed === undefined) {
     return undefined;
   }
@@ -5716,6 +5737,8 @@ export interface RunInput {
    * `workItemState` and the gateway's `DispatchInput.idempotencyKey`.
    */
   idempotencyKey?: string;
+  /** Keys of dispatches folded into this turn; see `Message.absorbedKeys`. */
+  absorbedKeys?: string[];
   /**
    * Whether this turn may run on a provider that hosts its own tool loop,
    * stored on the user message (`Message.hostedLoop`). The host knows what
@@ -5759,6 +5782,8 @@ export interface ResumeInput {
   addressed?: boolean;
   /** See `RunInput.idempotencyKey`. */
   idempotencyKey?: string;
+  /** See `RunInput.absorbedKeys`. */
+  absorbedKeys?: string[];
   /** See `RunInput.hostedLoop`. */
   hostedLoop?: boolean;
   /**
@@ -6234,6 +6259,7 @@ export class AgentRunner {
       ...userImages(input.images),
       ...(input.addressed === false ? { overheard: true } : {}),
       ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.absorbedKeys !== undefined && input.absorbedKeys.length > 0 ? { absorbedKeys: [...input.absorbedKeys] } : {}),
       ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
     };
     omitImagesOutsideReplayBudget([opening], this.imageReplayBudget);
@@ -6337,6 +6363,7 @@ export class AgentRunner {
       // frames it from the same mark.
       ...(input.addressed === false ? { overheard: true } : {}),
       ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.absorbedKeys !== undefined && input.absorbedKeys.length > 0 ? { absorbedKeys: [...input.absorbedKeys] } : {}),
       ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
     });
     // Before the save below: the row that carries this turn is the row

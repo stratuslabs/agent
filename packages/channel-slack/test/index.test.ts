@@ -8754,6 +8754,46 @@ test('a repeat of a turn another delivery is still waiting on posts nothing', as
   }
 });
 
+test('a message absorbed into a merged turn posts nothing, and it asked to be merged', async () => {
+  // Card 423: the merged turn's leading message posts the one answer; an
+  // absorbed one takes down what it put up, failure or not.
+  for (const fails of [false, true]) {
+    let optedIn = false;
+    const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'one answer for both'));
+    const gateway: StubGateway = {
+      ...stub,
+      async dispatch(input) {
+        optedIn = input.onAbsorbed !== undefined;
+        input.onAbsorbed?.();
+        if (fails) {
+          throw new Error('the provider refused the request');
+        }
+        return sessionWithReply(input.sessionId, 'one answer for both');
+      },
+    };
+    for (const replies of ['stream', 'final'] as const) {
+      const web = createFakeWeb('B-AVA', 'T1');
+      const socket = createFakeSocket();
+      const statuses = recordStatuses(web);
+      const adapter = createAdapterAsShipped({
+        agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
+        editIntervalMs: 0,
+        createSocketClient: () => socket,
+        createWebClient: () => web,
+      });
+      await adapter.start(gateway);
+      await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+      await adapter.stop();
+      const label = `${fails ? 'failed' : 'answered'}, ${replies}`;
+      assert.ok(optedIn, `${label}: the adapter did not opt into merged turns`);
+      assert.equal(web.posts.length, web.deletes.length, `${label}: a placeholder stayed up`);
+      const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+      assert.ok(!said.some((text) => text?.includes('one answer for both') || text?.includes('refused')), `${label}: the absorbed message answered`);
+      assert.equal(statuses.at(-1)?.status ?? '', '', `${label}: a loading status stayed up`);
+    }
+  }
+});
+
 test('a repeat of a failed turn posts the failure, and a live repeat of one posts nothing', async () => {
   const failed = (sessionId: string, key: string): Session => {
     const now = new Date().toISOString();
