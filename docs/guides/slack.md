@@ -210,6 +210,18 @@ Restart the daemon to apply it. In `stream` mode the setting is made when
 the placeholder is posted; Slack's edit call takes no preview setting of its
 own.
 
+## Stopping a turn
+
+Reply `stop` in the thread (or the DM) while the agent is working, or
+`@agent stop` when more than one agent is in the thread. The agent's running
+turn is cancelled, along with any of its turns queued behind it in that
+conversation, and the reply reads "Stopped by @you." A tool call in progress
+is cancelled the same way a timeout cancels it, and an approval it was
+waiting on is cancelled and its card says so.
+
+Only the agent's approvers (`approvals.slackApprovers`) can stop it. From
+anyone else, or when nothing is running, `stop` is an ordinary message.
+
 ## Sending an image
 
 Attach a screenshot — a PNG, JPEG, GIF, or WebP — to a message, or drop one

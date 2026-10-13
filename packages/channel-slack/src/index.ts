@@ -21,6 +21,7 @@ import {
   IMAGE_ATTACHMENT_MAX_DIMENSION,
   IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
   escapeControlCharacters,
+  RunAbortedError,
   type AlwaysMeans,
   type CredentialScope,
   type ApprovalAnswer,
@@ -824,6 +825,14 @@ class ReplyRenderer {
    * not be this one.
    */
   readonly turnId: string = randomUUID();
+  /**
+   * What a Slack stop aborts (card 337): the signal this renderer's dispatch
+   * runs under, so a stop cancels this turn whether it is running or still
+   * queued behind another.
+   */
+  readonly controller = new AbortController();
+  /** The Slack user who stopped this turn, once someone has. */
+  stoppedBy: string | undefined;
   private buffer = '';
   /**
    * In `final` mode, what the model has said since its last tool call. A
@@ -1645,6 +1654,19 @@ class ReplyRenderer {
     } finally {
       this.settle();
     }
+  }
+
+  /**
+   * Ends a turn an approver stopped from Slack: says who stopped it where
+   * the reply would have gone. A turn nobody asked for that had said
+   * nothing stays silent, as its failure would.
+   */
+  async stopped(by: string): Promise<ReplyOutcome> {
+    await this.editChain;
+    if (this.lazy && !this.ref && this.buffer.trim().length === 0) {
+      return this.finalize('');
+    }
+    return this.finalize(`Stopped by <@${by}>.`);
   }
 
   async fail(message: string): Promise<ReplyOutcome> {
@@ -2528,6 +2550,21 @@ const textAttachmentBlocks = (texts: ReadonlyArray<{ name: string; text: string 
  */
 const mentions = (text: string, botUserId: string): boolean =>
   botUserId.length > 0 && text.includes(`<@${botUserId}>`);
+
+/**
+ * Whether a message asks this agent to stop (card 337): the word "stop"
+ * and nothing else but mentions and closing punctuation, in any case. A
+ * message that mentions someone and not this agent is for them. Exported
+ * for tests.
+ */
+export const isStopRequest = (text: string, botUserId: string): boolean => {
+  const mentioned = [...text.matchAll(/<@([^>|]+)(?:\|[^>]*)?>/g)].map((match) => match[1]);
+  if (mentioned.length > 0 && !mentioned.includes(botUserId)) {
+    return false;
+  }
+  const words = text.replace(/<@[^>|]+(?:\|[^>]*)?>/g, ' ').trim().replace(/[.!]+$/, '').trim();
+  return words.toLowerCase() === 'stop';
+};
 
 /**
  * Slack's three markup characters. Tool input is written by a model, so it
@@ -5365,6 +5402,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     const { event, isDm, team, userId, thread, sessionId, threadKey, eventKey } = admitted;
+
+    // Stop (card 337): an approver's "stop" cancels every turn this agent is
+    // running or has queued in this conversation. Handled here, off the
+    // intake chain and before any dispatch, so it is never queued behind
+    // the turn it stops nor merged into the next one. Approvers only: a
+    // stop throws away work someone else asked for. With nothing running,
+    // or from anyone else, it is an ordinary message.
+    const running = renderers.get(sessionId) ?? [];
+    if (
+      running.length > 0 &&
+      isStopRequest(event.text ?? '', connection.botUserId) &&
+      (connection.config.approvers ?? []).includes(userId)
+    ) {
+      for (const renderer of running) {
+        if (renderer.stoppedBy === undefined) {
+          renderer.stoppedBy = userId;
+          renderer.controller.abort(new RunAbortedError(`Stopped from Slack by ${userId}`));
+        }
+      }
+      log(`slack: ${userId} stopped ${running.length} turn(s) of ${connection.config.agentId} in ${event.channel}`);
+      return;
+    }
+
     // What the gateway knows this message by (see `dispatchKeyFor`).
     const dispatchKey = dispatchKeyFor(eventKey);
 
@@ -5639,6 +5699,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ...(earlier.length > 0 ? { earlier } : {}),
         turnId: renderer.turnId,
         metadata,
+        signal: renderer.controller.signal,
         // A redelivery this process no longer remembers (it restarted, or
         // the dedupe evicted it) is still the message it was: the gateway
         // runs no second turn for it, and says so through `onRepeat`.
@@ -5799,7 +5860,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // not a failure of the agent. Matched by name, as this package does
       // not import the gateway. A turn nobody asked for stays silent.
       const pausedReply = failure instanceof Error && failure.name === 'IntakePausedError';
-      const { spoke, spokeAt } = pausedReply
+      const { spoke, spokeAt } = renderer.stoppedBy !== undefined
+        ? await renderer.stopped(renderer.stoppedBy)
+        : pausedReply
         ? await renderer.finalize(renderer.lazy ? '' : (failure as Error).message)
         : await renderer.fail(failure instanceof Error ? failure.message : String(failure));
       if (spoke && threadKey !== undefined) {

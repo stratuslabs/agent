@@ -9,6 +9,7 @@ import type { ChannelCredentialRequest, GatewayLike } from '@stratusagent/channe
 import {
   createSlackChannelAdapter as createAdapterAsShipped,
   createSlackFileFetcher,
+  isStopRequest,
   type SlackAdapterOptions,
   type SlackBlock,
   type SlackInboundFile,
@@ -10517,4 +10518,157 @@ test('a paused daemon answers a mention with its pause sentence, not as a failur
   const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
   assert.ok(said.includes("I'm paused: this workspace's usage limit is reached."), said.join('\n'));
   assert.ok(!said.some((text) => /Something went wrong/.test(text ?? '')), said.join('\n'));
+});
+
+// Card 337: an approver's "stop" in the conversation cancels the agent's turn.
+
+test('isStopRequest: the word stop, alone or with this agent named, in any case', () => {
+  for (const text of ['stop', 'Stop.', 'STOP!', '  stop  ', '<@B-AVA> stop', 'stop <@B-AVA|ava>']) {
+    assert.equal(isStopRequest(text, 'B-AVA'), true, text);
+  }
+  for (const text of ['stop that', "don't stop", 'stopping', '<@B-BEA> stop', 'stop?', '']) {
+    assert.equal(isStopRequest(text, 'B-AVA'), false, text);
+  }
+});
+
+/** A stub gateway whose turns run until their signal aborts, or `finish` ends them. */
+const stoppableGateway = () => {
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  const signals: Array<AbortSignal | undefined> = [];
+  const finishers: Array<() => void> = [];
+  const inner = gateway.dispatch.bind(gateway);
+  gateway.dispatch = async (input) => {
+    signals.push(input.signal);
+    // One turn at a time per session, as the gateway runs them.
+    const previous = chain;
+    let release!: () => void;
+    chain = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      await previous;
+      if (input.signal?.aborted) {
+        throw input.signal.reason;
+      }
+      return await inner({
+        ...input,
+        // The stub's reply ignores the signal, so the wait lives here.
+      }).then(async (session) => {
+        await new Promise<void>((resolve, reject) => {
+          finishers.push(resolve);
+          input.signal?.addEventListener('abort', () => reject(input.signal?.reason), { once: true });
+        });
+        return sessionWithReply(input.sessionId, `answer to ${input.userMessage}`);
+      });
+    } finally {
+      release();
+    }
+  };
+  let chain: Promise<void> = Promise.resolve();
+  return { gateway, signals, finishers };
+};
+
+const stopAdapter = (approvers: string[], replies: 'stream' | 'final' = 'stream') => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const logs: string[] = [];
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers, replies }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: (line) => logs.push(line),
+  });
+  return { socket, web, adapter, logs };
+};
+
+const until = async (check: () => boolean): Promise<void> => {
+  for (let i = 0; i < 200 && !check(); i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(check(), 'condition never held');
+};
+
+test("an approver's stop in the thread cancels the running turn and the one queued behind it, and is never dispatched", async () => {
+  const { gateway, signals } = stoppableGateway();
+  const { socket, web, adapter, logs } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  void socket.deliver('app_mention', mention('<@B-AVA> long job'));
+  await until(() => signals.length === 1);
+  void socket.deliver('message', channelMessage({ text: 'and another', ts: '100.2', thread: '100.1' }));
+  await until(() => signals.length === 2);
+  await socket.deliver('message', channelMessage({ text: 'stop', ts: '100.3', thread: '100.1' }));
+  await socket.settled();
+
+  assert.equal(signals.length, 2, 'the stop itself is not a turn');
+  assert.ok(signals.every((signal) => signal?.aborted === true));
+  const finals = web.updates.map((update) => update.text);
+  assert.equal(finals.filter((text) => text === 'Stopped by <@U-DYLAN>.').length, 2);
+  assert.ok(!finals.some((text) => text?.startsWith('Something went wrong')));
+  assert.ok(logs.some((line) => line.includes('U-DYLAN stopped 2 turn(s) of ava')));
+  await adapter.stop();
+});
+
+test('a stop from someone who is not an approver is an ordinary message, and nothing is cancelled', async () => {
+  const { gateway, signals, finishers } = stoppableGateway();
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  void socket.deliver('app_mention', mention('<@B-AVA> long job'));
+  await until(() => signals.length === 1);
+  void socket.deliver('message', channelMessage({ text: 'stop', ts: '100.2', thread: '100.1', user: 'U-OTHER' }));
+  await until(() => signals.length === 2);
+  assert.equal(signals[0]?.aborted, false);
+  finishers.shift()?.();
+  await until(() => finishers.length === 1);
+  finishers.shift()?.();
+  await socket.settled();
+  assert.equal(gateway.dispatches.at(-1)?.userMessage.endsWith('stop'), true);
+  assert.ok(!web.updates.some((update) => update.text?.startsWith('Stopped by')));
+  await adapter.stop();
+});
+
+test('with no approvers configured nobody can stop from Slack', async () => {
+  const { gateway, signals, finishers } = stoppableGateway();
+  const { socket, adapter } = stopAdapter([]);
+  await adapter.start(gateway);
+
+  void socket.deliver('app_mention', mention('<@B-AVA> long job'));
+  await until(() => signals.length === 1);
+  void socket.deliver('message', channelMessage({ text: 'stop', ts: '100.2', thread: '100.1' }));
+  await until(() => signals.length === 2);
+  assert.equal(signals[0]?.aborted, false);
+  finishers.shift()?.();
+  await until(() => finishers.length === 1);
+  finishers.shift()?.();
+  await socket.settled();
+  await adapter.stop();
+});
+
+test('a stop with nothing running is an ordinary message to the agent', async () => {
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  const { socket, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop'));
+  await socket.settled();
+  assert.equal(gateway.dispatches.length, 1);
+  assert.match(gateway.dispatches[0]?.userMessage ?? '', /stop/);
+  await adapter.stop();
+});
+
+test('in the default final reply mode a stopped turn posts who stopped it in the thread', async () => {
+  const { gateway, signals } = stoppableGateway();
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN'], 'final');
+  await adapter.start(gateway);
+
+  void socket.deliver('app_mention', mention('<@B-AVA> long job'));
+  await until(() => signals.length === 1);
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> stop', ts: '100.2', thread: '100.1' }));
+  await socket.settled();
+
+  assert.equal(signals[0]?.aborted, true);
+  const said = [...web.posts, ...web.updates].map((message) => message.text);
+  assert.ok(said.includes('Stopped by <@U-DYLAN>.'), JSON.stringify(said));
+  assert.equal(web.posts.find((post) => post.text === 'Stopped by <@U-DYLAN>.')?.thread_ts, '100.1');
+  await adapter.stop();
 });
