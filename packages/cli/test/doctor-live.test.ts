@@ -28,7 +28,7 @@ const createStreams = () => {
  */
 const doctor = async (
   argv: string[],
-  answer: number | 'offline' | 'hang',
+  answer: number | 'offline' | 'hang' | ((url: string) => Response),
   credential: Record<string, unknown> = { type: 'api_key', value: 'sk-ant-stored' },
 ) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
@@ -39,9 +39,16 @@ const doctor = async (
     { mode: 0o600 },
   );
   await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ anthropic: credential }));
-  const calls: Array<{ url: string; key: string | undefined }> = [];
+  const calls: Array<{ url: string; key: string | undefined; body?: unknown }> = [];
   const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
-    calls.push({ url: String(url), key: (init?.headers as Record<string, string> | undefined)?.['x-api-key'] });
+    calls.push({
+      url: String(url),
+      key: (init?.headers as Record<string, string> | undefined)?.['x-api-key'],
+      ...(typeof init?.body === 'string' ? { body: JSON.parse(init.body) as unknown } : {}),
+    });
+    if (typeof answer === 'function') {
+      return answer(String(url));
+    }
     if (answer === 'offline') {
       throw new TypeError('fetch failed');
     }
@@ -68,17 +75,64 @@ test('doctor without --live never calls a provider', async () => {
   assert.doesNotMatch(output.stdout, /Live check/);
 });
 
-test('doctor --live says the provider accepted the key a run would send', async () => {
+test('doctor --live says the provider accepted the key and the configured model answered', async () => {
   const { exitCode, calls, output } = await doctor(['doctor', '--live'], 200);
   assert.equal(exitCode, 0);
-  assert.deepEqual(calls, [{ url: 'https://api.anthropic.com/v1/models', key: 'sk-ant-stored' }]);
-  assert.match(output.stdout, /Live check\n {2}anthropic +key accepted/);
+  assert.deepEqual(calls, [
+    { url: 'https://api.anthropic.com/v1/models', key: 'sk-ant-stored' },
+    {
+      url: 'https://api.anthropic.com/v1/messages',
+      key: 'sk-ant-stored',
+      body: { model: 'claude-opus-5', max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] },
+    },
+  ]);
+  assert.match(output.stdout, /Live check\n {2}anthropic +key accepted · claude-opus-5 answered/);
   assert.match(output.stdout, /No problems found\./);
 });
 
-test('doctor --live makes a refused key a problem', async () => {
-  const { exitCode, output } = await doctor(['doctor', '--live'], 401);
+/** Accepts the key, then answers the one-token call with `status` and an API-style error body. */
+const modelAnswers = (status: number, message?: string) => (url: string) => (url.endsWith('/v1/models')
+  ? new Response('{}', { status: 200 })
+  : new Response(JSON.stringify(message ? { type: 'error', error: { type: 'x', message } } : {}), { status }));
+
+test('doctor --live makes a model the provider will not run a problem, with its reason', async () => {
+  const { exitCode, output } = await doctor(['doctor', '--live'], modelAnswers(404, 'model: claude-opus-5'));
   assert.equal(exitCode, 1);
+  assert.match(output.stdout, /anthropic +key accepted · claude-opus-5 refused \(HTTP 404: model: claude-opus-5\)/);
+  assert.match(output.stdout, /anthropic accepted the key but would not run claude-opus-5 \(HTTP 404: model: claude-opus-5\), so every such run fails/);
+});
+
+test('doctor --live reports an account the provider will not bill as a problem', async () => {
+  const { exitCode, output } = await doctor(['doctor', '--live'], modelAnswers(400, 'Your credit balance is too low to access the Anthropic API.'));
+  assert.equal(exitCode, 1);
+  assert.match(output.stdout, /claude-opus-5 refused \(HTTP 400: Your credit balance is too low/);
+});
+
+test('doctor --live does not condemn a model when the provider is busy', async () => {
+  for (const status of [429, 500, 529]) {
+    const { exitCode, output } = await doctor(['doctor', '--live'], modelAnswers(status, 'Overloaded'));
+    assert.equal(exitCode, 0, `HTTP ${status}`);
+    assert.match(output.stdout, new RegExp(`claude-opus-5 did not answer \\(HTTP ${status}: Overloaded\\); the model was not judged`));
+    assert.match(output.stdout, /No problems found\./);
+  }
+});
+
+test('doctor --live --format json carries the model check', async () => {
+  const { output } = await doctor(['doctor', '--live', '--format', 'json'], modelAnswers(404, 'model: claude-opus-5'));
+  const report = JSON.parse(output.stdout) as { keyChecks: unknown[] };
+  assert.deepEqual(report.keyChecks, [{
+    provider: 'anthropic',
+    role: 'default',
+    status: 'accepted',
+    model: { id: 'claude-opus-5', status: 'refused', detail: 'HTTP 404: model: claude-opus-5' },
+  }]);
+});
+
+test('doctor --live makes a refused key a problem', async () => {
+  const { exitCode, output, calls } = await doctor(['doctor', '--live'], 401);
+  assert.equal(exitCode, 1);
+  // A refused key has nothing to ask the model with.
+  assert.equal(calls.length, 1);
   assert.match(output.stdout, /anthropic +key refused \(HTTP 401\)/);
   assert.match(output.stdout, /anthropic refused the key your runs send \(HTTP 401\)/);
 });
@@ -119,6 +173,28 @@ test('doctor --live gives up on a provider that never answers and does not judge
     const { exitCode, output } = await run;
     assert.equal(exitCode, 0);
     assert.match(output.stdout, /anthropic +no answer \(no answer within 10s\); the key was not judged/);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('doctor --live gives up on a model reply that stalls mid-body', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    // Headers arrive, the body never finishes.
+    const run = doctor(['doctor', '--live'], (url) => (url.endsWith('/v1/models')
+      ? new Response('{}', { status: 200 })
+      : new Response(new ReadableStream({ start() {} }), { status: 500 })));
+    let finished = false;
+    void run.then(() => { finished = true; });
+    for (let i = 0; i < 200 && !finished; i += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      mock.timers.tick(5_000);
+    }
+    assert.ok(finished, 'doctor --live hung on a reply body that never finished');
+    const { exitCode, output } = await run;
+    assert.equal(exitCode, 0);
+    assert.match(output.stdout, /claude-opus-5 did not answer \(no answer within 10s\); the model was not judged/);
   } finally {
     mock.timers.reset();
   }

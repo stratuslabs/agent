@@ -30,6 +30,7 @@ import {
   type LegacyWorkspaceState,
   quoteShellArg,
   verifyProviderKey,
+  probeProviderModel,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
 import { callRunningGateway, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
@@ -47,6 +48,12 @@ export interface DoctorKeyCheck {
   role: 'default' | 'fallback';
   status: 'accepted' | 'rejected' | 'unreachable' | 'not checked';
   detail?: string;
+  /**
+   * Once the key is accepted: what the run's model said to a one-token call.
+   * `refused` is the provider declining it (unknown model, no credit);
+   * `no answer` is offline, rate-limited or overloaded and judges nothing.
+   */
+  model?: { id: string; status: 'answered' | 'refused' | 'no answer' | 'not checked'; detail?: string };
 }
 
 /** The key and endpoint a run would send, or why there is none to check. */
@@ -64,7 +71,7 @@ const keyToCheck = (
   return { skip: 'no key' };
 };
 
-/** A provider's models list answers in well under a second; past this, doctor reports no answer instead of hanging. */
+/** A provider's models list or a one-token reply comes back in seconds; past this, doctor reports no answer instead of hanging. */
 const KEY_CHECK_TIMEOUT_MS = 10_000;
 
 /**
@@ -81,7 +88,11 @@ const withDeadline = (fetchImpl: typeof fetch): typeof fetch => (async (input: P
     }, KEY_CHECK_TIMEOUT_MS);
   });
   try {
-    return await Promise.race([fetchImpl(input, { ...init, signal: controller.signal }), expired]);
+    const response = await Promise.race([fetchImpl(input, { ...init, signal: controller.signal }), expired]);
+    // Read the body under the same deadline, so a reply that stalls
+    // mid-body cannot hang doctor either.
+    const body = await Promise.race([response.text(), expired]);
+    return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   } finally {
     clearTimeout(timer);
   }
@@ -90,22 +101,26 @@ const withDeadline = (fetchImpl: typeof fetch): typeof fetch => (async (input: P
 /**
  * `--live`: the one part of doctor that leaves the machine. Each provider a
  * run consults is asked whether it accepts the key that run would send —
- * the same free models-list call setup makes when the key is entered. Only
- * a refusal is a problem: an unreachable endpoint says nothing about the key.
+ * the same free models-list call setup makes when the key is entered. An
+ * accepted key is then used for a one-token call to the run's model, which
+ * catches an unknown model or an account the provider will not bill. Only
+ * a refusal is a problem: no answer says nothing about the key or model.
  */
 const checkKeys = async (
   resolved: RuntimeConfig,
   env: CliEnvironment,
   problems: string[],
 ): Promise<DoctorKeyCheck[]> => {
-  const targets: Array<{ provider: CredentialProviderName; role: DoctorKeyCheck['role']; runtime: { apiKey?: string; authToken?: string; baseUrl?: string } }> = [];
+  type Target = { provider: CredentialProviderName; role: DoctorKeyCheck['role']; model: string; runtime: { apiKey?: string; authToken?: string; baseUrl?: string } };
+  const targets: Target[] = [];
   if (isSignedInRuntime(resolved)) {
-    targets.push({ provider: resolved.provider, role: 'default', runtime: resolved as { apiKey?: string; authToken?: string; baseUrl?: string } });
+    targets.push({ provider: resolved.provider, role: 'default', model: resolved.model, runtime: resolved as Target['runtime'] });
   }
   const fallback = resolved.provider !== 'demo' ? resolved.fallback : undefined;
   if (fallback && (CREDENTIAL_PROVIDER_NAMES as readonly string[]).includes(fallback.provider)) {
-    targets.push({ provider: fallback.provider as CredentialProviderName, role: 'fallback', runtime: fallback });
+    targets.push({ provider: fallback.provider as CredentialProviderName, role: 'fallback', model: fallback.model, runtime: fallback });
   }
+  const fetchImpl = withDeadline(env.fetch ?? globalThis.fetch);
   const checks: DoctorKeyCheck[] = [];
   for (const target of targets) {
     const plan = keyToCheck(target.provider, target.runtime);
@@ -113,9 +128,24 @@ const checkKeys = async (
       checks.push({ provider: target.provider, role: target.role, status: 'not checked', detail: plan.skip });
       continue;
     }
-    const verdict = await verifyProviderKey(target.provider, plan.key, plan.baseUrl, withDeadline(env.fetch ?? globalThis.fetch));
+    const verdict = await verifyProviderKey(target.provider, plan.key, plan.baseUrl, fetchImpl);
     const status = verdict.status === 'ok' ? 'accepted' : verdict.status;
-    checks.push({ provider: target.provider, role: target.role, status, ...(verdict.detail ? { detail: verdict.detail } : {}) });
+    const check: DoctorKeyCheck = { provider: target.provider, role: target.role, status, ...(verdict.detail ? { detail: verdict.detail } : {}) };
+    checks.push(check);
+    if (status === 'accepted') {
+      if (target.provider === 'codex') {
+        check.model = { id: target.model, status: 'not checked', detail: 'codex runs it through its own harness' };
+      } else {
+        const reply = await probeProviderModel(target.provider, plan.key, target.model, plan.baseUrl, fetchImpl);
+        check.model = { id: target.model, status: reply.status, ...(reply.detail ? { detail: reply.detail } : {}) };
+        if (reply.status === 'refused') {
+          problems.push(
+            `${target.provider} accepted the key but would not run ${target.model} (${reply.detail ?? 'refused'}), so every such run fails. `
+            + 'Choose a model the account can use with `stratus setup` → Model, or check the account\'s billing.',
+          );
+        }
+      }
+    }
     if (status === 'rejected') {
       problems.push(
         `${target.provider} refused the key ${target.role === 'default' ? 'your runs' : 'fallback runs'} send (${verdict.detail ?? 'auth failed'}), so every such run fails. `
@@ -802,7 +832,16 @@ export const runDoctor = async (
           : check.status === 'unreachable'
             ? `no answer (${check.detail ?? 'unreachable'}); the key was not judged`
             : `not checked: ${check.detail ?? ''}`;
-      writeLine(streams.stdout, `  ${check.provider.padEnd(10)}${what}${check.role === 'fallback' ? ' (fallback)' : ''}`);
+      const model = check.model === undefined
+        ? ''
+        : check.model.status === 'answered'
+          ? ` · ${check.model.id} answered`
+          : check.model.status === 'refused'
+            ? ` · ${check.model.id} refused (${check.model.detail ?? 'refused'})`
+            : check.model.status === 'no answer'
+              ? ` · ${check.model.id} did not answer (${check.model.detail ?? 'unreachable'}); the model was not judged`
+              : ` · ${check.model.id} not checked: ${check.model.detail ?? ''}`;
+      writeLine(streams.stdout, `  ${check.provider.padEnd(10)}${what}${model}${check.role === 'fallback' ? ' (fallback)' : ''}`);
     }
   }
 

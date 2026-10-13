@@ -18,6 +18,7 @@ import {
   saveConfigFile,
   servedRuntimes,
   verifyProviderKey,
+  probeProviderModel,
   type StateEnvironment,
 } from '../src/index.ts';
 
@@ -155,6 +156,33 @@ test('verifyProviderKey condemns a key only on an explicit auth failure', async 
 
   const ok = await verifyProviderKey('anthropic', 'sk-ant', undefined, async () => jsonResponse({ data: [] }));
   assert.equal(ok.status, 'ok');
+});
+
+test('probeProviderModel sends an OpenAI-compatible run its own shape and judges only a refusal', async () => {
+  const asked: Array<{ url: string; auth: string | null; body: unknown }> = [];
+  const answered = await probeProviderModel('openai', 'sk-good', 'gpt-4.1-mini', 'http://localhost:1234/v1/', (async (input: string | URL | Request, init?: RequestInit) => {
+    asked.push({ url: String(input), auth: new Headers(init?.headers).get('authorization'), body: JSON.parse(String(init?.body)) });
+    return jsonResponse({ choices: [] });
+  }) as typeof fetch);
+  assert.equal(answered.status, 'answered');
+  // No output cap: the adapter sends none on a run, and some models refuse `max_tokens`.
+  assert.deepEqual(asked, [{
+    url: 'http://localhost:1234/v1/chat/completions',
+    auth: 'Bearer sk-good',
+    body: { model: 'gpt-4.1-mini', messages: [{ role: 'user', content: 'ping' }] },
+  }]);
+
+  const unknown = await probeProviderModel('openai', 'sk-good', 'gpt-nope', undefined, async () =>
+    new Response(JSON.stringify({ error: { message: `The model \`gpt-nope\` does not exist${' x'.repeat(200)}` } }), { status: 404 }));
+  assert.equal(unknown.status, 'refused');
+  assert.match(unknown.detail ?? '', /^HTTP 404: The model `gpt-nope` does not exist/);
+  assert.ok((unknown.detail ?? '').length <= 'HTTP 404: '.length + 200, 'a long provider message is cut to one line');
+
+  const notJson = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined, async () => new Response('<html>bad gateway</html>', { status: 502 }));
+  assert.deepEqual(notJson, { status: 'no answer', detail: 'HTTP 502' });
+
+  const offline = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined, async () => { throw new TypeError('fetch failed'); });
+  assert.deepEqual(offline, { status: 'no answer', detail: 'fetch failed' });
 });
 
 test('collectAvailableModels never sends the default provider secret to a second provider', async () => {

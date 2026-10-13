@@ -96,6 +96,82 @@ export const verifyProviderKey = async (
   }
 };
 
+/**
+ * What a one-token call to a model concluded. `refused` is the provider
+ * answering and declining the request (unknown model, no credit, a model the
+ * key may not use); `no answer` is offline, rate-limited or overloaded, which
+ * says nothing about the model.
+ */
+export interface ProviderModelVerdict {
+  status: 'answered' | 'refused' | 'no answer';
+  detail?: string;
+}
+
+/** Long enough to read the cause, short enough for one doctor line. */
+const MODEL_ERROR_DETAIL_LIMIT = 200;
+
+const errorDetail = async (response: Response): Promise<string> => {
+  let message: string | undefined;
+  try {
+    const body = await response.json() as { error?: { message?: unknown } | string; message?: unknown };
+    const raw = typeof body.error === 'string' ? body.error : body.error?.message ?? body.message;
+    message = typeof raw === 'string' && raw.trim() ? raw.trim().replace(/\s+/g, ' ') : undefined;
+  } catch {
+    // Not JSON: the status alone is the answer.
+  }
+  if (message && message.length > MODEL_ERROR_DETAIL_LIMIT) {
+    message = `${message.slice(0, MODEL_ERROR_DETAIL_LIMIT - 1)}…`;
+  }
+  return message ? `HTTP ${response.status}: ${message}` : `HTTP ${response.status}`;
+};
+
+/**
+ * Ask `model` for a reply as small as the provider allows, with the key a run
+ * would send. A key check proves the key; only this proves the run's model
+ * answers on that account. It is a billed call (one output token on
+ * Anthropic), so callers make it only when asked.
+ */
+export const probeProviderModel = async (
+  provider: 'anthropic' | 'openai',
+  key: string,
+  model: string,
+  baseUrl: string | undefined,
+  fetchImpl: typeof fetch | undefined,
+): Promise<ProviderModelVerdict> => {
+  if (typeof fetchImpl !== 'function') {
+    return { status: 'no answer', detail: 'fetch is unavailable' };
+  }
+  const root = (baseUrl ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL)).replace(/\/+$/, '');
+  const messages = [{ role: 'user', content: 'ping' }];
+  // The OpenAI-compatible adapter sends no output cap on a run, and some of
+  // its models refuse `max_tokens`, so neither does this.
+  const request = provider === 'anthropic'
+    ? {
+        url: `${root}/v1/messages`,
+        headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: { model, max_tokens: 1, messages },
+      }
+    : {
+        url: `${root}/chat/completions`,
+        headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+        body: { model, messages },
+      };
+  try {
+    const response = await fetchImpl(request.url, { method: 'POST', headers: request.headers, body: JSON.stringify(request.body) });
+    if (response.ok) {
+      return { status: 'answered' };
+    }
+    const detail = await errorDetail(response);
+    // Rate limits and server trouble pass; they say nothing about the model.
+    if (response.status === 408 || response.status === 429 || response.status >= 500) {
+      return { status: 'no answer', detail };
+    }
+    return { status: 'refused', detail };
+  } catch (error) {
+    return { status: 'no answer', detail: error instanceof Error ? error.message : String(error) };
+  }
+};
+
 /** One model a stored sign-in can actually reach. */
 export interface CatalogModel {
   provider: CredentialProviderName;
