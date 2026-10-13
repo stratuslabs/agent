@@ -106,3 +106,18 @@ test('a host loads the harness providers only when a turn runs on one, and says 
   // object serves the next turn with no restart.
   assert.deepEqual(out.subscriptionInstalled, { ok: true, text: 'hello from claude-code' });
 });
+
+test('a harness that is installed but missing one of its own dependencies keeps its real error', async () => {
+  const { harnessNotInstalledError } = await import('../src/provider-runtime.ts');
+  const missing = (message: string) => Object.assign(new Error(message), { code: 'ERR_MODULE_NOT_FOUND' });
+
+  const absent = harnessNotInstalledError('codex', missing("Cannot find package '@stratusagent/provider-codex' imported from /usr/lib/node_modules/@stratusagent/state/dist/provider-runtime.js"));
+  assert.match(absent?.message ?? '', /@stratusagent\/provider-codex is not installed/);
+
+  // The importer's path names the harness, but the package missing is its dependency.
+  const broken = missing("Cannot find package 'missing-child' imported from /usr/lib/node_modules/@stratusagent/provider-codex/dist/index.js");
+  assert.equal(harnessNotInstalledError('codex', broken), undefined);
+  // Same for a file missing inside an installed harness.
+  const truncated = missing("Cannot find module '/usr/lib/node_modules/@stratusagent/provider-claude-code/dist/index.js' imported from /usr/lib/node_modules/@stratusagent/state/dist/provider-runtime.js");
+  assert.equal(harnessNotInstalledError('claude-code', truncated), undefined);
+});

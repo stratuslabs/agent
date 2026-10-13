@@ -321,15 +321,16 @@ const HARNESS_PACKAGES: Record<HarnessName, { specifier: string; label: string }
 
 /**
  * The error a turn fails with when its harness package is missing, or
- * `undefined` when `error` is anything else. Matched on the specifier as
- * well as the code, because a harness that is installed but fails to load
- * one of its own dependencies is a different fault with a different fix.
+ * `undefined` when `error` is anything else. Matched on the package Node
+ * names as missing, not just the code: a harness that is installed but
+ * fails to load one of its own dependencies (whose importer path also
+ * contains the specifier) is a different fault with a different fix.
  */
 export const harnessNotInstalledError = (harness: HarnessName, error: unknown): Error | undefined => {
   const { specifier, label } = HARNESS_PACKAGES[harness];
   const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
   const message = error instanceof Error ? error.message : '';
-  if (code !== 'ERR_MODULE_NOT_FOUND' || !message.includes(specifier)) return undefined;
+  if (code !== 'ERR_MODULE_NOT_FOUND' || !message.startsWith(`Cannot find package '${specifier}'`)) return undefined;
   return new Error(
     `This agent runs on ${label}, and ${specifier} is not installed. `
     + `Install it with \`npm install -g ${specifier}\` (or choose the provider again in \`stratus setup\`), then send the message again.`,
