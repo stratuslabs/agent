@@ -110,20 +110,43 @@ export interface ProviderModelVerdict {
 /** Long enough to read the cause, short enough for one doctor line. */
 const MODEL_ERROR_DETAIL_LIMIT = 200;
 
-const errorDetail = async (response: Response): Promise<string> => {
+/**
+ * The status and the provider's own message, cut to one line, plus the error
+ * code or type it gave (`insufficient_quota`, `rate_limit_error`), if any.
+ */
+const readError = async (response: Response): Promise<{ detail: string; message?: string; code?: string }> => {
   let message: string | undefined;
+  let code: string | undefined;
   try {
-    const body = await response.json() as { error?: { message?: unknown } | string; message?: unknown };
+    const body = await response.json() as { error?: { message?: unknown; code?: unknown; type?: unknown } | string; message?: unknown };
     const raw = typeof body.error === 'string' ? body.error : body.error?.message ?? body.message;
     message = typeof raw === 'string' && raw.trim() ? raw.trim().replace(/\s+/g, ' ') : undefined;
+    if (typeof body.error === 'object' && body.error) {
+      const named = typeof body.error.code === 'string' ? body.error.code : body.error.type;
+      code = typeof named === 'string' ? named : undefined;
+    }
   } catch {
     // Not JSON: the status alone is the answer.
   }
+  const full = message;
   if (message && message.length > MODEL_ERROR_DETAIL_LIMIT) {
     message = `${message.slice(0, MODEL_ERROR_DETAIL_LIMIT - 1)}…`;
   }
-  return message ? `HTTP ${response.status}: ${message}` : `HTTP ${response.status}`;
+  return {
+    detail: message ? `HTTP ${response.status}: ${message}` : `HTTP ${response.status}`,
+    ...(full ? { message: full } : {}),
+    ...(code ? { code } : {}),
+  };
 };
+
+/**
+ * A 429 that is the account having nothing to spend, not a busy minute:
+ * OpenAI says `insufficient_quota`, and a provider message about credit,
+ * billing or quota means the same. Every run would fail the same way.
+ */
+const isOutOfCredit = (error: { message?: string; code?: string }): boolean =>
+  error.code === 'insufficient_quota'
+  || /\b(credit balance|credits?|billing|quota)\b/i.test(error.message ?? '');
 
 /**
  * Ask `model` for a reply as small as the provider allows, with the key a run
@@ -161,8 +184,13 @@ export const probeProviderModel = async (
     if (response.ok) {
       return { status: 'answered' };
     }
-    const detail = await errorDetail(response);
+    const error = await readError(response);
+    const { detail } = error;
     // Rate limits and server trouble pass; they say nothing about the model.
+    // A 429 for an account with no credit is a refusal: no run would get through.
+    if (response.status === 429 && isOutOfCredit(error)) {
+      return { status: 'refused', detail };
+    }
     if (response.status === 408 || response.status === 429 || response.status >= 500) {
       return { status: 'no answer', detail };
     }

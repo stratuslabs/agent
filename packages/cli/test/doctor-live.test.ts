@@ -68,6 +68,19 @@ const doctor = async (
   return { exitCode, output, calls };
 };
 
+/**
+ * Run mocked timers forward until `done`, for up to 10 real seconds. A fixed
+ * number of turns is not enough on a slow runner: doctor reads files before
+ * it sets its deadline, and ticks before that move nothing.
+ */
+const driveClock = async (done: () => boolean): Promise<void> => {
+  const realDeadline = performance.now() + 10_000;
+  while (!done() && performance.now() < realDeadline) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    mock.timers.tick(5_000);
+  }
+};
+
 test('doctor without --live never calls a provider', async () => {
   const { exitCode, calls, output } = await doctor(['doctor'], 401);
   assert.equal(exitCode, 0);
@@ -165,10 +178,7 @@ test('doctor --live gives up on a provider that never answers and does not judge
     let finished = false;
     void run.then(() => { finished = true; });
     // Let doctor reach the probe, then run its deadline out.
-    for (let i = 0; i < 200 && !finished; i += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      mock.timers.tick(5_000);
-    }
+    await driveClock(() => finished);
     assert.ok(finished, 'doctor --live hung on a provider that never answered');
     const { exitCode, output } = await run;
     assert.equal(exitCode, 0);
@@ -187,10 +197,7 @@ test('doctor --live gives up on a model reply that stalls mid-body', async () =>
       : new Response(new ReadableStream({ start() {} }), { status: 500 })));
     let finished = false;
     void run.then(() => { finished = true; });
-    for (let i = 0; i < 200 && !finished; i += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      mock.timers.tick(5_000);
-    }
+    await driveClock(() => finished);
     assert.ok(finished, 'doctor --live hung on a reply body that never finished');
     const { exitCode, output } = await run;
     assert.equal(exitCode, 0);

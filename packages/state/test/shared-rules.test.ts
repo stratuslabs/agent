@@ -185,6 +185,31 @@ test('probeProviderModel sends an OpenAI-compatible run its own shape and judges
   assert.deepEqual(offline, { status: 'no answer', detail: 'fetch failed' });
 });
 
+test('probeProviderModel judges a 429 that says the account has no credit, not a plain rate limit', async () => {
+  const answer = (status: number, body: unknown) => async () => new Response(JSON.stringify(body), { status });
+
+  // OpenAI's out-of-credit answer is a 429 with code insufficient_quota.
+  const noQuota = await probeProviderModel('openai', 'sk', 'gpt-4.1-mini', undefined, answer(429, {
+    error: { message: 'You exceeded your current quota, please check your plan and billing details.', type: 'insufficient_quota', code: 'insufficient_quota' },
+  }));
+  assert.equal(noQuota.status, 'refused');
+  assert.match(noQuota.detail ?? '', /^HTTP 429: You exceeded your current quota/);
+
+  // A 429 whose message is about credit or billing is the same, whichever provider.
+  const noCredit = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined, answer(429, {
+    type: 'error', error: { type: 'rate_limit_error', message: 'Your credit balance is too low to access the Anthropic API.' },
+  }));
+  assert.equal(noCredit.status, 'refused');
+
+  // An ordinary rate limit still says nothing about the model.
+  const limited = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined, answer(429, {
+    type: 'error', error: { type: 'rate_limit_error', message: 'Number of request tokens has exceeded your per-minute rate limit' },
+  }));
+  assert.equal(limited.status, 'no answer');
+  const bare = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined, async () => new Response('', { status: 429 }));
+  assert.deepEqual(bare, { status: 'no answer', detail: 'HTTP 429' });
+});
+
 test('collectAvailableModels never sends the default provider secret to a second provider', async () => {
   const asked: Array<{ url: string; auth: string }> = [];
   const env: StateEnvironment = {
