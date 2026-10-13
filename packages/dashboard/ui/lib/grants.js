@@ -17,6 +17,8 @@ export const alwaysOffer = (always, agentName) => {
   switch (always) {
     case 'tool':
       return `Always allow grants this tool to ${agentName} until an operator revokes it.`;
+    case 'destination':
+      return `Always allow lets ${agentName} use this tool on this conversation without asking, until revoked.`;
     case 'session':
       return 'Always allow stops this tool asking again for the rest of this session.';
     case 'scope':
