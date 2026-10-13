@@ -132,7 +132,7 @@ a problem.
   doctor` lists the same line under the daemon's startup warnings. Slack
   can't report events to a bot token, so add the `message.*` events whenever
   you add the history scopes. No warning and still no reply usually means
-  another agent spoke last in that thread, including one on another daemon.
+  another agent spoke last in that thread.
 - **A DM to the app says "Sending messages to this app has been turned
   off"** — that is Slack's App Home setting, not Stratus: the app was
   created before the manifest turned on its Messages Tab. In the app's
