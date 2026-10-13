@@ -129,10 +129,13 @@ a problem.
   connects, the daemon warns `slack: <agent>'s app is missing bot scopes: …`
   for every scope the manifest asks for that the app lacks (`files:read`
   too, without which images reach the agent by name only), and `stratus
-  doctor` lists the same line under the daemon's startup warnings. Slack
-  can't report events to a bot token, so add the `message.*` events whenever
-  you add the history scopes. No warning and still no reply usually means
-  another agent spoke last in that thread.
+  doctor` lists the same line under the daemon's startup warnings. A daemon
+  started with `--held` (or a held `--hold-new-version` start) connects
+  Slack only when it is promoted, so there the warning is in the daemon log
+  but not in `stratus doctor`. Slack can't report event subscriptions to a
+  bot token, so no warning only clears the scopes: check the app's
+  `message.*` events too. With scopes and events both in place, a missing
+  reply usually means another agent spoke last in that thread.
 - **A DM to the app says "Sending messages to this app has been turned
   off"** — that is Slack's App Home setting, not Stratus: the app was
   created before the manifest turned on its Messages Tab. In the app's
