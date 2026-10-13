@@ -490,12 +490,25 @@ export interface GatewaySkill {
 /** What a turn cut short by an announced restart records as its failure. */
 export const RESTARTING_TURN_ERROR = 'Run aborted: stratusd is restarting';
 
+/** The error a turn still running when a stop's drain window closes is aborted with. */
+export const STOPPING_TURN_ERROR = 'Run aborted: stratusd is stopping';
+
 /**
  * How long an announced restart lets in-flight turns finish before aborting
- * them. Matches the systemd unit's `TimeoutStopSec`, so the two windows an
- * operator can hit agree.
+ * them. The same as a stop's window (`DEFAULT_STOP_DRAIN_TIMEOUT_MS`), so the
+ * two windows an operator can hit agree.
  */
 export const DEFAULT_RESTART_DRAIN_TIMEOUT_MS = 30_000;
+
+/**
+ * How long a stop lets in-flight turns finish before aborting them. The
+ * daemon's documented drain ("up to 30 seconds"), and shorter than the
+ * service units' stop timeouts, so the abort happens in this process
+ * rather than as the manager's SIGKILL. That matters beyond the turn's
+ * record: a shell command runs in its own process group, which launchd's
+ * kill of the job does not reach, so only the turn's abort stops it.
+ */
+export const DEFAULT_STOP_DRAIN_TIMEOUT_MS = 30_000;
 
 export interface RestartRequest {
   /** Why, for the log — "plugin stratus-plugin-github enabled". */
@@ -815,6 +828,8 @@ export interface GatewayOptions {
   onPromoted?: () => Promise<void>;
   /** The drain window a `restart()` uses when the request names none. Default 30s. */
   restartDrainTimeoutMs?: number;
+  /** The drain window a `stop()` uses. Default 30s; see `DEFAULT_STOP_DRAIN_TIMEOUT_MS`. */
+  stopDrainTimeoutMs?: number;
   log?: (line: string) => void;
   warn?: (line: string) => void;
 }
@@ -2740,8 +2755,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // announced restart must be able to cut short at the window.
       const idle = new AbortController();
       turnControllers.add(idle);
-      if (abortingTurns) {
-        idle.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
+      if (abortingWith !== undefined) {
+        idle.abort(new RunAbortedError(abortingWith));
       }
       try {
         return await run(idle.signal);
@@ -2752,8 +2767,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     const controller = new AbortController();
     turnControllers.add(controller);
-    if (abortingTurns) {
-      controller.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
+    if (abortingWith !== undefined) {
+      controller.abort(new RunAbortedError(abortingWith));
     }
     // The external reason travels: a caller that aborted with its own
     // `RunAbortedError` gets it recorded on the session, like the watchdog's.
@@ -2962,14 +2977,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const turnControllers = new Set<AbortController>();
   /**
-   * Set once a restart's window has closed and the turns in it were
-   * aborted. A turn that starts after that — one queued behind the
-   * aborted turn on the same session, accepted before the announcement —
-   * is aborted the moment it gets its controller, with the same reason,
-   * rather than running unseen until the shutdown closes the store under
-   * it and leaves it recorded as nothing at all.
+   * Set once a restart's or a stop's window has closed and the turns in it
+   * were aborted, to the reason they were aborted with. A turn that starts
+   * after that — one queued behind the aborted turn on the same session,
+   * accepted before the announcement — is aborted the moment it gets its
+   * controller, with the same reason, rather than running unseen until the
+   * shutdown closes the store under it and leaves it recorded as nothing
+   * at all.
    */
-  let abortingTurns = false;
+  let abortingWith: string | undefined;
   /**
    * Set once `start()` has finished. A restart before that would stop the
    * channels started so far and close the stores while the rest of
@@ -3421,8 +3437,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // reports undrained for a turn it could have finished cleanly.
       const controller = new AbortController();
       turnControllers.add(controller);
-      if (abortingTurns) {
-        controller.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
+      if (abortingWith !== undefined) {
+        controller.abort(new RunAbortedError(abortingWith));
       }
       try {
         await runner.recoverPendingApproval(sessionId, {
@@ -4457,11 +4473,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * The one shutdown sequence — for a stop, for a restart, and for a
    * start() that failed, whose caller never reaches stop().
    *
-   * `abortAfterMs` is the difference: a stop waits for every in-flight
-   * turn however long it takes (the service manager's own timeout is the
-   * bound there), while a restart waits that long and then aborts what is
-   * still running, so the daemon can come back instead of waiting on one
-   * stuck turn. Resolves with whether everything finished — after an abort,
+   * `abortAfterMs` is how long in-flight turns get before what is still
+   * running is aborted, with `kind` as the reason: a restart so the daemon
+   * can come back instead of waiting on one stuck turn, a stop so the
+   * abort happens here and not as the service manager's SIGKILL, which
+   * would leave the turn unrecorded and its shell commands' process groups
+   * running after the daemon. Undefined waits however long it takes: only
+   * a start() that failed, whose turns are the few a channel accepted in
+   * the moment before. Resolves with whether everything finished — after an abort,
    * a turn that still ignores its signal for a second window is shut down
    * around, and the host is told so it can exit rather than start a new
    * daemon beside it. Every wait after the window opens is bounded by it,
@@ -4469,7 +4488,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * the turn drain gave up on, and an unbounded wait there would hold the
    * restart forever on exactly the turn the window exists for.
    */
-  const shutdown = async (abortAfterMs: number | undefined): Promise<boolean> => {
+  const shutdown = async (abortAfterMs: number | undefined, kind: 'restart' | 'stop' = 'restart'): Promise<boolean> => {
     // Refuse new work first; then let channels finish rendering their
     // in-flight turns (already-started dispatches keep running), drain,
     // and close.
@@ -4521,19 +4540,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     } else if (await settlesWithin(drain, abortAfterMs)) {
       drained = channelsReleased;
     } else {
-      warn(`restart: ${inflight.size} turn(s) still running after ${abortAfterMs}ms; aborting them`);
+      warn(`${kind}: ${inflight.size} turn(s) still running after ${abortAfterMs}ms; aborting them`);
       // The watchdog's own mechanism: the runner fails each session with
       // the reason on the signal, saves it, and emits session.failed —
       // so the next daemon finds a finished turn, not an abandoned one.
       // Before the loop, so a turn queued behind one aborted here, which
       // starts as soon as that one settles, is aborted the same way.
-      abortingTurns = true;
+      abortingWith = kind === 'stop' ? STOPPING_TURN_ERROR : RESTARTING_TURN_ERROR;
       for (const controller of turnControllers) {
-        controller.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
+        controller.abort(new RunAbortedError(abortingWith));
       }
       drained = await settlesWithin(drain, abortAfterMs);
       if (!drained) {
-        warn(`restart: ${inflight.size} turn(s) did not stop after being aborted; shutting down around them`);
+        warn(`${kind}: ${inflight.size} turn(s) did not stop after being aborted; shutting down around them`);
       }
       drained = drained && channelsReleased;
     }
@@ -4546,7 +4565,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (drained || abortAfterMs === undefined) {
       await schedulerDrain;
     } else if (!(await settlesWithin(schedulerDrain, abortAfterMs))) {
-      warn('restart: a scheduled firing did not stop after being aborted; shutting down around it');
+      warn(`${kind}: a scheduled firing did not stop after being aborted; shutting down around it`);
     }
     // After the turns that might still be using them. A plugin holding a
     // browser is the reason this exists, and closing it out from under a
@@ -4563,7 +4582,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // hold is the same problem as one that never answered.
       drained = drained && await disposal;
     } else {
-      warn(`restart: a plugin did not release what it holds within ${abortAfterMs}ms; shutting down around it`);
+      warn(`${kind}: a plugin did not release what it holds within ${abortAfterMs}ms; shutting down around it`);
       drained = false;
     }
     closeStores();
@@ -4612,14 +4631,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       serving = true;
     },
 
-    // Drain: channels stop taking messages, in-flight turns finish, new
-    // dispatches are refused, then the database closes. SIGTERM handling
-    // in `stratus serve` calls this. Idempotent: a restart stops the
-    // gateway itself before handing the process to the host, whose own
-    // shutdown path then calls this again and must find nothing to do —
-    // and a start() that failed has already run the same sequence.
+    // Drain: channels stop taking messages, in-flight turns get the stop
+    // window to finish and are aborted after it, new dispatches are
+    // refused, then the database closes. SIGTERM handling in `stratus
+    // serve` calls this. Idempotent: a restart stops the gateway itself
+    // before handing the process to the host, whose own shutdown path then
+    // calls this again and must find nothing to do — and a start() that
+    // failed has already run the same sequence.
     stop() {
-      stopped ??= shutdown(undefined).then(() => undefined);
+      if (stopped === undefined) {
+        const requested = options.stopDrainTimeoutMs ?? DEFAULT_STOP_DRAIN_TIMEOUT_MS;
+        // A stop cannot refuse to happen over its own setting, so a window
+        // that would misfire (negative, NaN, or past Node's timer limit,
+        // where setTimeout fires at once) falls back rather than throwing.
+        const usable = Number.isFinite(requested) && requested >= 0 && requested <= MAX_TIMER_DELAY_MS;
+        if (!usable) {
+          warn(`stop drain window ${String(requested)}ms is not usable; using ${DEFAULT_STOP_DRAIN_TIMEOUT_MS}ms`);
+        }
+        stopped = shutdown(usable ? requested : DEFAULT_STOP_DRAIN_TIMEOUT_MS, 'stop').then(() => undefined);
+      }
       return stopped;
     },
 

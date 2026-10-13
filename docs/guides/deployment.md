@@ -411,7 +411,7 @@ What the recipe sets, and what it leaves to you.
   file — size them to your roster, and give the `browser` target more
   memory than the slim one.
 - [ ] **Stopped gracefully.** `stop_grace_period: 45s` / `TimeoutStopSec=45`,
-  longer than the 30-second drain, so a stop finishes in-flight turns
-  rather than failing them.
+  longer than the 30-second drain, so a turn still running after it is
+  aborted and recorded by the daemon rather than killed with it.
 - [ ] **Rebuilt.** The image carries Node and Debian; rebuild it for their
   security releases, not only for Stratus ones.

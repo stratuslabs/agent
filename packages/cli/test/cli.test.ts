@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 import { tokenFingerprint } from '@stratusagent/control-api';
-import { claimHome } from '@stratusagent/gateway';
+import { DEFAULT_STOP_DRAIN_TIMEOUT_MS, claimHome } from '@stratusagent/gateway';
 
 import {
   createFileMemoryStore,
@@ -6415,6 +6415,34 @@ test('--no-login installs the service without the login trigger', async () => {
   );
   const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
   assert.match(plist, /<key>RunAtLoad<\/key>\s*<false\/>/);
+});
+
+test('both service units give a stop longer than the daemon\'s drain window before SIGKILL', async () => {
+  // A stop drains for DEFAULT_STOP_DRAIN_TIMEOUT_MS and then aborts what is
+  // still running. The manager's SIGKILL has to land after that, or the
+  // abort never happens: launchd's default is about five seconds, and its
+  // kill of the job skips a shell command's own process group, which then
+  // runs on after the daemon.
+  const darwinHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'darwin', homeDir: darwinHome, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const plist = await readFile(path.join(darwinHome, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  const exitTimeOut = /<key>ExitTimeOut<\/key>\s*<integer>(\d+)<\/integer>/.exec(plist);
+  assert.ok(exitTimeOut, plist);
+  assert.ok(Number(exitTimeOut[1]) * 1000 > DEFAULT_STOP_DRAIN_TIMEOUT_MS, `ExitTimeOut ${exitTimeOut[1]}s`);
+
+  const linuxHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'linux',
+    homeDir: linuxHome,
+    execPath: '/usr/bin/node',
+    scriptPath: '/usr/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+  const unit = await readFile(path.join(linuxHome, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  const stopSec = /TimeoutStopSec=(\d+)/.exec(unit);
+  assert.ok(stopSec, unit);
+  assert.ok(Number(stopSec[1]) * 1000 > DEFAULT_STOP_DRAIN_TIMEOUT_MS, `TimeoutStopSec=${stopSec[1]}`);
+  assert.equal(stopSec[1], exitTimeOut[1]);
 });
 
 test('the systemd unit restarts on failure and enables at login', async () => {

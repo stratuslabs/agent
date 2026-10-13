@@ -10,6 +10,7 @@ import type { OptionalModuleHost } from '@stratusagent/plugins';
 
 import {
   RESTARTING_TURN_ERROR,
+  STOPPING_TURN_ERROR,
   RestartUnsupportedError,
   ShardedSessionStore,
   createGateway,
@@ -371,6 +372,55 @@ test('an announced restart refuses new turns, lets a running one finish, and han
     const stored = await next.store.get('long');
     assert.equal(stored?.status, 'completed');
     assert.equal(stored?.messages.at(-1)?.content, 'finished');
+  } finally {
+    await next.stop();
+  }
+});
+
+test('a stop drains for a bounded window, then aborts what is still running and records why', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  // Never answers; only the abort ends it. Under a service manager that is
+  // what a stop used to wait on until the manager's SIGKILL, which left the
+  // turn's own process groups (a shell command's) running after the daemon.
+  let firstCall!: () => void;
+  const started = new Promise<void>((resolve) => { firstCall = resolve; });
+  const fetchImpl = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      firstCall();
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    })) as typeof fetch;
+
+  const warnings: string[] = [];
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    stopDrainTimeoutMs: 50,
+    log: () => {},
+    warn: (line) => warnings.push(line),
+  });
+  const failed = nextEvent(gateway.bus, 'session.failed');
+  await gateway.start();
+
+  const stuck = gateway.dispatch({ sessionId: 'stuck', agentId: 'ava', userMessage: 'hang' });
+  await started;
+  await gateway.stop();
+
+  await assert.rejects(
+    stuck,
+    (error: Error) => error instanceof RunAbortedError && error.message === STOPPING_TURN_ERROR,
+  );
+  assert.equal((await failed).error, STOPPING_TURN_ERROR);
+  assert.ok(warnings.some((line) => /stop: 1 turn\(s\) still running after 50ms; aborting them/.test(line)), warnings.join('\n'));
+
+  const next = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
+  await next.start();
+  try {
+    const stored = await next.store.get('stuck');
+    assert.equal(stored?.status, 'failed');
+    assert.equal(stored?.lastError, STOPPING_TURN_ERROR);
   } finally {
     await next.stop();
   }

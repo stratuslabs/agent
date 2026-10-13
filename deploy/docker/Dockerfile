@@ -69,8 +69,8 @@ EXPOSE 4123
 # env file sets (`search.apiKey`). The daemon handles its own signals, and
 # `--init` reaps what its children leave behind.
 ENTRYPOINT []
-# The daemon drains on SIGTERM for up to 30 seconds. Give `docker stop` more
-# than that (`-t 45`, or compose's stop_grace_period) or the drain is cut
+# The daemon drains on SIGTERM for up to 30 seconds, then aborts what is
+# still running. Give `docker stop` more than that (`-t 45`, or compose's stop_grace_period) or the drain is cut
 # short by SIGKILL.
 STOPSIGNAL SIGTERM
 # Asks the running daemon over its own API, with the token it wrote — so
