@@ -52,6 +52,7 @@ import {
   type Executor,
   type ExecutorContribution,
   type ImageAttachment,
+  imagesWithinReplayBudget,
   type ObserveEntry,
   matchesToolAllowlist,
   type JsonObject,
@@ -937,7 +938,18 @@ interface MergeJoiner {
 interface MergeBatch {
   agentId: string | undefined;
   absorbed: MergeJoiner[];
+  /** Every image in the batch so far, leader's first. */
+  images: ImageAttachment[];
 }
+
+/**
+ * Whether `images` all fit the replay budget together. A merged turn's
+ * images are one message's, and the runner empties whatever falls outside
+ * the budget before the provider sees it, so a batch that would overflow
+ * must not take the message that overflows it (card 423).
+ */
+const fitsReplayBudget = (images: readonly ImageAttachment[]): boolean =>
+  images.length === 0 || imagesWithinReplayBudget([{ id: '', createdAt: '', role: 'user', content: '', images: [...images] }]).size === images.length;
 
 /** A signal that aborts once every one of `signals` has. */
 const allAborted = (signals: readonly AbortSignal[]): AbortSignal => {
@@ -3998,7 +4010,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // joins the batch already waiting, if there is one for the same agent.
     const mergeable = input.onAbsorbed !== undefined && input.addressed !== false;
     const open = openBatches.get(input.sessionId);
-    if (mergeable && open !== undefined && open.agentId === input.agentId) {
+    if (
+      mergeable &&
+      open !== undefined &&
+      open.agentId === input.agentId &&
+      fitsReplayBudget([...open.images, ...(input.images ?? [])])
+    ) {
+      open.images.push(...(input.images ?? []));
       waitingDispatches.set(input.sessionId, (waitingDispatches.get(input.sessionId) ?? 0) + 1);
       const joined = new Promise<Session>((resolve, reject) => {
         open.absorbed.push({ input, resolve, reject });
@@ -4023,7 +4041,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       return joined;
     }
-    // It cannot join, so the open batch takes no more: a message arriving
+    // It cannot join (or its images would overflow the batch's), so the
+    // open batch takes no more: a message arriving
     // after this one must not be answered ahead of it.
     if (open !== undefined) {
       openBatches.delete(input.sessionId);
@@ -4031,7 +4050,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Otherwise it leads a new batch, if it is waiting behind a turn at all:
     // a message to an idle session runs at once, alone.
     const batch: MergeBatch | undefined = mergeable && sessionChains.has(input.sessionId)
-      ? { agentId: input.agentId, absorbed: [] }
+      ? { agentId: input.agentId, absorbed: [], images: [...(input.images ?? [])] }
       : undefined;
     if (batch !== undefined) {
       openBatches.set(input.sessionId, batch);

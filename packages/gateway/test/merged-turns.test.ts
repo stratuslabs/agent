@@ -223,3 +223,39 @@ test('a batch leader cancelled while it waited is settled before the turn it han
   assert.deepEqual(prompts, ['first', 'kept']);
   await gateway.stop();
 });
+
+test('a queued message whose images would overflow the batch replay budget is not merged, so the provider sees every image', async () => {
+  // Counts the images in each request's newest user message.
+  const sent: number[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => { started = resolve; });
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: unknown }> };
+    const last = body.messages.filter((message) => message.role === 'user').at(-1)?.content;
+    sent.push(Array.isArray(last) ? last.filter((part: { type?: string }) => part.type === 'image_url').length : 0);
+    if (sent.length === 1) {
+      started();
+      await gate;
+    }
+    return openAiText(`answer ${sent.length}`);
+  }) as typeof fetch;
+  const gateway = await startGateway(fetchImpl);
+  // 11 images each: either message fits the 20-image replay count alone, the two together do not.
+  const images = (tag: string) =>
+    Array.from({ length: 11 }, (_, index) => ({ mediaType: 'image/png' as const, data: Buffer.from(`${tag}-${index}`).toString('base64'), name: `${tag}-${index}.png` }));
+
+  const first = gateway.dispatch({ sessionId: 'm-img', agentId: 'ava', userMessage: 'Dylan: first', idempotencyKey: 'i1', onAbsorbed: () => {} });
+  await running;
+  const absorbed: string[] = [];
+  const second = gateway.dispatch({ sessionId: 'm-img', agentId: 'ava', userMessage: 'Dylan: second', idempotencyKey: 'i2', turnId: 'ti2', images: images('a'), onAbsorbed: () => absorbed.push('i2') });
+  const third = gateway.dispatch({ sessionId: 'm-img', agentId: 'ava', userMessage: 'Dylan: third', idempotencyKey: 'i3', turnId: 'ti3', images: images('b'), onAbsorbed: () => absorbed.push('i3') });
+  release();
+  await Promise.all([first, second, third]);
+
+  // Two turns after the first, nothing absorbed, and each sent all 11 of its images.
+  assert.deepEqual(absorbed, []);
+  assert.deepEqual(sent, [0, 11, 11]);
+  await gateway.stop();
+});
