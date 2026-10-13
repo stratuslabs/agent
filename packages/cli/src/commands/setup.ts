@@ -2988,7 +2988,9 @@ export const runSetup = async (
     } else {
       const keyEnv = state.apiKeyEnv ?? defaultKeyEnvFor(state.provider);
       if (readNonEmptyString(processEnv[keyEnv])) {
-        writeLine(streams.stdout, `${keyEnv} is set in your environment — you are ready to go. Try:`);
+        if (!failedReadBack()) {
+          writeLine(streams.stdout, `${keyEnv} is set in your environment — you are ready to go. Try:`);
+        }
       } else {
         writeLine(streams.stdout, 'You are NOT signed in yet — re-run `stratus setup` and pick option 1, or:');
         writeLine(streams.stdout, `  export ${keyEnv}=your-key`);

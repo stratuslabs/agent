@@ -2192,6 +2192,30 @@ test('setup reads the saved settings back and does not call a run that cannot st
   assert.match(output.stdout, /stratus doctor/);
 });
 
+test('setup reads the settings back before calling an environment key ready', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const missingSoul = path.join(home, 'no-such-soul.md');
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'env-key', STRATUS_SOUL: missingSoul },
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => true,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /ready to go/);
+  assert.match(output.stdout, /Saved, but a run started here would fail:/);
+  assert.match(output.stdout, /no-such-soul\.md/);
+});
+
 test('setup stores a Claude subscription setup token', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const { streams, output } = createStreams();
