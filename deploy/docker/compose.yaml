@@ -45,9 +45,10 @@ services:
     # itself handles SIGTERM.
     init: true
     restart: unless-stopped
-    # Longer than the daemon's 30-second drain, or SIGKILL cuts it short and
-    # the turns still running are failed rather than finished.
-    stop_grace_period: 45s
+    # Longer than the daemon's 30-second drain plus the 30 seconds a turn it
+    # aborts gets to record that, or SIGKILL cuts the stop short and leaves
+    # the turns still running unrecorded.
+    stop_grace_period: 75s
     read_only: true
     tmpfs:
       - /tmp:size=256m

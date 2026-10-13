@@ -70,8 +70,9 @@ EXPOSE 4123
 # `--init` reaps what its children leave behind.
 ENTRYPOINT []
 # The daemon drains on SIGTERM for up to 30 seconds, then aborts what is
-# still running. Give `docker stop` more than that (`-t 45`, or compose's stop_grace_period) or the drain is cut
-# short by SIGKILL.
+# still running and gives those up to 30 seconds more to record it. Give
+# `docker stop` more than both (`-t 75`, or compose's stop_grace_period) or
+# the drain is cut short by SIGKILL.
 STOPSIGNAL SIGTERM
 # Asks the running daemon over its own API, with the token it wrote — so
 # "healthy" means serving, not merely a live process.

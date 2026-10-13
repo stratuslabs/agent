@@ -6417,10 +6417,11 @@ test('--no-login installs the service without the login trigger', async () => {
   assert.match(plist, /<key>RunAtLoad<\/key>\s*<false\/>/);
 });
 
-test('both service units give a stop longer than the daemon\'s drain window before SIGKILL', async () => {
-  // A stop drains for DEFAULT_STOP_DRAIN_TIMEOUT_MS and then aborts what is
-  // still running. The manager's SIGKILL has to land after that, or the
-  // abort never happens: launchd's default is about five seconds, and its
+test('both service units give a stop longer than the daemon\'s drain and post-abort windows before SIGKILL', async () => {
+  // A stop drains for DEFAULT_STOP_DRAIN_TIMEOUT_MS, then aborts what is
+  // still running and gives the aborted turns the same window again to
+  // record their failure. The manager's SIGKILL has to land after both, or
+  // the abort never happens or its record is cut off: launchd's default is about five seconds, and its
   // kill of the job skips a shell command's own process group, which then
   // runs on after the daemon.
   const darwinHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
@@ -6428,7 +6429,7 @@ test('both service units give a stop longer than the daemon\'s drain window befo
   const plist = await readFile(path.join(darwinHome, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
   const exitTimeOut = /<key>ExitTimeOut<\/key>\s*<integer>(\d+)<\/integer>/.exec(plist);
   assert.ok(exitTimeOut, plist);
-  assert.ok(Number(exitTimeOut[1]) * 1000 > DEFAULT_STOP_DRAIN_TIMEOUT_MS, `ExitTimeOut ${exitTimeOut[1]}s`);
+  assert.ok(Number(exitTimeOut[1]) * 1000 > 2 * DEFAULT_STOP_DRAIN_TIMEOUT_MS, `ExitTimeOut ${exitTimeOut[1]}s`);
 
   const linuxHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await installService({
@@ -6441,7 +6442,7 @@ test('both service units give a stop longer than the daemon\'s drain window befo
   const unit = await readFile(path.join(linuxHome, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
   const stopSec = /TimeoutStopSec=(\d+)/.exec(unit);
   assert.ok(stopSec, unit);
-  assert.ok(Number(stopSec[1]) * 1000 > DEFAULT_STOP_DRAIN_TIMEOUT_MS, `TimeoutStopSec=${stopSec[1]}`);
+  assert.ok(Number(stopSec[1]) * 1000 > 2 * DEFAULT_STOP_DRAIN_TIMEOUT_MS, `TimeoutStopSec=${stopSec[1]}`);
   assert.equal(stopSec[1], exitTimeOut[1]);
 });
 

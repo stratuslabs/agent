@@ -93,14 +93,15 @@ export interface ServiceInstallOptions {
 
 /**
  * How long either service manager waits after SIGTERM before SIGKILL, in
- * seconds. Longer than the daemon's 30-second stop drain
- * (`DEFAULT_STOP_DRAIN_TIMEOUT_MS`), so a turn still running at the end of
- * it is aborted by the daemon (recorded, and its shell commands killed),
- * with room for the abort to land. Without it launchd uses its own
+ * seconds. Longer than both of a stop's windows: the 30-second drain
+ * (`DEFAULT_STOP_DRAIN_TIMEOUT_MS`), after which a turn still running is
+ * aborted by the daemon (its shell commands killed), and the same window
+ * again for the aborted turn to record its failure, plus room for the
+ * rest of the shutdown. Without it launchd uses its own
  * default, about five seconds on macOS 15, and its kill of the job does
  * not reach a command's own process group, which runs on as an orphan.
  */
-const SERVICE_STOP_TIMEOUT_SECONDS = 45;
+const SERVICE_STOP_TIMEOUT_SECONDS = 75;
 
 export const launchdPlist = (definition: ServiceDefinition): string => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -48,11 +48,12 @@ EnvironmentFile=/etc/stratus/stratusd.env
 ExecStart=/usr/bin/node /usr/lib/node_modules/@stratusagent/cli/dist/bin.js serve --log-format json
 Restart=on-failure
 RestartSec=5
-# The daemon drains in-flight turns for up to 30 seconds on SIGTERM. The
-# stop timeout has to be longer, or SIGKILL lands mid-drain and the turns
-# still running are failed instead of finished.
+# The daemon drains in-flight turns for up to 30 seconds on SIGTERM, then
+# aborts the ones still running and gives them up to 30 seconds more to
+# record that. The stop timeout has to be longer than both, or SIGKILL
+# lands mid-stop and those turns are left unrecorded.
 KillSignal=SIGTERM
-TimeoutStopSec=45
+TimeoutStopSec=75
 UMask=0077
 
 # --- Hardening --------------------------------------------------------------

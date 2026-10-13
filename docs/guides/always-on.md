@@ -37,7 +37,7 @@ What they get:
 The unit runs the daemon by **absolute path** — the node binary and script
 of the process that installed it, never a bare `stratus`. A service manager
 starts with a minimal environment and never loads the shell profile that
-puts `stratus` on your `PATH`. It stops with SIGTERM and waits 45 seconds
+puts `stratus` on your `PATH`. It stops with SIGTERM and waits 75 seconds
 before SIGKILL (`ExitTimeOut` in the plist, `TimeoutStopSec` in the unit),
 so the gateway's drain, and the abort at the end of it, actually run. (Upgrading node moves those absolute paths — see
 [Updating](./updating.md) for why `stratus update` rewrites the unit.)
