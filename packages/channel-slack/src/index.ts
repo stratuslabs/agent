@@ -4873,8 +4873,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * The durable half of `noteForeignSpeaker`, for a thread this process has
    * no record of: whether a bot this adapter does not serve posted in the
    * thread after `agentId` last held it, read from the thread itself. Held
-   * means its own message there, a message naming it, or its session's
-   * `lastSpokeAt`, whichever is newest. False whenever it cannot tell: no
+   * means its own message there or a message naming it, whichever is
+   * newest, by position in the thread (its session's `lastSpokeAt` only
+   * when its bot user id is unknown). False whenever it cannot tell: no
    * thread read, a failed read, or a thread too long to reach its newest
    * replies. Then the reply is answered as it was before this check.
    */
@@ -4891,7 +4892,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return false;
     }
     const botUserId = botIdentities.get(agentId)?.botUserId;
-    const spoke = lastSpokeAt === undefined ? Number.NaN : Date.parse(lastSpokeAt) / 1000;
+    // Positions in the thread, as the live record keeps them: a reply that
+    // filled a placeholder sits where the placeholder was posted, above
+    // anything posted while it was being written, though the transcript
+    // dates it later. `lastSpokeAt` stands in only when this agent's own
+    // messages can't be told apart in the read.
+    const spoke = botUserId !== undefined || lastSpokeAt === undefined ? Number.NaN : Date.parse(lastSpokeAt) / 1000;
     let held = Number.isFinite(spoke) ? spoke : 0;
     let foreign = 0;
     try {

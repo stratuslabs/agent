@@ -10628,6 +10628,37 @@ test('after a restart, an untagged reply goes unanswered here when another gatew
   assert.ok(warnings.some((line) => line.includes('missing_scope')), warnings.join('\n'));
 });
 
+test('after a restart, the thread read places this agent at its reply in the thread, not at its transcript time', async () => {
+  // Ava's placeholder went up at 963.1, Fly Test posted beneath it at 963.2
+  // while she was generating, and the edit filled the placeholder in later:
+  // her transcript says 963.5, but Fly Test is the last voice in the thread.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:963.0', new Date(963.5 * 1000).toISOString()]]));
+  const thread = [
+    { ts: '963.0', user: 'U-DYLAN', text: '<@B-AVA> hi' },
+    { ts: '963.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'hello' },
+    { ts: '963.2', user: 'U-FLY', bot_id: 'B-FLY-APP', text: 'Fly Test here' },
+  ];
+  web.conversations.replies = async (args: { ts: string; latest?: string }) => ({
+    messages: thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'and you?', ts: '963.6', thread: '963.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), []);
+});
+
 test('after a restart, only a mention this agent would admit takes the thread back from another gateway\'s agent', async () => {
   // Live, a refused sender's mention and any bot's mention hand nothing
   // over, so the thread read must not count them either.
