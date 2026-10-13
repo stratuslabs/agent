@@ -170,7 +170,9 @@ test('built-in safe command scopes survive the gate and granted ones do not', as
   });
   const tainted = sessionAt('external');
 
-  assert.equal(await policy.approve(call(shellTool, tainted, { command: 'git status' })), true);
+  assert.equal(await policy.approve(call(shellTool, tainted, { command: 'pwd' })), true);
+  // No git form is built in: git runs programs a repository names.
+  assert.equal(await policy.approve(call(shellTool, tainted, { command: 'git status' })), false);
   assert.equal(await policy.approve(call(shellTool, tainted, { command: 'git push origin main' })), false);
   // The same granted scope still covers a conversation that read nothing.
   assert.equal(await policy.approve(call(shellTool, sessionAt('user'), { command: 'git push origin main' })), true);

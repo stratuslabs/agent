@@ -353,7 +353,9 @@ command line and in the repository's own config, but an agent that can
 write its repository's `.git` (an `fs.write` grant covering the
 workspace, for instance) can make any approved git command run anything.
 Turn on autonomy for agents you trust with that. A sandboxed executor is
-the boundary for agents you don't.
+the boundary for agents you don't. The same is true of a git scope granted
+with **Always allow**, which is why no git command runs unattended out of
+the box.
 
 This is policy over command arguments, not a sandbox. It holds because
 these commands read only what they're told to. A program you list in
@@ -574,7 +576,8 @@ what that label does to the agent's grants:
   authority the gate withdrew.
 
 What still runs unattended under `gate` is what never rested on a grant:
-`safe` tools, the built-in read-only commands (`git status`, `git log`, …),
+`safe` tools, the built-in read-only commands (`pwd`, `uname`, and the
+stdin filters like `grep fix`),
 and a schedule's pre-authorized destination — a schedule that reads the web
 and reports to the channel you approved it for is the job it was approved
 to do, and the page can only change the words it sends there.
