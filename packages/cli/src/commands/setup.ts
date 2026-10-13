@@ -33,6 +33,7 @@ import {
   readProcessEnv,
   readWorkingDirectory,
   resolveAgentApprovals,
+  resolveRuntimeConfig,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
   saveChannelCredentials,
@@ -2943,12 +2944,40 @@ export const runSetup = async (
     }
     const extraFlags = conflicts.flatMap((conflict) => (conflict.flag ? [` ${conflict.flag}`] : [])).join('');
 
+    // Read back what was just written, through the resolver a run uses,
+    // before saying "ready". The menu's state is what setup meant to save;
+    // whether a run starts is decided by the files on disk plus this shell's
+    // environment, and the two have disagreed: a soul named in the
+    // environment that no longer exists fails every run while the menu
+    // looked signed in. Only the "ready" claim waits on this. The
+    // not-signed-in branch already says what is missing.
+    const readBackFailure = conflicts.length > 0
+      ? undefined
+      : await resolveRuntimeConfig({ configPath }, env).then(
+        () => undefined,
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+    const failedReadBack = (): boolean => {
+      if (readBackFailure === undefined) {
+        return false;
+      }
+      writeLine(streams.stdout, `Saved, but a run started here would fail: ${readBackFailure}`);
+      writeLine(streams.stdout, `Run \`stratus doctor${runConfigFlag}${shadowConfigFlag}\` for the full picture. Once it is fixed, try:`);
+      return true;
+    };
+
     if (state.provider === 'demo') {
-      writeLine(streams.stdout, 'You are ready to go — no account needed. Try:');
+      if (!failedReadBack()) {
+        writeLine(streams.stdout, 'You are ready to go — no account needed. Try:');
+      }
     } else if (readNonEmptyString(processEnv.STRATUS_API_KEY)) {
-      writeLine(streams.stdout, 'STRATUS_API_KEY is exported and takes precedence over your saved sign-in. You are ready to go. Try:');
+      if (!failedReadBack()) {
+        writeLine(streams.stdout, 'STRATUS_API_KEY is exported and takes precedence over your saved sign-in. You are ready to go. Try:');
+      }
     } else if (isRegisteredProviderName(state.provider) || state.credentials[credentialProviderOf(state.provider) ?? 'anthropic']) {
-      writeLine(streams.stdout, `You are ${signInSummary()} — ready to go. Try:`);
+      if (!failedReadBack()) {
+        writeLine(streams.stdout, `You are ${signInSummary()} — ready to go. Try:`);
+      }
     } else {
       const keyEnv = state.apiKeyEnv ?? defaultKeyEnvFor(state.provider);
       if (readNonEmptyString(processEnv[keyEnv])) {
