@@ -1,6 +1,6 @@
 import type { JsonObject } from '@stratusagent/core';
 import type { ParsedSoul } from '@stratusagent/agents';
-import type { HarnessTransport } from '@stratusagent/providers';
+import type { ClaudeCodeTransport, CodexTransport } from '@stratusagent/providers';
 import {
   type RegisteredProviderName,
   type StratusProviderName,
@@ -381,12 +381,12 @@ export interface FallbackRuntime {
    * this, that configuration reaches the real Agent SDK the moment the
    * primary fails.
    */
-  queryFn?: HarnessTransport;
+  queryFn?: ClaudeCodeTransport;
   /**
    * The codex harness transport for a codex fallback — `queryFn`'s
    * counterpart, for the same reason: no other primary carries one.
    */
-  codexRunTurn?: HarnessTransport;
+  codexRunTurn?: CodexTransport;
   /**
    * A codex fallback with no key runs on the machine's own `codex login`
    * sign-in. Recorded explicitly (from the stored subscription marker)
@@ -481,7 +481,7 @@ type RuntimeConfigVariant =
        * only half of what this config can select is reachable from a
        * test.
        */
-      queryFn?: HarnessTransport;
+      queryFn?: ClaudeCodeTransport;
       /** See StratusConfigFile.promptCache. Absent means the adapter's default (on). */
       promptCache?: boolean;
       /** See StratusConfigFile.promptCacheTtl. Absent means the adapter's default ('5m'). */
@@ -515,7 +515,7 @@ type RuntimeConfigVariant =
        * anthropic variant's `queryFn`. Without it a codex config is the
        * one runtime a test cannot drive.
        */
-      codexRunTurn?: HarnessTransport;
+      codexRunTurn?: CodexTransport;
       soul?: ParsedSoul;
       /** Absolute path the soul was loaded from, for callers that re-read it. */
       soulPath?: string;

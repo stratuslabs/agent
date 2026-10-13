@@ -970,14 +970,32 @@ export const SDK_SESSION_AUTH_METADATA_KEY = 'claudeCodeAuth';
 export const CODEX_THREAD_METADATA_KEY = 'codexThreadId';
 
 /**
- * A harness's own transport (the Agent SDK's `query`, codex's `runTurn`),
- * as a host carries it without knowing its shape: config and environment
- * pass one through to the harness package, which is the only reader. The
- * parameter is `never` so any harness's transport is assignable, which is
- * what lets `state` hold one with no type from a package that may not be
- * installed.
+ * The harness transports (the Agent SDK's `query`, codex's `runTurn`) as a
+ * host carries them through config and environment without importing a
+ * harness package that may not be installed. Each is the structural slice
+ * of the harness's own params a host can see; the harness package is the
+ * only reader and casts to its full signature. Declared with method syntax
+ * so the harness's exact transport type (whose params are narrower than
+ * this slice) stays assignable, while a callback of an unrelated shape is
+ * still rejected and an inline callback still sees typed params.
  */
-export type HarnessTransport = (params: never) => AsyncIterable<unknown>;
+export type ClaudeCodeTransport = {
+  transport(params: {
+    prompt: string | AsyncIterable<unknown>;
+    options?: object;
+  }): AsyncIterable<unknown>;
+}['transport'];
+
+/** Codex's `runTurn`, as a host carries it. See ClaudeCodeTransport. */
+export type CodexTransport = {
+  transport(params: {
+    input: string;
+    resumeThreadId?: string;
+    clientOptions: object;
+    threadOptions: object;
+    signal: AbortSignal;
+  }): AsyncIterable<unknown>;
+}['transport'];
 
 /**
  * Executes one kernel tool call on behalf of a provider-hosted loop. The

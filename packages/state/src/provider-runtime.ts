@@ -422,8 +422,9 @@ export const createRuntimeProvider = (
         authToken: config.authToken,
         ...(config.agentSignIn !== undefined ? { authOwner: config.agentSignIn } : {}),
         model: config.model,
-        // The transport is carried untyped through config (`HarnessTransport`)
-        // so `state` names no harness type; this is the one reader.
+        // The transport is carried as a structural slice through config
+        // (`ClaudeCodeTransport`) so `state` names no harness type; this is
+        // the one reader.
         ...(config.queryFn ? { queryFn: config.queryFn as ClaudeCodeQueryFn } : {}),
         ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
         // Kernel tools run through the host loop (approvals, events,
