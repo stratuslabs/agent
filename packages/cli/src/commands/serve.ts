@@ -528,6 +528,10 @@ const serveHeldHome = async (
         const by = decision.grant.grantedBy ? ` by ${decision.grant.grantedBy}` : '';
         log(`${decision.agentId}: ${decision.toolName} ran under a standing grant (${describeToolGrant(decision.grant)}, granted ${decision.grant.grantedAt}${by}) (session ${decision.sessionId})`);
       }
+      if (decision.destinationGrant) {
+        const by = decision.destinationGrant.grantedBy ? ` by ${decision.destinationGrant.grantedBy}` : '';
+        log(`${decision.agentId}: ${decision.toolName} ran under a standing grant (${describeDestinationGrant(decision.destinationGrant)}, granted ${decision.destinationGrant.grantedAt}${by}) (session ${decision.sessionId})`);
+      }
       return;
     }
     warn(`${decision.agentId}: ${decision.reason} (session ${decision.sessionId})`);

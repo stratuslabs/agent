@@ -101,6 +101,10 @@ test('always allow on message.read persists for that conversation, past a restar
   assert.equal(await restarted.approve(call(read, 'C0C6GF7R96X', 'sess-2')), true);
   assert.equal(decisions[0]?.destination, 'slack:C0C6GF7R96X');
   assert.match(decisions[0]?.reason ?? '', /standing grant/);
+  // The daemon's grant-use trace needs the grant itself, not prose.
+  assert.equal(decisions[0]?.destinationGrant?.tool, 'message.read');
+  assert.equal(decisions[0]?.destinationGrant?.destination, 'slack:C0C6GF7R96X');
+  assert.equal(decisions[0]?.destinationGrant?.grantedBy, 'U-DYLAN');
 
   // Never wider than what was approved: another channel, or sending to
   // the same one, still has nobody to say yes.

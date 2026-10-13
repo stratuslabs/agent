@@ -257,6 +257,12 @@ export interface PermissionDecision {
    * the one that created the grant — that one ran on a human's answer.
    */
   grant?: ToolGrant;
+  /**
+   * The per-conversation grant this call ran under, when one did
+   * (`message.read`/`message.send` on a destination an approver answered
+   * "always" for). Logged by the daemon for the same reason as `grant`.
+   */
+  destinationGrant?: DestinationGrant;
 }
 
 export interface PermissionPolicyOptions {
@@ -738,6 +744,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     destination?: string,
     origin?: string,
     grant?: ToolGrant,
+    destinationGrant?: DestinationGrant,
   ): boolean => {
     onDecision?.({
       allowed,
@@ -751,6 +758,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       ...(destination === undefined ? {} : { destination }),
       ...(origin === undefined ? {} : { origin }),
       ...(grant === undefined ? {} : { grant }),
+      ...(destinationGrant === undefined ? {} : { destinationGrant }),
     });
     return allowed;
   };
@@ -1019,6 +1027,9 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             `${call.toolName} to ${destination} ran under a standing grant for ${session.agent.id}`,
             undefined,
             destination,
+            undefined,
+            undefined,
+            standing,
           );
         }
       }
