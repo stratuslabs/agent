@@ -2950,10 +2950,17 @@ export const runSetup = async (
     // environment, and the two have disagreed: a soul named in the
     // environment that no longer exists fails every run while the menu
     // looked signed in. Only the "ready" claim waits on this. The
-    // not-signed-in branch already says what is missing.
-    const readBackFailure = conflicts.length > 0
-      ? undefined
-      : await resolveRuntimeConfig({ configPath }, env).then(
+    // not-signed-in branch already says what is missing. An exported
+    // variable the suggested command overrides with a flag is resolved with
+    // that same flag, so the read-back checks the command it suggests.
+    const flagged = new Set(conflicts.flatMap((conflict) => (conflict.flag ? [conflict.envVar] : [])));
+    const readBackSelection = {
+      configPath,
+      ...(flagged.has('STRATUS_PROVIDER') ? { provider: state.provider } : {}),
+      ...(flagged.has('STRATUS_MODEL') ? { model: String(state.model ?? defaultModelFor(state.provider)) } : {}),
+      ...(flagged.has('STRATUS_BASE_URL') ? { baseUrl: state.baseUrl ?? DEFAULT_OPENAI_BASE_URL } : {}),
+    };
+    const readBackFailure = await resolveRuntimeConfig(readBackSelection, env).then(
         () => undefined,
         (error: unknown) => (error instanceof Error ? error.message : String(error)),
       );

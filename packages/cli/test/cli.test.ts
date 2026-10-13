@@ -2365,6 +2365,32 @@ test('setup warns when exported env vars override the saved config', async () =>
 
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
+  assert.match(output.stdout, /You are ready to go/);
+  assert.match(output.stdout, /stratus run --provider demo "say hello"/);
+});
+
+test('setup still reads the settings back when an exported variable is overridden by a suggested flag', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const missingSoul = path.join(home, 'no-such-soul.md');
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { STRATUS_PROVIDER: 'openai', STRATUS_SOUL: missingSoul },
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
+  assert.doesNotMatch(output.stdout, /ready to go/);
+  assert.match(output.stdout, /Saved, but a run started here would fail:/);
+  assert.match(output.stdout, /no-such-soul\.md/);
   assert.match(output.stdout, /stratus run --provider demo "say hello"/);
 });
 
