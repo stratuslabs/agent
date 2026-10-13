@@ -1,6 +1,6 @@
 import type { ParsedSoul } from '@stratusagent/agents';
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
-import { DEFAULT_CODEX_MODEL } from '@stratusagent/provider-codex';
+import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
 import { loadConfigFile } from './config-file.ts';
 import { type ResolvedConfigLocation, resolveConfigLocation } from './config-location.ts';
 import type {

@@ -1,5 +1,5 @@
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
-import { DEFAULT_CODEX_MODEL } from '@stratusagent/provider-codex';
+import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
 
 export const HELP_TEXT = `Stratus Agent CLI
 
