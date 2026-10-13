@@ -2919,6 +2919,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Per-session intake chains: the pre-dispatch pipeline (lookups,
   // placeholder, dispatch call) runs in Slack receipt order.
   const intakeChains = new Map<string, Promise<void>>();
+  /**
+   * Stop (card 337), for messages still in intake: how many each session
+   * has between claiming a place on its chain and reaching `renderers`, and
+   * the latest stop to land there. A message compares the stop it claimed
+   * its place under with the one in force when it is about to dispatch, so a
+   * stop also cancels a message whose lookups were still running.
+   */
+  const intakeInFlight = new Map<string, number>();
+  const stopsBySession = new Map<string, { count: number; by: string }>();
   const displayNames = new Map<string, string>();
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
@@ -5129,6 +5138,34 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * case, where by definition no message of this thread has been seen in
    * this process.
    */
+  /**
+   * Stop (card 337): cancels every turn this agent is running or has queued
+   * in this conversation, including messages still in intake, and says
+   * nothing was stopped when there was nothing to stop. Synchronous, and
+   * called off the intake chain before any dispatch, so a stop is never
+   * queued behind the turn it stops nor merged into the next one. The
+   * caller has checked that the sender is an approver: a stop throws away
+   * work someone else asked for.
+   */
+  const stopTurns = (connection: AgentConnection, sessionId: string, userId: string, channel: string): boolean => {
+    const running = renderers.get(sessionId) ?? [];
+    const inIntake = intakeInFlight.get(sessionId) ?? 0;
+    if (running.length === 0 && inIntake === 0) {
+      return false;
+    }
+    for (const renderer of running) {
+      if (renderer.stoppedBy === undefined) {
+        renderer.stoppedBy = userId;
+        renderer.controller.abort(new RunAbortedError(`Stopped from Slack by ${userId}`));
+      }
+    }
+    if (inIntake > 0) {
+      stopsBySession.set(sessionId, { count: (stopsBySession.get(sessionId)?.count ?? 0) + 1, by: userId });
+    }
+    log(`slack: ${userId} stopped ${running.length + inIntake} turn(s) of ${connection.config.agentId} in ${channel}`);
+    return true;
+  };
+
   const admit = (connection: AgentConnection, args: SlackSocketEventArgs): Admission | undefined => {
     const event = args.event;
     if (!gatewayRef || !event || !event.user || event.bot_id || !isPersonSpeaking(event)) {
@@ -5239,6 +5276,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Consuming the key here is safe because a refused message records
     // nothing a later copy could be needed for.
     if (!admitsSender(connection.config, sender)) {
+      // An approver the operator did not list as a principal can still stop
+      // the agent (card 337): approving is its own grant. Only when the
+      // message names this agent (or is a DM to it), and nothing else they
+      // say gets through.
+      if (
+        addressed &&
+        (connection.config.approvers ?? []).includes(sender) &&
+        isStopRequest(text, connection.botUserId) &&
+        !alreadySeen(eventKey)
+      ) {
+        const stopSession = channelSessionKey({
+          channel: 'slack',
+          agentId: connection.config.agentId,
+          team,
+          conversation: event.channel,
+          ...(thread ? { thread } : {}),
+        });
+        if (stopTurns(connection, stopSession, sender, event.channel)) {
+          return undefined;
+        }
+        log(`slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`);
+        return undefined;
+      }
       const refusal = `slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`;
       const held = threadKey !== undefined ? holderAt(threadKey, event.ts) : undefined;
       if (addressed || held === connection.config.agentId) {
@@ -5403,25 +5463,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const { event, isDm, team, userId, thread, sessionId, threadKey, eventKey } = admitted;
 
-    // Stop (card 337): an approver's "stop" cancels every turn this agent is
-    // running or has queued in this conversation. Handled here, off the
-    // intake chain and before any dispatch, so it is never queued behind
-    // the turn it stops nor merged into the next one. Approvers only: a
-    // stop throws away work someone else asked for. With nothing running,
-    // or from anyone else, it is an ordinary message.
-    const running = renderers.get(sessionId) ?? [];
+    // Stop (card 337), see `stopTurns`. Only a message addressed to this
+    // agent: an untagged reply this agent merely overhears is the holder's,
+    // and one only the sessions can place is not this agent's to act on yet.
     if (
-      running.length > 0 &&
+      !admitted.overhear &&
+      admitted.settled &&
+      (connection.config.approvers ?? []).includes(userId) &&
       isStopRequest(event.text ?? '', connection.botUserId) &&
-      (connection.config.approvers ?? []).includes(userId)
+      stopTurns(connection, sessionId, userId, event.channel)
     ) {
-      for (const renderer of running) {
-        if (renderer.stoppedBy === undefined) {
-          renderer.stoppedBy = userId;
-          renderer.controller.abort(new RunAbortedError(`Stopped from Slack by ${userId}`));
-        }
-      }
-      log(`slack: ${userId} stopped ${running.length} turn(s) of ${connection.config.agentId} in ${event.channel}`);
       return;
     }
 
@@ -5435,6 +5486,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // reverse order in durable history. The chain is claimed here,
     // synchronously, so a message's place in it is fixed by when Slack
     // delivered it and not by how long anything it does takes.
+    const stopsAtClaim = stopsBySession.get(sessionId)?.count ?? 0;
+    intakeInFlight.set(sessionId, (intakeInFlight.get(sessionId) ?? 0) + 1);
+    let leftIntake = false;
+    const leaveIntake = (): void => {
+      if (leftIntake) {
+        return;
+      }
+      leftIntake = true;
+      const left = (intakeInFlight.get(sessionId) ?? 1) - 1;
+      if (left > 0) {
+        intakeInFlight.set(sessionId, left);
+      } else {
+        intakeInFlight.delete(sessionId);
+        stopsBySession.delete(sessionId);
+      }
+    };
     const intake = onIntakeChain(sessionId, async () => {
       // The durable half of addressing runs INSIDE the chain, for the same
       // reason: it awaits, and a message that had to ask the sessions must
@@ -5683,6 +5750,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const queue = renderers.get(sessionId) ?? [];
       queue.push(renderer);
       renderers.set(sessionId, queue);
+      // Stopped while its lookups ran: dispatched under an aborted signal,
+      // so it ends the way a queued turn a stop reached does.
+      const stopped = stopsBySession.get(sessionId);
+      leaveIntake();
+      if (stopped !== undefined && stopped.count !== stopsAtClaim && renderer.stoppedBy === undefined) {
+        renderer.stoppedBy = stopped.by;
+        renderer.controller.abort(new RunAbortedError(`Stopped from Slack by ${stopped.by}`));
+      }
       // In a DM each message is its own status key, and Slack stops showing
       // the running turn's once a newer message sits below it — so a
       // message queued there that stayed dark read as the agent having
@@ -5711,6 +5786,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return { renderer, turn, repeat: () => repeat };
     });
 
+    // Whatever way the intake ended, it is no longer in flight.
+    void intake.then(leaveIntake, leaveIntake);
     const started = await intake;
     if (!started) {
       return;

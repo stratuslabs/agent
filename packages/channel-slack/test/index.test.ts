@@ -10672,3 +10672,95 @@ test('in the default final reply mode a stopped turn posts who stopped it in the
   assert.equal(web.posts.find((post) => post.text === 'Stopped by <@U-DYLAN>.')?.thread_ts, '100.1');
   await adapter.stop();
 });
+
+test('an untagged stop overheard by an agent that does not hold the thread leaves its turn running', async () => {
+  const { gateway, signals, finishers } = stoppableGateway();
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', approvers: ['U-DYLAN'], replies: 'stream' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', approvers: ['U-DYLAN'], replies: 'stream' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Ava is working; then Bea is handed the thread and is working too.
+  const toAva = mention('<@B-AVA> long job');
+  void socketAva.deliver('app_mention', toAva);
+  void socketBea.deliver('message', { ...toAva, event: { ...toAva.event, type: 'message' } });
+  await until(() => signals.length === 1);
+  const toBea = channelMessage({ text: '<@B-BEA> take a look', ts: '100.2', thread: '100.1' });
+  void socketAva.deliver('message', toBea);
+  void socketBea.deliver('message', toBea);
+  await until(() => signals.length === 2);
+
+  // An untagged stop is the holder's, Bea's. Ava only overhears it.
+  const stop = channelMessage({ text: 'stop', ts: '100.3', thread: '100.1' });
+  await socketAva.deliver('message', stop);
+  await socketBea.deliver('message', stop);
+  await until(() => signals[1]?.aborted === true);
+  assert.equal(signals[0]?.aborted, false, "Ava's turn is not cancelled by a stop meant for Bea");
+  finishers.shift()?.();
+  await socketAva.settled();
+  await socketBea.settled();
+  await adapter.stop();
+});
+
+test('a stop cancels a message still in intake behind the running turn, so it never runs', async () => {
+  const { gateway, signals } = stoppableGateway();
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  let releaseLookup!: () => void;
+  const lookup = new Promise<void>((resolve) => { releaseLookup = resolve; });
+  const inner = web.users.info.bind(web.users);
+  web.users.info = async (args: { user: string }) => {
+    if (args.user === 'U-OTHER') {
+      await lookup;
+    }
+    return inner(args);
+  };
+  await adapter.start(gateway);
+
+  void socket.deliver('app_mention', mention('<@B-AVA> long job'));
+  await until(() => signals.length === 1);
+  // Queued behind the turn, still awaiting its sender lookup.
+  void socket.deliver('message', channelMessage({ text: 'and another', ts: '100.2', thread: '100.1', user: 'U-OTHER' }));
+  await new Promise((resolve) => setImmediate(resolve));
+  await socket.deliver('message', channelMessage({ text: 'stop', ts: '100.3', thread: '100.1' }));
+  await until(() => signals[0]?.aborted === true);
+  releaseLookup();
+  await socket.settled();
+
+  assert.ok(signals.slice(1).every((signal) => signal?.aborted === true), 'the queued message does not run');
+  assert.ok(!web.updates.some((update) => update.text === 'answer to and another'));
+  await adapter.stop();
+});
+
+test('an approver who is not a listed principal can still stop a turn, and nothing else they say is admitted', async () => {
+  const { gateway, signals } = stoppableGateway();
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN'], admit: 'principals', approvers: ['U-BOSS'], replies: 'stream' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  void socket.deliver('app_mention', mention('<@B-AVA> long job'));
+  await until(() => signals.length === 1);
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> hello', ts: '100.2', thread: '100.1', user: 'U-BOSS' }));
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> stop', ts: '100.3', thread: '100.1', user: 'U-BOSS' }));
+  await until(() => signals[0]?.aborted === true);
+  await socket.settled();
+
+  assert.equal(signals.length, 1, "the approver's other message is still refused");
+  assert.ok(web.updates.some((update) => update.text === 'Stopped by <@U-BOSS>.'));
+  await adapter.stop();
+});

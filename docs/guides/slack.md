@@ -220,7 +220,11 @@ is cancelled the same way a timeout cancels it, and an approval it was
 waiting on is cancelled and its card says so.
 
 Only the agent's approvers (`approvals.slackApprovers`) can stop it. From
-anyone else, or when nothing is running, `stop` is an ordinary message.
+anyone else, or when nothing is running, `stop` is an ordinary message. An
+untagged `stop` goes to the agent that holds the thread; the others only
+hear it. Under `admit: "principals"`, an approver who is not a listed
+principal can still stop the agent by naming it (`@agent stop`), and
+nothing else they send is admitted.
 
 ## Sending an image
 
