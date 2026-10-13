@@ -5197,6 +5197,7 @@ test('run with no provider configured refuses with a pointer to setup instead of
   assert.notEqual(exitCode, 0);
   assert.match(output.stderr, /No provider is configured/);
   assert.match(output.stderr, /stratus setup/);
+  assert.doesNotMatch(output.stderr, /Usage:/, 'the error says what to do; the help would bury it');
   assert.doesNotMatch(output.stdout, /provider=demo/);
 });
 
