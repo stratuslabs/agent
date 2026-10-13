@@ -34,6 +34,8 @@ import {
   promptImagesOf,
   markHostedToolSideEffects,
   renderTranscriptPrompt,
+  SDK_SESSION_AUTH_METADATA_KEY,
+  SDK_SESSION_METADATA_KEY,
   type HostedToolExecutor,
 } from '@stratusagent/providers';
 
@@ -42,6 +44,10 @@ import {
 // one appeared. Re-exported here because this is where they used to live,
 // and the documented import paths keep working.
 export { bridgedToolNames, hasHostedToolSideEffects, markHostedToolSideEffects };
+
+// The session keys moved there too, because the host names them whether or
+// not this package is installed.
+export { SDK_SESSION_AUTH_METADATA_KEY, SDK_SESSION_METADATA_KEY };
 
 export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5-5';
 
@@ -350,38 +356,6 @@ const linkedAbortController = (signal: AbortSignal): AbortController => {
 
 // The Agent SDK takes a single prompt string per query, so multi-turn
 // sessions are rendered as a transcript with the latest user message last.
-/**
- * Where a session records the SDK session it is continuing.
- *
- * The pairing is the whole point of resuming: the kernel's session id is
- * ours and durable, the SDK's is its own and lives beside its transcript
- * under `~/.claude/projects`. Storing the link in session metadata means
- * it survives tool execution, approval waits, and a daemon restart, and
- * is garbage-collected with the session — the same treatment the
- * Anthropic provider gives its raw turns, for the same reasons.
- */
-export const SDK_SESSION_METADATA_KEY = 'claudeCodeSessionId';
-
-/**
- * Which sign-in the stored SDK session was made under, as a fingerprint.
- *
- * An SDK session is resumed only under the sign-in that made it. Two
- * agents can run on two subscriptions in one daemon, and a token can be
- * replaced or removed while a conversation is open; resuming across that
- * change would carry one account's harness session into another's. A
- * mismatch starts a fresh SDK session and replays the kernel's history
- * into it, the same recovery a lost transcript gets.
- *
- * A one-way hash, truncated, with a fixed prefix, so the session store
- * never holds anything a token could be recovered from. A session stored
- * before this key existed has none. On the shared sign-in it resumes as it
- * always did, because the upgrade itself must not cost every open
- * conversation a replay. Under an agent's own sign-in it does not: nothing
- * says which account made it, and that agent's sign-in is the one case
- * where it matters.
- */
-export const SDK_SESSION_AUTH_METADATA_KEY = 'claudeCodeAuth';
-
 const authFingerprintOf = (authToken: string | undefined): string => (authToken
   ? `token:${createHash('sha256').update(`stratus-claude-code-auth\0${authToken}`).digest('hex').slice(0, 16)}`
   : 'machine');

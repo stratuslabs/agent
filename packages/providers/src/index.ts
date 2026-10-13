@@ -919,6 +919,66 @@ const isProviderResponse = (value: ProviderResponseInput): value is ProviderResp
 // documented import paths still work.
 // ---------------------------------------------------------------------------
 
+/** The codex CLI's own current default model. */
+export const DEFAULT_CODEX_MODEL = 'gpt-5.5';
+
+/**
+ * Where a session records the Claude Code SDK session it is continuing.
+ *
+ * The pairing is the whole point of resuming: the kernel's session id is
+ * ours and durable, the SDK's is its own and lives beside its transcript
+ * under `~/.claude/projects`. Storing the link in session metadata means
+ * it survives tool execution, approval waits, and a daemon restart, and
+ * is garbage-collected with the session — the same treatment the
+ * Anthropic provider gives its raw turns, for the same reasons.
+ *
+ * This and the two keys below live here, not in the harness packages that
+ * write them, because the host has to name them (to keep them off a fresh
+ * transcript) whether or not that harness is installed.
+ */
+export const SDK_SESSION_METADATA_KEY = 'claudeCodeSessionId';
+
+/**
+ * Which sign-in the stored SDK session was made under, as a fingerprint.
+ *
+ * An SDK session is resumed only under the sign-in that made it. Two
+ * agents can run on two subscriptions in one daemon, and a token can be
+ * replaced or removed while a conversation is open; resuming across that
+ * change would carry one account's harness session into another's. A
+ * mismatch starts a fresh SDK session and replays the kernel's history
+ * into it, the same recovery a lost transcript gets.
+ *
+ * A one-way hash, truncated, with a fixed prefix, so the session store
+ * never holds anything a token could be recovered from. A session stored
+ * before this key existed has none. On the shared sign-in it resumes as it
+ * always did, because the upgrade itself must not cost every open
+ * conversation a replay. Under an agent's own sign-in it does not: nothing
+ * says which account made it, and that agent's sign-in is the one case
+ * where it matters.
+ */
+export const SDK_SESSION_AUTH_METADATA_KEY = 'claudeCodeAuth';
+
+/**
+ * Where a session records the codex thread it is continuing.
+ *
+ * The kernel's session id is ours and durable; the thread id is codex's
+ * and lives beside its transcript under `~/.codex/sessions`. Storing the
+ * link in session metadata means it survives tool execution, approval
+ * waits, and a daemon restart, and is garbage-collected with the session —
+ * the same treatment the Claude Code provider gives its SDK session id.
+ */
+export const CODEX_THREAD_METADATA_KEY = 'codexThreadId';
+
+/**
+ * A harness's own transport (the Agent SDK's `query`, codex's `runTurn`),
+ * as a host carries it without knowing its shape: config and environment
+ * pass one through to the harness package, which is the only reader. The
+ * parameter is `never` so any harness's transport is assignable, which is
+ * what lets `state` hold one with no type from a package that may not be
+ * installed.
+ */
+export type HarnessTransport = (params: never) => AsyncIterable<unknown>;
+
 /**
  * Executes one kernel tool call on behalf of a provider-hosted loop. The
  * host owns approvals, events, allowlists, and the executor —

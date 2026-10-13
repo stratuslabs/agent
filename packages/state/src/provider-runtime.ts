@@ -12,20 +12,22 @@ import {
 } from '@stratusagent/core';
 import { defineLocalCommandTool } from '@stratusagent/executor-local';
 import {
+  CODEX_THREAD_METADATA_KEY,
   createOpenAICompatibleProvider,
   createProviderResponseBuilder,
   defineProvider,
   hasHostedToolSideEffects,
+  SDK_SESSION_AUTH_METADATA_KEY,
+  SDK_SESSION_METADATA_KEY,
   type HostedToolExecutor,
 } from '@stratusagent/providers';
 import { createAnthropicProvider, RAW_TURNS_METADATA_KEY } from '@stratusagent/provider-anthropic';
 import { ContextOverflowError } from '@stratusagent/core';
-import {
-  createClaudeCodeProvider,
-  SDK_SESSION_AUTH_METADATA_KEY,
-  SDK_SESSION_METADATA_KEY,
-} from '@stratusagent/provider-claude-code';
-import { createCodexProvider, CODEX_THREAD_METADATA_KEY } from '@stratusagent/provider-codex';
+// Types only, erased at build: the two harness packages are loaded with
+// `import()` when an agent first runs on one (see `loadHarness`), so a
+// host that uses neither never loads either.
+import type { ClaudeCodeQueryFn } from '@stratusagent/provider-claude-code';
+import type { CodexRunTurn } from '@stratusagent/provider-codex';
 import type { RuntimeConfig } from './config.ts';
 import { registeredProviderNameOf } from './provider-names.ts';
 
@@ -296,6 +298,81 @@ export const runsOnHarness = (
 ): boolean =>
   config.provider === 'codex' || (config.provider === 'anthropic' && Boolean(config.authToken) && !config.apiKey);
 
+/**
+ * The two providers that wrap a harness with its own agent loop, by the
+ * package that carries each. They are the heavy installs (each brings a
+ * native binary), so they are loaded on first use rather than imported:
+ * a host whose agents use neither never loads either, and a host where
+ * one is not installed fails the turn that needs it, with the fix, rather
+ * than failing to start.
+ */
+export type HarnessName = 'claude-code' | 'codex';
+
+const HARNESS_PACKAGES: Record<HarnessName, { specifier: string; label: string }> = {
+  'claude-code': {
+    specifier: '@stratusagent/provider-claude-code',
+    label: 'the Claude subscription runtime',
+  },
+  codex: {
+    specifier: '@stratusagent/provider-codex',
+    label: 'the Codex runtime',
+  },
+};
+
+/**
+ * The error a turn fails with when its harness package is missing, or
+ * `undefined` when `error` is anything else. Matched on the specifier as
+ * well as the code, because a harness that is installed but fails to load
+ * one of its own dependencies is a different fault with a different fix.
+ */
+export const harnessNotInstalledError = (harness: HarnessName, error: unknown): Error | undefined => {
+  const { specifier, label } = HARNESS_PACKAGES[harness];
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  const message = error instanceof Error ? error.message : '';
+  if (code !== 'ERR_MODULE_NOT_FOUND' || !message.includes(specifier)) return undefined;
+  return new Error(
+    `This agent runs on ${label}, and ${specifier} is not installed. `
+    + `Install it with \`npm install -g ${specifier}\` (or choose the provider again in \`stratus setup\`), then send the message again.`,
+  );
+};
+
+type HarnessModules = {
+  'claude-code': typeof import('@stratusagent/provider-claude-code');
+  codex: typeof import('@stratusagent/provider-codex');
+};
+
+type HarnessOptions<H extends HarnessName> = H extends 'claude-code'
+  ? Parameters<HarnessModules['claude-code']['createClaudeCodeProvider']>[0]
+  : Parameters<HarnessModules['codex']['createCodexProvider']>[0];
+
+const loadHarness = async <H extends HarnessName>(harness: H): Promise<HarnessModules[H]> => {
+  try {
+    return await import(HARNESS_PACKAGES[harness].specifier) as HarnessModules[H];
+  } catch (error) {
+    throw harnessNotInstalledError(harness, error) ?? error;
+  }
+};
+
+/**
+ * A provider whose adapter is built on its first request. `createRuntimeProvider`
+ * stays synchronous for its callers, and the harness module is loaded only
+ * when a turn actually reaches it. A failed build is not cached, so a turn
+ * after the package is installed loads it without a restart.
+ */
+const createDeferredProvider = (name: string, build: () => Promise<ModelProvider>): ModelProvider => {
+  let built: Promise<ModelProvider> | undefined;
+  return {
+    name,
+    async generate(request) {
+      built ??= build().catch((error: unknown) => {
+        built = undefined;
+        throw error;
+      });
+      return (await built).generate(request);
+    },
+  };
+};
+
 export const createRuntimeProvider = (
   config: RuntimeConfig,
   onFallback?: (error: unknown) => void,
@@ -337,11 +414,16 @@ export const createRuntimeProvider = (
     // the raw Messages API.
     // `authToken` again only to narrow it: the rule already requires one.
     if (runsOnHarness(config) && config.authToken) {
-      return createClaudeCodeProvider({
+      // The options are read from `config` now, and only the package load
+      // waits for the first turn, so a config changed after this call cannot
+      // reach a provider built from it.
+      const options: HarnessOptions<'claude-code'> = {
         authToken: config.authToken,
         ...(config.agentSignIn !== undefined ? { authOwner: config.agentSignIn } : {}),
         model: config.model,
-        ...(config.queryFn ? { queryFn: config.queryFn } : {}),
+        // The transport is carried untyped through config (`HarnessTransport`)
+        // so `state` names no harness type; this is the one reader.
+        ...(config.queryFn ? { queryFn: config.queryFn as ClaudeCodeQueryFn } : {}),
         ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
         // Kernel tools run through the host loop (approvals, events,
         // allowlists intact), so the subscription runtime is the same
@@ -351,7 +433,8 @@ export const createRuntimeProvider = (
         // this provider consumes all tool calls inside one generate, so
         // the outer runner never sees them.
         ...(maxTurns !== undefined ? { maxTurns } : {}),
-      });
+      };
+      return createDeferredProvider('claude-code', async () => (await loadHarness('claude-code')).createClaudeCodeProvider(options));
     }
     return createAnthropicProvider({
       model: config.model,
@@ -372,17 +455,18 @@ export const createRuntimeProvider = (
     // intact) over the provider's loopback MCP endpoint, so this runtime
     // is the same agent as every other provider — with or without an API
     // key, which only decides billing.
-    return createCodexProvider({
+    const options: HarnessOptions<'codex'> = {
       model: config.model,
       ...(config.apiKey ? { apiKey: config.apiKey } : {}),
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
-      ...(config.codexRunTurn ? { runTurn: config.codexRunTurn } : {}),
+      ...(config.codexRunTurn ? { runTurn: config.codexRunTurn as CodexRunTurn } : {}),
       ...(executeTool ? { executeTool } : {}),
       // Codex has no native turn cap, so the provider enforces the same
       // limit as a hosted-tool budget — the inner loop consumes all tool
       // calls inside one generate, and the outer runner never sees them.
       ...(maxTurns !== undefined ? { maxTurns } : {}),
-    });
+    };
+    return createDeferredProvider('codex', async () => (await loadHarness('codex')).createCodexProvider(options));
   }
 
   if (config.provider === 'openai') {

@@ -1,6 +1,5 @@
 import os from 'node:os';
-import type { ClaudeCodeQueryFn } from '@stratusagent/provider-claude-code';
-import type { CodexRunTurn } from '@stratusagent/provider-codex';
+import type { HarnessTransport } from '@stratusagent/providers';
 
 /**
  * Where Stratus state lives and how the process environment is read. Every
@@ -20,13 +19,13 @@ export interface StateEnvironment {
    * the subscription path is the one runtime nothing can drive except by
    * launching Claude Code for real.
    */
-  queryFn?: ClaudeCodeQueryFn;
+  queryFn?: HarnessTransport;
   /**
    * The Codex harness transport — `queryFn`'s counterpart for the third
    * provider shape. Without it the codex runtime is the one nothing can
    * drive except by launching the codex binary for real.
    */
-  codexRunTurn?: CodexRunTurn;
+  codexRunTurn?: HarnessTransport;
   /**
    * Called as the workspace migration reaches each legacy entry, before it
    * looks at that entry's destination: the moment an ordinary command,
