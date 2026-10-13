@@ -11052,6 +11052,37 @@ test('a stop cancels a message still in intake behind the running turn, so it ne
   await adapter.stop();
 });
 
+test('a message this agent only overhears, still in intake, does not swallow a stop with nothing running', async () => {
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'mentions' }];
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  let releaseLookup!: () => void;
+  const lookup = new Promise<void>((resolve) => { releaseLookup = resolve; });
+  let lookupStarted = false;
+  const inner = web.users.info.bind(web.users);
+  web.users.info = async (args: { user: string }) => {
+    if (args.user === 'U-OTHER') {
+      lookupStarted = true;
+      await lookup;
+    }
+    return inner(args);
+  };
+  await adapter.start(gateway);
+
+  // Overheard (Ava answers mentions only), held in its sender lookup.
+  void socket.deliver('message', channelMessage({ text: 'just chatting', ts: '100.2', thread: '100.1', user: 'U-OTHER' }));
+  await until(() => lookupStarted);
+  await socket.deliver('app_mention', mention('<@B-AVA> stop'));
+  releaseLookup();
+  await socket.settled();
+
+  assert.ok(
+    gateway.dispatches.some((dispatch) => /stop/.test(dispatch.userMessage ?? '')),
+    'with no turn to stop, the stop is an ordinary message',
+  );
+  await adapter.stop();
+});
+
 test('an approver who is not a listed principal can still stop a turn, and nothing else they say is admitted', async () => {
   const { gateway, signals } = stoppableGateway();
   const socket = createFakeSocket();

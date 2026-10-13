@@ -5697,8 +5697,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // synchronously, so a message's place in it is fixed by when Slack
     // delivered it and not by how long anything it does takes.
     const stopsAtClaim = stopsBySession.get(sessionId)?.count ?? 0;
-    intakeInFlight.set(sessionId, (intakeInFlight.get(sessionId) ?? 0) + 1);
-    let leftIntake = false;
+    // Only intake that can still become a turn is something a stop can
+    // cancel. A settled overhear that is not judged only ever reaches
+    // `gateway.observe`, so counting it would let a stop with nothing to
+    // stop be consumed instead of passing on as an ordinary message.
+    const mayRun = !admitted.overhear || admitted.judge || !admitted.settled;
+    if (mayRun) {
+      intakeInFlight.set(sessionId, (intakeInFlight.get(sessionId) ?? 0) + 1);
+    }
+    let leftIntake = !mayRun;
     const leaveIntake = (): void => {
       if (leftIntake) {
         return;
