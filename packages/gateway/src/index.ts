@@ -4534,6 +4534,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       startedChannels.length = 0;
       await Promise.allSettled([...inflight]);
     })();
+    // One deadline for the whole bounded shutdown: the drain window, then
+    // one more window that everything after it shares (the aborted turns'
+    // record, the scheduler's drain, the plugins' dispose). A service
+    // manager's stop timeout is sized for exactly that (see the CLI's
+    // SERVICE_STOP_TIMEOUT_SECONDS); a window per phase would add up past
+    // it and land its SIGKILL mid-cleanup.
+    const deadline = abortAfterMs === undefined ? undefined : Date.now() + 2 * abortAfterMs;
+    const remaining = (): number =>
+      deadline === undefined || abortAfterMs === undefined ? 0 : Math.min(abortAfterMs, Math.max(0, deadline - Date.now()));
     let drained = true;
     if (abortAfterMs === undefined) {
       await drain;
@@ -4550,7 +4559,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       for (const controller of turnControllers) {
         controller.abort(new RunAbortedError(abortingWith));
       }
-      drained = await settlesWithin(drain, abortAfterMs);
+      drained = await settlesWithin(drain, remaining());
       if (!drained) {
         warn(`${kind}: ${inflight.size} turn(s) did not stop after being aborted; shutting down around them`);
       }
@@ -4564,7 +4573,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const schedulerDrain = scheduler.drain();
     if (drained || abortAfterMs === undefined) {
       await schedulerDrain;
-    } else if (!(await settlesWithin(schedulerDrain, abortAfterMs))) {
+    } else if (!(await settlesWithin(schedulerDrain, remaining()))) {
       warn(`${kind}: a scheduled firing did not stop after being aborted; shutting down around it`);
     }
     // After the turns that might still be using them. A plugin holding a
@@ -4575,14 +4584,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // coming back, and a plugin still holding on is one more thing the
     // host should not start a new daemon beside.
     const disposal = disposePlugins();
+    const disposalWindow = remaining();
     if (abortAfterMs === undefined) {
       await disposal;
-    } else if (await settlesWithin(disposal, abortAfterMs)) {
+    } else if (await settlesWithin(disposal, disposalWindow)) {
       // A dispose that rejected has already been named; what it may still
       // hold is the same problem as one that never answered.
       drained = drained && await disposal;
     } else {
-      warn(`${kind}: a plugin did not release what it holds within ${abortAfterMs}ms; shutting down around it`);
+      warn(`${kind}: a plugin did not release what it holds within ${disposalWindow}ms; shutting down around it`);
       drained = false;
     }
     closeStores();

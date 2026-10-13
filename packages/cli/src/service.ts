@@ -96,8 +96,9 @@ export interface ServiceInstallOptions {
  * seconds. Longer than both of a stop's windows: the 30-second drain
  * (`DEFAULT_STOP_DRAIN_TIMEOUT_MS`), after which a turn still running is
  * aborted by the daemon (its shell commands killed), and the same window
- * again for the aborted turn to record its failure, plus room for the
- * rest of the shutdown. Without it launchd uses its own
+ * again, which the aborted turns' record, the scheduler's drain and the
+ * plugins' dispose all share (the gateway holds them to one deadline),
+ * plus room for closing the stores and exiting. Without it launchd uses its own
  * default, about five seconds on macOS 15, and its kill of the job does
  * not reach a command's own process group, which runs on as an orphan.
  */
