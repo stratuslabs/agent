@@ -162,3 +162,64 @@ test('a message overheard after a batch opened closes it, so nothing said later 
   assert.deepEqual(users, ['first', 'second', 'Bea: overheard', 'third']);
   await gateway.stop();
 });
+
+test('a message that cannot join the open batch closes it, so a later one is not answered ahead of it', async () => {
+  const provider = gatedProvider();
+  const gateway = await startGateway(provider.fetchImpl);
+  const absorbed: string[] = [];
+
+  const first = gateway.dispatch({ sessionId: 'm-6', agentId: 'ava', userMessage: 'first', onAbsorbed: () => {} });
+  await provider.running;
+  const leader = gateway.dispatch({ sessionId: 'm-6', agentId: 'ava', userMessage: 'second', onAbsorbed: () => absorbed.push('second') });
+  // No onAbsorbed: this caller cannot be merged, and it arrived before "fourth".
+  const plain = gateway.dispatch({ sessionId: 'm-6', agentId: 'ava', userMessage: 'third' });
+  const later = gateway.dispatch({ sessionId: 'm-6', agentId: 'ava', userMessage: 'fourth', onAbsorbed: () => absorbed.push('fourth') });
+  provider.release();
+  await Promise.all([first, leader, plain, later]);
+  assert.deepEqual(absorbed, []);
+  assert.deepEqual(provider.prompts, ['first', 'second', 'third', 'fourth']);
+  await gateway.stop();
+});
+
+test('a batch leader cancelled while it waited is settled before the turn it handed over runs', async () => {
+  const prompts: string[] = [];
+  const gates: Array<() => void> = [];
+  const starts: Array<() => void> = [];
+  const gate = (n: number) => new Promise<void>((resolve) => { gates[n] = resolve; });
+  const started = (n: number) => new Promise<void>((resolve) => { starts[n] = resolve; });
+  const gate0 = gate(0);
+  const gate1 = gate(1);
+  const running0 = started(0);
+  const running1 = started(1);
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+    prompts.push(body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '');
+    const n = prompts.length - 1;
+    starts[n]?.();
+    if (n === 0) await gate0;
+    if (n === 1) await gate1;
+    return openAiText(`answer ${prompts.length}`);
+  }) as typeof fetch;
+  const gateway = await startGateway(fetchImpl);
+
+  const first = gateway.dispatch({ sessionId: 'm-7', agentId: 'ava', userMessage: 'first', onAbsorbed: () => {} });
+  await running0;
+  const cancel = new AbortController();
+  let leaderSettled = false;
+  const leader = gateway.dispatch({ sessionId: 'm-7', agentId: 'ava', userMessage: 'cancelled', signal: cancel.signal, onAbsorbed: () => {} });
+  const leaderDone = leader.then(() => 'resolved', () => 'rejected').finally(() => { leaderSettled = true; });
+  const joiner = gateway.dispatch({ sessionId: 'm-7', agentId: 'ava', userMessage: 'kept', onAbsorbed: () => {} });
+  cancel.abort();
+  gates[0]?.();
+  await first;
+  // The replacement turn is now running on the provider.
+  await running1;
+  await new Promise((resolve) => setImmediate(resolve));
+  const settledWhileRunning = leaderSettled;
+  gates[1]?.();
+  await joiner;
+  assert.equal(settledWhileRunning, true, 'the cancelled leader must not stay at the head of the queue while its replacement runs');
+  assert.equal(await leaderDone, 'rejected');
+  assert.deepEqual(prompts, ['first', 'kept']);
+  await gateway.stop();
+});

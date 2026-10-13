@@ -3997,8 +3997,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Merged turns (card 423): an opted-in message behind a running turn
     // joins the batch already waiting, if there is one for the same agent.
     const mergeable = input.onAbsorbed !== undefined && input.addressed !== false;
-    const open = mergeable ? openBatches.get(input.sessionId) : undefined;
-    if (open !== undefined && open.agentId === input.agentId) {
+    const open = openBatches.get(input.sessionId);
+    if (mergeable && open !== undefined && open.agentId === input.agentId) {
       waitingDispatches.set(input.sessionId, (waitingDispatches.get(input.sessionId) ?? 0) + 1);
       const joined = new Promise<Session>((resolve, reject) => {
         open.absorbed.push({ input, resolve, reject });
@@ -4023,9 +4023,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       return joined;
     }
+    // It cannot join, so the open batch takes no more: a message arriving
+    // after this one must not be answered ahead of it.
+    if (open !== undefined) {
+      openBatches.delete(input.sessionId);
+    }
     // Otherwise it leads a new batch, if it is waiting behind a turn at all:
     // a message to an idle session runs at once, alone.
-    const batch: MergeBatch | undefined = mergeable && open === undefined && sessionChains.has(input.sessionId)
+    const batch: MergeBatch | undefined = mergeable && sessionChains.has(input.sessionId)
       ? { agentId: input.agentId, absorbed: [] }
       : undefined;
     if (batch !== undefined) {
@@ -4052,7 +4057,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       let leader: { session: Session } | { error: unknown } | undefined;
       const settle = (part: Part, outcome: { session: Session } | { error: unknown }): void => {
         if (part.joiner === undefined) {
+          // Settled the moment it is known, not when the chain moves on: a
+          // leader cancelled or repeated while it waited must leave its
+          // caller's queue before the turn it handed over starts rendering.
           leader = outcome;
+          settleLeader(outcome);
         } else if ('session' in outcome) {
           part.joiner.resolve(outcome.session);
         } else {
@@ -4152,8 +4161,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       return outcome.session;
     };
+    // What this caller is handed. It follows the chain's work, except that a
+    // batch leader settles it early (`settle` in `runMerged`).
+    let settleLeader: (outcome: { session: Session } | { error: unknown }) => void = () => {};
+    const turn = new Promise<Session>((resolve, reject) => {
+      settleLeader = (outcome) => ('error' in outcome ? reject(outcome.error) : resolve(outcome.session));
+    });
     waitingDispatches.set(input.sessionId, (waitingDispatches.get(input.sessionId) ?? 0) + 1);
-    const turn: Promise<Session> = onSessionChain(input.sessionId, async () => {
+    const chained: Promise<Session> = onSessionChain(input.sessionId, async () => {
       // The batch closes here: anything arriving from now on waits behind
       // this turn and leads the next one.
       if (batch !== undefined && openBatches.get(input.sessionId) === batch) {
@@ -4199,6 +4214,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         activeTurns.delete(input.sessionId);
       }
     });
+    // A second settle (a leader already settled early) is a no-op.
+    chained.then((session) => settleLeader({ session }), (error: unknown) => settleLeader({ error }));
     if (idempotencyKey !== undefined) {
       // A repeat that queued instead of attaching — it named another agent,
       // and is about to be refused — must not displace the turn it repeats.
