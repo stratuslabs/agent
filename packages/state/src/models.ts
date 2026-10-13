@@ -96,6 +96,131 @@ export const verifyProviderKey = async (
   }
 };
 
+/**
+ * What a one-token call to a model concluded. `refused` is the provider
+ * answering and declining the request (unknown model, no credit, a model the
+ * key may not use); `no answer` is offline, rate-limited or overloaded, which
+ * says nothing about the model.
+ */
+export interface ProviderModelVerdict {
+  status: 'answered' | 'refused' | 'no answer';
+  detail?: string;
+}
+
+/** Long enough to read the cause, short enough for one doctor line. */
+const MODEL_ERROR_DETAIL_LIMIT = 200;
+
+/**
+ * The status and the provider's own message, cut to one line, plus the error
+ * code or type it gave (`insufficient_quota`, `rate_limit_error`), if any.
+ */
+const readError = async (response: Response): Promise<{ detail: string; message?: string; code?: string }> => {
+  let message: string | undefined;
+  let code: string | undefined;
+  try {
+    const body = await response.json() as { error?: { message?: unknown; code?: unknown; type?: unknown } | string; message?: unknown };
+    const raw = typeof body.error === 'string' ? body.error : body.error?.message ?? body.message;
+    message = typeof raw === 'string' && raw.trim() ? raw.trim().replace(/\s+/g, ' ') : undefined;
+    if (typeof body.error === 'object' && body.error) {
+      const named = typeof body.error.code === 'string' ? body.error.code : body.error.type;
+      code = typeof named === 'string' ? named : undefined;
+    }
+  } catch {
+    // Not JSON: the status alone is the answer.
+  }
+  const full = message;
+  if (message && message.length > MODEL_ERROR_DETAIL_LIMIT) {
+    message = `${message.slice(0, MODEL_ERROR_DETAIL_LIMIT - 1)}…`;
+  }
+  return {
+    detail: message ? `HTTP ${response.status}: ${message}` : `HTTP ${response.status}`,
+    ...(full ? { message: full } : {}),
+    ...(code ? { code } : {}),
+  };
+};
+
+/**
+ * A 429 that is the account having nothing to spend, not a busy minute:
+ * OpenAI says `insufficient_quota`, and a message about the credit balance,
+ * billing or payment means the same. Every run would fail the same way.
+ * A bare "quota" or "credits" is not enough: compatible endpoints use those
+ * words for per-minute and daily limits that clear on their own.
+ */
+const isOutOfCredit = (error: { message?: string; code?: string }): boolean =>
+  error.code === 'insufficient_quota'
+  || /\b(credit balance|insufficient (credits?|funds|balance)|billing|payment)\b/i.test(error.message ?? '');
+
+/**
+ * Whether a 200 carries what a run needs: a message with a content array on
+ * Anthropic, a first choice with a message on an OpenAI-compatible endpoint.
+ * The adapter fails a run on an empty body, `{}` or no choices, so the probe
+ * must not call those answered.
+ */
+const hasCompletion = async (provider: 'anthropic' | 'openai', response: Response): Promise<boolean> => {
+  try {
+    const body = await response.json() as { content?: unknown; choices?: Array<{ message?: unknown }> };
+    return provider === 'anthropic'
+      ? Array.isArray(body?.content)
+      : Array.isArray(body?.choices) && body.choices[0]?.message !== undefined && body.choices[0]?.message !== null;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Ask `model` for a reply as small as the provider allows, with the key a run
+ * would send. A key check proves the key; only this proves the run's model
+ * answers on that account. It is a billed call (one output token on
+ * Anthropic), so callers make it only when asked.
+ */
+export const probeProviderModel = async (
+  provider: 'anthropic' | 'openai',
+  key: string,
+  model: string,
+  baseUrl: string | undefined,
+  fetchImpl: typeof fetch | undefined,
+): Promise<ProviderModelVerdict> => {
+  if (typeof fetchImpl !== 'function') {
+    return { status: 'no answer', detail: 'fetch is unavailable' };
+  }
+  const root = (baseUrl ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL)).replace(/\/+$/, '');
+  const messages = [{ role: 'user', content: 'ping' }];
+  // The OpenAI-compatible adapter sends no output cap on a run, and some of
+  // its models refuse `max_tokens`, so neither does this.
+  const request = provider === 'anthropic'
+    ? {
+        url: `${root}/v1/messages`,
+        headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: { model, max_tokens: 1, messages },
+      }
+    : {
+        url: `${root}/chat/completions`,
+        headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+        body: { model, messages },
+      };
+  try {
+    const response = await fetchImpl(request.url, { method: 'POST', headers: request.headers, body: JSON.stringify(request.body) });
+    if (response.ok) {
+      return await hasCompletion(provider, response)
+        ? { status: 'answered' }
+        : { status: 'refused', detail: `HTTP ${response.status} without a completion` };
+    }
+    const error = await readError(response);
+    const { detail } = error;
+    // Rate limits and server trouble pass; they say nothing about the model.
+    // A 429 for an account with no credit is a refusal: no run would get through.
+    if (response.status === 429 && isOutOfCredit(error)) {
+      return { status: 'refused', detail };
+    }
+    if (response.status === 408 || response.status === 429 || response.status >= 500) {
+      return { status: 'no answer', detail };
+    }
+    return { status: 'refused', detail };
+  } catch (error) {
+    return { status: 'no answer', detail: error instanceof Error ? error.message : String(error) };
+  }
+};
+
 /** One model a stored sign-in can actually reach. */
 export interface CatalogModel {
   provider: CredentialProviderName;

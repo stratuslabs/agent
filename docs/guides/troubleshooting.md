@@ -53,17 +53,23 @@ subscription sign-in to per-token billing.
 Doctor stays on the machine by default. `stratus doctor --live` also asks
 each provider your runs use (the default and any fallback) whether it
 accepts the key that run would send, using the same free models-list call
-setup makes when you enter a key:
+setup makes when you enter a key. When the key is accepted, it then asks the
+run's model for a one-token reply, which catches a model name the provider
+doesn't know or an account it won't bill:
 
 ```text
 Live check
-  anthropic key refused (HTTP 401)
+  anthropic key accepted · claude-opus-5 answered
 ```
 
-A refused key is a problem and doctor exits non-zero. No answer (offline,
-or a compatible endpoint with no models route) says nothing about the key,
-so it isn't a problem. A subscription sign-in has no key to send and is
-reported as not checked.
+That reply is a real, billed call (one output token on Anthropic; an
+OpenAI-compatible endpoint gets the same uncapped request a run sends).
+
+A refused key or a refused model is a problem and doctor exits non-zero. No
+answer (offline, rate-limited, overloaded, or a compatible endpoint with no
+models route) says nothing about the key or model, so it isn't a problem. A
+subscription sign-in has no key to send and is reported as not checked, and a
+codex model is not asked because codex runs it through its own harness.
 
 The files are only half the answer when a daemon is running. It
 re-resolves runtime settings (provider, model, system prompt and the rest of
