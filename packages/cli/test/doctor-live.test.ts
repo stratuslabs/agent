@@ -57,7 +57,12 @@ const doctor = async (
       // signal, so only doctor's own deadline can end the wait.
       return new Promise<Response>(() => {});
     }
-    return new Response('{}', { status: answer });
+    // A 200 from the one-token call carries a message, as a real one does:
+    // the probe calls a 200 without a completion a refusal.
+    const body = answer === 200 && String(url).endsWith('/v1/messages')
+      ? JSON.stringify({ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'p' }], stop_reason: 'max_tokens' })
+      : '{}';
+    return new Response(body, { status: answer });
   }) as typeof fetch;
   const { streams, output } = createStreams();
   const exitCode = await runCli({
