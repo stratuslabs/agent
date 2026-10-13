@@ -1959,6 +1959,8 @@ const alwaysOutcome = (always: AlwaysMeans | undefined, agentName: string, agent
       return 'Allowed, and this site is now acted on without asking — until revoked';
     case 'tool':
       return `Allowed, and granted to ${escapeSlackText(agentName)} until revoked (stratus grants ${escapeSlackText(agentId)})`;
+    case 'destination':
+      return `Allowed, and granted to ${escapeSlackText(agentName)} for this conversation until revoked (stratus grants ${escapeSlackText(agentId)})`;
     case 'session':
       return 'Allowed for the rest of this session';
     default:
@@ -1979,6 +1981,8 @@ const alwaysOffer = (always: AlwaysMeans | undefined, agentName: string): string
   switch (always) {
     case 'tool':
       return `*Always allow* grants this tool to ${escapeSlackText(agentName)} until an operator revokes it.`;
+    case 'destination':
+      return `*Always allow* lets ${escapeSlackText(agentName)} use this tool on this conversation without asking, until revoked.`;
     case 'session':
       return '*Always allow* stops this tool asking again for the rest of this session.';
     case 'scope':

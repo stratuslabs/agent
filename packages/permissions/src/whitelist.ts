@@ -5,6 +5,12 @@ import { assertDerivedStatePath } from './state-directory.ts';
 
 import { describeCommandScope, parseCommandScope, sameScope, type CommandScope } from './commands.ts';
 import { parseToolGrant, sameToolGrant, type ToolGrant } from './grants.ts';
+import {
+  describeDestinationGrant,
+  parseDestinationGrant,
+  sameDestinationGrant,
+  type DestinationGrant,
+} from './destinations.ts';
 import { describeOriginScope, parseOriginScope, sameOriginScope, type OriginScope } from './origins.ts';
 
 /**
@@ -49,11 +55,22 @@ export interface ToolGrantStore {
   rememberTool(agentId: string, grant: ToolGrant): Promise<void>;
 }
 
+/**
+ * Which conversations one agent may read or send to unattended — the
+ * fourth answer in the same file, for a tool judged by destination
+ * (`Tool.destinationFor`). See `destinations.ts`.
+ */
+export interface DestinationWhitelistStore {
+  destinationsFor(agentId: string): Promise<DestinationGrant[]>;
+  rememberDestination(agentId: string, grant: DestinationGrant): Promise<void>;
+}
+
 /** Everything one agent may do unattended beyond the built-in safe list, as one read. */
 export interface AgentGrants {
   scopes: CommandScope[];
   origins: OriginScope[];
   tools: ToolGrant[];
+  destinations: DestinationGrant[];
 }
 
 /**
@@ -66,6 +83,7 @@ export interface AgentGrantsListing {
   scopes: Array<{ description: string; scope: CommandScope }>;
   origins: Array<{ origin: string; tool?: string; description: string }>;
   tools: ToolGrant[];
+  destinations: Array<DestinationGrant & { description: string }>;
 }
 
 export const describeAgentGrants = (grants: AgentGrants): AgentGrantsListing => ({
@@ -76,6 +94,7 @@ export const describeAgentGrants = (grants: AgentGrants): AgentGrantsListing => 
     description: describeOriginScope(scope),
   })),
   tools: [...grants.tools],
+  destinations: grants.destinations.map((grant) => ({ ...grant, description: describeDestinationGrant(grant) })),
 });
 
 /**
@@ -90,7 +109,8 @@ export const describeAgentGrants = (grants: AgentGrants): AgentGrantsListing => 
  * removal is visible to the next call on this store at once: a revoked
  * grant that kept working until a restart would be a ratchet with a delay.
  */
-export interface AgentGrantStore extends CommandWhitelistStore, OriginWhitelistStore, ToolGrantStore {
+export interface AgentGrantStore
+  extends CommandWhitelistStore, OriginWhitelistStore, ToolGrantStore, DestinationWhitelistStore {
   grantsFor(agentId: string): Promise<AgentGrants>;
   /**
    * By the line the listing shows (`describeCommandScope`), since that is
@@ -100,6 +120,8 @@ export interface AgentGrantStore extends CommandWhitelistStore, OriginWhitelistS
   forgetScope(agentId: string, description: string): Promise<boolean>;
   forgetOrigin(agentId: string, origin: string): Promise<boolean>;
   forgetTool(agentId: string, tool: string): Promise<boolean>;
+  /** Every grant on this destination, or only `tool`'s when one is named. */
+  forgetDestination(agentId: string, destination: string, tool?: string): Promise<boolean>;
 }
 
 interface WhitelistFile {
@@ -129,6 +151,8 @@ interface WhitelistFile {
    * `headless`, and the log names it.
    */
   tools?: ToolGrant[];
+  /** Per-conversation grants, on the same additive terms as `origins`. */
+  destinations?: DestinationGrant[];
 }
 
 const WHITELIST_VERSION = 1;
@@ -402,6 +426,7 @@ export const createFileCommandWhitelist = (options: {
     let scopes: CommandScope[] = [];
     let origins: OriginScope[] = [];
     let tools: ToolGrant[] = [];
+    let destinations: DestinationGrant[] = [];
     // The agent id is a validated invariant by the time it reaches any
     // path join (see 03) — it is a single path segment or it was refused
     // at the parse boundary, so this does not re-check it.
@@ -437,6 +462,11 @@ export const createFileCommandWhitelist = (options: {
         tools = Array.isArray(parsed.tools)
           ? parsed.tools.map(parseToolGrant).filter((grant): grant is ToolGrant => grant !== undefined)
           : [];
+        destinations = Array.isArray(parsed.destinations)
+          ? parsed.destinations
+            .map(parseDestinationGrant)
+            .filter((grant): grant is DestinationGrant => grant !== undefined)
+          : [];
       }
     } catch (error) {
       if (error instanceof GrantReadDeferred) {
@@ -447,7 +477,7 @@ export const createFileCommandWhitelist = (options: {
         options.warn?.(
           `${file} was not read (${error.reason}); ${agentId} is treated as having no grants until the next call reads it.`,
         );
-        return { scopes: [], origins: [], tools: [] };
+        return { scopes: [], origins: [], tools: [], destinations: [] };
       }
       // No whitelist means no stored scopes, and is not worth failing a
       // turn over: the fallback is asking a human, which is where an agent
@@ -462,6 +492,7 @@ export const createFileCommandWhitelist = (options: {
       scopes = [];
       origins = [];
       tools = [];
+      destinations = [];
       const reason = error instanceof Error ? error.message : String(error);
       unreadable.set(agentId, { file, reason });
       options.warn?.(
@@ -469,7 +500,7 @@ export const createFileCommandWhitelist = (options: {
           + 'are not saved over it until it is fixed and the daemon restarted.',
       );
     }
-    return { scopes, origins, tools };
+    return { scopes, origins, tools, destinations };
   };
 
   /**
@@ -488,6 +519,7 @@ export const createFileCommandWhitelist = (options: {
       scopes: grants.scopes,
       ...(grants.origins.length > 0 ? { origins: grants.origins } : {}),
       ...(grants.tools.length > 0 ? { tools: grants.tools } : {}),
+      ...(grants.destinations.length > 0 ? { destinations: grants.destinations } : {}),
     };
     const body = `${JSON.stringify(file, null, 2)}\n`;
     const current = whitelistPathFor(options.directory, agentId);
@@ -677,9 +709,26 @@ export const createFileCommandWhitelist = (options: {
         await save(agentId, { ...grants, tools: [...kept, grant] });
       });
     },
+    async destinationsFor(agentId) {
+      return [...(await read(agentId)).destinations];
+    },
+    async rememberDestination(agentId, grant) {
+      return serialized(agentId, async () => {
+        const grants = await readForChange(agentId);
+        refuseIfUnreadable(agentId);
+        // Replaces rather than skips, so the row carries the latest answer.
+        const kept = grants.destinations.filter((existing) => !sameDestinationGrant(existing, grant));
+        await save(agentId, { ...grants, destinations: [...kept, grant] });
+      });
+    },
     async grantsFor(agentId) {
       const grants = await read(agentId);
-      return { scopes: [...grants.scopes], origins: [...grants.origins], tools: [...grants.tools] };
+      return {
+        scopes: [...grants.scopes],
+        origins: [...grants.origins],
+        tools: [...grants.tools],
+        destinations: [...grants.destinations],
+      };
     },
     async forgetScope(agentId, description) {
       return serialized(agentId, async () => {
@@ -702,6 +751,19 @@ export const createFileCommandWhitelist = (options: {
           return false;
         }
         await save(agentId, { ...grants, origins: kept });
+        return true;
+      });
+    },
+    async forgetDestination(agentId, destination, tool) {
+      return serialized(agentId, async () => {
+        const grants = await readForChange(agentId);
+        refuseIfUnreadable(agentId);
+        const kept = grants.destinations.filter((grant) =>
+          grant.destination !== destination || (tool !== undefined && grant.tool !== tool));
+        if (kept.length === grants.destinations.length) {
+          return false;
+        }
+        await save(agentId, { ...grants, destinations: kept });
         return true;
       });
     },

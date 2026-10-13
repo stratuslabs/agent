@@ -4775,12 +4775,23 @@ test('a request that says what always grants is rendered and resolved in those w
   // no hedging, because the request said which lifetime this was.
   assert.match(update?.text ?? '', /Allowed, and granted to Ava until revoked \(stratus grants ava\) by <@U-DYLAN>/);
 
-  // A send outside a schedule is the one shape still scoped to the session,
-  // and both the offer and the outcome say that instead.
+  // A read or send names one conversation, and always grants that one.
+  gateway.pendingApprovals.add('req-3');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-3',
+    call: { id: 'call-3', toolName: 'message.read', input: { source: { channel: 'slack', to: 'C1' } } },
+    always: 'destination',
+  }));
+  assert.match(JSON.stringify(web.posts.at(-1)?.blocks), /Always allow\* lets Ava use this tool on this conversation without asking, until revoked/);
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-3', 'U-DYLAN'));
+  assert.match(web.updates.at(-1)?.text ?? '', /Allowed, and granted to Ava for this conversation until revoked \(stratus grants ava\) by <@U-DYLAN>/);
+
+  // A call naming no conversation is the one shape still scoped to the
+  // session, and both the offer and the outcome say that instead.
   gateway.pendingApprovals.add('req-2');
   await gateway.bus.emit(approvalRequest({
     requestId: 'req-2',
-    call: { id: 'call-2', toolName: 'message.send', input: { destination: 'slack:C1', text: 'hi' } },
+    call: { id: 'call-2', toolName: 'message.send', input: { text: 'hi' } },
     always: 'session',
   }));
   assert.match(JSON.stringify(web.posts.at(-1)?.blocks), /stops this tool asking again for the rest of this session/);

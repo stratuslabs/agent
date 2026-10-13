@@ -188,10 +188,12 @@ warning naming the file.
   [Shell commands](./shell.md)), an origin for `browser.act` (see
   [Browser actions](./browser.md)) and for `web.fetch`. Every other gated tool gets a
   **standing grant** on the tool itself — see
-  [Standing grants](#standing-grants). The one exception is a send outside
-  a schedule (`message.send`): a grant there would be a yes to every
-  destination, and no per-destination grant exists yet, so it lasts for
-  the session and the prompt says so. Everything else lives in
+  [Standing grants](#standing-grants). A tool judged by *conversation*
+  (`message.read`, `message.send`) gets that tool on that one
+  conversation, never every conversation the app is in: reading a channel
+  is not posting in it, and a yes for one channel is not a yes for the
+  next. Only a call that names no conversation at all falls back to the
+  rest of the session, and the prompt says so. Everything lives in
   `~/.stratus/agents/<id>/whitelist.json` and survives a restart. When that
   file exists and no longer parses it is never written over, so the answer
   holds only until the daemon stops; the log line says which happened, and
@@ -447,6 +449,9 @@ decision came through the control API:
   "origins": [{ "origin": "https://app.example.com", "tool": "browser.act" }],
   "tools": [
     { "tool": "fs.write", "package": "@stratusagent/tool-fs", "grantedAt": "2026-09-07T09:14:36.000Z", "grantedBy": "U01DYLAN" }
+  ],
+  "destinations": [
+    { "tool": "message.read", "destination": "slack:C0123ABCD", "grantedAt": "2026-10-12T09:14:36.000Z", "grantedBy": "U01DYLAN" }
   ]
 }
 ```
@@ -483,10 +488,11 @@ than scoping choices:
 ### Seeing and revoking them
 
 ```bash
-stratus grants blair                                # everything blair may do unattended, all three kinds
+stratus grants blair                                # everything blair may do unattended, every kind
 stratus grants revoke blair --tool fs.write           # a standing grant
 stratus grants revoke blair --scope "git push"        # a command scope, by the line the listing shows
 stratus grants revoke blair --origin https://app.example.com
+stratus grants revoke blair --destination slack:C0123ABCD   # every tool granted on that conversation
 ```
 
 With a daemon serving, both go through its control API (`GET

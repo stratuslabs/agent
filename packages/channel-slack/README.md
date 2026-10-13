@@ -276,7 +276,8 @@ widens: for most gated tools it is a **standing grant** to the agent that
 lasts until an operator revokes it (`stratus grants <agent>` lists and
 revokes; see [Approvals](../../docs/guides/approvals.md)); for a shell
 command it is that command's scope; for a browser action it is the site;
-and for a send outside a schedule it is the rest of this session.
+for a message read or send it is that tool on that one conversation; and
+only for one that names no conversation is it the rest of this session.
 
 The resolved message describes what the daemon did rather than which button
 was pressed — `POST /approvals` accepts `always` whatever this channel

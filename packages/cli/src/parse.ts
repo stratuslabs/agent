@@ -204,6 +204,8 @@ export interface ParsedGrantsCommand {
   /** The scope as `stratus grants` lists it — `git push`. */
   scope?: string;
   origin?: string;
+  /** A conversation as `stratus grants` lists it — `slack:C0123ABCD`. */
+  destination?: string;
   format: 'text' | 'json';
   gateway?: string;
   token?: string;
@@ -1187,7 +1189,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     const action: ParsedGrantsCommand['action'] = rest[0] === 'revoke' ? 'revoke' : 'list';
     const tokens = rest[0] === 'revoke' || rest[0] === 'list' ? rest.slice(1) : rest;
     const usage = action === 'revoke'
-      ? 'stratus grants revoke <agent> --tool <name> | --scope "<command>" | --origin <origin>'
+      ? 'stratus grants revoke <agent> --tool <name> | --scope "<command>" | --origin <origin> | --destination <channel:id>'
       : 'stratus grants <agent>';
     const parsed: ParsedGrantsCommand = { command: 'grants', action, agentId: '', format: 'text' };
     for (let index = 0; index < tokens.length; index += 1) {
@@ -1222,12 +1224,15 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         index += 1;
         continue;
       }
-      if (action === 'revoke' && (token === '--tool' || token === '--scope' || token === '--origin')) {
+      if (action === 'revoke'
+        && (token === '--tool' || token === '--scope' || token === '--origin' || token === '--destination')) {
         const value = readOptionValue(tokens, index, token);
         if (token === '--tool') {
           parsed.tool = value;
         } else if (token === '--scope') {
           parsed.scope = value;
+        } else if (token === '--destination') {
+          parsed.destination = value;
         } else {
           parsed.origin = value;
         }
@@ -1259,9 +1264,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       );
     }
     if (action === 'revoke') {
-      const named = [parsed.tool, parsed.scope, parsed.origin].filter((value) => value !== undefined).length;
+      const named = [parsed.tool, parsed.scope, parsed.origin, parsed.destination]
+        .filter((value) => value !== undefined).length;
       if (named !== 1) {
-        throw new Error(`grants revoke names exactly one of --tool, --scope, or --origin: ${usage}.`);
+        throw new Error(`grants revoke names exactly one of --tool, --scope, --origin, or --destination: ${usage}.`);
       }
     }
     return parsed;

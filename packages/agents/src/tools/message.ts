@@ -178,9 +178,9 @@ const optionalId = (input: JsonObject, key: string, tool = MESSAGE_READ_TOOL_NAM
  * source (`destinationFor`) for the same reason as a send: a durable
  * per-tool grant would be a standing yes to every conversation the app is
  * in, which anyone who can talk to the agent could then have it quote
- * anywhere. So **Always allow** lasts for this session only, and a
- * schedule approved with a destination may read that one conversation
- * unattended. The channel's own rule decides which conversations are
+ * anywhere. So **Always allow** grants reading this one conversation,
+ * until revoked, and a schedule approved with a destination may read that
+ * one conversation unattended. The channel's own rule decides which conversations are
  * readable at all. Output is `external`: the messages are written by
  * whoever is in the conversation, not by the operator.
  */

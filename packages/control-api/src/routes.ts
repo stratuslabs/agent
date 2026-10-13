@@ -1222,6 +1222,7 @@ export const routes: Route[] = [
         configCommands: context.configCommands?.(agentId) ?? [],
         scopes: listing.scopes,
         origins: listing.origins,
+        destinations: listing.destinations,
         tools: listing.tools.map((grant) => {
           const stale = !contributors.has(grant.tool)
             ? 'no loaded tool has this name, so the grant applies to nothing until one does'
@@ -1243,9 +1244,10 @@ export const routes: Route[] = [
       const tool = optionalString(body, 'tool');
       const scope = optionalString(body, 'scope');
       const origin = optionalString(body, 'origin');
-      const named = [tool, scope, origin].filter((value) => value !== undefined).length;
+      const destination = optionalString(body, 'destination');
+      const named = [tool, scope, origin, destination].filter((value) => value !== undefined).length;
       if (named !== 1) {
-        throw new ApiError(400, 'invalid_grant', 'Name exactly one of tool, scope, or origin to revoke.');
+        throw new ApiError(400, 'invalid_grant', 'Name exactly one of tool, scope, origin, or destination to revoke.');
       }
       // Through the daemon's own store, so the policy's next decision sees
       // the removal — this is what makes a revoke take effect without a
@@ -1256,7 +1258,9 @@ export const routes: Route[] = [
           ? await store.forgetTool(agentId, tool)
           : scope !== undefined
             ? await store.forgetScope(agentId, scope)
-            : await store.forgetOrigin(agentId, origin ?? '');
+            : destination !== undefined
+              ? await store.forgetDestination(agentId, destination)
+              : await store.forgetOrigin(agentId, origin ?? '');
       } catch (error) {
         if (!(error instanceof WhitelistUnreadableError)) {
           throw error;

@@ -11,11 +11,13 @@ import {
   createFileCommandWhitelist,
   createPermissionPolicy,
   describeCommandScope,
+  describeDestinationGrant,
   describeOriginScope,
   describeToolGrant,
   type CommandScope,
   type OriginScope,
   type PermissionDecision,
+  type DestinationGrant,
   type ToolGrant,
 } from '@stratusagent/permissions';
 import {
@@ -588,6 +590,16 @@ const serveHeldHome = async (
         log(`${agentId}: ${describeToolGrant(grant)} now runs without asking, until revoked${grant.grantedBy ? ` (granted by ${grant.grantedBy})` : ''}`);
       },
     };
+    // The schedule carve-out from the gateway, plus the per-conversation
+    // grants an approver's "always" makes on a read or a send, in the same
+    // file again.
+    const destinations = {
+      ...transport.destinations,
+      whitelist: grantStore,
+      onGranted: ({ agentId, grant }: { agentId: string; grant: DestinationGrant }) => {
+        log(`${agentId}: ${describeDestinationGrant(grant)} now runs without asking, until revoked${grant.grantedBy ? ` (granted by ${grant.grantedBy})` : ''}`);
+      },
+    };
     return createPermissionPolicy(
       // The destination scope rides along in BOTH modes — it is what lets a
       // scheduled turn report to the channel a human approved with the
@@ -596,8 +608,8 @@ const serveHeldHome = async (
       // grant is the only path a scope-less gated tool has to running
       // unattended, and headless is where that matters.
       approvalMode === 'remote'
-        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations: transport.destinations, gateExternalContent }
-        : { mode: 'headless', onDecision, commands, origins, grants, destinations: transport.destinations, gateExternalContent },
+        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations, gateExternalContent }
+        : { mode: 'headless', onDecision, commands, origins, grants, destinations, gateExternalContent },
     );
   };
 

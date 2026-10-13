@@ -2445,6 +2445,7 @@ test('grants are listable and revocable over the API, through the daemon\'s own 
   // that no longer contributes the tool, one for a tool nothing loads.
   await store.rememberTool('stratus', { tool: 'demo.echo', package: 'somebody-elses-demo', grantedAt: '2026-09-07T00:00:00.000Z' });
   await store.rememberTool('stratus', { tool: 'gone.tool', grantedAt: '2026-09-07T00:00:00.000Z' });
+  await store.rememberDestination('stratus', { tool: 'message.read', destination: 'slack:C-ENG', grantedAt: '2026-10-12T00:00:00.000Z' });
 
   const harness = await startApi({
     home,
@@ -2470,7 +2471,9 @@ test('grants are listable and revocable over the API, through the daemon\'s own 
       scopes: Array<{ description: string; scope: { command: string } }>;
       origins: Array<{ origin: string; tool?: string; description: string }>;
       tools: Array<{ tool: string; package?: string; grantedBy?: string; stale?: string }>;
+      destinations: Array<{ tool: string; destination: string; description: string }>;
     }>(await harness.call('/api/v1/agents/stratus/grants'));
+    assert.deepEqual(listed.destinations.map((row) => row.description), ['slack:C-ENG (message.read)']);
     assert.equal(listed.agentId, 'stratus');
     assert.deepEqual(listed.scopes.map((row) => row.description), ['git push']);
     assert.equal(listed.scopes[0]?.scope.command, 'git');
@@ -2495,6 +2498,8 @@ test('grants are listable and revocable over the API, through the daemon\'s own 
     assert.equal((await revoke({ tool: 'notes.write' })).status, 200);
     assert.equal((await revoke({ scope: 'git push' })).status, 200);
     assert.equal((await revoke({ origin: 'https://app.example.com' })).status, 200);
+    assert.equal((await revoke({ destination: 'slack:C-ENG' })).status, 200);
+    assert.equal((await revoke({ destination: 'slack:C-ENG' })).status, 404, 'already gone');
     assert.equal((await revoke({ tool: 'notes.write' })).status, 404, 'already gone');
     assert.equal((await revoke({ tool: 'x', scope: 'y' })).status, 400, 'exactly one kind');
     assert.equal((await revoke({})).status, 400);
@@ -2504,6 +2509,7 @@ test('grants are listable and revocable over the API, through the daemon\'s own 
     const after = await store.grantsFor('stratus');
     assert.deepEqual(after.scopes, []);
     assert.deepEqual(after.origins, []);
+    assert.deepEqual(after.destinations, []);
     assert.deepEqual(after.tools.map((grant) => grant.tool), ['demo.echo', 'gone.tool']);
   } finally {
     await harness.stop();

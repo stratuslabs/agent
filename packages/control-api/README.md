@@ -108,7 +108,7 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/agents/:id` | One agent in full: complete instructions, the raw soul markdown, its pins, and its `language` when the soul sets one |
 | PUT | `/agents/:id` | Edit a soul, by field (`name`, `instructions`, `tools`, `skills`, `credentials`, `provider`, `model`, `listens` — one of `mentions`, `thread`, `judge`, an empty string clearing it; anything else answers `400 invalid_listens` — `language` — a language tag, an empty string clearing it back to the config's or the default; anything else answers `400 invalid_language`; a field edit that omits it keeps the soul's) or as raw markdown |
 | GET | `/agents/:id/grants` | What this agent may do unattended beyond the built-in safe list — its command scopes, origins, and standing tool grants, from `~/.stratus/agents/<id>/whitelist.json`. A tool grant the engine would not honour carries `stale` saying why (the tool is now contributed by another package, or nothing loads it). The id is validated but not looked up: a grant can outlive its agent, and this is how it is found. `501 grants_unavailable` from a daemon started without a grant store |
-| POST | `/agents/:id/grants/revoke` | Take one back: exactly one of `{ tool }`, `{ scope }` (the listed `description`, such as `git push`), or `{ origin }` → `{ revoked: true }`. Through the daemon's own store, so the next call is judged without it — no restart. `404 grant_not_found` when nothing matched; `400 invalid_grant` for none or several; `409 grants_unreadable` when the agent's whitelist file exists but will not parse, since nothing is written over a grant list nobody can read |
+| POST | `/agents/:id/grants/revoke` | Take one back: exactly one of `{ tool }`, `{ scope }` (the listed `description`, such as `git push`), `{ origin }`, or `{ destination }` (every tool granted on that conversation) → `{ revoked: true }`. Through the daemon's own store, so the next call is judged without it — no restart. `404 grant_not_found` when nothing matched; `400 invalid_grant` for none or several; `409 grants_unreadable` when the agent's whitelist file exists but will not parse, since nothing is written over a grant list nobody can read |
 | POST | `/roster/reload` | Re-read the agents directory and the configured default soul |
 | POST | `/skills/reload` | Re-read `~/.stratus/skills` and serve it, no restart — the `skills` half of `/catalog/tools` as the response. A skill that will not load answers `422 skills_reload_refused` naming the file, and the previous set keeps serving |
 | GET | `/intake` | Whether the daemon is taking new work: `{ paused: false }`, or `{ paused: true, message?, since }` |
@@ -473,11 +473,14 @@ when `always` would remember nothing.
   removes it, and a revoke is the next call's answer, with no restart. Never
   for a tool with `commandFor` or `originFor` — a standing yes to `shell.run`
   would be a yes to every command — and never for a `dangerous` tool.
-- **`session`** — the one shape that is not durable: a tool judged by a
-  **destination** (`message.send`) outside a schedule, remembered against the
-  tool name for this session and this process only. A durable grant there
-  would be a standing yes to every destination, and no per-destination grant
-  exists yet; the schedule carve-out is how a send runs unattended.
+- **`destination`** — a tool judged by a **destination** (`message.read`,
+  `message.send`): that tool on that one conversation (`slack:C0123ABCD`),
+  durable and per agent, until revoked. Never the tool on every
+  conversation, which would be a standing yes to every channel the app is
+  in. Listed under `destinations` and revoked with `{ destination }`.
+- **`session`** — the one shape that is not durable: a destination-judged
+  call whose input names no conversation, remembered against the tool name
+  for this session and this process only.
 
 For a **one-shot** request `always` is absent and **`oneShot: true`** is
 present: the call runs once and the next one asks again. Four cases reach
@@ -495,8 +498,8 @@ which is also how the resolved message describes it.
 
 So a client can word the button and the outcome from the request alone:
 `always: 'tool'` is "always allow for Blair, until revoked", `always: 'session'`
-is "for the rest of this session", and the two scoped values name what they
-widen. One thing the request cannot promise is the disk write: the daemon
+is "for the rest of this session", and the three scoped values (`scope`,
+`origin`, `destination`) name what they widen. One thing the request cannot promise is the disk write: the daemon
 does not write over a whitelist it could not read, and a policy can be built
 without one, in which case the grant holds for the process and the daemon's
 log says it was not saved. The `tool.approval-resolved` event carries the

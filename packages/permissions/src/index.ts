@@ -46,8 +46,14 @@ import {
   type ToolGrant,
 } from './grants.ts';
 import {
+  describeDestinationGrant,
+  findMatchingDestinationGrant,
+  type DestinationGrant,
+} from './destinations.ts';
+import {
   WhitelistUnreadableError,
   type CommandWhitelistStore,
+  type DestinationWhitelistStore,
   type OriginWhitelistStore,
   type ToolGrantStore,
 } from './whitelist.ts';
@@ -87,6 +93,14 @@ export {
   type ToolGrant,
 } from './grants.ts';
 export {
+  describeDestinationGrant,
+  findMatchingDestinationGrant,
+  matchesDestinationGrant,
+  parseDestinationGrant,
+  sameDestinationGrant,
+  type DestinationGrant,
+} from './destinations.ts';
+export {
   createFileCommandWhitelist,
   describeAgentGrants,
   whitelistPathFor,
@@ -98,6 +112,7 @@ export {
   type AgentGrantsListing,
   type AgentGrantStore,
   type CommandWhitelistStore,
+  type DestinationWhitelistStore,
   type OriginWhitelistStore,
   type ToolGrantStore,
 } from './whitelist.ts';
@@ -344,6 +359,15 @@ export interface DestinationScopeOptions {
    * must gate the very next send.
    */
   isPreauthorized(session: Session, destination: string): boolean | Promise<boolean>;
+  /**
+   * Where "always allow" on a call judged by destination persists, and
+   * where one is read back: one conversation, one tool, for this agent,
+   * until revoked (`destinations.ts`). Omitted, the answer holds for this
+   * process only, like every other grant with nowhere to go.
+   */
+  whitelist?: DestinationWhitelistStore;
+  /** Called when a destination grant is persisted, for the daemon's log. */
+  onGranted?: (event: { agentId: string; grant: DestinationGrant }) => void;
 }
 
 export interface CommandScopeOptions {
@@ -456,12 +480,11 @@ const untilAborted = async <T>(
  * answer useless on the next one, and remembering it fleet-wide would make
  * one impatient yes permanent.
  *
- * Since standing grants landed this tier serves one shape only: a tool
- * judged by destination (`message.send`) answered outside a schedule. A
- * durable tool grant there would be a standing yes to every destination,
- * and no per-destination grant exists yet, so the session is the widest
- * honest lifetime. Every other unscoped gated tool goes to the standing
- * grant below.
+ * Since standing and destination grants landed this tier serves one
+ * narrow shape: a tool judged by destination whose input named none the
+ * tool could parse, so there is no conversation to grant. A durable tool
+ * grant there would be a standing yes to every destination, so the session
+ * is the widest honest lifetime.
  *
  * Joined on an escaped NUL rather than a space or a colon, because both of
  * those occur in real ids — a channel session id is
@@ -689,6 +712,8 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
   const sessionOrigins = new Map<string, OriginScope[]>();
   /** And for standing tool grants. */
   const processGrants = new Map<string, ToolGrant[]>();
+  /** And for destination grants. */
+  const processDestinations = new Map<string, DestinationGrant[]>();
   const rememberForProcess = <T>(tier: Map<string, T[]>, agentId: string, grant: T): void => {
     tier.set(agentId, [...(tier.get(agentId) ?? []), grant]);
   };
@@ -842,6 +867,13 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // silently never matches anything.
       const originScope = reportedOrigin === undefined ? undefined : originScopeFor(reportedOrigin);
       const origin = originScope?.origin;
+      // Where a tool judged by destination is reading or sending, for a
+      // standing grant on that one conversation. Undefined when the input
+      // names none the tool can parse; such a call asks, and "always"
+      // falls back to this session, as every destination call did before.
+      const destination = risk === 'gated' && singlyScoped
+        ? context.tool.destinationFor?.(call.input)
+        : undefined;
 
       if (analysis) {
         if (analysis.disqualifiedBy) {
@@ -974,6 +1006,23 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         return report(context, true, `${call.toolName} was approved for the rest of this session`);
       }
 
+      if (destination !== undefined && !externalGate) {
+        // Read per call, never cached here, so a revoke is the next call's answer.
+        const standing = findMatchingDestinationGrant(call.toolName, destination, [
+          ...(processDestinations.get(session.agent.id) ?? []),
+          ...(destinations?.whitelist ? await destinations.whitelist.destinationsFor(session.agent.id) : []),
+        ]);
+        if (standing) {
+          return report(
+            context,
+            true,
+            `${call.toolName} to ${destination} ran under a standing grant for ${session.agent.id}`,
+            undefined,
+            destination,
+          );
+        }
+      }
+
       if (origin !== undefined) {
         const granted = findMatchingOriginScope(origin, grantedOrigins, call.toolName);
         if (granted) {
@@ -1101,7 +1150,9 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             ? 'origin'
             : unscoped
               ? 'tool'
-              : 'session';
+              : destination !== undefined
+                ? 'destination'
+                : 'session';
       const alwaysMeans = oneShot
         ? risk === 'dangerous'
           ? 'not remembered — a dangerous tool asks every time'
@@ -1118,7 +1169,9 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             ? 'always this site'
             : always === 'tool'
               ? `always for ${session.agent.name}, until revoked`
-              : 'always this session';
+              : always === 'destination'
+                ? `always ${destination} for ${session.agent.name}, until revoked`
+                : 'always this session';
       const outcome = mode === 'remote'
         ? await awaitRemote(context, request!, origin, oneShot, always)
         : await awaitPrompt(context, ask!, command, origin, alwaysMeans);
@@ -1333,6 +1386,35 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           }
           return allowUnlessMoved(
             `${call.toolName} was approved, and ${describeToolGrant(grant)} now runs without asking for ${session.agent.id} until revoked`,
+          );
+        }
+        if (destination !== undefined) {
+          // One conversation, one tool, until revoked — never the tool on
+          // every conversation (see `destinations.ts`).
+          const grant: DestinationGrant = {
+            tool: call.toolName,
+            destination,
+            grantedAt: new Date().toISOString(),
+            ...(actor !== undefined ? { grantedBy: actor } : {}),
+          };
+          if (destinations?.whitelist) {
+            try {
+              await destinations.whitelist.rememberDestination(session.agent.id, grant);
+            } catch (error) {
+              if (!(error instanceof WhitelistUnreadableError)) {
+                throw error;
+              }
+              rememberForProcess(processDestinations, session.agent.id, grant);
+              return allowUnlessMoved(
+                `${call.toolName} was approved, and ${describeDestinationGrant(grant)} runs without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
+              );
+            }
+            destinations.onGranted?.({ agentId: session.agent.id, grant });
+          } else {
+            rememberForProcess(processDestinations, session.agent.id, grant);
+          }
+          return allowUnlessMoved(
+            `${call.toolName} was approved, and ${describeDestinationGrant(grant)} now runs without asking for ${session.agent.id} until revoked`,
           );
         }
         alwaysAllowed.add(sessionKey(session.id, call.toolName));
