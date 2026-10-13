@@ -19,6 +19,7 @@ import {
   gatewayInfoPath,
   gatewayTokenPath,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
+  signedInProviders,
   CREDENTIAL_PROVIDER_NAMES,
   type CredentialProviderName,
   type RosterEntry,
@@ -521,19 +522,27 @@ export const collectDoctorReport = async (
   }
 
   const envProviderPick = envPick('STRATUS_PROVIDER');
+  // Nothing named a provider: the resolver takes the only stored sign-in.
+  // Worked out here too, so a run that picked it and then failed still
+  // reports it rather than "none".
+  const namedProvider = envProviderPick?.value ?? soul?.provider ?? fileConfig.provider;
+  const soleSignIn = resolved?.inferredProvider
+    ?? (!resolved && namedProvider === undefined
+      ? await signedInProviders(env).then((names) => (names.length === 1 ? names[0] : undefined)).catch(() => undefined)
+      : undefined);
   const providerSource = envProviderPick
     ? envProviderPick.name
     : soul?.provider
       ? `${soulPath} (soul frontmatter)`
       : fileConfig.provider
         ? (winner?.path ?? 'config')
-        : resolved?.inferredProvider !== undefined
+        : soleSignIn !== undefined
           ? 'the only provider signed in — nothing set one'
           : 'nothing set a provider';
   // When resolution fails the intended provider is still worth reporting:
   // "why is it anthropic" is exactly the question, and the problems below
   // already say no run can start.
-  const intendedProvider = envProviderPick?.value ?? soul?.provider ?? fileConfig.provider ?? 'none';
+  const intendedProvider = namedProvider ?? soleSignIn ?? 'none';
   const provider: DoctorSetting = resolved
     ? { value: resolved.provider, source: providerSource }
     : { value: `${intendedProvider} (unreachable)`, source: providerSource };

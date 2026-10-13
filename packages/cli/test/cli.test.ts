@@ -5213,6 +5213,22 @@ test('doctor says a provider was taken from the only sign-in when nothing set on
   assert.match(output.stdout, /the only provider signed in — nothing set one/);
 });
 
+test('doctor keeps the provider taken from the only sign-in when that run then fails', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Synthetic value only. An unbound stored key is withheld from the
+  // project config's custom base URL, so the openai run cannot start.
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ openai: { type: 'api_key', value: 'synthetic-key' } }), { mode: 0o600 });
+  await writeFile(path.join(cwd, 'stratus.config.json'), JSON.stringify({ baseUrl: 'https://example.invalid/v1' }));
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['doctor'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(exitCode, 1);
+  assert.match(output.stdout, /provider {2}openai \(unreachable\)/);
+  assert.match(output.stdout, /the only provider signed in — nothing set one/);
+  assert.match(output.stdout, /No run can start/);
+});
+
 test('doctor names the project config that outranks the global one', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));

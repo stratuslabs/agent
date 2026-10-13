@@ -61,8 +61,10 @@ stratusd ok at http://0.0.0.0:4123 — version 0.11.6, up 8s, 1 agent, 0 session
 ```
 
 The address is the container's own: `0.0.0.0` inside it, published as
-`127.0.0.1:4123` on the host. An empty `stratusd.env` starts the offline
-demo provider, which is a fine way to prove the plumbing first.
+`127.0.0.1:4123` on the host. To prove the plumbing first, put
+`STRATUS_PROVIDER=demo` in `stratusd.env` for the offline demo provider. With
+no provider named and no sign-in stored, the daemon starts but refuses every
+turn.
 
 For [`tool-browser`](./browser.md), set `target: browser` in
 [`compose.yaml`](../../deploy/docker/compose.yaml) (and a different
