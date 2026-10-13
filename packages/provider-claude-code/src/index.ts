@@ -49,6 +49,36 @@ export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5-5';
 const MCP_SERVER_NAME = 'stratus';
 
 /**
+ * The most text, in UTF-16 code units, one bridged tool result hands the
+ * Claude Code loop. The CLI swaps a text result over 100,000 characters
+ * for a file under ~/.claude/projects, outside every agent root, so the
+ * model gets a path it cannot open. Below that it cuts anything it counts
+ * over MAX_MCP_OUTPUT_TOKENS (25,000 by default). The bridge bounds results
+ * itself, under the first, and lifts the second to match (see `env` below),
+ * so a result is either whole or cut here with a note saying so.
+ */
+export const BRIDGED_RESULT_MAX_CHARS = 90_000;
+
+/**
+ * Cuts a rendered result to the bound, from the end so a leading
+ * `untrusted` label survives, and never between the halves of a surrogate
+ * pair. The note names both sizes and points at paging, which fs.read and
+ * web.fetch support and other tools can be asked to narrow.
+ */
+const boundBridgedText = (text: string): string => {
+  if (text.length <= BRIDGED_RESULT_MAX_CHARS) {
+    return text;
+  }
+  let end = BRIDGED_RESULT_MAX_CHARS;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end -= 1;
+  }
+  const format = (count: number): string => count.toLocaleString('en-US');
+  return `${text.slice(0, end)}\n\n[Stratus: this tool result was cut at ${format(BRIDGED_RESULT_MAX_CHARS)} of ${format(text.length)} characters. Ask for less, or page with offset where the tool supports it.]`;
+};
+
+/**
  * Executes one kernel tool call on behalf of the Claude Code loop. The
  * host owns approvals, events, allowlists, and the executor —
  * AgentRunner.executeHostedToolCall is the canonical implementation.
@@ -151,7 +181,7 @@ export const bridgeKernelTools = (
           content: [
             {
               type: 'text' as const,
-              text: renderToolResultContent(result),
+              text: boundBridgedText(renderToolResultContent(result)),
             },
             // What the call showed, as MCP carries an image: the harness
             // hands it to the model as that tool's output.
@@ -641,6 +671,12 @@ export const createClaudeCodeProvider = ({
         ...process.env,
         CLAUDE_AGENT_SDK_CLIENT_APP: 'stratus-agent',
         ANTHROPIC_API_KEY: undefined,
+        // The bridge already bounds each result (BRIDGED_RESULT_MAX_CHARS).
+        // This allows four tokens a character, well above what text
+        // ordinarily costs, so a bounded result is not cut a second time
+        // and the CLI skips the token-count call it makes before cutting.
+        // An operator's explicit setting still wins.
+        MAX_MCP_OUTPUT_TOKENS: process.env.MAX_MCP_OUTPUT_TOKENS ?? String(BRIDGED_RESULT_MAX_CHARS * 4),
         ...(authToken ? { CLAUDE_CODE_OAUTH_TOKEN: authToken } : {}),
       },
       ...(pathToClaudeCodeExecutable ? { pathToClaudeCodeExecutable } : {}),
