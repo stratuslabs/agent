@@ -5630,6 +5630,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // key is shared, and the running turn's status stays up instead.
       renderer.showLoading(queue.length === 1 || queue[0]?.statusThread !== renderer.statusThread);
       let repeat: 'live' | 'finished' | undefined;
+      let absorbed = false;
       const turn = gateway.dispatch({
         sessionId,
         agentId: connection.config.agentId,
@@ -5646,8 +5647,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         onRepeat: (kind) => {
           repeat = kind;
         },
+        // Sent while a turn is running, this message is answered by the
+        // next turn together with everything else that queued (card 423);
+        // the first of them renders that answer.
+        onAbsorbed: () => {
+          absorbed = true;
+        },
       });
-      return { renderer, turn, repeat: () => repeat };
+      return { renderer, turn, repeat: () => repeat, absorbed: () => absorbed };
     });
 
     const started = await intake;
@@ -5665,7 +5672,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
       return;
     }
-    const { renderer, turn, repeat } = started;
+    const { renderer, turn, repeat, absorbed } = started;
 
     const removeFromQueue = (): void => {
       const current = renderers.get(sessionId);
@@ -5695,7 +5702,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // The turn is a live earlier delivery's, and that delivery's renderer
     // posts its answer, or its failure: this one takes down whatever it put
     // up and says nothing.
-    if (repeat() === 'live') {
+    // Likewise a message absorbed into a merged turn: the turn's leading
+    // message's renderer answers for all of them.
+    if (repeat() === 'live' || absorbed()) {
       await renderer.withdraw();
       renderers.get(sessionId)?.[0]?.refreshLoading();
       return;
