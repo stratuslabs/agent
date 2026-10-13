@@ -141,12 +141,31 @@ const readError = async (response: Response): Promise<{ detail: string; message?
 
 /**
  * A 429 that is the account having nothing to spend, not a busy minute:
- * OpenAI says `insufficient_quota`, and a provider message about credit,
- * billing or quota means the same. Every run would fail the same way.
+ * OpenAI says `insufficient_quota`, and a message about the credit balance,
+ * billing or payment means the same. Every run would fail the same way.
+ * A bare "quota" or "credits" is not enough: compatible endpoints use those
+ * words for per-minute and daily limits that clear on their own.
  */
 const isOutOfCredit = (error: { message?: string; code?: string }): boolean =>
   error.code === 'insufficient_quota'
-  || /\b(credit balance|credits?|billing|quota)\b/i.test(error.message ?? '');
+  || /\b(credit balance|insufficient (credits?|funds|balance)|billing|payment)\b/i.test(error.message ?? '');
+
+/**
+ * Whether a 200 carries what a run needs: a message with a content array on
+ * Anthropic, a first choice with a message on an OpenAI-compatible endpoint.
+ * The adapter fails a run on an empty body, `{}` or no choices, so the probe
+ * must not call those answered.
+ */
+const hasCompletion = async (provider: 'anthropic' | 'openai', response: Response): Promise<boolean> => {
+  try {
+    const body = await response.json() as { content?: unknown; choices?: Array<{ message?: unknown }> };
+    return provider === 'anthropic'
+      ? Array.isArray(body?.content)
+      : Array.isArray(body?.choices) && body.choices[0]?.message !== undefined && body.choices[0]?.message !== null;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * Ask `model` for a reply as small as the provider allows, with the key a run
@@ -182,7 +201,9 @@ export const probeProviderModel = async (
   try {
     const response = await fetchImpl(request.url, { method: 'POST', headers: request.headers, body: JSON.stringify(request.body) });
     if (response.ok) {
-      return { status: 'answered' };
+      return await hasCompletion(provider, response)
+        ? { status: 'answered' }
+        : { status: 'refused', detail: `HTTP ${response.status} without a completion` };
     }
     const error = await readError(response);
     const { detail } = error;
