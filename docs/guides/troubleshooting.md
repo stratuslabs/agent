@@ -50,6 +50,21 @@ surprises: a run that turns out to be on the `demo` provider, and an
 `ANTHROPIC_API_KEY` in the environment quietly demoting a Claude
 subscription sign-in to per-token billing.
 
+Doctor stays on the machine by default. `stratus doctor --live` also asks
+each provider your runs use (the default and any fallback) whether it
+accepts the key that run would send, using the same free models-list call
+setup makes when you enter a key:
+
+```text
+Live check
+  anthropic key refused (HTTP 401)
+```
+
+A refused key is a problem and doctor exits non-zero. No answer (offline,
+or a compatible endpoint with no models route) says nothing about the key,
+so it isn't a problem. A subscription sign-in has no key to send and is
+reported as not checked.
+
 The files are only half the answer when a daemon is running. It
 re-resolves runtime settings (provider, model, system prompt and the rest of
 the runtime config) on every turn, but daemon-level settings (plugins,

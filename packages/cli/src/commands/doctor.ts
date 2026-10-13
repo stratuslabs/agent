@@ -29,6 +29,7 @@ import {
   surveyLegacyWorkspaces,
   type LegacyWorkspaceState,
   quoteShellArg,
+  verifyProviderKey,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
 import { callRunningGateway, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
@@ -40,6 +41,90 @@ import { loadSlackAdapter } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
 import { CLI_VERSION } from '../npm.ts';
 import type { ParsedDoctorCommand } from '../parse.ts';
+
+export interface DoctorKeyCheck {
+  provider: CredentialProviderName;
+  role: 'default' | 'fallback';
+  status: 'accepted' | 'rejected' | 'unreachable' | 'not checked';
+  detail?: string;
+}
+
+/** The key and endpoint a run would send, or why there is none to check. */
+const keyToCheck = (
+  provider: CredentialProviderName,
+  runtime: { apiKey?: string; authToken?: string; baseUrl?: string },
+): { key: string; baseUrl?: string } | { skip: string } => {
+  if (runtime.apiKey) {
+    // codex verifies against OpenAI's default endpoint; its baseUrl is not a key endpoint.
+    return { key: runtime.apiKey, ...(provider !== 'codex' && runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}) };
+  }
+  if (runtime.authToken || provider === 'codex') {
+    return { skip: 'subscription sign-in, which has no key to check' };
+  }
+  return { skip: 'no key' };
+};
+
+/** A provider's models list answers in well under a second; past this, doctor reports no answer instead of hanging. */
+const KEY_CHECK_TIMEOUT_MS = 10_000;
+
+/**
+ * `fetchImpl` with a deadline. The signal stops a real request; the race
+ * also covers a transport that ignores it, so doctor always finishes.
+ */
+const withDeadline = (fetchImpl: typeof fetch): typeof fetch => (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`no answer within ${KEY_CHECK_TIMEOUT_MS / 1000}s`));
+    }, KEY_CHECK_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([fetchImpl(input, { ...init, signal: controller.signal }), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}) as typeof fetch;
+
+/**
+ * `--live`: the one part of doctor that leaves the machine. Each provider a
+ * run consults is asked whether it accepts the key that run would send —
+ * the same free models-list call setup makes when the key is entered. Only
+ * a refusal is a problem: an unreachable endpoint says nothing about the key.
+ */
+const checkKeys = async (
+  resolved: RuntimeConfig,
+  env: CliEnvironment,
+  problems: string[],
+): Promise<DoctorKeyCheck[]> => {
+  const targets: Array<{ provider: CredentialProviderName; role: DoctorKeyCheck['role']; runtime: { apiKey?: string; authToken?: string; baseUrl?: string } }> = [];
+  if (isSignedInRuntime(resolved)) {
+    targets.push({ provider: resolved.provider, role: 'default', runtime: resolved as { apiKey?: string; authToken?: string; baseUrl?: string } });
+  }
+  const fallback = resolved.provider !== 'demo' ? resolved.fallback : undefined;
+  if (fallback && (CREDENTIAL_PROVIDER_NAMES as readonly string[]).includes(fallback.provider)) {
+    targets.push({ provider: fallback.provider as CredentialProviderName, role: 'fallback', runtime: fallback });
+  }
+  const checks: DoctorKeyCheck[] = [];
+  for (const target of targets) {
+    const plan = keyToCheck(target.provider, target.runtime);
+    if ('skip' in plan) {
+      checks.push({ provider: target.provider, role: target.role, status: 'not checked', detail: plan.skip });
+      continue;
+    }
+    const verdict = await verifyProviderKey(target.provider, plan.key, plan.baseUrl, withDeadline(env.fetch ?? globalThis.fetch));
+    const status = verdict.status === 'ok' ? 'accepted' : verdict.status;
+    checks.push({ provider: target.provider, role: target.role, status, ...(verdict.detail ? { detail: verdict.detail } : {}) });
+    if (status === 'rejected') {
+      problems.push(
+        `${target.provider} refused the key ${target.role === 'default' ? 'your runs' : 'fallback runs'} send (${verdict.detail ?? 'auth failed'}), so every such run fails. `
+        + 'Sign in again with `stratus setup` → Providers, or fix the environment variable that supplies it.',
+      );
+    }
+  }
+  return checks;
+};
 
 /** One resolved setting, with the thing that decided it. */
 interface DoctorSetting {
@@ -58,6 +143,13 @@ export interface DoctorReport {
   /** The model a failing run retries on, when one is configured. */
   fallback?: { provider: string; model: string };
   signIns: Array<{ provider: CredentialProviderName; status: string }>;
+  /**
+   * With `--live` only: what each provider a run uses said about its key.
+   * `accepted`/`rejected` are the provider's answer; `unreachable` means no
+   * answer (offline, or an endpoint with no key check); `not checked` is a
+   * sign-in with no key to send, such as a subscription.
+   */
+  keyChecks?: DoctorKeyCheck[];
   slackAgents: string[];
   slackPackageInstalled: boolean;
   rosterCount: number;
@@ -620,6 +712,7 @@ export const collectDoctorReport = async (
   }
 
   const daemon = await inspectDaemon(env, problems);
+  const keyChecks = command.live && resolved ? await checkKeys(resolved, env, problems) : undefined;
 
   return {
     ...(winner ? { configInUse: winner.path } : {}),
@@ -630,6 +723,7 @@ export const collectDoctorReport = async (
     ...(soul ? { agent: `${soul.agent.name} (${soul.agent.id})` } : {}),
     ...(fallback ? { fallback: { provider: fallback.provider, model: fallback.model } } : {}),
     signIns,
+    ...(keyChecks ? { keyChecks } : {}),
     slackAgents,
     slackPackageInstalled,
     rosterCount,
@@ -692,6 +786,24 @@ export const runDoctor = async (
   writeLine(streams.stdout, 'Sign-ins');
   for (const entry of report.signIns) {
     writeLine(streams.stdout, `  ${entry.provider.padEnd(10)}${entry.status}`);
+  }
+
+  if (report.keyChecks) {
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, 'Live check');
+    if (report.keyChecks.length === 0) {
+      writeLine(streams.stdout, '  no provider sign-in to check');
+    }
+    for (const check of report.keyChecks) {
+      const what = check.status === 'accepted'
+        ? 'key accepted'
+        : check.status === 'rejected'
+          ? `key refused (${check.detail ?? 'auth failed'})`
+          : check.status === 'unreachable'
+            ? `no answer (${check.detail ?? 'unreachable'}); the key was not judged`
+            : `not checked: ${check.detail ?? ''}`;
+      writeLine(streams.stdout, `  ${check.provider.padEnd(10)}${what}${check.role === 'fallback' ? ' (fallback)' : ''}`);
+    }
   }
 
   writeLine(streams.stdout);
