@@ -4912,13 +4912,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           if (!Number.isFinite(at) || !(at < Number(ts))) {
             continue;
           }
-          if (botUserId !== undefined && (message.user === botUserId || mentions(message.text ?? '', botUserId))) {
+          if (botUserId !== undefined && message.user === botUserId) {
             held = Math.max(held, at);
             continue;
           }
           const bot = message.bot_id !== undefined || message.subtype === 'bot_message';
-          if (bot && !isFleetBot(parts.team, message.user)) {
-            foreign = Math.max(foreign, at);
+          if (bot) {
+            // A bot's mention hands nothing over live (admit ignores bots),
+            // so here it is only another app speaking, or a peer's words.
+            if (!isFleetBot(parts.team, message.user)) {
+              foreign = Math.max(foreign, at);
+            }
+            continue;
+          }
+          // A person naming this agent takes the thread back only if this
+          // agent would admit them, as the live handover does.
+          if (botUserId !== undefined && message.user !== undefined
+            && mentions(message.text ?? '', botUserId)
+            && admitsSender(agentConfigFor(agentId), message.user)) {
+            held = Math.max(held, at);
           }
         }
         cursor = page.response_metadata?.next_cursor || undefined;
